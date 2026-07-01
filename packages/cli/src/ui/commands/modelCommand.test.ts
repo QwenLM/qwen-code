@@ -45,7 +45,7 @@ describe('modelCommand', () => {
   it('should have the correct name and description', () => {
     expect(modelCommand.name).toBe('model');
     expect(modelCommand.description).toBe(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
   });
 
@@ -196,6 +196,231 @@ describe('modelCommand', () => {
       messageType: 'info',
       content: 'Model: qwen-max',
     });
+  });
+
+  it('runs a trailing prompt on the given model inline without switching or persisting', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model qwen-max explain this code',
+        name: 'model',
+        args: 'qwen-max explain this code',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'qwen-max explain this code',
+    );
+
+    // Inline override is per-turn: no session switch, no persistence.
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'explain this code',
+      modelOverride: 'qwen-max',
+    });
+  });
+
+  it('rejects an inline prompt when the model id is not available', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model missing-model hello',
+        name: 'model',
+        args: 'missing-model hello',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          switchModel,
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'missing-model hello',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+  });
+
+  it('rejects an inline prompt that targets a different provider', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model gpt-4(openai) hello',
+        name: 'model',
+        args: 'gpt-4(openai) hello',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          switchModel,
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'gpt-4(openai) hello',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('different provider'),
+    });
+  });
+
+  it('rejects an inline prompt whose model belongs to a same-auth-type provider with a different endpoint/credentials', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model shared-id hello',
+        name: 'model',
+        args: 'shared-id hello',
+      },
+      services: {
+        config: {
+          // Active provider: one OpenAI-compatible endpoint/credential.
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'shared-id',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://provider-a.example/v1',
+            apiKeyEnvKey: 'PROVIDER_A_KEY',
+          }),
+          switchModel,
+          // Same id + auth type, but a different provider's endpoint/credential.
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'shared-id',
+              label: 'Shared',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://provider-b.example/v1',
+              envKey: 'PROVIDER_B_KEY',
+            },
+          ]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, 'shared-id hello');
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('different provider'),
+    });
+  });
+
+  it('runs an inline prompt when the model matches the active provider endpoint/credentials', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model shared-id hello there',
+        name: 'model',
+        args: 'shared-id hello there',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'other',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://provider-a.example/v1',
+            apiKeyEnvKey: 'PROVIDER_A_KEY',
+          }),
+          switchModel,
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'shared-id',
+              label: 'Shared',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://provider-a.example/v1',
+              envKey: 'PROVIDER_A_KEY',
+            },
+          ]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'shared-id hello there',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'hello there',
+      modelOverride: 'shared-id',
+    });
+  });
+
+  it('rejects an inline prompt in ACP mode (no per-turn override pipeline)', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      executionMode: 'acp',
+      invocation: {
+        raw: '/model qwen-max explain this',
+        name: 'model',
+        args: 'qwen-max explain this',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          switchModel,
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'qwen-max explain this',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
   });
 
   it('should not persist the model when direct model validation fails', async () => {
@@ -589,6 +814,365 @@ describe('modelCommand', () => {
         "Fast model 'missing-model' is not available for auth type 'openai'.\n" +
         "Available models for 'openai': gpt-4.\n" +
         'Configure models in settings.modelProviders and ensure the required environment variables are set. In interactive mode, run /auth to configure or switch providers, or run /model --fast without a model to choose from configured models.',
+    });
+  });
+
+  it('should set the vision bridge model', async () => {
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision qwen-vl-max',
+        name: 'model',
+        args: '--vision qwen-vl-max',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-vl-max',
+              label: 'qwen-vl-max',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen-plus',
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision qwen-vl-max',
+    );
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'visionModel',
+      'qwen-vl-max',
+    );
+    expect(setVisionModel).toHaveBeenCalledWith('qwen-vl-max');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Vision Model: qwen-vl-max',
+    });
+  });
+
+  it('should set authType-qualified vision model selectors', async () => {
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision openai:qwen-vl-max',
+        name: 'model',
+        args: '--vision openai:qwen-vl-max',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'claude-opus-4-7',
+            authType: AuthType.USE_ANTHROPIC,
+          }),
+          getAvailableModelsForAuthType: vi.fn((authType: AuthType) =>
+            authType === AuthType.USE_OPENAI
+              ? [
+                  {
+                    id: 'qwen-vl-max',
+                    label: 'qwen-vl-max',
+                    authType: AuthType.USE_OPENAI,
+                  },
+                ]
+              : [],
+          ),
+          // The pinned model lives on a different provider than the primary, so
+          // the set-time primary guard (config.isCurrentPrimaryModel) never fires.
+          isCurrentPrimaryModel: (m: { id: string }) =>
+            m.id === 'claude-opus-4-7',
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision openai:qwen-vl-max',
+    );
+
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'visionModel',
+      'openai:qwen-vl-max',
+    );
+    expect(setVisionModel).toHaveBeenCalledWith('openai:qwen-vl-max');
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'Vision Model: openai:qwen-vl-max',
+    });
+  });
+
+  it('rejects a malformed --vision selector with no model id', async () => {
+    // `openai:` is a known authType with no model id — resolveModelId throws.
+    // The --vision handler's try/catch must turn that into an error result
+    // instead of letting the exception escape or persisting a half-baked pin.
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision openai:',
+        name: 'model',
+        args: '--vision openai:',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([]),
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--vision openai:');
+
+    expect(setValue).not.toHaveBeenCalled();
+    expect(setVisionModel).not.toHaveBeenCalled();
+    const msg = result as { messageType: string };
+    expect(msg.messageType).toBe('error');
+  });
+
+  it('still sets a non-image-capable vision model but warns', async () => {
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision qwen3.7-max',
+        name: 'model',
+        args: '--vision qwen3.7-max',
+      },
+      services: {
+        config: {
+          // Primary differs from the pinned model so the guard doesn't fire.
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          // qwen3.7-max is text-only (no modalities / isVision) → bridge can't use it.
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen3.7-max',
+              label: 'qwen3.7-max',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen-plus',
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision qwen3.7-max',
+    );
+
+    // The pin is still honored...
+    expect(setValue).toHaveBeenCalledWith(
+      expect.any(String),
+      'visionModel',
+      'qwen3.7-max',
+    );
+    expect(setVisionModel).toHaveBeenCalledWith('qwen3.7-max');
+    // ...but the confirmation warns it isn't image-capable.
+    const msg = result as { messageType: string; content: string };
+    expect(msg.messageType).toBe('info');
+    expect(msg.content).toContain('Vision Model: qwen3.7-max');
+    expect(msg.content).toMatch(/not a known image-capable model/i);
+  });
+
+  it('rejects pinning the current primary model as the vision bridge', async () => {
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision qwen-plus',
+        name: 'model',
+        args: '--vision qwen-plus',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-plus',
+              label: 'qwen-plus',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          // qwen-plus IS the current primary, so it can't double as the vision
+          // bridge — the runtime guard would silently ignore the pin.
+          isCurrentPrimaryModel: (m: { id: string }) => m.id === 'qwen-plus',
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision qwen-plus',
+    );
+
+    const msg = result as { messageType: string; content: string };
+    expect(msg.messageType).toBe('error');
+    expect(msg.content).toMatch(/current primary model/i);
+    expect(setVisionModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+  });
+
+  it('should reject unavailable vision models across all auth types', async () => {
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision missing-model',
+        name: 'model',
+        args: '--vision missing-model',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAllConfiguredModels: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-vl-max',
+              label: 'qwen-vl-max',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision missing-model',
+    );
+
+    expect(setVisionModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Vision model 'missing-model' is not configured for any auth type.\n" +
+        'Configured models: qwen-vl-max.\n' +
+        'Configure an image-capable model in settings.modelProviders and ensure the required environment variables are set. Run /model --vision <model-id> to set it, or leave it unset to auto-pick a same-provider vision model.',
+    });
+  });
+
+  it('should reject an authType-qualified vision model missing from that provider', async () => {
+    // Exercises the `selector.authType` branch: a qualified id absent from that
+    // provider's list reports the per-authType message, not the all-providers one.
+    const setValue = vi.fn();
+    const setVisionModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model --vision openai:ghost-model',
+        name: 'model',
+        args: '--vision openai:ghost-model',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.USE_OPENAI,
+          }),
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'qwen-vl-max',
+              label: 'qwen-vl-max',
+              authType: AuthType.USE_OPENAI,
+            },
+          ]),
+          setVisionModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      '--vision openai:ghost-model',
+    );
+
+    expect(setVisionModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content:
+        "Vision model 'ghost-model' is not available for auth type 'openai'.\n" +
+        "Available models for 'openai': qwen-vl-max.\n" +
+        'Configure an image-capable model in settings.modelProviders and ensure the required environment variables are set. Run /model --vision <model-id> to set it, or leave it unset to auto-pick a same-provider vision model.',
+    });
+  });
+
+  it('should open the vision model dialog for /model --vision in interactive mode', async () => {
+    const mockConfig = createMockConfig({
+      model: 'qwen-plus',
+      authType: AuthType.USE_OPENAI,
+    });
+    mockContext.services.config = mockConfig as Config;
+
+    const result = await modelCommand.action!(mockContext, '--vision');
+
+    expect(result).toEqual({
+      type: 'dialog',
+      dialog: 'vision-model',
+    });
+  });
+
+  it('should return current vision model outside interactive mode', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      invocation: { args: '--vision' },
+      services: {
+        config: createMockConfig({
+          model: 'qwen-max',
+          authType: AuthType.USE_OPENAI,
+        }),
+        settings: {
+          merged: { visionModel: 'qwen-vl-max' } as Record<string, unknown>,
+        },
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--vision');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Current vision model: qwen-vl-max\nUse "/model --vision <model-id>" to set the vision bridge model.',
     });
   });
 
@@ -1038,7 +1622,11 @@ describe('modelCommand', () => {
   describe('fastOnly/voiceOnly filtering', () => {
     it('should reject fastOnly models from normal /model selection', async () => {
       mockContext = createMockCommandContext({
-        invocation: { raw: '/model fast-model', name: 'model', args: 'fast-model' },
+        invocation: {
+          raw: '/model fast-model',
+          name: 'model',
+          args: 'fast-model',
+        },
         services: {
           config: {
             getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -1064,7 +1652,11 @@ describe('modelCommand', () => {
 
     it('should reject voiceOnly models from normal /model selection', async () => {
       mockContext = createMockCommandContext({
-        invocation: { raw: '/model voice-model', name: 'model', args: 'voice-model' },
+        invocation: {
+          raw: '/model voice-model',
+          name: 'model',
+          args: 'voice-model',
+        },
         services: {
           config: {
             getContentGeneratorConfig: vi.fn().mockReturnValue({
@@ -1112,7 +1704,10 @@ describe('modelCommand', () => {
         },
       });
 
-      const result = await modelCommand.action!(mockContext, '--fast fast-model');
+      const result = await modelCommand.action!(
+        mockContext,
+        '--fast fast-model',
+      );
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'info',
@@ -1143,7 +1738,10 @@ describe('modelCommand', () => {
         },
       });
 
-      const result = await modelCommand.action!(mockContext, '--fast voice-model');
+      const result = await modelCommand.action!(
+        mockContext,
+        '--fast voice-model',
+      );
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',
@@ -1166,7 +1764,11 @@ describe('modelCommand', () => {
               authType: AuthType.USE_OPENAI,
             }),
             getAllConfiguredModels: vi.fn().mockReturnValue([
-              { id: 'main-model', label: 'Main', authType: AuthType.USE_OPENAI },
+              {
+                id: 'main-model',
+                label: 'Main',
+                authType: AuthType.USE_OPENAI,
+              },
               {
                 id: 'qwen3-asr-flash',
                 label: 'ASR',
@@ -1180,7 +1782,10 @@ describe('modelCommand', () => {
         },
       });
 
-      const result = await modelCommand.action!(mockContext, '--voice qwen3-asr-flash');
+      const result = await modelCommand.action!(
+        mockContext,
+        '--voice qwen3-asr-flash',
+      );
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'info',
@@ -1210,11 +1815,82 @@ describe('modelCommand', () => {
         },
       });
 
-      const result = await modelCommand.action!(mockContext, '--voice fast-model');
+      const result = await modelCommand.action!(
+        mockContext,
+        '--voice fast-model',
+      );
       expect(result).toMatchObject({
         type: 'message',
         messageType: 'error',
         content: expect.stringContaining('fast-model'),
+      });
+    });
+
+    it('should reject fastOnly models from --vision selection', async () => {
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --vision fast-model',
+          name: 'model',
+          args: '--vision fast-model',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'main-model',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi.fn().mockReturnValue([
+              { id: 'main-model', label: 'Main' },
+              { id: 'fast-model', label: 'Fast', fastOnly: true },
+            ]),
+            setVisionModel: vi.fn(),
+          },
+          settings: createMockSettings(),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--vision fast-model',
+      );
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('fast-model'),
+      });
+    });
+
+    it('should reject voiceOnly models from --vision selection', async () => {
+      mockContext = createMockCommandContext({
+        invocation: {
+          raw: '/model --vision voice-model',
+          name: 'model',
+          args: '--vision voice-model',
+        },
+        services: {
+          config: {
+            getContentGeneratorConfig: vi.fn().mockReturnValue({
+              model: 'main-model',
+              authType: AuthType.USE_OPENAI,
+            }),
+            getAllConfiguredModels: vi.fn().mockReturnValue([
+              { id: 'main-model', label: 'Main' },
+              { id: 'voice-model', label: 'Voice', voiceOnly: true },
+            ]),
+            setVisionModel: vi.fn(),
+          },
+          settings: createMockSettings(),
+        },
+      });
+
+      const result = await modelCommand.action!(
+        mockContext,
+        '--vision voice-model',
+      );
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('voice-model'),
       });
     });
   });

@@ -7,8 +7,11 @@
 import * as nodeFs from 'node:fs';
 import * as nodePath from 'node:path';
 import * as crypto from 'node:crypto';
+import {
+  getGlobalQwenDirLite,
+  resolveConfigPathLite,
+} from '../config/storage-paths-lite.js';
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { Storage, updateSymlink } from '@qwen-code/qwen-code-core';
 
 export type DaemonLogLevel = 'INFO' | 'WARN' | 'ERROR';
 
@@ -109,6 +112,38 @@ const NOOP_LOGGER: DaemonLogger = {
   flush: () => Promise.resolve(),
 };
 
+function getRuntimeBaseDir(runtimeOutputDir?: string, cwd?: string): string {
+  const envDir = process.env['QWEN_RUNTIME_DIR'];
+  if (envDir) return resolveConfigPathLite(envDir);
+  if (runtimeOutputDir) return resolveConfigPathLite(runtimeOutputDir, cwd);
+  return getGlobalQwenDirLite();
+}
+
+export function resolveDaemonLogBaseDir(
+  runtimeOutputDir?: string,
+  cwd?: string,
+): string {
+  return nodePath.join(getRuntimeBaseDir(runtimeOutputDir, cwd), 'debug');
+}
+
+async function updateSymlinkBestEffort(
+  linkPath: string,
+  targetPath: string,
+): Promise<void> {
+  const linkDir = nodePath.dirname(linkPath);
+  const relativeTarget = nodePath.relative(linkDir, targetPath);
+  try {
+    await nodeFs.promises.unlink(linkPath);
+  } catch {
+    // Missing or inaccessible alias is non-fatal.
+  }
+  try {
+    await nodeFs.promises.symlink(relativeTarget, linkPath);
+  } catch {
+    // Symlink creation is best-effort; no copy fallback for live log files.
+  }
+}
+
 function isOptedOut(): boolean {
   const raw = process.env['QWEN_DAEMON_LOG_FILE'];
   if (!raw) return false;
@@ -130,7 +165,7 @@ export function initDaemonLogger(opts: InitDaemonLoggerOptions): DaemonLogger {
   const pid = opts.pid ?? process.pid;
   const now = opts.now ?? (() => new Date());
   const stderr = opts.stderr ?? writeStderrLine;
-  const baseDir = opts.baseDir ?? Storage.getGlobalDebugDir();
+  const baseDir = opts.baseDir ?? resolveDaemonLogBaseDir();
 
   const daemonId = computeDaemonId(pid, opts.boundWorkspace);
   const daemonDir = nodePath.join(baseDir, 'daemon');
@@ -155,11 +190,7 @@ export function initDaemonLogger(opts: InitDaemonLoggerOptions): DaemonLogger {
 
   try {
     const aliasPath = nodePath.join(daemonDir, 'latest');
-    void updateSymlink(aliasPath, logPath, { fallbackCopy: false }).catch(
-      () => {
-        // Best-effort. Symlink failure must not degrade primary writes.
-      },
-    );
+    void updateSymlinkBestEffort(aliasPath, logPath);
   } catch {
     // Defensive: any sync throw is ignored.
   }

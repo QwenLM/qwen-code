@@ -23,13 +23,15 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
   DaemonMidTurnMessageResult,
+  DaemonPendingPromptsResult,
+  DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
+  DaemonSessionLspStatus,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonSessionState,
   DaemonSession,
-  DaemonSessionLspStatus,
   DaemonSessionStatsStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionTaskStatus,
@@ -50,6 +52,8 @@ export interface DaemonReplaySnapshot {
 export interface DaemonSessionClientOptions {
   client: DaemonClient;
   session: DaemonSession;
+  /** True when load/resume attached to a session with an in-flight prompt. */
+  hasActivePrompt?: boolean;
   /** ACP state returned by load/resume; empty for create/attach clients. */
   state?: DaemonSessionState;
   /**
@@ -95,6 +99,7 @@ export class DaemonSessionClient {
   readonly session: DaemonSession;
   readonly state: DaemonSessionState;
   readonly replaySnapshot: DaemonReplaySnapshot;
+  readonly hasActivePrompt: boolean;
   private lastSeenEventId: number | undefined;
   private subscriptionActive = false;
   /** In-flight `reattach()` so concurrent prompts re-register only once. */
@@ -112,6 +117,7 @@ export class DaemonSessionClient {
     this.client = opts.client;
     this.session = { ...opts.session };
     this.state = { ...(opts.state ?? {}) };
+    this.hasActivePrompt = opts.hasActivePrompt ?? false;
     this.replaySnapshot = opts.replaySnapshot ?? {
       compactedReplay: [],
       liveJournal: [],
@@ -160,7 +166,12 @@ export class DaemonSessionClient {
     // of the bounded ring"; if older events have already been evicted,
     // clients receive the retained suffix and continue live from there.
     const lastEventId = !session.attached || req.modelServiceId ? 0 : undefined;
-    return new DaemonSessionClient({ client, session, lastEventId });
+    return new DaemonSessionClient({
+      client,
+      session,
+      hasActivePrompt: session.hasActivePrompt,
+      lastEventId,
+    });
   }
 
   /**
@@ -176,6 +187,7 @@ export class DaemonSessionClient {
   ): Promise<DaemonSessionClient> {
     const {
       state,
+      hasActivePrompt,
       compactedReplay,
       liveJournal,
       lastEventId: serverLastEventId,
@@ -184,6 +196,7 @@ export class DaemonSessionClient {
     return new DaemonSessionClient({
       client,
       session,
+      hasActivePrompt,
       state,
       lastEventId: serverLastEventId ?? 0,
       replaySnapshot: {
@@ -207,12 +220,14 @@ export class DaemonSessionClient {
   ): Promise<DaemonSessionClient> {
     const {
       state,
+      hasActivePrompt,
       lastEventId: serverLastEventId,
       ...session
     } = await client.resumeSession(sessionId, req, clientId);
     return new DaemonSessionClient({
       client,
       session,
+      hasActivePrompt,
       state,
       lastEventId: serverLastEventId ?? 0,
     });
@@ -308,6 +323,28 @@ export class DaemonSessionClient {
         signal?.addEventListener('abort', onAbort, { once: true });
       }
     });
+  }
+
+  /**
+   * Submit a prompt and return as soon as the daemon accepts it.
+   *
+   * This is admission-only: it does not reserve a client-side prompt slot,
+   * register the prompt in `_pendingPrompts`, or wait for the matching
+   * `turn_complete` / `turn_error` SSE event. Callers that need final turn
+   * results should use `prompt()` or manage SSE terminal events themselves.
+   */
+  async submitPrompt(
+    req: PromptRequest,
+    signal?: AbortSignal,
+  ): Promise<NonBlockingPromptAccepted> {
+    signal?.throwIfAborted();
+    const accepted = await this.withClientIdSelfHeal(() =>
+      this.client.promptNonBlocking(this.sessionId, req, signal, this.clientId),
+    );
+    if (!isNonBlockingAccepted(accepted)) {
+      throw new Error('Expected non-blocking prompt acceptance');
+    }
+    return accepted;
   }
 
   /**
@@ -443,6 +480,20 @@ export class DaemonSessionClient {
   ): Promise<DaemonMidTurnMessageResult> {
     return await this.client.enqueueMidTurnMessage(this.sessionId, message, {
       ...(opts?.signal ? { signal: opts.signal } : {}),
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  async getPendingPrompts(): Promise<DaemonPendingPromptsResult> {
+    return await this.client.getPendingPrompts(this.sessionId, {
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  async removePendingPrompt(
+    promptId: string,
+  ): Promise<DaemonRemovePendingPromptResult> {
+    return await this.client.removePendingPrompt(this.sessionId, promptId, {
       ...(this.clientId ? { clientId: this.clientId } : {}),
     });
   }

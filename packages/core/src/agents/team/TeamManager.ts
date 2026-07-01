@@ -190,6 +190,9 @@ export class TeamManager {
   /** Per-agent teammate identity for re-entering AsyncLocalStorage. */
   private readonly agentIdentities = new Map<string, TeammateIdentity>();
 
+  /** Async coordination work kicked off from synchronous event emitters. */
+  private readonly pendingAsyncWork = new Set<Promise<unknown>>();
+
   /** Optional subagent manager for loading specialized agent configs. */
   private readonly subagentManager: SubagentManager | null;
 
@@ -1134,7 +1137,7 @@ export class TeamManager {
    * least observable to the leader driving the team.
    */
   private fireAndForget(label: string, work: Promise<unknown>): void {
-    void work.catch((err) => {
+    const tracked = work.catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
       debug.warn(`${label} failed: ${msg}`);
       // Guarded: the callback can be detached during teardown / manager
@@ -1152,6 +1155,10 @@ export class TeamManager {
         debug.warn(`${label}: leader message callback threw: ${cbMsg}`);
       }
     });
+    this.pendingAsyncWork.add(tracked);
+    void tracked.finally(() => {
+      this.pendingAsyncWork.delete(tracked);
+    });
   }
 
   // ─── Cleanup ────────────────────────────────────────────
@@ -1166,6 +1173,10 @@ export class TeamManager {
       cleanup();
     }
     this.eventBridgeCleanups.clear();
+
+    while (this.pendingAsyncWork.size > 0) {
+      await Promise.allSettled([...this.pendingAsyncWork]);
+    }
 
     this.pendingMessages.clear();
     this.lastActivityAt.clear();

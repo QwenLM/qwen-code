@@ -4,6 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type {
   Content,
   FunctionCall,
@@ -28,13 +30,19 @@ import type {
   GoalTerminalEvent,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
+  LoopTickResult,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
   ApprovalMode,
   CompressionStatus,
+  detectLoopSentinel,
+  detectAutonomousSentinel,
+  LoopTickResolver,
   convertToFunctionResponse,
   createDuplicateProviderToolCallResponse,
+  findRepeatedDuplicateProviderToolCall,
+  markDuplicateProviderToolCallResponseSent,
   createDebugLogger,
   DiscoveredMCPTool,
   StreamEventType,
@@ -55,6 +63,7 @@ import {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  buildContextUsage,
   injectPermissionRulesIfMissing,
   NotificationType,
   persistPermissionOutcome,
@@ -65,6 +74,10 @@ import {
   getArenaSystemReminder,
   getStartupContextLength,
   isSystemReminderContent,
+  detectTurnInterruption,
+  buildSyntheticToolResponseParts,
+  ORPHAN_TOOL_USE_REPAIR_REASON,
+  TURN_INTERRUPTION_HISTORY_TAIL_COUNT,
   evaluatePermissionFlow,
   getEffectivePermissionForConfirmation,
   needsConfirmation,
@@ -81,6 +94,7 @@ import {
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
+  shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
@@ -93,6 +107,9 @@ import {
   endToolExecutionSpan,
   logConversationFinishedEvent,
   ConversationFinishedEvent,
+  logLoopDetected,
+  LoopDetectedEvent,
+  LoopType,
   acquireSleepInhibitor,
   clearGoalTerminalObserver,
   setGoalTerminalObserver,
@@ -100,6 +117,7 @@ import {
   dedupeToolCallsById,
   getProviderToolCallId,
   parsePositiveIntegerEnv,
+  DEFAULT_TOKEN_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -127,7 +145,10 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type { LoadedSettings } from '../../config/settings.js';
 import { z } from 'zod';
-import { normalizePartList } from '../../utils/nonInteractiveHelpers.js';
+import {
+  insertAfterFunctionResponses,
+  normalizePartList,
+} from '../../utils/nonInteractiveHelpers.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import {
   handleSlashCommand,
@@ -144,6 +165,12 @@ import {
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import {
+  buildExtensionMentionContext,
+  EXTENSION_CONTEXT_BUDGET,
+  matchExtensionByRef,
+  parseExtensionRef,
+} from '../../utils/extension-mention.js';
 
 // Import modular session components
 import type {
@@ -169,6 +196,7 @@ import {
 const debugLogger = createDebugLogger('SESSION');
 const USER_CANCEL_ABORT_REASON = 'qwen:user-cancel';
 const DAEMON_RETRY_META_KEY = 'qwen.daemon.retry';
+const DAEMON_CONTINUE_META_KEY = 'qwen.daemon.continueLastTurn';
 
 function maskApiKeyForDisplay(apiKey: string | undefined): string {
   const trimmed = apiKey?.trim() ?? '';
@@ -184,10 +212,91 @@ type AutoCompressionSendResult =
 type RunToolResult = {
   parts: Part[];
   stopAfterPermissionCancel: boolean;
+  repeatedDuplicateProviderToolCall?: boolean;
+  loopDetected?: boolean;
 };
+
+type DaemonToolLoopState = {
+  totalToolCalls: number;
+  invalidToolParamErrors: Map<string, number>;
+  loopDetected: boolean;
+};
+
+const DAEMON_TURN_TOOL_CALL_CAP = 100;
+const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
 
 const PERMISSION_CANCEL_SKIP_MESSAGE =
   'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.';
+const LOOP_DETECTED_SKIP_MESSAGE =
+  'Skipped because loop detection stopped the current turn before this tool call could run.';
+const LOOP_DETECTED_CONTEXT_MESSAGE =
+  'System: this turn was terminated because the model exceeded tool-call safety limits. Try a different approach on the next turn.';
+
+function createDaemonToolLoopState(): DaemonToolLoopState {
+  return {
+    totalToolCalls: 0,
+    invalidToolParamErrors: new Map(),
+    loopDetected: false,
+  };
+}
+
+function recordDaemonLoopDetected(
+  config: Config,
+  promptId: string,
+  loopType: LoopType,
+  message: string,
+  loopState: DaemonToolLoopState,
+): true {
+  if (!loopState.loopDetected) {
+    loopState.loopDetected = true;
+    debugLogger.warn(message);
+    logLoopDetected(config, new LoopDetectedEvent(loopType, promptId));
+  }
+  return true;
+}
+
+function recordDaemonToolCalls(
+  config: Config,
+  promptId: string,
+  loopState: DaemonToolLoopState | undefined,
+  count: number,
+): boolean {
+  if (!loopState || loopState.loopDetected)
+    return loopState?.loopDetected ?? false;
+  loopState.totalToolCalls += count;
+  if (loopState.totalToolCalls <= DAEMON_TURN_TOOL_CALL_CAP) return false;
+  return recordDaemonLoopDetected(
+    config,
+    promptId,
+    LoopType.TURN_TOOL_CALL_CAP,
+    `Stopping ACP turn after ${loopState.totalToolCalls} tool calls in one turn.`,
+    loopState,
+  );
+}
+
+function recordDaemonInvalidToolParams(
+  config: Config,
+  promptId: string,
+  loopState: DaemonToolLoopState | undefined,
+  toolName: string,
+  error: Error,
+): boolean {
+  if (!loopState || loopState.loopDetected)
+    return loopState?.loopDetected ?? false;
+  // Intentionally bucket by tool name only: repeated parameter errors for the
+  // same tool mean the model is stuck on that tool's schema.
+  const key = toolName;
+  const count = (loopState.invalidToolParamErrors.get(key) ?? 0) + 1;
+  loopState.invalidToolParamErrors.set(key, count);
+  if (count < DAEMON_INVALID_TOOL_PARAMS_THRESHOLD) return false;
+  return recordDaemonLoopDetected(
+    config,
+    promptId,
+    LoopType.INVALID_TOOL_PARAMS_STAGNATION,
+    `Stopping ACP turn after repeated tool parameter errors from ${toolName}: ${error.message}`,
+    loopState,
+  );
+}
 
 // The drain is served from an in-memory queue, so a conforming client answers
 // near-instantly (or rejects with -32601). No response within this window
@@ -209,6 +318,23 @@ const MAX_MID_TURN_RESOURCE_TEXT_LENGTH = 100_000;
 // conforming-but-busy client, while a client that never answers stops
 // costing a stall per tool batch after a few batches.
 const MID_TURN_QUEUE_DRAIN_MAX_TIMEOUT_STRIKES = 3;
+// fs codes that let a `dynamic` (self-paced) loop treat a THROWN loop.md
+// sentinel-resolution as transient — degrade to a no-op re-arm tick so the loop
+// survives — instead of re-throwing (which ends it: the firing wakeup is already
+// consumed, so only an end-of-turn re-arm keeps it alive). readLoopTaskFile only
+// re-throws EACCES/EIO/EBUSY/EPERM (it skips ENOENT/EISDIR/ENOTDIR/ELOOP/… to its
+// own `missing` → no-op path); EISDIR/ENOTDIR stay here as defense-in-depth for
+// the lstat→open TOCTOU race (path swapped to a dir/non-dir mid-read) should that
+// internal skip ever narrow. ENOENT is omitted on purpose: "absent" is not a
+// transient read failure and can never reach this catch.
+const TRANSIENT_FS_CODES: readonly string[] = [
+  'EACCES',
+  'EIO',
+  'EBUSY',
+  'EPERM',
+  'EISDIR',
+  'ENOTDIR',
+];
 
 type DrainedMidTurnMessage =
   | { kind: 'text'; message: string }
@@ -520,6 +646,22 @@ function isUserPromptRecord(record: ChatRecord): boolean {
   );
 }
 
+const AT_TOKEN_RE = /@([^\s,;!?()[\]{}]+)/g;
+
+function collectExtensionMentionRefs(
+  text: string,
+  mentions: Map<string, string>,
+): void {
+  for (const match of text.matchAll(AT_TOKEN_RE)) {
+    const pathName = match[1];
+    if (!pathName) continue;
+    const ref = parseExtensionRef(pathName);
+    if (ref) {
+      mentions.set(ref.name.toLowerCase(), ref.name);
+    }
+  }
+}
+
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
@@ -563,6 +705,13 @@ export async function buildAvailableCommandsSnapshot(
         supportedModes: getEffectiveSupportedModes(cmd),
         subcommands: getCommandSubcommandNames(cmd),
         modelInvocable: cmd.modelInvocable === true,
+        // Carry aliases so a channel consumer (which only sees the wire snapshot,
+        // not the command registry) can recognize an aliased command and avoid
+        // tagging it. _meta is ACP's extension point; omitted when there are none
+        // so command entries without aliases stay byte-identical on the wire.
+        ...(cmd.altNames && cmd.altNames.length > 0
+          ? { altNames: cmd.altNames }
+          : {}),
       },
     };
   });
@@ -664,12 +813,23 @@ export class Session implements SessionContext {
   private cronQueue: CronQueueItem[] = [];
   private cronProcessing = false;
   private cronAbortController: AbortController | null = null;
+  // Resolves the `<<loop.md>>` / `<<loop.md-dynamic>>` sentinels at fire time.
+  // Lazily created on the first loop tick; its content cache is reset on
+  // compaction (see #sendMessageStreamWithAutoCompression) and it is rebuilt if
+  // the working dir changes (e.g. /cd) so it always reads the current project's
+  // loop.md.
+  private loopTickResolver: LoopTickResolver | null = null;
+  private loopTickResolverRoot: string | null = null;
   private cronCompletion: Promise<void> | null = null;
   private cronDisabledByTokenLimit = false;
   private lastPromptTokenCount = 0;
   private lastPromptTokenCountChat: GeminiChat | null = null;
   private midTurnDrainUnavailable = false;
   private midTurnDrainTimeoutStrikes = 0;
+  // ACP can continue one logical conversation through prompt, cron, and
+  // background loops, so keep this with the session instead of a single
+  // runToolCalls invocation.
+  private readonly duplicateProviderToolCallResponseIds = new Set<string>();
   // Messages from a drain that the daemon answered but we timed out waiting for
   // (the daemon already spliced + SSE-published them). Re-injected on the next
   // batch so a transient stall can't silently lose them. See
@@ -1115,6 +1275,8 @@ export class Session implements SessionContext {
       return { stopReason: 'cancelled' };
     }
 
+    this.duplicateProviderToolCallResponseIds.clear();
+
     // Track this prompt's completion for the next prompt to await
     let resolveCompletion!: () => void;
     this.pendingPromptCompletion = new Promise<void>((resolve) => {
@@ -1140,6 +1302,56 @@ export class Session implements SessionContext {
       resolveCompletion();
       this.pendingPromptCompletion = null;
     }
+  }
+
+  /**
+   * Classify whether an unfinished previous turn can be resumed — an
+   * interrupted prompt (the model never answered) or a turn left with dangling
+   * tool calls — without injecting a synthetic "continue" user message.
+   * Classifies from persisted history. Idempotent no-op (accepted:false) when
+   * the last turn ended cleanly or a prompt is already in flight.
+   *
+   * This is the accept/reject pre-check only — it does NOT fire the turn. When
+   * accepted, the daemon bridge drives the continuation through the normal
+   * prompt-admission path (`sendPrompt` with the trusted continue meta) so it is
+   * tracked like any other prompt; `prompt()` then re-detects/strips
+   * authoritatively. Powers `qwen/control/session/continue`.
+   */
+  async continueLastTurn(): Promise<{
+    accepted: boolean;
+    interruption: 'none' | 'interrupted_prompt' | 'interrupted_turn';
+  }> {
+    const geminiClient = this.config.getGeminiClient();
+    if (!geminiClient || !geminiClient.isInitialized()) {
+      return { accepted: false, interruption: 'none' };
+    }
+
+    // Classify from a bounded, shallow tail — this accept/reject pre-check does
+    // not need to structuredClone the whole history. The authoritative
+    // re-detection inside the fired prompt() reads full history for the strip.
+    const chat = this.#getCurrentChat();
+    const detection = detectTurnInterruption(
+      chat.getHistoryTailShallow?.(TURN_INTERRUPTION_HISTORY_TAIL_COUNT) ??
+        chat.getHistoryTail(TURN_INTERRUPTION_HISTORY_TAIL_COUNT),
+    );
+    if (detection.kind === 'none') {
+      return { accepted: false, interruption: 'none' };
+    }
+    // A prompt (or an earlier continuation) is still in flight: there is no
+    // settled turn to continue. Reject rather than abort the live turn.
+    if (this.pendingPrompt && !this.pendingPrompt.signal.aborted) {
+      return { accepted: false, interruption: detection.kind };
+    }
+
+    // Accepted. This method only classifies — the daemon bridge drives the
+    // actual continuation through the normal prompt-admission path
+    // (`sendPrompt` with the trusted continue meta), so the turn is tracked
+    // like any other prompt and `prompt()` re-detects/strips authoritatively.
+    // Firing an internal `this.prompt()` here would bypass that tracking (the
+    // daemon would report the session idle and a racing prompt could abort the
+    // continuation), which is exactly what routing through the bridge fixes.
+
+    return { accepted: true, interruption: detection.kind };
   }
 
   /**
@@ -1300,7 +1512,68 @@ export class Session implements SessionContext {
               (params as { _meta?: Record<string, unknown> })._meta?.[
                 DAEMON_RETRY_META_KEY
               ] === true;
-            if (isRetry) {
+
+            // Continue an interrupted previous turn without a synthetic user
+            // message. Classified from full history (the strip pass removes the
+            // entire trailing user run, so detection must see all of it):
+            // `interrupted_prompt` re-submits the orphaned user run after
+            // stripping it (history is neither duplicated nor lost),
+            // `interrupted_turn` closes dangling tool calls with synthesized
+            // error responses. Mirrors the stream-json path in
+            // nonInteractiveCli.ts so both surfaces behave identically.
+            const isContinue =
+              (params as { _meta?: Record<string, unknown> })._meta?.[
+                DAEMON_CONTINUE_META_KEY
+              ] === true;
+            let continuationParts: Part[] | null = null;
+            // For an `interrupted_prompt` continuation we strip the orphaned
+            // user run from history before re-sending it. If the send then
+            // throws before re-pushing it, the orphan would be permanently lost
+            // — so hold it (and a push-count snapshot) to restore on that path.
+            let strippedOrphanEntries: Content[] | null = null;
+            let orphanPushCountSnapshot = 0;
+            if (isContinue) {
+              const detection = detectTurnInterruption(
+                this.#getCurrentChat().getHistory(),
+              );
+              if (detection.kind === 'none') {
+                // History moved between continueLastTurn()'s accept and this
+                // re-detection (e.g. a concurrent turn settled it). Nothing to
+                // continue; log so an abandoned continuation is diagnosable.
+                debugLogger.warn(
+                  `[Session] continue ${promptId}: no interrupted turn on re-detection, nothing to continue`,
+                );
+                // This early return sits before the send-loop try/finally that
+                // emits conversation_finished, so emit it here too — otherwise a
+                // no-op continuation silently drops turn-level telemetry.
+                logConversationFinishedEvent(
+                  this.config,
+                  new ConversationFinishedEvent(
+                    this.config.getApprovalMode(),
+                    0,
+                  ),
+                );
+                return { stopReason: 'end_turn' };
+              }
+              if (detection.kind === 'interrupted_prompt') {
+                strippedOrphanEntries =
+                  this.#getCurrentChat().stripOrphanedUserEntriesFromHistory() ??
+                  null;
+                orphanPushCountSnapshot =
+                  this.#getCurrentChat().getUserContentPushCount?.() ?? 0;
+                continuationParts = detection.parts;
+              } else {
+                continuationParts = buildSyntheticToolResponseParts(
+                  detection.danglingCalls,
+                  ORPHAN_TOOL_USE_REPAIR_REASON,
+                );
+              }
+            }
+
+            if (isContinue) {
+              // The orphaned content is already persisted; recording a new user
+              // message would duplicate the turn in the transcript.
+            } else if (isRetry) {
               this.#getCurrentChat().stripOrphanedUserEntriesFromHistory();
             } else {
               // record user message for session management
@@ -1318,7 +1591,11 @@ export class Session implements SessionContext {
 
             let parts: Part[] | null;
 
-            if (isSlashCommand(inputText)) {
+            if (isContinue) {
+              // Non-null here: the `none` case returned early above, and both
+              // interruption branches assign a concrete part list.
+              parts = continuationParts!;
+            } else if (isSlashCommand(inputText)) {
               // Handle slash command in ACP mode using capability-based filtering
               const slashCommandResult = await handleSlashCommand(
                 inputText,
@@ -1349,6 +1626,7 @@ export class Session implements SessionContext {
             const hooksEnabled = !this.config.getDisableAllHooks?.();
             const messageBus = this.config.getMessageBus?.();
             if (
+              !isContinue &&
               hooksEnabled &&
               messageBus &&
               this.config.hasHooksForEvent?.('UserPromptSubmit')
@@ -1379,7 +1657,7 @@ export class Session implements SessionContext {
                 const blockReason =
                   hookOutput?.getEffectiveReason() || 'No reason provided';
                 await this.messageEmitter.emitAgentMessage(
-                  `🚫 **UserPromptSubmit blocked**: ${blockReason}`,
+                  `✗ **UserPromptSubmit blocked**: ${blockReason}`,
                 );
                 return { stopReason: 'end_turn' };
               }
@@ -1419,25 +1697,47 @@ export class Session implements SessionContext {
             // should avoid edits.
             const systemReminders = await this.#buildInitialSystemReminders();
             if (systemReminders.length > 0) {
-              parts = [...systemReminders, ...parts];
+              // On an `interrupted_prompt` continuation the replayed orphaned
+              // user run can already carry the reminders that were prepended on
+              // the original send. Re-inserting would show the model duplicate
+              // (and, if approval mode changed since, conflicting) reminders, so
+              // skip when one is already present — mirrors the
+              // `hasSystemReminderPart` guard in nonInteractiveCli.ts.
+              const alreadyHasReminder =
+                isContinue &&
+                parts.some((part) =>
+                  isSystemReminderContent({ role: 'user', parts: [part] }),
+                );
+              if (!alreadyHasReminder) {
+                // Insert after any leading functionResponse parts so a
+                // tool-result continuation (interrupted_turn) keeps tool_result
+                // blocks first, as Anthropic-compatible backends require. With
+                // no leading functionResponses this is equivalent to prepending.
+                parts = insertAfterFunctionResponses(parts, systemReminders);
+              }
             }
 
             // Phase C: one-shot worktree restore notice, set by acpAgent on
             // --resume / loadSession when the session's worktree is still alive.
-            // Prepended exactly once, then cleared so it doesn't repeat on
-            // subsequent turns.
+            // Inserted exactly once, then cleared so it doesn't repeat on
+            // subsequent turns. Uses the same insert-after-functionResponses
+            // helper as the reminders above (a continuation closing dangling
+            // tool calls leads with functionResponses, and text before them
+            // violates the tool_result-first ordering). Because the reminders
+            // are inserted first, the resulting order on such a continuation is
+            // `[...functionResponses, worktreeNotice, ...systemReminders, ...]`;
+            // Session.worktree.test.ts locks this ordering.
             if (this.pendingWorktreeNotice) {
-              parts = [
-                {
-                  text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
-                },
-                ...parts,
-              ];
+              const noticePart = {
+                text: `<system-reminder>\n${this.pendingWorktreeNotice}\n</system-reminder>\n\n`,
+              };
+              parts = insertAfterFunctionResponses(parts, [noticePart]);
               this.pendingWorktreeNotice = null;
             }
 
             let nextMessage: Content | null = { role: 'user', parts };
             let turnCount = 0;
+            const toolLoopState = createDaemonToolLoopState();
 
             // conversation_finished must fire on every terminal path of the
             // turn — the loop below has cancel/abort/no-stream early-returns
@@ -1468,9 +1768,14 @@ export class Session implements SessionContext {
                       pendingSend.signal,
                     );
                   if (!sendResult.responseStream) {
+                    // Preserve the full message (not just functionResponse
+                    // parts) for a continuation: its content was stripped from
+                    // history before the send, so dropping it here on a
+                    // non-cancelled failure would lose the orphaned turn the
+                    // user never got an answer to.
                     this.#preserveUnsentMessageHistory(
                       nextMessage,
-                      sendResult.stopReason === 'cancelled',
+                      isContinue || sendResult.stopReason === 'cancelled',
                     );
                     return { stopReason: sendResult.stopReason };
                   }
@@ -1516,6 +1821,23 @@ export class Session implements SessionContext {
                     }
                   }
                 } catch (error) {
+                  // Restore the stripped orphan if the send threw before
+                  // re-pushing it (the null-stream path above already preserves;
+                  // an exception bypasses it). Gate on the push counter — like
+                  // the core Retry restore in client.ts — so we only restore
+                  // when the content never landed (a later tool-loop send
+                  // throwing leaves the counter advanced → no double-restore).
+                  if (
+                    strippedOrphanEntries &&
+                    (this.#getCurrentChat().getUserContentPushCount?.() ?? 0) <=
+                      orphanPushCountSnapshot
+                  ) {
+                    for (const entry of strippedOrphanEntries) {
+                      this.#getCurrentChat().addHistory(entry);
+                    }
+                    strippedOrphanEntries = null;
+                  }
+
                   // Only explicit user cancellation maps to a normal
                   // cancelled turn. Other aborts/errors should surface so
                   // infra failures are not hidden as successful cancels.
@@ -1583,23 +1905,26 @@ export class Session implements SessionContext {
                     pendingSend.signal,
                     promptId,
                     functionCalls,
+                    toolLoopState,
                   );
                   if (toolRun.stopAfterPermissionCancel) {
-                    await this.#preserveCancelledPermissionToolRun(
+                    await this.#preserveStoppedToolRun(
                       toolRun,
                       pendingSend.signal,
                     );
                     return { stopReason: 'end_turn' };
                   }
-                  nextMessage = {
-                    role: 'user',
-                    parts: [
-                      ...toolRun.parts,
-                      ...(await this.#drainMidTurnUserMessages(
-                        pendingSend.signal,
-                      )),
-                    ],
-                  };
+                  nextMessage = await this.#buildNextMessageAfterToolRun(
+                    toolRun,
+                    pendingSend.signal,
+                  );
+                  if (toolRun.loopDetected) {
+                    await this.#preserveStoppedToolRun(
+                      toolRun,
+                      pendingSend.signal,
+                    );
+                    return { stopReason: 'end_turn' };
+                  }
                 }
               }
 
@@ -1670,6 +1995,12 @@ export class Session implements SessionContext {
         this.#getCurrentChat().getLastModelMessageText?.() ||
         '[no response text]';
 
+      const contextUsage = buildContextUsage(
+        this.config.getContentGeneratorConfig()?.contextWindowSize ??
+          DEFAULT_TOKEN_LIMIT,
+        this.lastPromptTokenCount,
+      );
+
       const response = await messageBus.request<
         HookExecutionRequest,
         HookExecutionResponse
@@ -1680,6 +2011,7 @@ export class Session implements SessionContext {
           input: {
             stop_hook_active: true,
             last_assistant_message: responseText,
+            ...contextUsage,
           },
           signal: pendingSend.signal,
         },
@@ -1742,6 +2074,7 @@ export class Session implements SessionContext {
           role: 'user',
           parts: continueParts,
         };
+        const toolLoopState = createDaemonToolLoopState();
 
         // Process the follow-up message and any tool calls that result
         while (nextMessage !== null) {
@@ -1857,21 +2190,20 @@ export class Session implements SessionContext {
               pendingSend.signal,
               promptId,
               functionCalls,
+              toolLoopState,
             );
             if (toolRun.stopAfterPermissionCancel) {
-              await this.#preserveCancelledPermissionToolRun(
-                toolRun,
-                pendingSend.signal,
-              );
+              await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
               return { stopReason: 'end_turn' };
             }
-            nextMessage = {
-              role: 'user',
-              parts: [
-                ...toolRun.parts,
-                ...(await this.#drainMidTurnUserMessages(pendingSend.signal)),
-              ],
-            };
+            nextMessage = await this.#buildNextMessageAfterToolRun(
+              toolRun,
+              pendingSend.signal,
+            );
+            if (toolRun.loopDetected) {
+              await this.#preserveStoppedToolRun(toolRun, pendingSend.signal);
+              return { stopReason: 'end_turn' };
+            }
           }
         }
 
@@ -1926,6 +2258,10 @@ export class Session implements SessionContext {
         compressionInfo = compressed;
         this.#recordCompressionTokenCount(compressed);
         if (compressed.compressionStatus === CompressionStatus.COMPRESSED) {
+          // Context was just compacted; a loop.md tick must re-deliver the full
+          // task block (a short reminder refers back to a message that is no
+          // longer in context).
+          this.loopTickResolver?.resetCache();
           const reasonClause =
             compressed.triggerReason === 'image_overflow'
               ? `accumulated enough tool screenshots to trigger compaction for ${this.config.getModel()}`
@@ -2032,7 +2368,7 @@ export class Session implements SessionContext {
     }
   }
 
-  async #preserveCancelledPermissionToolRun(
+  async #preserveStoppedToolRun(
     toolRun: RunToolResult,
     abortSignal: AbortSignal,
   ): Promise<void> {
@@ -2041,12 +2377,36 @@ export class Session implements SessionContext {
         role: 'user',
         parts: [
           ...toolRun.parts,
+          ...(toolRun.loopDetected
+            ? [{ text: LOOP_DETECTED_CONTEXT_MESSAGE }]
+            : []),
           ...(await this.#drainMidTurnUserMessages(abortSignal)),
         ],
       },
       true,
     );
     await this.messageRewriter?.waitForPendingRewrites();
+  }
+
+  async #buildNextMessageAfterToolRun(
+    toolRun: RunToolResult,
+    abortSignal: AbortSignal,
+  ): Promise<Content | null> {
+    if (toolRun.loopDetected) {
+      debugLogger.debug('Stopping ACP turn after daemon loop detection.');
+      return null;
+    }
+    if (toolRun.repeatedDuplicateProviderToolCall) {
+      debugLogger.debug(
+        'Stopping ACP turn after dropping repeated duplicate provider tool-call response.',
+      );
+      return null;
+    }
+    const parts = [
+      ...toolRun.parts,
+      ...(await this.#drainMidTurnUserMessages(abortSignal)),
+    ];
+    return { role: 'user', parts };
   }
 
   #recordCompressionTokenCount(info: ChatCompressionInfo): void {
@@ -2374,14 +2734,17 @@ export class Session implements SessionContext {
 
     if (!scheduler.hasPendingWork) return;
 
-    scheduler.start((job: { prompt: string; cronExpr?: string }) => {
-      if (this.cronDisabledByTokenLimit) return;
-      this.cronQueue.push({
-        prompt: job.prompt,
-        source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
-      });
-      void this.#drainCronQueue();
-    });
+    scheduler.start(
+      (job: { prompt: string; cronExpr?: string; missed?: boolean }) => {
+        if (this.cronDisabledByTokenLimit) return;
+        if (job.missed && detectAutonomousSentinel(job.prompt)) return;
+        this.cronQueue.push({
+          prompt: job.prompt,
+          source: job.cronExpr === '@wakeup' ? 'loop' : 'cron',
+        });
+        void this.#drainCronQueue();
+      },
+    );
   }
 
   /**
@@ -2427,6 +2790,44 @@ export class Session implements SessionContext {
     }
   }
 
+  #getLoopTickResolver(): LoopTickResolver {
+    const root = this.config.getWorkingDir();
+    // Rebuild if the working dir changed (e.g. /cd) so loop.md resolves against
+    // the current project; a fresh resolver also correctly re-delivers full.
+    if (!this.loopTickResolver || this.loopTickResolverRoot !== root) {
+      // Resolve the home/global loop.md from the QWEN_HOME-aware global dir (the
+      // rest of Qwen honors QWEN_HOME for `.qwen`); reading raw os.homedir() here
+      // would always hit the real `~/.qwen` and ignore a relocated config home.
+      const homeQwenDir = Storage.getGlobalQwenDir();
+      // Confinement root for the home candidate's resolved target: $QWEN_HOME
+      // when set (it IS the global dir), else $HOME — keeps the earlier
+      // confinement (an in-root dotfile symlink resolves; an escape is refused).
+      // The `|| path.dirname(homeQwenDir)` guards an empty os.homedir() (minimal
+      // containers with no HOME): an empty root makes isWithin('', target) always
+      // true, trivially bypassing the symlink confinement. homeQwenDir
+      // (Storage.getGlobalQwenDir()) is always non-empty, so its parent is a
+      // sound non-empty fallback root.
+      const homeConfineRoot =
+        (process.env['QWEN_HOME'] ? homeQwenDir : os.homedir()) ||
+        path.dirname(homeQwenDir);
+      this.loopTickResolver = new LoopTickResolver({
+        projectRoot: root,
+        homeDir: homeConfineRoot,
+        homeQwenDir,
+        // The project `.qwen/loop.md` is repo-controlled, so an untrusted folder
+        // must not read it and feed it to the model (mirrors getProjectHooks()'s
+        // trust gate). The home/global `~/.qwen/loop.md` is user-owned and stays
+        // allowed. Pass a getter, not a snapshot: isTrustedFolder() can flip
+        // mid-session on an IDE workspace-trust update, and the resolver outlives
+        // a single tick — re-read it on every resolve() so a trusted→untrusted
+        // flip stops reading the project file immediately.
+        allowProjectFile: () => this.config.isTrustedFolder(),
+      });
+      this.loopTickResolverRoot = root;
+    }
+    return this.loopTickResolver;
+  }
+
   /**
    * Executes a single cron-fired prompt: echoes it as a user message with
    * `_meta.source='cron'`, streams the model response, and handles tool calls.
@@ -2460,10 +2861,132 @@ export class Session implements SessionContext {
           async () => {
             let turnCount = 0;
             try {
+              // A `<<loop.md>>` / `<<loop.md-dynamic>>` sentinel is expanded at
+              // fire time into the loop.md task block — full on the first or a
+              // changed fire, a short reminder when unchanged. Non-sentinel
+              // prompts pass through untouched.
+              const loopMode = detectLoopSentinel(prompt);
+              // A bare `/loop` arms an autonomous sentinel instead of a loop.md
+              // one; only one family can match a given prompt.
+              const autonomousMode = loopMode
+                ? null
+                : detectAutonomousSentinel(prompt);
+              let loopTick: LoopTickResult | null = null;
+              if (loopMode) {
+                const resolver = this.#getLoopTickResolver();
+                // Capture folder-trust ONCE for this tick and thread it through
+                // both the resolve probe and the error path. isTrustedFolder()
+                // can flip mid-tick (an IDE workspace-trust update), so two
+                // separate reads could let the sanitized error name a different
+                // candidate set than resolve() actually probed.
+                const trustedAtResolve = this.config.isTrustedFolder();
+                try {
+                  loopTick = await resolver.resolve(loopMode, trustedAtResolve);
+                } catch (resolveErr) {
+                  // resolve() reads .qwen/loop.md (project or home/global); an
+                  // EACCES/EIO here is a sentinel-RESOLUTION failure, not a
+                  // model-call failure — tag it so the two are distinguishable
+                  // in logs.
+                  const code =
+                    (resolveErr as NodeJS.ErrnoException).code ?? 'unknown';
+                  // Full detail — including the raw fs error's ABSOLUTE loop.md
+                  // path (OS username + dir layout) — stays in this LOCAL debug
+                  // log only; debug logs are never sent to the ACP client.
+                  debugLogger.warn(
+                    `loop.md sentinel resolution failed (mode=${loopMode}, code=${code}) — check .qwen/loop.md permissions/IO`,
+                    resolveErr,
+                  );
+                  if (
+                    loopMode === 'dynamic' &&
+                    TRANSIENT_FS_CODES.includes(code)
+                  ) {
+                    // A `dynamic` (self-paced) loop is kept alive ONLY by the
+                    // model re-arming LoopWakeup at the end of each turn; the
+                    // firing wakeup was already consumed, so throwing here (no
+                    // turn → no re-arm) would silently kill the loop forever on a
+                    // transient hiccup (EACCES/EIO, or a Windows editor/AV briefly
+                    // locking the file). Degrade to a no-op tick mirroring the
+                    // absent path so the model still re-arms and the loop survives.
+                    // (`cron` re-fires on its own next interval, so it still
+                    // throws below.) The captured trust names the SAME candidate
+                    // set the probe used; the errno (no absolute path) is noted.
+                    // Only KNOWN-transient codes degrade: an unexpected error
+                    // (TypeError / assertion → code 'unknown') falls through to the
+                    // throw so the real bug surfaces instead of an infinite no-op
+                    // cycle.
+                    loopTick = resolver.buildTransientErrorTick(
+                      loopMode,
+                      trustedAtResolve,
+                      code,
+                    );
+                  } else {
+                    // Reached by `cron` (re-fires on its own next interval) and by
+                    // `dynamic` with an UNEXPECTED (non-transient) error — both
+                    // surface rather than silently degrade. Re-throw a SANITIZED
+                    // error: the outer catch forwards error.message verbatim to the
+                    // client via emitAgentMessage,
+                    // so re-throwing the raw fs error would leak that absolute
+                    // path. Surface only the candidate labels + errno code via the
+                    // shared absentLocations() — reusing the QWEN_HOME-aware home
+                    // label (never a hardcoded `~/.qwen`) and naming the project
+                    // candidate only when it was actually read (the captured trust
+                    // matches the resolve() probe, so an untrusted folder can't
+                    // falsely claim `(project)`).
+                    throw new Error(
+                      `loop.md resolution failed (${code}) for ${resolver.absentLocations(
+                        trustedAtResolve,
+                      )}`,
+                    );
+                  }
+                }
+              } else if (autonomousMode) {
+                // A bare `/loop` arms an autonomous-loop sentinel (no prompt, no
+                // file). Resolve it to the autonomous preamble — full on the first
+                // fire, a short tick after. Synchronous: no fs read, so no
+                // folder-trust / transient handling.
+                loopTick =
+                  this.#getLoopTickResolver().resolveAutonomous(autonomousMode);
+              }
+              const modelText = loopTick ? loopTick.modelText : prompt;
+              if (loopTick) {
+                debugLogger.debug(
+                  `loop tick: mode=${loopMode ?? autonomousMode} delivery=${
+                    loopTick.full
+                      ? 'full'
+                      : loopTick.transientError
+                        ? 'transient-error'
+                        : loopTick.autonomous
+                          ? 'autonomous-tick'
+                          : loopTick.sourceLabel
+                            ? 'reminder'
+                            : 'absent'
+                  } source=${loopTick.sourceLabel ?? 'none'} autonomous=${
+                    loopTick.autonomous ?? false
+                  } transient=${loopTick.transientError ?? false}`,
+                );
+              }
+              // For a loop tick echo a stable, relative label — never the bare
+              // sentinel or the full task dump (and the resolver never hands back
+              // the absolute path, which would leak the OS username / dir layout
+              // into the ACP client UI); otherwise echo the prompt verbatim.
+              const echoText = !loopTick
+                ? prompt
+                : // An autonomous tick (a bare-`/loop` sentinel, or a loop.md
+                  // sentinel whose file is gone and converged on the preamble).
+                  loopTick.autonomous
+                  ? 'Autonomous loop tick'
+                  : loopTick.sourceLabel
+                    ? `Loop tick — tasks from ${loopTick.sourceLabel}`
+                    : // The only remaining tick is a transient read failure
+                      // (buildTransientErrorTick): a loop.md exists but couldn't be
+                      // read this tick. A genuinely-absent loop.md converges on the
+                      // autonomous branch above, so there is no "not present" echo.
+                      'Loop tick — loop.md temporarily unavailable';
+
               // Echo the cron prompt as a user message so the client sees it
               await this.sendUpdate({
                 sessionUpdate: 'user_message_chunk',
-                content: { type: 'text', text: prompt },
+                content: { type: 'text', text: echoText },
                 _meta: { source: item.source },
               });
 
@@ -2472,8 +2995,9 @@ export class Session implements SessionContext {
               const cronReminders = await this.#buildInitialSystemReminders();
               let nextMessage: Content | null = {
                 role: 'user',
-                parts: [...cronReminders, { text: prompt }],
+                parts: [...cronReminders, { text: modelText }],
               };
+              const toolLoopState = createDaemonToolLoopState();
 
               while (nextMessage !== null) {
                 turnCount++;
@@ -2501,6 +3025,13 @@ export class Session implements SessionContext {
                   return;
                 }
                 const responseStream = sendResult.responseStream;
+                if (loopTick && turnCount === 1) {
+                  // The block reached the model (the send started); commit it so
+                  // the next tick can detect "unchanged". Deferring the commit
+                  // to here keeps an abort before delivery from poisoning the
+                  // cache into a dangling short reminder.
+                  this.loopTickResolver?.markDelivered();
+                }
                 nextMessage = null;
 
                 for await (const resp of responseStream) {
@@ -2555,21 +3086,20 @@ export class Session implements SessionContext {
                     ac.signal,
                     promptId,
                     functionCalls,
+                    toolLoopState,
                   );
                   if (toolRun.stopAfterPermissionCancel) {
-                    await this.#preserveCancelledPermissionToolRun(
-                      toolRun,
-                      ac.signal,
-                    );
+                    await this.#preserveStoppedToolRun(toolRun, ac.signal);
                     return;
                   }
-                  nextMessage = {
-                    role: 'user',
-                    parts: [
-                      ...toolRun.parts,
-                      ...(await this.#drainMidTurnUserMessages(ac.signal)),
-                    ],
-                  };
+                  nextMessage = await this.#buildNextMessageAfterToolRun(
+                    toolRun,
+                    ac.signal,
+                  );
+                  if (toolRun.loopDetected) {
+                    await this.#preserveStoppedToolRun(toolRun, ac.signal);
+                    return;
+                  }
                 }
               }
             } catch (error) {
@@ -2773,6 +3303,7 @@ export class Session implements SessionContext {
             role: 'user',
             parts: [...notificationReminders, ...notificationParts],
           };
+          const toolLoopState = createDaemonToolLoopState();
 
           while (nextMessage !== null) {
             if (ac.signal.aborted) {
@@ -2873,22 +3404,22 @@ export class Session implements SessionContext {
                 ac.signal,
                 promptId,
                 functionCalls,
+                toolLoopState,
               );
               if (toolRun.stopAfterPermissionCancel) {
-                await this.#preserveCancelledPermissionToolRun(
-                  toolRun,
-                  ac.signal,
-                );
+                await this.#preserveStoppedToolRun(toolRun, ac.signal);
                 await this.#emitBackgroundNotificationEndTurn('end_turn');
                 return;
               }
-              nextMessage = {
-                role: 'user',
-                parts: [
-                  ...toolRun.parts,
-                  ...(await this.#drainMidTurnUserMessages(ac.signal)),
-                ],
-              };
+              nextMessage = await this.#buildNextMessageAfterToolRun(
+                toolRun,
+                ac.signal,
+              );
+              if (toolRun.loopDetected) {
+                await this.#preserveStoppedToolRun(toolRun, ac.signal);
+                await this.#emitBackgroundNotificationEndTurn('end_turn');
+                return;
+              }
             }
           }
 
@@ -3229,8 +3760,67 @@ export class Session implements SessionContext {
     abortSignal: AbortSignal,
     promptId: string,
     functionCalls: FunctionCall[],
+    toolLoopState?: DaemonToolLoopState,
   ): Promise<RunToolResult> {
     const dedupedFunctionCalls = dedupeToolCallsById(functionCalls);
+    let skippedToolCallCounter = 0;
+    const recordSkippedToolCall = async (
+      fc: FunctionCall,
+      message = PERMISSION_CANCEL_SKIP_MESSAGE,
+      emitStart = true,
+    ): Promise<Part> => {
+      const toolName = fc.name ?? 'unknown_tool';
+      const callId = fc.id ?? `${toolName}-skip-${++skippedToolCallCounter}`;
+      const part: Part = {
+        functionResponse: {
+          id: callId,
+          name: toolName,
+          response: { error: message },
+        },
+      };
+      const error = new Error(message);
+      try {
+        this.config.getChatRecordingService()?.recordToolResult([part], {
+          callId,
+          status: 'error',
+          resultDisplay: undefined,
+          error,
+          errorType: undefined,
+        });
+        if (emitStart) {
+          await this.toolCallEmitter.emitStart({
+            callId,
+            toolName,
+            args: (fc.args ?? {}) as Record<string, unknown>,
+            status: 'pending',
+          });
+        }
+        await this.toolCallEmitter.emitError(callId, toolName, error);
+      } catch (recordError) {
+        debugLogger.error('Failed to record skipped tool call:', recordError);
+      }
+      return part;
+    };
+
+    if (
+      recordDaemonToolCalls(
+        this.config,
+        promptId,
+        toolLoopState,
+        dedupedFunctionCalls.length,
+      )
+    ) {
+      return {
+        parts: await Promise.all(
+          dedupedFunctionCalls.map((fc) =>
+            recordSkippedToolCall(fc, LOOP_DETECTED_SKIP_MESSAGE, false),
+          ),
+        ),
+        stopAfterPermissionCancel: false,
+        loopDetected: true,
+      };
+    }
+
     type ExecutableBatch = {
       kind: 'execute';
       concurrent: boolean;
@@ -3246,12 +3836,38 @@ export class Session implements SessionContext {
     const handledProviderToolCallIds = new Set(
       this.#getCurrentChat().getHistoryFunctionResponseIds(),
     );
+    const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
+      dedupedFunctionCalls,
+      (fc) => getProviderToolCallId(fc) ?? fc.id,
+      handledProviderToolCallIds,
+      this.duplicateProviderToolCallResponseIds,
+    );
+    if (repeatedDuplicateCall) {
+      const providerCallId =
+        getProviderToolCallId(repeatedDuplicateCall) ??
+        repeatedDuplicateCall.id;
+      debugLogger.debug(
+        `[Session.runToolCalls] Dropping batch after repeated duplicate provider tool-call id: ` +
+          `${providerCallId} (tool: ${repeatedDuplicateCall.name ?? 'unknown_tool'})`,
+      );
+      return {
+        parts: [],
+        stopAfterPermissionCancel: false,
+        repeatedDuplicateProviderToolCall: true,
+      };
+    }
 
     const pushDuplicateBatch = (request: ToolCallRequestInfo): void => {
+      const providerCallId = request.providerCallId ?? request.callId;
+      markDuplicateProviderToolCallResponseSent(
+        providerCallId,
+        this.duplicateProviderToolCallResponseIds,
+      );
+
       const response = createDuplicateProviderToolCallResponse(request);
       debugLogger.debug(
         `[Session.runToolCalls] Suppressing duplicate provider tool-call id: ` +
-          `${request.providerCallId} (tool: ${request.name})`,
+          `${providerCallId} (tool: ${request.name})`,
       );
       batches.push({ kind: 'duplicate', request, response });
     };
@@ -3329,43 +3945,14 @@ export class Session implements SessionContext {
       }
     }
 
-    let skippedToolCallCounter = 0;
-    const recordSkippedToolCall = async (fc: FunctionCall): Promise<Part> => {
-      const toolName = fc.name ?? 'unknown_tool';
-      const callId = fc.id ?? `${toolName}-skip-${++skippedToolCallCounter}`;
-      const part: Part = {
-        functionResponse: {
-          id: callId,
-          name: toolName,
-          response: { error: PERMISSION_CANCEL_SKIP_MESSAGE },
-        },
-      };
-      const error = new Error(PERMISSION_CANCEL_SKIP_MESSAGE);
-      try {
-        this.config.getChatRecordingService()?.recordToolResult([part], {
-          callId,
-          status: 'error',
-          resultDisplay: undefined,
-          error,
-          errorType: undefined,
-        });
-        await this.toolCallEmitter.emitStart({
-          callId,
-          toolName,
-          args: (fc.args ?? {}) as Record<string, unknown>,
-          status: 'pending',
-        });
-        await this.toolCallEmitter.emitError(callId, toolName, error);
-      } catch (recordError) {
-        debugLogger.error('Failed to record skipped tool call:', recordError);
-      }
-      return part;
-    };
-
-    const appendSkippedAfter = async (parts: Part[], fc: FunctionCall) => {
+    const appendSkippedAfter = async (
+      parts: Part[],
+      fc: FunctionCall,
+      message = PERMISSION_CANCEL_SKIP_MESSAGE,
+    ) => {
       const startIndex = dedupedFunctionCalls.indexOf(fc) + 1;
       for (const remainingCall of dedupedFunctionCalls.slice(startIndex)) {
-        parts.push(await recordSkippedToolCall(remainingCall));
+        parts.push(await recordSkippedToolCall(remainingCall, message));
       }
     };
 
@@ -3377,16 +3964,81 @@ export class Session implements SessionContext {
       calls: FunctionCall[],
       runAbortSignal: AbortSignal,
       onStopAfterPermissionCancel?: () => void,
+      onStopAfterLoopDetected?: () => void,
       shouldSkipUnstarted?: () => boolean,
     ): Promise<RunToolResult[]> => {
-      const maxConcurrency = parsePositiveIntegerEnv(
+      const configuredMaxConcurrency = parsePositiveIntegerEnv(
         process.env['QWEN_CODE_MAX_TOOL_CONCURRENCY'],
         10,
       );
+      const maxConcurrency = toolLoopState
+        ? Math.min(
+            configuredMaxConcurrency,
+            DAEMON_INVALID_TOOL_PARAMS_THRESHOLD,
+          )
+        : configuredMaxConcurrency;
       const results: RunToolResult[] = new Array(calls.length);
       const executing = new Set<Promise<void>>();
-      for (let i = 0; i < calls.length; i++) {
+      const fillLoopSkippedFrom = async (startIndex: number) => {
+        for (let i = startIndex; i < calls.length; i++) {
+          if (results[i]) continue;
+          results[i] = {
+            parts: [
+              await recordSkippedToolCall(calls[i], LOOP_DETECTED_SKIP_MESSAGE),
+            ],
+            stopAfterPermissionCancel: false,
+            loopDetected: true,
+          };
+        }
+      };
+      const fillPermissionSkippedFrom = async (startIndex: number) => {
+        for (let i = startIndex; i < calls.length; i++) {
+          if (results[i]) continue;
+          results[i] = {
+            parts: [await recordSkippedToolCall(calls[i])],
+            stopAfterPermissionCancel: false,
+          };
+        }
+      };
+      let startIndex = 0;
+      if (
+        toolLoopState &&
+        calls.length > DAEMON_INVALID_TOOL_PARAMS_THRESHOLD
+      ) {
+        startIndex = DAEMON_INVALID_TOOL_PARAMS_THRESHOLD;
+        for (let i = 0; i < startIndex; i++) {
+          if (runAbortSignal.aborted && shouldSkipUnstarted?.()) {
+            results[i] = {
+              parts: [await recordSkippedToolCall(calls[i])],
+              stopAfterPermissionCancel: false,
+            };
+            continue;
+          }
+          const r = await this.runTool(
+            runAbortSignal,
+            promptId,
+            calls[i],
+            onStopAfterPermissionCancel,
+            toolLoopState,
+            recordSkippedToolCall,
+          );
+          results[i] = r;
+          if (r.loopDetected) {
+            await fillLoopSkippedFrom(i + 1);
+            return results;
+          }
+          if (r.stopAfterPermissionCancel) {
+            await fillPermissionSkippedFrom(i + 1);
+            return results;
+          }
+        }
+      }
+      for (let i = startIndex; i < calls.length; i++) {
         const idx = i;
+        if (toolLoopState?.loopDetected) {
+          await fillLoopSkippedFrom(idx);
+          return results;
+        }
         if (runAbortSignal.aborted && shouldSkipUnstarted?.()) {
           results[idx] = {
             parts: [await recordSkippedToolCall(calls[idx])],
@@ -3399,6 +4051,8 @@ export class Session implements SessionContext {
           promptId,
           calls[idx],
           onStopAfterPermissionCancel,
+          toolLoopState,
+          recordSkippedToolCall,
         )
           .then((r) => {
             results[idx] = r;
@@ -3409,6 +4063,25 @@ export class Session implements SessionContext {
         executing.add(p);
         if (executing.size >= maxConcurrency) {
           await Promise.race(executing);
+          if (results.some((result) => result?.loopDetected)) {
+            onStopAfterLoopDetected?.();
+            await Promise.all(executing);
+            await fillLoopSkippedFrom(idx + 1);
+            return results;
+          }
+          const invalidToolErrorNearThreshold =
+            toolLoopState &&
+            [...toolLoopState.invalidToolParamErrors.values()].some(
+              (count) => count >= DAEMON_INVALID_TOOL_PARAMS_THRESHOLD - 1,
+            );
+          if (invalidToolErrorNearThreshold && executing.size > 0) {
+            await Promise.all(executing);
+            if (results.some((result) => result?.loopDetected)) {
+              onStopAfterLoopDetected?.();
+              await fillLoopSkippedFrom(idx + 1);
+              return results;
+            }
+          }
         }
       }
       await Promise.all(executing);
@@ -3445,32 +4118,74 @@ export class Session implements SessionContext {
             batch.calls,
             batchAbortController.signal,
             stopBatchAfterPermissionCancel,
+            () => batchAbortController.abort('loop_detected'),
             () => batchStopAfterPermissionCancel,
           );
         } finally {
           abortSignal.removeEventListener('abort', propagateAbort);
         }
         let shouldStop = false;
+        let shouldStopForLoop = false;
         for (const r of results) {
           parts.push(...r.parts);
           shouldStop ||= r.stopAfterPermissionCancel;
+          shouldStopForLoop ||= r.loopDetected === true;
+        }
+        if (shouldStopForLoop) {
+          await appendSkippedAfter(
+            parts,
+            batch.calls[batch.calls.length - 1],
+            LOOP_DETECTED_SKIP_MESSAGE,
+          );
+          return {
+            parts,
+            stopAfterPermissionCancel: false,
+            loopDetected: true,
+          };
         }
         if (shouldStop) {
           await appendSkippedAfter(parts, batch.calls[batch.calls.length - 1]);
-          return { parts, stopAfterPermissionCancel: true };
+          return {
+            parts,
+            stopAfterPermissionCancel: true,
+            repeatedDuplicateProviderToolCall: false,
+          };
         }
       } else {
         for (const fc of batch.calls) {
-          const r = await this.runTool(abortSignal, promptId, fc);
+          const r = await this.runTool(
+            abortSignal,
+            promptId,
+            fc,
+            undefined,
+            toolLoopState,
+            recordSkippedToolCall,
+          );
           parts.push(...r.parts);
+          if (r.loopDetected) {
+            await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
+            return {
+              parts,
+              stopAfterPermissionCancel: false,
+              loopDetected: true,
+            };
+          }
           if (r.stopAfterPermissionCancel) {
             await appendSkippedAfter(parts, fc);
-            return { parts, stopAfterPermissionCancel: true };
+            return {
+              parts,
+              stopAfterPermissionCancel: true,
+              repeatedDuplicateProviderToolCall: false,
+            };
           }
         }
       }
     }
-    return { parts, stopAfterPermissionCancel: false };
+    return {
+      parts,
+      stopAfterPermissionCancel: false,
+      repeatedDuplicateProviderToolCall: false,
+    };
   }
 
   /**
@@ -3513,9 +4228,32 @@ export class Session implements SessionContext {
     promptId: string,
     fc: FunctionCall,
     onStopAfterPermissionCancel?: () => void,
+    toolLoopState?: DaemonToolLoopState,
+    recordSkippedToolCall?: (
+      fc: FunctionCall,
+      message?: string,
+      emitStart?: boolean,
+    ) => Promise<Part>,
   ): Promise<RunToolResult> {
     const callId = fc.id ?? `${fc.name}-${Date.now()}`;
     let args = (fc.args ?? {}) as Record<string, unknown>;
+    if (toolLoopState?.loopDetected) {
+      return {
+        parts: [
+          recordSkippedToolCall
+            ? await recordSkippedToolCall(fc, LOOP_DETECTED_SKIP_MESSAGE, false)
+            : {
+                functionResponse: {
+                  id: callId,
+                  name: fc.name ?? 'unknown_tool',
+                  response: { error: LOOP_DETECTED_SKIP_MESSAGE },
+                },
+              },
+        ],
+        stopAfterPermissionCancel: false,
+        loopDetected: true,
+      };
+    }
 
     const startTime = Date.now();
     let spanError: string | undefined;
@@ -3565,7 +4303,10 @@ export class Session implements SessionContext {
     const earlyErrorResponse = async (
       error: Error,
       toolName = fc.name ?? 'unknown_tool',
-      opts?: { stopAfterPermissionCancel?: boolean },
+      opts?: {
+        recordInvalidToolParams?: boolean;
+        stopAfterPermissionCancel?: boolean;
+      },
     ) => {
       spanError = error.message;
       cleanupAgentToolResources();
@@ -3581,14 +4322,28 @@ export class Session implements SessionContext {
         error,
         errorType: undefined,
       });
+      const loopDetected =
+        opts?.recordInvalidToolParams === true &&
+        !activeToolAbortSignal.aborted &&
+        !opts?.stopAfterPermissionCancel &&
+        recordDaemonInvalidToolParams(
+          this.config,
+          promptId,
+          toolLoopState,
+          toolName,
+          error,
+        );
       return {
         parts: errorParts,
         stopAfterPermissionCancel: opts?.stopAfterPermissionCancel ?? false,
+        loopDetected,
       };
     };
 
     if (!fc.name) {
-      return earlyErrorResponse(new Error('Missing function name'));
+      return earlyErrorResponse(new Error('Missing function name'), undefined, {
+        recordInvalidToolParams: true,
+      });
     }
 
     const toolName = fc.name;
@@ -3598,6 +4353,8 @@ export class Session implements SessionContext {
     if (!tool) {
       return earlyErrorResponse(
         new Error(`Tool "${toolName}" not found in registry.`),
+        toolName,
+        { recordInvalidToolParams: true },
       );
     }
 
@@ -3651,8 +4408,10 @@ export class Session implements SessionContext {
         // Get approval mode for hook context (defined outside try for catch block access)
         const approvalMode = this.config.getApprovalMode();
 
+        let toolBuildSucceeded = false;
         try {
           const invocation = tool.build(args);
+          toolBuildSucceeded = true;
 
           // Production AgentTool always initializes `eventEmitter` on its
           // invocation (`agent.ts:392`). Be defensive about the `undefined`
@@ -3732,7 +4491,8 @@ export class Session implements SessionContext {
           // prompt right after an allow-rule call just worked.
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+              shouldClassifyAllShellForAutoMode(toolName, this.config));
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
@@ -4139,7 +4899,7 @@ export class Session implements SessionContext {
               const blockReason =
                 preHookResult.blockReason || 'Blocked by PreToolUse hook';
               await this.messageEmitter.emitAgentMessage(
-                `🚫 **PreToolUse blocked**: ${toolName} - ${blockReason}`,
+                `✗ **PreToolUse blocked**: ${toolName} - ${blockReason}`,
               );
               return earlyErrorResponse(new Error(blockReason), toolName);
             }
@@ -4427,9 +5187,21 @@ export class Session implements SessionContext {
             errorType: undefined,
           });
 
+          const loopDetected =
+            !activeToolAbortSignal.aborted &&
+            !toolBuildSucceeded &&
+            recordDaemonInvalidToolParams(
+              this.config,
+              promptId,
+              toolLoopState,
+              toolName,
+              error,
+            );
+
           return {
             parts: errorResponse(error),
             stopAfterPermissionCancel: nestedPermissionCancelled,
+            loopDetected,
           };
         }
       }); // end runInToolSpanContext
@@ -4587,10 +5359,12 @@ export class Session implements SessionContext {
     const FILE_URI_SCHEME = 'file://';
 
     const embeddedContext: EmbeddedResourceResource[] = [];
+    const extensionMentions = new Map<string, string>();
 
     const parts = message.map((part) => {
       switch (part.type) {
         case 'text':
+          collectExtensionMentionRefs(part.text, extensionMentions);
           return { text: part.text };
         case 'image':
         case 'audio':
@@ -4625,9 +5399,21 @@ export class Session implements SessionContext {
     });
 
     const atPathCommandParts = parts.filter((part) => 'fileData' in part);
+    const extensionParts = await this.#resolveExtensionMentionParts(
+      extensionMentions,
+      abortSignal,
+    );
+
+    if (
+      atPathCommandParts.length === 0 &&
+      embeddedContext.length === 0 &&
+      extensionParts.length === 0
+    ) {
+      return parts;
+    }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
-      return parts;
+      return [...parts, ...extensionParts];
     }
 
     // Extract paths from @ commands - pass directly to readManyFiles without filtering
@@ -4670,6 +5456,7 @@ export class Session implements SessionContext {
 
       // Add initial query text first
       processedQueryParts.push({ text: initialQueryText });
+      processedQueryParts.push(...extensionParts);
 
       // Then add content parts (preserving binary files as inlineData)
       for (const part of contentParts) {
@@ -4681,6 +5468,7 @@ export class Session implements SessionContext {
       }
     } else {
       processedQueryParts.push({ text: initialQueryText.trim() });
+      processedQueryParts.push(...extensionParts);
     }
 
     // Process embedded context from resource blocks
@@ -4705,6 +5493,39 @@ export class Session implements SessionContext {
     }
 
     return processedQueryParts;
+  }
+
+  async #resolveExtensionMentionParts(
+    extensionMentions: Map<string, string>,
+    abortSignal: AbortSignal,
+  ): Promise<Part[]> {
+    if (extensionMentions.size === 0) return [];
+    const activeExtensions = this.config.getActiveExtensions?.() ?? [];
+    if (activeExtensions.length === 0) return [];
+
+    const extensionParts: Part[] = [];
+    const resolvedExtensionNames = new Set<string>();
+    let remainingBudget = EXTENSION_CONTEXT_BUDGET;
+    for (const name of extensionMentions.values()) {
+      const extension = matchExtensionByRef(name, activeExtensions);
+      if (!extension) {
+        this.debug(
+          `Extension "${name}" not found among active extensions. ` +
+            `Available: ${activeExtensions.map((e) => e.name).join(', ') || '(none)'}`,
+        );
+        continue;
+      }
+      if (resolvedExtensionNames.has(extension.name)) continue;
+      resolvedExtensionNames.add(extension.name);
+      const context = await buildExtensionMentionContext(extension, {
+        remainingBudget,
+        signal: abortSignal,
+        onDebugMessage: (message) => this.debug(message),
+      });
+      remainingBudget = context.remainingBudget;
+      extensionParts.push({ text: context.text });
+    }
+    return extensionParts;
   }
 
   debug(msg: string): void {

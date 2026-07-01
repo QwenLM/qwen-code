@@ -212,6 +212,7 @@ export default {
   'toolDisplayName.EnterWorktree': 'toolDisplayName.EnterWorktree',
   'toolDisplayName.ExitWorktree': 'toolDisplayName.ExitWorktree',
   'toolDisplayName.Workflow': 'toolDisplayName.Workflow',
+  'toolDisplayName.ReadMcpResource': 'toolDisplayName.ReadMcpResource',
   // ============================================================================
   // Help / UI Components
   // ============================================================================
@@ -514,7 +515,7 @@ export default {
   'Open in editor': 'Open in editor',
   'Edit tools': 'Edit tools',
   'Edit color': 'Edit color',
-  '❌ Error:': '❌ Error:',
+  '✗ Error:': '✗ Error:',
   'Are you sure you want to delete agent "{{name}}"?':
     'Are you sure you want to delete agent "{{name}}"?',
   // ============================================================================
@@ -522,12 +523,12 @@ export default {
   // ============================================================================
   'Project Level (.qwen/agents/)': 'Project Level (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'User Level (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ Subagent Created Successfully!',
+  '✓ Subagent Created Successfully!': '✓ Subagent Created Successfully!',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'Subagent "{{name}}" has been saved to {{level}} level.',
   'Name: ': 'Name: ',
   'Location: ': 'Location: ',
-  '❌ Error saving subagent:': '❌ Error saving subagent:',
+  '✗ Error saving subagent:': '✗ Error saving subagent:',
   'Warnings:': 'Warnings:',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent',
@@ -725,6 +726,8 @@ export default {
     'Show model-specific usage statistics.',
   'Show tool-specific usage statistics.':
     'Show tool-specific usage statistics.',
+  'Show skill-specific usage statistics.':
+    'Show skill-specific usage statistics.',
   'Show daily token usage statistics.': 'Show daily token usage statistics.',
   'Show monthly token usage statistics.':
     'Show monthly token usage statistics.',
@@ -1430,13 +1433,25 @@ export default {
     'Switch the model for this session (--fast for suggestion model, [model-id] to switch immediately).',
   'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).':
     'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, [model-id] to switch immediately).',
+  'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).':
+    'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
+  "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.":
+    "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.",
+  "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.":
+    "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.",
+  "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.":
+    "⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.",
   'Set a lighter model for prompt suggestions and speculative execution':
     'Set a lighter model for prompt suggestions and speculative execution',
   'Toggle voice dictation input': 'Toggle voice dictation input',
   'Set the model for voice transcription':
     'Set the model for voice transcription',
+  'Set the image-capable model used to transcribe images for a text-only main model':
+    'Set the image-capable model used to transcribe images for a text-only main model',
   'Select Fast Model': 'Select Fast Model',
+  'Select Vision Model': 'Select Vision Model',
   'Select Voice Model': 'Select Voice Model',
+  'Vision Model': 'Vision Model',
   'Voice Model': 'Voice Model',
   'Selected voice model is unavailable.':
     'Selected voice model is unavailable.',
@@ -1476,8 +1491,10 @@ export default {
     'Voice dictation needs microphone access. macOS will ask the first time you record — approve it, then start again. Your first recording may be empty while the dialog is open.',
   'Voice: recording': 'Voice: recording',
   'Voice: transcribing': 'Voice: transcribing',
+  'Voice: refining': 'Voice: refining',
   'listening…': 'listening…',
   'transcribing…': 'transcribing…',
+  'refining…': 'refining…',
   'Content generator configuration not available.':
     'Content generator configuration not available.',
   'Authentication type not available.': 'Authentication type not available.',
@@ -1588,9 +1605,9 @@ export default {
     'Choose how to proceed with your session:',
   'Start new chat session': 'Start new chat session',
   'Continue previous conversation': 'Continue previous conversation',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 Welcome back! (Last updated: {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 Overall Goal:',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'Welcome back! (Last updated: {{timeAgo}})',
+  'Overall Goal:': 'Overall Goal:',
   'Connect a Provider': 'Connect a Provider',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'You must connect a provider to proceed. Press Ctrl+C again to exit.',
@@ -1681,6 +1698,8 @@ export default {
   'not set': 'not set',
   'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.':
     'Current voice model: {{voiceModel}}\nUse "/model --voice <model-id>" to set voice model.',
+  'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.':
+    'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
   "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.":
     "Voice model '{{modelName}}' is ambiguous. Configure a unique model id before using /model --voice.",
   none: 'none',
@@ -1776,8 +1795,8 @@ export default {
   // MCP Status
   // ============================================================================
   'No MCP servers configured.': 'No MCP servers configured.',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP servers are starting up ({{count}} initializing)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ MCP servers are starting up ({{count}} initializing)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Note: First startup may take longer. Tool availability will update automatically.',
   'Configured MCP servers:': 'Configured MCP servers:',
@@ -1801,7 +1820,7 @@ export default {
   'Prompts:': 'Prompts:',
   'Resources:': 'Resources:',
   Blocked: 'Blocked',
-  '💡 Tips:': '💡 Tips:',
+  '★ Tips:': '★ Tips:',
   Use: 'Use',
   'to show server and tool descriptions':
     'to show server and tool descriptions',
@@ -1918,6 +1937,8 @@ export default {
   'No tasks currently running': 'No tasks currently running',
   'No entry to show.': 'No entry to show.',
   'needs approval': 'needs approval',
+  'rejected — edit config to re-approve':
+    'rejected — edit config to re-approve',
   'Background agent needs approval': 'Background agent needs approval',
   'Approve or deny the request above': 'Approve or deny the request above',
   Running: 'Running',
@@ -2274,14 +2295,44 @@ export default {
     'Failed to authenticate with Coding Plan: {{error}}',
   '中国 (China)': '中国 (China)',
   '阿里云百炼 (aliyun.com)': '阿里云百炼 (aliyun.com)',
+  'Get or set any setting by dot-path key':
+    'Get or set any setting by dot-path key',
+  'Invalid boolean value: "{{value}}". Use "true" or "false".':
+    'Invalid boolean value: "{{value}}". Use "true" or "false".',
+  'Cannot toggle a number setting. Provide a value: key=<number>.':
+    'Cannot toggle a number setting. Provide a value: key=<number>.',
+  'Invalid number value: "{{value}}".': 'Invalid number value: "{{value}}".',
+  'Cannot toggle a string setting. Provide a value: key=<value>.':
+    'Cannot toggle a string setting. Provide a value: key=<value>.',
+  'Cannot toggle an enum setting. Provide one of: {{options}}.':
+    'Cannot toggle an enum setting. Provide one of: {{options}}.',
+  'Invalid enum value: "{{value}}". Valid values: {{options}}.':
+    'Invalid enum value: "{{value}}". Valid values: {{options}}.',
+  'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.':
+    'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.',
+  'Unsupported setting type: "{{type}}".':
+    'Unsupported setting type: "{{type}}".',
+  'Available settings:': 'Available settings:',
+  'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?':
+    'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?',
+  'Unknown setting key: "{{key}}".': 'Unknown setting key: "{{key}}".',
+  'Failed to set "{{key}}": {{error}}': 'Failed to set "{{key}}": {{error}}',
+  'Set {{key}} = {{value}}': 'Set {{key}} = {{value}}',
+  '(This setting requires a restart to take effect.)':
+    '(This setting requires a restart to take effect.)',
+  '(Security-sensitive setting — verify you are not exposing credentials.)':
+    '(Security-sensitive setting — verify you are not exposing credentials.)',
+  'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.':
+    'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.',
+  '(empty)': '(empty)',
   Global: 'Global',
   'Alibaba Cloud (alibabacloud.com)': 'Alibaba Cloud (alibabacloud.com)',
   'Select region for Coding Plan:': 'Select region for Coding Plan:',
   'Enter your Coding Plan API key: ': 'Enter your Coding Plan API key: ',
   'Select authentication method:': 'Select authentication method:',
   '\n=== Authentication Status ===\n': '\n=== Authentication Status ===\n',
-  '⚠️  No authentication method configured.\n':
-    '⚠️  No authentication method configured.\n',
+  '⚠  No authentication method configured.\n':
+    '⚠  No authentication method configured.\n',
   'Run one of the following commands to get started:\n':
     'Run one of the following commands to get started:\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -2303,8 +2354,8 @@ export default {
   '  Current Model: {{model}}': '  Current Model: {{model}}',
   '  Config Version: {{version}}': '  Config Version: {{version}}',
   '  Status: API key configured\n': '  Status: API key configured\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)',
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)',
   '  Issue: API key not found in environment or settings\n':
     '  Issue: API key not found in environment or settings\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':

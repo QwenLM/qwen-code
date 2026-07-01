@@ -67,6 +67,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // hierarchical QWEN.md state and accepts append/replace writes scoped
   // to either the bound workspace or the global ~/.qwen directory.
   workspace_memory: { since: 'v1' },
+  workspace_memory_remember: {
+    since: 'v1',
+    modes: ['workspace', 'clean'],
+  },
   // Workspace agents CRUD (`GET/POST /workspace/agents` +
   // `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
   // `SubagentManager` over HTTP so remote clients can list / read /
@@ -82,7 +86,9 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_tasks: { since: 'v1' },
   session_stats: { since: 'v1' },
   session_lsp: { since: 'v1' },
+  session_status: { since: 'v1' },
   session_close: { since: 'v1' },
+  session_archive: { since: 'v1' },
   session_metadata: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
   // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`
@@ -131,7 +137,17 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // (`tools.disabled` is consulted at `Config` construction time).
   workspace_tool_toggle: { since: 'v1' },
   workspace_settings: { since: 'v1' },
+  // `GET /workspace/permissions` is always available when this tag is
+  // advertised. `POST /workspace/permissions` updates the active ACP
+  // child and returns `permission_session_required` when no live ACP
+  // session exists; the tag means the route contract exists, not that
+  // the current daemon state can accept a write.
   workspace_permissions: { since: 'v1' },
+  workspace_voice: { since: 'v1' },
+  workspace_voice_transcription: { since: 'v1', modes: ['batch'] },
+  // Inspect bound workspace trust and request local operator action.
+  // Remote clients cannot directly write trustedFolders.json.
+  workspace_trust: { since: 'v1' },
   // `POST /workspace/init` scaffolds an empty
   // `QWEN.md` (or whatever `getCurrentGeminiMdFilename()` returns) at
   // the bound workspace root. Body: `{force?: boolean}`. Default
@@ -140,6 +156,11 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // the file, the caller should follow up with
   // `POST /session/:id/prompt`.
   workspace_init: { since: 'v1' },
+  // `POST /workspace/setup-github` installs the fixed
+  // qwen-code-action workflow set into the bound workspace after
+  // explicit consent. The route reuses the interactive `/setup-github`
+  // release lookup, workflow download, and `.gitignore` update logic.
+  workspace_github_setup: { since: 'v1' },
   // `POST /workspace/mcp/:server/restart` performs
   // a single-server MCP restart (disconnect + reconnect + rediscover)
   // through the ACP child's `McpClientManager`. Pre-checks the live
@@ -232,6 +253,21 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  // Phase 2 "reverse tool channel" (issue #5626). A connected WS client (e.g.
+  // the Chrome extension) can host an MCP server that the daemon's agent
+  // calls by carrying `mcp_message` JSON-RPC frames over the daemon WS,
+  // reusing the SDK-MCP-server control-plane pattern. Inbound WS frame types:
+  // `mcp_register` { server }, `mcp_message` { id, server, payload }
+  // (bidirectional, request/response correlated by `id`), `mcp_unregister`
+  // { server }. Advertised CONDITIONALLY — only when the operator opts in
+  // (the public contract is still settling per #5626), so clients pre-flight
+  // this tag before attempting to register a client-hosted server.
+  client_mcp_over_ws: { since: 'v1' },
+  // Plan C "CDP tunnel" (issue #5626): the daemon exposes a `/cdp` WebSocket
+  // where a loopback puppeteer client (chrome-devtools-mcp) drives ONE real tab
+  // via the extension's `chrome.debugger`, tunneled over `/acp` as `cdp_*`
+  // frames. Advertised only when the operator opts in (contract still settling).
+  cdp_tunnel_over_ws: { since: 'v1' },
   // Daemon hosts the `/voice/stream` WebSocket: the browser captures audio and
   // streams raw PCM, the daemon transcribes server-side via the configured
   // `voiceModel` (credentials never reach the client). Advertised
@@ -258,9 +294,22 @@ export interface AdvertiseFeatureToggles {
   promptDeadlineMs?: number;
   writerIdleTimeoutMs?: number;
   persistSettingAvailable?: boolean;
+  voiceTranscriptionAvailable?: boolean;
   sessionShellCommandEnabled?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
+  /**
+   * Whether the daemon will accept client-hosted MCP servers over the WS
+   * (`client_mcp_over_ws`, issue #5626). Opt-in: the contract is still
+   * settling, so the tag is advertised only when explicitly enabled.
+   */
+  clientMcpOverWsEnabled?: boolean;
+  /**
+   * Whether the daemon exposes the Plan C `/cdp` tunnel endpoint
+   * (`cdp_tunnel_over_ws`, issue #5626). Opt-in: the contract is still
+   * settling, so the tag is advertised only when explicitly enabled.
+   */
+  cdpTunnelOverWsEnabled?: boolean;
   voiceWsAvailable?: boolean;
 }
 
@@ -317,9 +366,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
       toggles.writerIdleTimeoutMs > 0,
   ],
   ['workspace_settings', (toggles) => toggles.persistSettingAvailable === true],
+  ['workspace_voice', (toggles) => toggles.persistSettingAvailable === true],
   [
-    'workspace_permissions',
-    (toggles) => toggles.persistSettingAvailable === true,
+    'workspace_voice_transcription',
+    (toggles) => toggles.voiceTranscriptionAvailable === true,
   ],
   [
     'session_shell_command',
@@ -327,6 +377,8 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
+  ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],
   [
     // Advertised whenever the `/voice/stream` WS endpoint exists. A configured
     // token (or `--require-auth`) no longer suppresses it: browsers can't set

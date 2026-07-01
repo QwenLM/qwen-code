@@ -30,6 +30,8 @@ import {
 } from './agent-context.js';
 import {
   createDuplicateProviderToolCallResponse,
+  findRepeatedDuplicateProviderToolCall,
+  markDuplicateProviderToolCallResponseSent,
   type ToolCallRequestInfo,
 } from '../../core/turn.js';
 import {
@@ -89,6 +91,11 @@ import {
   runWithTeammateIdentity,
 } from '../team/identity.js';
 import type { TeammateIdentity } from '../team/types.js';
+import {
+  getSubagentPlanToolUnavailableMessage,
+  isPlanLifecycleToolUnavailableInSubagent,
+  SUBAGENT_PLAN_LIFECYCLE_TOOLS,
+} from './subagent-plan-tool-policy.js';
 
 /**
  * Result of a single reasoning loop invocation.
@@ -107,6 +114,8 @@ import type { TeammateIdentity } from '../team/types.js';
  *   non-team Agent subagent has no teammate identity, so isTeammate()
  *   returns false and these tools would treat it as the leader — letting
  *   it delete or rewrite the active team.
+ * - Plan lifecycle tools are owned by the caller/main session. A subagent
+ *   should return its plan to the caller instead of entering or exiting mode.
  */
 export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
@@ -120,6 +129,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.TASK_CREATE,
   ToolNames.TASK_UPDATE,
   ToolNames.TASK_LIST,
+  ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session — a subagent must
   // never enter or exit the user's worktree state independently.
   ToolNames.ENTER_WORKTREE,
@@ -134,6 +144,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
  * Tools excluded from teammates. Teammates need send_message and the
  * task_* coordination tools to do their job, but they must not be able
  * to create or destroy the team itself — only the leader can do that.
+ * Plan lifecycle tools remain caller-owned for teammates too.
  */
 const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.AGENT,
@@ -143,6 +154,7 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.TASK_STOP,
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
+  ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session.
   ToolNames.ENTER_WORKTREE,
   ToolNames.EXIT_WORKTREE,
@@ -374,9 +386,7 @@ export class AgentCore {
     // When initialMessages is set, the caller owns the full prior history
     // (including any env bootstrap it wants). Fork relies on this to inherit
     // the parent conversation verbatim without duplicating env messages.
-    const hasInitialMessages =
-      !!this.promptConfig.initialMessages &&
-      this.promptConfig.initialMessages.length > 0;
+    const hasInitialMessages = this.promptConfig.initialMessages !== undefined;
     const hasSkillTool = this.willHaveSkillTool();
     const [envHistory] = hasInitialMessages
       ? [[]]
@@ -467,10 +477,6 @@ export class AgentCore {
     const excludedFromSubagents = isTeammate()
       ? EXCLUDED_TOOLS_FOR_TEAMMATES
       : EXCLUDED_TOOLS_FOR_SUBAGENTS;
-    // When a subagent has an explicit tools list (not wildcard), only the
-    // recursive-spawn guard (AgentTool) is enforced.
-    const recursionGuardOnly = new Set<string>([ToolNames.AGENT]);
-
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
         (t): t is string => typeof t === 'string',
@@ -498,17 +504,34 @@ export class AgentCore {
         // the recursion guard). This prevents control-plane tools
         // (CRON_CREATE, TASK_STOP, SEND_MESSAGE, etc.) from leaking into
         // explicitly-configured subagents that happen to list them.
+        const allowedNames = asStrings.filter((name) => {
+          if (excludedFromSubagents.has(name)) {
+            this.runtimeContext
+              .getDebugLogger()
+              ?.debug(
+                `[prepareTools] Filtered "${name}" from explicit subagent tool list`,
+              );
+            return false;
+          }
+          return true;
+        });
         toolsList.push(
-          ...toolRegistry.getFunctionDeclarationsFiltered(
-            asStrings.filter((name) => !excludedFromSubagents.has(name)),
-          ),
+          ...toolRegistry.getFunctionDeclarationsFiltered(allowedNames),
         );
       }
       // Also filter inline FunctionDeclaration[] passed directly in toolConfig.
       toolsList.push(
-        ...onlyInlineDecls.filter(
-          (d) => !(d.name && recursionGuardOnly.has(d.name)),
-        ),
+        ...onlyInlineDecls.filter((d) => {
+          if (d.name && excludedFromSubagents.has(d.name)) {
+            this.runtimeContext
+              .getDebugLogger()
+              ?.debug(
+                `[prepareTools] Filtered inline declaration "${d.name}" from subagent tool list`,
+              );
+            return false;
+          }
+          return true;
+        }),
       );
     } else {
       // Inherit all available tools by default when not specified — see the
@@ -662,6 +685,9 @@ export class AgentCore {
     let finalText = '';
     let terminateMode: AgentTerminateMode | null = null;
     const handledProviderToolCallIds = chat.getHistoryFunctionResponseIds();
+    // Scoped to this reasoning loop. A second duplicate response for the same
+    // provider id would keep deterministic providers in a tool-result loop.
+    const duplicateProviderToolCallResponseIds = new Set<string>();
     let stickyMaxOutputTokens: number | undefined;
 
     while (true) {
@@ -822,7 +848,7 @@ export class AgentCore {
         }
 
         if (functionCalls.length > 0) {
-          currentMessages = await this.processFunctionCalls(
+          const toolCallResult = await this.processFunctionCalls(
             functionCalls,
             roundAbortController,
             promptId,
@@ -831,7 +857,13 @@ export class AgentCore {
             currentResponseId,
             wasOutputTruncated,
             handledProviderToolCallIds,
+            duplicateProviderToolCallResponseIds,
           );
+          if (toolCallResult.repeatedDuplicateProviderToolCall) {
+            terminateMode = AgentTerminateMode.LOOP_DETECTED;
+            break;
+          }
+          currentMessages = toolCallResult.messages;
 
           const externalInputs = this.drainExternalInputs(options);
           if (externalInputs.length > 0) {
@@ -847,6 +879,10 @@ export class AgentCore {
             // user-role record. The framing prefix is stripped — the prefix
             // is a model-facing detail, not part of the original message.
             this.emitExternalInputEvents(externalInputs);
+          }
+          if ((currentMessages[0]?.parts?.length ?? 0) === 0) {
+            terminateMode = AgentTerminateMode.ERROR;
+            break;
           }
         } else {
           const immediateExternalInputs = this.drainExternalInputs(options);
@@ -1149,12 +1185,36 @@ export class AgentCore {
     responseId?: string,
     wasOutputTruncated = false,
     handledProviderToolCallIds = new Set<string>(),
-  ): Promise<Content[]> {
+    duplicateProviderToolCallResponseIds = new Set<string>(),
+  ): Promise<{
+    messages: Content[];
+    repeatedDuplicateProviderToolCall: boolean;
+  }> {
     const toolResponseParts: Part[] = [];
     const uniqueFunctionCalls = dedupeToolCallsById(functionCalls);
 
     // Build allowed tool names set for filtering
     const allowedToolNames = new Set(toolsList.map((t) => t.name));
+    const repeatedDuplicateCall = findRepeatedDuplicateProviderToolCall(
+      uniqueFunctionCalls,
+      (fc) => getProviderToolCallId(fc) ?? fc.id,
+      handledProviderToolCallIds,
+      duplicateProviderToolCallResponseIds,
+    );
+    if (repeatedDuplicateCall) {
+      const providerCallId =
+        getProviderToolCallId(repeatedDuplicateCall) ??
+        repeatedDuplicateCall.id;
+      this.runtimeContext
+        .getDebugLogger()
+        ?.debug(
+          `[processFunctionCalls] Dropping batch after repeated duplicate provider tool-call id: ${providerCallId} (tool: ${String(repeatedDuplicateCall.name)}, round: ${currentRound})`,
+        );
+      return {
+        messages: [{ role: 'user', parts: [] }],
+        repeatedDuplicateProviderToolCall: true,
+      };
+    }
 
     // Filter unauthorized tool calls before scheduling
     const authorizedCalls: FunctionCall[] = [];
@@ -1166,7 +1226,9 @@ export class AgentCore {
       const args = (fc.args ?? {}) as Record<string, unknown>;
 
       if (!allowedToolNames.has(fc.name)) {
-        const errorMessage = `Tool "${toolName}" not found. Tools must use the exact names provided.`;
+        const errorMessage = isPlanLifecycleToolUnavailableInSubagent(toolName)
+          ? getSubagentPlanToolUnavailableMessage(toolName)
+          : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
         const functionResponsePart = {
           functionResponse: {
             id: callId,
@@ -1191,6 +1253,11 @@ export class AgentCore {
 
       if (providerCallId) {
         if (handledProviderToolCallIds.has(providerCallId)) {
+          markDuplicateProviderToolCallResponseSent(
+            providerCallId,
+            duplicateProviderToolCallResponseIds,
+          );
+
           const request: ToolCallRequestInfo = {
             callId,
             providerCallId,
@@ -1523,7 +1590,10 @@ export class AgentCore {
       });
     }
 
-    return [{ role: 'user', parts: toolResponseParts }];
+    return {
+      messages: [{ role: 'user', parts: toolResponseParts }],
+      repeatedDuplicateProviderToolCall: false,
+    };
   }
 
   // ─── Observable state accessors ────────────────────────────

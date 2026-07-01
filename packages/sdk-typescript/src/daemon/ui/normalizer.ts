@@ -49,6 +49,7 @@ const MCP_RESTART_REFUSED_REASONS = new Set<string>([
   'budget_would_exceed',
 ]);
 
+const MALFORMED_MEMORY_CHANGED = 'malformed memory_changed payload';
 const MAX_DETAILS_LENGTH = 4096;
 
 export function normalizeDaemonEvent(
@@ -198,6 +199,11 @@ export function normalizeDaemonEvent(
     case 'mid_turn_message_injected':
       return normalizeMidTurnMessageInjected(event, base);
 
+    case 'pending_prompt_added':
+    case 'pending_prompt_started':
+    case 'pending_prompt_completed':
+      return [];
+
     case 'user_shell_command': {
       const command = getString(event.data, 'command');
       const cwd = getString(event.data, 'cwd');
@@ -261,8 +267,14 @@ export function normalizeDaemonEvent(
     case 'settings_changed':
       return normalizeSettingsChanged(event, base);
 
+    case 'trust_change_requested':
+      return normalizeTrustChangeRequested(event, base);
+
     case 'workspace_initialized':
       return normalizeWorkspaceInitialized(event, base);
+
+    case 'github_setup_completed':
+      return normalizeGithubSetupCompleted(event, base);
 
     case 'mcp_budget_warning':
       return normalizeMcpBudgetWarning(event, base);
@@ -463,9 +475,7 @@ function createBase(
  * Forward-compat: SDK reads whichever location the daemon eventually emits
  * without requiring a coordinated SDK release.
  */
-export function extractServerTimestamp(
-  event: DaemonEvent,
-): number | undefined {
+export function extractServerTimestamp(event: DaemonEvent): number | undefined {
   const direct = (event as { serverTimestamp?: unknown }).serverTimestamp;
   if (typeof direct === 'number' && Number.isFinite(direct)) return direct;
   const envelopeMeta = (event as { _meta?: unknown })._meta;
@@ -1094,6 +1104,29 @@ function normalizeMemoryChanged(
   base: NormalizedEventBase,
 ): DaemonUiEvent[] {
   const scope = getString(event.data, 'scope');
+  if (scope === 'managed') {
+    const source = getString(event.data, 'source');
+    const taskId = getString(event.data, 'taskId');
+    const touchedScopes = (event.data as Record<string, unknown> | undefined)?.[
+      'touchedScopes'
+    ];
+    if (
+      !(source && taskId && Array.isArray(touchedScopes)) ||
+      touchedScopes.some((s) => s !== 'user' && s !== 'project')
+    ) {
+      return fallbackDebug(event, base, MALFORMED_MEMORY_CHANGED);
+    }
+    return [
+      {
+        ...base,
+        type: 'workspace.memory.changed',
+        scope,
+        source,
+        taskId,
+        touchedScopes: touchedScopes as Array<'user' | 'project'>,
+      },
+    ];
+  }
   const filePath = getString(event.data, 'filePath');
   const mode = getString(event.data, 'mode');
   // Use the `numberField` helper so NaN /
@@ -1110,7 +1143,7 @@ function normalizeMemoryChanged(
     (mode !== 'append' && mode !== 'replace') ||
     bytesWritten === undefined
   ) {
-    return fallbackDebug(event, base, 'malformed memory_changed payload');
+    return fallbackDebug(event, base, MALFORMED_MEMORY_CHANGED);
   }
   return [
     {
@@ -1208,6 +1241,65 @@ function normalizeWorkspaceInitialized(
     );
   }
   return [{ ...base, type: 'workspace.initialized', path, action }];
+}
+
+function normalizeTrustChangeRequested(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const workspaceCwd = getString(event.data, 'workspaceCwd');
+  const desiredState = getString(event.data, 'desiredState');
+  const reason = getString(event.data, 'reason');
+  if (
+    !workspaceCwd ||
+    (desiredState !== 'trusted' && desiredState !== 'untrusted')
+  ) {
+    return fallbackDebug(event, base, 'bad trust_change_requested payload');
+  }
+  return [
+    {
+      ...base,
+      type: 'workspace.trust.change.requested',
+      workspaceCwd,
+      desiredState,
+      ...(reason !== undefined ? { reason } : {}),
+    },
+  ];
+}
+
+function normalizeGithubSetupCompleted(
+  event: DaemonEvent,
+  base: NormalizedEventBase,
+): DaemonUiEvent[] {
+  const releaseTag = getString(event.data, 'releaseTag');
+  const readmeUrl = getString(event.data, 'readmeUrl');
+  if (!releaseTag || !readmeUrl || !isRecord(event.data)) {
+    return fallbackDebug(
+      event,
+      base,
+      'malformed github_setup_completed payload',
+    );
+  }
+  const workflows = event.data['workflows'];
+  const warnings = event.data['warnings'];
+  return [
+    {
+      ...base,
+      type: 'workspace.github.setup.completed',
+      releaseTag,
+      readmeUrl,
+      ...(typeof event.data['secretsUrl'] === 'string'
+        ? { secretsUrl: event.data['secretsUrl'] }
+        : {}),
+      workflows: Array.isArray(workflows) ? workflows : [],
+      gitignore: event.data['gitignore'],
+      warnings: Array.isArray(warnings)
+        ? warnings.filter(
+            (warning): warning is string => typeof warning === 'string',
+          )
+        : [],
+    },
+  ];
 }
 
 function normalizeMcpBudgetWarning(

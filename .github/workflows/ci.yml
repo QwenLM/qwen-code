@@ -3,10 +3,10 @@
 name: 'Qwen Code CI'
 
 on:
-  push:
-    branches:
-      - 'main'
-      - 'release/**'
+  # No `push` trigger: every job here is gated to pull_request / merge_group, so
+  # a push to `main` ran nothing (CodeQL was the last push job and moved to its
+  # own scheduled codeql.yml). The merge queue validates the merged tree before
+  # it lands, so there is nothing left to run on the post-merge push.
   pull_request:
     branches:
       - 'main'
@@ -42,9 +42,12 @@ env:
 jobs:
   classify_pr:
     name: 'Classify PR'
-    if: "${{ github.event_name == 'pull_request' }}"
-    # Gate runs on ECS for in-repo PRs too, else a busy hosted pool delays it and blocks the ECS-bound jobs. The kill-switch is read here, so flipping it reverts everything to hosted.
-    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    if: "${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}"
+    # Gate runs on ECS for in-repo PRs and for the merge queue (which runs in the
+    # base-repo context), else a busy hosted pool delays it and blocks the
+    # ECS-bound jobs. The kill-switch is read here, so flipping it reverts
+    # everything to hosted.
+    runs-on: '${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && (github.event.pull_request.head.repo.full_name == github.repository || github.event_name == ''merge_group'')) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     continue-on-error: true
     outputs:
       skip_ci: '${{ steps.release_sync.outputs.skip_ci }}'
@@ -86,16 +89,18 @@ jobs:
           echo "skip_ci=${skip_ci}" >> "${GITHUB_OUTPUT}"
           echo "skip_ci=${skip_ci}"
 
-      # In-repo PR (head branch in this repo => author has write access) runs the
-      # Linux Test on ECS; forks stay hosted. Disable via repo var MAINTAINER_ECS_RUNNER_DISABLED=true.
+      # In-repo PR (head branch in this repo => author has write access) and the
+      # merge queue (base-repo context) run the Linux jobs on ECS; fork PRs stay
+      # hosted. Disable via repo var MAINTAINER_ECS_RUNNER_DISABLED=true.
       - name: 'Select Linux runner'
         id: 'pick_runner'
         env:
           SAME_REPO: '${{ github.event.pull_request.head.repo.full_name == github.repository }}'
           ECS_DISABLED: '${{ vars.MAINTAINER_ECS_RUNNER_DISABLED }}'
+          EVENT_NAME: '${{ github.event_name }}'
         run: |-
           ubuntu_runner='["ubuntu-latest"]'
-          if [[ "${ECS_DISABLED}" != "true" && "${SAME_REPO}" == "true" ]]; then
+          if [[ "${ECS_DISABLED}" != "true" && ( "${SAME_REPO}" == "true" || "${EVENT_NAME}" == "merge_group" ) ]]; then
             ubuntu_runner='["self-hosted", "linux", "x64", "ecs-qwen"]'
           fi
           echo "ubuntu_runner=${ubuntu_runner}" >> "${GITHUB_OUTPUT}"
@@ -109,8 +114,11 @@ jobs:
     needs: 'classify_pr'
     # Stay running on release-sync PRs so the required Test contexts still
     # report; the per-step skip_ci guards below make them no-op (pass) there.
-    if: '${{ !cancelled() }}'
+    # Not on push: the merge queue already tested the merged tree, so a
+    # post-merge re-run on `main` would be redundant.
+    if: "${{ !cancelled() && github.event_name != 'push' }}"
     runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
+    timeout-minutes: 60
     permissions:
       contents: 'read'
       checks: 'write'
@@ -128,13 +136,23 @@ jobs:
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
-          fetch-depth: 0
+          # Shallow: nothing here walks git history (the verify guard below checks
+          # head.sha == HEAD, schema/tests touch only the working tree). On the
+          # in-repo ECS runner a full-history clone is the heaviest transfer and
+          # chokes the squid egress proxy, flaking checkout. depth 1 is enough.
+          fetch-depth: 1
 
-      - name: 'Verify PR checkout includes head commit'
-        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
+      # Guard against a stale checkout (e.g. a caching egress proxy serving an old
+      # ref) silently testing the wrong tree. Cheap: one merge-base, sub-second.
+      # Also runs in the merge queue — now that the queue's Ubuntu checkout is on
+      # ECS/squid, a wrong-tree pass would merge bad code.
+      - name: 'Verify checkout includes expected head commit'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}"
+        env:
+          EXPECTED_SHA: "${{ github.event_name == 'merge_group' && github.event.merge_group.head_sha || github.event.pull_request.head.sha }}"
         run: |-
-          if ! git merge-base --is-ancestor '${{ github.event.pull_request.head.sha }}' HEAD; then
-            echo "::error::Checked out ref does not contain PR head ${{ github.event.pull_request.head.sha }}."
+          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
+            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
             git log --oneline --decorate -5
             exit 1
           fi
@@ -174,6 +192,10 @@ jobs:
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
+      - name: 'Audit critical runtime dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run audit:runtime:critical'
+
       - name: 'Check lockfile'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: 'npm run check:lockfile'
@@ -192,6 +214,7 @@ jobs:
 
       - name: 'Run actionlint'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        timeout-minutes: 5
         run: 'node scripts/lint.js --actionlint'
 
       - name: 'Run shellcheck'
@@ -230,12 +253,25 @@ jobs:
           fi
           echo "Settings schema is up-to-date"
 
+      - name: 'Check serve fast-path bundle closure'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run check:serve-fast-path-bundle'
+
       - name: 'Run tests and generate reports'
         id: 'unit_tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
           NO_COLOR: true
-        run: 'npm run test:ci'
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          npm run test:ci
 
       - name: 'Run no-AK integration smoke tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
@@ -244,7 +280,7 @@ jobs:
       - name: 'Publish Test Report (for non-forks)'
         if: |-
           ${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && steps.unit_tests.outcome != 'skipped' && (github.event.pull_request.head.repo.full_name == github.repository) }}
-        uses: 'dorny/test-reporter@dc3a92680fcc15842eef52e8c4606ea7ce6bd3f3' # ratchet:dorny/test-reporter@v2
+        uses: 'dorny/test-reporter@a43b3a5f7366b97d083190328d2c652e1a8b6aa2' # ratchet:dorny/test-reporter@v3
         with:
           name: 'Test Results (ubuntu-latest, Node 22.x)'
           path: 'packages/*/junit.xml'
@@ -266,23 +302,21 @@ jobs:
           name: 'coverage-reports-22.x-ubuntu-latest'
           path: 'packages/*/coverage'
 
-  test_platforms:
-    name: 'Test (${{ matrix.os }}, Node ${{ matrix.node-version }})'
+  # macOS/Windows: slowest/costliest runners, rare platform regressions — run
+  # only in the merge queue. Skipped on PR (ubuntu is the fast PR signal) and on
+  # push (the queue already tested the merged tree, so a post-merge re-run is
+  # redundant). Two named jobs, not a matrix: a skipped matrix job reports one
+  # collapsed check name, never the per-OS required contexts, so PRs would sit
+  # "Expected" forever and never enter the queue. A skipped named job reports
+  # under its exact name and satisfies the required check (same as the
+  # Integration Tests job).
+  test_macos:
+    name: 'Test (macos-latest, Node 22.x)'
     needs: 'classify_pr'
-    if: '${{ !cancelled() }}'
-    runs-on: '${{ fromJSON(matrix.runner) }}'
+    if: "${{ !cancelled() && github.event_name == 'merge_group' }}"
+    runs-on: 'macos-latest'
     permissions:
       contents: 'read'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: 'macos-latest'
-            runner: '["macos-latest"]'
-            node-version: '22.x'
-          - os: 'windows-latest'
-            runner: '["windows-2022"]'
-            node-version: '22.x'
     steps:
       # See the Ubuntu gate's checkout: on PRs use the immutable refs/pull/N/head
       # to avoid merge-ref rebuild lag; other events keep github.ref.
@@ -293,11 +327,11 @@ jobs:
         with:
           ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
 
-      - name: 'Set up Node.js ${{ matrix.node-version }}'
+      - name: 'Set up Node.js 22.x'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
-          node-version: '${{ matrix.node-version }}'
+          node-version: '22.x'
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
           registry-url: 'https://registry.npmjs.org/'
@@ -319,7 +353,71 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         env:
           NO_COLOR: true
-        run: 'npm run test:ci'
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          npm run test:ci
+
+  # Windows counterpart of test_macos (see that job's note). Runner is
+  # windows-2022; the check name keeps the windows-latest label so it matches
+  # the required-status-check context.
+  test_windows:
+    name: 'Test (windows-latest, Node 22.x)'
+    needs: 'classify_pr'
+    if: "${{ !cancelled() && github.event_name == 'merge_group' }}"
+    runs-on: 'windows-2022'
+    permissions:
+      contents: 'read'
+    steps:
+      - name: 'Checkout'
+        id: 'checkout'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: "${{ github.event.inputs.branch_ref || (github.event_name == 'pull_request' && format('refs/pull/{0}/head', github.event.pull_request.number)) || github.ref }}"
+
+      - name: 'Set up Node.js 22.x'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+          cache: 'npm'
+          cache-dependency-path: 'package-lock.json'
+          registry-url: 'https://registry.npmjs.org/'
+
+      - name: 'Configure npm for rate limiting'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
+          npm config set fetch-retries 5
+          npm config set fetch-timeout 300000
+
+      - name: 'Install dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: |-
+          npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Run tests and generate reports'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        env:
+          NO_COLOR: true
+          HOME: '${{ runner.temp }}/qwen-ci-home'
+          USERPROFILE: '${{ runner.temp }}/qwen-ci-home'
+          OPENAI_API_KEY: ''
+          DASHSCOPE_API_KEY: ''
+          QWEN_API_KEY: ''
+          GEMINI_API_KEY: ''
+          QWEN_DEFAULT_AUTH_TYPE: ''
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          npm run test:ci
 
   post_coverage_comment:
     name: 'Post Coverage Comment'
@@ -367,27 +465,6 @@ jobs:
           os: '${{ matrix.os }}'
           github_token: '${{ secrets.GITHUB_TOKEN }}'
 
-  codeql:
-    name: 'CodeQL'
-    needs: 'classify_pr'
-    if: "${{ !cancelled() && needs.classify_pr.outputs.skip_ci != 'true' }}"
-    runs-on: 'ubuntu-latest'
-    permissions:
-      actions: 'read'
-      contents: 'read'
-      security-events: 'write'
-    steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-
-      - name: 'Initialize CodeQL'
-        uses: 'github/codeql-action/init@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/init@v3
-        with:
-          languages: 'javascript'
-
-      - name: 'Perform CodeQL Analysis'
-        uses: 'github/codeql-action/analyze@df559355d593797519d70b90fc8edd5db049e7a2' # ratchet:github/codeql-action/analyze@v3
-
   # Integration tests run only in the merge queue, not on every PR push.
   # They are the suite that previously ran *only* in the nightly Release
   # pipeline (`release.yml`), so regressions stayed hidden until release
@@ -401,8 +478,13 @@ jobs:
   # `test:integration:cli:sandbox:none` script from `release.yml`.
   integration_cli:
     name: 'Integration Tests (CLI, No Sandbox)'
-    if: "${{ github.event_name == 'merge_group' }}"
-    runs-on: 'ubuntu-latest'
+    needs: 'classify_pr'
+    # Same ECS routing as the Ubuntu gate (via classify_pr): the merge queue runs
+    # in the base-repo context, so use the self-hosted ECS pool and keep the
+    # scarce hosted Linux runners free. Falls back to hosted if classify_pr is
+    # skipped or the ECS kill-switch is set.
+    if: "${{ !cancelled() && github.event_name == 'merge_group' }}"
+    runs-on: '${{ fromJSON(needs.classify_pr.outputs.ubuntu_runner || ''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
     env:
@@ -412,13 +494,45 @@ jobs:
     steps:
       - name: 'Checkout'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          # Shallow, mirroring the Ubuntu gate: nothing here walks git history,
+          # and a full-history clone is the heaviest transfer on the ECS runner.
+          fetch-depth: 1
 
-      - name: 'Setup Node.js'
+      # Same stale-checkout guard as the Ubuntu gate: this job now runs on ECS
+      # via classify_pr, so fail loud if the checkout lacks the merge-queue head
+      # rather than silently testing the wrong tree into a merge.
+      - name: 'Verify checkout includes expected head commit'
+        env:
+          EXPECTED_SHA: '${{ github.event.merge_group.head_sha }}'
+        run: |-
+          if ! git merge-base --is-ancestor "${EXPECTED_SHA}" HEAD; then
+            echo "::error::Checked out ref does not contain expected head ${EXPECTED_SHA}."
+            git log --oneline --decorate -5
+            exit 1
+          fi
+
+      # Hosted downloads Node; self-hosted ECS reuses its pre-installed Node 22
+      # (it can't reach nodejs.org reliably). Mirrors the Ubuntu gate.
+      - name: 'Setup Node.js (hosted)'
+        if: "${{ runner.environment == 'github-hosted' }}"
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
           node-version-file: '.nvmrc'
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
+
+      - name: 'Use pre-installed Node.js (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          if ! command -v node >/dev/null 2>&1; then
+            echo "::error::Node.js is not on PATH for this self-hosted runner. Provision Node 22.x or set the MAINTAINER_ECS_RUNNER_DISABLED repository variable to 'true' to route the merge queue back to hosted runners."
+            exit 1
+          fi
+          echo "Using pre-installed Node $(node -v) / npm $(npm -v)"
+          if [[ "$(node -p 'process.versions.node.split(".")[0]')" != "22" ]]; then
+            echo "::warning::Expected Node 22.x but found $(node -v); integration tests will run against the runner's Node."
+          fi
 
       - name: 'Install Dependencies'
         env:

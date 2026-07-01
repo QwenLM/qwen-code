@@ -60,6 +60,8 @@ import { WriteFileTool } from '../tools/write-file.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import type { ShellToolParams } from '../tools/shell.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -102,6 +104,7 @@ const { mockAcquireSleepInhibitor, mockSleepInhibitorRelease } = vi.hoisted(
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerInfoSpy = vi.hoisted(() => vi.fn());
 const runSideQueryMock = vi.hoisted(() => vi.fn());
+const mockTelemetrySdkState = vi.hoisted(() => ({ initialized: false }));
 
 vi.mock('../utils/debugLogger.js', async (importOriginal) => {
   const actual =
@@ -137,6 +140,14 @@ vi.mock('../services/sleepInhibitor.js', () => ({
 vi.mock('../utils/sideQuery.js', () => ({
   runSideQuery: (...args: unknown[]) => runSideQueryMock(...args),
 }));
+
+vi.mock('../telemetry/sdk.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../telemetry/sdk.js')>();
+  return {
+    ...actual,
+    isTelemetrySdkInitialized: () => mockTelemetrySdkState.initialized,
+  };
+});
 
 function createMockToolSpan(
   name: string,
@@ -1463,6 +1474,54 @@ describe('CoreToolScheduler', () => {
     expect(output).toBe(content);
   });
 
+  it('exempts read_mcp_resource from the persistence spill gate', async () => {
+    // The gate fires above DEFAULT_TRUNCATE_TOOL_OUTPUT_THRESHOLD (25k) +
+    // GATE_HEADROOM (3k) ≈ 28k and is keyed by tool NAME (not maxOutputChars),
+    // so a self-capped read_mcp_resource result above that size must NOT be
+    // spilled to a stub — the model has to receive the framed body the tool
+    // reports as injected.
+    const content = 'a'.repeat(40_000);
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: content,
+      returnDisplay: 'x',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'read_mcp_resource',
+        new MockTool({
+          name: 'read_mcp_resource',
+          execute,
+          maxOutputChars: Number.POSITIVE_INFINITY,
+        }),
+      ],
+    ]);
+    const { scheduler, onAllToolCallsComplete } =
+      createSchedulerForLegacyToolTests({ toolsByName });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'c',
+          name: 'read_mcp_resource',
+          args: {},
+          isClientInitiated: false,
+          prompt_id: 'p',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    const output = outputOfFirstCall(onAllToolCallsComplete);
+    expect(output).not.toContain(
+      'Tool output was too large and has been truncated',
+    );
+    expect(output).toBe(content);
+  });
+
   it('schedules a memory pressure check after tool execution', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'ok',
@@ -2484,6 +2543,52 @@ describe('CoreToolScheduler', () => {
     });
   });
 
+  it('clears displayed tool calls when completion finalization throws', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'alpha output',
+      returnDisplay: 'alpha output',
+    });
+    const toolsByName = new Map<string, MockTool>([
+      [
+        'alpha',
+        new MockTool({
+          name: 'alpha',
+          kind: Kind.Read,
+          execute,
+        }),
+      ],
+    ]);
+    const onAllToolCallsComplete = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('completion failed'));
+    const onToolCallsUpdate = vi.fn();
+    const { scheduler } = createSchedulerForLegacyToolTests({
+      toolsByName,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+    });
+
+    await scheduler.schedule(
+      [
+        {
+          callId: 'call-alpha',
+          name: 'alpha',
+          args: { value: 'a' },
+          isClientInitiated: false,
+          prompt_id: 'prompt-finalization-throws',
+        },
+      ],
+      new AbortController().signal,
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+    await vi.waitFor(() => {
+      expect(onToolCallsUpdate.mock.calls.at(-1)?.[0]).toEqual([]);
+    });
+  });
+
   it('applies PostToolBatch stop decisions and preserves additional context', async () => {
     const executeA = vi.fn().mockResolvedValue({
       llmContent: 'alpha output',
@@ -2930,6 +3035,179 @@ describe('CoreToolScheduler', () => {
     expect(errored.response.errorType).not.toBe(
       ToolErrorType.UNHANDLED_EXCEPTION,
     );
+  });
+
+  describe('MCP tool-not-found messaging', () => {
+    const makeScheduler = (opts: {
+      mcpServers?: Record<string, unknown>;
+      removed?: string[];
+      // Per-server admission reason for configured-but-unavailable servers.
+      reasons?: Record<string, 'not_allowed' | 'excluded' | 'pending_approval'>;
+      allToolNames?: string[];
+    }) => {
+      const mockToolRegistry = {
+        getAllToolNames: () => opts.allToolNames ?? [],
+        getTool: () => undefined,
+        ensureTool: async () => undefined,
+      } as unknown as ToolRegistry;
+      const mockConfig = {
+        getToolRegistry: () => mockToolRegistry,
+        getUseModelRouter: () => false,
+        getGeminiClient: () => null,
+        getPermissionsDeny: () => undefined,
+        isInteractive: () => true,
+        getMessageBus: vi.fn().mockReturnValue(undefined),
+        getDisableAllHooks: vi.fn().mockReturnValue(true),
+        getMcpServerNames: () => Object.keys(opts.mcpServers ?? {}),
+        getRecentlyRemovedMcpServers: () => opts.removed ?? [],
+        getMcpServerUnavailableReason: (name: string) => {
+          if ((opts.removed ?? []).includes(name)) return 'removed';
+          if (!(name in (opts.mcpServers ?? {}))) return undefined;
+          return opts.reasons?.[name];
+        },
+      } as unknown as Config;
+      return new CoreToolScheduler({
+        config: mockConfig,
+        getPreferredEditor: () => 'vscode',
+        onEditorClose: vi.fn(),
+      });
+    };
+
+    it('names a server removed this session (precise, branch B)', () => {
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['pangu-server'],
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__pangu_search',
+      );
+      expect(msg).toContain('"pangu-server"');
+      expect(msg).toContain('removed during this session');
+    });
+
+    it('reports an MCP tool with no configured server (branch A)', () => {
+      const scheduler = makeScheduler({ mcpServers: {}, removed: [] });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__ghost__do_thing',
+      );
+      expect(msg).toContain(
+        'no MCP server providing it is currently configured',
+      );
+    });
+
+    it('reports a configured server that lacks the tool', () => {
+      const scheduler = makeScheduler({
+        mcpServers: { 'pangu-server': {} },
+        removed: [],
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__missing_tool',
+      );
+      expect(msg).toContain('on MCP server "pangu-server"');
+    });
+
+    it('explains a not-allowed server with the allow-list recovery action', () => {
+      const scheduler = makeScheduler({
+        mcpServers: { 'pangu-server': {} },
+        reasons: { 'pangu-server': 'not_allowed' },
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__search',
+      );
+      expect(msg).toContain('"pangu-server"');
+      expect(msg).toContain('allow-list');
+      expect(msg).toContain('mcp.allowed');
+    });
+
+    it('explains an excluded server with the mcp.excluded recovery action', () => {
+      const scheduler = makeScheduler({
+        mcpServers: { 'pangu-server': {} },
+        reasons: { 'pangu-server': 'excluded' },
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__search',
+      );
+      expect(msg).toContain('excluded');
+      expect(msg).toContain('mcp.excluded');
+    });
+
+    it('explains a pending-approval server with the approval recovery action', () => {
+      const scheduler = makeScheduler({
+        mcpServers: { 'pangu-server': {} },
+        reasons: { 'pangu-server': 'pending_approval' },
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__search',
+      );
+      expect(msg).toContain('awaiting approval');
+      expect(msg).toContain('/mcp');
+    });
+
+    it('prefers the removed-this-session message over the generic one', () => {
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['pangu-server'],
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage(
+        'mcp__pangu-server__pangu_search',
+      );
+      expect(msg).toContain('removed during this session');
+      expect(msg).not.toContain('currently configured');
+    });
+
+    it('returns null for non-MCP names (keeps generic suggestion path)', () => {
+      const scheduler = makeScheduler({ mcpServers: {}, removed: [] });
+      // @ts-expect-error accessing private method
+      expect(scheduler.getMcpToolUnavailableMessage('list_fils')).toBeNull();
+    });
+
+    it('a prefix server name does not match a longer server (boundary)', () => {
+      // `foo` must NOT claim a `mcp__foobar__*` tool.
+      const scheduler = makeScheduler({ mcpServers: {}, removed: ['foo'] });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage('mcp__foobar__x');
+      expect(msg).not.toContain('removed during this session');
+      expect(msg).toContain('no MCP server providing it');
+    });
+
+    it('attributes the tool to the most specific server when names are prefixes', () => {
+      // Both `foo` and `foo__bar` exist; `mcp__foo__bar__baz` startsWith both
+      // `mcp__foo__` and `mcp__foo__bar__`. The longer (more specific) server
+      // must win regardless of iteration order — not the first match.
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['foo', 'foo__bar'],
+      });
+      // @ts-expect-error accessing private method
+      const msg = scheduler.getMcpToolUnavailableMessage('mcp__foo__bar__baz');
+      expect(msg).toContain('"foo__bar"');
+      expect(msg).toContain('removed during this session');
+    });
+
+    it('getToolNotFoundMessage routes MCP names to the MCP branch, others to Levenshtein', async () => {
+      const scheduler = makeScheduler({
+        mcpServers: {},
+        removed: ['pangu-server'],
+        allToolNames: ['list_files', 'read_file'],
+      });
+      // @ts-expect-error accessing private method
+      const mcpMsg = await scheduler.getToolNotFoundMessage(
+        'mcp__pangu-server__pangu_search',
+      );
+      expect(mcpMsg).toContain('removed during this session');
+      expect(mcpMsg).not.toContain('Did you mean');
+
+      // @ts-expect-error accessing private method
+      const genericMsg = await scheduler.getToolNotFoundMessage('list_fils');
+      expect(genericMsg).toContain('Did you mean');
+    });
   });
 
   describe('getToolSuggestion', () => {
@@ -5140,6 +5418,60 @@ describe('CoreToolScheduler truncated output protection', () => {
       );
     }
   });
+
+  it('should inject retry loop directive after repeated truncated write_file rejections', async () => {
+    const writeFileConfig = {
+      getProjectRoot: () => '/tmp',
+      getTargetDir: () => '/tmp',
+      getFileSystemService: () => ({
+        readTextFile: vi.fn(),
+        writeTextFile: vi.fn(),
+      }),
+      getDefaultFileEncoding: () => undefined,
+      setApprovalMode: vi.fn(),
+    } as unknown as Config;
+    const writeFileTool = new WriteFileTool(writeFileConfig);
+    const { scheduler, onAllToolCallsComplete } = createTruncationTestScheduler(
+      writeFileTool,
+      [WriteFileTool.Name],
+    );
+
+    const messages: string[] = [];
+
+    for (let i = 1; i <= 3; i++) {
+      await scheduler.schedule(
+        [
+          {
+            callId: `truncated-write-file-${i}`,
+            name: WriteFileTool.Name,
+            args: { file_path: '/tmp/test.txt', content: 'partial' },
+            isClientInitiated: false,
+            prompt_id: `prompt-id-write-file-truncated-${i}`,
+            wasOutputTruncated: true,
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalledTimes(i);
+      });
+
+      const completedCalls = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as
+        | ToolCall[]
+        | undefined;
+      const completedCall = completedCalls?.[0];
+      expect(completedCall?.status).toBe('error');
+      if (completedCall?.status === 'error') {
+        messages.push(completedCall.response.error?.message ?? '');
+      }
+    }
+
+    expect(messages[0]).toContain('truncated due to max_tokens limit');
+    expect(messages[0]).not.toContain('RETRY LOOP DETECTED');
+    expect(messages[1]).not.toContain('RETRY LOOP DETECTED');
+    expect(messages[2]).toContain('RETRY LOOP DETECTED');
+  });
 });
 
 describe('CoreToolScheduler Sequential Execution', () => {
@@ -5469,6 +5801,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     tool: MockTool,
     onAllToolCallsComplete: ReturnType<typeof vi.fn>,
     onToolCallsUpdate: ReturnType<typeof vi.fn>,
+    options: { sdkMode?: boolean } = {},
   ) {
     const mockToolRegistry = {
       getTool: () => tool,
@@ -5490,6 +5823,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.PLAN,
+      getSdkMode: () => options.sdkMode ?? false,
       getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
@@ -5661,8 +5995,83 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       expect(completedCalls[0].response.resultDisplay).toBe(
         'Plan mode blocked a non-read-only tool call.',
       );
+      expect(
+        JSON.stringify(completedCalls[0].response.responseParts),
+      ).toContain('exit_plan_mode tool');
     }
   });
+
+  it.each([
+    {
+      label: 'subagents',
+      promptId: 'prompt-plan-subagent-blocked',
+      run: (schedule: () => Promise<void>) =>
+        runWithAgentContext('agent-1', schedule),
+    },
+    {
+      label: 'teammates',
+      promptId: 'prompt-plan-teammate-blocked',
+      run: (schedule: () => Promise<void>) =>
+        runWithTeammateIdentity(
+          {
+            agentId: 'agent@test',
+            agentName: 'agent',
+            teamName: 'test',
+            isTeamLead: false,
+          },
+          schedule,
+        ),
+    },
+    {
+      label: 'SDK callers',
+      promptId: 'prompt-plan-sdk-blocked',
+      schedulerOptions: { sdkMode: true },
+      run: (schedule: () => Promise<void>) => schedule(),
+    },
+  ])(
+    'should tell $label to return the plan directly when plan mode blocks a tool',
+    async ({ promptId, run, schedulerOptions }) => {
+      const editTool = new MockTool({
+        name: 'write_file',
+        getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+        getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+      });
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+      const scheduler = createPlanModeScheduler(
+        editTool,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+        schedulerOptions,
+      );
+
+      const abortController = new AbortController();
+      const request = {
+        callId: '1',
+        name: 'write_file',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: promptId,
+      };
+
+      await run(() => scheduler.schedule([request], abortController.signal));
+
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
+
+      const completedCalls = onAllToolCallsComplete.mock
+        .calls[0][0] as ToolCall[];
+      expect(completedCalls[0].status).toBe('error');
+      if (completedCalls[0].status === 'error') {
+        const responseText = JSON.stringify(
+          completedCalls[0].response.responseParts,
+        );
+        expect(responseText).toContain('Present your plan directly');
+        expect(responseText).not.toContain('exit_plan_mode tool');
+      }
+    },
+  );
 
   it('should allow info confirmation tools in plan mode after approval', async () => {
     const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
@@ -5785,6 +6194,7 @@ describe('CoreToolScheduler telemetry spans', () => {
   afterEach(() => {
     shouldThrowToolSpanSetAttribute.value = false;
     shouldThrowToolSpanSetStatus.value = false;
+    mockTelemetrySdkState.initialized = false;
   });
 
   function getLastToolSpan(): ToolSpanRecord {
@@ -5801,6 +6211,8 @@ describe('CoreToolScheduler telemetry spans', () => {
     execute?: () => Promise<ToolResult>;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     disableHooks?: boolean;
+    includeSensitiveSpanAttributes?: boolean;
+    sensitiveSpanAttributeMaxLength?: number;
   }): {
     scheduler: CoreToolScheduler;
     onAllToolCallsComplete: ReturnType<typeof vi.fn>;
@@ -5853,6 +6265,10 @@ describe('CoreToolScheduler telemetry spans', () => {
       getChatRecordingService: () => undefined,
       getMessageBus: vi.fn().mockReturnValue(options.messageBus),
       getDisableAllHooks: vi.fn().mockReturnValue(options.disableHooks ?? true),
+      getTelemetryIncludeSensitiveSpanAttributes: () =>
+        options.includeSensitiveSpanAttributes ?? false,
+      getTelemetrySensitiveSpanAttributeMaxLength: () =>
+        options.sensitiveSpanAttributeMaxLength ?? 1024 * 1024,
     } as unknown as Config;
 
     const onAllToolCallsComplete = vi.fn();
@@ -5874,6 +6290,8 @@ describe('CoreToolScheduler telemetry spans', () => {
       abortController?: AbortController;
       throwSpanSetAttribute?: boolean;
       throwSpanSetStatus?: boolean;
+      includeSensitiveSpanAttributes?: boolean;
+      sensitiveSpanAttributeMaxLength?: number;
     } = {},
   ): Promise<{
     spanRecord: ToolSpanRecord;
@@ -6298,6 +6716,27 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(spanRecord.statusCalls).toEqual([]);
     expect(spanRecord.spanAttributes).not.toHaveProperty('tool.failure_kind');
     expect(spanRecord.ended).toBe(true);
+  });
+
+  it('does not fail tool execution when sensitive tool span attributes fail', async () => {
+    mockTelemetrySdkState.initialized = true;
+    debugLoggerWarnSpy.mockClear();
+
+    const { spanRecord, completedCalls } = await runSingleTool({
+      includeSensitiveSpanAttributes: true,
+      sensitiveSpanAttributeMaxLength: 0,
+    });
+
+    expect(completedCalls[0].status).toBe('success');
+    expect(spanRecord.ended).toBe(true);
+    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+      'Failed to add tool input span attributes:',
+      expect.any(TypeError),
+    );
+    expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+      'Failed to add tool result span attributes:',
+      expect.any(TypeError),
+    );
   });
 
   it('marks successful tool calls with OK status via endToolSpan', async () => {
@@ -7542,8 +7981,8 @@ describe('CoreToolScheduler telemetry spans', () => {
   });
 
   it('prelude throw in _executeToolCallBody transitions tool from scheduled to error (#4321)', async () => {
-    // _executeToolCallBody's prelude (addToolInputAttributes,
-    // getMessageBus, startToolExecutionSpan, etc.) runs BEFORE the
+    // _executeToolCallBody's prelude (getMessageBus,
+    // startToolExecutionSpan, etc.) runs BEFORE the
     // `scheduled → executing` transition. If a synchronous throw escapes
     // the prelude, the catch in executeSingleToolCall must finalize the
     // tool span with failure_kind=tool_exception AND transition the
@@ -7735,6 +8174,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.PLAN,
+      getSdkMode: () => false,
       getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({}),
       getShellExecutionConfig: () => ({

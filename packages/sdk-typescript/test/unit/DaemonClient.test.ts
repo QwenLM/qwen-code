@@ -495,6 +495,25 @@ describe('DaemonClient', () => {
       ]);
     });
 
+    it('GETs /workspace/mcp/:server/resources with URL encoding', async () => {
+      const resourcesStatus = {
+        v: 1,
+        serverName: 'my server',
+        resources: [{ uri: 'file:///intro.md', name: 'Intro' }],
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, resourcesStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(client.workspaceMcpResources('my server')).resolves.toEqual(
+        resourcesStatus,
+      );
+      expect(calls.map((c) => [c.method, c.url])).toEqual([
+        ['GET', 'http://daemon/workspace/mcp/my%20server/resources'],
+      ]);
+    });
+
     it('GETs /workspace/tools and returns the tools envelope', async () => {
       const toolsStatus = {
         v: 1,
@@ -1661,6 +1680,47 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('archiveSessionsData / unarchiveSessionsData', () => {
+    it('POSTs to /sessions/archive with sessionIds in body and returns result', async () => {
+      const result = {
+        archived: ['s-1'],
+        alreadyArchived: ['s-2'],
+        notFound: [],
+        errors: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.archiveSessionsData(['s-1', 's-2']);
+      expect(res).toEqual(result);
+      expect(calls[0]?.url).toBe('http://daemon/sessions/archive');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        sessionIds: ['s-1', 's-2'],
+      });
+    });
+
+    it('POSTs to /sessions/unarchive with sessionIds in body and returns result', async () => {
+      const result = {
+        unarchived: ['s-1'],
+        alreadyActive: ['s-2'],
+        notFound: [],
+        errors: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const res = await client.unarchiveSessionsData(
+        ['s-1', 's-2'],
+        'client-1',
+      );
+      expect(res).toEqual(result);
+      expect(calls[0]?.url).toBe('http://daemon/sessions/unarchive');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        sessionIds: ['s-1', 's-2'],
+      });
+    });
+  });
+
   describe('updateSessionMetadata', () => {
     it('sends PATCH to /session/:id/metadata and returns effective metadata', async () => {
       const { fetch, calls } = recordingFetch(() =>
@@ -1798,7 +1858,51 @@ describe('DaemonClient', () => {
       // The cwd must be URL-encoded so the slashes don't collide with the
       // route segments.
       expect(calls[0]?.url).toBe(
-        'http://daemon/workspace/%2Fwork%2Fa/sessions',
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=20',
+      );
+    });
+
+    it('uses the requested page size without following pagination', async () => {
+      const { fetch, calls } = recordingFetch((request) => {
+        if (request.url.includes('cursor=next-page')) {
+          return jsonResponse(200, {
+            sessions: [{ sessionId: 's-2', workspaceCwd: '/work/a' }],
+          });
+        }
+        return jsonResponse(200, {
+          sessions: [{ sessionId: 's-1', workspaceCwd: '/work/a' }],
+          nextCursor: 'next-page',
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const sessions = await client.listWorkspaceSessions('/work/a', {
+        pageSize: 50,
+      });
+      expect(sessions.map((session) => session.sessionId)).toEqual(['s-1']);
+      expect(calls.map((call) => call.url)).toEqual([
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=50',
+      ]);
+    });
+
+    it('passes archiveState when listing archived sessions', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessions: [
+            {
+              sessionId: 's-archived',
+              workspaceCwd: '/work/a',
+              isArchived: true,
+            },
+          ],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const sessions = await client.listWorkspaceSessions('/work/a', {
+        archiveState: 'archived',
+      });
+      expect(sessions[0]?.isArchived).toBe(true);
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=20&archiveState=archived',
       );
     });
 
@@ -2185,6 +2289,239 @@ describe('DaemonClient', () => {
       await expect(client.initWorkspace()).rejects.toMatchObject({
         status: 409,
       });
+    });
+  });
+
+  describe('workspaceTrust', () => {
+    const trustStatus = {
+      v: 1,
+      workspaceCwd: '/work',
+      folderTrustEnabled: true,
+      effective: { state: 'trusted', source: 'file' },
+      explicitTrustLevel: 'TRUST_FOLDER',
+      requiresDaemonRestartForChanges: true,
+    };
+
+    it('calls GET /workspace/trust', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, trustStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.workspaceTrust();
+
+      expect(result).toEqual(trustStatus);
+      expect(calls[0]?.url).toBe('http://daemon/workspace/trust');
+      expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('requestWorkspaceTrustChange posts desired state and reason', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(202, {
+          accepted: true,
+          desiredState: 'untrusted',
+          requiresOperatorAction: true,
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.requestWorkspaceTrustChange(
+        { desiredState: 'untrusted', reason: 'remote user request' },
+        'client-1',
+      );
+
+      expect(result).toEqual({
+        accepted: true,
+        desiredState: 'untrusted',
+        requiresOperatorAction: true,
+      });
+      expect(calls[0]?.url).toBe('http://daemon/workspace/trust/request');
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        desiredState: 'untrusted',
+        reason: 'remote user request',
+      });
+    });
+  });
+
+  describe('workspacePermissions', () => {
+    const permissionsStatus = {
+      v: 1,
+      user: {
+        path: '/home/.qwen/settings.json',
+        rules: { allow: ['Bash(git status)'], ask: [], deny: [] },
+      },
+      workspace: {
+        path: '/work/.qwen/settings.json',
+        rules: { allow: [], ask: ['Bash(npm *)'], deny: ['Read(.env)'] },
+      },
+      merged: {
+        allow: ['Bash(git status)'],
+        ask: ['Bash(npm *)'],
+        deny: ['Read(.env)'],
+      },
+      isTrusted: true,
+    };
+
+    it('calls GET /workspace/permissions', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.workspacePermissions();
+
+      expect(result).toEqual(permissionsStatus);
+      expect(calls[0]?.url).toBe('http://daemon/workspace/permissions');
+      expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('posts scope ruleType and rules when setting permissions', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, permissionsStatus),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.setWorkspacePermissionRules('workspace', 'deny', [
+        'Read(.env)',
+      ]);
+
+      expect(calls[0]?.url).toBe('http://daemon/workspace/permissions');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        scope: 'workspace',
+        ruleType: 'deny',
+        rules: ['Read(.env)'],
+      });
+    });
+
+    it('addWorkspacePermissionRule deduplicates against scope-local rules', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'GET') return jsonResponse(200, permissionsStatus);
+        return jsonResponse(200, permissionsStatus);
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.addWorkspacePermissionRule(
+        'workspace',
+        'deny',
+        ' Read(.env) ',
+      );
+
+      expect(result).toEqual(permissionsStatus);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe('GET');
+    });
+
+    it('removeWorkspacePermissionRule preserves missing rule as no-op', async () => {
+      const { fetch, calls } = recordingFetch((req) => {
+        if (req.method === 'GET') return jsonResponse(200, permissionsStatus);
+        return jsonResponse(200, permissionsStatus);
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.removeWorkspacePermissionRule(
+        'workspace',
+        'deny',
+        'Bash(rm *)',
+      );
+
+      expect(result).toEqual(permissionsStatus);
+      expect(calls).toHaveLength(1);
+      expect(calls[0]?.method).toBe('GET');
+    });
+  });
+
+  describe('setupGithub', () => {
+    it('posts consent to /workspace/setup-github', async () => {
+      const body = {
+        kind: 'github_setup',
+        workspaceCwd: '/work',
+        gitRepoRoot: '/work',
+        releaseTag: 'v1.2.3',
+        readmeUrl: 'https://github.com/QwenLM/qwen-code-action',
+        workflows: [],
+        gitignore: { path: '.gitignore', status: 'unchanged' },
+        warnings: [],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const result = await client.setupGithub({ consent: true });
+
+      expect(result).toEqual(body);
+      expect(calls[0]?.url).toBe('http://daemon/workspace/setup-github');
+      expect(calls[0]?.method).toBe('POST');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({ consent: true });
+    });
+
+    it('forwards client id', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          kind: 'github_setup',
+          workspaceCwd: '/work',
+          gitRepoRoot: '/work',
+          releaseTag: 'v1.2.3',
+          readmeUrl: 'https://github.com/QwenLM/qwen-code-action',
+          workflows: [],
+          gitignore: { path: '.gitignore', status: 'unchanged' },
+          warnings: [],
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await client.setupGithub({ consent: true }, 'client-1');
+
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+    });
+
+    it('throws DaemonHttpError for setup failures', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(502, {
+          code: 'github_release_lookup_failed',
+          error: 'Unable to look up release',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.setupGithub({ consent: true }),
+      ).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+
+    it('allows setup-github to run longer than the client default timeout', async () => {
+      const body = {
+        kind: 'github_setup',
+        workspaceCwd: '/work',
+        gitRepoRoot: '/work',
+        releaseTag: 'v1.2.3',
+        readmeUrl: 'https://github.com/QwenLM/qwen-code-action',
+        workflows: [],
+        gitignore: { path: '.gitignore', status: 'unchanged' },
+        warnings: [],
+      };
+      const fetch = vi.fn(
+        (_input: RequestInfo | URL, init?: RequestInit) =>
+          new Promise<Response>((resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(
+                init.signal!.reason ??
+                  new DOMException('aborted', 'AbortError'),
+              );
+            });
+            setTimeout(() => resolve(jsonResponse(200, body)), 20);
+          }),
+      ) as unknown as typeof globalThis.fetch;
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        fetchTimeoutMs: 1,
+      });
+
+      await expect(client.setupGithub({ consent: true })).resolves.toEqual(
+        body,
+      );
     });
   });
 
@@ -3121,6 +3458,60 @@ describe('DaemonClient', () => {
           content: 'x',
         }),
       ).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+
+    it('POSTs /workspace/memory/remember and forwards context mode/client id', async () => {
+      const reply = {
+        taskId: 'remember-1',
+        status: 'queued' as const,
+        contextMode: 'clean' as const,
+        createdAt: '2026-06-26T00:00:00.000Z',
+        updatedAt: '2026-06-26T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.rememberWorkspaceMemory('remember this', {
+          contextMode: 'clean',
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/remember');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        content: 'remember this',
+        contextMode: 'clean',
+      });
+    });
+
+    it('GETs /workspace/memory/remember/:taskId', async () => {
+      const reply = {
+        taskId: 'remember/a b',
+        status: 'completed' as const,
+        contextMode: 'workspace' as const,
+        createdAt: '2026-06-26T00:00:00.000Z',
+        updatedAt: '2026-06-26T00:00:01.000Z',
+        result: {
+          summary: 'saved',
+          filesTouched: ['/mem/MEMORY.md'],
+          touchedScopes: ['project' as const],
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getWorkspaceMemoryRememberTask('remember/a b', {
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/memory/remember/remember%2Fa%20b',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
     });
 
     it('GETs /workspace/agents (list) and /workspace/agents/:id (detail)', async () => {

@@ -2,16 +2,21 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
+import { Buffer } from 'node:buffer';
 import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
-import { ChannelBase } from '@qwen-code/channel-base';
+import {
+  ChannelBase,
+  sanitizeLogText,
+  sanitizeSenderName,
+} from '@qwen-code/channel-base';
 import { normalizeDingTalkMarkdown, extractTitle } from './markdown.js';
 import { downloadMedia } from './media.js';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
-  AcpBridge,
+  ChannelAgentBridge,
 } from '@qwen-code/channel-base';
 
 /**
@@ -76,6 +81,14 @@ const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
 
+type DingTalkClientInternals = DWClient & {
+  debug: boolean;
+  onDownStream(data: unknown): void;
+  onSystem(message: DWClientDownStream): void;
+  onEvent(message: DWClientDownStream): void;
+  onCallback(message: DWClientDownStream): void;
+};
+
 export class DingtalkChannel extends ChannelBase {
   private client: DWClient;
   private seenMessages: Map<string, number> = new Map();
@@ -86,7 +99,7 @@ export class DingtalkChannel extends ChannelBase {
   constructor(
     name: string,
     config: ChannelConfig,
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
@@ -101,6 +114,120 @@ export class DingtalkChannel extends ChannelBase {
       clientId: config.clientId,
       clientSecret: config.clientSecret,
     });
+    this.installStructuredDownstreamHandler();
+  }
+
+  private installStructuredDownstreamHandler(): void {
+    const client = this.client as DingTalkClientInternals;
+    client.debug = false;
+    // Keep raw SDK downstream frames off stdout; this switch mirrors the SDK
+    // dispatch table and should be checked when upgrading the DingTalk SDK.
+    client.onDownStream = (raw: unknown) => {
+      this.onDownStream(raw, client);
+    };
+  }
+
+  private onDownStream(raw: unknown, client: DingTalkClientInternals): void {
+    const decoded = this.decodeDownStream(raw);
+    let msg: DWClientDownStream;
+    try {
+      const parsed = JSON.parse(decoded.text) as unknown;
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] downstream parsed to non-object, ignoring.\n`,
+        );
+        return;
+      }
+      msg = parsed as DWClientDownStream;
+    } catch (err) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Failed to parse downstream: ${sanitizeLogText(
+          String(err),
+          200,
+        )}\n`,
+      );
+      return;
+    }
+    const headers: Record<string, unknown> =
+      msg.headers && typeof msg.headers === 'object' ? msg.headers : {};
+    const type = typeof msg.type === 'string' ? msg.type : '';
+    const topic = typeof headers['topic'] === 'string' ? headers['topic'] : '';
+    const messageId =
+      typeof headers['messageId'] === 'string' ? headers['messageId'] : '';
+
+    process.stderr.write(
+      `[DingTalk:${this.name}] downstream type=${sanitizeLogText(type, 40)} topic=${sanitizeLogText(
+        topic,
+        80,
+      )} messageId=${sanitizeLogText(messageId, 80)} bytes=${decoded.bytes}\n`,
+    );
+
+    if ((type === 'CALLBACK' || type === 'EVENT') && (!topic || !messageId)) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] Ignoring downstream with invalid routing headers.\n`,
+      );
+      return;
+    }
+
+    const normalizedMsg = {
+      ...msg,
+      headers: { ...headers, topic, messageId },
+    } as DWClientDownStream;
+
+    switch (type) {
+      case 'SYSTEM':
+        this.callDownStreamHandler(client, 'onSystem', normalizedMsg);
+        break;
+      case 'EVENT':
+        this.callDownStreamHandler(client, 'onEvent', normalizedMsg);
+        break;
+      case 'CALLBACK':
+        this.callDownStreamHandler(client, 'onCallback', normalizedMsg);
+        break;
+      default:
+        process.stderr.write(
+          `[DingTalk:${this.name}] Ignoring downstream type ${sanitizeLogText(
+            type || 'unknown',
+            40,
+          )}.\n`,
+        );
+    }
+  }
+
+  private callDownStreamHandler(
+    client: DingTalkClientInternals,
+    method: 'onSystem' | 'onEvent' | 'onCallback',
+    msg: DWClientDownStream,
+  ): void {
+    try {
+      client[method](msg);
+    } catch (err) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] ${method} failed: ${sanitizeLogText(
+          String(err),
+          200,
+        )}\n`,
+      );
+    }
+  }
+
+  private decodeDownStream(raw: unknown): { text: string; bytes: number } {
+    if (typeof raw === 'string') {
+      return { text: raw, bytes: Buffer.byteLength(raw) };
+    }
+    if (Buffer.isBuffer(raw)) {
+      return { text: raw.toString('utf8'), bytes: raw.length };
+    }
+    if (raw instanceof Uint8Array) {
+      return { text: Buffer.from(raw).toString('utf8'), bytes: raw.byteLength };
+    }
+    if (raw instanceof ArrayBuffer) {
+      return {
+        text: Buffer.from(raw).toString('utf8'),
+        bytes: raw.byteLength,
+      };
+    }
+    return { text: String(raw), bytes: Buffer.byteLength(String(raw)) };
   }
 
   async connect(): Promise<void> {
@@ -129,6 +256,18 @@ export class DingtalkChannel extends ChannelBase {
     }, 60_000);
 
     process.stderr.write(`[DingTalk:${this.name}] Connected via stream.\n`);
+  }
+
+  /**
+   * A group message with no conversationId can't be routed to a stable shared
+   * session (chatId would fall back to the expiring sessionWebhook), so it is
+   * dropped on ingestion. Exposed for testing the drop rule.
+   */
+  static isUnroutableGroupMessage(
+    isGroup: boolean,
+    conversationId: string | undefined,
+  ): boolean {
+    return isGroup && !conversationId;
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -491,7 +630,12 @@ export class DingtalkChannel extends ChannelBase {
         typeof downstream.data === 'string'
           ? JSON.parse(downstream.data)
           : (downstream.data as DingTalkMessageData);
-      const msgId = data.msgId || downstream.headers.messageId;
+      const dataMsgId = typeof data.msgId === 'string' ? data.msgId : undefined;
+      const headerMsgId =
+        typeof downstream.headers.messageId === 'string'
+          ? downstream.headers.messageId
+          : undefined;
+      const msgId = dataMsgId || headerMsgId;
 
       // Dedup: DingTalk retries unACKed messages
       if (msgId && this.seenMessages.has(msgId)) {
@@ -502,12 +646,42 @@ export class DingtalkChannel extends ChannelBase {
       }
 
       const isGroup = data.conversationType === '2';
-      const sessionWebhook = data.sessionWebhook;
-      const conversationId = data.conversationId;
+      const sessionWebhook =
+        typeof data.sessionWebhook === 'string'
+          ? data.sessionWebhook
+          : undefined;
+      const conversationId =
+        typeof data.conversationId === 'string'
+          ? data.conversationId
+          : undefined;
+      const isMentioned = Boolean(data.isInAtList);
+      const senderNick =
+        typeof data.senderNick === 'string' ? data.senderNick : undefined;
+      const senderStaffId =
+        typeof data.senderStaffId === 'string' ? data.senderStaffId : undefined;
+      const senderIdValue =
+        typeof data.senderId === 'string' ? data.senderId : undefined;
 
       if (!sessionWebhook) {
         process.stderr.write(
           `[DingTalk:${this.name}] No sessionWebhook in message, skipping.\n`,
+        );
+        return;
+      }
+
+      // A group message with no conversationId can't be routed to a stable
+      // session — chatId would fall back to the expiring sessionWebhook and the
+      // shared-session key would churn. Drop it rather than fragment the group.
+      if (DingtalkChannel.isUnroutableGroupMessage(isGroup, conversationId)) {
+        // Include identifying context so an operator can tell whether one sender
+        // or every group message is affected if DingTalk starts omitting
+        // conversationId (API regression / edge-case message type).
+        process.stderr.write(
+          `[DingTalk:${this.name}] Group message has no conversationId, skipping (msgId=${
+            msgId || 'unknown'
+          }, sender=${sanitizeSenderName(
+            senderNick || senderStaffId || 'unknown',
+          )})\n`,
         );
         return;
       }
@@ -517,7 +691,21 @@ export class DingtalkChannel extends ChannelBase {
         this.webhooks.set(conversationId, sessionWebhook);
       }
 
-      const isMentioned = Boolean(data.isInAtList);
+      process.stderr.write(
+        `[DingTalk:${this.name}] message msgId=${sanitizeLogText(
+          msgId || 'unknown',
+          80,
+        )} conversationId=${sanitizeLogText(
+          conversationId || '',
+          120,
+        )} isGroup=${isGroup} isMentioned=${isMentioned} senderNick=${sanitizeLogText(
+          senderNick || '',
+          80,
+        )} senderStaffId=${sanitizeLogText(
+          senderStaffId || '',
+          80,
+        )} senderId=${sanitizeLogText(senderIdValue || '', 80)}\n`,
+      );
 
       // Extract text and media info from message
       const content = this.extractContent(data);
@@ -537,11 +725,13 @@ export class DingtalkChannel extends ChannelBase {
       // (user pinged the bot with no other text). Don't fall back to the
       // original text in that case — it would re-introduce the @mention.
       const envelopeText = isMentioned ? cleanText : cleanText || content.text;
+      const senderId = senderStaffId || senderIdValue || '';
+      const senderName = senderNick || senderId || 'Unknown';
 
       const envelope: Envelope = {
         channelName: this.name,
-        senderId: data.senderStaffId || data.senderId || '',
-        senderName: data.senderNick || 'Unknown',
+        senderId,
+        senderName,
         chatId,
         text: envelopeText,
         isGroup,

@@ -177,6 +177,7 @@ describe('AgentTool', () => {
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getModel: vi.fn().mockReturnValue('parent-model'),
       getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
       getSandbox: vi.fn().mockReturnValue(undefined),
       getScreenReader: vi.fn().mockReturnValue(false),
       getMaxSessionTurns: vi.fn().mockReturnValue(-1),
@@ -775,6 +776,82 @@ describe('AgentTool', () => {
       expect(display.type).toBe('task_execution');
       expect(display.status).toBe('completed');
       expect(display.subagentName).toBe('file-search');
+    });
+
+    it('strips internal analysis and summary tags from subagent result', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        [
+          '<analysis>',
+          'Scratchpad details should stay out of the parent context.',
+          '</analysis>',
+          '',
+          '<summary>',
+          'Task completed successfully',
+          '',
+          '- Found the target file',
+          '</summary>',
+        ].join('\n'),
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe(
+        'Task completed successfully\n\n- Found the target file',
+      );
+      expect(llmText).not.toContain('<analysis>');
+      expect(llmText).not.toContain('<summary>');
+    });
+
+    it('preserves diagnostic tags from failed subagent result', async () => {
+      const raw = '<analysis>debug</analysis><summary>partial</summary>';
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(raw);
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(raw);
+    });
+
+    it('explains successful subagents with no model-visible output', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch only</analysis>',
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(
+        '(subagent produced no model-visible output)',
+      );
     });
 
     it('passes custom ignore files into worktree isolation file service', async () => {
@@ -2613,6 +2690,52 @@ describe('AgentTool', () => {
       ).toHaveBeenCalled();
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('background');
+    });
+
+    it('stores sanitized background results in the registry', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch</analysis><summary>visible</summary>',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.runAllTimersAsync();
+
+      expect(mockRegistry.complete).toHaveBeenCalledWith(
+        expect.any(String),
+        'visible',
+        expect.any(Object),
+      );
+    });
+
+    it('stores a fallback for background results with no model-visible text', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch only</analysis>',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.runAllTimersAsync();
+
+      expect(mockRegistry.complete).toHaveBeenCalledWith(
+        expect.any(String),
+        '(subagent produced no model-visible output)',
+        expect.any(Object),
+      );
     });
 
     it('routes owned monitor notifications into a background agent external input queue', async () => {

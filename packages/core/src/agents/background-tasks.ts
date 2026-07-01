@@ -162,6 +162,7 @@ export type BackgroundTaskStatus = TaskStatus;
 
 export interface AgentCompletionStats {
   totalTokens: number;
+  outputTokens: number;
   toolUses: number;
   durationMs: number;
 }

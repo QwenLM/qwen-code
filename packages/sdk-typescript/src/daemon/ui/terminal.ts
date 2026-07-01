@@ -103,7 +103,9 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
     case 'workspace.memory.changed':
       return terminalLine(
         'memory',
-        `${event.mode} ${event.scope} ${event.filePath} +${event.bytesWritten}b`,
+        event.scope === 'managed'
+          ? (event.source ?? 'managed_memory')
+          : `${event.mode} ${event.scope} ${event.filePath} +${event.bytesWritten}b`,
         '36',
       );
     case 'workspace.agent.changed':
@@ -124,10 +126,22 @@ export function daemonUiEventToTerminalText(event: DaemonUiEvent): string {
         `${event.key} changed (scope: ${event.scope})`,
         '36',
       );
+    case 'workspace.trust.change.requested':
+      return terminalLine(
+        'trust',
+        `${event.desiredState} ${event.workspaceCwd}`,
+        '33',
+      );
     case 'workspace.initialized':
       return terminalLine(
         'workspace',
         `init ${event.action} ${event.path}`,
+        '36',
+      );
+    case 'workspace.github.setup.completed':
+      return terminalLine(
+        'github',
+        `setup ${event.releaseTag} (${event.workflows.length} workflows)`,
         '36',
       );
     case 'workspace.mcp.budget_warning':

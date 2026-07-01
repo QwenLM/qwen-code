@@ -25,24 +25,14 @@ import { useI18n } from '../i18n';
 import { MessageItem } from './MessageItem';
 import { MessageTimestamp } from './MessageTimestamp';
 import { ParallelAgentsGroup } from './messages/tools/ParallelAgentsGroup';
-import { ToolApproval } from './messages/ToolApproval';
-import { AskUserQuestion } from './messages/AskUserQuestion';
 import { useSharedNow } from '../hooks/useSharedNow';
-import {
-  isAskUserQuestionToolName,
-  toolContainsCallId,
-} from './messages/toolFormatting';
+import { toolContainsCallId } from './messages/toolFormatting';
 import turnCollapseStyles from './TurnCollapseRow.module.css';
 import styles from './MessageList.module.css';
 
 interface MessageListProps {
   messages: Message[];
   pendingApproval: PermissionRequest | null;
-  onConfirm: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
   catchingUp?: boolean;
@@ -68,31 +58,6 @@ interface MessageListProps {
   onRetryClick?: () => void;
   onBranchSession?: () => void;
   onFollowStateChange?: (isFollowing: boolean) => void;
-}
-
-function isAskUserQuestion(request: PermissionRequest): boolean {
-  if (
-    !request.rawInput?.questions ||
-    !Array.isArray(request.rawInput.questions)
-  ) {
-    return false;
-  }
-  if (!request.toolName) return true;
-  return isAskUserQuestionToolName(request.toolName);
-}
-
-function approvalMatchesToolGroup(
-  messages: Message[],
-  approval: PermissionRequest | null,
-): boolean {
-  if (!approval?.toolCallId) return false;
-  for (const msg of messages) {
-    if (msg.role === 'tool_group') {
-      if (msg.tools.some((t) => toolContainsCallId(t, approval.toolCallId!)))
-        return true;
-    }
-  }
-  return false;
 }
 
 function getLastUserMessageId(messages: Message[]): string | null {
@@ -376,6 +341,33 @@ function findFinalAnswerIndex(
   return -1;
 }
 
+function collectFinalAssistantIdsByTurn(
+  items: readonly DisplayItem[],
+  isResponding: boolean,
+): ReadonlySet<string> {
+  const userIdxs: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type === 'message' && item.message.role === 'user') {
+      userIdxs.push(i);
+    }
+  }
+
+  const ids = new Set<string>();
+  for (let k = 0; k < userIdxs.length; k++) {
+    if (k === userIdxs.length - 1 && isResponding) continue;
+    const start = userIdxs[k];
+    const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
+    const answerIdx = findFinalAnswerIndex(items, start, end);
+    if (answerIdx < 0) continue;
+    const item = items[answerIdx];
+    if (item.type === 'message' && item.message.role === 'assistant') {
+      ids.add(item.message.id);
+    }
+  }
+  return ids;
+}
+
 /**
  * A turn's hideable "steps": tool activity, plans, and mid-turn assistant text.
  * The final answer and any system/shell/insight rows (errors, cancellations,
@@ -433,6 +425,58 @@ function isExecutionWorkStep(item: DisplayItem): boolean {
   if (item.type === 'turn_collapse') return false;
   if (item.type === 'turn_content') return item.items.some(isExecutionWorkStep);
   return item.message.role === 'tool_group' || item.message.role === 'plan';
+}
+
+function isActiveToolStatus(status: ACPToolCall['status'] | string): boolean {
+  return (
+    status === 'pending' || status === 'running' || status === 'in_progress'
+  );
+}
+
+function activeExecutionKey(item: DisplayItem): string | null {
+  if (item.type === 'turn_content') {
+    for (let i = item.items.length - 1; i >= 0; i--) {
+      const key = activeExecutionKey(item.items[i]!);
+      if (key) return key;
+    }
+    return null;
+  }
+
+  if (item.type === 'turn_collapse') {
+    if (item.turnCollapse.liveStartedAt === undefined) return null;
+    if (
+      item.turnCollapse.toolCallCount === undefined ||
+      item.turnCollapse.toolCallCount <= 0
+    ) {
+      return null;
+    }
+    return `turn:${item.turnCollapse.turnId}:${item.turnCollapse.toolCallCount}`;
+  }
+
+  if (item.type === 'parallel_agents') {
+    const activeAgents = item.agents.filter((agent) =>
+      isActiveToolStatus(agent.status),
+    );
+    if (activeAgents.length === 0) return null;
+    return `agents:${item.key}:${activeAgents.map((agent) => agent.callId).join(',')}`;
+  }
+
+  if (item.message.role !== 'tool_group') return null;
+  const activeTools = item.message.tools.filter((tool) =>
+    isActiveToolStatus(tool.status),
+  );
+  if (activeTools.length === 0) return null;
+  return `tools:${item.message.id}:${activeTools.map((tool) => tool.callId).join(',')}`;
+}
+
+function latestActiveExecutionKey(
+  items: readonly DisplayItem[],
+): string | null {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const key = activeExecutionKey(items[i]!);
+    if (key) return key;
+  }
+  return null;
 }
 
 function terminalTurnTimestamp(item: DisplayItem): number | undefined {
@@ -791,7 +835,6 @@ const HEADER_INDEX = 0;
 const ESTIMATE_HEADER = 120;
 const ESTIMATE_MESSAGE = 80;
 const ESTIMATE_TURN_COLLAPSE = 32;
-const ESTIMATE_APPROVAL = 200;
 const ESTIMATE_TAIL = 240;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
 
@@ -865,7 +908,7 @@ function hasNonDurationMetrics(collapse: TurnCollapseHead): boolean {
 
 interface TurnCollapseRowProps {
   turnCollapse: TurnCollapseHead;
-  onToggleCollapse: (turnId: string) => void;
+  onToggleCollapse: (turnId: string, nextExpanded: boolean) => void;
 }
 
 const TurnCollapseRow = memo(function TurnCollapseRow({
@@ -909,7 +952,8 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
   if (!showMetadataRow) return null;
   const toggleExpanded = () => {
     if (!hasToggle) return;
-    onToggleCollapse(turnCollapse.turnId);
+    const nextExpanded = turnCollapse.collapsed;
+    onToggleCollapse(turnCollapse.turnId, nextExpanded);
   };
 
   return (
@@ -950,7 +994,12 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
       <span className={turnCollapseStyles.collapseLabel}>
         <span className={turnCollapseStyles.processedLabel}>
           {statusLabel}
-          {showVisibleMetrics && ` ${visibleMetrics}`}
+          {showVisibleMetrics && (
+            <span className={turnCollapseStyles.processedMeta}>
+              {' '}
+              {visibleMetrics}
+            </span>
+          )}
         </span>
         {showSummaryMetrics && (
           <span className={turnCollapseStyles.summaryMetrics}>
@@ -1027,7 +1076,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     {
       messages,
       pendingApproval,
-      onConfirm,
       onShowContextDetail,
       catchingUp,
       isResponding = false,
@@ -1078,6 +1126,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       }
       return null;
     }, [isResponding, mergedMessages]);
+    const finalAssistantIdsByTurn = useMemo(
+      () => collectFinalAssistantIdsByTurn(displayItems, isResponding),
+      [displayItems, isResponding],
+    );
 
     // ── Per-turn collapse ────────────────────────────────────────────────
     // Completed turns fold down to their prompt + final answer (toggle on the
@@ -1097,11 +1149,16 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const scrollCooldownCount = useRef(0);
     const lastReportedFollow = useRef(true);
     const prevLastUserMsgId = useRef<string | null>(null);
+    const prevActiveExecutionKey = useRef<string | null>(null);
     const prevCatchingUp: MutableRefObject<boolean | undefined> =
       useRef(catchingUp);
     const catchingUpRef = useRef(catchingUp);
     const prevHasTailContent = useRef(false);
+    const pendingFollowRecheck = useRef(false);
+    const pendingFollowRecheckFrame = useRef<number | undefined>(undefined);
+    const pendingFollowRecheckTimer = useRef<number | undefined>(undefined);
     catchingUpRef.current = catchingUp;
+    const containerRef = useRef<HTMLDivElement>(null);
 
     const setShouldFollow = useCallback(
       (value: boolean) => {
@@ -1111,20 +1168,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         onFollowStateChange?.(value);
       },
       [onFollowStateChange],
-    );
-    const handleToggleCollapse = useCallback(
-      (turnId: string) => {
-        // (Un)folding a turn is the user reading history, not following the tail.
-        // Pause follow so the height change does not yank the viewport to the
-        // bottom — the toggled prompt row stays where it is on screen.
-        setShouldFollow(false);
-        setCollapseOverrides((prev) => {
-          const next = new Map(prev);
-          next.set(turnId, prev.has(turnId) ? !prev.get(turnId) : true);
-          return next;
-        });
-      },
-      [setShouldFollow],
     );
     const visibleItems = useMemo(
       () =>
@@ -1144,8 +1187,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         collapseEnabled,
       ],
     );
-
-    const containerRef = useRef<HTMLDivElement>(null);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //
@@ -1192,17 +1233,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     // appearance — flows through this one effect.
     // ─────────────────────────────────────────────────────────────────────
 
-    const hasTailApproval = useMemo(() => {
-      if (!pendingApproval) return false;
-      if (isAskUserQuestion(pendingApproval)) return true;
-      return !approvalMatchesToolGroup(messages, pendingApproval);
-    }, [pendingApproval, messages]);
-
     const hasTailContent = tailContent !== undefined && tailContent !== null;
     const hasHeader = !!welcomeHeader;
     const headerOffset = hasHeader ? 1 : 0;
-    const tailApprovalIndex = headerOffset + visibleItems.length;
-    const tailContentIndex = tailApprovalIndex + (hasTailApproval ? 1 : 0);
+    const tailContentIndex = headerOffset + visibleItems.length;
     const totalCount = tailContentIndex + (hasTailContent ? 1 : 0);
     const useVirtualScroll = shouldUseVirtualScroll(
       totalCount,
@@ -1212,14 +1246,74 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       return containerRef.current;
     }, []);
 
+    const recheckFollowFromScrollGeometry = useCallback(() => {
+      const el = containerRef.current;
+      if (!el) return;
+      const distanceFromBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight;
+      setShouldFollow(distanceFromBottom < 30);
+    }, [setShouldFollow]);
+
+    const scheduleFollowRecheck = useCallback(() => {
+      pendingFollowRecheck.current = true;
+      if (pendingFollowRecheckFrame.current !== undefined) {
+        window.cancelAnimationFrame(pendingFollowRecheckFrame.current);
+      }
+      if (pendingFollowRecheckTimer.current !== undefined) {
+        window.clearTimeout(pendingFollowRecheckTimer.current);
+      }
+      pendingFollowRecheckFrame.current = window.requestAnimationFrame(
+        recheckFollowFromScrollGeometry,
+      );
+      // Turn content uses a 180ms grid transition. The real scrollHeight can
+      // cross the overflow threshold only after the animation advances, so do a
+      // final geometry read once the expansion has settled.
+      pendingFollowRecheckTimer.current = window.setTimeout(() => {
+        pendingFollowRecheck.current = false;
+        pendingFollowRecheckFrame.current = undefined;
+        pendingFollowRecheckTimer.current = undefined;
+        recheckFollowFromScrollGeometry();
+      }, 220);
+    }, [recheckFollowFromScrollGeometry]);
+
+    useEffect(
+      () => () => {
+        if (pendingFollowRecheckFrame.current !== undefined) {
+          window.cancelAnimationFrame(pendingFollowRecheckFrame.current);
+        }
+        if (pendingFollowRecheckTimer.current !== undefined) {
+          window.clearTimeout(pendingFollowRecheckTimer.current);
+        }
+      },
+      [],
+    );
+
+    const handleToggleCollapse = useCallback(
+      (turnId: string, nextExpanded: boolean) => {
+        // Expanding/collapsing a turn is an explicit reading action. Pause
+        // follow so streaming output does not yank the viewport back to the
+        // tail while the user is inspecting history.
+        const el = containerRef.current;
+        if (el && el.scrollHeight <= el.clientHeight + 1) {
+          // If there is no scrollbar yet, there is no meaningful "not at
+          // bottom" state to report. The toggle may create overflow though, so
+          // re-check after the expanded/collapsed rows have been laid out.
+          scheduleFollowRecheck();
+        } else {
+          setShouldFollow(false);
+        }
+        setCollapseOverrides((prev) => {
+          const next = new Map(prev);
+          next.set(turnId, nextExpanded);
+          return next;
+        });
+      },
+      [scheduleFollowRecheck, setShouldFollow],
+    );
+
     const getItemKey = useCallback(
       (index: number) => {
         if (hasHeader && index === HEADER_INDEX) return 'slot:header';
-        if (hasTailApproval && index === tailApprovalIndex) {
-          return pendingApproval
-            ? `slot:approval:${pendingApproval.id}`
-            : 'slot:approval';
-        }
         if (hasTailContent && index === tailContentIndex) {
           return `slot:tail:${tailKey}`;
         }
@@ -1228,9 +1322,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       },
       [
         hasHeader,
-        hasTailApproval,
-        tailApprovalIndex,
-        pendingApproval,
         hasTailContent,
         tailContentIndex,
         tailKey,
@@ -1283,9 +1374,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       getItemKey,
       estimateSize: (index) => {
         if (hasHeader && index === HEADER_INDEX) return ESTIMATE_HEADER;
-        if (hasTailApproval && index === tailApprovalIndex) {
-          return ESTIMATE_APPROVAL;
-        }
         if (hasTailContent && index === tailContentIndex) return ESTIMATE_TAIL;
         const item = visibleItems[index - headerOffset];
         if (item?.type === 'turn_collapse') return ESTIMATE_TURN_COLLAPSE;
@@ -1434,12 +1522,14 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
       // Rule 2: scrolling up → pause follow
       if (curr < prev - 1) {
-        setShouldFollow(false);
+        // Container resizes can clamp scrollTop downward while the viewport is
+        // still at the tail. Treat that as follow mode, not a manual scroll-up.
+        setShouldFollow(distanceFromBottom < 30);
+        return;
       }
       // Rule 3: near bottom → resume follow
-      // (runs unconditionally so that container-resize-induced scrollTop
-      // clamping — which looks like scrolling up — doesn't permanently
-      // disable follow when the viewport is still near the bottom)
+      // Run only after non-upward scrolls. Otherwise a tiny wheel-up near the
+      // tail would pause follow and immediately re-enable it in the same event.
       if (distanceFromBottom < 30) {
         setShouldFollow(true);
       }
@@ -1510,6 +1600,33 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       prevCatchingUp.current = catchingUp;
     }, [catchingUp, scrollToBottom, setShouldFollow]);
 
+    const runningExecutionKey = useMemo(
+      () => latestActiveExecutionKey(visibleItems),
+      [visibleItems],
+    );
+
+    // Tool summaries and parallel-agent boxes can grow after their first
+    // render, which used to leave the row clipped behind the fixed composer.
+    // Instead of observing every row resize (too noisy while streaming), scroll
+    // once when a new execution row starts, and only while the user is already
+    // following the bottom.
+    useLayoutEffect(() => {
+      if (catchingUp) return;
+      if (!runningExecutionKey) {
+        prevActiveExecutionKey.current = null;
+        return;
+      }
+      if (runningExecutionKey === prevActiveExecutionKey.current) return;
+      prevActiveExecutionKey.current = runningExecutionKey;
+      if (shouldFollow.current) {
+        requestAnimationFrame(() => {
+          if (shouldFollow.current) {
+            scrollToBottom();
+          }
+        });
+      }
+    }, [catchingUp, runningExecutionKey, scrollToBottom]);
+
     // Rule 6: an inline picker/dialog (tailContent) just appeared. It renders
     // at the very bottom of the virtualized list, so if the user had scrolled
     // up it would open below the fold and the action would look like a no-op.
@@ -1548,7 +1665,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
                 <ParallelAgentsGroup
                   agents={displayItem.agents}
                   pendingApproval={pendingApproval}
-                  onConfirm={onConfirm}
                 />
               </MessageTimestamp>
             );
@@ -1582,7 +1698,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
             <MessageItem
               message={displayItem.message}
               pendingApproval={pendingApproval}
-              onConfirm={onConfirm}
               onShowContextDetail={onShowContextDetail}
               workspaceCwd={workspaceCwd}
               isLatest={isLatest}
@@ -1591,7 +1706,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
               onBranchSession={onBranchSession}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
-                displayItem.message.id === lastCompletedAssistantId
+                finalAssistantIdsByTurn.has(displayItem.message.id)
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
@@ -1604,23 +1719,6 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
         if (hasHeader && index === HEADER_INDEX) {
           return welcomeHeader;
-        }
-
-        if (hasTailApproval && index === tailApprovalIndex) {
-          if (pendingApproval && isAskUserQuestion(pendingApproval)) {
-            return (
-              <AskUserQuestion
-                request={pendingApproval}
-                onConfirm={onConfirm}
-              />
-            );
-          }
-          if (pendingApproval) {
-            return (
-              <ToolApproval request={pendingApproval} onConfirm={onConfirm} />
-            );
-          }
-          return null;
         }
 
         if (hasTailContent && index === tailContentIndex) {
@@ -1639,13 +1737,11 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         hasTailContent,
         tailContent,
         tailContentIndex,
-        hasTailApproval,
-        tailApprovalIndex,
         pendingApproval,
-        onConfirm,
         onShowContextDetail,
         headerOffset,
         visibleItems,
+        finalAssistantIdsByTurn,
         lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
@@ -1679,6 +1775,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     useLayoutEffect(() => {
       if (catchingUp) return;
       if (scrollCooldown.current) return;
+      if (pendingFollowRecheck.current) return;
       if (shouldFollow.current) {
         const lastId = getLastUserMessageId(messages);
         const isNewUserMessage =

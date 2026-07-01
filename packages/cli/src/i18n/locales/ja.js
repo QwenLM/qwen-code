@@ -236,18 +236,17 @@ export default {
   'Open in editor': 'エディタで開く',
   'Edit tools': 'ツールを編集',
   'Edit color': '色を編集',
-  '❌ Error:': '❌ エラー:',
+  '✗ Error:': '✗ エラー:',
   'Are you sure you want to delete agent "{{name}}"?':
     'エージェント "{{name}}" を削除してもよろしいですか?',
   'Project Level (.qwen/agents/)': 'プロジェクトレベル (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'ユーザーレベル (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!':
-    '✅ サブエージェントの作成に成功しました!',
+  '✓ Subagent Created Successfully!': '✓ サブエージェントの作成に成功しました!',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'サブエージェント "{{name}}" を {{level}} に保存しました',
   'Name: ': '名前: ',
   'Location: ': '場所: ',
-  '❌ Error saving subagent:': '❌ サブエージェント保存エラー:',
+  '✗ Error saving subagent:': '✗ サブエージェント保存エラー:',
   'Warnings:': '警告:',
   'Step {{n}}: Choose Location': 'ステップ {{n}}: 場所を選択',
   'Step {{n}}: Choose Generation Method': 'ステップ {{n}}: 作成方法を選択',
@@ -923,6 +922,7 @@ export default {
   'No tasks currently running': '現在実行中のタスクはありません',
   'No entry to show.': '表示するエントリはありません。',
   'needs approval': '承認待ち',
+  'rejected — edit config to re-approve': '拒否済み — 設定を編集して再承認',
   'Background agent needs approval':
     'バックグラウンドエージェントが承認待ちです',
   'Approve or deny the request above':
@@ -947,9 +947,9 @@ export default {
     'セッションの続行方法を選択してください:',
   'Start new chat session': '新しいチャットセッションを開始',
   'Continue previous conversation': '前回の会話を続行',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 おかえりなさい!(最終更新: {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 全体目標:',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'おかえりなさい!(最終更新: {{timeAgo}})',
+  'Overall Goal:': '全体目標:',
   'Connect a Provider': 'プロバイダーに接続',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     '続行するにはプロバイダーに接続してください。Ctrl+C をもう一度押すと終了します',
@@ -1087,8 +1087,8 @@ export default {
   'Press Esc again to clear.': 'Esc をもう一度押すとクリアします',
   'Press ↑ to edit queued messages': '↑ を押してキュー内のメッセージを編集',
   // MCP Status
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP servers を起動中({{count}} 初期化中)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ MCP servers を起動中({{count}} 初期化中)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     '注: 初回起動には時間がかかる場合があります。ツールの利用可能状況は自動的に更新されます',
   'Starting... (first startup may take longer)':
@@ -1107,7 +1107,7 @@ export default {
   'Prompts:': 'プロンプト:',
   'Resources:': 'リソース:',
   Blocked: 'ブロック',
-  '💡 Tips:': '💡 ヒント:',
+  '★ Tips:': '★ ヒント:',
   Use: '使用',
   'to show server and tool descriptions': 'サーバーとツールの説明を表示',
   'to show tool parameter schemas': 'tool parameter schemas を表示',
@@ -1369,8 +1369,8 @@ export default {
     'Coding Plan の API Key を入力してください: ',
   'Select authentication method:': '認証方法を選択:',
   '\n=== Authentication Status ===\n': '\n=== 認証ステータス ===\n',
-  '⚠️  No authentication method configured.\n':
-    '⚠️  認証方法が設定されていません。\n',
+  '⚠  No authentication method configured.\n':
+    '⚠  認証方法が設定されていません。\n',
   'Run one of the following commands to get started:\n':
     '以下のコマンドのいずれかを実行して開始してください:\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1391,8 +1391,8 @@ export default {
   '  Current Model: {{model}}': '  現在のモデル: {{model}}',
   '  Config Version: {{version}}': '  設定バージョン: {{version}}',
   '  Status: API key configured\n': '  ステータス: API Key 設定済み\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    '⚠️  認証方法: Alibaba Cloud Coding Plan（不完全）',
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠  認証方法: Alibaba Cloud Coding Plan（不完全）',
   '  Issue: API key not found in environment or settings\n':
     '  問題: 環境変数または設定に API Key が見つかりません\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':

@@ -24,10 +24,26 @@ const ajvOptions = {
   // strictSchema defaults to true and prevents use of JSON schemas that
   // include unrecognized keywords. The JSON schema spec specifically allows
   // for the use of non-standard keywords and the spec-compliant behavior
-  // is to ignore those keywords. Note that setting this to false also
-  // allows use of non-standard or custom formats (the unknown format value
-  // will be logged but the schema will still be considered valid).
+  // is to ignore those keywords.
   strictSchema: false,
+  // Ajv still validates known formats, but MCP/OpenAPI schemas often include
+  // annotation-only formats like uint64 that would otherwise spam stderr.
+  logger: {
+    // eslint-disable-next-line no-console
+    log: (...args: unknown[]) => console.log(...args),
+    warn: (...args: unknown[]) => {
+      if (
+        typeof args[0] === 'string' &&
+        args[0].startsWith('unknown format ')
+      ) {
+        return;
+      }
+      // eslint-disable-next-line no-console
+      console.warn(...args);
+    },
+    // eslint-disable-next-line no-console
+    error: (...args: unknown[]) => console.error(...args),
+  },
 };
 
 // Draft-07 validator (default)

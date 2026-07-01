@@ -14,6 +14,8 @@ import type {
   DaemonForkSessionResult,
   DaemonSessionBtwResult,
   DaemonMidTurnMessageResult,
+  DaemonPendingPromptsResult,
+  DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
@@ -233,6 +235,15 @@ export interface SendPromptOptions {
   retry?: boolean;
 }
 
+export interface SubmitPromptOptions extends SendPromptOptions {
+  sessionId?: string;
+  signal?: AbortSignal;
+}
+
+export interface PendingPromptActionOptions {
+  sessionId?: string;
+}
+
 export interface DaemonPromptImage {
   data: string;
   mimeType?: string;
@@ -259,8 +270,22 @@ export interface DaemonTodoList {
   raw: Extract<DaemonTranscriptBlock, { kind: 'tool' }>;
 }
 
+export interface SubmitPromptResult {
+  promptId: string;
+}
+
 export interface DaemonSessionActions {
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
+  /**
+   * Non-blocking prompt submission. POSTs to the daemon and returns
+   * immediately with the `promptId`. The daemon queues the prompt in its
+   * FIFO if a turn is already running. Use this during streaming to
+   * enqueue prompts without waiting for the current turn to complete.
+   */
+  submitPrompt(
+    text: string,
+    options?: SubmitPromptOptions,
+  ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
   setApprovalMode(
@@ -281,9 +306,11 @@ export interface DaemonSessionActions {
     answers?: Record<string, string>,
   ): Promise<boolean>;
   heartbeat(): Promise<HeartbeatResult | undefined>;
-  listSessions(): Promise<DaemonSessionSummary[]>;
-  loadSession(sessionId: string): Promise<void>;
-  resumeSession(sessionId: string): Promise<void>;
+  listSessions(options?: {
+    pageSize?: number;
+  }): Promise<DaemonSessionSummary[]>;
+  loadSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
+  resumeSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
   createSession(): Promise<DaemonSession>;
   newSession(): Promise<void>;
   releaseSession(sessionId: string): Promise<void>;
@@ -314,6 +341,13 @@ export interface DaemonSessionActions {
     message: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonMidTurnMessageResult>;
+  getPendingPrompts(
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonPendingPromptsResult>;
+  removePendingPrompt(
+    promptId: string,
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(): Promise<DaemonSessionTasksStatus>;
   cancelTask(
@@ -326,6 +360,10 @@ export interface DaemonSessionActions {
     name?: string,
   ): Promise<{ sessionId: string; displayName: string }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
+}
+
+export interface SessionSwitchOptions {
+  deferTranscriptReset?: boolean;
 }
 
 export interface DaemonSessionContextValue {

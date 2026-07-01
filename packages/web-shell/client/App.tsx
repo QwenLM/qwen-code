@@ -13,7 +13,6 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
-  useDaemonMidTurnInjected,
   useSettings,
   useSessionNotices,
   useStreamingState,
@@ -30,7 +29,6 @@ import type {
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
-import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
@@ -73,12 +71,12 @@ import { ThemeDialog } from './components/dialogs/ThemeDialog';
 import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
+import { WebShellSidebar } from './components/sidebar/WebShellSidebar';
 import { getLocalCommands } from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { useMessages } from './hooks/useMessages';
-import { usePanelActive } from './hooks/usePanelActive';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
 import {
   I18nProvider,
@@ -92,8 +90,15 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
+import { isEditableTarget } from './utils/dom';
+import { getModelDisplayName } from './utils/modelDisplay';
+import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
+import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
+import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
+import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
+import { useQueuedPrompts } from './hooks/useQueuedPrompts';
 import {
   TasksStatusMessage,
   type SerializedTasksMessage,
@@ -112,18 +117,13 @@ import {
   serializeStatusMessage,
   type StatusInfo,
 } from './components/messages/StatusMessage';
-import {
-  MCP_STATUS_ACTIVE_EVENT,
-  parseMcpStatusMessage,
-  type SerializedMcpStatusMessage,
-} from './components/messages/McpStatusMessage';
+import type { SerializedMcpStatusMessage } from './components/messages/McpStatusMessage';
 import { McpDialog } from './components/dialogs/McpDialog';
 import {
   GOAL_STATUS_ACTIVE_EVENT,
   parseGoalStatusMessage,
   serializeGoalStatusMessage,
 } from './components/messages/GoalStatusMessage';
-import { TASKS_STATUS_ACTIVE_EVENT } from './components/messages/TasksStatusMessage';
 import { BtwMessage } from './components/messages/BtwMessage';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
@@ -153,7 +153,10 @@ import {
   type WelcomeFooterRenderer,
   type ComposerToolbarStartRenderer,
   type ComposerToolbarEndRenderer,
+  type ComposerToolbarRightRenderer,
   type FooterRenderer,
+  type LoadingPhrasesResolver,
+  type MarkdownTableMode,
   type WebShellTaskInfo,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
@@ -204,7 +207,6 @@ function TodoContextsProvider({
 }
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
-const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
 const MAX_TOASTS = 4;
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
@@ -234,13 +236,6 @@ function isGoalClearCommand(text: string): boolean {
     .trim()
     .toLowerCase();
   return GOAL_CLEAR_KEYWORDS.has(goalArg);
-}
-
-interface QueuedPrompt {
-  id: number;
-  text: string;
-  images?: PromptImage[];
-  onComplete?: () => void;
 }
 
 interface ActiveGoalStatus {
@@ -307,6 +302,11 @@ export interface BugReportInfo {
   systemInfo: Record<string, string>;
 }
 
+export interface WebShellSidebarOptions {
+  enabled?: boolean;
+  defaultCollapsed?: boolean;
+}
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string) => void;
@@ -324,6 +324,8 @@ export interface WebShellProps {
   style?: React.CSSProperties;
   /** Maximum chat content width in regular mode. Defaults to 1000px. */
   chatMaxWidth?: number;
+  /** Optional workspace sidebar. Disabled by default. */
+  sidebar?: boolean | WebShellSidebarOptions;
   /** Built-in composer toolbar actions to show. Defaults to all actions. */
   composerToolbarActions?: readonly ComposerToolbarAction[];
   /** Called when connection status changes (idle/connecting/connected/disconnected/error). */
@@ -354,16 +356,26 @@ export interface WebShellProps {
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   /** Custom renderer inserted after the built-in composer toolbar controls. */
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
+  /** Custom renderer inserted into the composer toolbar's right-side action area. */
+  renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   /** Custom component for the footer area below the Editor. Replaces the built-in StatusBar. */
   renderFooter?: FooterRenderer;
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
   /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
   collapseCompletedTurns?: boolean;
+  /** Markdown table rendering mode. Defaults to basic. */
+  markdownTableMode?: MarkdownTableMode;
   /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
   virtualScrollThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
   markdown?: WebShellMarkdownCustomization;
+  /**
+   * Override the witty phrases cycled while a prompt is streaming. Receives the
+   * resolved UI language; return phrases to replace the built-in defaults, an
+   * empty array to hide the phrase, or `undefined`/`null` to keep the defaults.
+   */
+  loadingPhrases?: LoadingPhrasesResolver;
   /** When provided, all toast notifications are forwarded to this callback and the built-in ToastHost is hidden. */
   onToast?: (tone: ToastTone, message: string) => void;
   /** Imperative handle for externally controlling the composer input. */
@@ -389,20 +401,63 @@ const emptyComposerApi: WebShellComposerApi = {
   submit: () => {},
 };
 
-type ChatWidthMode = '1000' | 'wide';
+const DEFAULT_CHAT_MAX_WIDTH = 1000;
+type ChatWidthMode = `${typeof DEFAULT_CHAT_MAX_WIDTH}` | 'wide';
 
 const CHAT_WIDTH_STORAGE_KEY = 'qwen-code-web-shell-chat-width';
-const DEFAULT_CHAT_MAX_WIDTH = 1000;
 const CHAT_SHELL_HORIZONTAL_PADDING = 40;
+const SIDEBAR_COLLAPSED_STORAGE_KEY = 'qwen-code-web-shell-sidebar-collapsed';
+
+function resolveSidebarOptions(
+  sidebar: WebShellProps['sidebar'],
+): Required<WebShellSidebarOptions> {
+  if (sidebar === true) {
+    return { enabled: true, defaultCollapsed: false };
+  }
+  if (!sidebar) {
+    return { enabled: false, defaultCollapsed: false };
+  }
+  return {
+    enabled: sidebar.enabled ?? true,
+    defaultCollapsed: sidebar.defaultCollapsed ?? false,
+  };
+}
+
+function readSidebarCollapsed(defaultCollapsed: boolean): boolean {
+  if (typeof window === 'undefined') return defaultCollapsed;
+  try {
+    const stored = window.localStorage.getItem(SIDEBAR_COLLAPSED_STORAGE_KEY);
+    if (stored === 'true') return true;
+    if (stored === 'false') return false;
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+  return defaultCollapsed;
+}
+
+function writeSidebarCollapsed(collapsed: boolean): void {
+  try {
+    window.localStorage.setItem(
+      SIDEBAR_COLLAPSED_STORAGE_KEY,
+      String(collapsed),
+    );
+  } catch {
+    // localStorage can be unavailable in private or embedded contexts.
+  }
+}
+
+function getDefaultChatWidthMode(): ChatWidthMode {
+  return `${DEFAULT_CHAT_MAX_WIDTH}`;
+}
 
 function readChatWidthMode(): ChatWidthMode {
-  if (typeof window === 'undefined') return '1000';
+  if (typeof window === 'undefined') return getDefaultChatWidthMode();
   try {
     return window.localStorage.getItem(CHAT_WIDTH_STORAGE_KEY) === 'wide'
       ? 'wide'
-      : '1000';
+      : getDefaultChatWidthMode();
   } catch {
-    return '1000';
+    return getDefaultChatWidthMode();
   }
 }
 
@@ -551,49 +606,10 @@ function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
 
 function serializeModelSwitchSummary(summary: ModelSwitchSummary): string {
   return (
-    `● authType: ${formatModelAuthType(summary.authType)}` +
-    `\n  Using ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}` +
-    `\n  Base URL: ${summary.baseUrl}` +
-    `\n  API key: ${summary.apiKey}`
-  );
-}
-
-function parseModelSwitchStatusModel(content: string): string | null {
-  const prefix = 'Model switched: ';
-  if (!content.startsWith(prefix)) return null;
-  const rawModel = content.slice(prefix.length).trim();
-  return rawModel.replace(/\([^()]+\)$/, '');
-}
-
-function parseModelSwitchSummaryModel(content: string): string | null {
-  if (!content.startsWith('● authType:')) return null;
-  const match = content.match(/\n {2}Using (?:runtime )?model: ([^\n]+)/);
-  return match?.[1]?.trim() || null;
-}
-
-function filterDuplicateModelSwitchMessages(
-  messages: readonly Message[],
-): Message[] {
-  const summarizedModels = new Set<string>();
-  for (const message of messages) {
-    if (message.role !== 'system' || message.variant !== 'info') continue;
-    const model = parseModelSwitchSummaryModel(message.content);
-    if (model) summarizedModels.add(model);
-  }
-  if (summarizedModels.size === 0) return [...messages];
-  return messages.filter((message) => {
-    if (message.role !== 'system' || message.variant !== 'info') return true;
-    const statusModel = parseModelSwitchStatusModel(message.content);
-    return !statusModel || !summarizedModels.has(statusModel);
-  });
-}
-
-function hasMcpStatusPanel(messages: readonly Message[]): boolean {
-  return messages.some(
-    (message) =>
-      message.role === 'system' &&
-      message.variant === 'info' &&
-      parseMcpStatusMessage(message.content) !== null,
+    `AuthType: ${formatModelAuthType(summary.authType)}` +
+    `\nUsing ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}` +
+    `\nBase URL: ${summary.baseUrl}` +
+    `\nAPI key: ${summary.apiKey}`
   );
 }
 
@@ -732,101 +748,6 @@ function translateCopyMessage(
   return message;
 }
 
-function QueuedPromptDisplay({
-  prompts,
-  t,
-  onDelete,
-  onInsert,
-  onEditLast,
-}: {
-  prompts: readonly QueuedPrompt[];
-  t: ReturnType<typeof getTranslator>;
-  onDelete: (id: number) => void;
-  onInsert: (id: number) => void;
-  onEditLast: () => void;
-}) {
-  if (prompts.length === 0) return null;
-  const lastPromptId = prompts[prompts.length - 1]?.id;
-
-  return (
-    <div className={styles.queuedPrompts}>
-      {prompts.map((prompt) => {
-        const normalizedPreview = prompt.text.replace(/\s+/g, ' ').trim();
-        const preview =
-          normalizedPreview.length > MAX_QUEUED_PROMPT_PREVIEW_CHARS
-            ? `${normalizedPreview.slice(0, MAX_QUEUED_PROMPT_PREVIEW_CHARS)}...`
-            : normalizedPreview;
-        const imageCount = prompt.images?.length ?? 0;
-        return (
-          <div key={prompt.id} className={styles.queuedPrompt}>
-            <span className={styles.queuedPromptText}>
-              {preview}
-              {imageCount > 0
-                ? ` ${t('queue.imageCount', { count: imageCount })}`
-                : ''}
-            </span>
-            <span className={styles.queuedPromptActions}>
-              <button
-                type="button"
-                className={styles.queuedPromptAction}
-                onClick={() => onDelete(prompt.id)}
-              >
-                <svg viewBox="0 0 16 16" aria-hidden="true">
-                  <path
-                    d="M3.5 4.5h9M6.5 2.5h3M5 4.5l.5 8h5l.5-8"
-                    fill="none"
-                    stroke="currentColor"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-                {t('queue.delete')}
-              </button>
-              {imageCount === 0 && (
-                <button
-                  type="button"
-                  className={styles.queuedPromptAction}
-                  onClick={() => onInsert(prompt.id)}
-                >
-                  <svg viewBox="0 0 16 16" aria-hidden="true">
-                    <path
-                      d="M8 3.5v7M4.5 7 8 10.5 11.5 7M3.5 12.5h9"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                  {t('queue.insert')}
-                </button>
-              )}
-              {prompt.id === lastPromptId && (
-                <button
-                  type="button"
-                  className={styles.queuedPromptAction}
-                  onClick={onEditLast}
-                >
-                  <svg viewBox="0 0 16 16" aria-hidden="true">
-                    <path
-                      d="M3.5 11.5 4 9l6.7-6.7a1.1 1.1 0 0 1 1.6 0l1.4 1.4a1.1 1.1 0 0 1 0 1.6L7 12l-2.5.5h-1z"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                  {t('queue.edit')}
-                </button>
-              )}
-            </span>
-          </div>
-        );
-      })}
-      <div className={styles.queuedHint}>{t('queue.footer')}</div>
-    </div>
-  );
-}
-
 export function App({
   onSessionIdChange,
   theme: providedTheme,
@@ -846,13 +767,17 @@ export function App({
   renderWelcomeFooter,
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
+  renderComposerToolbarRight,
   renderFooter,
   chatMaxWidth,
+  sidebar,
   composerToolbarActions,
   compactThinking = false,
   collapseCompletedTurns = true,
+  markdownTableMode = 'basic',
   virtualScrollThreshold,
   markdown,
+  loadingPhrases,
   onTranscriptChange,
   onToast,
   composerRef,
@@ -869,6 +794,77 @@ export function App({
         : normalizeLanguage(providedLanguage),
   );
   const t = useMemo(() => getTranslator(selectedLanguage), [selectedLanguage]);
+  const sidebarOptions = useMemo(
+    () => resolveSidebarOptions(sidebar),
+    [sidebar],
+  );
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    readSidebarCollapsed(sidebarOptions.defaultCollapsed),
+  );
+  const [sidebarSwitchingSessionId, setSidebarSwitchingSessionId] = useState<
+    string | null
+  >(null);
+  const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const closeMobileDrawer = useCallback(() => setMobileDrawerOpen(false), []);
+
+  useEffect(() => {
+    const mql = window.matchMedia('(max-width: 760px)');
+    const handler = (e: MediaQueryListEvent) => {
+      if (!e.matches) setMobileDrawerOpen(false);
+    };
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!mobileDrawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      // A pending tool/permission approval owns Escape (it rejects the call),
+      // so don't let the drawer swallow it while a prompt is visible.
+      if (pendingApprovalRef.current) return;
+      const target = e.target as HTMLElement | null;
+      // Only let an editable element keep Escape for itself when it lives
+      // outside the drawer; the drawer's own search input should still close
+      // the drawer on the first Escape.
+      if (
+        isEditableTarget(target) &&
+        !target?.closest('[data-mobile-drawer]')
+      ) {
+        return;
+      }
+      e.stopPropagation();
+      e.preventDefault();
+      closeMobileDrawer();
+    };
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const preventScroll = (e: TouchEvent) => {
+      // Allow native scrolling inside the drawer panel (e.g. the session list).
+      // The dim backdrop also lives under [data-mobile-drawer], so exclude it:
+      // a touchmove starting on the backdrop must still be blocked, otherwise
+      // iOS Safari scrolls the page behind the open drawer.
+      const el = e.target as HTMLElement | null;
+      if (
+        el?.closest('[data-mobile-drawer]') &&
+        !el.closest(`.${styles.mobileBackdrop}`)
+      ) {
+        return;
+      }
+      e.preventDefault();
+    };
+    document.addEventListener('touchmove', preventScroll, { passive: false });
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.removeEventListener('touchmove', preventScroll);
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, [mobileDrawerOpen, closeMobileDrawer]);
+  const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
+    setSidebarCollapsed(collapsed);
+    writeSidebarCollapsed(collapsed);
+  }, []);
   const customization = useMemo(
     () => ({
       renderToolHeaderExtra,
@@ -876,10 +872,13 @@ export function App({
       renderWelcomeFooter,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
+      renderComposerToolbarRight,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
+      markdownTableMode,
       markdown,
+      loadingPhrases,
     }),
     [
       renderToolHeaderExtra,
@@ -887,10 +886,13 @@ export function App({
       renderWelcomeFooter,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
+      renderComposerToolbarRight,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
+      markdownTableMode,
       markdown,
+      loadingPhrases,
     ],
   );
   const CustomFooter = renderFooter;
@@ -935,17 +937,13 @@ export function App({
   const nextRecapMessageIdRef = useRef(1);
   const nextBtwMessageIdRef = useRef(1);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
-  // Scopes explicit "insert queued message" POST(s) to the current turn.
-  // Aborted when the turn settles so a slow/late insert can't arrive during a
-  // subsequent turn and get injected in the wrong place.
-  const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const activeSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
       (message): message is LocalAnchoredMessage => message !== null,
     );
     if (localMessages.length === 0) {
-      return filterDuplicateModelSwitchMessages(messages);
+      return filterModelSwitchMessages(messages);
     }
 
     const result = [...messages];
@@ -963,33 +961,30 @@ export function App({
           : Math.min(localMessage.anchorIndex, result.length);
       result.splice(index, 0, localMessage.message);
     }
-    return filterDuplicateModelSwitchMessages(result);
+    return filterModelSwitchMessages(result);
   }, [messages, recapMessage]);
-  const hasMcpPanelMessage = useMemo(
-    () => hasMcpStatusPanel(displayMessages),
-    [displayMessages],
-  );
-  useEffect(() => {
-    if (hasMcpPanelMessage) return;
-    window.dispatchEvent(
-      new CustomEvent(MCP_STATUS_ACTIVE_EVENT, {
-        detail: { active: false },
-      }),
-    );
-  }, [hasMcpPanelMessage]);
   const messageBlocks = useAnimationFrameValue(blocks);
   const rawPendingApproval = useMemo(
     () => extractPendingPermission(messageBlocks),
     [messageBlocks],
   );
   const pendingApproval = useShallowMemo(rawPendingApproval);
+  const canActOnPendingApproval = !(
+    connection.catchingUp && sidebarSwitchingSessionId !== null
+  );
   const pendingAskUserApproval = isAskUserPermission(pendingApproval)
-    ? pendingApproval
+    ? canActOnPendingApproval
+      ? pendingApproval
+      : null
     : null;
   const pendingToolApproval =
-    pendingApproval && !pendingAskUserApproval ? pendingApproval : null;
+    pendingApproval && !isAskUserPermission(pendingApproval)
+      ? canActOnPendingApproval
+        ? pendingApproval
+        : null
+      : null;
   const pendingApprovalRef = useRef(pendingApproval);
-  pendingApprovalRef.current = pendingApproval;
+  pendingApprovalRef.current = canActOnPendingApproval ? pendingApproval : null;
   const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
     [messages],
@@ -1034,22 +1029,15 @@ export function App({
     (t) => `${t.id}:${t.status}:${t.content}`,
   );
   const floatingTodosAllCompleted = floatingTodosState.allCompleted;
-  // The all-completed list is only shown as a transient "all done" moment
-  // when the panel was already visible live in this client; on session
-  // restore (catch-up replay) a historical finished list stays hidden.
-  // State is adjusted during render (not in an effect) so the
-  // active → completed transition doesn't unmount the panel for a frame.
-  const [todoPanelMode, setTodoPanelMode] = useState<
-    'hidden' | 'active' | 'completed'
-  >('hidden');
+  const [todoPanelMode, setTodoPanelMode] = useState<'hidden' | 'active'>(
+    'hidden',
+  );
   const nextTodoPanelMode =
-    connection.catchingUp || floatingTodos.length === 0
+    connection.catchingUp ||
+    floatingTodos.length === 0 ||
+    floatingTodosAllCompleted
       ? 'hidden'
-      : !floatingTodosAllCompleted
-        ? 'active'
-        : todoPanelMode === 'hidden'
-          ? 'hidden'
-          : 'completed';
+      : 'active';
   if (nextTodoPanelMode !== todoPanelMode) {
     setTodoPanelMode(nextTodoPanelMode);
   }
@@ -1280,12 +1268,14 @@ export function App({
   const [agentsDialogMode, setAgentsDialogMode] =
     useState<AgentsInitialMode | null>(null);
   const [escapeHintVisible, setEscapeHintVisible] = useState(false);
-  const escPressCountRef = useRef(0);
+  // Whether the first Esc has armed a stream cancellation; the composer's send
+  // button shows an "Esc again to stop" affordance while true.
+  const [cancelArmed, setCancelArmed] = useState(false);
+  // Which action the pending second Esc would perform, or null when idle.
+  const escArmedActionRef = useRef<'cancel' | 'clear' | null>(null);
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
-  const mcpPanelActive = usePanelActive(MCP_STATUS_ACTIVE_EVENT);
-  const tasksPanelActive = usePanelActive(TASKS_STATUS_ACTIVE_EVENT);
   const [selectedTheme, setSelectedTheme] = useState<WebShellTheme>(
     providedTheme ?? WebShellThemeId.Dark,
   );
@@ -1296,22 +1286,14 @@ export function App({
   connectionRef.current = connection;
   const sessionDisplayName = connection.displayName;
   const [currentMode, setCurrentMode] = useState('default');
-  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
-  const queuedTexts = useMemo(
-    () => queuedPrompts.map((prompt) => prompt.text),
-    [queuedPrompts],
-  );
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((m) => ({
         id: m.id,
-        label: m.label,
+        label: getModelDisplayName(m.label || m.id),
       })),
     [connection.models],
   );
-  const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
-  const nextQueuedPromptIdRef = useRef(1);
-  const drainingQueueRef = useRef(false);
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -1329,8 +1311,7 @@ export function App({
     showSettingsDialog ||
     showMemoryDialog ||
     showAuthDialog;
-  const bottomHidden = mcpPanelActive || tasksPanelActive;
-  const interactionBlocked = dialogOpen || bottomHidden;
+  const interactionBlocked = dialogOpen;
 
   const reportError = useCallback(
     (error: unknown, fallback: string) => {
@@ -1349,6 +1330,32 @@ export function App({
     },
     [pushToast],
   );
+  const notifySuccess = useCallback(
+    (message: string) => pushToast('success', message),
+    [pushToast],
+  );
+
+  const {
+    queuedPrompts,
+    queuedTexts,
+    enqueuePrompt,
+    removeQueuedPrompt,
+    insertQueuedPrompt,
+    editQueuedPrompt,
+    editLastQueuedPrompt,
+    clearQueuedPrompts,
+  } = useQueuedPrompts({
+    connected,
+    sessionId: connection.sessionId,
+    clientId: connection.clientId,
+    streamingState,
+    sessionActions,
+    store,
+    editorRef,
+    reportError,
+    notifySuccess,
+    t,
+  });
 
   useEffect(() => {
     logSessionNoticesHook(notices);
@@ -1390,6 +1397,7 @@ export function App({
         role: 'system',
         content: `※ recap: ${t('recap.loading')}`,
         variant: 'info',
+        source: 'recap',
       },
     });
     sessionActions.recapSession().then(
@@ -1405,6 +1413,7 @@ export function App({
               ? `※ recap: ${result.recap}`
               : t('recap.empty'),
             variant: 'info',
+            source: 'recap',
           },
         });
       },
@@ -1517,170 +1526,27 @@ export function App({
     return () => window.removeEventListener('keydown', onBtwShortcut, true);
   }, [interactionBlocked, btwMessage, dismissBtwMessage, pendingApproval]);
 
-  useEffect(() => {
-    queuedPromptsRef.current = queuedPrompts;
-  }, [queuedPrompts]);
-
-  const enqueuePrompt = useCallback(
-    (text: string, images?: PromptImage[], onComplete?: () => void) => {
-      const trimmed = text.trim();
-      if (!trimmed) return true;
-      const nextPrompt: QueuedPrompt = {
-        id: nextQueuedPromptIdRef.current++,
-        text: trimmed,
-        images: images ? [...images] : undefined,
-        onComplete,
-      };
-      queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
-      setQueuedPrompts(queuedPromptsRef.current);
-      return true;
-    },
-    [],
+  // Echo a local command into the transcript, or suppress it while a turn is
+  // streaming so the injected user row can't split the active turn (see
+  // appendOrDeferLocalUserMessage). Returns true when suppressed — callers must
+  // then stop and not run the command's inline side effects.
+  const echoOrDeferLocalCommand = useCallback(
+    (text: string, images?: PromptImage[]): boolean =>
+      appendOrDeferLocalUserMessage(
+        streamingStateRef.current !== 'idle',
+        text,
+        images,
+        {
+          append: (value: string) => store.appendLocalUserMessage(value),
+        },
+      ),
+    [store],
   );
 
-  // When the turn settles, abort any still-in-flight explicit insert so it can't
-  // arrive during the next turn (see midTurnEnqueueAbortRef). If aborted, the
-  // message remains in queuedPrompts.
-  useEffect(() => {
-    if (streamingState !== 'idle') return;
-    const ctrl = midTurnEnqueueAbortRef.current;
-    if (!ctrl) return;
-    // A controller exists ⇒ at least one mid-turn push was issued this turn.
-    // Cancel it so a still-in-flight push can't land in the next turn (a
-    // completed one makes this a no-op). Debug-only, mirrors the server-side
-    // mid-turn observability.
-    console.debug('[mid-turn] turn settled; cancelling any in-flight push');
-    ctrl.abort();
-    midTurnEnqueueAbortRef.current = null;
-  }, [streamingState]);
-
-  const popNextQueuedPrompt = useCallback((): QueuedPrompt | null => {
-    const [nextPrompt, ...rest] = queuedPromptsRef.current;
-    if (!nextPrompt) return null;
-    queuedPromptsRef.current = rest;
-    setQueuedPrompts(rest);
-    return nextPrompt;
-  }, []);
-
-  const popQueuedPromptsForEdit = useCallback((): string | null => {
-    const current = queuedPromptsRef.current;
-    if (current.length === 0) return null;
-    const next = current.slice(0, -1);
-    const prompt = current[current.length - 1];
-    queuedPromptsRef.current = next;
-    setQueuedPrompts(next);
-    return prompt?.text ?? null;
-  }, []);
-
-  const removeQueuedPrompt = useCallback((id: number) => {
-    const next = queuedPromptsRef.current.filter((prompt) => prompt.id !== id);
-    if (next.length === queuedPromptsRef.current.length) return;
-    queuedPromptsRef.current = next;
-    setQueuedPrompts(next);
-  }, []);
-
-  const insertQueuedPrompt = useCallback(
-    async (id: number) => {
-      const prompt = queuedPromptsRef.current.find((item) => item.id === id);
-      if (!prompt || (prompt.images?.length ?? 0) > 0) return;
-      let abort = midTurnEnqueueAbortRef.current;
-      if (!abort) {
-        abort = new AbortController();
-        midTurnEnqueueAbortRef.current = abort;
-      }
-      let result: Awaited<
-        ReturnType<typeof sessionActions.enqueueMidTurnMessage>
-      >;
-      try {
-        result = await sessionActions.enqueueMidTurnMessage(prompt.text, {
-          signal: abort.signal,
-        });
-      } catch (error) {
-        reportError(error, t('queue.insertFailed'));
-        return;
-      }
-      if (!result.accepted) return;
-      const next = queuedPromptsRef.current.filter((item) => item.id !== id);
-      queuedPromptsRef.current = next;
-      setQueuedPrompts(next);
-    },
-    [reportError, sessionActions, t],
-  );
-
-  const editLastQueuedPrompt = useCallback(() => {
-    const queuedText = popQueuedPromptsForEdit();
-    if (!queuedText) return;
-    const current = editorRef.current?.getText() ?? '';
-    const next = current.trim() ? `${queuedText}\n${current}` : queuedText;
-    editorRef.current?.setText(next);
-    editorRef.current?.focus();
-  }, [popQueuedPromptsForEdit]);
-
-  const clearQueuedPrompts = useCallback((): boolean => {
-    if (queuedPromptsRef.current.length === 0) return false;
-    queuedPromptsRef.current = [];
-    setQueuedPrompts([]);
-    store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
-    return true;
-  }, [store, t]);
-
-  // When the daemon drains queued messages into the running turn it emits
-  // `mid_turn_message_injected` (one frame per tool batch). Drop the matching
-  // (text-only) entries from the local queue so the idle-time drain doesn't ALSO
-  // resend them as the next turn. Reconcile EVERY accumulated batch, not just the
-  // newest — a multi-batch turn can publish several frames back-to-back, and the
-  // first must not be lost before this runs. The frames arrive in-order ahead of
-  // the turn-complete frame that flips streamingState to idle, so this runs
-  // before that resend fires; `consume()` then clears the reconciled batches.
-  const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
-    useDaemonMidTurnInjected();
-  useEffect(() => {
-    const sessionId = connection.sessionId;
-    if (!sessionId || midTurnInjectedBatches.length === 0) return;
-    // Pass OUR client id so only batches the daemon stamped with it (or
-    // anonymous ones) are deduped. The daemon stamps every drained frame with
-    // the originator's client id, and the web-shell always sends one, so
-    // omitting this would skip every batch — leaving our own messages in the
-    // queue to be resent next turn (double delivery). A peer on the same
-    // session keeps its own coincidentally-equal entry.
-    if (
-      connection.clientId === undefined &&
-      midTurnInjectedBatches.some(
-        (b) => b.sessionId === sessionId && b.originatorClientId !== undefined,
-      )
-    ) {
-      // Edge: stamped batches but no client id yet (older daemon / reconnect
-      // timing). Dedupe skips them, so they may be resent next turn — make it
-      // diagnosable rather than a silent double-delivery.
-      console.debug(
-        '[mid-turn] originator-stamped batches but no client id; dedupe skipped (may resend next turn)',
-      );
-    }
-    const next = removeInjectedFromQueue(
-      queuedPromptsRef.current,
-      midTurnInjectedBatches,
-      sessionId,
-      connection.clientId,
-    );
-    if (next) {
-      queuedPromptsRef.current = next;
-      setQueuedPrompts(next);
-    }
-    // Consume ONLY this session's batches. The reconcile above is session-
-    // scoped, so a batch for another session (a late frame after an in-place
-    // session switch) must NOT be cleared here — it was never reconciled and
-    // would otherwise be lost on switch-back (resent next turn = double
-    // delivery). Identity-removal also leaves any frame that arrived after this
-    // render's snapshot for the next effect run.
-    consumeMidTurnInjected(
-      midTurnInjectedBatches.filter((b) => b.sessionId === sessionId),
-    );
-  }, [
-    midTurnInjectedBatches,
-    connection.sessionId,
-    connection.clientId,
-    consumeMidTurnInjected,
-  ]);
+  const blockLocalCommandDuringTurn = useCallback((): false => {
+    pushToast('error', t('queue.commandBlocked'));
+    return false;
+  }, [pushToast, t]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {
@@ -1768,7 +1634,8 @@ export function App({
         ]);
       };
       if (streamingStateRef.current !== 'idle') {
-        enqueuePrompt(command, undefined, refreshSettings);
+        handleLanguageChange(previousLanguage);
+        blockLocalCommandDuringTurn();
         return;
       }
       sendPrompt(command)
@@ -1779,7 +1646,7 @@ export function App({
         });
     },
     [
-      enqueuePrompt,
+      blockLocalCommandDuringTurn,
       handleLanguageChange,
       reloadWorkspaceSettings,
       reportError,
@@ -1983,7 +1850,11 @@ export function App({
         (result) => {
           if (result.recap) {
             store.dispatch([
-              { type: 'status', text: `※ recap: ${result.recap}` },
+              {
+                type: 'status',
+                text: `※ recap: ${result.recap}`,
+                source: 'recap',
+              },
             ]);
           }
         },
@@ -2011,7 +1882,9 @@ export function App({
   // is revealed even when the click comes while scrolled up.
   const showContextUsage = useCallback(
     (commandText: string, detail: boolean) => {
-      store.appendLocalUserMessage(commandText);
+      // Self-guard so every entry point (keyboard, status-bar button, in-chat
+      // "context detail" click) defers mid-turn instead of splitting the turn.
+      if (echoOrDeferLocalCommand(commandText)) return;
       sessionActions
         .getContextUsage({ detail })
         .then((result) => {
@@ -2027,7 +1900,13 @@ export function App({
           reportError(error, 'Failed to load context usage');
         });
     },
-    [store, sessionActions, reportError, resumeChatBottomFollow],
+    [
+      echoOrDeferLocalCommand,
+      store,
+      sessionActions,
+      reportError,
+      resumeChatBottomFollow,
+    ],
   );
 
   // Stable reference: this travels through the memoized MessageList →
@@ -2060,20 +1939,60 @@ export function App({
     branchCurrentSession();
   }, [branchCurrentSession]);
 
-  const createNewSession = useCallback(() => {
-    (sessionActions as typeof sessionActions & SessionActionsWithCreate)
-      .createSession()
-      .then((session) => {
-        if (onSessionIdChange) {
-          onSessionIdChange(session.sessionId);
-          return;
-        }
-        return sessionActions.loadSession(session.sessionId);
-      })
-      .catch((error: unknown) => {
-        reportError(error, 'Failed to create a new session');
-      });
-  }, [onSessionIdChange, reportError, sessionActions]);
+  const createNewSession = useCallback(async () => {
+    // Close the drawer before awaiting so a failed createSession() doesn't leave
+    // it stuck open with the page scroll still locked, matching loadSidebarSession.
+    closeMobileDrawer();
+    try {
+      const session = await (
+        sessionActions as typeof sessionActions & SessionActionsWithCreate
+      ).createSession();
+      if (onSessionIdChange) {
+        onSessionIdChange(session.sessionId);
+        return true;
+      }
+      void sessionActions
+        .loadSession(session.sessionId)
+        .catch((error: unknown) =>
+          reportError(error, 'Failed to switch session'),
+        );
+      return true;
+    } catch (error) {
+      reportError(error, 'Failed to create a new session');
+      return false;
+    }
+  }, [closeMobileDrawer, onSessionIdChange, reportError, sessionActions]);
+
+  const loadSidebarSession = useCallback(
+    async (sessionId: string) => {
+      setSidebarSwitchingSessionId(sessionId);
+      // Close the drawer before awaiting the load so it doesn't linger over the
+      // old transcript while the new session streams in, matching the other
+      // session-switch paths (/resume, ResumeDialog).
+      closeMobileDrawer();
+      try {
+        await sessionActions.loadSession(sessionId, {
+          deferTranscriptReset: true,
+        });
+      } catch (error) {
+        setSidebarSwitchingSessionId((current) =>
+          current === sessionId ? null : current,
+        );
+        throw error;
+      }
+    },
+    [closeMobileDrawer, sessionActions],
+  );
+
+  useEffect(() => {
+    if (
+      sidebarSwitchingSessionId !== null &&
+      connection.sessionId === sidebarSwitchingSessionId &&
+      !connection.catchingUp
+    ) {
+      setSidebarSwitchingSessionId(null);
+    }
+  }, [connection.catchingUp, connection.sessionId, sidebarSwitchingSessionId]);
 
   const openTasksPanel = useCallback(() => {
     sessionActions
@@ -2221,7 +2140,7 @@ export function App({
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             sendPrompt(text, images).catch((error: unknown) =>
               reportError(error, 'Failed to send hidden slash command'),
             );
@@ -2240,7 +2159,7 @@ export function App({
               if (isGoalClearCommand(text)) {
                 return handleBusyGoalClear(text);
               }
-              return enqueuePrompt(text, images);
+              return blockLocalCommandDuringTurn();
             }
             return handleGoalSlashCommand(text, images);
           }
@@ -2342,13 +2261,13 @@ export function App({
             return true;
           }
           if (cmd === 'branch') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const branchName = text.slice(match[0].length).trim();
             branchCurrentSession(branchName || undefined);
             return true;
           }
           if (cmd === 'fork') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const directive = text.slice(match[0].length).trim();
             if (!directive) {
               pushToast('error', t('fork.empty'));
@@ -2385,14 +2304,14 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /model --fast'),
               );
               return true;
             }
             if (modelArg === '--voice') {
-              store.appendLocalUserMessage(text);
+              if (echoOrDeferLocalCommand(text, images)) return true;
               workspaceActions
                 .loadProviders()
                 .then((status) => {
@@ -2405,7 +2324,7 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--voice ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /model --voice'),
               );
@@ -2426,7 +2345,7 @@ export function App({
             return true;
           }
           if (cmd === 'plan') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const prompt = text.slice(match[0].length).trim();
             sessionActions
               .setApprovalMode('plan')
@@ -2461,19 +2380,44 @@ export function App({
                   string,
                   Awaited<ReturnType<typeof workspaceActions.loadMcpTools>>
                 > = {};
+                const resourcesByServer: Record<
+                  string,
+                  Awaited<ReturnType<typeof workspaceActions.loadMcpResources>>
+                > = {};
                 await Promise.all(
                   (status?.servers ?? []).map(async (server) => {
-                    try {
-                      toolsByServer[server.name] =
-                        await workspaceActions.loadMcpTools(server.name);
-                    } catch {
-                      // Allow partial failure — other servers still render
-                    }
+                    // Tools and resources load in parallel; a failure in one
+                    // must not hide the other, and per-server failures still
+                    // let sibling servers render.
+                    await Promise.all([
+                      (async () => {
+                        try {
+                          toolsByServer[server.name] =
+                            await workspaceActions.loadMcpTools(server.name);
+                        } catch {
+                          // Allow partial failure — other servers still render
+                        }
+                      })(),
+                      (async () => {
+                        // Skip the round-trip for servers that advertise no
+                        // resources (or older daemons that omit the count).
+                        if (!server.resourceCount) return;
+                        try {
+                          resourcesByServer[server.name] =
+                            await workspaceActions.loadMcpResources(
+                              server.name,
+                            );
+                        } catch {
+                          // Allow partial failure — other servers still render
+                        }
+                      })(),
+                    ]);
                   }),
                 );
                 setMcpDialogMessage({
                   status,
                   toolsByServer,
+                  resourcesByServer,
                   showDescriptions: mcpArg === 'desc',
                   showSchema: mcpArg === 'schema',
                   showTips: !mcpArg,
@@ -2487,12 +2431,12 @@ export function App({
           if (cmd === 'skills') {
             const skillArg = text.slice(match[0].length).trim();
             if (skillArg) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /skills command'),
               );
             } else {
-              store.appendLocalUserMessage(text);
+              if (echoOrDeferLocalCommand(text, images)) return true;
               workspaceActions
                 .loadSkillsStatus()
                 .then((status) => {
@@ -2529,7 +2473,7 @@ export function App({
             if (toolsArg === 'desc' || toolsArg === 'descriptions') {
               setShowToolsDialog(true);
             } else {
-              store.appendLocalUserMessage(text);
+              if (echoOrDeferLocalCommand(text, images)) return true;
               workspaceActions
                 .loadToolsStatus()
                 .then((status) => {
@@ -2618,6 +2562,9 @@ export function App({
               return true;
             }
             if (subCommand === 'install') {
+              // Install echoes into the transcript (and its error/usage replies
+              // do too); block it mid-turn so it can't split the active turn.
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               const tokens = args.slice('install'.length).trim().split(/\s+/);
               let source = '';
               let ref: string | undefined;
@@ -2676,16 +2623,6 @@ export function App({
                 ]);
                 return true;
               }
-              if (promptBlocked) {
-                store.appendLocalUserMessage(text);
-                store.dispatch([
-                  {
-                    type: 'error',
-                    text: t('extensions.install.waitForTurn'),
-                  },
-                ]);
-                return true;
-              }
               const clientId = connectionRef.current.clientId;
               if (!clientId) {
                 store.appendLocalUserMessage(text);
@@ -2724,7 +2661,7 @@ export function App({
                 });
               return true;
             }
-            store.appendLocalUserMessage(text);
+            if (echoOrDeferLocalCommand(text, images)) return true;
             store.dispatch([
               {
                 type: 'error',
@@ -2744,7 +2681,7 @@ export function App({
           if (cmd === 'rename') {
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /rename command'),
               );
@@ -2773,10 +2710,12 @@ export function App({
           if (cmd === 'resume') {
             const sessionId = text.slice(match[0].length).trim();
             if (sessionId) {
+              closeMobileDrawer();
               sessionActions.loadSession(sessionId).catch((error: unknown) => {
                 reportError(error, 'Failed to load session');
               });
             } else {
+              closeMobileDrawer();
               setShowResumeDialog(true);
             }
             return true;
@@ -2794,7 +2733,7 @@ export function App({
             let statsView: StatsView = 'overview';
             if (statsArg === 'model') statsView = 'model';
             else if (statsArg === 'tools') statsView = 'tools';
-            store.appendLocalUserMessage(text);
+            if (echoOrDeferLocalCommand(text, images)) return true;
             sessionActions
               .getStats()
               .then((result) => {
@@ -2810,7 +2749,7 @@ export function App({
             return true;
           }
           if (cmd === 'status' || cmd === 'about') {
-            store.appendLocalUserMessage(text);
+            if (echoOrDeferLocalCommand(text, images)) return true;
             Promise.all([
               workspaceActions.loadPreflight().catch(() => null),
               workspaceActions.loadProviders().catch(() => null),
@@ -2876,7 +2815,7 @@ export function App({
           }
           if (cmd === 'bug') {
             const bugTitle = text.slice(match[0].length).trim();
-            store.appendLocalUserMessage(text);
+            if (echoOrDeferLocalCommand(text, images)) return true;
             Promise.all([
               workspaceActions.loadPreflight().catch(() => null),
               workspaceActions.loadEnv().catch(() => null),
@@ -2934,7 +2873,10 @@ export function App({
         );
         return true;
       } else if (text.startsWith('!')) {
-        if (promptBlocked) return enqueuePrompt(text, images);
+        if (promptBlocked) {
+          pushToast('error', t('queue.shellBlocked'));
+          return false;
+        }
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
         sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
@@ -2954,13 +2896,16 @@ export function App({
       sessionActions,
       store,
       enqueuePrompt,
+      echoOrDeferLocalCommand,
       branchCurrentSession,
+      closeMobileDrawer,
       createNewSession,
       handleBusyGoalClear,
       handleGoalSlashCommand,
       handleThemeChange,
       handleSetMode,
       handleLanguageChange,
+      blockLocalCommandDuringTurn,
       openTasksPanel,
       hiddenCommands,
       pushToast,
@@ -2985,50 +2930,6 @@ export function App({
     },
     [handleSubmit, resumeChatBottomFollow],
   );
-
-  useEffect(() => {
-    if (drainingQueueRef.current) return;
-    if (!connected) return;
-    if (streamingState !== 'idle') return;
-    if (interactionBlocked) return;
-    if (pendingApproval) return;
-    if (queuedPrompts.length === 0) return;
-
-    const nextPrompt = popNextQueuedPrompt();
-    if (!nextPrompt) return;
-
-    drainingQueueRef.current = true;
-    let sent = false;
-    const timer = window.setTimeout(() => {
-      sent = true;
-      try {
-        handleSubmit(nextPrompt.text, nextPrompt.images);
-        nextPrompt.onComplete?.();
-      } finally {
-        drainingQueueRef.current = false;
-      }
-    }, 0);
-    return () => {
-      if (!sent) {
-        // Cleanup ran before timeout fired — put the prompt back at the
-        // front of the queue so it's not lost. This can happen when any
-        // dependency (e.g. handleSubmit, streamingState) changes between
-        // popNextQueuedPrompt() and the setTimeout firing.
-        queuedPromptsRef.current = [nextPrompt, ...queuedPromptsRef.current];
-        setQueuedPrompts(queuedPromptsRef.current);
-      }
-      window.clearTimeout(timer);
-      drainingQueueRef.current = false;
-    };
-  }, [
-    connected,
-    interactionBlocked,
-    handleSubmit,
-    pendingApproval,
-    popNextQueuedPrompt,
-    queuedPrompts,
-    streamingState,
-  ]);
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
@@ -3118,81 +3019,107 @@ export function App({
     t,
   ]);
 
+  const resetEscapeState = useCallback(() => {
+    escArmedActionRef.current = null;
+    setEscapeHintVisible(false);
+    setCancelArmed(false);
+    if (escapeTimerRef.current) {
+      clearTimeout(escapeTimerRef.current);
+      escapeTimerRef.current = null;
+    }
+  }, []);
+
+  // The Esc handler reads live state, but its global keydown listener must mount
+  // ONCE: streamingState flips among 'waiting'/'responding'/'thinking' mid-turn,
+  // and if it were an effect dep each flip would tear the listener down and run
+  // resetEscapeState(), wiping a half-armed two-press cancel. Read live values
+  // through a ref so the listener stays put across re-renders.
+  const escLiveRef = useRef({
+    streamingState,
+    pendingApproval,
+    interactionBlocked,
+    handleCancel,
+    handleCycleMode,
+  });
+  escLiveRef.current = {
+    streamingState,
+    pendingApproval,
+    interactionBlocked,
+    handleCancel,
+    handleCycleMode,
+  };
+
+  // Clear a half-armed two-press whenever the streaming/idle boundary flips — the
+  // relevant action (cancel vs clear) changes with it, so a leftover arm is now
+  // stale. Keyed on the boolean, so intra-turn sub-state flips don't reset it.
+  const escStreamingBoundary = streamingState !== 'idle';
   useEffect(() => {
-    const resetEscapeState = () => {
-      escPressCountRef.current = 0;
-      setEscapeHintVisible(false);
-      if (escapeTimerRef.current) {
-        clearTimeout(escapeTimerRef.current);
-        escapeTimerRef.current = null;
-      }
+    resetEscapeState();
+  }, [escStreamingBoundary, resetEscapeState]);
+
+  useEffect(() => {
+    // Arm a two-press action: the first Esc shows the affordance and starts a
+    // confirm window; a second Esc within it confirms, any other key resets it.
+    const ESC_CANCEL_CONFIRM_WINDOW_MS = 2000;
+    const ESC_CLEAR_CONFIRM_WINDOW_MS = 500;
+    const armEscape = (action: 'cancel' | 'clear', windowMs: number) => {
+      escArmedActionRef.current = action;
+      if (action === 'cancel') setCancelArmed(true);
+      else setEscapeHintVisible(true);
+      if (escapeTimerRef.current) clearTimeout(escapeTimerRef.current);
+      escapeTimerRef.current = setTimeout(resetEscapeState, windowMs);
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing) return;
+      const live = escLiveRef.current;
 
       if (e.key !== 'Escape') {
-        if (escPressCountRef.current > 0) {
+        if (escArmedActionRef.current !== null) {
           resetEscapeState();
         }
-        if (e.key === 'Tab' && e.shiftKey && !interactionBlocked) {
+        if (e.key === 'Tab' && e.shiftKey && !live.interactionBlocked) {
           e.preventDefault();
-          handleCycleMode();
+          live.handleCycleMode();
         }
         return;
       }
 
-      if (pendingApproval || interactionBlocked) return;
-
-      if (clearQueuedPrompts()) {
-        e.preventDefault();
-        resetEscapeState();
-        return;
-      }
-
-      if (editorRef.current?.hasInput()) {
-        e.preventDefault();
-        if (escPressCountRef.current === 0) {
-          escPressCountRef.current = 1;
-          setEscapeHintVisible(true);
-          if (escapeTimerRef.current) {
-            clearTimeout(escapeTimerRef.current);
-          }
-          escapeTimerRef.current = setTimeout(() => {
-            resetEscapeState();
-          }, 500);
-        } else {
+      // Streaming takes priority over clearing text (queued prompts stay intact
+      // and drain after the turn settles); see decideEscapeIntent for the rules.
+      const intent = decideEscapeIntent({
+        blocked: !!live.pendingApproval || live.interactionBlocked,
+        streaming: live.streamingState !== 'idle',
+        hasInput: !!editorRef.current?.hasInput(),
+        armed: escArmedActionRef.current,
+      });
+      if (intent.kind === 'ignore') return;
+      e.preventDefault();
+      switch (intent.kind) {
+        case 'cancel':
+          live.handleCancel();
+          resetEscapeState();
+          break;
+        case 'clear':
           editorRef.current?.clear();
           resetEscapeState();
-        }
-        return;
-      }
-
-      if (streamingState !== 'idle') {
-        e.preventDefault();
-        handleCancel();
-        resetEscapeState();
-        return;
+          break;
+        case 'arm':
+          armEscape(
+            intent.action,
+            intent.action === 'cancel'
+              ? ESC_CANCEL_CONFIRM_WINDOW_MS
+              : ESC_CLEAR_CONFIRM_WINDOW_MS,
+          );
+          break;
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
-      escPressCountRef.current = 0;
-      setEscapeHintVisible(false);
-      if (escapeTimerRef.current) {
-        clearTimeout(escapeTimerRef.current);
-        escapeTimerRef.current = null;
-      }
+      resetEscapeState();
     };
-  }, [
-    streamingState,
-    handleCancel,
-    handleCycleMode,
-    pendingApproval,
-    interactionBlocked,
-    clearQueuedPrompts,
-  ]);
+  }, [resetEscapeState]);
 
   const isDisabled = !connected || connection.catchingUp;
 
@@ -3207,6 +3134,8 @@ export function App({
             store.dispatch({
               type: 'debug',
               text: serializeModelSwitchSummary(summary),
+              source: 'model_switch_summary',
+              data: summary,
             });
           }
         })
@@ -3220,14 +3149,14 @@ export function App({
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') {
-        enqueuePrompt(`/model --fast ${modelId}`);
+        blockLocalCommandDuringTurn();
         return;
       }
       sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
     },
-    [enqueuePrompt, sendPrompt, streamingState, reportError],
+    [blockLocalCommandDuringTurn, sendPrompt, streamingState, reportError],
   );
 
   // Persist via the prompt channel (like `/model --fast`): the daemon's command
@@ -3237,14 +3166,14 @@ export function App({
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') {
-        enqueuePrompt(`/model --voice ${modelId}`);
+        blockLocalCommandDuringTurn();
         return;
       }
       sendPrompt(`/model --voice ${modelId}`).catch((error: unknown) => {
         reportError(error, t('model.setVoice'));
       });
     },
-    [enqueuePrompt, sendPrompt, streamingState, reportError, t],
+    [blockLocalCommandDuringTurn, sendPrompt, streamingState, reportError, t],
   );
 
   const commands = useMemo(() => {
@@ -3298,12 +3227,16 @@ export function App({
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
+  const effectiveChatWidthMode: ChatWidthMode = isChatEmptyState
+    ? getDefaultChatWidthMode()
+    : chatWidthMode;
   const chatWidthToggleMin = getChatMaxWidth(chatMaxWidth);
 
   const appClassName = [
     styles.app,
     styles.appChat,
     isChatEmptyState ? styles.appChatEmpty : undefined,
+    sidebarOptions.enabled ? styles.appWithSidebar : undefined,
     selectedTheme === WebShellThemeId.Light
       ? styles.themeLight
       : styles.themeDark,
@@ -3314,9 +3247,9 @@ export function App({
   const appStyle = useMemo(
     () => ({
       ...externalStyle,
-      ...getChatWidthStyle(chatWidthMode, chatMaxWidth),
+      ...getChatWidthStyle(effectiveChatWidthMode, chatMaxWidth),
     }),
-    [chatMaxWidth, chatWidthMode, externalStyle],
+    [chatMaxWidth, effectiveChatWidthMode, externalStyle],
   );
   const handleChatWidthModeChange = useCallback((mode: ChatWidthMode) => {
     setChatWidthMode(mode);
@@ -3363,6 +3296,7 @@ export function App({
             >
               <ResumeDialog
                 onSelect={(sessionId) => {
+                  closeMobileDrawer();
                   sessionActions
                     .loadSession(sessionId)
                     .catch((error: unknown) => {
@@ -3633,218 +3567,279 @@ export function App({
             </DialogShell>
           )}
 
-          <WebShellCustomizationProvider value={customization}>
-            <CompactModeContext.Provider value={compactMode}>
-              <TodoContextsProvider
-                timeline={todoTimeline}
-                details={todoDetails}
+          <div className={styles.appShell}>
+            {sidebarOptions.enabled && (
+              <div
+                data-mobile-drawer=""
+                {...(mobileDrawerOpen
+                  ? { role: 'dialog', 'aria-modal': 'true' as const }
+                  : {})}
+                aria-label={t('sidebar.label')}
+                className={[
+                  styles.mobileDrawer,
+                  mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
               >
                 <div
-                  className={[
-                    styles.content,
-                    showFloatingTodos ||
-                    displayMessages.length > 0 ||
-                    pendingApproval
-                      ? styles.contentHasMessages
-                      : undefined,
-                  ]
-                    .filter(Boolean)
-                    .join(' ')}
+                  className={styles.mobileBackdrop}
+                  onClick={closeMobileDrawer}
+                  aria-hidden="true"
+                />
+                <WebShellSidebar
+                  collapsed={sidebarCollapsed && !mobileDrawerOpen}
+                  onCollapsedChange={handleSidebarCollapsedChange}
+                  onOpenSettings={() => {
+                    closeMobileDrawer();
+                    setShowSettingsDialog(true);
+                  }}
+                  onNewSession={createNewSession}
+                  onLoadSession={loadSidebarSession}
+                  onError={reportError}
+                  mobileOpen={mobileDrawerOpen}
+                />
+              </div>
+            )}
+            <div className={styles.chatPane}>
+              {sidebarOptions.enabled && (
+                <button
+                  type="button"
+                  className={styles.hamburgerButton}
+                  onClick={() => setMobileDrawerOpen((open) => !open)}
+                  aria-label={t('sidebar.toggleMenu')}
+                  aria-expanded={mobileDrawerOpen}
                 >
-                  <MessageList
-                    ref={messageListRef}
-                    messages={displayMessages}
-                    pendingApproval={pendingToolApproval}
-                    onConfirm={handleConfirm}
-                    onShowContextDetail={handleShowContextDetail}
-                    catchingUp={connection.catchingUp}
-                    isResponding={streamingState !== 'idle'}
-                    activeTurnStartedAt={activeTurnStartedAt}
-                    workspaceCwd={connection.workspaceCwd || ''}
-                    shellOutputMaxLines={shellOutputMaxLines}
-                    showRetryHint={showRetryHint}
-                    onRetryClick={handleRetry}
-                    onBranchSession={handleBranchCurrentSession}
-                    welcomeHeader={isChatEmptyState ? welcomeHeader : undefined}
-                    tailContent={undefined}
-                    tailKey={undefined}
-                    onFollowStateChange={handleFollowStateChange}
-                    virtualScrollThreshold={virtualScrollThreshold}
-                  />
-                  {btwMessage?.role === 'btw' && (
-                    <div className={styles.btwPanel}>
-                      <BtwMessage
-                        question={btwMessage.question}
-                        answer={btwMessage.answer}
-                        isPending={btwMessage.isPending}
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <line x1="3" y1="6" x2="21" y2="6" />
+                    <line x1="3" y1="12" x2="21" y2="12" />
+                    <line x1="3" y1="18" x2="21" y2="18" />
+                  </svg>
+                </button>
+              )}
+              <WebShellCustomizationProvider value={customization}>
+                <CompactModeContext.Provider value={compactMode}>
+                  <TodoContextsProvider
+                    timeline={todoTimeline}
+                    details={todoDetails}
+                  >
+                    <div
+                      className={[
+                        styles.content,
+                        showFloatingTodos ||
+                        displayMessages.length > 0 ||
+                        pendingApproval
+                          ? styles.contentHasMessages
+                          : undefined,
+                      ]
+                        .filter(Boolean)
+                        .join(' ')}
+                    >
+                      <MessageList
+                        ref={messageListRef}
+                        messages={displayMessages}
+                        pendingApproval={pendingToolApproval}
+                        onShowContextDetail={handleShowContextDetail}
+                        catchingUp={connection.catchingUp}
+                        isResponding={streamingState !== 'idle'}
+                        activeTurnStartedAt={activeTurnStartedAt}
+                        workspaceCwd={connection.workspaceCwd || ''}
+                        shellOutputMaxLines={shellOutputMaxLines}
+                        showRetryHint={showRetryHint}
+                        onRetryClick={handleRetry}
+                        onBranchSession={handleBranchCurrentSession}
+                        welcomeHeader={
+                          isChatEmptyState ? welcomeHeader : undefined
+                        }
+                        tailContent={undefined}
+                        tailKey={undefined}
+                        onFollowStateChange={handleFollowStateChange}
+                        virtualScrollThreshold={virtualScrollThreshold}
+                      />
+                      {btwMessage?.role === 'btw' && (
+                        <div className={styles.btwPanel}>
+                          <BtwMessage
+                            question={btwMessage.question}
+                            answer={btwMessage.answer}
+                            isPending={btwMessage.isPending}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  </TodoContextsProvider>
+                </CompactModeContext.Provider>
+
+                <div ref={footerRef} className={styles.footer}>
+                  {showScrollToBottom && (
+                    <div
+                      className={
+                        showFloatingTodos
+                          ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
+                          : styles.scrollToBottomLayer
+                      }
+                    >
+                      <button
+                        type="button"
+                        className={styles.scrollToBottomButton}
+                        aria-label={t('chat.scrollToBottom')}
+                        onClick={() => resumeChatBottomFollow('smooth')}
+                      >
+                        <svg
+                          className={styles.scrollToBottomIcon}
+                          viewBox="0 0 24 24"
+                          aria-hidden="true"
+                        >
+                          <path
+                            d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeLinecap="round"
+                            strokeLinejoin="round"
+                          />
+                        </svg>
+                      </button>
+                    </div>
+                  )}
+                  {showFloatingTodos && (
+                    <div className={styles.bottomPanels}>
+                      <TodoPanel todos={floatingTodos} />
+                    </div>
+                  )}
+                  {pendingToolApproval && (
+                    <div className={styles.approvalOverlay}>
+                      <ToolApproval
+                        request={pendingToolApproval}
+                        onConfirm={handleConfirm}
+                        variant="floating"
                       />
                     </div>
                   )}
-                </div>
-              </TodoContextsProvider>
-            </CompactModeContext.Provider>
-
-            <div
-              ref={footerRef}
-              className={
-                bottomHidden
-                  ? `${styles.footer} ${styles.footerHidden}`
-                  : styles.footer
-              }
-            >
-              {showScrollToBottom && (
-                <div
-                  className={
-                    showFloatingTodos
-                      ? `${styles.scrollToBottomLayer} ${styles.scrollToBottomLayerWithTodos}`
-                      : styles.scrollToBottomLayer
-                  }
-                >
-                  <button
-                    type="button"
-                    className={styles.scrollToBottomButton}
-                    aria-label={t('chat.scrollToBottom')}
-                    onClick={() => resumeChatBottomFollow('smooth')}
-                  >
-                    <svg
-                      className={styles.scrollToBottomIcon}
-                      viewBox="0 0 24 24"
-                      aria-hidden="true"
-                    >
-                      <path
-                        d="M12 5v13M6.5 12.5 12 18l5.5-5.5"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
+                  {pendingAskUserApproval && (
+                    <div className={styles.approvalOverlay}>
+                      <AskUserQuestion
+                        request={pendingAskUserApproval}
+                        onConfirm={handleConfirm}
+                        variant="floating"
                       />
-                    </svg>
-                  </button>
+                    </div>
+                  )}
+                  <div className={styles.composer}>
+                    <StreamingStatus startedAt={activeTurnStartedAt} />
+                    {escapeHintVisible && streamingState === 'idle' && (
+                      <div className={styles.escClearStatus} role="status">
+                        {t('editor.escClearHint')}
+                      </div>
+                    )}
+                    <QueuedPromptDisplay
+                      prompts={queuedPrompts}
+                      t={t}
+                      onDelete={removeQueuedPrompt}
+                      onInsert={insertQueuedPrompt}
+                      onEdit={editQueuedPrompt}
+                    />
+                    <ChatEditor
+                      ref={setEditorHandle}
+                      onSubmit={handleEditorSubmit}
+                      onCycleMode={handleCycleMode}
+                      onToggleShortcuts={handleToggleShortcuts}
+                      onCancel={handleCancel}
+                      isRunning={streamingState !== 'idle'}
+                      cancelArmed={cancelArmed}
+                      disabled={isDisabled || pendingApproval !== null}
+                      commands={commands}
+                      skills={loadedSkills}
+                      slashCommandCategoryOrder={slashCommandCategoryOrder}
+                      queuedMessages={queuedTexts}
+                      onFocusFooter={handleFocusTaskPill}
+                      onPopQueuedMessages={editLastQueuedPrompt}
+                      onClearQueuedMessages={clearQueuedPrompts}
+                      currentMode={currentMode}
+                      currentModel={currentModel}
+                      chatWidthMode={chatWidthMode}
+                      showChatWidthToggle={!isChatEmptyState}
+                      chatWidthToggleMin={chatWidthToggleMin}
+                      visibleToolbarActions={composerToolbarActions}
+                      availableModels={availableModels}
+                      onSelectMode={handleSetMode}
+                      onSelectModel={handleModelSelect}
+                      onChatWidthModeChange={handleChatWidthModeChange}
+                      sessionName={sessionDisplayName}
+                      dialogOpen={interactionBlocked}
+                      followupState={followupState}
+                      onAcceptFollowup={onAcceptFollowup}
+                      onDismissFollowup={onDismissFollowup}
+                      composerInput={composerInput}
+                      composerInputVersion={composerInputVersion}
+                      placeholderText={
+                        !connected || connection.catchingUp
+                          ? t('common.loading')
+                          : streamingState !== 'idle'
+                            ? t('editor.processing')
+                            : t('editor.placeholder')
+                      }
+                    />
+                  </div>
+                  {CustomFooter ? (
+                    <CustomFooter
+                      connected={connected}
+                      mode={currentMode}
+                      model={currentModel}
+                      streamingState={streamingState}
+                      contextUsageRatio={
+                        (connection.contextWindow ?? 0) > 0
+                          ? (connection.tokenCount ?? 0) /
+                            (connection.contextWindow ?? 0)
+                          : 0
+                      }
+                      activeGoal={activeGoal}
+                      tasks={footerTasks}
+                      availableModes={MODES_CYCLE}
+                      availableModels={(connection.models ?? [])
+                        .filter(isVisibleComposerModel)
+                        .map((m) => ({
+                          id: m.id,
+                          label: getModelDisplayName(m.label || m.id),
+                          contextWindow: m.contextWindow,
+                        }))}
+                      skills={loadedSkills}
+                      onSelectMode={handleSetMode}
+                      onSelectModel={handleModelSelect}
+                    />
+                  ) : (
+                    <StatusBar
+                      onSelectMode={() => setShowApprovalModeDialog((v) => !v)}
+                      onSelectModel={() =>
+                        setModelDialogMode((v) => (v ? null : 'main'))
+                      }
+                      onShowContext={() => showContextUsage('/context', false)}
+                      onOpenSettings={() => setShowSettingsDialog(true)}
+                      ref={statusBarRef}
+                      onOpenTasks={() => openTasksPanel()}
+                      onReturnToInput={handleReturnToEditor}
+                      tasks={backgroundTasks}
+                      activeGoal={activeGoal}
+                      hideSettings={hideSettings}
+                      onToggleShortcuts={handleToggleShortcuts}
+                      compact={true}
+                    />
+                  )}
+                  {isChatEmptyState && welcomeFooter && (
+                    <div className={styles.emptyWelcomeFooter}>
+                      {welcomeFooter}
+                    </div>
+                  )}
                 </div>
-              )}
-              {showFloatingTodos && (
-                <div className={styles.bottomPanels}>
-                  <TodoPanel todos={floatingTodos} />
-                </div>
-              )}
-              {pendingToolApproval && (
-                <div className={styles.approvalOverlay}>
-                  <ToolApproval
-                    request={pendingToolApproval}
-                    onConfirm={handleConfirm}
-                    variant="floating"
-                  />
-                </div>
-              )}
-              {pendingAskUserApproval && (
-                <div className={styles.approvalOverlay}>
-                  <AskUserQuestion
-                    request={pendingAskUserApproval}
-                    onConfirm={handleConfirm}
-                    variant="floating"
-                  />
-                </div>
-              )}
-              <div className={styles.composer}>
-                <StreamingStatus startedAt={activeTurnStartedAt} />
-                <QueuedPromptDisplay
-                  prompts={queuedPrompts}
-                  t={t}
-                  onDelete={removeQueuedPrompt}
-                  onInsert={insertQueuedPrompt}
-                  onEditLast={editLastQueuedPrompt}
-                />
-                <ChatEditor
-                  ref={setEditorHandle}
-                  onSubmit={handleEditorSubmit}
-                  onCycleMode={handleCycleMode}
-                  onToggleShortcuts={handleToggleShortcuts}
-                  onCancel={handleCancel}
-                  isRunning={streamingState !== 'idle'}
-                  disabled={isDisabled || pendingApproval !== null}
-                  commands={commands}
-                  skills={loadedSkills}
-                  slashCommandCategoryOrder={slashCommandCategoryOrder}
-                  queuedMessages={queuedTexts}
-                  onFocusFooter={handleFocusTaskPill}
-                  onPopQueuedMessages={popQueuedPromptsForEdit}
-                  onClearQueuedMessages={clearQueuedPrompts}
-                  currentMode={currentMode}
-                  currentModel={currentModel}
-                  chatWidthMode={chatWidthMode}
-                  showChatWidthToggle={!isChatEmptyState}
-                  chatWidthToggleMin={chatWidthToggleMin}
-                  visibleToolbarActions={composerToolbarActions}
-                  availableModels={availableModels}
-                  onSelectMode={handleSetMode}
-                  onSelectModel={handleModelSelect}
-                  onChatWidthModeChange={handleChatWidthModeChange}
-                  sessionName={sessionDisplayName}
-                  dialogOpen={interactionBlocked}
-                  followupState={followupState}
-                  onAcceptFollowup={onAcceptFollowup}
-                  onDismissFollowup={onDismissFollowup}
-                  composerInput={composerInput}
-                  composerInputVersion={composerInputVersion}
-                  placeholderText={
-                    !connected || connection.catchingUp
-                      ? t('common.loading')
-                      : streamingState !== 'idle'
-                        ? t('editor.processing')
-                        : t('editor.placeholder')
-                  }
-                />
-              </div>
-              {CustomFooter ? (
-                <CustomFooter
-                  connected={connected}
-                  mode={currentMode}
-                  model={currentModel}
-                  streamingState={streamingState}
-                  contextUsageRatio={
-                    (connection.contextWindow ?? 0) > 0
-                      ? (connection.tokenCount ?? 0) /
-                        (connection.contextWindow ?? 0)
-                      : 0
-                  }
-                  activeGoal={activeGoal}
-                  tasks={footerTasks}
-                  availableModes={MODES_CYCLE}
-                  availableModels={(connection.models ?? [])
-                    .filter(isVisibleComposerModel)
-                    .map((m) => ({
-                      id: m.id,
-                      label: m.label,
-                      contextWindow: m.contextWindow,
-                    }))}
-                  skills={loadedSkills}
-                  onSelectMode={handleSetMode}
-                  onSelectModel={handleModelSelect}
-                />
-              ) : (
-                <StatusBar
-                  escapeHint={escapeHintVisible}
-                  onSelectMode={() => setShowApprovalModeDialog((v) => !v)}
-                  onSelectModel={() =>
-                    setModelDialogMode((v) => (v ? null : 'main'))
-                  }
-                  onShowContext={() => showContextUsage('/context', false)}
-                  onOpenSettings={() => setShowSettingsDialog(true)}
-                  ref={statusBarRef}
-                  onOpenTasks={() => openTasksPanel()}
-                  onReturnToInput={handleReturnToEditor}
-                  tasks={backgroundTasks}
-                  activeGoal={activeGoal}
-                  hideSettings={hideSettings}
-                  onToggleShortcuts={handleToggleShortcuts}
-                  compact={true}
-                />
-              )}
-              {isChatEmptyState && welcomeFooter && (
-                <div className={styles.emptyWelcomeFooter}>{welcomeFooter}</div>
-              )}
+              </WebShellCustomizationProvider>
             </div>
-          </WebShellCustomizationProvider>
+          </div>
         </div>
       </I18nProvider>
     </ThemeProvider>

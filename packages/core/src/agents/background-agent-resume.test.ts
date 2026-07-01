@@ -433,6 +433,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -470,6 +471,183 @@ describe('BackgroundAgentResumeService', () => {
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
+  });
+
+  it('returns only model-visible subagent output when resumed background agents complete', async () => {
+    const sessionId = 'session-resume-sanitized';
+    const agentId = 'agent-resume-sanitized';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume with tagged result',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Resume with tagged result' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume with tagged result',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume with tagged result',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        rounds: 0,
+        totalToolCalls: 0,
+        successfulToolCalls: 0,
+        failedToolCalls: 0,
+        successRate: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        thoughtTokens: 0,
+        cachedTokens: 0,
+        totalTokens: 0,
+        toolUsage: [],
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () =>
+        [
+          '<analysis>',
+          'Scratchpad details should stay out of the parent context.',
+          '</analysis>',
+          '',
+          '<summary>',
+          'Resume completed successfully',
+          '</summary>',
+        ].join('\n'),
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    expect(registry.get(agentId)?.result).toBe('Resume completed successfully');
+  });
+
+  it('stores a fallback when resumed output has no model-visible text', async () => {
+    const sessionId = 'session-resume-empty-visible';
+    const agentId = 'agent-resume-empty-visible';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume with scratchpad-only result',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Resume with scratchpad-only result' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume with scratchpad-only result',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume with scratchpad-only result',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        rounds: 0,
+        totalToolCalls: 0,
+        successfulToolCalls: 0,
+        failedToolCalls: 0,
+        successRate: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        thoughtTokens: 0,
+        cachedTokens: 0,
+        totalTokens: 0,
+        toolUsage: [],
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => '<analysis>scratch only</analysis>',
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    expect(registry.get(agentId)?.result).toBe(
+      '(subagent produced no model-visible output)',
+    );
   });
 
   it('can resume into the final background concurrency slot', async () => {
@@ -524,6 +702,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -662,6 +841,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -739,6 +919,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -829,6 +1010,7 @@ describe('BackgroundAgentResumeService', () => {
         getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
         getExecutionSummary: () => ({
           totalTokens: 0,
+          outputTokens: 0,
           totalDurationMs: 0,
         }),
         getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -911,6 +1093,7 @@ describe('BackgroundAgentResumeService', () => {
         getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
         getExecutionSummary: () => ({
           totalTokens: 0,
+          outputTokens: 0,
           totalDurationMs: 0,
         }),
         getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -995,6 +1178,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -1081,7 +1265,11 @@ describe('BackgroundAgentResumeService', () => {
       setExternalMessageWaiter: vi.fn(),
       setExternalMessageWaitPredicate: vi.fn(),
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({ totalTokens: 0, totalDurationMs: 0 }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
       getFinalText: () => 'done',
     };
@@ -1193,7 +1381,11 @@ describe('BackgroundAgentResumeService', () => {
       getCore: vi.fn(() => {
         throw new Error('setup failed');
       }),
-      getExecutionSummary: () => ({ totalTokens: 0, totalDurationMs: 0 }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
       getFinalText: () => 'done',
     };
@@ -1324,6 +1516,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -1601,6 +1794,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.CANCELLED,
@@ -1679,6 +1873,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.CANCELLED,
@@ -1777,6 +1972,7 @@ describe('BackgroundAgentResumeService', () => {
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
       getExecutionSummary: () => ({
         totalTokens: 0,
+        outputTokens: 0,
         totalDurationMs: 0,
       }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
@@ -1872,7 +2068,11 @@ describe('BackgroundAgentResumeService', () => {
       execute,
       setExternalMessageProvider: vi.fn(),
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({ totalTokens: 0, totalDurationMs: 0 }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
       getFinalText: () => 'iterated',
     };
@@ -2196,7 +2396,11 @@ describe('BackgroundAgentResumeService', () => {
       execute: vi.fn(async () => undefined),
       setExternalMessageProvider: vi.fn(),
       getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-      getExecutionSummary: () => ({ totalTokens: 0, totalDurationMs: 0 }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
       getTerminateMode: () => AgentTerminateMode.GOAL,
       getFinalText: () => 'iterated',
     };

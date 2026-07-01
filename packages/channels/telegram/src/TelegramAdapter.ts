@@ -13,21 +13,58 @@ import type {
   ChannelConfig,
   ChannelBaseOptions,
   Envelope,
-  AcpBridge,
+  ChannelAgentBridge,
+  SessionTarget,
 } from '@qwen-code/channel-base';
+
+const TELEGRAM_BOT_COMMANDS = [
+  { command: 'start', description: 'Show quick-start help' },
+  { command: 'help', description: 'Show available commands' },
+  { command: 'new', description: 'Start a fresh conversation' },
+  { command: 'cancel', description: 'Cancel the running request' },
+  { command: 'status', description: 'Show session info' },
+] as const;
+
+const TELEGRAM_START_MESSAGE = [
+  'Qwen Code Telegram bot',
+  '',
+  'Send any message to chat with Qwen Code.',
+  'Use /new to start a fresh conversation.',
+  'Use /cancel to stop a running request.',
+  'Use /help to see available commands.',
+].join('\n');
 
 export class TelegramChannel extends ChannelBase {
   private bot: Bot;
   private botId: number = 0;
   private botUsername: string = '';
+  private hasConnectedOnce = false;
+  private signalHandlersRegistered = false;
 
   constructor(
     name: string,
     config: ChannelConfig,
-    bridge: AcpBridge,
+    bridge: ChannelAgentBridge,
     options?: ChannelBaseOptions,
   ) {
     super(name, config, bridge, options);
+    this.bot = this.createBot();
+    this.registerCommand('start', async (envelope) => {
+      await this.sendMessage(envelope.chatId, TELEGRAM_START_MESSAGE);
+      return true;
+    });
+    this.registerCancelCommand();
+  }
+
+  override supportsProactiveSend(): boolean {
+    return true;
+  }
+
+  protected override supportsProactiveTarget(target: SessionTarget): boolean {
+    return target.threadId === undefined || /^\d+$/u.test(target.threadId);
+  }
+
+  private createBot(): Bot {
     const botConfig = this.proxy
       ? {
           client: {
@@ -35,7 +72,7 @@ export class TelegramChannel extends ChannelBase {
           },
         }
       : undefined;
-    this.bot = new Bot(config.token, botConfig);
+    return new Bot(this.config.token, botConfig);
   }
 
   private getFileUrl(filePath: string): string {
@@ -43,9 +80,14 @@ export class TelegramChannel extends ChannelBase {
   }
 
   async connect(): Promise<void> {
+    if (this.hasConnectedOnce) {
+      this.bot = this.createBot();
+    }
+    this.hasConnectedOnce = true;
     const botInfo = await this.bot.api.getMe();
     this.botId = botInfo.id;
     this.botUsername = botInfo.username ?? '';
+    await this.registerBotCommands();
     // All messages (including slash commands) go through handleInbound
     // where ChannelBase dispatches shared commands (/help, /clear, /status, etc.)
     this.bot.on('message:text', async (ctx) => {
@@ -214,8 +256,21 @@ export class TelegramChannel extends ChannelBase {
       );
     });
 
-    process.once('SIGINT', () => this.bot.stop());
-    process.once('SIGTERM', () => this.bot.stop());
+    if (!this.signalHandlersRegistered) {
+      process.once('SIGINT', () => this.bot.stop());
+      process.once('SIGTERM', () => this.bot.stop());
+      this.signalHandlersRegistered = true;
+    }
+  }
+
+  private async registerBotCommands(): Promise<void> {
+    try {
+      await this.bot.api.setMyCommands(TELEGRAM_BOT_COMMANDS);
+    } catch (err) {
+      process.stderr.write(
+        `[Telegram:${this.name}] Failed to register bot commands: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
   }
 
   /** Per-chat typing interval — repeats every 4s since Telegram expires it after 5s. */
@@ -241,16 +296,39 @@ export class TelegramChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    await this.sendTelegramMessage(chatId, text);
+  }
+
+  protected override async pushProactive(
+    target: SessionTarget,
+    text: string,
+  ): Promise<void> {
+    await this.sendTelegramMessage(target.chatId, text, target.threadId);
+  }
+
+  private async sendTelegramMessage(
+    chatId: string,
+    text: string,
+    threadId?: string,
+  ): Promise<void> {
     const html = telegramFormat(text);
     const chunks = splitHtmlForTelegram(html);
+    const options =
+      threadId === undefined
+        ? { parse_mode: 'HTML' as const }
+        : { parse_mode: 'HTML' as const, message_thread_id: Number(threadId) };
     for (const chunk of chunks) {
       try {
-        await this.bot.api.sendMessage(chatId, chunk, {
-          parse_mode: 'HTML',
-        });
+        await this.bot.api.sendMessage(chatId, chunk, options);
       } catch {
         // Fallback to plain text for the failed chunk only
-        await this.bot.api.sendMessage(chatId, chunk.replace(/<[^>]*>/g, ''));
+        await this.bot.api.sendMessage(
+          chatId,
+          chunk.replace(/<[^>]*>/g, ''),
+          threadId === undefined
+            ? undefined
+            : { message_thread_id: Number(threadId) },
+        );
       }
     }
   }
@@ -267,6 +345,7 @@ export class TelegramChannel extends ChannelBase {
     msg: {
       from: { id: number; first_name: string; last_name?: string };
       chat: { id: number; type: string };
+      message_thread_id?: number;
       reply_to_message?: { from?: { id: number }; text?: string };
     },
     text: string,
@@ -275,13 +354,21 @@ export class TelegramChannel extends ChannelBase {
     const isGroup = msg.chat.type === 'group' || msg.chat.type === 'supergroup';
 
     const isMentioned =
-      entities?.some(
-        (e) =>
-          e.type === 'mention' &&
-          this.botUsername &&
-          text.slice(e.offset, e.offset + e.length).toLowerCase() ===
-            `@${this.botUsername.toLowerCase()}`,
-      ) ?? false;
+      entities?.some((e) => {
+        if (!this.botUsername) return false;
+        const value = text.slice(e.offset, e.offset + e.length).toLowerCase();
+        const username = this.botUsername.toLowerCase();
+        if (e.type === 'mention') {
+          return value === `@${username}`;
+        }
+        if (e.type === 'bot_command') {
+          const mentionIndex = value.indexOf('@');
+          return (
+            mentionIndex !== -1 && value.slice(mentionIndex + 1) === username
+          );
+        }
+        return false;
+      }) ?? false;
 
     const isReplyToBot = msg.reply_to_message?.from?.id === this.botId;
 
@@ -302,6 +389,10 @@ export class TelegramChannel extends ChannelBase {
         msg.from.first_name +
         (msg.from.last_name ? ` ${msg.from.last_name}` : ''),
       chatId: String(msg.chat.id),
+      threadId:
+        typeof msg.message_thread_id === 'number'
+          ? String(msg.message_thread_id)
+          : undefined,
       text: cleanText,
       isGroup,
       isMentioned,

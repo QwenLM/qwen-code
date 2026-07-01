@@ -1010,6 +1010,50 @@ function longRunThresholdFor(effectiveTimeoutMs: number): number {
   );
 }
 
+const FOREGROUND_TIMEOUT_WARNING_LEAD_MS = 15_000;
+const FOREGROUND_TIMEOUT_WARNING =
+  'Warning: this command is about to time out. In the interactive TUI, press Ctrl+B to keep it running in the background.';
+
+function foregroundTimeoutWarningDelayFor(
+  effectiveTimeoutMs: number,
+  elapsedMs: number,
+): number | null {
+  if (effectiveTimeoutMs <= FOREGROUND_TIMEOUT_WARNING_LEAD_MS) {
+    return null;
+  }
+  const remainingMs = effectiveTimeoutMs - elapsedMs;
+  if (remainingMs <= 0) {
+    return null;
+  }
+  return Math.max(0, remainingMs - FOREGROUND_TIMEOUT_WARNING_LEAD_MS);
+}
+
+function appendForegroundTimeoutWarning(
+  output: string | AnsiOutput,
+): string | AnsiOutput {
+  if (typeof output === 'string') {
+    return output
+      ? `${output}\n\n${FOREGROUND_TIMEOUT_WARNING}`
+      : FOREGROUND_TIMEOUT_WARNING;
+  }
+
+  return [
+    ...output,
+    [
+      {
+        text: FOREGROUND_TIMEOUT_WARNING,
+        bold: true,
+        italic: false,
+        underline: false,
+        dim: false,
+        inverse: false,
+        fg: '#ff5555',
+        bg: '',
+      },
+    ],
+  ];
+}
+
 /**
  * Format the long-run advisory appended to long foreground commands.
  * Exported so tests and any future consumer (e.g. an alternative
@@ -2013,6 +2057,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     shellExecutionConfig?: ShellExecutionConfig,
     setPidCallback?: (pid: number) => void,
     setPromoteAbortControllerCallback?: (ac: AbortController) => void,
+    canPromoteForegroundShell?: () => boolean,
   ): Promise<ToolResult> {
     const strippedCommand = stripShellWrapper(this.params.command);
 
@@ -2043,7 +2088,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
       signal,
       promoteAbortController.signal,
     ]);
+    let timeoutSignalStartedAt: number | null = null;
     if (effectiveTimeout) {
+      timeoutSignalStartedAt = Date.now();
       const timeoutSignal = AbortSignal.timeout(effectiveTimeout);
       combinedSignal = AbortSignal.any([
         signal,
@@ -2121,11 +2168,20 @@ export class ShellToolInvocation extends BaseToolInvocation<
     let totalLines = 0;
     let totalBytes = 0;
     let trailingFlushTimer: ReturnType<typeof setTimeout> | null = null;
+    let timeoutWarningTimer: ReturnType<typeof setTimeout> | null = null;
+    let showTimeoutWarning = false;
 
     const cancelTrailingFlush = () => {
       if (trailingFlushTimer !== null) {
         clearTimeout(trailingFlushTimer);
         trailingFlushTimer = null;
+      }
+    };
+
+    const cancelTimeoutWarning = () => {
+      if (timeoutWarningTimer !== null) {
+        clearTimeout(timeoutWarningTimer);
+        timeoutWarningTimer = null;
       }
     };
 
@@ -2137,11 +2193,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
       cancelTrailingFlush();
       lastUpdateTime = Date.now();
       if (!updateOutput) return;
-      if (typeof cumulativeOutput === 'string') {
-        updateOutput(cumulativeOutput);
+      const displayOutput = showTimeoutWarning
+        ? appendForegroundTimeoutWarning(cumulativeOutput)
+        : cumulativeOutput;
+      if (typeof displayOutput === 'string') {
+        updateOutput(displayOutput);
       } else {
         updateOutput({
-          ansiOutput: cumulativeOutput,
+          ansiOutput: displayOutput,
           totalLines,
           totalBytes,
           ...(this.params.timeout != null && {
@@ -2156,8 +2215,37 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // between the abort signal firing and the result promise settling.
     const onAbort = () => {
       cancelTrailingFlush();
+      cancelTimeoutWarning();
     };
     combinedSignal.addEventListener('abort', onAbort, { once: true });
+
+    const armTimeoutWarning = () => {
+      if (
+        !updateOutput ||
+        combinedSignal.aborted ||
+        !this.config.isInteractive() ||
+        setPromoteAbortControllerCallback === undefined ||
+        canPromoteForegroundShell?.() !== true ||
+        timeoutSignalStartedAt === null
+      ) {
+        return;
+      }
+      const warningDelay = foregroundTimeoutWarningDelayFor(
+        effectiveTimeout,
+        Date.now() - timeoutSignalStartedAt,
+      );
+      if (warningDelay === null) {
+        return;
+      }
+      timeoutWarningTimer = setTimeout(() => {
+        timeoutWarningTimer = null;
+        if (combinedSignal.aborted || canPromoteForegroundShell?.() !== true) {
+          return;
+        }
+        showTimeoutWarning = true;
+        doUpdate();
+      }, warningDelay);
+    };
 
     const onShellOutputEvent = (event: ShellOutputEvent) => {
       let shouldUpdate = false;
@@ -2316,6 +2404,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // (theoretically) scheduled trailing flush so nothing fires after we
       // re-throw to the caller.
       cancelTrailingFlush();
+      cancelTimeoutWarning();
       combinedSignal.removeEventListener('abort', onAbort);
       throw err;
     }
@@ -2330,6 +2419,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
     // implement promote yet, but exposing it now means PR-3 doesn't
     // need to revisit shell.ts.
     setPromoteAbortControllerCallback?.(promoteAbortController);
+    armTimeoutWarning();
 
     // Bracket the spawn → settle wall-clock so the result builder below
     // can decide whether to append the long-run advisory. Captured AFTER
@@ -2358,6 +2448,7 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // fire a stale frame after we've returned. `finally` covers both the
       // happy path and the (theoretical) reject path so no timer leaks.
       cancelTrailingFlush();
+      cancelTimeoutWarning();
       combinedSignal.removeEventListener('abort', onAbort);
     }
 
@@ -4380,9 +4471,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * Detect `gh pr create` commands and append AI attribution text to the
-   * PR body. Format: "🤖 Generated with Qwen Code (N-shotted by Qwen-Coder)"
+   * PR body. Format: "Generated with Qwen Code (N-shotted by Qwen-Coder)"
    * when at least one user prompt has been recorded since the last commit;
-   * otherwise just "🤖 Generated with Qwen Code".
+   * otherwise just "Generated with Qwen Code".
    *
    * Skipped on Windows: the appended text relies on bash quote-escape
    * conventions (`\$`, `'\''`) that cmd.exe and PowerShell don't honor,
@@ -4417,8 +4508,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     const attribution =
       shots > 0
-        ? `\n\n🤖 Generated with Qwen Code (${shots}-shotted by ${generator})`
-        : `\n\n🤖 Generated with Qwen Code`;
+        ? `\n\nGenerated with Qwen Code (${shots}-shotted by ${generator})`
+        : `\n\nGenerated with Qwen Code`;
 
     // Match both the long form `--body` and the short alias `-b`
     // (documented in `gh pr create --help`), with either space or

@@ -34,14 +34,16 @@ import {
   MCPServerStatus,
   DiscoveredMCPTool,
   MCPOAuthTokenStorage,
+  isGatedMcpScope,
   type MCPServerConfig,
   type AnyDeclarativeTool,
   type DiscoveredMCPPrompt,
   createDebugLogger,
+  matchesAnyServerPattern,
 } from '@qwen-code/qwen-code-core';
 import { loadSettings, SettingScope } from '../../../config/settings.js';
+import { loadMcpApprovals } from '../../../config/mcpApprovals.js';
 import { isToolValid, getToolInvalidReasons } from './utils.js';
-import { useTerminalSize } from '../../hooks/useTerminalSize.js';
 
 const debugLogger = createDebugLogger('MCP_DIALOG');
 
@@ -49,8 +51,6 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
   onClose,
 }) => {
   const config = useConfig();
-  const { columns: width } = useTerminalSize();
-  const boxWidth = width - 4;
 
   const [servers, setServers] = useState<MCPServerDisplayInfo[]>([]);
   const [selectedServerIndex, setSelectedServerIndex] = useState<number>(-1);
@@ -74,6 +74,12 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
     const toolRegistry = config.getToolRegistry();
     const promptRegistry = config.getPromptRegistry();
     const resourceRegistry = config.getResourceRegistry();
+
+    // Approval state is keyed by the same project root the approval dialog
+    // writes under — `getWorkingDir()` (see useMcpApproval) — so the lookup
+    // matches what discovery gated on.
+    const approvals = loadMcpApprovals();
+    const approvalRoot = config.getWorkingDir();
 
     const serverInfos: MCPServerDisplayInfo[] = [];
 
@@ -137,6 +143,17 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         (mcpServerRequiresOAuth.get(name) === true ||
           (Boolean(serverConfig.oauth?.enabled) && !hasOAuthTokens));
 
+      // Why a gated (#4615) server is skipped by discovery: `pending` (awaiting
+      // a first/renewed approval) or `rejected`. Only gated scopes carry this;
+      // `approved` (and all non-gated scopes) leave it undefined.
+      let approvalState: 'pending' | 'rejected' | undefined;
+      if (isGatedMcpScope(serverConfig.scope)) {
+        const state = approvals.getState(approvalRoot, name, serverConfig);
+        if (state !== 'approved') {
+          approvalState = state;
+        }
+      }
+
       serverInfos.push({
         name,
         status,
@@ -149,6 +166,7 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         isDisabled,
         hasOAuthTokens,
         requiresAuth,
+        approvalState,
       });
     }
 
@@ -517,8 +535,8 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         ).settings;
         const currentExcluded = scopeSettings.mcp?.excluded || [];
 
-        // If server is not in exclusion list, add it
-        if (!currentExcluded.includes(server.name)) {
+        // If server is not already covered by an exclusion pattern, add it
+        if (!matchesAnyServerPattern(server.name, currentExcluded)) {
           const newExcluded = [...currentExcluded, server.name];
           settings.setValue(
             targetScope === 'user' ? SettingScope.User : SettingScope.Workspace,
@@ -563,8 +581,8 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
         ).settings;
         const currentExcluded = scopeSettings.mcp?.excluded || [];
 
-        // If server is not in exclusion list, add it
-        if (!currentExcluded.includes(server.name)) {
+        // If server is not already covered by an exclusion pattern, add it
+        if (!matchesAnyServerPattern(server.name, currentExcluded)) {
           const newExcluded = [...currentExcluded, server.name];
           settings.setValue(
             scope === 'user' ? SettingScope.User : SettingScope.Workspace,
@@ -886,20 +904,17 @@ export const MCPManagementDialog: React.FC<MCPManagementDialogProps> = ({
   );
 
   return (
-    <Box flexDirection="column" width={boxWidth}>
-      <Box
-        borderStyle="single"
-        borderColor={theme.border.default}
-        flexDirection="column"
-        width={boxWidth}
-        gap={1}
-        paddingLeft={1}
-        paddingRight={1}
-      >
-        {renderStepHeader()}
-        {renderStepContent()}
-        {renderStepFooter()}
-      </Box>
+    <Box
+      borderStyle="round"
+      borderColor={theme.border.default}
+      flexDirection="column"
+      gap={1}
+      padding={1}
+      width="100%"
+    >
+      {renderStepHeader()}
+      {renderStepContent()}
+      {renderStepFooter()}
     </Box>
   );
 };

@@ -53,7 +53,10 @@ export type {
   DaemonTodoStatus,
   DaemonStreamingState,
   DaemonWorkspaceEventSignals,
+  PendingPromptActionOptions,
   SendPromptOptions,
+  SubmitPromptOptions,
+  SubmitPromptResult,
 } from './session/index.js';
 
 // ── Workspace axis (per-workspace, outlives sessions) ──────────────
@@ -97,6 +100,14 @@ export {
 
 export { useDaemonMidTurnInjected } from './useDaemonMidTurnInjected.js';
 
+export {
+  getPendingPromptVersion,
+  getPendingPromptEvents,
+  consumePendingPromptEvents,
+  subscribePendingPromptEvents,
+  subscribePendingPromptVersion,
+} from './pendingPromptVersion.js';
+
 // ── Re-exported SDK types/constants for UI consumers ──────────────
 // These allow web-shell and other UI packages to depend only on
 // @qwen-code/webui without importing @qwen-code/sdk/daemon directly.
@@ -125,6 +136,8 @@ export type {
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceMcpResourceStatus,
+  DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryFile,
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceToolStatus,

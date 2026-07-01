@@ -1753,6 +1753,17 @@ describe('daemon UI normalizer and transcript reducer', () => {
     expect(output).not.toContain('\x00');
   });
 
+  it('renders managed memory events without a source fallback leak', () => {
+    const output = daemonUiEventToTerminalText({
+      type: 'workspace.memory.changed',
+      scope: 'managed',
+      touchedScopes: ['project'],
+    });
+
+    expect(output).toContain('managed_memory');
+    expect(output).not.toContain('undefined');
+  });
+
   it('renders extension failures without assuming install failed', () => {
     const output = daemonUiEventToTerminalText({
       type: 'workspace.extensions.changed',
@@ -2172,6 +2183,45 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
     ]);
   });
 
+  it('normalizes managed memory_changed from workspace remember', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('memory_changed', {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['project'],
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.memory.changed',
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['project'],
+      }),
+    ]);
+  });
+
+  it('rejects malformed managed memory_changed payloads', () => {
+    for (const data of [
+      {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        touchedScopes: ['project'],
+      },
+      {
+        scope: 'managed',
+        source: 'workspace_memory_remember',
+        taskId: 'remember-123',
+        touchedScopes: ['bad'],
+      },
+    ]) {
+      const events = normalizeDaemonEvent(envelopeOf('memory_changed', data));
+      expect(events[0]).toMatchObject({ type: 'debug' });
+    }
+  });
+
   it('normalizes agent_changed for create/update/delete', () => {
     for (const change of ['created', 'updated', 'deleted'] as const) {
       const events = normalizeDaemonEvent(
@@ -2214,6 +2264,49 @@ describe('daemon UI normalizer — Wave 3/4 event coverage (PR-A)', () => {
         type: 'workspace.initialized',
         path: '/w',
         action: 'created',
+      }),
+    ]);
+  });
+
+  it('normalizes trust_change_requested', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('trust_change_requested', {
+        workspaceCwd: '/w',
+        desiredState: 'untrusted',
+        reason: 'remote client request',
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.trust.change.requested',
+        workspaceCwd: '/w',
+        desiredState: 'untrusted',
+        reason: 'remote client request',
+      }),
+    ]);
+  });
+
+  it('normalizes github_setup_completed', () => {
+    const events = normalizeDaemonEvent(
+      envelopeOf('github_setup_completed', {
+        releaseTag: 'v1.2.3',
+        readmeUrl:
+          'https://github.com/QwenLM/qwen-code-action/blob/v1.2.3/README.md#quick-start',
+        workflows: [
+          {
+            path: '.github/workflows/qwen-dispatch.yml',
+            status: 'written',
+            sizeBytes: 12,
+          },
+        ],
+        gitignore: { path: '.gitignore', status: 'updated' },
+        warnings: [],
+      }),
+    );
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: 'workspace.github.setup.completed',
+        releaseTag: 'v1.2.3',
       }),
     ]);
   });
@@ -2603,7 +2696,7 @@ describe('daemon UI time schema (PR-B)', () => {
     });
   });
 
-  it('stamps assistant.done serverTimestamp onto the active assistant block', () => {
+  it('does not let assistant.done overwrite an existing assistant timestamp', () => {
     let state = createDaemonTranscriptState({ now: 1 });
     state = reduceDaemonTranscriptEvents(
       state,
@@ -2614,6 +2707,41 @@ describe('daemon UI time schema (PR-B)', () => {
         data: {
           update: {
             _meta: { timestamp: 1_000 },
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'done' },
+          },
+        },
+      }),
+    );
+
+    state = reduceDaemonTranscriptEvents(state, [
+      {
+        type: 'assistant.done',
+        reason: 'end_turn',
+        eventId: 2,
+        serverTimestamp: 5_000,
+      },
+    ]);
+
+    expect(state.blocks[0]).toMatchObject({
+      kind: 'assistant',
+      text: 'done',
+      streaming: false,
+      eventId: 2,
+      serverTimestamp: 1_000,
+    });
+  });
+
+  it('uses assistant.done timestamp when the active assistant block has none', () => {
+    let state = createDaemonTranscriptState({ now: 1 });
+    state = reduceDaemonTranscriptEvents(
+      state,
+      normalizeDaemonEvent({
+        id: 1,
+        v: 1,
+        type: 'session_update',
+        data: {
+          update: {
             sessionUpdate: 'agent_message_chunk',
             content: { type: 'text', text: 'done' },
           },

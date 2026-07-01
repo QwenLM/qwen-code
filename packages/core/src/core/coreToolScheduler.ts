@@ -86,6 +86,7 @@ import {
   applyAutoModeDecision,
   evaluateAutoMode,
   getAutoModePermissionDeniedReason,
+  shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
@@ -110,6 +111,7 @@ import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
 import { IdeClient } from '../ide/ide-client.js';
+import { isSubagentLikeExecutionContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 import { safeSetStatus } from '../telemetry/tracer.js';
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import {
@@ -160,7 +162,15 @@ function dedupeRequestsByCallId(
 // the headroom ensures the gate only fires for genuinely un-truncated output
 // and must exceed the stub size (~2.3K) to avoid cascading re-persistence.
 const GATE_HEADROOM = 3000;
-const GATE_EXEMPT_TOOLS = new Set(['read_file']);
+// Tools that bound their own output and must bypass the persistence gate.
+// read_file pages/truncates itself; read_mcp_resource caps text in
+// formatMcpResourceContents and sets maxOutputChars=Infinity — but this gate
+// runs first, so without the exemption a 28k–100k resource is spilled to a
+// stub before that self-cap takes effect and the model never sees the body.
+const GATE_EXEMPT_TOOLS = new Set<string>([
+  ToolNames.READ_FILE,
+  ToolNames.READ_MCP_RESOURCE,
+]);
 
 function extractTextFromPartListUnion(c: PartListUnion): string {
   if (typeof c === 'string') return c;
@@ -780,12 +790,22 @@ function batchResponseOutputSize(call: CompletedToolCall): number {
 
 const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
 
+// NOTE: the `⚠` in this and TRUNCATION_RETRY_LOOP_DIRECTIVE below is part of an
+// LLM-facing prompt directive (injected into the model prompt, not rendered in
+// the TUI). The width-1 glyph rationale used elsewhere in this change does not
+// apply here — these are not terminal strings to "fix" for column width.
 /** Directive injected when a tool call repeatedly fails validation. */
 const RETRY_LOOP_STOP_DIRECTIVE =
-  '\n\n⚠️ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
+  '\n\n⚠ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
   'STOP retrying the same approach. Re-examine the tool schema and parameter requirements, then try a ' +
   'fundamentally different approach. If you cannot resolve the validation error, explain the issue to the user ' +
   'instead of retrying.';
+
+/** Directive injected when a truncated file-modifying call repeats. */
+const TRUNCATION_RETRY_LOOP_DIRECTIVE =
+  '\n\n⚠ RETRY LOOP DETECTED: The same truncated file write has been rejected multiple times. ' +
+  'STOP resending the same large content. Either split it into smaller write_file + incremental edit calls, ' +
+  'or explain to the user that the content is too large to write safely in one call.';
 
 const createErrorResponse = (
   request: ToolCallRequestInfo,
@@ -1609,9 +1629,82 @@ export class CoreToolScheduler {
       }
     }
 
+    // MCP tool whose server is gone / unconfigured: explain in MCP terms
+    // instead of falling through to a Levenshtein suggestion that would surface
+    // unrelated tools (e.g. "did you mean computer_use__click?").
+    const mcpMessage = this.getMcpToolUnavailableMessage(unknownToolName);
+    if (mcpMessage) {
+      return mcpMessage;
+    }
+
     // Standard "not found" message with Levenshtein suggestions
     const suggestion = this.getToolSuggestion(unknownToolName, topN);
     return `Tool "${unknownToolName}" not found in registry. Tools must use the exact names that are registered.${suggestion}`;
+  }
+
+  /**
+   * For an `mcp__<server>__<tool>` name whose tool is not registered, explains
+   * *why* in MCP terms — the server was removed this session, is not (or no
+   * longer) configured, or is configured but lacks that tool — instead of
+   * letting the generic Levenshtein path suggest unrelated tools. Returns null
+   * for non-MCP names so they keep the existing suggestion behaviour unchanged.
+   *
+   * Detection is by prefix-membership against known server names (each
+   * sanitized the way `generateValidName` builds the registered tool name),
+   * never by parsing the server back out of the unknown name: the `__`
+   * separator is ambiguous and long names are truncated, so extraction is
+   * unreliable. A name we cannot classify falls through to the generic message.
+   */
+  private getMcpToolUnavailableMessage(unknownToolName: string): string | null {
+    if (!unknownToolName.startsWith('mcp__')) {
+      return null;
+    }
+    // Mirror generateValidName's per-char sanitization when rebuilding a
+    // server's registered prefix. The trailing `__` makes the match exact at a
+    // server boundary (so `foo` does not match a `foobar` server). Truncation
+    // (>63-char names) is the rare case we let fall through.
+    const prefixOf = (server: string): string =>
+      `mcp__${server}__`.replace(/[^a-zA-Z0-9_.-]/g, '_');
+    // When one server name is a prefix of another after sanitization (e.g.
+    // `foo` vs `foo__bar`), a tool of the longer server also startsWith the
+    // shorter one's prefix. Match longest-first so the most specific server
+    // wins, instead of relying on iteration order.
+    const byPrefixLengthDesc = (a: string, b: string) =>
+      prefixOf(b).length - prefixOf(a).length;
+
+    // Candidate servers: everything still configured (regardless of admission
+    // state) plus servers removed this session. Longest-prefix-first so the most
+    // specific server wins when one name is a prefix of another.
+    const candidates = Array.from(
+      new Set([
+        ...(this.config.getMcpServerNames?.() ?? []),
+        ...(this.config.getRecentlyRemovedMcpServers?.() ?? []),
+      ]),
+    ).sort(byPrefixLengthDesc);
+    const serverHit = candidates.find((s) =>
+      unknownToolName.startsWith(prefixOf(s)),
+    );
+
+    if (!serverHit) {
+      // No known server owns this prefix → never configured.
+      return `Tool "${unknownToolName}" not found: no MCP server providing it is currently configured. If you recently removed or renamed an MCP server, its tools are no longer available.`;
+    }
+
+    // Explain WHY the owning server's tools aren't loaded, with the matching
+    // recovery action for each admission gate.
+    switch (this.config.getMcpServerUnavailableReason?.(serverHit)) {
+      case 'removed':
+        return `Tool "${unknownToolName}" is unavailable: the MCP server "${serverHit}" was removed during this session, so its tools were unloaded. Re-add it to your settings to use this tool again.`;
+      case 'not_allowed':
+        return `Tool "${unknownToolName}" is unavailable: the MCP server "${serverHit}" is not in the allow-list (mcp.allowed / --allowed-mcp-server-names), so its tools are not loaded. Add it to mcp.allowed to use this tool.`;
+      case 'excluded':
+        return `Tool "${unknownToolName}" is unavailable: the MCP server "${serverHit}" is excluded (mcp.excluded), so its tools are not loaded. Remove it from mcp.excluded to use this tool.`;
+      case 'pending_approval':
+        return `Tool "${unknownToolName}" is unavailable: the MCP server "${serverHit}" is awaiting approval, so its tools are not loaded. Approve it (run /mcp) to use this tool.`;
+      default:
+        // Configured and admitted — a genuine "tool not found".
+        return `Tool "${unknownToolName}" not found on MCP server "${serverHit}". The server may be disconnected, still starting up, or the tool was renamed.`;
+    }
   }
 
   /** Suggests similar tool names using Levenshtein distance. */
@@ -1690,6 +1783,28 @@ export class CoreToolScheduler {
         this.validationRetryCounts.delete(key);
       }
     }
+  }
+
+  /**
+   * Increments the retry counter for a (tool, errorMessage) pair and prunes any
+   * other error counters for the same tool, so a different failure on the same
+   * tool restarts the count rather than tripping the loop threshold. Shared by
+   * the truncated-Edit rejection path and the schema-validation failure path so
+   * both feed the same RETRY LOOP DETECTED detector.
+   */
+  private recordRetryableToolError(
+    toolName: string,
+    errorMessage: string,
+  ): number {
+    const errorKey = `${toolName}:${errorMessage}`;
+    const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
+    for (const key of this.validationRetryCounts.keys()) {
+      if (key.startsWith(`${toolName}:`) && key !== errorKey) {
+        this.validationRetryCounts.delete(key);
+      }
+    }
+    this.validationRetryCounts.set(errorKey, count);
+    return count;
   }
 
   private async _schedule(
@@ -1798,7 +1913,15 @@ export class CoreToolScheduler {
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content, even if params failed schema validation.
         if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
-          const truncationError = new Error(TRUNCATION_EDIT_REJECTION);
+          const count = this.recordRetryableToolError(
+            reqInfo.name,
+            TRUNCATION_EDIT_REJECTION,
+          );
+          const truncationError = new Error(
+            count >= VALIDATION_RETRY_LOOP_THRESHOLD
+              ? `${TRUNCATION_EDIT_REJECTION}${TRUNCATION_RETRY_LOOP_DIRECTIVE}`
+              : TRUNCATION_EDIT_REJECTION,
+          );
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
@@ -1829,14 +1952,10 @@ export class CoreToolScheduler {
           // Track validation retry for loop detection. Counts accumulate per
           // (tool, error message) pair so a different validation mistake on
           // the same tool starts fresh rather than tripping the threshold.
-          const errorKey = `${reqInfo.name}:${invocationOrError.message}`;
-          const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
-          for (const key of this.validationRetryCounts.keys()) {
-            if (key.startsWith(`${reqInfo.name}:`) && key !== errorKey) {
-              this.validationRetryCounts.delete(key);
-            }
-          }
-          this.validationRetryCounts.set(errorKey, count);
+          const count = this.recordRetryableToolError(
+            reqInfo.name,
+            invocationOrError.message,
+          );
 
           const finalError =
             count >= VALIDATION_RETRY_LOOP_THRESHOLD
@@ -1956,7 +2075,8 @@ export class CoreToolScheduler {
 
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+              shouldClassifyAllShellForAutoMode(canonicalName, this.config));
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
@@ -2151,7 +2271,12 @@ export class CoreToolScheduler {
                 responseParts: convertToFunctionResponse(
                   reqInfo.name,
                   reqInfo.callId,
-                  getPlanModeSystemReminder(),
+                  // SDK and subagent-like callers should return the plan
+                  // directly instead of entering an interactive approval flow.
+                  getPlanModeSystemReminder(
+                    isSubagentLikeExecutionContext() ||
+                      this.config.getSdkMode(),
+                  ),
                 ),
                 resultDisplay: 'Plan mode blocked a non-read-only tool call.',
                 error: undefined,
@@ -2931,7 +3056,7 @@ export class CoreToolScheduler {
     } catch (error) {
       // _executeToolCallBody pre-sets span status (OK / FAILURE /
       // CANCELLED) only AFTER its main try/catch is entered. Throws
-      // from the prelude — addToolInputAttributes, getMessageBus,
+      // from the prelude — getMessageBus,
       // startToolExecutionSpan, etc. — happen BEFORE the
       // `scheduled → executing` transition, so the span would end
       // UNSET with no failure_kind AND the tool call would stay in
@@ -2969,6 +3094,30 @@ export class CoreToolScheduler {
     }
   }
 
+  private safelyAddToolInputAttributes(
+    span: Span,
+    toolName: string,
+    toolInput: string,
+  ): void {
+    try {
+      addToolInputAttributes(this.config, span, toolName, toolInput);
+    } catch (error) {
+      debugLogger.warn('Failed to add tool input span attributes:', error);
+    }
+  }
+
+  private safelyAddToolResultAttributes(
+    span: Span,
+    toolName: string,
+    toolResult: string,
+  ): void {
+    try {
+      addToolResultAttributes(this.config, span, toolName, toolResult);
+    } catch (error) {
+      debugLogger.warn('Failed to add tool result span attributes:', error);
+    }
+  }
+
   private async _executeToolCallBody(
     scheduledCall: ScheduledToolCall,
     signal: AbortSignal,
@@ -2991,8 +3140,7 @@ export class CoreToolScheduler {
     // when sensitive attributes are off, but the argument is computed
     // before the call.
     if (this.config.getTelemetryIncludeSensitiveSpanAttributes?.()) {
-      addToolInputAttributes(
-        this.config,
+      this.safelyAddToolInputAttributes(
         span,
         toolName,
         safeJsonStringify(toolInput) ?? '{}',
@@ -3052,8 +3200,7 @@ export class CoreToolScheduler {
           new Error(blockMessage),
           ToolErrorType.EXECUTION_DENIED,
         );
-        addToolResultAttributes(
-          this.config,
+        this.safelyAddToolResultAttributes(
           span,
           toolName,
           `BLOCKED: ${blockMessage}`,
@@ -3131,12 +3278,25 @@ export class CoreToolScheduler {
           );
           this.notifyToolCallsUpdate();
         };
+        const canPromoteForegroundShell = () => {
+          const promotableShells = this.toolCalls.filter(
+            (tc) =>
+              tc.status === 'executing' &&
+              tc.request.name === ToolNames.SHELL &&
+              tc.promoteAbortController !== undefined,
+          );
+          return (
+            promotableShells.length === 1 &&
+            promotableShells[0]?.request.callId === callId
+          );
+        };
         promise = invocation.execute(
           signal,
           liveOutputCallback,
           shellExecutionConfig,
           setPidCallback,
           setPromoteAbortControllerCallback,
+          canPromoteForegroundShell,
         );
       } else {
         promise = invocation.execute(
@@ -3193,8 +3353,7 @@ export class CoreToolScheduler {
             cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
         }
-        addToolResultAttributes(
-          this.config,
+        this.safelyAddToolResultAttributes(
           span,
           toolName,
           `CANCELLED: ${cancelMessage}`,
@@ -3271,8 +3430,7 @@ export class CoreToolScheduler {
               new Error(stopMessage),
               ToolErrorType.EXECUTION_DENIED,
             );
-            addToolResultAttributes(
-              this.config,
+            this.safelyAddToolResultAttributes(
               span,
               toolName,
               `STOPPED: ${stopMessage}`,
@@ -3507,8 +3665,7 @@ export class CoreToolScheduler {
         // results can contain Part[] with large inlineData/media payloads
         // that we don't want to serialize when telemetry is off.
         if (this.config.getTelemetryIncludeSensitiveSpanAttributes?.()) {
-          addToolResultAttributes(
-            this.config,
+          this.safelyAddToolResultAttributes(
             span,
             toolName,
             typeof content === 'string'
@@ -3596,8 +3753,7 @@ export class CoreToolScheduler {
           errorMessage = persistResult.content;
         }
 
-        addToolResultAttributes(
-          this.config,
+        this.safelyAddToolResultAttributes(
           span,
           toolName,
           `ERROR: ${errorMessage}`,
@@ -3665,8 +3821,7 @@ export class CoreToolScheduler {
             cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
         }
-        addToolResultAttributes(
-          this.config,
+        this.safelyAddToolResultAttributes(
           span,
           toolName,
           `CANCELLED: ${cancelMessage}`,
@@ -3704,8 +3859,7 @@ export class CoreToolScheduler {
             exceptionErrorMessage += `\n\n${failureHookResult.additionalContext}`;
           }
         }
-        addToolResultAttributes(
-          this.config,
+        this.safelyAddToolResultAttributes(
           span,
           toolName,
           `EXCEPTION: ${exceptionErrorMessage}`,
@@ -3837,15 +3991,18 @@ export class CoreToolScheduler {
         if (this.onAllToolCallsComplete) {
           await this.onAllToolCallsComplete(completedCalls);
         }
-        this.notifyToolCallsUpdate();
       } finally {
-        this.isFinalizingToolCalls = false;
-        // Always drain the queue, even if completion callbacks throw.
-        if (this.requestQueue.length > 0) {
-          const next = this.requestQueue.shift()!;
-          this._schedule(next.request, next.signal)
-            .then(next.resolve)
-            .catch(next.reject);
+        try {
+          this.notifyToolCallsUpdate();
+        } finally {
+          this.isFinalizingToolCalls = false;
+          // Always drain the queue, even if completion callbacks throw.
+          if (this.requestQueue.length > 0) {
+            const next = this.requestQueue.shift()!;
+            this._schedule(next.request, next.signal)
+              .then(next.resolve)
+              .catch(next.reject);
+          }
         }
       }
     }
@@ -4062,11 +4219,15 @@ export class CoreToolScheduler {
 
         const forceAutoReviewForAllow =
           this.config.getApprovalMode() === ApprovalMode.AUTO &&
-          shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+          (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+            shouldClassifyAllShellForAutoMode(
+              pendingTool.request.name,
+              this.config,
+            ));
 
         if (finalPermission === 'allow' && forceAutoReviewForAllow) {
           debugLogger.info(
-            `Auto mode: pending L4 allow overridden by protected-write guard for ${pendingTool.request.name}`,
+            `Auto mode: pending L4 allow overridden by protected-write guard or classifyAllShell for ${pendingTool.request.name}`,
           );
           const denialState = this.config.getAutoModeDenialState();
           const fallback = shouldFallback(denialState);
