@@ -43,7 +43,7 @@ export function QwenCodePanel() {
     <WebShellWithProviders
       baseUrl="http://127.0.0.1:4170"
       token="your-bearer-token"
-      initialSessionId="838e1811-9f84-4848-9915-d9a7f01ff5c6"
+      sessionId="838e1811-9f84-4848-9915-d9a7f01ff5c6"
       onSessionIdChange={(sessionId) => {
         console.log('current session:', sessionId);
       }}
@@ -69,7 +69,7 @@ import { WebShell } from '@qwen-code/web-shell';
 export function App() {
   return (
     <DaemonWorkspaceProvider baseUrl="http://127.0.0.1:4170" token="...">
-      <DaemonSessionProvider initialSessionId="...">
+      <DaemonSessionProvider sessionId="...">
         <ChatPanel />
         <WebShell theme="dark" language="zh-CN" />
       </DaemonSessionProvider>
@@ -87,21 +87,21 @@ export function App() {
 
 包含 `WebShell` 的所有 Props，加上 Provider 配置：
 
-| 属性               | 类型     | 说明                                                 |
-| ------------------ | -------- | ---------------------------------------------------- |
-| `baseUrl`          | `string` | daemon API 地址，未传时使用 `window.location.origin` |
-| `token`            | `string` | daemon API Bearer token                              |
-| `initialSessionId` | `string` | 初始要连接的 session id                              |
+| 属性        | 类型     | 说明                                                 |
+| ----------- | -------- | ---------------------------------------------------- |
+| `baseUrl`   | `string` | daemon API 地址，未传时使用 `window.location.origin` |
+| `token`     | `string` | daemon API Bearer token                              |
+| `sessionId` | `string` | 要连接的 session id；未传或 `undefined` 时保持空页面 |
 
 ### WebShell
 
-| 属性                | 类型                                   | 说明                              |
-| ------------------- | -------------------------------------- | --------------------------------- |
-| `onSessionIdChange` | `(sessionId: string) => void`          | 当前 session id 变化时触发        |
-| `theme`             | `'dark' \| 'light'`                    | UI 主题，默认 `dark`              |
-| `onThemeChange`     | `(theme: WebShellTheme) => void`       | `/theme` 命令切换主题后触发       |
-| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`   | UI 语言                           |
-| `onLanguageChange`  | `(language: WebShellLanguage) => void` | `/language ui` 切换 UI 语言后触发 |
+| 属性                | 类型                                       | 说明                              |
+| ------------------- | ------------------------------------------ | --------------------------------- |
+| `onSessionIdChange` | `(sessionId: string \| undefined) => void` | 当前 session id 变化或清空时触发  |
+| `theme`             | `'dark' \| 'light'`                        | UI 主题，默认 `dark`              |
+| `onThemeChange`     | `(theme: WebShellTheme) => void`           | `/theme` 命令切换主题后触发       |
+| `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`       | UI 语言                           |
+| `onLanguageChange`  | `(language: WebShellLanguage) => void`     | `/language ui` 切换 UI 语言后触发 |
 
 ## 架构说明
 
