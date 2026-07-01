@@ -17,22 +17,15 @@ import {
   atomicWriteJSON,
   getTaskRunsDir,
   type FireContext,
+  type TaskRunRecord,
 } from '@qwen-code/qwen-code-core';
+
+export type { TaskRunRecord };
 
 /** Wall-clock safety cap for an unattended run. */
 const DEFAULT_MAX_WALL_TIME = '30m';
 /** How much stderr tail to keep for a failure summary. */
 const STDERR_TAIL_BYTES = 2000;
-
-export interface TaskRunRecord {
-  taskId: string;
-  runId: string;
-  firedAt: number;
-  finishedAt: number;
-  exitCode: number;
-  ok: boolean;
-  summary: string;
-}
 
 export interface RunScheduledTaskDeps {
   /** Injectable spawn for tests. */

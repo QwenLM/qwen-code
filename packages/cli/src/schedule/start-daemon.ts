@@ -25,7 +25,13 @@ export async function startScheduleDaemon(
   deps: StartDaemonDeps = {},
 ): Promise<ScheduleDaemon> {
   const daemon = new ScheduleDaemon({
-    fire: deps.fire ?? ((ctx) => runScheduledTask(ctx)),
+    // Await the run so the daemon's in-flight tracking spans the whole child
+    // process, but return void to satisfy FireCallback.
+    fire:
+      deps.fire ??
+      (async (ctx) => {
+        await runScheduledTask(ctx);
+      }),
     now: deps.now,
     tickIntervalMs: deps.tickIntervalMs,
     reloadIntervalMs: deps.reloadIntervalMs,

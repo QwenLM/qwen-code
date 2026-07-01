@@ -225,6 +225,7 @@ export {
 } from './services/schedule/task-store.js';
 export * from './services/schedule/schedule-daemon.js';
 export * from './services/schedule/daemon-lock.js';
+export * from './services/schedule/run-delivery.js';
 export { humanReadableCron } from './utils/cronDisplay.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';

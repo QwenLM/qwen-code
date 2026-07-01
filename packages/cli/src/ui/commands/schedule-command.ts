@@ -9,8 +9,10 @@ import {
   humanReadableCron,
   isTaskEnabled,
   listScheduledTasks,
+  readAllRunRecords,
   readState,
   readTask,
+  readTaskRunRecords,
   sanitizeTaskId,
   type FireContext,
   type ScheduledTask,
@@ -179,6 +181,41 @@ const runCommand: SlashCommand = {
   },
 };
 
+const MAX_LOG_ROWS = 20;
+
+const logsCommand: SlashCommand = {
+  name: 'logs',
+  altNames: ['runs'],
+  kind: CommandKind.BUILT_IN,
+  get description() {
+    return t('Show recent scheduled-run results (optionally for one task)');
+  },
+  action: async (_context, args): Promise<SlashCommandActionReturn> => {
+    const id = sanitizeTaskId(args.trim());
+    const records = id
+      ? await readTaskRunRecords(id)
+      : await readAllRunRecords();
+    if (records.length === 0) {
+      return {
+        type: 'message',
+        messageType: 'info',
+        content: id
+          ? `No runs recorded for "${id}".`
+          : 'No scheduled runs recorded yet.',
+      };
+    }
+    const rows = records
+      .slice(0, MAX_LOG_ROWS)
+      .map(
+        (r) =>
+          `${r.ok ? '✓' : '✗'} [${r.taskId}] ${r.runId}  ${new Date(
+            r.finishedAt,
+          ).toLocaleString()}  ${r.summary}`,
+      );
+    return { type: 'message', messageType: 'info', content: rows.join('\n') };
+  },
+};
+
 export const scheduleCommand: SlashCommand = {
   name: 'schedule',
   altNames: ['routines'],
@@ -186,7 +223,13 @@ export const scheduleCommand: SlashCommand = {
   get description() {
     return t('Create and manage local scheduled tasks (routines)');
   },
-  subCommands: [createCommand, listCommand, runCommand, deleteCommand],
+  subCommands: [
+    createCommand,
+    listCommand,
+    runCommand,
+    logsCommand,
+    deleteCommand,
+  ],
   action: async (_context, args): Promise<SlashCommandActionReturn> => {
     // A bare `/schedule` shows usage; `/schedule <free text>` that isn't a
     // subcommand is treated as a natural-language create request.
@@ -202,6 +245,7 @@ export const scheduleCommand: SlashCommand = {
       '  /schedule create <desc>   Same, explicit',
       '  /schedule list            List tasks',
       '  /schedule run <id>        Run a task once now',
+      '  /schedule logs [id]       Show recent run results',
       '  /schedule delete <id>     Delete a task',
       '',
       'Current tasks:',

@@ -135,6 +135,31 @@ describe('/schedule command', () => {
     expect(res.content).toContain('Usage');
   });
 
+  it('logs shows an empty state and then recorded runs', async () => {
+    const empty = await runAction(sub('logs'), '');
+    expect(empty.content).toContain('No scheduled runs recorded');
+
+    await writeTask(makeTask({ id: 'logged' }));
+    const runsDir = path.join(tmpDir, 'scheduled-tasks', 'logged', 'runs');
+    await fs.mkdir(runsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(runsDir, 'runzzzz.json'),
+      JSON.stringify({
+        taskId: 'logged',
+        runId: 'runzzzz',
+        firedAt: 1,
+        finishedAt: 2,
+        exitCode: 0,
+        ok: true,
+        summary: 'completed',
+      }),
+    );
+    const res = await runAction(sub('logs'), '');
+    expect(res.content).toContain('[logged]');
+    expect(res.content).toContain('runzzzz');
+    expect(res.content).toContain('✓');
+  });
+
   it('parent action treats free text as a create request', async () => {
     const ctx = createMockCommandContext();
     const res = (await scheduleCommand.action!(
