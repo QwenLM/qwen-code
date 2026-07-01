@@ -108,6 +108,9 @@ export class QQChannel extends ChannelBase {
   /** Named handler for permanent textChunk listener (cron/non-prompt messages). */
   private _cronTextHandler: ((sessionId: string, text: string) => void) | null =
     null;
+  /** Tracks whether _cronTextHandler is currently registered on the bridge,
+   *  to avoid duplicate registration after disconnect/reconnect cycles. */
+  private cronTextHandlerAttached: boolean = false;
 
   /** Track whether a chatId is a group or C2C for correct API routing. */
   private chatTypeMap: Map<string, 'c2c' | 'group'> = new Map();
@@ -238,6 +241,7 @@ export class QQChannel extends ChannelBase {
       });
     };
     this.bridge.on?.('textChunk', this._cronTextHandler);
+    this.cronTextHandlerAttached = true;
   }
 
   /**
@@ -514,9 +518,9 @@ export class QQChannel extends ChannelBase {
       this.connectReject(new Error('Channel disconnected'));
       this.connectReject = null;
     }
-    if (this._cronTextHandler) {
+    if (this._cronTextHandler && this.cronTextHandlerAttached) {
       this.bridge.off?.('textChunk', this._cronTextHandler);
-      this._cronTextHandler = null;
+      this.cronTextHandlerAttached = false;
     }
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
@@ -928,7 +932,8 @@ export class QQChannel extends ChannelBase {
               );
               this.isReconnecting = true;
               this.disconnect();
-              setTimeout(() => {
+              this.reconnectTimer = setTimeout(() => {
+                if (this.disposed) return;
                 this.isReconnecting = false;
                 this.connect().catch((err: unknown) => {
                   process.stderr.write(
@@ -936,6 +941,7 @@ export class QQChannel extends ChannelBase {
                   );
                 });
               }, 1000);
+              this.reconnectTimer.unref?.();
               return;
             }
             this.tokenRefreshTimer = setTimeout(() => {
@@ -1149,6 +1155,10 @@ export class QQChannel extends ChannelBase {
                 this.connectReject = null;
                 this._ready = true;
                 this.coldStart = false;
+                if (this._cronTextHandler && !this.cronTextHandlerAttached) {
+                  this.bridge.on?.('textChunk', this._cronTextHandler);
+                  this.cronTextHandlerAttached = true;
+                }
                 onReady();
               })
               .catch((err: unknown) => {
@@ -1158,6 +1168,10 @@ export class QQChannel extends ChannelBase {
                 this.connectReject = null;
                 this._ready = true;
                 this.coldStart = false;
+                if (this._cronTextHandler && !this.cronTextHandlerAttached) {
+                  this.bridge.on?.('textChunk', this._cronTextHandler);
+                  this.cronTextHandlerAttached = true;
+                }
                 onReady();
               });
           } else {
@@ -1166,6 +1180,10 @@ export class QQChannel extends ChannelBase {
             );
             this.connectReject = null;
             this._ready = true;
+            if (this._cronTextHandler && !this.cronTextHandlerAttached) {
+              this.bridge.on?.('textChunk', this._cronTextHandler);
+              this.cronTextHandlerAttached = true;
+            }
             onReady();
           }
         } else if (t === 'C2C_MESSAGE_CREATE') {
@@ -1389,7 +1407,7 @@ export class QQChannel extends ChannelBase {
     if (!selfMention?.id) return '';
     if (!/^[A-F0-9]{32}$/i.test(selfMention.id)) {
       process.stderr.write(
-        `[QQ:${this.name}] Invalid botOpenId format: ${selfMention.id}\n`,
+        `[QQ:${this.name}] Invalid botOpenId format: ${sanitizeLogText(selfMention.id, 64)}\n`,
       );
       return '';
     }
@@ -1485,7 +1503,7 @@ export class QQChannel extends ChannelBase {
     this.chatTypeMap.set(chatId, 'group');
     if (this.groupActiveMsgEnabled.get(chatId) === false) {
       process.stderr.write(
-        `[QQ:${this.name}] handleGroup blocked: active messages disabled for ${chatId}\n`,
+        `[QQ:${this.name}] handleGroup blocked: active messages disabled for ${sanitizeLogText(chatId, 64)}\n`,
       );
       return;
     }
@@ -1623,16 +1641,12 @@ export class QQChannel extends ChannelBase {
     this.chatTypeMap.set(chatId, 'group');
     if (isNewGroup) this.saveQQState();
 
-    // Deduplicate early — before any side effects beyond chatTypeMap.set
-    // to avoid unnecessary state mutations on replayed messages.
-    if (this.isDuplicate(event.id)) return;
-
     // Guard: if the group admin disabled active messages via QQ's
     // permission toggle, drop the inbound message silently. QQ platform
     // policy requires bots to stop processing when active messages are off.
     if (this.groupActiveMsgEnabled.get(chatId) === false) {
       process.stderr.write(
-        `[QQ:${this.name}] handleGroupAll blocked: active messages disabled for ${chatId}\n`,
+        `[QQ:${this.name}] handleGroupAll blocked: active messages disabled for ${sanitizeLogText(chatId, 64)}\n`,
       );
       return;
     }
@@ -1671,6 +1685,9 @@ export class QQChannel extends ChannelBase {
       const matched = triggers.some((kw) => lower.includes(kw.toLowerCase()));
       if (!matched) return;
     }
+
+    // All policy checks passed — now deduplicate, then forward to LLM.
+    if (this.isDuplicate(event.id)) return;
 
     // policy === 'all' or keyword matched → forward to LLM
 
