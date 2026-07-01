@@ -111,6 +111,22 @@ describe('GroupHistoryStore', () => {
     expect(new GroupHistoryStore(path).drain('k', 10)).toEqual([]);
   });
 
+  it('compacts drained records while preserving other keys', () => {
+    const path = filePath();
+    const store = new GroupHistoryStore(path);
+
+    store.record('drained', entry('a'), 10);
+    store.record('kept', entry('b'), 10);
+
+    expect(store.drain('drained', 10).map((item) => item.text)).toEqual(['a']);
+    const data = readFileSync(path, 'utf-8');
+    expect(data).not.toContain('"key":"drained"');
+    expect(data).toContain('"key":"kept"');
+    expect(
+      new GroupHistoryStore(path).drain('kept', 10).map((item) => item.text),
+    ).toEqual(['b']);
+  });
+
   it('clears all keys on disk', () => {
     const path = filePath();
     const store = new GroupHistoryStore(path);
