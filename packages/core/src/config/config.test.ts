@@ -725,6 +725,37 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('falls back to auto-select when a legacy visionModel matches multiple endpoints', () => {
+      const config = new Config({
+        ...baseParams,
+        visionModel: 'openai:qwen3.7-plus',
+      });
+      stubProvider(config, [
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          isVision: true,
+        },
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          isVision: true,
+        },
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
     it('falls back to auto-select on a malformed visionModel selector instead of throwing', () => {
       // 'openai:' is a known authType with no model id — resolveModelId throws,
       // and the guard must swallow it rather than take down every image request.
