@@ -122,7 +122,7 @@ Deferred to follow-up PRs:
 
 - **Scrollbar drag + click-to-position** — needs screen-absolute element coords, blocked on a stock-ink-7 limitation (see V.4 / V.7).
 - **In-app `/` search** — claude-code's `TranscriptSearchBar` pattern (V.5).
-- **Alternate-buffer mode** — `contexts/ScrollProvider.tsx`-style focus / lock, with full alt-screen takeover (V.6).
+- **Dedicated alternate-buffer setting** — VP already enters alternate screen; revisit a separate toggle only if compatibility reports require it.
 
 ### Setting (V.2)
 
@@ -132,9 +132,10 @@ ui: {
   /**
    * Enables virtualized history rendering for long conversations.
    * When true, only items in the visible viewport are rendered through React;
-   * scrolled-out items remain in the terminal scrollback buffer.
+   * scrolled-out items stay in the in-app scrollback model instead of the
+   * host terminal scrollback buffer.
    *
-   * Default: false. Opt-in until proven stable on long conversations.
+   * Default: true. Users can opt out if they prefer host terminal scrollback.
    */
   useTerminalBuffer?: boolean;  // alias kept compat with gemini-cli
 }
@@ -143,7 +144,7 @@ ui: {
 `MainContent.tsx` reads the setting and switches paths:
 
 ```tsx
-const useTerminalBuffer = uiState.settings?.ui?.useTerminalBuffer ?? false;
+const useTerminalBuffer = uiState.settings?.ui?.useTerminalBuffer ?? true;
 
 if (useTerminalBuffer) {
   return <ScrollableList .../>; // virtualized
@@ -152,7 +153,7 @@ if (useTerminalBuffer) {
 return <Static .../>; // existing path, untouched
 ```
 
-The legacy `<Static>` path stays as-is — no regression risk for users who don't opt in.
+The legacy `<Static>` path stays available for users who explicitly opt out.
 
 ## 6. Key adaptations from gemini-cli source
 
@@ -316,10 +317,10 @@ Same pattern in qwen-code. Required for virtualization to actually skip re-rende
 | **V.3**   | test(integration): capture-suite regressions for streaming / resize / shell | port 3 capture scripts from PR #3663                                                                                                                                               | ~2000 (test-only) | #4146        | pending                                        |
 | **V.4**   | feat(cli): scrollbar drag + click-to-position                               | SGR mouse hit-test on scrollbar column. Needs screen-absolute coords — either upstream `getBoundingBox` to ink 7 or own yoga walker. Auto-hide animation already shipped in #4146. | ~400              | #4146        | deferred — coord blocker                       |
 | **V.5**   | feat(cli): in-app `/` search                                                | viewport-bound highlight + n/N navigation (claude-code's `TranscriptSearchBar` pattern)                                                                                            | ~300              | #4146        | deferred                                       |
-| **V.6**   | feat(cli): alternate-buffer mode (full alt-screen takeover)                 | additional setting `ui.useAlternateBuffer`                                                                                                                                         | ~500              | #4146        | deferred — separate UX decision required       |
+| **V.6**   | feat(cli): dedicated alternate-buffer toggle                                | no separate setting planned for the default flow; VP already enters alternate screen, revisit only if compatibility reports require it                                             | —                 | #4146        | deferred — compatibility-driven only           |
 | **V.7**   | research: preserve host terminal scrollback (dual-write)                    | `@jrichman/ink`'s `overflowToBackbuffer` is fork-only. Options: upstream PR to ink 7, own dual-write, or accept loss. Investigation.                                               | —                 | #4146        | structurally blocked on stock ink 7            |
 
-V.3 (integration tests) is the remaining critical-path item before flipping the default. V.4–V.6 close the remaining gemini-cli-parity gaps; V.7 is open research because the underlying ink prop we'd need (`overflowToBackbuffer`) only exists in gemini-cli's `@jrichman/ink` fork.
+V.3 (integration tests) remains desirable for long-session regression coverage but is no longer a gating prerequisite for the default flip. V.4–V.6 close the remaining gemini-cli-parity gaps; V.7 is open research because the underlying ink prop we'd need (`overflowToBackbuffer`) only exists in gemini-cli's `@jrichman/ink` fork.
 
 ## 8. Verification plan
 
@@ -342,10 +343,10 @@ End-to-end (after V.3):
 ## 9. Open questions / decisions needed
 
 1. **Setting name**: `ui.useTerminalBuffer` (gemini-cli compat) vs `ui.virtualizedHistory` (more descriptive)?
-2. **Default value**: ship as `false` (opt-in) or stage rollout via env var first?
+2. **Default value**: resolved as `true` (default-on) with `false` as an explicit opt-out.
 3. **Static-item heuristic**: gemini-cli marks only `header` as static. Should we also mark completed Gemini messages, tool results that are no longer in `pendingHistoryItems`, etc.?
 4. **Mouse support**: gemini-cli's `ScrollProvider` includes mouse drag for scrollbar. Worth porting now or skip until V.4?
-5. **Compatibility with #3905**: ~~PR #3905 (Ctrl+O freeze fix) is open and modifies the same `MainContent.tsx`. Coordinate merge order — likely V.2 rebases on top of #3905.~~ **Resolved**: #3905's progressive-replay landed in `main` and is preserved in the legacy `<Static>` branch of `MainContent.tsx`; the VP branch supersedes it for opt-in users because the freeze trigger (full Static remount) no longer applies.
+5. **Compatibility with #3905**: ~~PR #3905 (Ctrl+O freeze fix) is open and modifies the same `MainContent.tsx`. Coordinate merge order — likely V.2 rebases on top of #3905.~~ **Resolved**: #3905's progressive-replay landed in `main` and is preserved in the legacy `<Static>` branch of `MainContent.tsx`; the VP branch supersedes it for default users because the freeze trigger (full Static remount) no longer applies.
 6. **Compatibility with `chore/re-upgrade-ink-7-0-3`**: PR #4146 stacks on it. After #4119 (the ink 7.0.3 re-upgrade PR) merges to `main`, PR #4146's base will re-target to `main`.
 
 ## 10. Risks
@@ -361,7 +362,7 @@ End-to-end (after V.3):
 ## 11. Approval checklist
 
 - [x] Architectural direction approved — port from gemini-cli (§4)
-- [x] Setting name + default decided — `ui.useTerminalBuffer`, default `false` (opt-in)
+- [x] Setting name + default decided — `ui.useTerminalBuffer`, default `true` (opt-out)
 - [x] Static-item heuristic — `isStaticItem={(item) => item.id > 0}` (completed history items)
 - [x] Mouse-support scope — deferred to V.4; keyboard-only scroll in #4146
 - [x] Merge ordering with #3905 (§9.5) — #3905 already in `main`; #4146 preserves the legacy progressive-replay path and supersedes it only for VP users

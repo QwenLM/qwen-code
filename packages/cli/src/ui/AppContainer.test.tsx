@@ -32,7 +32,7 @@ import {
   type Mock,
 } from 'vitest';
 import { render, cleanup } from 'ink-testing-library';
-import { useContext, act } from 'react';
+import { useContext, useState, act } from 'react';
 import {
   AppContainer,
   dedupeNewestFirst,
@@ -396,6 +396,7 @@ describe('AppContainer State Management', () => {
         ui: {
           showStatusInTitle: false,
           hideWindowTitle: false,
+          useTerminalBuffer: false,
         },
       },
       setValue: vi.fn(),
@@ -711,6 +712,107 @@ describe('AppContainer State Management', () => {
       expect(mockStdout.write).not.toHaveBeenCalledWith(
         ansiEscapes.clearTerminal,
       );
+    });
+
+    it('defaults to VP mode when useTerminalBuffer is unset', () => {
+      const defaultSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={defaultSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedUIState.useTerminalBuffer).toBe(true);
+    });
+
+    it('keeps screen reader mode on the Static path when useTerminalBuffer is unset', () => {
+      vi.spyOn(mockConfig, 'getScreenReader').mockReturnValue(true);
+      const defaultSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      render(
+        <AppContainer
+          config={mockConfig}
+          settings={defaultSettings}
+          version="1.0.0"
+          initializationResult={mockInitResult}
+        />,
+      );
+
+      expect(capturedUIState.useTerminalBuffer).toBe(false);
+    });
+
+    it('locks terminal buffer mode for the running session', () => {
+      const vpSettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: true,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+      const legacySettings = {
+        merged: {
+          hideTips: false,
+          theme: 'default',
+          ui: {
+            showStatusInTitle: false,
+            hideWindowTitle: false,
+            useTerminalBuffer: false,
+          },
+        },
+        setValue: vi.fn(),
+      } as unknown as LoadedSettings;
+
+      vi.spyOn(mockConfig, 'initialize').mockResolvedValue(undefined);
+      let updateSettings!: (settings: LoadedSettings) => void;
+      function Wrapper() {
+        const [settings, setSettings] = useState(vpSettings);
+        updateSettings = setSettings;
+        return (
+          <AppContainer
+            config={mockConfig}
+            settings={settings}
+            version="1.0.0"
+            initializationResult={mockInitResult}
+          />
+        );
+      }
+
+      render(<Wrapper />);
+
+      expect(capturedUIState.useTerminalBuffer).toBe(true);
+
+      act(() => updateSettings(legacySettings));
+
+      expect(capturedUIState.useTerminalBuffer).toBe(true);
     });
 
     // #4891 changed the resize contract: width changes now trigger ONE full

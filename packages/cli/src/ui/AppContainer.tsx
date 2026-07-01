@@ -116,6 +116,7 @@ import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { usePreferredEditor } from './hooks/usePreferredEditor.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
+import { shouldUseVirtualViewport } from './utils/terminal-buffer.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
@@ -953,12 +954,17 @@ export const AppContainer = (props: AppContainerProps) => {
   // cursorTo+eraseDown would be a wasted flash and would also corrupt the
   // in-app scroll position. The remount-key bump is also a near-no-op for
   // VP: nothing in the VP render path is keyed by historyRemountKey, so
-  // the only reason to bump it is to keep the legacy `<Static>` branch in
-  // sync if the user toggles `useTerminalBuffer` off mid-session. The
-  // visible refresh in VP mode comes for free from the React tree
+  // keeping the bump is harmless because the startup-scoped VP decision
+  // is intentionally restart-only to match Ink's alternateScreen lifetime.
+  // The visible refresh in VP mode comes for free from the React tree
   // re-reading `mergedHistory` / `allVirtualItems` on whatever state
   // change triggered refreshStatic (Ctrl+O, model change, etc.).
-  const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
+  const [useTerminalBuffer] = useState(() =>
+    shouldUseVirtualViewport(
+      settings.merged.ui?.useTerminalBuffer,
+      config.getScreenReader(),
+    ),
+  );
   const refreshStatic = useCallback(() => {
     if (!useTerminalBuffer) {
       stdout.write(ansiEscapes.clearTerminal);

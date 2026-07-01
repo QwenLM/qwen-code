@@ -69,7 +69,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 
 ## History scrollback
 
-Active only when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized History). In that mode conversation history is rendered inside an in-app viewport instead of the host terminal scrollback, so the keys below replace the terminal's native scroll.
+Active when `ui.useTerminalBuffer` is enabled (Settings → UI → Virtualized History) and screen reader mode is off, which is the default for non-screen-reader sessions. In that mode conversation history is rendered inside an in-app viewport instead of the host terminal scrollback, so the keys below replace the terminal's native scroll.
 
 | Shortcut        | Description                                          |
 | --------------- | ---------------------------------------------------- |
@@ -87,7 +87,7 @@ When `ui.useTerminalBuffer` is on, the terminal forwards mouse events to qwen-co
 
 Inside tmux, some terminals translate trackpad or wheel gestures into plain `Up Arrow` and `Down Arrow` sequences before qwen-code sees them. Those bytes are identical to real arrow-key presses, so qwen-code cannot tell whether you meant to scroll the viewport or navigate prompt history.
 
-If trackpad scrolling changes the prompt history in tmux, enable `ui.useTerminalBuffer`; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
+If trackpad scrolling changes the prompt history in tmux, make sure `ui.useTerminalBuffer` is enabled; then use `Shift+Up` / `Shift+Down`, or the mouse wheel when tmux forwards wheel events to the app. If you prefer host scrollback, adjust your tmux mouse bindings for wheel events.
 
 ## IDE Integration
 
