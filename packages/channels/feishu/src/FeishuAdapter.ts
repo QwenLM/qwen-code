@@ -1039,6 +1039,7 @@ export class FeishuChannel extends ChannelBase {
 
   private stopLabelFor(terminalStatus?: FeishuTerminalStatus): string {
     switch (terminalStatus) {
+      case 'completed':
       case 'cancelled':
       case 'failed':
         return this.statusLabelFor(terminalStatus);
