@@ -802,6 +802,7 @@ export function createServeApp(
       opts.allowOrigins && opts.allowOrigins.length > 0
         ? parseAllowOriginPatterns(opts.allowOrigins)
         : undefined,
+    hostname: opts.hostname,
     sessionShellCommandEnabled,
     workspaceRememberLane,
     checkRate: rateLimiter?.checkRate,

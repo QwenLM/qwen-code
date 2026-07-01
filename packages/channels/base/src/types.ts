@@ -152,10 +152,32 @@ export type ChannelTaskLifecycleEvent =
     })
   | (ChannelTaskLifecycleBase & {
       type: 'cancelled';
-      reason: 'cancel_command' | 'clear' | 'steer';
+      reason: 'cancel_command' | 'clear' | 'steer' | 'timeout';
     })
   | (ChannelTaskLifecycleBase & { type: 'completed' })
   | (ChannelTaskLifecycleBase & { type: 'failed'; error: string });
+
+export interface ChannelMemoryTarget {
+  channelName: string;
+  chatId: string;
+  threadId?: string;
+}
+
+export interface ChannelMemoryWriteResult {
+  changed: boolean;
+  filePath?: string;
+}
+
+export interface ChannelMemoryCallbacks {
+  readChannelMemory(target: ChannelMemoryTarget): Promise<string>;
+  appendChannelMemory(
+    target: ChannelMemoryTarget,
+    text: string,
+  ): Promise<ChannelMemoryWriteResult>;
+  clearChannelMemory(
+    target: ChannelMemoryTarget,
+  ): Promise<ChannelMemoryWriteResult>;
+}
 
 /**
  * A channel plugin registers a channel type and provides a factory

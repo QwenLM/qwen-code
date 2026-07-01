@@ -649,6 +649,48 @@ describe('LoopTickResolver', () => {
     }
   });
 
+  it('homeLoopLabel uses forward slashes for Windows tilde labels under the real home', async () => {
+    const prevQwenHome = process.env['QWEN_HOME'];
+    delete process.env['QWEN_HOME'];
+    vi.resetModules();
+    vi.doMock('node:path', async (importActual) => {
+      const actual = await importActual<typeof import('node:path')>();
+      return {
+        ...actual.win32,
+        default: actual.win32,
+        posix: actual.posix,
+        win32: actual.win32,
+      };
+    });
+    vi.doMock('node:os', async (importActual) => {
+      const actual = await importActual<typeof import('node:os')>();
+      return {
+        ...actual,
+        default: { ...actual, homedir: () => 'C:\\Users\\runneradmin' },
+        homedir: () => 'C:\\Users\\runneradmin',
+      };
+    });
+    try {
+      const { LoopTickResolver: WindowsPathResolver } = await import(
+        './loop-tick-resolver.js'
+      );
+      const windowsPathResolver = new WindowsPathResolver({
+        projectRoot: 'C:\\project',
+        homeDir: 'C:\\Users\\runneradmin',
+        homeQwenDir: 'C:\\Users\\runneradmin\\.qwen-loop',
+        allowProjectFile: () => true,
+      });
+
+      expect(windowsPathResolver.homeLoopLabel()).toBe('~/.qwen-loop/loop.md');
+    } finally {
+      vi.doUnmock('node:path');
+      vi.doUnmock('node:os');
+      vi.resetModules();
+      if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+      else process.env['QWEN_HOME'] = prevQwenHome;
+    }
+  });
+
   it('re-expands after delete→recreate even when the recreated content is identical', async () => {
     await writeProject('- same tasks');
     expect((await resolver.resolve('dynamic')).full).toBe(true);

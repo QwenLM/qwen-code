@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import {
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
+  resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
 import type { Content, FunctionCall, Part } from '@google/genai';
@@ -41,6 +42,7 @@ import { MessageType } from '../../ui/types.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
+const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
 const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
@@ -58,6 +60,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     }),
     generatePromptSuggestion: vi.fn(),
     logPromptSuggestion: vi.fn(),
+    runVisionBridge: runVisionBridgeSpy,
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
     LoopTickResolver: class extends actual.LoopTickResolver {
@@ -179,18 +182,25 @@ function createEmptyStream() {
 
 /**
  * Points os.homedir() at `home` for a test by overriding the env vars libuv
- * reads (HOME on POSIX, USERPROFILE on Windows) — the module export itself can't
- * be spied under ESM. Returns a restore function.
+ * reads — the module export itself can't be spied under ESM. Returns a restore
+ * function.
  */
 function setFakeHome(home: string): () => void {
-  const prev = {
-    HOME: process.env['HOME'],
-    USERPROFILE: process.env['USERPROFILE'],
-  };
-  process.env['HOME'] = home;
-  process.env['USERPROFILE'] = home;
+  const keys = [
+    'HOME',
+    'USERPROFILE',
+    'HOMEDRIVE',
+    'HOMEPATH',
+    'HOMESHARE',
+  ] as const;
+  const prev = Object.fromEntries(
+    keys.map((key) => [key, process.env[key]]),
+  ) as Record<(typeof keys)[number], string | undefined>;
+  for (const key of keys) {
+    process.env[key] = home;
+  }
   return () => {
-    for (const key of ['HOME', 'USERPROFILE'] as const) {
+    for (const key of keys) {
       if (prev[key] === undefined) delete process.env[key];
       else process.env[key] = prev[key];
     }
@@ -344,6 +354,7 @@ describe('Session', () => {
   }
 
   beforeEach(() => {
+    runVisionBridgeSpy.mockReset();
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
     switchModelSpy = vi
@@ -2209,6 +2220,281 @@ describe('Session', () => {
       } finally {
         if (original === undefined) delete process.env[ENV_KEY];
         else process.env[ENV_KEY] = original;
+      }
+    });
+
+    it('routes ACP image prompts through the vision bridge for text-only primary models', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: 'look at this' }, { text: '[transcribed image]' }],
+        transcript: '[transcribed image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      expect(runVisionBridgeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: mockConfig,
+          signal: expect.any(AbortSignal),
+        }),
+      );
+      const sent = firstSentMessage();
+      expect(textParts(sent)).toContain('[transcribed image]');
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+    });
+
+    it('strips image parts when the vision bridge is cancelled before applying', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: false,
+        status: 'skipped',
+        convertedCount: 0,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+        egressOccurred: true,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(
+        textParts(sent).some((t: string) => t.includes('look at this')),
+      ).toBe(true);
+    });
+
+    it('preserves oversized inline images for the vision bridge', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = '8';
+      try {
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'qwen3.7-plus',
+        });
+        runVisionBridgeSpy.mockResolvedValue({
+          applied: true,
+          status: 'ok',
+          parts: [{ text: 'look at this' }, { text: '[large image]' }],
+          transcript: '[large image]',
+          convertedCount: 1,
+          omittedCount: 0,
+          modelId: 'qwen3.7-plus',
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'QUJDREVGR0hJSktMTU5PUFFSU1Q=',
+            },
+          ],
+        });
+
+        const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
+          ?.parts as Part[];
+        expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
+        expect(textParts(firstSentMessage())).toContain('[large image]');
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+    });
+
+    it('falls back to text-only parts when the vision bridge throws', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockRejectedValue(new Error('provider unavailable'));
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(
+        textParts(sent).some((t: string) => t.includes('look at this')),
+      ).toBe(true);
+      expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('provider unavailable'),
+      );
+    });
+
+    it('forwards failed bridge replacement parts to the primary model', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'failed',
+        parts: [{ text: 'look at this' }, { text: '[bridge failed]' }],
+        convertedCount: 0,
+        omittedCount: 1,
+        modelId: 'qwen3.7-plus',
+        egressOccurred: true,
+        error: 'quota exceeded',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      const sent = firstSentMessage();
+      expect(textParts(sent)).toContain('[bridge failed]');
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('error=quota exceeded'),
+      );
+    });
+
+    it('does not run the vision bridge when the primary model supports images', async () => {
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ image: true });
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+      expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+        true,
+      );
+    });
+
+    it('preserves unsupported image @ files for the vision bridge', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: {
+            inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          },
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: 'look at this' }, { text: '[file image]' }],
+        transcript: '[file image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'resource_link',
+              uri: 'file:///tmp/image.png',
+              mimeType: 'image/png',
+              name: 'image.png',
+            },
+          ],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            preserveUnsupportedImageForBridge: true,
+          }),
+        );
+        const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
+          ?.parts as Part[];
+        expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
+        expect(textParts(firstSentMessage())).toContain('[file image]');
+      } finally {
+        readManyFilesSpy.mockRestore();
       }
     });
 
@@ -5653,7 +5939,7 @@ describe('Session', () => {
         });
       });
 
-      it('keeps the home confinement root non-empty when os.homedir() is empty (no QWEN_HOME)', async () => {
+      it('keeps the home confinement root non-empty when os.homedir() is empty (no QWEN_HOME)', () => {
         // Minimal containers with no HOME make os.homedir() === ''. With QWEN_HOME
         // unset the home confinement root must NOT collapse to '': isWithin('',
         // anyPath) is trivially true, so an empty root lets a home
@@ -5661,66 +5947,33 @@ describe('Session', () => {
         // The guard falls back to the parent of the global qwen dir
         // (Storage.getGlobalQwenDir(), itself empty-home-safe), which is the
         // homeQwenDir Session passes to the resolver.
-        const tmpDir = await fs.mkdtemp(
-          path.join(os.tmpdir(), 'loop-md-nohome-'),
-        );
-        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
-        // HOME='' makes libuv's os.homedir() return '' on every platform — it
-        // null-checks HOME, never its emptiness.
-        const restoreHome = setFakeHome('');
-        const prevQwenHome = process.env['QWEN_HOME'];
-        delete process.env['QWEN_HOME'];
-        loopTickResolverDepsSpy.mockClear();
+        const homeQwenDir = path.join(os.tmpdir(), '.qwen');
 
-        const scheduler = {
-          size: 1,
-          hasPendingWork: true,
-          start: vi.fn(
-            (
-              callback: (job: { prompt: string; cronExpr?: string }) => void,
-            ) => {
-              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
-            },
-          ),
-          stop: vi.fn(),
-          getExitSummary: vi.fn().mockReturnValue(undefined),
-        };
-        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
-        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+        const roots = resolveHomeLoopResolverRoots({
+          homeDir: '',
+          homeQwenDir,
+          qwenHome: '',
+        });
 
-        try {
-          await session.prompt({
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'hello' }],
-          });
+        // Without the `|| path.dirname(homeQwenDir)` guard this would be ''
+        // (os.homedir()); the guard makes it the non-empty parent of the
+        // empty-home-safe global qwen dir.
+        expect(roots.homeConfineRoot).not.toBe('');
+        expect(roots.homeConfineRoot).toBe(path.dirname(homeQwenDir));
+        expect(roots.homeQwenDir).toBe(homeQwenDir);
+      });
 
-          await vi.waitFor(
-            () => {
-              expect(loopTickResolverDepsSpy).toHaveBeenCalled();
-            },
-            {
-              timeout: 3000,
-            },
-          );
+      it('confines the home loop resolver within QWEN_HOME when set', () => {
+        const homeQwenDir = path.join(os.tmpdir(), '.qwen-home');
 
-          const deps = loopTickResolverDepsSpy.mock.calls.at(-1)![0] as {
-            homeDir: string;
-            homeQwenDir?: string;
-          };
-          // Without the `|| path.dirname(homeQwenDir)` guard this would be ''
-          // (os.homedir()); the guard makes it the non-empty parent of the
-          // empty-home-safe global qwen dir.
-          expect(deps.homeDir).not.toBe('');
-          expect(deps.homeDir).toBe(path.dirname(deps.homeQwenDir!));
-        } finally {
-          if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
-          else process.env['QWEN_HOME'] = prevQwenHome;
-          restoreHome();
-          await fs.rm(tmpDir, { recursive: true, force: true });
-        }
+        const roots = resolveHomeLoopResolverRoots({
+          homeDir: path.join(os.tmpdir(), 'real-home'),
+          homeQwenDir,
+          qwenHome: homeQwenDir,
+        });
+
+        expect(roots.homeConfineRoot).toBe(homeQwenDir);
+        expect(roots.homeQwenDir).toBe(homeQwenDir);
       });
 
       it('reads the home loop.md from QWEN_HOME, not the real ~/.qwen', async () => {
