@@ -31,6 +31,7 @@ interface ChannelAgentBridgeEventMap {
 
 export interface ChannelAgentBridge {
   readonly availableCommands: AvailableCommand[];
+  getAvailableCommands?(sessionId: string): AvailableCommand[];
   on<K extends keyof ChannelAgentBridgeEventMap>(
     eventName: K,
     listener: (...args: ChannelAgentBridgeEventMap[K]) => void,

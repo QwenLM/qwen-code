@@ -15,6 +15,7 @@ import type {
 import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
+import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
@@ -62,6 +63,8 @@ export interface DaemonStatusIssue {
     | 'mcp_budget_exhausted'
     | 'rate_limit_hits'
     | 'workspace_status_unavailable'
+    | 'channel_worker_exited'
+    | 'channel_worker_partial_connect'
     | 'daemon_runtime_starting'
     | 'daemon_runtime_failed';
   severity: IssueSeverity;
@@ -90,6 +93,7 @@ export interface BuildDaemonStatusOptions {
   deviceFlowRegistry: DeviceFlowRegistry;
   sessionShellCommandEnabled: boolean;
   startup?: DaemonStartupSnapshot;
+  getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
 }
 
 interface DaemonStatusSection<T> {
@@ -147,6 +151,7 @@ interface DaemonStatusRuntime {
     policy: string;
   };
   channel: { live: boolean };
+  channelWorker: ChannelWorkerSnapshot;
   transport: {
     restSseActive: number;
     acp: {
@@ -215,10 +220,22 @@ export async function buildDaemonStatusResponse(
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
+  const channelWorker = input.getChannelWorkerSnapshot?.() ?? {
+    enabled: false,
+    state: 'disabled',
+    channels: [],
+  };
   const issues: DaemonStatusIssue[] = [];
   let full: FullDaemonStatus | undefined;
 
-  pushRuntimeIssues(issues, bridgeSnapshot, acpSnapshot, rateLimitHits, input);
+  pushRuntimeIssues(
+    issues,
+    bridgeSnapshot,
+    acpSnapshot,
+    rateLimitHits,
+    input,
+    channelWorker,
+  );
 
   if (detail === 'full') {
     full = await buildFullStatus(input, bridgeSnapshot, acpSnapshot);
@@ -280,6 +297,7 @@ export async function buildDaemonStatusResponse(
         policy: bridgeSnapshot.permissionPolicy,
       },
       channel: { live: bridgeSnapshot.channelLive },
+      channelWorker,
       transport: {
         restSseActive: input.getRestSseActive(),
         acp: {
@@ -433,6 +451,7 @@ function pushRuntimeIssues(
   acpSnapshot: ReturnType<AcpHttpHandle['registry']['getSnapshot']> | undefined,
   rateLimitHits: Record<RateLimitTier, number>,
   input: BuildDaemonStatusOptions,
+  channelWorker: ChannelWorkerSnapshot,
 ): void {
   if (
     bridgeSnapshot.limits.maxSessions !== null &&
@@ -483,6 +502,49 @@ function pushRuntimeIssues(
       severity: 'warning',
       message: `${sumRateHits(rateLimitHits)} request(s) have been rejected by rate limiting since start.`,
     });
+  }
+
+  if (
+    channelWorker.enabled &&
+    (channelWorker.state === 'exited' || channelWorker.state === 'failed')
+  ) {
+    const detailParts = [
+      channelWorker.pid !== undefined ? `pid=${channelWorker.pid}` : undefined,
+      channelWorker.exitCode !== undefined
+        ? `code=${channelWorker.exitCode ?? 'null'}`
+        : undefined,
+      channelWorker.signal ? `signal=${channelWorker.signal}` : undefined,
+    ].filter(Boolean);
+    const details =
+      detailParts.length > 0 ? ` (${detailParts.join(', ')})` : '';
+    const error = channelWorker.error ? `: ${channelWorker.error}` : '';
+    issues.push({
+      code: 'channel_worker_exited',
+      severity: 'warning',
+      message: `Channel worker is ${channelWorker.state}${details}${error}.`,
+      section: 'runtime.channelWorker',
+    });
+  }
+
+  if (
+    channelWorker.enabled &&
+    channelWorker.state === 'running' &&
+    channelWorker.requestedChannels !== undefined
+  ) {
+    const connected = new Set(channelWorker.channels);
+    const failed = channelWorker.requestedChannels.filter(
+      (channel) => !connected.has(channel),
+    );
+    if (failed.length > 0) {
+      issues.push({
+        code: 'channel_worker_partial_connect',
+        severity: 'warning',
+        message:
+          `Channel worker connected ${channelWorker.channels.length}/${channelWorker.requestedChannels.length} channel(s). ` +
+          `Failed: ${failed.join(', ')}.`,
+        section: 'runtime.channelWorker',
+      });
+    }
   }
 }
 

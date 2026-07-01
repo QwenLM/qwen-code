@@ -621,6 +621,38 @@ describe('subagent.ts', () => {
         expect(history).toEqual(initialMessages);
       });
 
+      it('should skip env history when initialMessages is an empty array', async () => {
+        const { config } = await createMockConfig();
+        vi.mocked(GeminiChat).mockClear();
+        vi.mocked(getInitialChatHistory).mockClear();
+
+        const promptConfig: PromptConfig = {
+          systemPrompt: 'System ${name}.',
+          initialMessages: [],
+        };
+        const context = new ContextState();
+        context.set('name', 'Agent');
+
+        mockSendMessageStream.mockImplementation(createMockStream(['stop']));
+
+        const scope = await AgentHeadless.create(
+          'test-agent',
+          config,
+          promptConfig,
+          defaultModelConfig,
+          defaultRunConfig,
+        );
+
+        await scope.execute(context);
+
+        const callArgs = vi.mocked(GeminiChat).mock.calls[0];
+        const generationConfig = getGenerationConfigFromMock();
+
+        expect(generationConfig.systemInstruction).toContain('System Agent.');
+        expect(callArgs[2]).toEqual([]);
+        expect(getInitialChatHistory).not.toHaveBeenCalled();
+      });
+
       it('should use renderedSystemPrompt verbatim and bypass templating', async () => {
         const { config } = await createMockConfig();
         vi.mocked(GeminiChat).mockClear();

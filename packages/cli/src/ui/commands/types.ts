@@ -217,6 +217,13 @@ export interface SubmitPromptActionReturn {
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /**
+   * Optional per-turn model id. When set, this prompt (and any tool-call
+   * continuations it spawns) runs on the given model without changing the
+   * session's selected model or persisting anything; it auto-reverts on the
+   * next user turn.
+   */
+  modelOverride?: string;
 }
 
 /**
