@@ -70,8 +70,12 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       "SENDER_LOGIN: '${{ github.event.sender.login }}'",
     );
+    expect(workflow).toContain("permissions:\n      contents: 'read'");
     expect(workflow).toContain(
       'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
+    );
+    expect(workflow).toContain(
+      '::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}',
     );
     expect(workflow).toContain("${sender_permission}\" == 'write'");
     expect(workflow).toContain("${sender_permission}\" == 'maintain'");
@@ -85,6 +89,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('bug=${issue_is_bug}');
     expect(workflow).toContain('ready=${issue_is_ready}');
     expect(workflow).toContain('trigger_label=${label_is_trigger}');
+    expect(workflow).toContain('trigger_label=false label=');
     expect(workflow).toContain('sender_trusted=${sender_is_trusted}');
     expect(workflow).toContain(
       "qwen-autofix-issue-${{ github.event.issue.number || inputs.issue_number || 'scan' }}",
@@ -94,6 +99,12 @@ describe('qwen-autofix workflow', () => {
     );
     expect(workflow).toContain(
       '[[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e',
+    );
+    expect(workflow).toContain(
+      '"${EVENT_NAME}" == \'workflow_dispatch\' && -n "${FORCED_ISSUE}"',
+    );
+    expect(workflow).toContain(
+      '"${EVENT_NAME}" == \'workflow_dispatch\' && -n "${FORCED_PR}"',
     );
     expect(workflow).toContain(
       'is missing ${BUG_LABEL} or ${READY_FOR_AGENT_LABEL}; skipping.',

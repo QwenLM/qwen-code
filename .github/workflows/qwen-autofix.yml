@@ -10,7 +10,8 @@ name: 'Qwen Autofix'
 # tick runs only the phase(s) that make sense, decided by the `route` job:
 #   • every 4h             → review phase (sweep the bot's open PRs)
 #   • every 12h (00/12 UTC) → also the issue phase (locate + fix one new bug)
-# workflow_dispatch can force a phase, an issue, or a PR.
+#   • issues:labeled        → issue phase when label, state, and sender all match
+#   • workflow_dispatch     → force a phase, an issue, or a PR
 #
 # Every GitHub write (issue/PR comments, labels, branch push, PR create) goes
 # through CI_DEV_BOT_PAT so the bot acts as a single identity, qwen-code-dev-bot.
@@ -81,6 +82,8 @@ jobs:
       ${{ github.repository == 'QwenLM/qwen-code' }}
     runs-on: 'ubuntu-latest'
     timeout-minutes: 5
+    permissions:
+      contents: 'read'
     outputs:
       do_issue: '${{ steps.decide.outputs.do_issue }}'
       do_review: '${{ steps.decide.outputs.do_review }}'
@@ -120,20 +123,30 @@ jobs:
               fi
               if [[ "${EVENT_NAME}" == 'issues' ]]; then
                 DO_REVIEW=false
-                issue_is_bug="$(jq -r --arg label "${BUG_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
-                issue_is_ready="$(jq -r --arg label "${READY_FOR_AGENT_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
                 label_is_trigger=false
                 [[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" ]] && label_is_trigger=true
-                sender_permission=''
-                sender_is_trusted=false
-                if [[ -n "${SENDER_LOGIN}" ]]; then
-                  sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2> /dev/null || true)"
-                  [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
-                fi
-                if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_bug}" == 'true' && "${issue_is_ready}" == 'true' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
-                  DO_ISSUE=true
+                if [[ "${label_is_trigger}" != 'true' ]]; then
+                  echo "🧭 issue event ignored: trigger_label=false label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
                 else
-                  echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} trigger_label=${label_is_trigger} sender_permission='${sender_permission:-none}' sender_trusted=${sender_is_trusted} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                  issue_is_bug="$(jq -r --arg label "${BUG_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                  issue_is_ready="$(jq -r --arg label "${READY_FOR_AGENT_LABEL}" 'index($label) != null' <<< "${ISSUE_LABELS_JSON:-[]}")"
+                  sender_permission=''
+                  sender_is_trusted=false
+                  if [[ -n "${SENDER_LOGIN}" ]]; then
+                    if ! sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
+                      api_error="${sender_permission}"
+                      sender_permission=''
+                      api_error="${api_error//$'\r'/ }"
+                      api_error="${api_error//$'\n'/ }"
+                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}"
+                    fi
+                    [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
+                  fi
+                  if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_bug}" == 'true' && "${issue_is_ready}" == 'true' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
+                    DO_ISSUE=true
+                  else
+                    echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} trigger_label=${label_is_trigger} sender_permission='${sender_permission:-none}' sender_trusted=${sender_is_trusted} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
+                  fi
                 fi
               fi
               ;;
