@@ -192,6 +192,10 @@ jobs:
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
 
+      - name: 'Audit critical runtime dependencies'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
+        run: 'npm run audit:runtime:critical'
+
       - name: 'Check lockfile'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: 'npm run check:lockfile'
@@ -265,7 +269,9 @@ jobs:
           QWEN_API_KEY: ''
           GEMINI_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
-        run: 'npm run test:ci'
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          npm run test:ci
 
       - name: 'Run no-AK integration smoke tests'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && github.event_name == 'pull_request' }}"
@@ -354,7 +360,9 @@ jobs:
           QWEN_API_KEY: ''
           GEMINI_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
-        run: 'npm run test:ci'
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          npm run test:ci
 
   # Windows counterpart of test_macos (see that job's note). Runner is
   # windows-2022; the check name keeps the windows-latest label so it matches
@@ -407,7 +415,9 @@ jobs:
           QWEN_API_KEY: ''
           GEMINI_API_KEY: ''
           QWEN_DEFAULT_AUTH_TYPE: ''
-        run: 'npm run test:ci'
+        run: |-
+          node -e "const fs = require('node:fs'); for (const key of ['HOME', 'USERPROFILE']) { const dir = process.env[key]; if (dir) fs.mkdirSync(dir, { recursive: true }); }"
+          npm run test:ci
 
   post_coverage_comment:
     name: 'Post Coverage Comment'

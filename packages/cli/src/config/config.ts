@@ -1856,9 +1856,11 @@ export async function loadCliConfig(
     // Use provided session ID without session resumption
     // Check if session ID is already in use
     const sessionService = new SessionService(cwd);
-    const exists = await sessionService.sessionExists(argv['sessionId']);
+    const exists = await sessionService.sessionExistsInAnyState(
+      argv['sessionId'],
+    );
     if (exists) {
-      const message = `Error: Session Id ${argv['sessionId']} is already in use.`;
+      const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
       writeStderrLine(message);
       process.exit(1);
     }
