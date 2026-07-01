@@ -196,15 +196,17 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     return details;
   }
 
-  private setApprovalModeSafely(mode: ApprovalMode): void {
+  private setApprovalModeSafely(mode: ApprovalMode): string | undefined {
     try {
       this.config.setApprovalMode(mode);
+      return undefined;
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.error(
         `[ExitPlanModeTool] Failed to set approval mode to "${mode}": ${errorMessage}`,
       );
+      return errorMessage;
     }
   }
 
@@ -483,14 +485,15 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
       };
     }
 
-    try {
-      this.config.savePlan(plan);
-    } catch (error) {
-      debugLogger.warn(
-        `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
-      );
+    const modeError = this.setApprovalModeSafely(decision.targetMode);
+    if (modeError) {
+      const message = `Leader approved the plan, but failed to switch this teammate to ${decision.targetMode}: ${modeError}`;
+      return {
+        llmContent: `${message}. Stay in plan mode and report this failure to the leader.`,
+        returnDisplay: message,
+        error: { message },
+      };
     }
-    this.setApprovalModeSafely(decision.targetMode);
 
     const feedback = decision.message
       ? ` Leader note: ${decision.message}`

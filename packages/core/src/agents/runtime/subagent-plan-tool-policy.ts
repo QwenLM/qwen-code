@@ -28,6 +28,14 @@ const PLAN_REQUIRED_TEAMMATE_PRE_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
   ToolNames.READ_MCP_RESOURCE,
 ]);
 
+const PRE_APPROVAL_TASK_CLAIM_KEYS: ReadonlySet<string> = new Set([
+  'taskId',
+  'status',
+  'owner',
+  'addBlocks',
+  'addBlockedBy',
+]);
+
 export function isSubagentLikeExecutionContext(): boolean {
   return getCurrentAgentId() !== null || isTeammate();
 }
@@ -98,14 +106,17 @@ function isPreApprovalClaimOnlyTaskUpdate(params: unknown): boolean {
   }
 
   const taskParams = params as Record<string, unknown>;
+  for (const key of Object.keys(taskParams)) {
+    if (!PRE_APPROVAL_TASK_CLAIM_KEYS.has(key)) {
+      return false;
+    }
+  }
+
   const agentName = getTeammateContext()?.agentName;
   return (
+    typeof taskParams['taskId'] === 'string' &&
     taskParams['status'] === 'in_progress' &&
     (taskParams['owner'] === undefined || taskParams['owner'] === agentName) &&
-    taskParams['subject'] === undefined &&
-    taskParams['description'] === undefined &&
-    taskParams['activeForm'] === undefined &&
-    taskParams['metadata'] === undefined &&
     isAbsentOrEmptyArray(taskParams['addBlocks']) &&
     isAbsentOrEmptyArray(taskParams['addBlockedBy'])
   );

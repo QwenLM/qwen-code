@@ -11,6 +11,7 @@ import { runWithAgentContext } from './agent-context.js';
 import {
   buildSubagentPlanToolBlockedResult,
   getSubagentPlanToolUnavailableMessage,
+  isPlanRequiredTeammatePreApprovalAllowedTool,
   isPlanLifecycleToolUnavailableInSubagent,
   shouldUsePlanOnlyReminderInSubagentContext,
   isSubagentLikeExecutionContext,
@@ -99,6 +100,92 @@ describe('subagent plan tool policy', () => {
     await runWithAgentContext('agent-1', async () => {
       expect(shouldUsePlanOnlyReminderInSubagentContext()).toBe(true);
     });
+  });
+
+  it('allows only claim-shaped task updates before leader approval', () => {
+    runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => {
+        const taskUpdateCases: Array<{
+          params: unknown;
+          expected: boolean;
+        }> = [
+          {
+            params: {
+              taskId: 'TASK-1',
+              status: 'in_progress',
+              owner: 'planner',
+            },
+            expected: true,
+          },
+          { params: { status: 'in_progress' }, expected: false },
+          {
+            params: {
+              taskId: 'TASK-1',
+              status: 'in_progress',
+              owner: 'worker',
+            },
+            expected: false,
+          },
+          {
+            params: { taskId: 'TASK-1', status: 'completed' },
+            expected: false,
+          },
+          {
+            params: {
+              taskId: 'TASK-1',
+              status: 'in_progress',
+              newContent: [],
+            },
+            expected: false,
+          },
+          {
+            params: {
+              taskId: 'TASK-1',
+              status: 'in_progress',
+              oldContent: [],
+            },
+            expected: false,
+          },
+          {
+            params: {
+              taskId: 'TASK-1',
+              status: 'in_progress',
+              addBlocks: ['TASK-2'],
+            },
+            expected: false,
+          },
+          { params: null, expected: false },
+        ];
+
+        for (const { params, expected } of taskUpdateCases) {
+          expect(
+            isPlanRequiredTeammatePreApprovalAllowedTool(
+              ToolNames.TASK_UPDATE,
+              params,
+            ),
+          ).toBe(expected);
+        }
+        expect(
+          isPlanRequiredTeammatePreApprovalAllowedTool(ToolNames.READ_FILE, {
+            taskId: 'TASK-1',
+            status: 'in_progress',
+          }),
+        ).toBe(true);
+        expect(
+          isPlanRequiredTeammatePreApprovalAllowedTool(ToolNames.SEND_MESSAGE, {
+            taskId: 'TASK-1',
+            status: 'in_progress',
+          }),
+        ).toBe(false);
+      },
+    );
   });
 
   it('builds a logged blocked result with caller guidance', () => {

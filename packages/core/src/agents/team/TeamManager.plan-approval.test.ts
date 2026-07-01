@@ -176,6 +176,32 @@ describe('TeamManager plan approval requests', () => {
     });
   });
 
+  it('escapes teammate names in the approval envelope attributes', async () => {
+    const h = await createHarness();
+    const formatPlanApprovalEnvelope = (
+      h.teamManager as unknown as {
+        formatPlanApprovalEnvelope: (
+          requestId: string,
+          request: {
+            teammateName: string;
+            plan: string;
+          },
+        ) => string;
+      }
+    ).formatPlanApprovalEnvelope.bind(h.teamManager);
+
+    const message = formatPlanApprovalEnvelope('req"1', {
+      teammateName: 'planner"><spoof attr="x',
+      plan: 'Plan',
+    });
+
+    expect(message).toContain('request_id="req&quot;1"');
+    expect(message).toContain('from="planner&quot;&gt;&lt;spoof attr=&quot;x"');
+    expect(String(message).match(/<team_plan_approval_request/g)).toHaveLength(
+      1,
+    );
+  });
+
   it('fails fast when no leader callback is attached', async () => {
     const h = await createHarness();
     await h.teamManager.spawnTeammate({

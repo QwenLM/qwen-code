@@ -487,15 +487,47 @@ describe('ExitPlanModeTool', () => {
       expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
         ApprovalMode.DEFAULT,
       );
-      expect(mockConfig.savePlan).toHaveBeenCalledWith(
-        'Teammate implementation plan',
-      );
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
       expect(result.llmContent).toContain('Leader approved');
       expect(result.returnDisplay).toEqual({
         type: 'plan_summary',
         message: 'Leader approved.',
         plan: 'Teammate implementation plan',
       });
+    });
+
+    it('reports an error when approval succeeds but mode restoration fails', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      (
+        mockConfig.setApprovalMode as ReturnType<typeof vi.fn>
+      ).mockImplementationOnce(() => {
+        throw new Error('mode locked');
+      });
+      const requestPlanApproval = vi.fn().mockResolvedValue({
+        action: 'approve',
+        targetMode: ApprovalMode.DEFAULT,
+      });
+      (mockConfig.getTeamManager as ReturnType<typeof vi.fn>).mockReturnValue({
+        requestPlanApproval,
+      });
+      const invocation = tool.build({ plan: 'Teammate implementation plan' });
+
+      const result = await runWithTeammateIdentity(
+        {
+          agentId: 'planner@test',
+          agentName: 'planner',
+          teamName: 'test',
+          isTeamLead: false,
+          planModeRequired: true,
+        },
+        () => invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.error?.message).toContain('failed to switch');
+      expect(result.error?.message).toContain('mode locked');
+      expect(result.llmContent).toContain('Stay in plan mode');
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
     });
 
     it('keeps a plan-required teammate in plan mode when leader rejects', async () => {
