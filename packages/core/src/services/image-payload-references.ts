@@ -10,6 +10,12 @@ import { createHash } from 'node:crypto';
 import { approxBase64Bytes } from '../core/inlineMediaLimit.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 
+const IMAGE_ID_LENGTH = 12;
+const IMAGE_REFERENCE_PATTERN = new RegExp(
+  `Image #([a-f0-9]{${IMAGE_ID_LENGTH}})`,
+  'gi',
+);
+
 export interface StoredImagePayload {
   id: string;
   mimeType: string;
@@ -76,10 +82,7 @@ export function prepareImagePayloadsForRequest(
   });
 
   const reattachById = new Map<string, StoredImagePayload>();
-  const recent =
-    options.maxRecentImages > 0
-      ? collected.slice(-options.maxRecentImages)
-      : [];
+  const recent = recentUniqueImages(collected, options.maxRecentImages);
   for (const image of recent) {
     reattachById.set(image.stored.id, image.stored);
   }
@@ -144,12 +147,31 @@ function collectReferencedImageIds(content: Content | undefined): Set<string> {
   for (const part of content?.parts ?? []) {
     const text = part.text;
     if (!text) continue;
-    for (const match of text.matchAll(/Image #([a-f0-9]{12})/gi)) {
+    for (const match of text.matchAll(IMAGE_REFERENCE_PATTERN)) {
       const id = match[1];
       if (id) ids.add(id.toLowerCase());
     }
   }
   return ids;
+}
+
+function recentUniqueImages(
+  collected: CollectedImage[],
+  maxRecentImages: number,
+): CollectedImage[] {
+  if (maxRecentImages <= 0) {
+    return [];
+  }
+  const recent: CollectedImage[] = [];
+  const seen = new Set<string>();
+  for (let index = collected.length - 1; index >= 0; index--) {
+    const image = collected[index];
+    if (!image || seen.has(image.stored.id)) continue;
+    seen.add(image.stored.id);
+    recent.push(image);
+    if (recent.length === maxRecentImages) break;
+  }
+  return recent.reverse();
 }
 
 function imagePartToStoredPayload(part: Part): StoredImagePayload {
@@ -161,7 +183,7 @@ function imagePartToStoredPayload(part: Part): StoredImagePayload {
     .update(data)
     .digest('hex');
   return {
-    id: hash.slice(0, 12),
+    id: hash.slice(0, IMAGE_ID_LENGTH),
     mimeType,
     data,
     bytes: approxBase64Bytes(data),

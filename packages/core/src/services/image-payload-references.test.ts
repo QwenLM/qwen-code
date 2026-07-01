@@ -105,6 +105,30 @@ describe('prepareImagePayloadsForRequest', () => {
     ]);
   });
 
+  it('reattaches the most recent unique historical images', () => {
+    const store = new InMemoryImagePayloadStore();
+    const prepared = prepareImagePayloadsForRequest(
+      [
+        toolImageTurn('shot-a'),
+        toolImageTurn('shot-b'),
+        toolImageTurn('shot-c'),
+        toolImageTurn('shot-c'),
+        toolImageTurn('shot-c'),
+        { role: 'user', parts: [{ text: 'continue' }] },
+      ],
+      {
+        maxRecentImages: 3,
+        store,
+      },
+    );
+
+    expect(imageParts(prepared).map((part) => part.inlineData?.data)).toEqual([
+      'shot-a',
+      'shot-b',
+      'shot-c',
+    ]);
+  });
+
   it('preserves images in the current user request when maxRecentImages is zero', () => {
     const store = new InMemoryImagePayloadStore();
     const prepared = prepareImagePayloadsForRequest(
