@@ -7,7 +7,7 @@
 import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../semantic-colors.js';
-import { escapeAnsiCtrlCodes } from '../../utils/textUtils.js';
+import { sanitizeTerminalText } from '../../utils/textUtils.js';
 
 interface ErrorBoundaryProps {
   children: ReactNode;
@@ -67,7 +67,7 @@ export class ErrorBoundary extends Component<
             Something went wrong while rendering.
           </Text>
           <Text color={theme.text.secondary}>
-            {escapeAnsiCtrlCodes(error.message)}
+            {sanitizeTerminalText(error.message)}
           </Text>
         </Box>
       );

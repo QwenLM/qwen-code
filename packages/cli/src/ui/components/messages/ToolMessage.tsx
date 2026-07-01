@@ -37,6 +37,7 @@ import type { LoadedSettings } from '../../../config/settings.js';
 
 import {
   escapeAnsiCtrlCodes,
+  sanitizeTerminalText,
   getCachedStringWidth,
   toCodePoints,
 } from '../../utils/textUtils.js';
@@ -56,20 +57,6 @@ const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 // outputs that will get truncated further MaxSizedBox anyway.
 const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
 
-// Bare C0 control bytes (plus DEL / C1) that `escapeAnsiCtrlCodes` (ansi-regex)
-// leaves untouched because they carry no ESC prefix — BEL \x07, BS \x08,
-// VT \x0b, FF \x0c, CR \x0d, SO \x0e, SI \x0f, etc. TAB (\x09) and LF (\x0a)
-// are intentionally preserved: they legitimately structure multi-line tool
-// output rendered in the transcript. Used to sanitize raw `detailedDisplay`.
-// eslint-disable-next-line no-control-regex
-const BARE_C0_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
-
-// Unicode bidirectional override / isolate characters (the "Trojan Source"
-// attack class, CVE-2021-42572) that can visually reorder rendered text.
-// Mirrors the repo's existing BIDI_CONTROL_RE (daemon-tui-adapter.ts,
-// extension-mention.ts). Stripped from raw `detailedDisplay` before rendering.
-const BIDI_OVERRIDE_CHARS_REGEX =
-  /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
 export type TextEmphasis = 'high' | 'medium' | 'low';
 type DiffResultDisplay = Pick<
   FileDiff,
@@ -706,20 +693,13 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   // `detailedDisplay` is RAW, un-sanitized tool output (file contents, grep
   // hits, directory listings). A malicious repo could embed terminal control
   // codes that execute when the transcript renders the full content unfiltered.
-  // Three passes, memoized (the content can be ~25K chars and this runs on every
-  // render): (1) `escapeAnsiCtrlCodes` neutralizes ESC-prefixed ANSI sequences
-  // (`\x1b[?1049l`, OSC 52 clipboard, …) — the same escaper used for agent
-  // names above; (2) strip bare C0 control bytes that lack an ESC prefix so
-  // ansi-regex misses them (BEL `\x07`, BS `\x08`, FF `\x0c`, SO/SI, CR, …),
-  // keeping only TAB and LF which legitimately structure multi-line output;
-  // (3) strip Unicode bidirectional override chars (Trojan Source /
-  // CVE-2021-42572) that could reorder rendered text.
+  // Run it through the shared `sanitizeTerminalText` pipeline (ANSI escape + C0
+  // strip + bidi strip), memoized since the content can be ~25K chars and this
+  // runs on every render.
   const sanitizedDetailedDisplay = React.useMemo(
     () =>
       usingDetailedDisplay && typeof detailedDisplay === 'string'
-        ? escapeAnsiCtrlCodes(detailedDisplay)
-            .replace(BARE_C0_CONTROL_CHARS_REGEX, '')
-            .replace(BIDI_OVERRIDE_CHARS_REGEX, '')
+        ? sanitizeTerminalText(detailedDisplay)
         : detailedDisplay,
     [detailedDisplay, usingDetailedDisplay],
   );
