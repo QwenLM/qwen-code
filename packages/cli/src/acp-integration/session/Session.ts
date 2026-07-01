@@ -554,6 +554,24 @@ interface CronQueueItem {
 
 const MAX_NOTIFICATION_QUEUE = 20;
 
+export function resolveHomeLoopResolverRoots({
+  homeQwenDir = Storage.getGlobalQwenDir(),
+  homeDir = os.homedir(),
+  qwenHome = process.env['QWEN_HOME'],
+}: {
+  homeQwenDir?: string;
+  homeDir?: string;
+  qwenHome?: string;
+} = {}): { homeConfineRoot: string; homeQwenDir: string } {
+  // qwenHome truthy → QWEN_HOME is itself the global dir, so confine within
+  // homeQwenDir; the homeDir param is only consulted when qwenHome is unset.
+  return {
+    homeConfineRoot:
+      (qwenHome ? homeQwenDir : homeDir) || path.dirname(homeQwenDir),
+    homeQwenDir,
+  };
+}
+
 export function computeInitialTurnFromHistory(
   records: ChatRecord[],
   sessionId: string,
@@ -2804,18 +2822,7 @@ export class Session implements SessionContext {
       // Resolve the home/global loop.md from the QWEN_HOME-aware global dir (the
       // rest of Qwen honors QWEN_HOME for `.qwen`); reading raw os.homedir() here
       // would always hit the real `~/.qwen` and ignore a relocated config home.
-      const homeQwenDir = Storage.getGlobalQwenDir();
-      // Confinement root for the home candidate's resolved target: $QWEN_HOME
-      // when set (it IS the global dir), else $HOME — keeps the earlier
-      // confinement (an in-root dotfile symlink resolves; an escape is refused).
-      // The `|| path.dirname(homeQwenDir)` guards an empty os.homedir() (minimal
-      // containers with no HOME): an empty root makes isWithin('', target) always
-      // true, trivially bypassing the symlink confinement. homeQwenDir
-      // (Storage.getGlobalQwenDir()) is always non-empty, so its parent is a
-      // sound non-empty fallback root.
-      const homeConfineRoot =
-        (process.env['QWEN_HOME'] ? homeQwenDir : os.homedir()) ||
-        path.dirname(homeQwenDir);
+      const { homeConfineRoot, homeQwenDir } = resolveHomeLoopResolverRoots();
       this.loopTickResolver = new LoopTickResolver({
         projectRoot: root,
         homeDir: homeConfineRoot,
