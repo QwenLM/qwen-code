@@ -156,14 +156,14 @@ export function writeServeServiceInfo({
   servePid?: number;
   workerPid?: number;
 }): void {
-  const info: ServiceInfo = {
+  const buildInfo = (startedAt: string): ServiceInfo => ({
     owner: 'serve',
     pid: servePid,
-    startedAt: new Date().toISOString(),
+    startedAt,
     channels,
     servePid,
     ...(workerPid !== undefined ? { workerPid } : {}),
-  };
+  });
 
   const filePath = pidFilePath();
   let fd: number;
@@ -171,7 +171,7 @@ export function writeServeServiceInfo({
     fd = openSync(filePath, constants.O_RDWR | constants.O_NOFOLLOW);
   } catch (err) {
     if ((err as NodeJS.ErrnoException).code === 'ENOENT') {
-      writeInfo(info, 'wx');
+      writeInfo(buildInfo(new Date().toISOString()), 'wx');
       return;
     }
     throw err;
@@ -195,6 +195,7 @@ export function writeServeServiceInfo({
         'Channel service pidfile is owned by another process.',
       );
     }
+    const info = buildInfo(existing.startedAt);
     ftruncateSync(fd, 0);
     writeSync(fd, JSON.stringify(info, null, 2), 0, 'utf-8');
   } finally {
