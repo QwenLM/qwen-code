@@ -44,6 +44,7 @@ describe('ExitPlanModeTool', () => {
       }),
       savePlan: vi.fn(),
       getPlanGateState: vi.fn(() => undefined),
+      getTeamManager: vi.fn(() => undefined),
     } as unknown as Config;
 
     tool = new ExitPlanModeTool(mockConfig);
@@ -443,6 +444,92 @@ describe('ExitPlanModeTool', () => {
       expect(mockConfig.savePlan).not.toHaveBeenCalled();
       expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
       expect(mockedRunPlanApprovalGate).not.toHaveBeenCalled();
+      expect(approvalMode).toBe(ApprovalMode.PLAN);
+    });
+
+    it('requests leader approval for a plan-required teammate and restores mode on approval', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      const requestPlanApproval = vi.fn().mockResolvedValue({
+        action: 'approve',
+        targetMode: ApprovalMode.DEFAULT,
+        message: 'Looks good.',
+      });
+      (mockConfig.getTeamManager as ReturnType<typeof vi.fn>).mockReturnValue({
+        requestPlanApproval,
+      });
+      const invocation = tool.build({
+        plan: 'Teammate implementation plan',
+        originalRequest: 'Implement feature',
+        researchSummary: 'Read relevant files',
+      });
+      const signal = new AbortController().signal;
+
+      const result = await runWithTeammateIdentity(
+        {
+          agentId: 'planner@test',
+          agentName: 'planner',
+          teamName: 'test',
+          isTeamLead: false,
+          planModeRequired: true,
+        },
+        () => invocation.execute(signal),
+      );
+
+      expect(requestPlanApproval).toHaveBeenCalledWith(
+        expect.objectContaining({
+          teammateName: 'planner',
+          plan: 'Teammate implementation plan',
+          originalRequest: 'Implement feature',
+          researchSummary: 'Read relevant files',
+          signal,
+        }),
+      );
+      expect(mockConfig.setApprovalMode).toHaveBeenCalledWith(
+        ApprovalMode.DEFAULT,
+      );
+      expect(mockConfig.savePlan).toHaveBeenCalledWith(
+        'Teammate implementation plan',
+      );
+      expect(result.llmContent).toContain('Leader approved');
+      expect(result.returnDisplay).toEqual({
+        type: 'plan_summary',
+        message: 'Leader approved.',
+        plan: 'Teammate implementation plan',
+      });
+    });
+
+    it('keeps a plan-required teammate in plan mode when leader rejects', async () => {
+      approvalMode = ApprovalMode.PLAN;
+      const requestPlanApproval = vi.fn().mockResolvedValue({
+        action: 'reject',
+        message: 'Add rollback details.',
+      });
+      (mockConfig.getTeamManager as ReturnType<typeof vi.fn>).mockReturnValue({
+        requestPlanApproval,
+      });
+      const invocation = tool.build({ plan: 'Incomplete teammate plan' });
+
+      const result = await runWithTeammateIdentity(
+        {
+          agentId: 'planner@test',
+          agentName: 'planner',
+          teamName: 'test',
+          isTeamLead: false,
+          planModeRequired: true,
+        },
+        () => invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('Leader rejected');
+      expect(result.llmContent).toContain('Add rollback details.');
+      expect(result.returnDisplay).toEqual({
+        type: 'plan_summary',
+        message: 'Leader rejected the plan.',
+        plan: expect.stringContaining('Add rollback details.'),
+        rejected: true,
+      });
+      expect(mockConfig.savePlan).not.toHaveBeenCalled();
+      expect(mockConfig.setApprovalMode).not.toHaveBeenCalled();
       expect(approvalMode).toBe(ApprovalMode.PLAN);
     });
   });

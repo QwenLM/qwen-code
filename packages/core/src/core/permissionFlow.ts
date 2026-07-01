@@ -30,6 +30,8 @@ import type { ToolCallConfirmationDetails } from '../tools/tools.js';
 export type PermissionFlowPermission = 'allow' | 'deny' | 'ask' | 'default';
 
 export interface PermissionFlowResult {
+  /** The tool's intrinsic L3 permission before PermissionManager rules. */
+  defaultPermission: string;
   /** The final permission after L3→L4 (allow | deny | ask | default) */
   finalPermission: PermissionFlowPermission;
   /** Whether PM forced 'ask' (hides "Always Allow" buttons) */
@@ -77,6 +79,7 @@ export async function evaluatePermissionFlow(
 
   // Build result
   const result: PermissionFlowResult = {
+    defaultPermission,
     finalPermission: finalPermission as PermissionFlowPermission,
     pmForcedAsk,
     pmCtx,

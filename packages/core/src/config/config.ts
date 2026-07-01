@@ -5958,6 +5958,12 @@ export class Config {
         const { TeamDeleteTool } = await import('../tools/team-delete.js');
         return new TeamDeleteTool(this);
       });
+      await registerLazy(ToolNames.TEAM_PLAN_APPROVAL, async () => {
+        const { TeamPlanApprovalTool } = await import(
+          '../tools/team-plan-approval.js'
+        );
+        return new TeamPlanApprovalTool(this);
+      });
       await registerLazy(ToolNames.TASK_CREATE, async () => {
         const { TaskCreateTool } = await import('../tools/task-create.js');
         return new TaskCreateTool(this);

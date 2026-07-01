@@ -12,6 +12,7 @@ import {
   buildSubagentPlanToolBlockedResult,
   getSubagentPlanToolUnavailableMessage,
   isPlanLifecycleToolUnavailableInSubagent,
+  shouldUsePlanOnlyReminderInSubagentContext,
   isSubagentLikeExecutionContext,
   SUBAGENT_PLAN_LIFECYCLE_TOOLS,
 } from './subagent-plan-tool-policy.js';
@@ -58,6 +59,45 @@ describe('subagent plan tool policy', () => {
       expect(
         isPlanLifecycleToolUnavailableInSubagent(ToolNames.READ_FILE),
       ).toBe(false);
+    });
+  });
+
+  it('allows only exit_plan_mode for plan-required teammates', () => {
+    runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => {
+        expect(
+          isPlanLifecycleToolUnavailableInSubagent(ToolNames.ENTER_PLAN_MODE),
+        ).toBe(true);
+        expect(
+          isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE),
+        ).toBe(false);
+        expect(shouldUsePlanOnlyReminderInSubagentContext()).toBe(false);
+      },
+    );
+  });
+
+  it('keeps plan-only reminders for ordinary teammates and subagents', async () => {
+    runWithTeammateIdentity(
+      {
+        agentId: 'worker@test',
+        agentName: 'worker',
+        teamName: 'test',
+        isTeamLead: false,
+      },
+      () => {
+        expect(shouldUsePlanOnlyReminderInSubagentContext()).toBe(true);
+      },
+    );
+
+    await runWithAgentContext('agent-1', async () => {
+      expect(shouldUsePlanOnlyReminderInSubagentContext()).toBe(true);
     });
   });
 
