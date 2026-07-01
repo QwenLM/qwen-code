@@ -320,9 +320,8 @@ const createCommand: CommandModule = {
       // Auto-start daemon if not running and not disabled
       const noAutoStart = argv['no-auto-start'] as boolean;
       if (!noAutoStart) {
-        const { isDaemonRunning, startDaemonInBackground } = await import(
-          '../schedule/run-schedule-daemon.js'
-        );
+        const { isDaemonRunning, startDaemonInBackground, sendDaemonCommand } =
+          await import('../schedule/run-schedule-daemon.js');
         const running = await isDaemonRunning();
         if (!running) {
           try {
@@ -335,6 +334,13 @@ const createCommand: CommandModule = {
             writeStderrLine(
               'Start manually: qwen schedule daemon start --background',
             );
+          }
+        } else {
+          // Signal running daemon to load the new task
+          try {
+            await sendDaemonCommand('load', task.definition.taskId);
+          } catch {
+            // best-effort — daemon will pick it up on next restart
           }
         }
       } else {
@@ -393,6 +399,18 @@ const deleteCommand: CommandModule = {
     const ok = await deleteScheduleTask(taskId);
     if (ok) {
       writeStderrLine(`Task ${taskId} deleted.`);
+
+      // Signal running daemon to unload the task
+      const { isDaemonRunning, sendDaemonCommand } = await import(
+        '../schedule/run-schedule-daemon.js'
+      );
+      if (await isDaemonRunning()) {
+        try {
+          await sendDaemonCommand('unload', taskId);
+        } catch {
+          // best-effort
+        }
+      }
     } else {
       writeStderrLine(`Task ${taskId} not found.`);
     }
@@ -505,6 +523,18 @@ const updateCommand: CommandModule = {
 
       writeStderrLine(formatScheduleTaskSummary(task));
       writeStderrLine('Task updated.');
+
+      // Signal running daemon to reload the task
+      const { isDaemonRunning, sendDaemonCommand } = await import(
+        '../schedule/run-schedule-daemon.js'
+      );
+      if (await isDaemonRunning()) {
+        try {
+          await sendDaemonCommand('reload', taskId);
+        } catch {
+          // best-effort
+        }
+      }
     } catch (err) {
       writeStderrLine(
         `Error: ${err instanceof Error ? err.message : String(err)}`,

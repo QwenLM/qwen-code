@@ -10,6 +10,9 @@
 
 import { spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { homedir } from 'node:os';
 
 import { CronScheduler, type CronJob } from './cronScheduler.js';
 import {
@@ -79,6 +82,7 @@ export class ScheduleDaemon {
   private forceSandbox: boolean;
   private channelRegistry: ChannelRegistry;
   private fireAtTimers = new Map<string, NodeJS.Timeout>();
+  private commandPollInterval: NodeJS.Timeout | null = null;
 
   constructor(options: DaemonOptions = {}) {
     this.scheduler = new CronScheduler(null);
@@ -104,6 +108,9 @@ export class ScheduleDaemon {
       void this.onFire(job);
     });
 
+    // Start command-file polling for CRUD reload signals
+    this.startCommandPolling();
+
     this.state = 'running';
     debugLogger.info(
       `ScheduleDaemon started with ${this.loadedTasks.size} task(s)${this.forceSandbox ? ' (forced sandbox)' : ''}`,
@@ -115,6 +122,12 @@ export class ScheduleDaemon {
     this.state = 'stopping';
 
     this.scheduler.stop();
+
+    // Stop command-file polling
+    if (this.commandPollInterval) {
+      clearInterval(this.commandPollInterval);
+      this.commandPollInterval = null;
+    }
 
     // Clear all pending fireAt timers
     for (const timer of this.fireAtTimers.values()) {
@@ -163,6 +176,61 @@ export class ScheduleDaemon {
       })),
       lastFireTimes,
     };
+  }
+
+  // -----------------------------------------------------------------------
+  // Command-file IPC (CRUD reload signals)
+  // -----------------------------------------------------------------------
+
+  private getCmdFilePath(): string {
+    return path.join(homedir(), '.qwen', 'schedule-daemon.cmd');
+  }
+
+  private startCommandPolling(): void {
+    this.commandPollInterval = setInterval(() => {
+      void this.processCommandFile();
+    }, 1000);
+  }
+
+  private async processCommandFile(): Promise<void> {
+    const cmdFile = this.getCmdFilePath();
+    try {
+      if (!fs.existsSync(cmdFile)) return;
+
+      const content = fs.readFileSync(cmdFile, 'utf-8').trim();
+      if (!content) return;
+
+      // Process each line as a separate command
+      const lines = content.split('\n').filter((l) => l.trim());
+      for (const line of lines) {
+        let cmd: { action: string; taskId?: string };
+        try {
+          cmd = JSON.parse(line);
+        } catch {
+          debugLogger.warn(`Invalid command in daemon command file: ${line}`);
+          continue;
+        }
+
+        switch (cmd.action) {
+          case 'load':
+            if (cmd.taskId) this.loadTask(cmd.taskId);
+            break;
+          case 'reload':
+            if (cmd.taskId) this.reloadTask(cmd.taskId);
+            break;
+          case 'unload':
+            if (cmd.taskId) this.unloadTask(cmd.taskId);
+            break;
+          default:
+            debugLogger.warn(`Unknown daemon command: ${cmd.action}`);
+        }
+      }
+
+      // Truncate file after processing
+      fs.writeFileSync(cmdFile, '');
+    } catch (err) {
+      debugLogger.warn(`Error processing command file: ${err}`);
+    }
   }
 
   // -----------------------------------------------------------------------

@@ -48,6 +48,29 @@ function removePidFile(): void {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Command-file IPC (CRUD reload signals)
+// ---------------------------------------------------------------------------
+
+function getCmdFilePath(): string {
+  return path.join(homedir(), '.qwen', 'schedule-daemon.cmd');
+}
+
+/**
+ * Append a JSON command line to the daemon command file.
+ * The running daemon polls this file every 1s and processes commands.
+ */
+export async function sendDaemonCommand(
+  action: 'load' | 'reload' | 'unload',
+  taskId?: string,
+): Promise<void> {
+  const cmdFile = getCmdFilePath();
+  const dir = path.dirname(cmdFile);
+  fs.mkdirSync(dir, { recursive: true });
+  const line = JSON.stringify({ action, taskId }) + '\n';
+  await fsp.appendFile(cmdFile, line, 'utf-8');
+}
+
 function isProcessAlive(pid: number): boolean {
   try {
     process.kill(pid, 0);

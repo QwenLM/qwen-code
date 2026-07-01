@@ -1,8 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { ScheduleDaemon } from './schedule-daemon.js';
-import {
-  createScheduleTask,
-} from './schedule-task-store.js';
+import { createScheduleTask } from './schedule-task-store.js';
 import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -11,7 +9,14 @@ import { EventEmitter } from 'node:events';
 // Mock child_process.spawn
 vi.mock('node:child_process', () => ({
   spawn: vi.fn(() => {
-    const child = new EventEmitter();
+    const child = new EventEmitter() as EventEmitter & {
+      stdout: EventEmitter;
+      stderr: EventEmitter;
+      stdin: null;
+      kill: ReturnType<typeof vi.fn>;
+      pid: number;
+      exitCode: number | null;
+    };
     child.stdout = new EventEmitter();
     child.stderr = new EventEmitter();
     child.stdin = null;
@@ -131,7 +136,9 @@ describe('ScheduleDaemon', () => {
       });
 
       // Manually write a run record
-      const { writeScheduleRunRecord } = await import('./schedule-task-store.js');
+      const { writeScheduleRunRecord } = await import(
+        './schedule-task-store.js'
+      );
       await writeScheduleRunRecord(task.definition.taskId, {
         startedAt: '2026-07-01T09:00:00.000Z',
         endedAt: '2026-07-01T09:01:00.000Z',
@@ -196,7 +203,9 @@ describe('ScheduleDaemon', () => {
 
       // Update the task
       const { updateScheduleTask } = await import('./schedule-task-store.js');
-      await updateScheduleTask(task.definition.taskId, { name: 'Updated Name' });
+      await updateScheduleTask(task.definition.taskId, {
+        name: 'Updated Name',
+      });
 
       daemon.reloadTask(task.definition.taskId);
       await new Promise((resolve) => setTimeout(resolve, 100));
