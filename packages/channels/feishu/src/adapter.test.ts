@@ -1069,6 +1069,57 @@ describe('FeishuChannel', () => {
       expect(updateCard.mock.calls[0]![1]).toContain('已取消');
     });
 
+    it('keeps the first terminal lifecycle state for prompt-end card finalization', async () => {
+      const channel = createChannel();
+      const cardSessions = getPrivateMethod<Map<string, unknown>>(
+        channel,
+        'cardSessions',
+      );
+      cardSessions.set('inbound_1', {
+        messageId: 'om_valid_message_id',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'answer',
+        lastUpdateAt: Date.now(),
+      });
+
+      const updateCard = vi.fn().mockResolvedValue(true);
+      (channel as unknown as { updateCard: typeof updateCard }).updateCard =
+        updateCard;
+
+      const lifecycle = getPrivateMethod<
+        (event: ChannelTaskLifecycleEvent) => void
+      >(channel, 'onTaskLifecycle');
+      const baseEvent = {
+        channelName: 'feishu',
+        chatId: 'oc_chat_id',
+        sessionId: 'session_1',
+        messageId: 'inbound_1',
+        identity: { id: 'channel:feishu', displayName: 'feishu' },
+        memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
+      };
+
+      lifecycle.call(channel, { ...baseEvent, type: 'completed' });
+      lifecycle.call(channel, {
+        ...baseEvent,
+        type: 'cancelled',
+        reason: 'cancel_command',
+      });
+
+      await getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => Promise<void>
+      >(channel, 'onPromptEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+
+      expect(updateCard.mock.calls[0]![1]).toContain('已完成');
+      expect(updateCard.mock.calls[0]![1]).not.toContain('已取消');
+    });
+
     it('treats prompt-end during stop cancellation as cancelled', async () => {
       const channel = createChannel();
       const cardSessions = getPrivateMethod<Map<string, unknown>>(

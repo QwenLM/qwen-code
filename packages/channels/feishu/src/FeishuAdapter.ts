@@ -1063,7 +1063,7 @@ export class FeishuChannel extends ChannelBase {
     const cardState = this.cardSessions.get(inboundMsgId);
     if (!cardState) return;
 
-    cardState.terminalStatus = event.type;
+    cardState.terminalStatus ??= event.type;
   }
 
   protected override async onResponseComplete(
