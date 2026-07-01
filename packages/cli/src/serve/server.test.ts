@@ -9798,6 +9798,36 @@ describe('createServeApp', () => {
       ).rejects.toThrow();
     });
 
+    it('does not move JSONL when live strict close reports channel unavailable', async () => {
+      const sid = '22222222-bbbb-cccc-dddd-eeeeeeeeeeef';
+      await writeSession(sid);
+      const closeError = Object.assign(
+        new Error(`ACP session close channel unavailable for ${sid}`),
+        { data: { errorKind: 'acp_channel_unavailable' } },
+      );
+      const bridge = fakeBridge({
+        closeImpl: async () => {
+          throw closeError;
+        },
+      });
+      const app = createArchiveApp(bridge);
+
+      const res = await request(app)
+        .post('/sessions/archive')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sid] });
+
+      expect(res.status).toBe(200);
+      expect(res.body.archived).toEqual([]);
+      expect(res.body.errors).toEqual([
+        { sessionId: sid, error: closeError.message },
+      ]);
+      await expect(fsp.access(sessionFilePath(sid))).resolves.toBeUndefined();
+      await expect(
+        fsp.access(sessionFilePath(sid, 'archived')),
+      ).rejects.toThrow();
+    });
+
     it('does not close a live session when no active JSONL exists', async () => {
       const sid = '22222222-bbbb-cccc-dddd-eeeeeeeeeeee';
       const bridge = fakeBridge();
