@@ -93,6 +93,18 @@ export const scheduleCommand: SlashCommand = {
         };
       }
       const ok = await deleteScheduleTask(taskId);
+      if (ok) {
+        const { isDaemonRunning, sendDaemonCommand } = await import(
+          '../../schedule/run-schedule-daemon.js'
+        );
+        if (await isDaemonRunning()) {
+          try {
+            await sendDaemonCommand('unload', taskId);
+          } catch {
+            // best-effort
+          }
+        }
+      }
       return {
         type: 'message',
         messageType: ok ? 'info' : 'error',
@@ -143,6 +155,19 @@ export const scheduleCommand: SlashCommand = {
             content: `Task ${taskId} not found.`,
           };
         }
+
+        // Signal running daemon to reload the task
+        const { isDaemonRunning, sendDaemonCommand } = await import(
+          '../../schedule/run-schedule-daemon.js'
+        );
+        if (await isDaemonRunning()) {
+          try {
+            await sendDaemonCommand('reload', taskId);
+          } catch {
+            // best-effort
+          }
+        }
+
         return {
           type: 'message',
           messageType: 'info',
