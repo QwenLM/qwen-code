@@ -15,6 +15,7 @@ import type {
   ChatCompletionContentPartWithCache,
   ChatCompletionToolWithCache,
 } from './types.js';
+import type { OpenAIResponseParsingOptions } from '../responseParsingOptions.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import { createDebugLogger } from '../../../utils/debugLogger.js';
 import { DefaultOpenAICompatibleProvider } from './default.js';
@@ -310,6 +311,13 @@ export class DashScopeOpenAICompatibleProvider extends DefaultOpenAICompatiblePr
   }
 
   override getDefaultGenerationConfig(): GenerateContentConfig {
+    return {};
+  }
+
+  getResponseParsingOptions(model?: string): OpenAIResponseParsingOptions {
+    if (this.isGlmModel(model ?? this.contentGeneratorConfig.model)) {
+      return { taggedThinkingTags: true };
+    }
     return {};
   }
 
