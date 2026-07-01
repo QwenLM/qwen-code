@@ -2102,14 +2102,18 @@ export class CoreToolScheduler {
             isPlanRequiredTeammateAwaitingApproval(this.config) &&
             finalPermission !== 'deny'
           ) {
-            const canRunBeforeLeaderApproval =
+            const isExplicitPreApprovalTool =
               isPlanRequiredTeammatePreApprovalAllowedTool(
                 canonicalName,
                 toolParams,
-              ) ||
-              (defaultPermission === 'allow' &&
-                finalPermission === 'allow' &&
-                !forceAutoReviewForAllow);
+              );
+            const canRunBeforeLeaderApproval =
+              isExplicitPreApprovalTool &&
+              (canonicalName === ToolNames.EXIT_PLAN_MODE ||
+                canonicalName === ToolNames.TASK_UPDATE ||
+                (defaultPermission === 'allow' &&
+                  finalPermission === 'allow' &&
+                  !forceAutoReviewForAllow));
 
             if (canRunBeforeLeaderApproval) {
               this.setToolCallOutcome(

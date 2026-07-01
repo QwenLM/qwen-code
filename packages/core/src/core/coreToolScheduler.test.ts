@@ -5845,6 +5845,8 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       getTruncateToolOutputLines: () => DEFAULT_TRUNCATE_TOOL_OUTPUT_LINES,
       getToolRegistry: () => mockToolRegistry,
       getPermissionManager: () => options.permissionManager,
+      getConditionalRulesRegistry: () => undefined,
+      getSkillManager: () => undefined,
       getUseModelRouter: () => false,
       getGeminiClient: () => null,
       isInteractive: () => true,
@@ -6288,6 +6290,124 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
         'send_message is not available while this plan-required teammate is waiting for leader approval',
       );
     }
+  });
+
+  it('lets a plan-required teammate run explicit inspection tools before approval', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'file contents',
+      returnDisplay: 'file contents',
+    });
+    const tool = new MockTool({
+      name: ToolNames.READ_FILE,
+      getDefaultPermission: async () => 'allow',
+      execute,
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      tool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      { avoidPermissionPrompts: true },
+    );
+
+    await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test-team',
+        agentName: 'planner',
+        teamName: 'test-team',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () =>
+        scheduler.schedule(
+          [
+            {
+              callId: 'plan-required-read-file',
+              name: ToolNames.READ_FILE,
+              args: { file_path: '/tmp/a.ts' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-plan-required-read-file',
+            },
+          ],
+          new AbortController().signal,
+        ),
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('success');
+    const statuses = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0] as ToolCall[])
+      .map((call) => call.status);
+    expect(statuses).not.toContain('awaiting_approval');
+  });
+
+  it('blocks trusted MCP-like default-allow tools before leader approval', async () => {
+    const execute = vi.fn().mockResolvedValue({
+      llmContent: 'mutated remote system',
+      returnDisplay: 'mutated remote system',
+    });
+    const tool = new MockTool({
+      name: 'mcp__trusted__write_record',
+      getDefaultPermission: async () => 'allow',
+      execute,
+    });
+    const onAllToolCallsComplete = vi.fn();
+    const onToolCallsUpdate = vi.fn();
+    const scheduler = createPlanModeScheduler(
+      tool,
+      onAllToolCallsComplete,
+      onToolCallsUpdate,
+      { avoidPermissionPrompts: true },
+    );
+
+    await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test-team',
+        agentName: 'planner',
+        teamName: 'test-team',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () =>
+        scheduler.schedule(
+          [
+            {
+              callId: 'plan-required-mcp-write',
+              name: 'mcp__trusted__write_record',
+              args: { id: '1', value: 'new' },
+              isClientInitiated: false,
+              prompt_id: 'prompt-plan-required-mcp-write',
+            },
+          ],
+          new AbortController().signal,
+        ),
+    );
+
+    await vi.waitFor(() => {
+      expect(onAllToolCallsComplete).toHaveBeenCalled();
+    });
+
+    expect(execute).not.toHaveBeenCalled();
+    const completedCalls = onAllToolCallsComplete.mock
+      .calls[0][0] as ToolCall[];
+    expect(completedCalls[0].status).toBe('error');
+    if (completedCalls[0].status === 'error') {
+      const response = JSON.stringify(completedCalls[0].response.responseParts);
+      expect(response).toContain(
+        'mcp__trusted__write_record is not available while this plan-required teammate is waiting for leader approval',
+      );
+    }
+    const statuses = onToolCallsUpdate.mock.calls
+      .flatMap((call) => call[0] as ToolCall[])
+      .map((call) => call.status);
+    expect(statuses).not.toContain('awaiting_approval');
   });
 
   it('lets a plan-required teammate claim a task before confirmation is requested', async () => {

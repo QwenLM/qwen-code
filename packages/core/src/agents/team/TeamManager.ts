@@ -414,6 +414,7 @@ export class TeamManager {
           agentName: name,
           completeOnIdle: false,
           approvalMode: config.planModeRequired ? ApprovalMode.PLAN : undefined,
+          teammateIdentity: identity,
           initialTask:
             config.prompt ??
             (config.planModeRequired

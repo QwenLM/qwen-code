@@ -25,6 +25,7 @@ import { AgentEventEmitter } from '../runtime/agent-events.js';
 import { ContextState } from '../runtime/agent-headless.js';
 import { AgentInteractive } from '../runtime/agent-interactive.js';
 import { createDenialState } from '../../permissions/denialTracking.js';
+import { runWithTeammateIdentity } from '../team/identity.js';
 import type {
   Backend,
   AgentSpawnConfig,
@@ -63,6 +64,7 @@ export class InProcessBackend implements Backend {
   private readonly agentOrder: string[] = [];
   private activeAgentId: string | null = null;
   private exitCallback: AgentExitCallback | null = null;
+  private autoApprovalOverrideCount = 0;
   /** Whether cleanup() has been called */
   private cleanedUp = false;
 
@@ -90,18 +92,27 @@ export class InProcessBackend implements Backend {
 
     const { promptConfig, modelConfig, runConfig, toolConfig } =
       inProcessConfig.runtimeConfig;
+    const runInContext = createRunInContext(inProcessConfig);
+    const runWithContext = <T>(fn: () => T): T =>
+      runInContext ? runInContext(fn) : fn();
 
     const eventEmitter = new AgentEventEmitter();
 
     // Build a per-agent runtime context with isolated working directory,
     // target directory, workspace context, tool registry, and (optionally)
     // a dedicated ContentGenerator for per-agent auth isolation.
-    const perAgent = await createPerAgentConfig(
-      this.runtimeContext,
-      config.cwd,
-      inProcessConfig.runtimeConfig.modelConfig.model,
-      inProcessConfig.authOverrides,
-      inProcessConfig.approvalMode,
+    const perAgent = await runWithContext(() =>
+      createPerAgentConfig(
+        this.runtimeContext,
+        config.cwd,
+        inProcessConfig.runtimeConfig.modelConfig.model,
+        inProcessConfig.authOverrides,
+        inProcessConfig.approvalMode,
+        {
+          acquireAutoApprovalOverride: () => this.acquireAutoApprovalOverride(),
+          releaseAutoApprovalOverride: () => this.releaseAutoApprovalOverride(),
+        },
+      ),
     );
     const agentContext = perAgent.config;
     if (perAgent.contentGenerator) {
@@ -135,6 +146,7 @@ export class InProcessBackend implements Backend {
         maxTimeMinutesPerMessage: runConfig.max_time_minutes,
         completeOnIdle: inProcessConfig.completeOnIdle,
         chatHistory: inProcessConfig.chatHistory,
+        runInContext,
       },
       core,
     );
@@ -149,7 +161,7 @@ export class InProcessBackend implements Backend {
 
     try {
       const context = new ContextState();
-      await interactive.start(context);
+      await runWithContext(() => interactive.start(context));
 
       // Watch for completion and fire exit callback — but only for
       // truly terminal statuses. IDLE means the agent is still alive
@@ -403,6 +415,32 @@ export class InProcessBackend implements Backend {
       });
     }
   }
+
+  private acquireAutoApprovalOverride(): boolean {
+    if (this.runtimeContext.getApprovalMode() === ApprovalMode.AUTO) {
+      return false;
+    }
+    if (this.autoApprovalOverrideCount === 0) {
+      this.runtimeContext
+        .getPermissionManager?.()
+        ?.stripDangerousRulesForAutoMode();
+    }
+    this.autoApprovalOverrideCount++;
+    return true;
+  }
+
+  private releaseAutoApprovalOverride(): void {
+    if (this.autoApprovalOverrideCount === 0) {
+      return;
+    }
+    this.autoApprovalOverrideCount--;
+    if (
+      this.autoApprovalOverrideCount === 0 &&
+      this.runtimeContext.getApprovalMode() !== ApprovalMode.AUTO
+    ) {
+      this.runtimeContext.getPermissionManager?.()?.restoreDangerousRules();
+    }
+  }
 }
 
 /**
@@ -426,6 +464,7 @@ async function createPerAgentConfig(
   modelId?: string,
   authOverrides?: InProcessSpawnConfig['authOverrides'],
   approvalMode?: ApprovalMode,
+  approvalModeHooks?: ApprovalModeOverrideHooks,
 ): Promise<{
   config: Config;
   contentGenerator?: ContentGenerator;
@@ -439,7 +478,11 @@ async function createPerAgentConfig(
   let cleanup = () => {};
 
   if (approvalMode !== undefined) {
-    const handle = createApprovalModeConfigOverride(base, approvalMode);
+    const handle = createApprovalModeConfigOverride(
+      base,
+      approvalMode,
+      approvalModeHooks,
+    );
     override = handle.config as unknown as Record<string, unknown>;
     cleanup = handle.cleanup;
   }
@@ -510,23 +553,54 @@ async function createPerAgentConfig(
   }
 }
 
+interface ApprovalModeOverrideHooks {
+  acquireAutoApprovalOverride(): boolean;
+  releaseAutoApprovalOverride(): void;
+}
+
 function createApprovalModeConfigOverride(
   base: Config,
   mode: ApprovalMode,
+  hooks?: ApprovalModeOverrideHooks,
 ): { config: Config; cleanup: () => void } {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
   const baseApprovalMode = base.getApprovalMode();
-  override.approvalMode = mode;
+  const initialMode = getTrustedInitialApprovalMode(base, mode);
+  let autoOverrideAcquired = false;
+  const acquireAutoOverride = () => {
+    if (autoOverrideAcquired || base.getApprovalMode() === ApprovalMode.AUTO) {
+      return;
+    }
+    if (hooks) {
+      autoOverrideAcquired = hooks.acquireAutoApprovalOverride();
+      return;
+    }
+    base.getPermissionManager?.()?.stripDangerousRulesForAutoMode();
+    autoOverrideAcquired = true;
+  };
+  const releaseAutoOverride = () => {
+    if (!autoOverrideAcquired) {
+      return;
+    }
+    if (hooks) {
+      hooks.releaseAutoApprovalOverride();
+    } else if (base.getApprovalMode() !== ApprovalMode.AUTO) {
+      base.getPermissionManager?.()?.restoreDangerousRules();
+    }
+    autoOverrideAcquired = false;
+  };
+
+  override.approvalMode = initialMode;
   override.getApprovalMode = Config.prototype.getApprovalMode;
   override.prePlanMode =
-    mode === ApprovalMode.PLAN
+    initialMode === ApprovalMode.PLAN
       ? baseApprovalMode === ApprovalMode.PLAN
         ? base.getPrePlanMode()
         : baseApprovalMode
       : undefined;
   const basePlanGateState =
-    mode === ApprovalMode.PLAN ? base.getPlanGateState() : undefined;
+    initialMode === ApprovalMode.PLAN ? base.getPlanGateState() : undefined;
   override.planGateState = basePlanGateState
     ? {
         ...basePlanGateState,
@@ -538,15 +612,7 @@ function createApprovalModeConfigOverride(
     nextMode: ApprovalMode,
     options?: Parameters<Config['setApprovalMode']>[1],
   ) => {
-    if (base.getApprovalMode() !== ApprovalMode.AUTO) {
-      Config.prototype.setApprovalMode.call(
-        override as Config,
-        nextMode,
-        options,
-      );
-      return;
-    }
-
+    const beforeMode = (override as Config).getApprovalMode();
     const hadOwnPermissionManager = Object.prototype.hasOwnProperty.call(
       override,
       'permissionManager',
@@ -566,25 +632,54 @@ function createApprovalModeConfigOverride(
         delete override.permissionManager;
       }
     }
+
+    const afterMode = (override as Config).getApprovalMode();
+    if (beforeMode !== ApprovalMode.AUTO && afterMode === ApprovalMode.AUTO) {
+      acquireAutoOverride();
+    } else if (
+      beforeMode === ApprovalMode.AUTO &&
+      afterMode !== ApprovalMode.AUTO
+    ) {
+      releaseAutoOverride();
+    }
   };
   override.planGateEntryCounter = override.planGateState?.entryId ?? 0;
   override.autoModeDenialState = createDenialState();
 
   const cleanup = () => {
-    if (
-      (override as Config).getApprovalMode() === ApprovalMode.AUTO &&
-      base.getApprovalMode() !== ApprovalMode.AUTO
-    ) {
-      base.getPermissionManager?.()?.restoreDangerousRules();
-    }
+    releaseAutoOverride();
   };
 
   if (
-    mode === ApprovalMode.AUTO &&
+    initialMode === ApprovalMode.AUTO &&
     base.getApprovalMode() !== ApprovalMode.AUTO
   ) {
-    base.getPermissionManager?.()?.stripDangerousRulesForAutoMode();
+    acquireAutoOverride();
   }
 
   return { config: override as Config, cleanup };
+}
+
+function getTrustedInitialApprovalMode(
+  base: Config,
+  mode: ApprovalMode,
+): ApprovalMode {
+  if (
+    !base.isTrustedFolder() &&
+    mode !== ApprovalMode.DEFAULT &&
+    mode !== ApprovalMode.PLAN
+  ) {
+    return ApprovalMode.DEFAULT;
+  }
+  return mode;
+}
+
+function createRunInContext(
+  inProcessConfig: InProcessSpawnConfig,
+): AgentInteractive['config']['runInContext'] {
+  const identity = inProcessConfig.teammateIdentity;
+  if (!identity) {
+    return undefined;
+  }
+  return <T>(fn: () => T): T => runWithTeammateIdentity(identity, fn);
 }

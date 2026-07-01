@@ -8,7 +8,10 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
-import { TeamPlanApprovalTool } from './team-plan-approval.js';
+import {
+  TeamPlanApprovalTool,
+  type TeamPlanApprovalParams,
+} from './team-plan-approval.js';
 
 describe('TeamPlanApprovalTool', () => {
   let approvalMode: ApprovalMode;
@@ -128,5 +131,37 @@ describe('TeamPlanApprovalTool', () => {
 
     expect(resolvePlanApprovalRequest).not.toHaveBeenCalled();
     expect(result.error?.message).toContain('Only the team leader');
+  });
+
+  it('uses the standard message when there is no active team', async () => {
+    vi.mocked(config.getTeamManager).mockReturnValue(null);
+
+    const result = await tool
+      .build({ request_id: 'req-1', action: 'approve' })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.message).toBe('No active team. Create a team first.');
+  });
+
+  it('validates request parameters', () => {
+    expect(
+      tool.validateToolParams({ request_id: '', action: 'approve' }),
+    ).toContain('request_id');
+    expect(
+      tool.validateToolParams({
+        request_id: 'req-1',
+        action: 'maybe',
+      } as unknown as TeamPlanApprovalParams),
+    ).toContain('action');
+    expect(
+      tool.validateToolParams({
+        request_id: 'req-1',
+        action: 'approve',
+        message: 42,
+      } as unknown as TeamPlanApprovalParams),
+    ).toContain('message');
+    expect(
+      tool.validateToolParams({ request_id: 'req-1', action: 'approve' }),
+    ).toBeNull();
   });
 });

@@ -51,6 +51,32 @@ describe('TeamManager plan approval requests', () => {
     return h;
   }
 
+  it('rejects approval requests for unknown teammates', async () => {
+    const h = await createHarness();
+
+    await expect(
+      h.teamManager.requestPlanApproval({
+        teammateName: 'missing',
+        plan: 'Plan',
+      }),
+    ).rejects.toThrow('Teammate "missing" not found.');
+  });
+
+  it('rejects approval requests for teammates without plan approval enabled', async () => {
+    const h = await createHarness();
+    await h.teamManager.spawnTeammate({
+      name: 'runner',
+      cwd: h.tmpDir,
+    });
+
+    await expect(
+      h.teamManager.requestPlanApproval({
+        teammateName: 'runner',
+        plan: 'Plan',
+      }),
+    ).rejects.toThrow('Teammate "runner" is not configured for plan approval.');
+  });
+
   it('delivers a leader approval request immediately and resolves by request id', async () => {
     const h = await createHarness();
     await h.teamManager.spawnTeammate({
@@ -63,6 +89,15 @@ describe('TeamManager plan approval requests', () => {
     expect(member.mode).toBe(PermissionMode.Plan);
     const spawnConfig = h.backend.getSpawnConfig(member.agentId);
     expect(spawnConfig?.inProcess?.approvalMode).toBe(ApprovalMode.PLAN);
+    expect(spawnConfig?.inProcess?.teammateIdentity).toEqual(
+      expect.objectContaining({
+        agentId: member.agentId,
+        agentName: 'planner',
+        teamName: h.teamManager.getTeamFile().name,
+        isTeamLead: false,
+        planModeRequired: true,
+      }),
+    );
     expect(spawnConfig?.inProcess?.initialTask).toContain('exit_plan_mode');
 
     const callback = vi.fn();

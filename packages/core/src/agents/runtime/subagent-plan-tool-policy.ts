@@ -6,15 +6,26 @@
 
 import { ToolNames } from '../../tools/tool-names.js';
 import type { ToolResult } from '../../tools/tools.js';
-import type { ApprovalMode, Config } from '../../config/config.js';
+import { ApprovalMode } from '../../config/approval-mode.js';
+import type { Config } from '../../config/config.js';
 import { getTeammateContext, isTeammate } from '../team/identity.js';
 import { getCurrentAgentId } from './agent-context.js';
-
-const PLAN_MODE = 'plan' as ApprovalMode;
 
 export const SUBAGENT_PLAN_LIFECYCLE_TOOLS: ReadonlySet<string> = new Set([
   ToolNames.ENTER_PLAN_MODE,
   ToolNames.EXIT_PLAN_MODE,
+]);
+
+const PLAN_REQUIRED_TEAMMATE_PRE_APPROVAL_TOOLS: ReadonlySet<string> = new Set([
+  ToolNames.EXIT_PLAN_MODE,
+  ToolNames.READ_FILE,
+  ToolNames.GREP,
+  ToolNames.GLOB,
+  ToolNames.LS,
+  ToolNames.LSP,
+  ToolNames.TASK_LIST,
+  ToolNames.TOOL_SEARCH,
+  ToolNames.READ_MCP_RESOURCE,
 ]);
 
 export function isSubagentLikeExecutionContext(): boolean {
@@ -29,7 +40,8 @@ export function isPlanRequiredTeammateAwaitingApproval(
   config: Config,
 ): boolean {
   return (
-    isPlanRequiredTeammateContext() && config.getApprovalMode() === PLAN_MODE
+    isPlanRequiredTeammateContext() &&
+    config.getApprovalMode() === ApprovalMode.PLAN
   );
 }
 
@@ -71,7 +83,7 @@ export function isPlanRequiredTeammatePreApprovalAllowedTool(
   toolName: string,
   params: unknown,
 ): boolean {
-  if (toolName === ToolNames.EXIT_PLAN_MODE) {
+  if (PLAN_REQUIRED_TEAMMATE_PRE_APPROVAL_TOOLS.has(toolName)) {
     return true;
   }
   if (toolName !== ToolNames.TASK_UPDATE) {

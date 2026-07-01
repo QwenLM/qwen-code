@@ -54,7 +54,7 @@ class TeamPlanApprovalInvocation extends BaseToolInvocation<
 
     const manager = this.config.getTeamManager();
     if (!manager) {
-      const msg = 'No active team plan approval request is available.';
+      const msg = 'No active team. Create a team first.';
       return {
         llmContent: msg,
         returnDisplay: msg,

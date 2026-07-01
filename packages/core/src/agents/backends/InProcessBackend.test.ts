@@ -9,6 +9,7 @@ import { InProcessBackend } from './InProcessBackend.js';
 import { DISPLAY_MODE } from './types.js';
 import type { AgentSpawnConfig } from './types.js';
 import { AgentCore } from '../runtime/agent-core.js';
+import { getTeammateContext } from '../team/identity.js';
 import { createContentGenerator } from '../../core/contentGenerator.js';
 import { ApprovalMode, type Config } from '../../config/config.js';
 
@@ -19,6 +20,13 @@ const PLAN_MODE = 'plan' as ApprovalMode;
 const mockContentGenerator = {
   generateContentStream: vi.fn(),
 };
+const runReasoningLoopMock = vi.hoisted(() =>
+  vi.fn().mockResolvedValue({
+    text: 'Done',
+    terminateMode: null,
+    turnsUsed: 1,
+  }),
+);
 vi.mock('../../core/contentGenerator.js', async (importOriginal) => {
   const actual =
     await importOriginal<typeof import('../../core/contentGenerator.js')>();
@@ -56,11 +64,7 @@ vi.mock('../runtime/agent-core.js', () => ({
       },
       createChat: vi.fn().mockResolvedValue({}),
       prepareTools: vi.fn().mockReturnValue([]),
-      runReasoningLoop: vi.fn().mockResolvedValue({
-        text: 'Done',
-        terminateMode: null,
-        turnsUsed: 1,
-      }),
+      runReasoningLoop: runReasoningLoopMock,
       getEventEmitter: vi.fn().mockReturnValue(emitter),
       getExecutionSummary: vi.fn().mockReturnValue({}),
       getMessages: () => messages,
@@ -177,6 +181,12 @@ describe('InProcessBackend', () => {
   let backend: InProcessBackend;
 
   beforeEach(() => {
+    runReasoningLoopMock.mockReset();
+    runReasoningLoopMock.mockResolvedValue({
+      text: 'Done',
+      terminateMode: null,
+      turnsUsed: 1,
+    });
     backend = new InProcessBackend(createMockConfig());
   });
 
@@ -266,6 +276,42 @@ describe('InProcessBackend', () => {
 
     expect(backend.writeToAgent('agent-1', 'hello')).toBe(true);
     expect(backend.writeToAgent('nonexistent', 'hello')).toBe(false);
+  });
+
+  it('runs direct enqueued teammate messages inside teammate identity', async () => {
+    const seenContexts: unknown[] = [];
+    runReasoningLoopMock.mockImplementation(async () => {
+      seenContexts.push(getTeammateContext());
+      return { text: 'Done', terminateMode: null, turnsUsed: 1 };
+    });
+    await backend.init();
+    const config = createSpawnConfig('planner@test-team');
+    config.inProcess!.initialTask = undefined;
+    Object.assign(config.inProcess!, {
+      teammateIdentity: {
+        agentId: 'planner@test-team',
+        agentName: 'planner',
+        teamName: 'test-team',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+    });
+
+    await backend.spawnAgent(config);
+    const agent = backend.getAgent('planner@test-team');
+    expect(agent).toBeDefined();
+
+    agent!.enqueueMessage('follow-up from teammate tab');
+    await agent!.waitForCompletion();
+
+    expect(seenContexts).toEqual([
+      expect.objectContaining({
+        agentId: 'planner@test-team',
+        agentName: 'planner',
+        teamName: 'test-team',
+        planModeRequired: true,
+      }),
+    ]);
   });
 
   it('should return null for screen capture methods', async () => {
@@ -423,6 +469,71 @@ describe('InProcessBackend', () => {
     expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
   });
 
+  it('keeps dangerous rules stripped until the last AUTO child exits', async () => {
+    const restoreDangerousRules = vi.fn();
+    const stripDangerousRulesForAutoMode = vi.fn();
+    const parentConfig = createMockConfig() as unknown as {
+      getPermissionManager: ReturnType<typeof vi.fn>;
+    };
+    parentConfig.getPermissionManager.mockReturnValue({
+      restoreDangerousRules,
+      stripDangerousRulesForAutoMode,
+    });
+    const localBackend = new InProcessBackend(parentConfig as never);
+    await localBackend.init();
+
+    const first = createSpawnConfig('agent-1');
+    first.inProcess!.approvalMode = ApprovalMode.AUTO;
+    first.inProcess!.initialTask = undefined;
+    const second = createSpawnConfig('agent-2');
+    second.inProcess!.approvalMode = ApprovalMode.AUTO;
+    second.inProcess!.initialTask = undefined;
+
+    await localBackend.spawnAgent(first);
+    await localBackend.spawnAgent(second);
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+    localBackend.stopAgent('agent-1');
+    expect(restoreDangerousRules).not.toHaveBeenCalled();
+
+    localBackend.stopAgent('agent-2');
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+  });
+
+  it('continues tracking AUTO children while the parent mode changes', async () => {
+    const restoreDangerousRules = vi.fn();
+    const stripDangerousRulesForAutoMode = vi.fn();
+    let parentMode = DEFAULT_MODE;
+    const parentConfig = createMockConfig() as unknown as {
+      getApprovalMode: ReturnType<typeof vi.fn>;
+      getPermissionManager: ReturnType<typeof vi.fn>;
+    };
+    parentConfig.getApprovalMode.mockImplementation(() => parentMode);
+    parentConfig.getPermissionManager.mockReturnValue({
+      restoreDangerousRules,
+      stripDangerousRulesForAutoMode,
+    });
+    const localBackend = new InProcessBackend(parentConfig as never);
+    await localBackend.init();
+
+    const first = createSpawnConfig('agent-1');
+    first.inProcess!.approvalMode = ApprovalMode.AUTO;
+    first.inProcess!.initialTask = undefined;
+    const second = createSpawnConfig('agent-2');
+    second.inProcess!.approvalMode = ApprovalMode.AUTO;
+    second.inProcess!.initialTask = undefined;
+
+    await localBackend.spawnAgent(first);
+    await localBackend.spawnAgent(second);
+    parentMode = ApprovalMode.AUTO;
+    localBackend.stopAgent('agent-1');
+    parentMode = DEFAULT_MODE;
+    localBackend.stopAgent('agent-2');
+
+    expect(stripDangerousRulesForAutoMode).toHaveBeenCalledTimes(1);
+    expect(restoreDangerousRules).toHaveBeenCalledTimes(1);
+  });
+
   it('should cleanup all agents', async () => {
     await backend.init();
     await backend.spawnAgent(createSpawnConfig('agent-1'));
@@ -535,6 +646,30 @@ describe('InProcessBackend', () => {
     expect(() => agentContext.setApprovalMode(ApprovalMode.AUTO_EDIT)).toThrow(
       'Cannot enable privileged approval modes in an untrusted folder.',
     );
+  });
+
+  it('downgrades privileged initial approval modes in untrusted folders', async () => {
+    const parentConfig = createMockConfig() as unknown as {
+      isTrustedFolder: ReturnType<typeof vi.fn>;
+    };
+    parentConfig.isTrustedFolder.mockReturnValue(false);
+    const backendWithUntrustedParent = new InProcessBackend(
+      parentConfig as never,
+    );
+    await backendWithUntrustedParent.init();
+
+    const config = createSpawnConfig('agent-1');
+    config.inProcess!.approvalMode = ApprovalMode.AUTO_EDIT;
+
+    await backendWithUntrustedParent.spawnAgent(config);
+
+    const MockAgentCore = AgentCore as unknown as ReturnType<typeof vi.fn>;
+    const lastCall = MockAgentCore.mock.calls.at(-1);
+    expect(lastCall).toBeDefined();
+
+    const { runtimeContext } = destructureAgentCoreCall(lastCall!);
+    const agentContext = runtimeContext as unknown as Config;
+    expect(agentContext.getApprovalMode()).toBe(ApprovalMode.DEFAULT);
   });
 
   it('should pass parent custom ignore files to per-agent file service', async () => {
