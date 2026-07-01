@@ -2,13 +2,18 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { dp } from './dialogStyles';
 import { useConnection, useSessions } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
-import { formatRelativeTime } from '../../utils/formatRelativeTime';
+import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
+import { useFilterInput } from '../../hooks/useFilterInput';
+import { SessionRow } from './SessionRow';
 
 interface DeleteSessionDialogProps {
   onDeleted: (sessionIds: string[]) => void;
   onError: (error: unknown) => void;
   onClose: () => void;
 }
+
+const LIST_ID = 'delete-session-list';
+const optionId = (index: number) => `${LIST_ID}-opt-${index}`;
 
 export function DeleteSessionDialog({
   onDeleted,
@@ -26,9 +31,14 @@ export function DeleteSessionDialog({
   } = useSessions({ autoLoad: true });
   const currentSessionId = connection.sessionId;
   const [deleting, setDeleting] = useState(false);
+  // `selectedIdx` is the keyboard/hover cursor (roving highlight); `selectedIds`
+  // is the multi-select set marked for deletion (shown by the [x] checkbox).
   const [selectedIdx, setSelectedIdx] = useState(0);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [searchQuery, setSearchQuery] = useState('');
+  const { filterValue: filterQuery, inputProps } = useFilterInput(() => {
+    setSelectedIdx(0);
+    setSelectedIds(new Set());
+  });
   const [message, setMessage] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -39,27 +49,43 @@ export function DeleteSessionDialog({
 
   const filtered = useMemo(
     () =>
-      searchQuery
+      filterQuery
         ? sessions.filter((s) => {
-            const q = searchQuery.toLowerCase();
+            const q = filterQuery.toLowerCase();
             return (
               (s.displayName || '').toLowerCase().includes(q) ||
               s.sessionId.toLowerCase().includes(q)
             );
           })
         : sessions,
-    [sessions, searchQuery],
+    [sessions, filterQuery],
+  );
+
+  const toggleSelection = useCallback(
+    (sessionId: string) => {
+      if (sessionId === currentSessionId) return;
+      setSelectedIds((prev) => {
+        const next = new Set(prev);
+        if (next.has(sessionId)) {
+          next.delete(sessionId);
+        } else {
+          next.add(sessionId);
+        }
+        return next;
+      });
+    },
+    [currentSessionId],
   );
 
   useEffect(() => {
-    if (searchQuery && selectedIds.size > 0) {
+    if (filterQuery && selectedIds.size > 0) {
       const filteredSet = new Set(filtered.map((s) => s.sessionId));
       setSelectedIds((prev) => {
         const pruned = new Set([...prev].filter((id) => filteredSet.has(id)));
         return pruned.size === prev.size ? prev : pruned;
       });
     }
-  }, [searchQuery, filtered, selectedIds.size]);
+  }, [filterQuery, filtered, selectedIds.size]);
 
   useEffect(() => {
     if (selectedIdx >= filtered.length && filtered.length > 0) {
@@ -78,21 +104,17 @@ export function DeleteSessionDialog({
     inputRef.current?.focus();
   }, []);
 
-  const toggleSelection = useCallback(
-    (sessionId: string) => {
-      if (sessionId === currentSessionId) return;
-      setSelectedIds((prev) => {
-        const next = new Set(prev);
-        if (next.has(sessionId)) {
-          next.delete(sessionId);
-        } else {
-          next.add(sessionId);
-        }
-        return next;
-      });
+  // Enter toggles the cursor row's checkbox; the actual (destructive) delete
+  // still requires pressing the danger button — mirroring the click behaviour.
+  const { keyboardMode } = useListboxKeyboard({
+    itemCount: filtered.length,
+    activeIndex: selectedIdx,
+    onActiveIndexChange: setSelectedIdx,
+    onConfirm: (index) => {
+      const session = filtered[index];
+      if (session) toggleSelection(session.sessionId);
     },
-    [currentSessionId],
-  );
+  });
 
   const handleDelete = useCallback(() => {
     if (deleting) return;
@@ -191,23 +213,25 @@ export function DeleteSessionDialog({
   const canDelete = !deleting && !loading && hasSelection;
 
   return (
-    <div className={dp('resume-picker', 'resume-picker-in-shell')}>
-      <div className={dp('resume-picker-search')}>
-        <span className={dp('resume-picker-search-label')}>
+    <div className={dp('picker', 'picker-in-shell')}>
+      <div className={dp('picker-search')}>
+        <span className={dp('picker-search-label')}>
           {t('resume.search')}:{' '}
         </span>
         <input
           ref={inputRef}
-          className={dp('resume-picker-search-input')}
-          value={searchQuery}
-          onChange={(e) => {
-            setSearchQuery(e.target.value);
-            setSelectedIdx(0);
-            setSelectedIds(new Set());
-          }}
+          className={dp('picker-search-input')}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded="true"
+          aria-controls={LIST_ID}
+          aria-activedescendant={
+            filtered.length > 0 ? optionId(selectedIdx) : undefined
+          }
+          {...inputProps}
           placeholder=""
         />
-        <span className={dp('resume-picker-search-hint')}>
+        <span className={dp('picker-search-hint')}>
           {message ||
             (deleting
               ? t('delete.deleting')
@@ -215,27 +239,34 @@ export function DeleteSessionDialog({
                 ? t('common.loading')
                 : hasSelection
                   ? t('delete.selected', { count: selectedIds.size })
-                  : searchQuery
+                  : filterQuery
                     ? t('delete.matches', { count: filtered.length })
                     : '')}
         </span>
       </div>
 
-      <div className={dp('resume-picker-sep')} />
+      <div className={dp('picker-sep')} />
 
-      <div className={dp('resume-picker-list')} ref={listRef}>
+      <div
+        id={LIST_ID}
+        role="listbox"
+        aria-multiselectable="true"
+        className={dp(
+          'picker-list',
+          keyboardMode ? 'picker-keyboard-only' : undefined,
+        )}
+        ref={listRef}
+      >
         {loading && (
-          <div className={dp('resume-picker-empty')}>{t('common.loading')}</div>
+          <div className={dp('picker-empty')}>{t('common.loading')}</div>
         )}
         {!loading && sessionsError && (
-          <div className={dp('resume-picker-empty')}>
-            {sessionsError.message}
-          </div>
+          <div className={dp('picker-empty')}>{sessionsError.message}</div>
         )}
         {!loading && !sessionsError && filtered.length === 0 && (
-          <div className={dp('resume-picker-empty')}>
-            {searchQuery
-              ? t('delete.noMatch', { query: searchQuery })
+          <div className={dp('picker-empty')}>
+            {filterQuery
+              ? t('delete.noMatch', { query: filterQuery })
               : t('delete.none')}
           </div>
         )}
@@ -243,55 +274,37 @@ export function DeleteSessionDialog({
           filtered.map((s, i) => {
             const isCurrent = s.sessionId === currentSessionId;
             const isChecked = selectedIds.has(s.sessionId);
-            const checkbox = isChecked ? '[x] ' : '[ ] ';
             return (
-              <div
+              <SessionRow
                 key={s.sessionId}
-                className={dp(
-                  'resume-picker-item',
-                  'resume-picker-session-item',
-                  isChecked ? 'selected' : undefined,
-                  isCurrent ? 'resume-picker-item-current' : undefined,
-                  isCurrent ? 'disabled' : undefined,
-                )}
+                session={s}
+                optionId={optionId(i)}
+                active={i === selectedIdx}
+                ariaSelected={isChecked}
+                current={isCurrent}
+                disabled={isCurrent}
+                currentLabel={t('resume.current')}
+                leading={
+                  <span
+                    className={dp(
+                      'picker-item-checkbox',
+                      isChecked ? 'picker-item-checkbox-checked' : undefined,
+                    )}
+                  >
+                    {isChecked ? '[x] ' : '[ ] '}
+                  </span>
+                }
                 onClick={() => {
                   setSelectedIdx(i);
                   if (!isCurrent) toggleSelection(s.sessionId);
                 }}
-              >
-                <div className={dp('resume-picker-item-row')}>
-                  <span className={dp('resume-picker-item-checkbox')}>
-                    {checkbox}
-                  </span>
-                  <span className={dp('resume-picker-item-title')}>
-                    {s.displayName || s.sessionId.slice(0, 8)}
-                  </span>
-                  {isCurrent && (
-                    <span className={dp('resume-picker-item-badge')}>
-                      {t('resume.current')}
-                    </span>
-                  )}
-                </div>
-                <div className={dp('resume-picker-item-meta')}>
-                  <span>
-                    {(s.updatedAt || s.createdAt) &&
-                      formatRelativeTime(s.updatedAt || s.createdAt || '', t)}
-                  </span>
-                  <span className={dp('resume-picker-item-detail')}>
-                    {t('common.clients', { count: s.clientCount ?? 0 })}
-                  </span>
-                  {s.hasActivePrompt && (
-                    <span className={dp('resume-picker-item-detail')}>
-                      {t('resume.activePrompt')}
-                    </span>
-                  )}
-                </div>
-              </div>
+                onActivate={() => setSelectedIdx(i)}
+              />
             );
           })}
       </div>
 
-      <div className={dp('resume-picker-sep')} />
+      <div className={dp('picker-sep')} />
       <div className={dp('dialog-footer-actions')}>
         <button
           type="button"

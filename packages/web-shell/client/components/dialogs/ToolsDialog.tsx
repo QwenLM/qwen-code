@@ -5,6 +5,7 @@ import {
   type DaemonWorkspaceToolStatus,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 
 function toolLabel(tool: DaemonWorkspaceToolStatus): string {
   return tool.displayName || tool.name;
@@ -47,6 +48,16 @@ export function ToolsDialog() {
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
+  const { keyboardMode } = useListboxKeyboard({
+    itemCount: tools.length,
+    activeIndex: selectedIdx,
+    onActiveIndexChange: setSelectedIdx,
+    onConfirm: (index) => {
+      const tool = tools[index];
+      if (tool?.description) toggleDetails(tool);
+    },
+  });
+
   const summary = useMemo(() => {
     if (!status) return '';
     const enabled = tools.filter((tool) => tool.enabled).length;
@@ -54,25 +65,31 @@ export function ToolsDialog() {
   }, [status, tools, t]);
 
   return (
-    <div className={dp('resume-picker', 'resume-picker-in-shell')}>
+    <div className={dp('picker', 'picker-in-shell')}>
       {summary && (
-        <div className={dp('resume-picker-search')}>
-          <span className={dp('resume-picker-search-hint')}>{summary}</span>
+        <div className={dp('picker-search')}>
+          <span className={dp('picker-search-hint')}>{summary}</span>
         </div>
       )}
       {(message || loading) && (
-        <div className={dp('resume-picker-search')}>
-          <span className={dp('resume-picker-search-hint')}>
+        <div className={dp('picker-search')}>
+          <span className={dp('picker-search-hint')}>
             {message || t('tools.loading')}
           </span>
         </div>
       )}
 
-      <div className={dp('resume-picker-sep')} />
+      <div className={dp('picker-sep')} />
 
-      <div className={dp('resume-picker-list')} ref={listRef}>
+      <div
+        className={dp(
+          'picker-list',
+          keyboardMode ? 'picker-keyboard-only' : undefined,
+        )}
+        ref={listRef}
+      >
         {!loading && tools.length === 0 && (
-          <div className={dp('resume-picker-empty')}>{t('tools.empty')}</div>
+          <div className={dp('picker-empty')}>{t('tools.empty')}</div>
         )}
         {tools.map((tool, i) => {
           const expanded = expandedTools.has(tool.name);
@@ -81,20 +98,21 @@ export function ToolsDialog() {
             <div
               key={tool.name}
               className={dp(
-                'resume-picker-item',
-                'resume-picker-session-item',
+                'picker-item',
+                'picker-session-item',
                 'tools-picker-item',
-                expanded ? 'selected' : undefined,
+                i === selectedIdx ? 'selected' : undefined,
                 expanded ? 'tools-picker-item-expanded' : undefined,
               )}
               onClick={() => {
                 setSelectedIdx(i);
                 if (tool.description) toggleDetails(tool);
               }}
+              onMouseMove={() => setSelectedIdx(i)}
             >
-              <div className={dp('resume-picker-item-row')}>
+              <div className={dp('picker-item-row')}>
                 <span className={dp('tools-item-icon')} aria-hidden="true" />
-                <span className={dp('resume-picker-item-title')}>
+                <span className={dp('picker-item-title')}>
                   {toolLabel(tool)}
                 </span>
                 <span

@@ -12,6 +12,12 @@
   padding: 4px 0;
 }
 
+/* Focused programmatically for keyboard nav / aria-activedescendant; selection
+   is shown by the roving row highlight, so suppress the container outline. */
+.list:focus {
+  outline: none;
+}
+
 .item {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -34,7 +40,17 @@
   background: var(--secondary);
 }
 
-.item:disabled {
+/* Keyboard mode: the pointer yields to the keyboard, so a cursor resting on a
+   row must not paint a second highlight. Only the selected row keeps its bg. */
+.keyboardOnly .item:hover {
+  background: transparent;
+}
+
+.keyboardOnly .itemSelected:hover {
+  background: var(--secondary);
+}
+
+.itemDisabled {
   cursor: default;
   opacity: 0.6;
 }
