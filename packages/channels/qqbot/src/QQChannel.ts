@@ -977,7 +977,6 @@ export class QQChannel extends ChannelBase {
               this.isReconnecting = true;
               this.disconnect();
               this.reconnectTimer = setTimeout(() => {
-                if (this.disposed) return;
                 this.isReconnecting = false;
                 this.connect().catch((err: unknown) => {
                   process.stderr.write(
