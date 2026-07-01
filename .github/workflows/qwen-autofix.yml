@@ -170,7 +170,7 @@ jobs:
     runs-on: 'ubuntu-latest'
     timeout-minutes: 180
     concurrency:
-      group: "qwen-autofix-issue-${{ github.event.issue.number || inputs.issue_number || 'scan' }}"
+      group: 'qwen-autofix-issue'
       cancel-in-progress: false
     permissions:
       contents: 'read'

@@ -64,6 +64,7 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('keeps label-triggered issue routing guarded and diagnosable', () => {
+    expect(workflow).toContain("issues:\n    types:\n      - 'labeled'");
     expect(workflow).toContain(
       "ISSUE_LABELS_JSON: '${{ toJSON(github.event.issue.labels.*.name) }}'",
     );
@@ -91,9 +92,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('trigger_label=${label_is_trigger}');
     expect(workflow).toContain('trigger_label=false label=');
     expect(workflow).toContain('sender_trusted=${sender_is_trusted}');
-    expect(workflow).toContain(
-      "qwen-autofix-issue-${{ github.event.issue.number || inputs.issue_number || 'scan' }}",
-    );
+    expect(workflow).toContain("group: 'qwen-autofix-issue'");
     expect(workflow).toContain(
       '(.labels // []) | map(.name) as $labels | ($labels | index($bug)) and ($labels | index($ready))',
     );
@@ -116,6 +115,18 @@ describe('qwen-autofix workflow', () => {
       "contains(github.event.issue.labels.*.name, 'status/ready-for-agent')",
     );
     expect(workflow).not.toContain('github.event.sender.author_association');
+  });
+
+  it('keeps forced issue routing bounded to open issues', () => {
+    expect(workflow).toContain(
+      '--json number,title,body,labels,createdAt,url,state',
+    );
+    expect(workflow).toContain(
+      'Forced issue #${FORCED_ISSUE} is not open; skipping.',
+    );
+    expect(workflow).toContain(
+      'elif [[ "$(jq -r \'.state // ""\' "${forced_issue_json}")" != \'OPEN\' ]]; then',
+    );
   });
 
   it('checks unattended filtering uses maintainer association gates', () => {
