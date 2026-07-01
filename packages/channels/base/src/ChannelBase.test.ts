@@ -216,7 +216,10 @@ describe('ChannelBase', () => {
         appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
         clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
       };
-      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      const ch = createChannel(
+        { allowedUsers: ['alice'], groupPolicy: 'open' },
+        { channelMemory },
+      );
 
       await ch.handleInbound(
         envelope({
