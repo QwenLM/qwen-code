@@ -29,6 +29,14 @@ export interface DaemonUnarchiveSessionsResult {
   errors: Array<{ sessionId: string; error: unknown }>;
 }
 
+export interface DaemonDeleteSessionsResult {
+  removed: string[];
+  notFound: string[];
+  errors: Array<{ sessionId: string; error: unknown }>;
+}
+
+export type DaemonDeleteErrorPhase = 'close' | 'remove' | 'delete';
+
 export class SessionArchiveCoordinator {
   private readonly exclusive = new Set<string>();
   private readonly shared = new Map<string, number>();
@@ -86,6 +94,88 @@ export class SessionArchiveCoordinator {
       }
     }
   }
+}
+
+export async function deleteDaemonSessions(params: {
+  sessionIds: string[];
+  service: SessionService;
+  bridge: Pick<AcpSessionBridge, 'closeSession'>;
+  coordinator: SessionArchiveCoordinator;
+  onError?: (entry: {
+    phase: DaemonDeleteErrorPhase;
+    sessionId: string;
+    error: string;
+  }) => void;
+}): Promise<DaemonDeleteSessionsResult> {
+  const { sessionIds, service, bridge, coordinator, onError } = params;
+  const uniqueSessionIds = [...new Set(sessionIds)];
+  const closeErrors: Array<{ sessionId: string; error: string }> = [];
+  const removed: string[] = [];
+  const notFound: string[] = [];
+  const removeErrors: Array<{ sessionId: string; error: string }> = [];
+
+  for (const sessionId of uniqueSessionIds) {
+    coordinator.assertNotTransitioning(sessionId);
+  }
+
+  await Promise.all(
+    uniqueSessionIds.map(async (sessionId) => {
+      try {
+        // Keep close+remove under one gate so load/resume cannot recreate the
+        // same live session between bridge close and transcript deletion.
+        await coordinator.runExclusiveMany([sessionId], async () => {
+          let shouldRemove = false;
+          try {
+            // Intentional: batch delete bypasses per-tab ownership.
+            await bridge.closeSession(sessionId);
+            shouldRemove = true;
+          } catch (closeErr) {
+            if (
+              closeErr instanceof SessionNotFoundError ||
+              (closeErr instanceof Error &&
+                closeErr.name === 'SessionNotFoundError')
+            ) {
+              shouldRemove = true;
+            } else {
+              const message =
+                closeErr instanceof Error ? closeErr.message : String(closeErr);
+              onError?.({ phase: 'close', sessionId, error: message });
+              closeErrors.push({ sessionId, error: message });
+            }
+          }
+
+          if (!shouldRemove) return;
+
+          try {
+            if (await service.removeSession(sessionId)) {
+              removed.push(sessionId);
+            } else {
+              notFound.push(sessionId);
+            }
+          } catch (removeErr) {
+            const message =
+              removeErr instanceof Error
+                ? removeErr.message
+                : String(removeErr);
+            onError?.({ phase: 'remove', sessionId, error: message });
+            removeErrors.push({ sessionId, error: message });
+          }
+        });
+      } catch (err) {
+        if (
+          err instanceof SessionArchivingError &&
+          err.lockKind === 'exclusive'
+        ) {
+          throw err;
+        }
+        const message = err instanceof Error ? err.message : String(err);
+        onError?.({ phase: 'delete', sessionId, error: message });
+        closeErrors.push({ sessionId, error: message });
+      }
+    }),
+  );
+
+  return { removed, notFound, errors: [...closeErrors, ...removeErrors] };
 }
 
 export async function assertSessionLoadable(

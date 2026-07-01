@@ -36,7 +36,6 @@ import {
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
-  SessionArchivingError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   WorkspaceMismatchError,
@@ -83,6 +82,7 @@ import {
 import {
   archiveDaemonSessions,
   assertSessionLoadable,
+  deleteDaemonSessions,
   logSessionArchiveWarning,
   SessionArchiveCoordinator,
   unarchiveDaemonSessions,
@@ -3050,82 +3050,21 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}sessions/delete`: {
           const ids = this.parseSessionIds(params);
-          const closeErrors: Array<{ sessionId: string; error: string }> = [];
-          const removed: string[] = [];
-          const notFound: string[] = [];
-          const removeErrors: Array<{ sessionId: string; error: string }> = [];
           const svc = new SessionService(this.boundWorkspace);
-          for (const sid of ids) {
-            this.archiveCoordinator.assertNotTransitioning(sid);
-          }
-          await Promise.all(
-            ids.map(async (sid) => {
-              try {
-                await this.archiveCoordinator.runExclusiveMany(
-                  [sid],
-                  async () => {
-                    let shouldRemove = false;
-                    try {
-                      await this.bridge.closeSession(sid);
-                      shouldRemove = true;
-                    } catch (err) {
-                      const msg =
-                        err instanceof Error ? err.message : String(err);
-                      if (
-                        err instanceof Error &&
-                        err.name === 'SessionNotFoundError'
-                      ) {
-                        shouldRemove = true;
-                      } else {
-                        const safeSessionId = logSafe(sid.slice(0, 8));
-                        const safeMessage = logSafe(msg);
-                        writeStderrLine(
-                          `qwen serve: /acp sessions/delete closeSession(${safeSessionId}) failed: ${safeMessage}`,
-                        );
-                        closeErrors.push({ sessionId: sid, error: msg });
-                      }
-                    }
-                    if (!shouldRemove) return;
-                    try {
-                      if (await svc.removeSession(sid)) {
-                        removed.push(sid);
-                      } else {
-                        notFound.push(sid);
-                      }
-                    } catch (err) {
-                      const safeSessionId = logSafe(sid.slice(0, 8));
-                      const safeMessage = logSafe(errMsg(err));
-                      writeStderrLine(
-                        `qwen serve: /acp sessions/delete removeSession(${safeSessionId}) failed: ${safeMessage}`,
-                      );
-                      removeErrors.push({
-                        sessionId: sid,
-                        error: errMsg(err),
-                      });
-                    }
-                  },
-                );
-              } catch (err) {
-                if (
-                  err instanceof SessionArchivingError &&
-                  err.lockKind === 'exclusive'
-                ) {
-                  throw err;
-                }
-                const safeSessionId = logSafe(sid.slice(0, 8));
-                const safeMessage = logSafe(errMsg(err));
-                writeStderrLine(
-                  `qwen serve: /acp sessions/delete deleteSession(${safeSessionId}) failed: ${safeMessage}`,
-                );
-                closeErrors.push({ sessionId: sid, error: errMsg(err) });
-              }
-            }),
-          );
-          this.replyConn(conn, id, {
-            removed,
-            notFound,
-            errors: [...closeErrors, ...removeErrors],
-          } as unknown);
+          const result = await deleteDaemonSessions({
+            sessionIds: ids,
+            service: svc,
+            bridge: this.bridge,
+            coordinator: this.archiveCoordinator,
+            onError: ({ phase, sessionId, error }) => {
+              const safeSessionId = logSafe(sessionId.slice(0, 8));
+              const safeMessage = logSafe(error);
+              writeStderrLine(
+                `qwen serve: /acp sessions/delete ${phase}Session(${safeSessionId}) failed: ${safeMessage}`,
+              );
+            },
+          });
+          this.replyConn(conn, id, result as unknown);
           return;
         }
 

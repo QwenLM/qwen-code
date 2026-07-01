@@ -20,8 +20,6 @@ import {
   canonicalizeWorkspace,
   InvalidClientIdError,
   PromptQueueFullError,
-  SessionArchivingError,
-  SessionNotFoundError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   type AcpSessionBridge,
@@ -47,6 +45,7 @@ import {
 import {
   archiveDaemonSessions,
   assertSessionLoadable,
+  deleteDaemonSessions,
   logSessionArchiveWarning,
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
@@ -782,6 +781,8 @@ export function registerSessionRoutes(
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
     try {
+      // ACP session/close can fall back to a shared gate because it has
+      // connection-local promptAbort state; REST close does not.
       await archiveCoordinator.runExclusiveMany([sessionId], async () =>
         bridge.closeSession(
           sessionId,
@@ -804,79 +805,18 @@ export function registerSessionRoutes(
     if (uniqueIds === undefined) return;
     try {
       const service = new SessionService(boundWorkspace);
-      const closeErrors: Array<{ sessionId: string; error: string }> = [];
-      const removed: string[] = [];
-      const notFound: string[] = [];
-      const removeErrors: Array<{ sessionId: string; error: string }> = [];
-      for (const id of uniqueIds) {
-        archiveCoordinator.assertNotTransitioning(id);
-      }
-      await Promise.all(
-        uniqueIds.map(async (id) => {
-          try {
-            // Keep each close+remove under one gate so a load/resume cannot
-            // recreate that same live session between bridge close and
-            // transcript deletion. Gate per id so one busy session does not
-            // make the whole batch fail.
-            await archiveCoordinator.runExclusiveMany([id], async () => {
-              let shouldRemove = false;
-              try {
-                // Intentional: no clientId — batch delete bypasses per-tab ownership.
-                await bridge.closeSession(id);
-                shouldRemove = true;
-              } catch (closeErr) {
-                if (closeErr instanceof SessionNotFoundError) {
-                  // Session not active in bridge — still attempt to remove its transcript file
-                  shouldRemove = true;
-                } else {
-                  const msg =
-                    closeErr instanceof Error
-                      ? closeErr.message
-                      : String(closeErr);
-                  writeStderrLine(
-                    `qwen serve: closeSession failed for ${safeLogValue(id)}: ${safeLogValue(msg)}`,
-                  );
-                  closeErrors.push({ sessionId: id, error: msg });
-                }
-              }
-              if (!shouldRemove) return;
-              try {
-                if (await service.removeSession(id)) {
-                  removed.push(id);
-                } else {
-                  notFound.push(id);
-                }
-              } catch (removeErr) {
-                const msg =
-                  removeErr instanceof Error
-                    ? removeErr.message
-                    : String(removeErr);
-                writeStderrLine(
-                  `qwen serve: removeSession failed for ${safeLogValue(id)}: ${safeLogValue(msg)}`,
-                );
-                removeErrors.push({ sessionId: id, error: msg });
-              }
-            });
-          } catch (err) {
-            if (
-              err instanceof SessionArchivingError &&
-              err.lockKind === 'exclusive'
-            ) {
-              throw err;
-            }
-            const message = err instanceof Error ? err.message : String(err);
-            writeStderrLine(
-              `qwen serve: deleteSession failed for ${safeLogValue(id)}: ${safeLogValue(message)}`,
-            );
-            closeErrors.push({ sessionId: id, error: message });
-          }
-        }),
-      );
-      res.status(200).json({
-        removed,
-        notFound,
-        errors: [...closeErrors, ...removeErrors],
+      const result = await deleteDaemonSessions({
+        sessionIds: uniqueIds,
+        service,
+        bridge,
+        coordinator: archiveCoordinator,
+        onError: ({ phase, sessionId, error }) => {
+          writeStderrLine(
+            `qwen serve: ${phase}Session failed for ${safeLogValue(sessionId)}: ${safeLogValue(error)}`,
+          );
+        },
       });
+      res.status(200).json(result);
     } catch (err) {
       sendBridgeError(res, err, { route: 'POST /sessions/delete' });
     }
