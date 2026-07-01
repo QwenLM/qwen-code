@@ -46,7 +46,7 @@ import type {
   SessionArtifactStore,
 } from './sessionArtifacts.js';
 
-const ARTIFACT_TOOL_NAME = 'artifact';
+const PUBLISH_ARTIFACT_TOOL_NAME = 'artifact';
 
 /**
  * Duck-type check for `FsError` from `cli/src/serve/fs/errors.ts`.
@@ -133,7 +133,7 @@ function isTrustedArtifactToolUpdate(
   return (
     update.sessionUpdate === 'tool_call_update' &&
     update.status === 'completed' &&
-    updateMeta?.['toolName'] === ARTIFACT_TOOL_NAME
+    updateMeta?.['toolName'] === PUBLISH_ARTIFACT_TOOL_NAME
   );
 }
 
