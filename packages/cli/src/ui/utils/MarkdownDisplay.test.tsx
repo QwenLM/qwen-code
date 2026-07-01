@@ -101,9 +101,13 @@ describe('<MarkdownDisplay />', () => {
         />,
       );
       const output = lastFrame() ?? '';
-      // Non-blank: a regression that clips to nothing would still satisfy the
-      // line-count bound (''.split('\n').length === 1), so assert real content.
-      expect(output).toMatch(/line \d+/);
+      // Contiguous head + a "generating more" cue — NOT decimated (ink
+      // overflow="hidden" would drop interspersed rows) and NOT blank.
+      expect(output).toContain('line 1');
+      expect(output).toContain('line 2');
+      expect(output).toContain('generating more');
+      // The tail is dropped (budget exceeded), so a late line is absent.
+      expect(output).not.toContain('line 60');
       const lineCount = output.split('\n').length;
       expect(lineCount).toBeLessThanOrEqual(10);
     });

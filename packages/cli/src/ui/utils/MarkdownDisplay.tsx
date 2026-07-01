@@ -179,7 +179,27 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // text into scrollback on every repaint. The committed transcript still
   // renders the full message via MarkdownDisplay with isPending=false.
   const displayText = isPending ? text.trimEnd() : text;
-  const lines = displayText.split(/\r?\n/);
+  const allLines = displayText.split(/\r?\n/);
+  // Bound the live (non-`<Static>`) markdown to the viewport budget. A long
+  // streaming message otherwise renders ALL its lines, pushing the non-`<Static>`
+  // frame past the terminal height — at which point ink clears the terminal and
+  // re-streams the entire transcript on every repaint (the top→bottom "scroll
+  // replay" seen on tab-switch in terminal multiplexers). Slice to a CONTIGUOUS
+  // head of source lines (reserving one row for the "generating more" cue
+  // below) rather than clipping with ink `overflow="hidden"`, which decimates
+  // rows (drops interspersed lines) and can erase a code block's own truncation
+  // indicator. Short messages are untouched; the full message still renders once
+  // it commits to `<Static>`. Only while pending and when a budget is known
+  // (constrainHeight on — both non-VP and VP pending items pass a budget).
+  const pendingLineBudget =
+    isPending && availableTerminalHeight !== undefined
+      ? Math.max(MINIMUM_MAX_HEIGHT, availableTerminalHeight) - 1
+      : undefined;
+  const pendingClipped =
+    pendingLineBudget !== undefined && allLines.length > pendingLineBudget;
+  const lines = pendingClipped
+    ? allLines.slice(0, pendingLineBudget)
+    : allLines;
   const headerRegex = /^ *(#{1,4}) +(.*)/;
   const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
   const ulItemRegex = /^([ \t]*)([-*+]) +(.*)/;
@@ -563,22 +583,14 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     );
   }
 
-  // Bound the live (non-`<Static>`) markdown to the viewport budget. A long
-  // streaming message otherwise renders ALL its lines, pushing the non-`<Static>`
-  // frame past the terminal height — at which point ink clears the terminal and
-  // re-streams the entire transcript on every repaint (the top→bottom "scroll
-  // replay" seen on tab-switch in terminal multiplexers, since the live region
-  // re-renders every token). `overflow="hidden"` + `maxHeight` clips only when
-  // the content is genuinely taller than the budget (short messages render
-  // unpadded); the full message still renders uncapped once it commits to
-  // `<Static>`. Code blocks already self-truncate above, but plain prose / lists
-  // had no overall cap. Only applies while pending and when a budget is known
-  // (constrainHeight on — both non-VP and VP pending items pass a budget).
-  if (isPending && availableTerminalHeight !== undefined) {
-    const maxHeight = Math.max(MINIMUM_MAX_HEIGHT, availableTerminalHeight);
+  // When the live message was clipped to a head slice (see pendingLineBudget
+  // above), add a cue that more is streaming. Code blocks retained in the head
+  // still render their own "... generating more ..." truncation.
+  if (pendingClipped) {
     return (
-      <Box flexDirection="column" maxHeight={maxHeight} overflow="hidden">
+      <Box flexDirection="column">
         {contentBlocks}
+        <Text color={theme.text.secondary}>… generating more …</Text>
       </Box>
     );
   }
