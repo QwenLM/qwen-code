@@ -67,6 +67,15 @@ For a complete working example, see [`@qwen-code/channel-plugin-example`](../plu
 
 Migration note for existing TypeScript plugins: if your adapter constructor or factory explicitly types `bridge` as `AcpBridge`, change that annotation to `ChannelAgentBridge` and keep using only the methods exposed by that contract. JavaScript plugins are unaffected at runtime, and standalone `qwen channel start` still passes the current `AcpBridge` implementation.
 
+## Runtime modes
+
+Channel adapters can run in two host modes:
+
+- `qwen channel start [name]` is the standalone service. It uses `AcpBridge` over a `qwen-code --acp` child process and remains the default channel command.
+- `qwen serve --channel <name>` and `qwen serve --channel all` are experimental daemon-managed modes. `qwen serve` starts one out-of-process channel worker, the worker connects back to the daemon through the SDK, and adapters receive a `DaemonChannelBridge`-backed `ChannelAgentBridge` facade.
+
+In daemon-managed mode, one daemon is bound to one workspace. Every selected channel's `cwd` must resolve to that same workspace. The optional `shellCommand` method is exposed to adapters only when the daemon advertises the `session_shell_command` capability.
+
 ## Architecture
 
 ```
@@ -159,6 +168,8 @@ constructor(name: string, config: ChannelConfig, bridge: ChannelAgentBridge, opt
 ### ChannelAgentBridge
 
 `ChannelAgentBridge` is the adapter-facing contract. Channel adapters, channel plugins, `ChannelBase`, and `SessionRouter` should depend on this type instead of a concrete bridge implementation.
+
+`shellCommand` is optional. Adapters should check for it before enabling `!cmd`-style features because daemon-managed hosts expose it only when the connected daemon supports shell execution.
 
 ```typescript
 interface ChannelAgentBridge {

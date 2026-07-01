@@ -60,7 +60,8 @@ interface ChatEditorProps {
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   queuedMessages?: string[];
-  onPopQueuedMessages?: () => string | null;
+  onPopQueuedMessages?: () => boolean;
+  onClearQueuedMessages?: () => boolean;
   currentMode?: string;
   currentModel?: string;
   chatWidthMode?: '1000' | 'wide';
@@ -1214,6 +1215,7 @@ export const ChatEditor = memo(
 
     // Model display label
     const modelLabel = getModelDisplayName(currentModel);
+    const showCancelButton = isRunning && !core.hasContent;
 
     return (
       <div className={styles.editorShell}>
@@ -1549,47 +1551,28 @@ export const ChatEditor = memo(
                 )}
                 <button
                   className={
-                    isRunning
-                      ? `${styles.sendBtn} ${styles.sendBtnRunning}${
-                          cancelArmed ? ` ${styles.sendBtnArmed}` : ''
-                        }`
+                    showCancelButton
+                      ? `${styles.sendBtn} ${styles.sendBtnRunning}`
                       : styles.sendBtn
                   }
                   disabled={
-                    isRunning ? !onCancel : core.disabled || !core.hasContent
+                    showCancelButton
+                      ? !onCancel
+                      : core.disabled || !core.hasContent
                   }
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (isRunning) {
+                    if (showCancelButton) {
                       onCancel?.();
                       return;
                     }
                     core.submitText();
                   }}
                   aria-label={
-                    isRunning
-                      ? cancelArmed
-                        ? t('stream.cancelArmed')
-                        : t('stream.cancel')
-                      : t('editor.send')
-                  }
-                  title={
-                    isRunning && cancelArmed
-                      ? t('stream.cancelArmed')
-                      : undefined
+                    showCancelButton ? t('stream.cancel') : t('editor.send')
                   }
                 >
-                  {isRunning ? (
-                    cancelArmed ? (
-                      <span className={styles.escLabel} aria-hidden="true">
-                        Esc
-                      </span>
-                    ) : (
-                      <StopIcon />
-                    )
-                  ) : (
-                    <SendIcon />
-                  )}
+                  {showCancelButton ? <StopIcon /> : <SendIcon />}
                 </button>
                 <span
                   role="status"

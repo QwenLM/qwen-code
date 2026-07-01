@@ -140,6 +140,15 @@ export { useDaemonFollowupSuggestion } from './daemon/index.js';
 /** Notifies when the daemon drains browser-queued messages into the running turn. */
 export { useDaemonMidTurnInjected } from './daemon/index.js';
 
+/** Notifies when the daemon's pending prompt queue changes (added/started/completed). */
+export {
+  getPendingPromptVersion,
+  getPendingPromptEvents,
+  consumePendingPromptEvents,
+  subscribePendingPromptEvents,
+  subscribePendingPromptVersion,
+} from './daemon/index.js';
+
 // ── Constants ─────────────────────────────────────────────────────
 
 /** Ordered list of approval modes for cycling: `['auto', 'suggest', 'ask']`. */
@@ -203,8 +212,14 @@ export type {
   DaemonSessionStatsStatus,
   /** Per-tool call count, success/fail, and duration within a stats response. */
   DaemonSessionStatsToolByName,
+  /** Options for pending prompt queue actions scoped to a session. */
+  PendingPromptActionOptions,
   /** Options for `sendPrompt()`: optimistic message, image attachments. */
   SendPromptOptions,
+  /** Options for non-blocking `submitPrompt()`. */
+  SubmitPromptOptions,
+  /** Result of non-blocking `submitPrompt()`: the daemon-assigned promptId. */
+  SubmitPromptResult,
 } from './daemon/index.js';
 
 // ── Types: Todos ─────────────────────────────────────────────────

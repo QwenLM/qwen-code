@@ -1,7 +1,8 @@
 import type { ChannelConfig } from '@qwen-code/channel-base';
 import { resolvePath } from '@qwen-code/channel-base';
-import * as path from 'node:path';
 import { getPlugin, supportedTypes } from './channel-registry.js';
+
+export { findCliEntryPath } from './cli-entry-path.js';
 
 export function resolveEnvVars(value: string): string {
   if (value.startsWith('$')) {
@@ -15,14 +16,6 @@ export function resolveEnvVars(value: string): string {
     return envValue;
   }
   return value;
-}
-
-export function findCliEntryPath(): string {
-  const mainModule = process.argv[1];
-  if (mainModule) {
-    return path.resolve(mainModule);
-  }
-  throw new Error('Cannot determine CLI entry path');
 }
 
 function resolveOptionalStringField(
@@ -45,6 +38,7 @@ function resolveOptionalStringField(
 export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
+  defaultCwd: string = process.cwd(),
 ): Promise<ChannelConfig & Record<string, unknown>> {
   if (!rawConfig['type']) {
     throw new Error(`Channel "${name}" is missing required field "type".`);
@@ -90,7 +84,7 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope:
       (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) || 'user',
-    cwd: resolvePath((rawConfig['cwd'] as string) || process.cwd()),
+    cwd: resolvePath((rawConfig['cwd'] as string) || defaultCwd),
     approvalMode: rawConfig['approvalMode'] as string | undefined,
     instructions: rawConfig['instructions'] as string | undefined,
     model: rawConfig['model'] as string | undefined,

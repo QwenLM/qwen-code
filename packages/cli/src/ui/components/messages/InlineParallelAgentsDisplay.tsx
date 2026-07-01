@@ -189,12 +189,7 @@ function truncateMiddle(input: string, max: number): string {
 
 export const InlineParallelAgentsDisplay: React.FC<
   InlineParallelAgentsDisplayProps
-> = ({
-  toolCalls,
-  contentWidth,
-  totalAgentCount,
-  availableTerminalHeight,
-}) => {
+> = ({ toolCalls, contentWidth, totalAgentCount, availableTerminalHeight }) => {
   const config = useContext(ConfigContext);
 
   // Static slice of agent calls for this group. The caller already

@@ -32,6 +32,10 @@ import type { AuthType, InputModalities } from '@qwen-code/qwen-code-core';
  */
 export type ServeMode = 'http-bridge' | 'native';
 
+export type ServeChannelSelection =
+  | { mode: 'all' }
+  | { mode: 'names'; names: string[] };
+
 export interface ServeOptions {
   hostname: string;
   port: number;
@@ -225,6 +229,11 @@ export interface ServeOptions {
   cdpTunnelOverWs?: boolean;
   /** Forward the experimental LSP opt-in to spawned ACP children. */
   experimentalLsp?: boolean;
+  /**
+   * Experimental: channels to host in a daemon-managed worker process.
+   * Omitted means plain daemon mode with no channel worker.
+   */
+  channelSelection?: ServeChannelSelection;
 }
 
 /**

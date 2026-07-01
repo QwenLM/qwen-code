@@ -345,6 +345,24 @@ qwen channel stop
 
 The bot runs in the foreground. Press `Ctrl+C` to stop, or use `qwen channel stop` from another terminal.
 
+### Experimental Daemon-Managed Mode
+
+You can also run configured channels under `qwen serve`:
+
+```bash
+# Start one channel under the daemon lifecycle
+qwen serve --channel my-channel
+
+# Start all configured channels
+qwen serve --channel all
+```
+
+This mode starts one channel worker process owned by `qwen serve`. The worker connects back to the daemon through the SDK and uses the same channel adapters. It is separate from the daemon process, so a channel adapter crash does not crash the daemon.
+
+`qwen serve --channel` is not the same service as `qwen channel start`. Standalone `qwen channel start` still uses the ACP-backed channel service and can run channel configs with different `cwd` values. Daemon-managed channels require every selected channel's `cwd` to resolve to the daemon workspace.
+
+When channels are serve-managed, `qwen channel status` shows the owner as `qwen serve`, and `qwen channel stop` tells you to stop the daemon instead of signaling the worker directly. If a ready worker exits unexpectedly, the daemon continues running and reports a channel-worker warning in `/daemon/status`.
+
 ### Multi-Channel Mode
 
 When you run `qwen channel start` without a name, all channels defined in `settings.json` start together sharing a single agent process. Each channel maintains its own sessions — a Telegram user and a WeChat user get separate conversations, even though they share the same agent.
