@@ -5924,13 +5924,13 @@ export class Config {
         );
         return new ArtifactTool(this);
       });
+      await registerLazy(ToolNames.RECORD_ARTIFACT, async () => {
+        const { RecordArtifactTool } = await import(
+          '../tools/record-artifact.js'
+        );
+        return new RecordArtifactTool();
+      });
     }
-    await registerLazy(ToolNames.RECORD_ARTIFACT, async () => {
-      const { RecordArtifactTool } = await import(
-        '../tools/record-artifact.js'
-      );
-      return new RecordArtifactTool();
-    });
     if (this.isLspEnabled() && this.getLspClient()) {
       await registerLazy(ToolNames.LSP, async () => {
         const { LspTool } = await import('../tools/lsp.js');

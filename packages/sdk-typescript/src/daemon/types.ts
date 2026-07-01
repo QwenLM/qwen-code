@@ -307,10 +307,19 @@ export interface DaemonSessionArtifact {
   clientId?: string;
 }
 
-export type DaemonSessionArtifactRemovalReason = 'eviction' | 'explicit';
+export type KnownDaemonSessionArtifactChangeAction =
+  | 'created'
+  | 'updated'
+  | 'removed';
+export type DaemonSessionArtifactChangeAction =
+  OpenStringUnion<KnownDaemonSessionArtifactChangeAction>;
+
+export type KnownDaemonSessionArtifactRemovalReason = 'eviction' | 'explicit';
+export type DaemonSessionArtifactRemovalReason =
+  OpenStringUnion<KnownDaemonSessionArtifactRemovalReason>;
 
 export interface DaemonSessionArtifactChange {
-  action: 'created' | 'updated' | 'removed';
+  action: DaemonSessionArtifactChangeAction;
   artifactId: string;
   artifact?: DaemonSessionArtifact;
   reason?: DaemonSessionArtifactRemovalReason;

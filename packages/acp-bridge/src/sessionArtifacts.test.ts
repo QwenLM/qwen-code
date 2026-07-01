@@ -65,6 +65,36 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('prevents one client from removing another client retained artifact', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-client-owner',
+      workspaceCwd: workspace,
+    });
+
+    const created = await store.upsertMany([
+      {
+        title: 'Client link',
+        source: 'client',
+        clientId: 'client-a',
+        url: 'https://example.com/client-a',
+      },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    await expect(
+      store.remove(artifactId, { clientId: 'client-b' }),
+    ).resolves.toMatchObject({ changes: [] });
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ id: artifactId, clientId: 'client-a' }],
+    });
+
+    await expect(
+      store.remove(artifactId, { clientId: 'client-a' }),
+    ).resolves.toMatchObject({
+      changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+    });
+  });
+
   it('serializes concurrent store operations', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-queue',

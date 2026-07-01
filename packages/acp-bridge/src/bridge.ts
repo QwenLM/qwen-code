@@ -4032,7 +4032,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
-      const result = await entry.artifacts.remove(artifactId);
+      const result = await entry.artifacts.remove(artifactId, { clientId });
       publishArtifactChanges(entry, result.changes, clientId);
       return result;
     },

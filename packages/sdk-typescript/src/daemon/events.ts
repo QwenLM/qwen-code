@@ -2481,12 +2481,8 @@ function isArtifactChangedData(
     return false;
   }
   return (
-    (change['action'] === 'created' ||
-      change['action'] === 'updated' ||
-      change['action'] === 'removed') &&
-    (change['reason'] === undefined ||
-      change['reason'] === 'eviction' ||
-      change['reason'] === 'explicit')
+    isNonEmptyString(change['action']) &&
+    (change['reason'] === undefined || isNonEmptyString(change['reason']))
   );
 }
 

@@ -1773,6 +1773,33 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
     });
 
+    it('does not register artifact tools when artifacts are disabled', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).not.toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers both artifact tools when artifacts are enabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        artifactEnabled: true,
+        interactive: true,
+        sdkMode: false,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
     describe('isArtifactEnabled', () => {
       const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
       const originalDisable = process.env['QWEN_CODE_DISABLE_ARTIFACT'];

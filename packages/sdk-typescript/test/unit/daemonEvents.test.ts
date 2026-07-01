@@ -217,6 +217,24 @@ describe('daemon event schema', () => {
     expect(asKnownDaemonEvent(event)).toBe(event);
   });
 
+  it('keeps artifact_changed events with future change literals', () => {
+    const event: DaemonEvent = {
+      id: 5,
+      v: 1,
+      type: 'artifact_changed',
+      data: {
+        sessionId: 's-1',
+        change: {
+          action: 'renamed',
+          artifactId: 'art-3',
+          reason: 'lifecycle_policy',
+        },
+      },
+    };
+
+    expect(asKnownDaemonEvent(event)).toBe(event);
+  });
+
   it('leaves malformed or unknown events on the raw DaemonEvent path', () => {
     expect(
       asKnownDaemonEvent({

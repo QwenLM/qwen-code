@@ -236,10 +236,21 @@ export class SessionArtifactStore {
     });
   }
 
-  async remove(artifactId: string): Promise<SessionArtifactMutationResult> {
+  async remove(
+    artifactId: string,
+    options?: { clientId?: string },
+  ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
       const existing = this.artifacts.get(artifactId);
       if (!existing) {
+        return { v: 1, sessionId: this.sessionId, changes: [] };
+      }
+      if (
+        existing.source === 'client' &&
+        existing.clientId !== undefined &&
+        options?.clientId !== undefined &&
+        existing.clientId !== options.clientId
+      ) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
       this.artifacts.delete(artifactId);
