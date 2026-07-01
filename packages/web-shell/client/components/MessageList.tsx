@@ -57,7 +57,7 @@ interface MessageListProps {
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   onBranchSession?: () => void;
-  onFollowStateChange?: (isFollowing: boolean) => void;
+  onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
 }
 
 function getLastUserMessageId(messages: Message[]): string | null {
@@ -1593,7 +1593,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       showRetryHint = false,
       onRetryClick,
       onBranchSession,
-      onFollowStateChange,
+      onCanScrollToBottomChange,
     },
     ref,
   ) {
@@ -1683,6 +1683,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const scrollCooldownCount = useRef(0);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedFollow = useRef(true);
+    const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
     const prevLastUserMsgId = useRef<string | null>(null);
     const prevActiveExecutionKey = useRef<string | null>(null);
     const prevCatchingUp: MutableRefObject<boolean | undefined> =
@@ -1692,18 +1693,33 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const pendingFollowRecheck = useRef(false);
     const pendingFollowRecheckFrame = useRef<number | undefined>(undefined);
     const pendingFollowRecheckTimer = useRef<number | undefined>(undefined);
+    const pendingOverflowFrame = useRef<number | undefined>(undefined);
     catchingUpRef.current = catchingUp;
     const containerRef = useRef<HTMLDivElement>(null);
 
-    const setShouldFollow = useCallback(
-      (value: boolean) => {
-        shouldFollow.current = value;
-        if (lastReportedFollow.current === value) return;
-        lastReportedFollow.current = value;
-        onFollowStateChange?.(value);
-      },
-      [onFollowStateChange],
-    );
+    const setShouldFollow = useCallback((value: boolean) => {
+      shouldFollow.current = value;
+    }, []);
+
+    const reportCanScrollToBottom = useCallback(() => {
+      const el = containerRef.current;
+      const distanceFromBottom = el
+        ? el.scrollHeight - el.scrollTop - el.clientHeight
+        : 0;
+      const canScrollToBottom = !shouldFollow.current && distanceFromBottom > 1;
+      if (lastReportedCanScrollToBottom.current === canScrollToBottom) return;
+      lastReportedCanScrollToBottom.current = canScrollToBottom;
+      onCanScrollToBottomChange?.(canScrollToBottom);
+    }, [onCanScrollToBottomChange]);
+
+    const scheduleScrollOverflowReport = useCallback(() => {
+      if (pendingOverflowFrame.current !== undefined) {
+        window.cancelAnimationFrame(pendingOverflowFrame.current);
+      }
+      pendingOverflowFrame.current = window.requestAnimationFrame(
+        reportCanScrollToBottom,
+      );
+    }, [reportCanScrollToBottom]);
     const visibleItems = useMemo(
       () =>
         applyTurnCollapse(displayItems, {
@@ -1845,6 +1861,9 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         if (pendingFollowRecheckTimer.current !== undefined) {
           window.clearTimeout(pendingFollowRecheckTimer.current);
         }
+        if (pendingOverflowFrame.current !== undefined) {
+          window.cancelAnimationFrame(pendingOverflowFrame.current);
+        }
       },
       [],
     );
@@ -1905,6 +1924,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         } else {
           el.scrollTop = el.scrollHeight;
         }
+        scheduleScrollOverflowReport();
         lastScrollTop.current = Math.max(0, el.scrollHeight - el.clientHeight);
         const releaseCooldown = () => {
           if (scrollCooldownCount.current === gen) {
@@ -1917,7 +1937,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
           requestAnimationFrame(releaseCooldown);
         }
       },
-      [getScrollElement],
+      [getScrollElement, scheduleScrollOverflowReport],
     );
 
     const resumeBottomFollow = useCallback(
@@ -2221,6 +2241,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       const curr = el.scrollTop;
       lastScrollTop.current = curr;
       const distanceFromBottom = el.scrollHeight - curr - el.clientHeight;
+      scheduleScrollOverflowReport();
 
       // Rule 2: scrolling up → pause follow
       if (curr < prev - 1) {
@@ -2235,7 +2256,12 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       if (distanceFromBottom < 30) {
         setShouldFollow(true);
       }
-    }, [getScrollElement, scheduleSessionTimelineRangeUpdate, setShouldFollow]);
+    }, [
+      getScrollElement,
+      scheduleScrollOverflowReport,
+      scheduleSessionTimelineRangeUpdate,
+      setShouldFollow,
+    ]);
 
     useEffect(() => {
       const el = getScrollElement();
@@ -2243,6 +2269,23 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       el.addEventListener('scroll', handleScroll, { passive: true });
       return () => el.removeEventListener('scroll', handleScroll);
     }, [getScrollElement, handleScroll]);
+
+    useEffect(() => {
+      const el = getScrollElement();
+      if (!el) return;
+      const observer = new ResizeObserver(scheduleScrollOverflowReport);
+      observer.observe(el);
+      for (const child of Array.from(el.children)) {
+        observer.observe(child);
+      }
+      scheduleScrollOverflowReport();
+      return () => observer.disconnect();
+    }, [
+      getScrollElement,
+      scheduleScrollOverflowReport,
+      totalCount,
+      totalVirtualSize,
+    ]);
 
     // Clear screen (e.g. /clear) → reset to follow mode, drop stale per-turn
     // collapse overrides, and disarm any deferred scroll so it can't fire
@@ -2486,6 +2529,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         scrollToBottom(isNewUserMessage ? 'smooth' : 'auto');
       }
     }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
+
+    useLayoutEffect(() => {
+      scheduleScrollOverflowReport();
+    }, [messages, scheduleScrollOverflowReport, totalCount, totalVirtualSize]);
 
     return (
       <div ref={containerRef} className={styles.list}>

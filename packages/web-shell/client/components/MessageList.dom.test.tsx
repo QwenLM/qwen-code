@@ -107,7 +107,10 @@ const planMsg = (id: string): PlanMessage => ({
 function mount(
   messages: Message[],
   ref?: RefObject<MessageListHandle | null>,
-  opts: { isResponding?: boolean } = {},
+  opts: {
+    isResponding?: boolean;
+    onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
+  } = {},
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -121,6 +124,7 @@ function mount(
           pendingApproval={null}
           isResponding={opts.isResponding}
           shellOutputMaxLines={50}
+          onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
     );
@@ -426,5 +430,81 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(assistantActions(c, 'mid')).toBe('false');
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('reports when the user has scrolled away from the bottom', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      value: 600,
+      writable: true,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const onCanScrollToBottomChange = vi.fn();
+
+    const container = mount([asstMsg('a1')], undefined, {
+      onCanScrollToBottomChange,
+    });
+    await nextFrame();
+
+    const list = container.firstElementChild as HTMLElement;
+    list.scrollTop = 600;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    await nextFrame();
+
+    list.scrollTop = 500;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenCalledWith(true);
+  });
+
+  it('reports no scroll-to-bottom affordance when the list has no scrollbar', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onCanScrollToBottomChange = vi.fn();
+
+    mount([userMsg('u1')], undefined, { onCanScrollToBottomChange });
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenCalledWith(false);
+  });
+
+  it('reports no scroll-to-bottom affordance when already at the bottom', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      value: 600,
+      writable: true,
+    });
+    const onCanScrollToBottomChange = vi.fn();
+
+    mount([userMsg('u1')], undefined, { onCanScrollToBottomChange });
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenCalledWith(false);
   });
 });
