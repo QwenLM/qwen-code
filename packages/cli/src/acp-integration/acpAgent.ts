@@ -155,7 +155,12 @@ import {
   buildDisabledSkillNamesProvider,
   loadCliConfig,
 } from '../config/config.js';
-import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
+import {
+  Session,
+  buildAvailableCommandsSnapshot,
+  isHistorySnapshot,
+  type HistorySnapshot,
+} from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
 import {
@@ -6876,7 +6881,7 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        if (!Array.isArray(history)) {
+        if (!Array.isArray(history) && !isHistorySnapshot(history)) {
           throw RequestError.invalidParams(
             undefined,
             'Invalid or missing history',
@@ -6890,7 +6895,7 @@ class QwenAgent implements Agent {
           );
         }
 
-        session.restoreHistory(history as Content[]);
+        session.restoreHistory(history as Content[] | HistorySnapshot);
         return { success: true };
       }
       case 'getAccountInfo': {

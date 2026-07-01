@@ -2721,6 +2721,35 @@ describe('OpenAIContentConverter', () => {
         (usage?.promptTokenCount ?? 0) + (usage?.candidatesTokenCount ?? 0),
       ).toBe(5);
     });
+
+    it('maps DeepSeek prompt cache hit tokens into cached content token count', () => {
+      const response = converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-deepseek-cache',
+          created: 123,
+          model: 'deepseek-v4-pro',
+          choices: [],
+          usage: {
+            prompt_tokens: 21225,
+            completion_tokens: 45,
+            total_tokens: 21270,
+            prompt_cache_hit_tokens: 21120,
+            prompt_cache_miss_tokens: 105,
+          },
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+
+      expect(response.usageMetadata).toEqual(
+        expect.objectContaining({
+          promptTokenCount: 21225,
+          candidatesTokenCount: 45,
+          totalTokenCount: 21270,
+          cachedContentTokenCount: 21120,
+        }),
+      );
+    });
   });
 
   describe('OpenAI -> Gemini reasoning content', () => {

@@ -42,6 +42,13 @@ import * as fs from 'node:fs';
 import { AcpFileHandler } from './acpFileHandler.js';
 import { ACP_ERROR_CODES } from '../constants/acpSchema.js';
 
+export type AcpHistorySnapshot =
+  | unknown[]
+  | {
+      history: unknown[];
+      modelFacingUserTurnCount: number;
+    };
+
 /**
  * ACP Connection Handler for VSCode Extension
  *
@@ -493,7 +500,7 @@ export class AcpConnection {
 
   async rewindSession(
     targetTurnIndex: number,
-  ): Promise<{ historyBeforeRewind?: unknown[] }> {
+  ): Promise<{ historyBeforeRewind?: AcpHistorySnapshot }> {
     const conn = this.ensureConnection();
     if (!this.sessionId) {
       throw new Error('No active ACP session');
@@ -503,10 +510,10 @@ export class AcpConnection {
       sessionId: this.sessionId,
       targetTurnIndex,
       cwd: this.workingDir,
-    })) as { historyBeforeRewind?: unknown[] };
+    })) as { historyBeforeRewind?: AcpHistorySnapshot };
   }
 
-  async restoreSessionHistory(history: unknown[]): Promise<void> {
+  async restoreSessionHistory(history: AcpHistorySnapshot): Promise<void> {
     const conn = this.ensureConnection();
     if (!this.sessionId) {
       throw new Error('No active ACP session');

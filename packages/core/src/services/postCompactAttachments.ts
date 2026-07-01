@@ -23,6 +23,14 @@ import { CHARS_PER_TOKEN } from './tokenEstimation.js';
 import { getFunctionResponseParts } from './compactionInputSlimming.js';
 import { escapeXml } from '../utils/xml.js';
 import { ToolNames } from '../tools/tool-names.js';
+import {
+  COMPRESSION_SUMMARY_MODEL_ACK,
+  POST_COMPACT_BACKGROUND_TASKS_PREFIX,
+  POST_COMPACT_FILE_EMBED_PREFIX,
+  POST_COMPACT_FILE_REFERENCES_PREFIX,
+  POST_COMPACT_IMAGE_RESTORATION_PREFIX,
+  POST_COMPACT_PLAN_MODE_PREFIX,
+} from './chat-compression-constants.js';
 
 export const POST_COMPACT_MAX_FILES_TO_RESTORE = 5;
 
@@ -389,7 +397,7 @@ export async function buildFileRestorationBlocks(
 
   if (references.length > 0) {
     const lines = [
-      'The following files were recently accessed before context was compacted. They are listed as reference only because they are large. Use `read_file` to view current content for any file you need:',
+      `${POST_COMPACT_FILE_REFERENCES_PREFIX} They are listed as reference only because they are large. Use \`read_file\` to view current content for any file you need:`,
       '',
       ...references.map((p) => `- ${sanitizePathForDisplay(p)}`),
     ];
@@ -411,7 +419,7 @@ export async function buildFileRestorationBlocks(
       parts: [
         {
           text:
-            `Recently accessed file (full current content embedded):\n\n` +
+            `${POST_COMPACT_FILE_EMBED_PREFIX}\n\n` +
             `## ${sanitizePathForDisplay(path)}\n\n` +
             safeFence +
             '\n' +
@@ -439,7 +447,7 @@ export function buildImageRestorationBlock(
   if (images.length === 0) return null;
 
   const lines = [
-    'Recent visual snapshots preserved from before context was compacted (most recent last). Each image corresponds to a tool result or user-pasted image earlier in the conversation:',
+    `${POST_COMPACT_IMAGE_RESTORATION_PREFIX} (most recent last). Each image corresponds to a tool result or user-pasted image earlier in the conversation:`,
     '',
   ];
   for (const img of images) {
@@ -667,7 +675,7 @@ function safeRealpath(p: string): string {
 // leaving stale guidance. Keep the list small (the most common modification
 // tools) — an exhaustive enumeration would drift faster than it helps.
 const PLAN_MODE_REMINDER_TEXT =
-  '<plan-mode-active>\n' +
+  `${POST_COMPACT_PLAN_MODE_PREFIX}\n` +
   'You are currently in PLAN mode. You may research, read files, and ' +
   'propose plans, but you may not execute modification tools (' +
   `${ToolNames.WRITE_FILE}, ${ToolNames.EDIT}, ${ToolNames.SHELL}, etc.) ` +
@@ -736,7 +744,7 @@ function buildSubagentSnapshotPart(snaps: SubagentSnapshot[]): Part | null {
   }
   return {
     text:
-      '<background-tasks>\n' +
+      `${POST_COMPACT_BACKGROUND_TASKS_PREFIX}\n` +
       'The following background subagent tasks were active at compaction. ' +
       'The summary above does not include their per-task state. Use ' +
       '`task_stop` / `send_message` to interact; do not assume they ' +
@@ -825,9 +833,7 @@ export async function composePostCompactHistory(
   //                       model→model adjacency that would otherwise
   //                       arise from a separate appended entry.
   const trailingFc = trailingFunctionCallContent(history);
-  const ackParts: Part[] = [
-    { text: 'Got it. Thanks for the additional context!' },
-  ];
+  const ackParts: Part[] = [{ text: COMPRESSION_SUMMARY_MODEL_ACK }];
 
   const out: Content[] = [
     { role: 'user', parts: [{ text: postProcessSummary(summary) }] },

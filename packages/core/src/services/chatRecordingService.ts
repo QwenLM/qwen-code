@@ -443,6 +443,11 @@ export interface AttributionSnapshotPayload {
 export interface RewindRecordPayload {
   /** Number of UI history items truncated. */
   truncatedCount: number;
+  /**
+   * Highest model-facing user turn count observed before this rewind. Used by
+   * ACP resume to preserve snapshot validation's historical upper bound.
+   */
+  maxModelFacingUserTurnCount?: number;
 }
 
 /**

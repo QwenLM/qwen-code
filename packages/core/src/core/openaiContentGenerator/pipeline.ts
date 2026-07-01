@@ -29,6 +29,26 @@ import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
 
+function compareStableStrings(left: string, right: string): number {
+  if (left < right) return -1;
+  if (left > right) return 1;
+  return 0;
+}
+
+function getToolSortKey(tool: OpenAI.Chat.ChatCompletionTool): string {
+  return [tool.function.name, tool.type, JSON.stringify(tool)].join('\u0000');
+}
+
+function sortToolsForCacheStableRequest(
+  request: OpenAI.Chat.ChatCompletionCreateParams,
+): void {
+  if (!request.tools || request.tools.length < 2) return;
+
+  request.tools = [...request.tools].sort((left, right) =>
+    compareStableStrings(getToolSortKey(left), getToolSortKey(right)),
+  );
+}
+
 /**
  * Error thrown when the API returns an error embedded as stream content
  * instead of a proper HTTP error. Some providers (e.g., certain OpenAI-compatible
@@ -612,6 +632,14 @@ export class ContentGenerationPipeline {
       }
     }
 
+    // DeepSeek's KV cache is prefix-exact: a different tool order changes the
+    // serialized prompt prefix even when the tool set and schemas are identical.
+    // Sort only for official DeepSeek endpoints to avoid surprising other
+    // OpenAI-compatible providers with changed tool presentation order.
+    if (isDeepSeekHostname(this.contentGeneratorConfig)) {
+      sortToolsForCacheStableRequest(providerRequest);
+    }
+
     return providerRequest;
   }
 
@@ -742,7 +770,11 @@ export class ContentGenerationPipeline {
       // provider enhancement, post disable-reasoning) and before the SDK call
       // so the logger sees the exact bytes sent on the wire.
       openaiRequestCaptureContext.getStore()?.(openaiRequest);
-      runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest);
+      runtimeDiagnostics.recordOpenAIWireRequest(openaiRequest, {
+        provider: isDeepSeekHostname(this.contentGeneratorConfig)
+          ? 'deepseek'
+          : 'openai-compatible',
+      });
 
       const result = await executor(openaiRequest, context);
       return result;

@@ -53,9 +53,10 @@ class InMemoryServerTransport {
 }
 
 /** Build a canned client-hosted MCP server exposing one echo tool. */
-function buildCannedServer(
-  sink: (message: JSONRPCMessage) => void,
-): { transport: InMemoryServerTransport; ready: Promise<void> } {
+function buildCannedServer(sink: (message: JSONRPCMessage) => void): {
+  transport: InMemoryServerTransport;
+  ready: Promise<void>;
+} {
   const server = new McpServer({
     name: 'chrome-tools',
     version: '0.0.1',

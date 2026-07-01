@@ -238,7 +238,10 @@ describe('SessionMessageHandler', () => {
       isConnected: true,
       currentSessionId: 'session-1',
       rewindSession: vi.fn().mockResolvedValue({
-        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+        historyBeforeRewind: {
+          history: [{ role: 'user', parts: [{ text: 'first' }] }],
+          modelFacingUserTurnCount: 1,
+        },
       }),
       restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(undefined),
@@ -445,7 +448,10 @@ describe('SessionMessageHandler', () => {
       isConnected: true,
       currentSessionId: 'session-1',
       rewindSession: vi.fn().mockResolvedValue({
-        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+        historyBeforeRewind: {
+          history: [{ role: 'user', parts: [{ text: 'first' }] }],
+          modelFacingUserTurnCount: 1,
+        },
       }),
       restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(undefined),
@@ -524,12 +530,14 @@ describe('SessionMessageHandler', () => {
       createdAt: 1,
       updatedAt: 4,
     };
+    const historyBeforeRewind = {
+      history: [{ role: 'user', parts: [{ text: 'first' }] }],
+      modelFacingUserTurnCount: 1,
+    };
     const agentManager = {
       isConnected: true,
       currentSessionId: 'session-1',
-      rewindSession: vi.fn().mockResolvedValue({
-        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
-      }),
+      rewindSession: vi.fn().mockResolvedValue({ historyBeforeRewind }),
       restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockRejectedValue(new Error('send failed')),
     };
@@ -557,9 +565,9 @@ describe('SessionMessageHandler', () => {
       },
     });
 
-    expect(agentManager.restoreSessionHistory).toHaveBeenCalledWith([
-      { role: 'user', parts: [{ text: 'first' }] },
-    ]);
+    expect(agentManager.restoreSessionHistory).toHaveBeenCalledWith(
+      historyBeforeRewind,
+    );
     expect(conversationStore.replaceMessages).toHaveBeenCalledWith(
       'session-1',
       originalConversation.messages,
@@ -586,7 +594,10 @@ describe('SessionMessageHandler', () => {
       isConnected: true,
       currentSessionId: 'session-1',
       rewindSession: vi.fn().mockResolvedValue({
-        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+        historyBeforeRewind: {
+          history: [{ role: 'user', parts: [{ text: 'first' }] }],
+          modelFacingUserTurnCount: 1,
+        },
       }),
       restoreSessionHistory: vi.fn(),
       sendMessage: vi.fn().mockResolvedValue(undefined),
@@ -658,7 +669,10 @@ describe('SessionMessageHandler', () => {
       isConnected: true,
       currentSessionId: 'session-1',
       rewindSession: vi.fn().mockResolvedValue({
-        historyBeforeRewind: [{ role: 'user', parts: [{ text: 'first' }] }],
+        historyBeforeRewind: {
+          history: [{ role: 'user', parts: [{ text: 'first' }] }],
+          modelFacingUserTurnCount: 1,
+        },
       }),
       restoreSessionHistory: vi.fn().mockResolvedValue(undefined),
       sendMessage: vi.fn().mockResolvedValue(undefined),
@@ -781,7 +795,10 @@ describe('SessionMessageHandler', () => {
       promptImages: [],
     });
 
-    const historyBeforeRewind = [{ role: 'user', parts: [{ text: 'first' }] }];
+    const historyBeforeRewind = {
+      history: [{ role: 'user', parts: [{ text: 'first' }] }],
+      modelFacingUserTurnCount: 1,
+    };
     const originalConversation = {
       id: 'session-1',
       title: 'Existing session',

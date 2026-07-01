@@ -26,6 +26,7 @@ import {
   MAX_STREAM_IDLE_TIMEOUT_MS,
   QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
 } from './constants.js';
+import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 
 // Mock dependencies
 vi.mock('./converter.js', () => ({
@@ -174,6 +175,93 @@ describe('ContentGenerationPipeline', () => {
           modalities: {},
         }),
       );
+    });
+
+    it('labels runtime OpenAI diagnostics as deepseek for DeepSeek hostnames', async () => {
+      const diagnosticsSpy = vi
+        .spyOn(runtimeDiagnostics, 'recordOpenAIWireRequest')
+        .mockImplementation(() => undefined);
+      try {
+        mockContentGeneratorConfig.baseUrl = 'https://api.deepseek.com';
+        const request: GenerateContentParameters = {
+          model: 'deepseek-v4-pro',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        };
+        const mockMessages = [
+          { role: 'user', content: 'Hello' },
+        ] as OpenAI.Chat.ChatCompletionMessageParam[];
+        const mockOpenAIResponse = {
+          id: 'response-id',
+          choices: [
+            { message: { content: 'Hello response' }, finish_reason: 'stop' },
+          ],
+          created: Date.now(),
+          model: 'deepseek-v4-pro',
+        } as OpenAI.Chat.ChatCompletion;
+        const mockGeminiResponse = new GenerateContentResponse();
+
+        (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+          mockMessages,
+        );
+        (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+          mockGeminiResponse,
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue(
+          mockOpenAIResponse,
+        );
+
+        await pipeline.execute(request, 'test-prompt-id');
+
+        expect(diagnosticsSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ model: 'deepseek-v4-pro' }),
+          { provider: 'deepseek' },
+        );
+      } finally {
+        diagnosticsSpy.mockRestore();
+      }
+    });
+
+    it('labels runtime OpenAI diagnostics as openai-compatible for non-DeepSeek hostnames', async () => {
+      const diagnosticsSpy = vi
+        .spyOn(runtimeDiagnostics, 'recordOpenAIWireRequest')
+        .mockImplementation(() => undefined);
+      try {
+        mockContentGeneratorConfig.baseUrl = 'https://example.test/v1';
+        const request: GenerateContentParameters = {
+          model: 'deepseek-v4-pro',
+          contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        };
+        const mockMessages = [
+          { role: 'user', content: 'Hello' },
+        ] as OpenAI.Chat.ChatCompletionMessageParam[];
+        const mockOpenAIResponse = {
+          id: 'response-id',
+          choices: [
+            { message: { content: 'Hello response' }, finish_reason: 'stop' },
+          ],
+          created: Date.now(),
+          model: 'deepseek-v4-pro',
+        } as OpenAI.Chat.ChatCompletion;
+        const mockGeminiResponse = new GenerateContentResponse();
+
+        (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+          mockMessages,
+        );
+        (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+          mockGeminiResponse,
+        );
+        (mockClient.chat.completions.create as Mock).mockResolvedValue(
+          mockOpenAIResponse,
+        );
+
+        await pipeline.execute(request, 'test-prompt-id');
+
+        expect(diagnosticsSpy).toHaveBeenCalledWith(expect.any(Object), {
+          provider: 'openai-compatible',
+        });
+      } finally {
+        diagnosticsSpy.mockRestore();
+      }
     });
 
     it('should use request.model when provided', async () => {
@@ -598,6 +686,113 @@ describe('ContentGenerationPipeline', () => {
           signal: undefined,
         }),
       );
+    });
+
+    it('sorts DeepSeek tools by function name before sending the wire request', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://api.deepseek.com/v1';
+      const request: GenerateContentParameters = {
+        model: 'deepseek-v4-pro',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: 'placeholder',
+                  description: 'Placeholder function',
+                  parameters: { type: Type.OBJECT, properties: {} },
+                },
+              ],
+            },
+          ],
+        },
+      };
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockTools = [
+        { type: 'function', function: { name: 'zeta' } },
+        { type: 'function', function: { name: 'alpha' } },
+        { type: 'function', function: { name: 'bravo' } },
+      ] as OpenAI.Chat.ChatCompletionTool[];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue(
+        mockTools,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'response-id',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'test-prompt-id');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(
+        apiCall.tools.map(
+          (tool: OpenAI.Chat.ChatCompletionTool) => tool.function.name,
+        ),
+      ).toEqual(['alpha', 'bravo', 'zeta']);
+    });
+
+    it('preserves tool order for non-DeepSeek hostnames', async () => {
+      mockContentGeneratorConfig.baseUrl = 'https://example.test/v1';
+      const request: GenerateContentParameters = {
+        model: 'deepseek-v4-pro',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+        config: {
+          tools: [
+            {
+              functionDeclarations: [
+                {
+                  name: 'placeholder',
+                  description: 'Placeholder function',
+                  parameters: { type: Type.OBJECT, properties: {} },
+                },
+              ],
+            },
+          ],
+        },
+      };
+
+      const mockMessages = [
+        { role: 'user', content: 'Hello' },
+      ] as OpenAI.Chat.ChatCompletionMessageParam[];
+      const mockTools = [
+        { type: 'function', function: { name: 'zeta' } },
+        { type: 'function', function: { name: 'alpha' } },
+      ] as OpenAI.Chat.ChatCompletionTool[];
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue(
+        mockMessages,
+      );
+      (mockConverter.convertGeminiToolsToOpenAI as Mock).mockResolvedValue(
+        mockTools,
+      );
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'response-id',
+        choices: [],
+      } as unknown as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'test-prompt-id');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(
+        apiCall.tools.map(
+          (tool: OpenAI.Chat.ChatCompletionTool) => tool.function.name,
+        ),
+      ).toEqual(['zeta', 'alpha']);
     });
 
     it('should skip empty tools array in request', async () => {

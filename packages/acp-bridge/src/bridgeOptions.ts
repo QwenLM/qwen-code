@@ -398,6 +398,4 @@ export interface BridgeOptions {
  */
 export type ClientMcpMessageSender = (
   serverName: string,
-) =>
-  | ((payload: unknown) => Promise<unknown>)
-  | undefined;
+) => ((payload: unknown) => Promise<unknown>) | undefined;
