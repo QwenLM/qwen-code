@@ -100,7 +100,11 @@ describe('<MarkdownDisplay />', () => {
           availableTerminalHeight={10}
         />,
       );
-      const lineCount = (lastFrame() ?? '').split('\n').length;
+      const output = lastFrame() ?? '';
+      // Non-blank: a regression that clips to nothing would still satisfy the
+      // line-count bound (''.split('\n').length === 1), so assert real content.
+      expect(output).toMatch(/line \d+/);
+      const lineCount = output.split('\n').length;
       expect(lineCount).toBeLessThanOrEqual(10);
     });
 
@@ -115,10 +119,28 @@ describe('<MarkdownDisplay />', () => {
           availableTerminalHeight={20}
         />,
       );
-      const lineCount = (lastFrame() ?? '')
-        .replace(/\n+$/, '')
-        .split('\n').length;
+      const output = (lastFrame() ?? '').replace(/\n+$/, '');
+      expect(output).toContain('just one short line');
+      const lineCount = output.split('\n').length;
       expect(lineCount).toBeLessThan(20);
+    });
+
+    it('does not clip a long committed (non-pending) message', () => {
+      // The clip is gated on isPending: committed messages live in <Static> and
+      // must render in full. Guards against accidentally dropping the isPending
+      // check (which would silently truncate scrollback).
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={false}
+          availableTerminalHeight={10}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('line 60');
     });
 
     it('renders unordered lists with different markers', () => {

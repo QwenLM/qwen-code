@@ -573,7 +573,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // unpadded); the full message still renders uncapped once it commits to
   // `<Static>`. Code blocks already self-truncate above, but plain prose / lists
   // had no overall cap. Only applies while pending and when a budget is known
-  // (constrainHeight on, non-VP).
+  // (constrainHeight on — both non-VP and VP pending items pass a budget).
   if (isPending && availableTerminalHeight !== undefined) {
     const maxHeight = Math.max(MINIMUM_MAX_HEIGHT, availableTerminalHeight);
     return (
