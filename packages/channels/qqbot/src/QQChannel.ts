@@ -428,11 +428,19 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] Retrying as active message\n`,
           );
+          const activeBody: Record<string, unknown> = {
+            content: text,
+            msg_type: 0,
+          };
+          if (msgId) {
+            activeBody['msg_id'] = msgId;
+            activeBody['msg_seq'] = nextSeq;
+          }
           const activeResp = await sendQQMessage(
             route.base,
             route.path,
             this.accessToken,
-            { content: text, msg_type: 0 },
+            activeBody,
           );
           if (activeResp.ok) {
             if (msgId) this.saveQQState();

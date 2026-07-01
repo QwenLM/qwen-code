@@ -277,13 +277,13 @@ describe('sendMessage', () => {
         msg_seq: 1,
       },
     );
-    // Fallback: active message (no msg_id)
+    // Fallback: active retry stays passive by including msg_id
     expect(mockSendQQMessage).toHaveBeenNthCalledWith(
       2,
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { content: '**bold**', msg_type: 0 },
+      { content: '**bold**', msg_type: 0, msg_id: 'msg-001', msg_seq: 1 },
     );
   });
 
