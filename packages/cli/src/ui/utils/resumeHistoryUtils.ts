@@ -24,6 +24,7 @@ import type {
 } from '../types.js';
 import { ToolCallStatus, MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
+import { isCollapsibleTool } from '../components/messages/CompactToolGroupDisplay.js';
 
 /**
  * Extracts text content from a Content object's parts (excluding thought parts).
@@ -431,10 +432,16 @@ function convertToHistoryItems(
             // functionResponse parts are persisted on the tool_result record
             // (only resultDisplay is sanitized), so resume yields full detail
             // too. Fall back to message.parts for older records. Only derive it
-            // for SUCCESS, matching the live path (useReactToolScheduler only
-            // sets detailedDisplay in its 'success' branch) so errored/cancelled
-            // tools don't surface raw output in the transcript.
-            if (toolCall.status === ToolCallStatus.Success) {
+            // for SUCCESS + collapsible (read/search/list) tools, mirroring the
+            // live path's gate in useReactToolScheduler — the renderer's
+            // `usingDetailedDisplay` only consumes it for collapsible tools, so
+            // extracting it for edit/write/command/agent calls would store a
+            // large (~25K char) string the transcript never reads. Errored /
+            // cancelled tools are excluded so raw output never surfaces.
+            if (
+              toolCall.status === ToolCallStatus.Success &&
+              isCollapsibleTool(toolCall.name)
+            ) {
               toolCall.detailedDisplay = getToolResponseDisplayText(
                 (record.toolCallResult.responseParts as Part[] | undefined) ??
                   (record.message?.parts as Part[] | undefined),
