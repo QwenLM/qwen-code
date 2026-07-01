@@ -29,7 +29,6 @@
 ## Task 1: Core Exports And Store
 
 **Files:**
-
 - Modify: `packages/core/src/index.ts`
 - Modify: `packages/channels/base/src/paths.ts`
 - Create: `packages/channels/base/src/ChannelLoopStore.ts`
@@ -81,9 +80,7 @@ describe('ChannelLoopStore', () => {
       runCount: 0,
       createdAt: '2026-06-30T09:00:00.000Z',
     });
-    await expect(
-      store.listForTarget('telegram-main', target),
-    ).resolves.toHaveLength(1);
+    await expect(store.listForTarget('telegram-main', target)).resolves.toHaveLength(1);
   });
 
   it('enforces target quotas atomically through createForTarget', async () => {
@@ -103,37 +100,32 @@ describe('ChannelLoopStore', () => {
       createdBy: 'Alice',
     };
 
-    await expect(store.createForTarget(input, 1)).resolves.toMatchObject({
-      id: 'loop-1',
-    });
+    await expect(store.createForTarget(input, 1)).resolves.toMatchObject({ id: 'loop-1' });
     await expect(store.createForTarget(input, 1)).resolves.toBeUndefined();
   });
 
   it('loads pre-lifecycle loop JSON with runCount defaulted to 0', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'channel-loop-legacy-'));
     const filePath = join(dir, 'loops.json');
-    await writeFile(
-      filePath,
-      JSON.stringify([
-        {
-          id: 'loop-legacy',
-          channelName: 'telegram-main',
-          target,
-          cwd: '/repo',
-          cron: '0 9 * * *',
-          prompt: 'post summary',
-          recurring: true,
-          enabled: true,
-          createdBy: 'Alice',
-          createdAt: '2026-06-30T09:00:00.000Z',
-          consecutiveFailures: 0,
-        },
-      ]),
-    );
+    await writeFile(filePath, JSON.stringify([
+      {
+        id: 'loop-legacy',
+        channelName: 'telegram-main',
+        target,
+        cwd: '/repo',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T09:00:00.000Z',
+        consecutiveFailures: 0,
+      },
+    ]));
 
-    await expect(
-      new ChannelLoopStore({ filePath }).list(),
-    ).resolves.toMatchObject([{ id: 'loop-legacy', runCount: 0 }]);
+    await expect(new ChannelLoopStore({ filePath }).list()).resolves.toMatchObject([
+      { id: 'loop-legacy', runCount: 0 },
+    ]);
   });
 
   it('refuses corrupt JSON instead of treating it as empty state', async () => {
@@ -342,9 +334,7 @@ export class ChannelLoopStore {
     }
     for (const [index, value] of parsed.entries()) {
       if (!isChannelLoop(value)) {
-        throw new Error(
-          `Invalid channel loop at index ${index} in ${this.filePath}.`,
-        );
+        throw new Error(`Invalid channel loop at index ${index} in ${this.filePath}.`);
       }
     }
     return parsed.map(normalizeLoop);
@@ -411,8 +401,7 @@ function isChannelLoop(value: unknown): value is ChannelLoop {
     (loop['lastStatus'] === undefined ||
       loop['lastStatus'] === 'ok' ||
       loop['lastStatus'] === 'error') &&
-    (loop['lastError'] === undefined ||
-      typeof loop['lastError'] === 'string') &&
+    (loop['lastError'] === undefined || typeof loop['lastError'] === 'string') &&
     typeof loop['consecutiveFailures'] === 'number' &&
     (loop['runningSince'] === undefined ||
       typeof loop['runningSince'] === 'string') &&
@@ -441,11 +430,7 @@ Export from `index.ts` and export cron helpers from `packages/core/src/index.ts`
 
 ```ts
 export { ChannelLoopStore } from './ChannelLoopStore.js';
-export type {
-  ChannelLoop,
-  ChannelLoopInput,
-  ChannelLoopPatch,
-} from './ChannelLoopStore.js';
+export type { ChannelLoop, ChannelLoopInput, ChannelLoopPatch } from './ChannelLoopStore.js';
 export { channelLoopPath } from './paths.js';
 export { nextFireTime, parseCron } from './utils/cronParser.js';
 ```
@@ -463,7 +448,6 @@ Expected: all tests pass.
 ## Task 2: Channel Loop Scheduler
 
 **Files:**
-
 - Create: `packages/channels/base/src/ChannelLoopScheduler.ts`
 - Create: `packages/channels/base/src/ChannelLoopScheduler.test.ts`
 - Modify: `packages/channels/base/src/index.ts`
@@ -525,7 +509,6 @@ Expected: all tests pass.
 ## Task 3: ChannelBase `/loop` Command Surface
 
 **Files:**
-
 - Modify: `packages/channels/base/src/ChannelBase.ts`
 - Modify: `packages/channels/base/src/ChannelBase.test.ts`
 
@@ -558,14 +541,8 @@ Add:
 ```ts
 export interface ChannelLoopController {
   create(input: ChannelLoopInput): Promise<ChannelLoop>;
-  createForTarget?(
-    input: ChannelLoopInput,
-    maxEnabledLoops: number,
-  ): Promise<ChannelLoop | undefined>;
-  listForTarget(
-    channelName: string,
-    target: SessionTarget,
-  ): Promise<ChannelLoop[]>;
+  createForTarget?(input: ChannelLoopInput, maxEnabledLoops: number): Promise<ChannelLoop | undefined>;
+  listForTarget(channelName: string, target: SessionTarget): Promise<ChannelLoop[]>;
   disable(id: string): Promise<boolean>;
   validateCron(cron: string): void;
   nextFireTime?(loop: ChannelLoop): Date;
@@ -634,7 +611,6 @@ Expected: all ChannelBase tests pass.
 ## Task 4: Loop Prompt Execution
 
 **Files:**
-
 - Modify: `packages/channels/base/src/ChannelBase.ts`
 - Modify: `packages/channels/base/src/ChannelBase.test.ts`
 
@@ -695,7 +671,6 @@ Expected: all ChannelBase tests pass.
 ## Task 5: Adapter Opt-In
 
 **Files:**
-
 - Modify: `packages/channels/telegram/src/TelegramAdapter.ts`
 - Modify: `packages/channels/telegram/src/TelegramAdapter.test.ts`
 - Modify: `packages/channels/feishu/src/FeishuAdapter.ts`
@@ -740,7 +715,6 @@ Expected: all adapter tests pass.
 ## Task 6: CLI Startup Wiring
 
 **Files:**
-
 - Modify: `packages/cli/src/commands/channel/start.ts`
 - Modify: `packages/cli/src/commands/channel/start.test.ts`
 
@@ -813,7 +787,6 @@ Expected: all CLI start tests pass.
 ## Task 7: Verification And PR
 
 **Files:**
-
 - Modify: `.qwen/pr-drafts/channel-loop.md`
 
 - [ ] **Step 1: Run focused verification**

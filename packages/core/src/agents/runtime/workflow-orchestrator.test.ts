@@ -1185,18 +1185,20 @@ describe('createProductionDispatch', () => {
   // T10 (PR #4732 R1): the production dispatch must throw when the
   // subagent terminates with a non-GOAL mode. Without this, `await agent(...)`
   // would resolve to '' on user cancel and the script would keep running.
-  it.each([['CANCELLED'], ['MAX_TURNS'], ['TIMEOUT'], ['ERROR']])(
-    'throws when subagent terminate mode is %s',
-    async (mode) => {
-      nextTerminateMode.value = mode;
-      const dispatch = createProductionDispatch(fakeConfig());
-      await expect(dispatch('hello', { label: 'h1' })).rejects.toThrow(
-        new RegExp(
-          `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
-        ),
-      );
-    },
-  );
+  it.each([
+    ['CANCELLED'],
+    ['MAX_TURNS'],
+    ['TIMEOUT'],
+    ['ERROR'],
+  ])('throws when subagent terminate mode is %s', async (mode) => {
+    nextTerminateMode.value = mode;
+    const dispatch = createProductionDispatch(fakeConfig());
+    await expect(dispatch('hello', { label: 'h1' })).rejects.toThrow(
+      new RegExp(
+        `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
+      ),
+    );
+  });
 
   // ── R1 (#1 + #3): token reporting across all terminate modes ──────────
 
