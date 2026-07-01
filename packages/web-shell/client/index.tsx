@@ -109,12 +109,16 @@ export type {
 export type { ComposerToolbarAction } from './components/ChatEditor';
 export type {
   MarkdownContentSource,
+  MarkdownTableMode,
   MarkdownRenderContext,
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
   ComposerToolbarStartRenderer,
+  ComposerToolbarRightRenderer,
+  WebShellComposerToolbarRenderInfo,
   WebShellComposerToolbarStartRenderInfo,
+  WebShellComposerToolbarRightRenderInfo,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
   WebShellMarkdownCustomization,

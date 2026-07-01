@@ -437,7 +437,7 @@
   gap: 6px;
   min-height: 0;
   padding: 4px 0;
-  overflow: scroll;
+  overflow: auto;
 }
 
 .editorArea > :last-child {
@@ -521,6 +521,12 @@
 .toolbarRight {
   flex-shrink: 0;
   margin-right: -5px;
+}
+
+.toolbarRightCustom {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
 }
 
 @container (max-width: 699px) {
@@ -731,7 +737,7 @@
 }
 
 .quickActionsBtn {
-  display: none;
+  display: inline-flex;
 }
 
 .quickActionsBtn .toolBtnIcon svg {
@@ -790,7 +796,7 @@
 }
 
 .quickActionsPanel {
-  display: none;
+  display: block;
   position: relative;
   z-index: 2;
   margin-top: 8px;
@@ -902,16 +908,6 @@
 .quickKey:focus-visible {
   background: var(--chat-editor-bg-tertiary);
   outline: none;
-}
-
-@container (max-width: 699px) {
-  .quickActionsBtn {
-    display: inline-flex;
-  }
-
-  .quickActionsPanel {
-    display: block;
-  }
 }
 
 .sendBtn {

@@ -25,6 +25,7 @@ export {
   isInSafeToolAllowlist,
   passesAcceptEditsFastPath,
   shouldFirePermissionDeniedForAutoMode,
+  shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
   shouldRunAutoModeForCall,
 } from './autoMode.js';
