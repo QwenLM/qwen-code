@@ -1278,7 +1278,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
         );
         pendingSessionLoadRef.current = undefined;
       }
-      if (!keepSessionForNextEffect && session?.clientId) {
+      if ((!keepSessionForNextEffect || isUnmounting) && session?.clientId) {
         void detachDaemonClient({
           baseUrl: resolvedBaseUrl!,
           token: resolvedToken,
@@ -1288,7 +1288,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           console.warn('[DaemonSessionProvider] detach failed:', err),
         );
       }
-      if (!keepSessionForNextEffect) {
+      if (!keepSessionForNextEffect || isUnmounting) {
         sessionRef.current = undefined;
       }
     };

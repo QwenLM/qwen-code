@@ -169,7 +169,7 @@ export function createDaemonSessionActions({
               addNotice,
               `${capitalize(mode)} session failed`,
               new Error(`Session ${mode} timed out`),
-              mode === 'resume' ? 'resume_session' : 'load_session',
+              getSessionLoadNoticeOperation(mode),
             ),
           );
         }
@@ -579,6 +579,20 @@ export function createDaemonSessionActions({
           createDetachedSession(),
           'Create session timed out',
         );
+        if (manualSessionClearRef.current) {
+          try {
+            await withActionTimeout(
+              nextSession.detach(),
+              'Detach cleared session timed out',
+            );
+          } catch (error) {
+            console.warn(
+              '[DaemonSessionActions] detach after interrupted create failed:',
+              error,
+            );
+          }
+          throw new DOMException('Session creation interrupted', 'AbortError');
+        }
         persistStableClientId(nextSession.clientId, nextSession.sessionId);
         sessionRef.current = nextSession;
         skipNextCleanupDetachSessionIdRef.current = nextSession.sessionId;
@@ -606,7 +620,7 @@ export function createDaemonSessionActions({
         addNotice,
         sessionRef.current,
         'Attach session failed',
-        'load_session',
+        'attach_session',
       );
       const loadPromise = startPendingSessionLoad(session.sessionId, 'attach');
       setAttachSessionNonce((nonce) => nonce + 1);
@@ -1295,4 +1309,12 @@ function markNoticeDispatched(error: Error): Error {
 
 function capitalize(value: string): string {
   return value.charAt(0).toUpperCase() + value.slice(1);
+}
+
+function getSessionLoadNoticeOperation(
+  mode: PendingSessionLoad['mode'],
+): DaemonNoticeOperation {
+  if (mode === 'resume') return 'resume_session';
+  if (mode === 'attach') return 'attach_session';
+  return 'load_session';
 }

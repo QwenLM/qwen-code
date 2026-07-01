@@ -116,6 +116,30 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection()).toMatchObject({ sessionId: 'session-b' });
   });
 
+  it('does not restore a detached session after the session was cleared', async () => {
+    const nextSession = createMockSession('session-b');
+    const deferred = createDeferred<DaemonSessionClient>();
+    const manualSessionClearRef = { current: false };
+    const createDetachedSession = vi.fn(() => deferred.promise);
+    const { actions, sessionRef, getConnection } = createActionsHarness({
+      connection: { status: 'connected' },
+      createDetachedSession,
+      manualSessionClearRef,
+    });
+
+    const createPromise = actions.createSession();
+    manualSessionClearRef.current = true;
+    deferred.resolve(nextSession as unknown as DaemonSessionClient);
+
+    await expect(createPromise).rejects.toMatchObject({
+      name: 'AbortError',
+      message: 'Session creation interrupted',
+    });
+    expect(nextSession.detach).toHaveBeenCalledOnce();
+    expect(sessionRef.current).toBeUndefined();
+    expect(getConnection()).not.toHaveProperty('sessionId');
+  });
+
   it('creates a detached session when the ref and connection do not match', async () => {
     const existingSession = createMockSession('session-a');
     const nextSession = createMockSession('session-b');
@@ -155,6 +179,31 @@ describe('createDaemonSessionActions', () => {
     clearTimeout(pendingSessionLoadRef.current?.timeout);
     pendingSessionLoadRef.current?.resolve();
     await expect(attachPromise).resolves.toBeUndefined();
+  });
+
+  it('reports attach timeouts as attach session failures', async () => {
+    vi.useFakeTimers();
+    try {
+      const session = createMockSession('session-a');
+      const addNotice = vi.fn((notice) => notice);
+      const { actions } = createActionsHarness({
+        addNotice,
+        session,
+      });
+
+      const attachPromise = actions.attachSession();
+      vi.advanceTimersByTime(30_000);
+
+      await expect(attachPromise).rejects.toThrow('Session attach timed out');
+      expect(addNotice).toHaveBeenCalledWith(
+        expect.objectContaining({
+          code: 'daemon.attach_session.failed',
+          operation: 'attach_session',
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('rejects attachSession when no session exists', async () => {
@@ -201,8 +250,10 @@ describe('createDaemonSessionActions', () => {
 function createActionsHarness(
   opts: {
     activePrompts?: Map<string, ActivePrompt>;
+    addNotice?: ReturnType<typeof vi.fn>;
     connection?: DaemonConnectionState;
     createDetachedSession?: ReturnType<typeof vi.fn>;
+    manualSessionClearRef?: { current: boolean };
     pendingSessionLoadRef?: { current: PendingSessionLoad | undefined };
     session?: ReturnType<typeof createMockSession>;
     setAttachSessionNonce?: ReturnType<typeof vi.fn>;
@@ -235,7 +286,7 @@ function createActionsHarness(
     pendingSessionLoadRef,
     pendingSessionLoadIdRef: { current: 0 },
     heartbeatSupportedRef: { current: false },
-    manualSessionClearRef: { current: false },
+    manualSessionClearRef: opts.manualSessionClearRef ?? { current: false },
     skipNextCleanupDetachSessionIdRef: { current: undefined },
     passiveAssistantDoneTimerRef: { current: undefined },
     getCreateSessionRequest: () => ({ workspaceCwd: '/workspace' }),
@@ -249,7 +300,7 @@ function createActionsHarness(
     getConnection: () => connection,
     hasSessionActivePrompt: () => false,
     resetCurrentSessionActivePrompt: vi.fn(),
-    addNotice: vi.fn(),
+    addNotice: opts.addNotice ?? vi.fn(),
     setConnection: (update) => {
       connection = typeof update === 'function' ? update(connection) : update;
     },
@@ -281,6 +332,16 @@ function createMockSession(sessionId: string) {
     },
     detach: vi.fn(async () => undefined),
   };
+}
+
+function createDeferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }
 
 function commandInfo(name: string) {

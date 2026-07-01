@@ -150,6 +150,7 @@ export type DaemonNoticeOperation =
   | 'set_approval_mode'
   | 'submit_permission'
   | 'cancel_prompt'
+  | 'attach_session'
   | 'load_session'
   | 'resume_session'
   | 'create_session'
