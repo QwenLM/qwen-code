@@ -43,6 +43,7 @@ import { CommandKind } from '../../ui/commands/types.js';
 import { MessageType } from '../../ui/types.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
 const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
@@ -53,7 +54,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     createDebugLogger: () => ({
-      debug: vi.fn(),
+      debug: debugLoggerDebugSpy,
       info: vi.fn(),
       warn: debugLoggerWarnSpy,
       error: vi.fn(),
@@ -3291,6 +3292,87 @@ describe('Session', () => {
         ).toContain('Duplicate provider tool call id "shell_1"');
       });
 
+      it('stops an ACP prompt after repeated invalid tool parameters with fresh ids', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const build = vi.fn().mockImplementation(() => {
+          throw new Error('Parameter "questions" must be an array.');
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'ask_user_question',
+          kind: core.Kind.Other,
+          displayName: 'Ask User Question',
+          description: 'Ask user question',
+          build,
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'ask_1',
+                      name: 'ask_user_question',
+                      args: { questions: '[{"question":"Continue?"}]' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'ask_2',
+                      name: 'ask_user_question',
+                      args: { questions: '[{"question":"Continue?"}]' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'ask_3',
+                      name: 'ask_user_question',
+                      args: { questions: '[{"question":"Continue?"}]' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'ask me before continuing' }],
+        });
+
+        expect(build).toHaveBeenCalledTimes(3);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after repeated tool parameter errors',
+          ),
+        );
+      });
+
       it('clears duplicate provider id tracking between ACP prompts', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
         vi.mocked(mockChat.getHistoryFunctionResponseIds).mockReturnValue(
@@ -6116,8 +6198,9 @@ describe('Session', () => {
 
       it('does not expand the project loop.md sentinel in an untrusted folder', async () => {
         // An untrusted folder's repo-controlled .qwen/loop.md must not be read
-        // and fed to the model. With no user-owned ~/.qwen/loop.md, the tick is
-        // a labelled no-op — and the repo task block never reaches the model.
+        // and fed to the model. With no user-owned ~/.qwen/loop.md the tick is
+        // absent, which converges on the autonomous preamble — and the repo task
+        // block still never reaches the model.
         const tmpDir = await fs.mkdtemp(
           path.join(os.tmpdir(), 'loop-md-untrusted-'),
         );
@@ -6163,7 +6246,7 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'hello' }],
           });
 
-          // The client sees the absent label, never the repo file's path.
+          // The client sees the autonomous label, never the repo file's path.
           await vi.waitFor(() => {
             expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
               sessionId: 'test-session-id',
@@ -6171,7 +6254,7 @@ describe('Session', () => {
                 sessionUpdate: 'user_message_chunk',
                 content: {
                   type: 'text',
-                  text: 'Loop tick — loop.md not present',
+                  text: 'Autonomous loop tick',
                 },
                 _meta: { source: 'loop' },
               },
@@ -6188,13 +6271,121 @@ describe('Session', () => {
           await vi.waitFor(() => {
             expect(sentToModel()).toContain('# /loop tick — loop.md absent');
           });
-          // The repo-controlled task block never reaches the model.
+          // Absent converged on the autonomous preamble; the repo-controlled task
+          // block still never reaches the model.
+          expect(sentToModel()).toContain('# Autonomous loop check');
           expect(sentToModel()).not.toContain('finish the migration');
         } finally {
           restoreHome();
           await fs.rm(tmpDir, { recursive: true, force: true });
           await fs.rm(fakeHome, { recursive: true, force: true });
         }
+      });
+
+      it('expands a bare-/loop autonomous sentinel into the preamble with an Autonomous loop tick echo', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({
+                prompt: '<<autonomous-loop-dynamic>>',
+                cronExpr: '@wakeup',
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        // The client sees a stable autonomous label, never the raw sentinel.
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: 'Autonomous loop tick' },
+              _meta: { source: 'loop' },
+            },
+          });
+        });
+
+        // The model receives the full autonomous preamble + the dynamic tick.
+        const sentToModel = () =>
+          (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+            .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+            .map((p: { text?: string }) => p.text ?? '')
+            .join('');
+        await vi.waitFor(() => {
+          expect(sentToModel()).toContain('# Autonomous loop check');
+        });
+        expect(sentToModel()).toContain(
+          '# Autonomous loop tick (dynamic pacing)',
+        );
+      });
+
+      it('skips missed bare-/loop autonomous sentinels', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: {
+                prompt: string;
+                cronExpr?: string;
+                missed?: boolean;
+              }) => void,
+            ) => {
+              callback({
+                prompt: '<<autonomous-loop-dynamic>>',
+                cronExpr: '@wakeup',
+                missed: true,
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        const sentToModel = (
+          mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+        ).mock.calls
+          .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+          .map((p: { text?: string }) => p.text ?? '')
+          .join('');
+        expect(sentToModel).not.toContain('# Autonomous loop check');
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'Autonomous loop tick' },
+            _meta: { source: 'loop' },
+          },
+        });
       });
 
       it('keeps the home confinement root non-empty when os.homedir() is empty (no QWEN_HOME)', async () => {
@@ -6241,9 +6432,14 @@ describe('Session', () => {
             prompt: [{ type: 'text', text: 'hello' }],
           });
 
-          await vi.waitFor(() => {
-            expect(loopTickResolverDepsSpy).toHaveBeenCalled();
-          });
+          await vi.waitFor(
+            () => {
+              expect(loopTickResolverDepsSpy).toHaveBeenCalled();
+            },
+            {
+              timeout: 3000,
+            },
+          );
 
           const deps = loopTickResolverDepsSpy.mock.calls.at(-1)![0] as {
             homeDir: string;
@@ -6728,6 +6924,7 @@ describe('Session', () => {
         // the dynamic re-arm instruction, so the model re-arms and the loop
         // survives. Mutation guard: drop the `dynamic` branch (always throw) and a
         // `[loop error]` surfaces while no tick reaches the model.
+        debugLoggerDebugSpy.mockClear();
         debugLoggerWarnSpy.mockClear();
         const eio = Object.assign(new Error('EIO: i/o error, read'), {
           code: 'EIO',
@@ -6804,6 +7001,9 @@ describe('Session', () => {
           expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
             'loop.md sentinel resolution failed (mode=dynamic, code=EIO) — check .qwen/loop.md permissions/IO',
             eio,
+          );
+          expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+            expect.stringContaining('delivery=transient-error'),
           );
         } finally {
           resolveSpy.mockRestore();
@@ -7225,9 +7425,9 @@ describe('Session', () => {
         }
       });
 
-      it('echoes the absent label when a sentinel fires with no loop.md present', async () => {
-        // The `loopTick && !loopTick.sourceLabel` branch: a sentinel fires but no
-        // project or home loop.md exists, so the tick is a labelled no-op.
+      it('echoes the autonomous label when a sentinel fires with no loop.md present', async () => {
+        // A sentinel fires but no project or home loop.md exists, so the absent
+        // tick converges on the autonomous preamble with an autonomous echo.
         const tmpDir = await fs.mkdtemp(
           path.join(os.tmpdir(), 'loop-md-absent-'),
         );
@@ -7270,7 +7470,7 @@ describe('Session', () => {
                 sessionUpdate: 'user_message_chunk',
                 content: {
                   type: 'text',
-                  text: 'Loop tick — loop.md not present',
+                  text: 'Autonomous loop tick',
                 },
                 _meta: { source: 'cron' },
               },

@@ -356,6 +356,44 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('should request provider parsing options for the effective request model', async () => {
+      const request: GenerateContentParameters = {
+        model: 'glm-5.2',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [{ message: { content: 'response' }, finish_reason: 'stop' }],
+        created: Date.now(),
+        model: 'glm-5.2',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      mockProvider.getResponseParsingOptions = vi.fn().mockReturnValue({
+        taggedThinkingTags: true,
+      });
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      await pipeline.execute(request, 'prompt-id');
+
+      expect(mockProvider.getResponseParsingOptions).toHaveBeenCalledWith(
+        'glm-5.2',
+      );
+      expect(mockConverter.convertOpenAIResponseToGemini).toHaveBeenCalledWith(
+        mockOpenAIResponse,
+        expect.objectContaining({
+          model: 'glm-5.2',
+          responseParsingOptions: { taggedThinkingTags: true },
+        }),
+      );
+    });
+
     it('should let provider request context overrides take precedence over content generator config', async () => {
       const request: GenerateContentParameters = {
         model: 'test-model',

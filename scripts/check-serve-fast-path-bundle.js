@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 const DEFAULT_METAFILE_PATH = resolve('dist/esbuild.json');
 const METAFILE_BUILD_COMMAND =
-  'npm run build -- --cli-only && npx cross-env DEV=true npm run bundle';
+  'npm run build -- --cli-only && cross-env DEV=true npm run bundle';
 const SERVE_PRE_LISTEN_ROOTS = [
   {
     label: 'serve fast path entry',
