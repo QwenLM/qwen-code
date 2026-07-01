@@ -7,6 +7,7 @@
 import {
   ApprovalMode,
   APPROVAL_MODES,
+  createDebugLogger,
   ModelsConfig,
   resolveProviderProtocol,
   tokenLimit,
@@ -31,6 +32,8 @@ import {
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
+
+const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
 
 export type WorkspaceProvidersStatusProvider = (
   workspaceCwd: string,
@@ -214,6 +217,11 @@ function resolveApprovalMode(settings: Settings): ApprovalMode {
     return mode as ApprovalMode;
   }
 
+  if (value.trim().length > 0) {
+    debugLogger.warn(
+      `[workspace-providers-status] unrecognized approvalMode "${value}", falling back to default`,
+    );
+  }
   return ApprovalMode.DEFAULT;
 }
 

@@ -300,6 +300,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
   const [workspaceEventSignals, setWorkspaceEventSignals] =
     useState<DaemonWorkspaceEventSignals>(INITIAL_WORKSPACE_EVENT_SIGNALS);
   const hasCurrentSessionActivePromptRef = useRef<() => boolean>(() => false);
+  const mountedRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!autoConnect) return undefined;
@@ -1243,14 +1251,18 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
       const keepSessionForNextEffect =
         session?.sessionId === skipNextCleanupDetachSessionIdRef.current;
-      if (pendingSessionLoadRef.current && !keepSessionForNextEffect) {
+      const isUnmounting = !mountedRef.current;
+      if (
+        pendingSessionLoadRef.current &&
+        (!keepSessionForNextEffect || isUnmounting)
+      ) {
         clearTimeout(pendingSessionLoadRef.current.timeout);
         pendingSessionLoadRef.current.reject(
           new DOMException('Session load interrupted by cleanup', 'AbortError'),
         );
         pendingSessionLoadRef.current = undefined;
       }
-      if (keepSessionForNextEffect) {
+      if (keepSessionForNextEffect && !isUnmounting) {
         skipNextCleanupDetachSessionIdRef.current = undefined;
       } else if (session?.clientId) {
         void detachDaemonClient({

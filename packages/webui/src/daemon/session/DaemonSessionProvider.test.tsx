@@ -90,6 +90,7 @@ interface MockSession {
 }
 
 interface MockClient {
+  createOrAttachSession: (req: unknown) => Promise<MockSession>;
   capabilities: () => Promise<unknown>;
   workspaceProviders: () => Promise<unknown>;
   listWorkspaceSessions: () => Promise<unknown[]>;
@@ -155,6 +156,9 @@ const sdkMocks = vi.hoisted(() => {
   class MockDaemonClient {
     constructor(_opts: unknown) {}
 
+    createOrAttachSession = vi.fn((req: unknown) =>
+      MockDaemonSessionClient.createOrAttach(this, req),
+    );
     capabilities = capabilities;
     workspaceProviders = workspaceProviders;
     listWorkspaceSessions = listWorkspaceSessions;
@@ -4084,6 +4088,42 @@ describe('DaemonSessionProvider', () => {
     });
   });
 
+  it('creates a session from the active session client when already attached', async () => {
+    const firstSession = createMockSession({ sessionId: 'session-a' });
+    const secondSession = createMockSession({ sessionId: 'session-b' });
+    sdkMocks.sessions.push(firstSession, secondSession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({ sessionId: 'session-a' });
+    const activeClient = firstSession.client;
+    if (!activeClient) throw new Error('session client was not attached');
+    sdkMocks.MockDaemonSessionClient.createOrAttach.mockClear();
+
+    await act(async () => {
+      await actions?.createSession();
+      await flushPromises();
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).toHaveBeenCalledTimes(1);
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach.mock.calls[0]?.[0],
+    ).toBe(activeClient);
+    expect(connection).toMatchObject({ sessionId: 'session-a' });
+  });
+
   it('clears the current session without creating a replacement session', async () => {
     const firstSession = createMockSession({ sessionId: 'session-a' });
     sdkMocks.sessions.push(firstSession);
@@ -4130,6 +4170,49 @@ describe('DaemonSessionProvider', () => {
     expect(
       sdkMocks.MockDaemonSessionClient.createOrAttach,
     ).not.toHaveBeenCalled();
+  });
+
+  it('clears connection state before detach resolves', async () => {
+    const detached = createDeferred<void>();
+    const firstSession = createMockSession({
+      sessionId: 'session-a',
+      detach: vi.fn(() => detached.promise),
+    });
+    sdkMocks.sessions.push(firstSession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      initialSessionId: 'session-a',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({ sessionId: 'session-a' });
+
+    let clearPromise: Promise<void> | undefined;
+    act(() => {
+      clearPromise = actions?.clearSession();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({ status: 'connected' });
+    expect(connection).not.toHaveProperty('sessionId');
+    detached.resolve();
+    await act(async () => {
+      await clearPromise;
+      await flushPromises();
+    });
+    expect(firstSession.detach).toHaveBeenCalledTimes(1);
   });
 
   it('clears connection state when detaching the current session fails', async () => {

@@ -6,6 +6,7 @@ import {
 type PromptSessionActions = {
   createSession: () => Promise<unknown>;
   attachSession: () => Promise<void>;
+  clearSession: () => Promise<void>;
   setModel: (modelId: string) => Promise<unknown>;
   setApprovalMode: (mode: DaemonApprovalMode) => Promise<unknown>;
 };
@@ -26,15 +27,28 @@ export async function createAndAttachSessionForPrompt({
   warn?: (message?: unknown, ...optionalParams: unknown[]) => void;
 }): Promise<void> {
   await sessionActions.createSession();
-  await sessionActions.attachSession();
-  if (modelId) {
-    await sessionActions.setModel(modelId).catch((error: unknown) => {
-      warn('[WebShell] failed to set model for new session:', error);
+  try {
+    await sessionActions.attachSession();
+  } catch (error) {
+    warn('[WebShell] failed to attach new session:', error);
+    await sessionActions.clearSession().catch((clearError: unknown) => {
+      warn('[WebShell] failed to clear unattached session:', clearError);
     });
+    throw error;
   }
-  if (modeId && isDaemonApprovalMode(modeId)) {
-    await sessionActions.setApprovalMode(modeId).catch((error: unknown) => {
-      warn('[WebShell] failed to set approval mode for new session:', error);
-    });
-  }
+  await Promise.all([
+    modelId
+      ? sessionActions.setModel(modelId).catch((error: unknown) => {
+          warn('[WebShell] failed to set model for new session:', error);
+        })
+      : Promise.resolve(),
+    modeId && isDaemonApprovalMode(modeId)
+      ? sessionActions.setApprovalMode(modeId).catch((error: unknown) => {
+          warn(
+            '[WebShell] failed to set approval mode for new session:',
+            error,
+          );
+        })
+      : Promise.resolve(),
+  ]);
 }

@@ -608,6 +608,9 @@ export function createDaemonSessionActions({
       manualSessionClearRef.current = true;
       clearActiveSessionState();
       sessionRef.current = undefined;
+      setConnection((current) =>
+        getConnectionAfterSessionClear(current, session?.sessionId),
+      );
       if (session) {
         try {
           await withActionTimeout(session.detach(), 'Clear session timed out');
@@ -615,7 +618,6 @@ export function createDaemonSessionActions({
           console.warn('[DaemonSessionActions] detach on clear failed:', error);
         }
       }
-      setConnection((current) => getConnectionAfterSessionClear(current, session?.sessionId));
     },
 
     async newSession() {
