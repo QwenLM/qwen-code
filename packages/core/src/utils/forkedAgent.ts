@@ -48,6 +48,7 @@ import {
   type RunConfig,
   type ToolConfig,
 } from '../agents/index.js';
+import { toModelVisibleSubagentResult } from '../agents/subagent-result.js';
 import {
   buildModelIdContext,
   resolveModelId,
@@ -66,7 +67,10 @@ import {
 export interface CacheSafeParams {
   /** Full generation config including systemInstruction and tools */
   generationConfig: GenerateContentConfig;
-  /** Curated conversation history (shallow copy; consumers must not mutate) */
+  /**
+   * Curated conversation history with copied Content and parts containers.
+   * Part objects are shared by reference; consumers must not mutate them.
+   */
   history: Content[];
   /** Model identifier */
   model: string;
@@ -77,6 +81,13 @@ export interface CacheSafeParams {
 // Module-level slot written after each successful main turn.
 let currentCacheSafeParams: CacheSafeParams | null = null;
 let currentVersion = 0;
+
+function copyHistoryContainers(history: Content[]): Content[] {
+  return history.map((content) => ({
+    ...content,
+    ...(content.parts ? { parts: [...content.parts] } : {}),
+  }));
+}
 
 /**
  * Save cache-safe params after a successful main conversation turn.
@@ -102,7 +113,7 @@ export function saveCacheSafeParams(
 
   currentCacheSafeParams = {
     generationConfig: structuredClone(generationConfig),
-    history,
+    history: copyHistoryContainers(history),
     model,
     version: currentVersion,
   };
@@ -112,9 +123,13 @@ export function saveCacheSafeParams(
  * Get the current cache-safe params, or null if not yet captured.
  */
 export function getCacheSafeParams(): CacheSafeParams | null {
-  return currentCacheSafeParams
-    ? structuredClone(currentCacheSafeParams)
-    : null;
+  if (!currentCacheSafeParams) return null;
+  return {
+    generationConfig: structuredClone(currentCacheSafeParams.generationConfig),
+    history: copyHistoryContainers(currentCacheSafeParams.history),
+    model: currentCacheSafeParams.model,
+    version: currentCacheSafeParams.version,
+  };
 }
 
 /**
@@ -532,7 +547,9 @@ export async function runForkedAgent(
     });
 
     const terminateReason = headless.getTerminateMode();
-    const finalText = headless.getFinalText() || undefined;
+    const finalText =
+      toModelVisibleSubagentResult(headless.getFinalText(), terminateReason) ||
+      undefined;
     const touched = [...filesTouched];
 
     if (terminateReason === AgentTerminateMode.CANCELLED) {
