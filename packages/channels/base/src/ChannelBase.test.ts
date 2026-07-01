@@ -4495,6 +4495,57 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('does not expose mutable lifecycle metadata references', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue('done');
+      const ch = createChannel({
+        identity: { id: 'team-bot', displayName: 'Team Bot' },
+        memoryScope: { namespace: 'team-chat' },
+      });
+
+      await ch.handleInbound(envelope());
+      const started = ch.taskEvents.find((event) => event.type === 'started');
+      expect(started).toBeDefined();
+      started!.identity.displayName = 'mutated';
+      started!.memoryScope.namespace = 'mutated-memory';
+
+      await ch.handleInbound(envelope({ text: '/who' }));
+
+      expect(ch.sent.at(-1)!.text).toContain('Identity: Team Bot');
+      expect(ch.sent.at(-1)!.text).toContain('Memory: team-chat');
+    });
+
+    it('strips raw tool input from lifecycle events while preserving adapter tool calls', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          (bridge as unknown as EventEmitter).emit('toolCall', {
+            sessionId: sid,
+            toolCallId: 'tool-1',
+            name: 'run_shell_command',
+            rawInput: { command: 'echo $SECRET' },
+          });
+          return Promise.resolve('done');
+        },
+      );
+      const ch = createChannel();
+
+      await ch.handleInbound(envelope());
+
+      const lifecycleToolCall = ch.taskEvents.find(
+        (event) => event.type === 'tool_call',
+      );
+      expect(lifecycleToolCall).toMatchObject({
+        type: 'tool_call',
+        toolCall: expect.objectContaining({
+          toolCallId: 'tool-1',
+          name: 'run_shell_command',
+        }),
+      });
+      expect(lifecycleToolCall!.toolCall).not.toHaveProperty('rawInput');
+      expect(ch.toolCalls[0]!.event).toMatchObject({
+        rawInput: { command: 'echo $SECRET' },
+      });
+    });
+
     it('emits failed lifecycle event when prompting rejects', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
         new Error('agent boom'),
@@ -7125,6 +7176,115 @@ describe('ChannelBase', () => {
         }),
         expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
       ]);
+    });
+
+    it('emits a terminal lifecycle event when a loop is disabled after the agent response', async () => {
+      const shouldContinue = vi
+        .fn()
+        .mockResolvedValueOnce(true)
+        .mockResolvedValueOnce(false);
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue(
+        'loop response',
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runLoopPrompt(
+          {
+            id: 'job-1',
+            channelName: 'test-chan',
+            target: {
+              channelName: 'test-chan',
+              senderId: 'alice',
+              chatId: 'chat1',
+              isGroup: false,
+            },
+            cwd: '/tmp',
+            cron: '0 9 * * *',
+            prompt: 'post summary',
+            label: 'daily summary',
+            recurring: true,
+            enabled: true,
+            createdBy: 'Alice',
+            createdAt: '2026-06-30T01:00:00.000Z',
+            consecutiveFailures: 0,
+            runCount: 0,
+          },
+          { shouldContinue },
+        ),
+      ).rejects.toThrow('loop dropped before delivery');
+
+      expect(ch.proactive).toEqual([]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'cancelled',
+          messageId: 'job-1',
+          reason: 'timeout',
+        }),
+      ]);
+    });
+
+    it('logs loop prompt errors that arrive after cancellation', async () => {
+      let rejectPrompt!: (error: Error) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((_resolve, reject) => {
+          rejectPrompt = reject;
+        }),
+      );
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+
+      try {
+        const loopRun = ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        });
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+        await ch.handleInbound(
+          envelope({ text: '/cancel', senderId: 'alice' }),
+        );
+        rejectPrompt(new Error('bridge crashed'));
+
+        await expect(loopRun).rejects.toThrow('bridge crashed');
+        expect(ch.taskEvents).toEqual([
+          expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+          expect.objectContaining({
+            type: 'cancelled',
+            messageId: 'job-1',
+            reason: 'cancel_command',
+          }),
+        ]);
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[test-chan] loop job-1 threw after cancellation for session s-1: bridge crashed',
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
     });
 
     it('disables single-scope loop prompts before they reach the agent', async () => {
