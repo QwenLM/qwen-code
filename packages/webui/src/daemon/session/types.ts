@@ -311,6 +311,10 @@ export interface DaemonSessionActions {
   }): Promise<DaemonSessionSummary[]>;
   loadSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
   resumeSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
+  /**
+   * Create a daemon session and update local session state. Callers that need
+   * transcript/event streaming must follow with `attachSession()`.
+   */
   createSession(): Promise<DaemonSession>;
   attachSession(): Promise<void>;
   clearSession(): Promise<void>;

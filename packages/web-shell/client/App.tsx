@@ -2092,7 +2092,7 @@ export function App({
 
   const handleBusyGoalClear = useCallback(
     (text: string) => {
-      if (!requireActiveSessionForLocalCommand()) return true;
+      if (!requireActiveSessionForLocalCommand()) return false;
       store.appendLocalUserMessage(text);
       sessionActions.clearGoal().catch((error: unknown) => {
         reportError(error, 'Failed to clear /goal');
@@ -3318,6 +3318,7 @@ export function App({
   );
   const isChatEmptyState =
     !connection.sessionId &&
+    displayMessages.length === 0 &&
     !showFloatingTodos &&
     !pendingApproval &&
     !btwMessage;
