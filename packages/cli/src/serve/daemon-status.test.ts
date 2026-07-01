@@ -80,7 +80,7 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
-  it('reports failed channel worker snapshots in runtime status', async () => {
+  it('reports permanently failed channel worker snapshots as errors', async () => {
     const response = await buildDaemonStatusResponse(
       'summary',
       makeOptions({
@@ -99,11 +99,11 @@ describe('buildDaemonStatusResponse', () => {
     );
 
     expect(response).toMatchObject({
-      status: 'warning',
+      status: 'error',
       issues: expect.arrayContaining([
         expect.objectContaining({
           code: 'channel_worker_exited',
-          severity: 'warning',
+          severity: 'error',
           message:
             'Channel worker is failed (pid=1234, restarts=2, lastExitAt=2026-07-01T01:00:00.000Z, lastRestartAt=2026-07-01T01:00:05.000Z, lastHeartbeatAt=2026-07-01T00:59:50.000Z): ipc failed.',
           section: 'runtime.channelWorker',
@@ -122,6 +122,35 @@ describe('buildDaemonStatusResponse', () => {
           lastHeartbeatAt: '2026-07-01T00:59:50.000Z',
         },
       },
+    });
+  });
+
+  it('warns for failed channel worker snapshots that still have a scheduled restart', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        channelWorkerSnapshot: {
+          enabled: true,
+          state: 'failed',
+          channels: ['telegram'],
+          error: 'restart failed',
+          restartCount: 1,
+          nextRestartAt: '2026-07-01T01:01:00.000Z',
+        },
+      }),
+    );
+
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'channel_worker_exited',
+          severity: 'warning',
+          message:
+            'Channel worker is failed (restarts=1, nextRestartAt=2026-07-01T01:01:00.000Z): restart failed.',
+          section: 'runtime.channelWorker',
+        }),
+      ]),
     });
   });
 

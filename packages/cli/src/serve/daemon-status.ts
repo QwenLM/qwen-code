@@ -536,9 +536,11 @@ function pushRuntimeIssues(
     const details =
       detailParts.length > 0 ? ` (${detailParts.join(', ')})` : '';
     const error = channelWorker.error ? `: ${channelWorker.error}` : '';
+    const isPermanentFailure =
+      channelWorker.state === 'failed' && !channelWorker.nextRestartAt;
     issues.push({
       code: 'channel_worker_exited',
-      severity: 'warning',
+      severity: isPermanentFailure ? 'error' : 'warning',
       message: `Channel worker is ${channelWorker.state}${details}${error}.`,
       section: 'runtime.channelWorker',
     });
