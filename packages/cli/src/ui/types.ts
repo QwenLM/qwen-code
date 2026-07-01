@@ -655,6 +655,18 @@ export type HistoryItemWithoutId =
 
 export type HistoryItem = HistoryItemWithoutId & { id: number };
 
+/**
+ * Shared visibility predicate: an item collapsed on session resume
+ * (`ui.history.collapseOnResume`) sets `display.suppressOnRestore` and is
+ * represented only by its collapse-summary row. Both the main view
+ * (MainContent) and the Ctrl+O transcript (AppContainer's freeze snapshot)
+ * filter on this, so keep the single source of truth here to prevent the two
+ * surfaces from diverging.
+ */
+export const isHistoryItemVisibleAfterRestore = (
+  item: Pick<HistoryItem, 'display'>,
+): boolean => !item.display?.suppressOnRestore;
+
 // Message types used by internal command feedback (subset of HistoryItem types)
 export enum MessageType {
   INFO = 'info',

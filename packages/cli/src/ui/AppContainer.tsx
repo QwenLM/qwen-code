@@ -30,7 +30,11 @@ import {
   type HistoryItemWithoutId,
 } from './types.js';
 import type { RestoreOption } from './components/RewindSelector.js';
-import { MessageType, StreamingState } from './types.js';
+import {
+  MessageType,
+  StreamingState,
+  isHistoryItemVisibleAfterRestore,
+} from './types.js';
 import {
   type EditorType,
   type Config,
@@ -2220,12 +2224,12 @@ export const AppContainer = (props: AppContainerProps) => {
     // when the transcript closes (the transcript renders ahead of it).
     setThinkingViewerData(null);
     setTranscriptFreeze({
-      // Mirror MainContent's filter (`!item.display?.suppressOnRestore`) so the
-      // transcript shows exactly what the main view shows. Items collapsed on
-      // session resume (ui.history.collapseOnResume) are represented by their
-      // collapse-summary row and must NOT be re-exposed in the Ctrl+O view.
+      // Share MainContent's visibility predicate so the transcript shows exactly
+      // what the main view shows. Items collapsed on session resume
+      // (ui.history.collapseOnResume) are represented by their collapse-summary
+      // row and must NOT be re-exposed in the Ctrl+O view.
       committedItems: historyForTranscriptRef.current.filter(
-        (item) => !item.display?.suppressOnRestore,
+        isHistoryItemVisibleAfterRestore,
       ),
       pendingItems: [...pendingForTranscriptRef.current],
     });
@@ -3452,6 +3456,10 @@ export const AppContainer = (props: AppContainerProps) => {
       if (thinkingViewerData) {
         if (keyMatchers[Command.QUIT](key) || keyMatchers[Command.EXIT](key)) {
           closeThinkingViewer();
+        } else if (keyMatchers[Command.TOGGLE_TRANSCRIPT](key)) {
+          // Ctrl+O swaps the thinking viewer for the transcript: fall through
+          // to the TOGGLE_TRANSCRIPT handler below (openTranscript clears the
+          // viewer) instead of swallowing the key with no feedback.
         } else {
           return;
         }

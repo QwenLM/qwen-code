@@ -15,6 +15,7 @@ import { AlternateScreen } from './AlternateScreen.js';
 import { HistoryItemDisplay } from './HistoryItemDisplay.js';
 import { ErrorBoundary } from './shared/ErrorBoundary.js';
 import { ScrollableList, SCROLL_TO_ITEM_END } from './shared/ScrollableList.js';
+import { escapeAnsiCtrlCodes } from '../utils/textUtils.js';
 import { OverflowProvider } from '../contexts/OverflowContext.js';
 import type { HistoryItem } from '../types.js';
 
@@ -116,7 +117,9 @@ const TranscriptViewImpl = ({
         <Text color={theme.status.error} bold>
           {t('Failed to render transcript.')}
         </Text>
-        <Text color={theme.text.secondary}>{error.message}</Text>
+        <Text color={theme.text.secondary}>
+          {escapeAnsiCtrlCodes(error.message)}
+        </Text>
         <Text dimColor italic>
           Esc/q {t('to close')}
         </Text>

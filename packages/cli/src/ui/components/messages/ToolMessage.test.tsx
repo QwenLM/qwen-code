@@ -339,6 +339,27 @@ describe('<ToolMessage />', () => {
       expect(output).not.toContain('\x0e');
     });
 
+    it('strips Unicode bidi override chars in detailedDisplay (Trojan Source)', () => {
+      // U+202E (RLO) and friends can visually reorder text (CVE-2021-42572);
+      // they must be stripped from raw tool output before rendering.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="evil.txt"
+          resultDisplay="Read 1 file"
+          detailedDisplay={'safe\u202estart\u202cmid\u2066end\u2069'}
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('safe');
+      expect(output).toContain('end');
+      expect(output).not.toMatch(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+    });
+
     it('preserves TAB and LF in detailedDisplay (structural whitespace)', () => {
       // The C0 strip regex intentionally skips \x09 (TAB) and \x0a (LF) so
       // multi-line / column-aligned file output still renders. Lock that in:

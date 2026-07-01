@@ -14,6 +14,7 @@ import {
   getStructuredResponse,
   getStructuredResponseFromParts,
   getToolResponseDisplayText,
+  TOOL_SUCCEEDED_OUTPUT,
 } from './generateContentResponseUtilities.js';
 import type {
   GenerateContentResponse,
@@ -304,13 +305,13 @@ describe('generateContentResponseUtilities', () => {
 
     it('skips the non-informative "Tool execution succeeded." placeholder', () => {
       expect(
-        getToolResponseDisplayText([frPart('Tool execution succeeded.')]),
+        getToolResponseDisplayText([frPart(TOOL_SUCCEEDED_OUTPUT)]),
       ).toBeUndefined();
     });
 
     it('emits <media: mime> placeholders for nested inline/file data', () => {
       const parts = [
-        frPart('Tool execution succeeded.', [
+        frPart(TOOL_SUCCEEDED_OUTPUT, [
           { inlineData: { mimeType: 'image/png', data: 'AAAA' } },
           { fileData: { mimeType: 'application/pdf', fileUri: 'file:///x' } },
         ]),
