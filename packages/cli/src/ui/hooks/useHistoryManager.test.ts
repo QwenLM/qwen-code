@@ -370,6 +370,47 @@ describe('useHistoryManager', () => {
       expect(recentTool.detailedDisplay).toBe('full secret file content here');
     });
 
+    it('clears a tool that carries detailedDisplay but no resultDisplay (defensive)', () => {
+      const { result } = renderHook(() => useHistory());
+      const ts = Date.now();
+
+      // Degenerate shape: detailedDisplay set with resultDisplay null. Both the
+      // compaction trigger AND the clear must cover it so the raw transcript
+      // detail can't survive compaction, even though the live/resume paths
+      // don't currently produce this shape.
+      for (let i = 0; i < 25; i++) {
+        act(() => {
+          result.current.addItem(
+            {
+              type: 'tool_group',
+              tools: [
+                {
+                  callId: String(i),
+                  name: 'read_file',
+                  description: '',
+                  resultDisplay: undefined,
+                  detailedDisplay: 'full secret file content here',
+                  status: ToolCallStatus.Success,
+                  confirmationDetails: undefined,
+                },
+              ],
+            } as unknown as HistoryItemWithoutId,
+            ts + i,
+          );
+        });
+      }
+
+      act(() => {
+        result.current.compactOldItems();
+      });
+
+      const tool = (
+        result.current.history[0] as unknown as HistoryItemToolGroup
+      ).tools[0];
+      expect(tool.resultDisplay).toBe(UI_COMPACT_CLEARED_MESSAGE);
+      expect(tool.detailedDisplay).toBeUndefined();
+    });
+
     it('should blank fileDiff object on old tool_group items', () => {
       const { result } = renderHook(() => useHistory());
       const ts = Date.now();

@@ -161,8 +161,9 @@ export function useHistory(): UseHistoryManagerReturn {
           item.type === 'tool_group' &&
           item.tools.some(
             (t) =>
-              t.resultDisplay != null &&
-              t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE,
+              (t.resultDisplay != null &&
+                t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
+              t.detailedDisplay != null,
           )
         ) {
           totalToolGroupsWithOutput++;
@@ -196,11 +197,14 @@ export function useHistory(): UseHistoryManagerReturn {
         .map((item) => {
           if (item.type !== 'tool_group') return item;
           // Check for any non-null resultDisplay (covers string, FileDiff,
-          // AnsiOutputDisplay, AgentResultDisplay, etc.)
+          // AnsiOutputDisplay, AgentResultDisplay, etc.) OR a lingering
+          // `detailedDisplay` — so a tool that somehow carries only the raw
+          // transcript detail still triggers compaction and gets cleared.
           const hasOldOutput = item.tools.some(
             (t) =>
-              t.resultDisplay != null &&
-              t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE,
+              (t.resultDisplay != null &&
+                t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
+              t.detailedDisplay != null,
           );
           if (!hasOldOutput) return item;
           toolGroupsSeen++;
@@ -210,14 +214,17 @@ export function useHistory(): UseHistoryManagerReturn {
             ...item,
             tools: item.tools.map((t) => {
               if (
-                t.resultDisplay != null &&
-                t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE
+                (t.resultDisplay != null &&
+                  t.resultDisplay !== UI_COMPACT_CLEARED_MESSAGE) ||
+                t.detailedDisplay != null
               ) {
                 // Also drop `detailedDisplay` (the raw functionResponse text
                 // kept for the Ctrl+O full-detail transcript): clearing only
                 // `resultDisplay` would let a post-compaction transcript reopen
                 // re-surface the supposedly cleared read/search/list output,
-                // defeating the memory/privacy compaction.
+                // defeating the memory/privacy compaction. The `detailedDisplay`
+                // arm keeps the guard robust even if a tool ever carries the
+                // raw detail without a `resultDisplay`.
                 return {
                   ...t,
                   resultDisplay: UI_COMPACT_CLEARED_MESSAGE,
