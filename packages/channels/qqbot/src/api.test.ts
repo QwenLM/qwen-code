@@ -193,7 +193,7 @@ describe('fetchGatewayUrl', () => {
   it('rejects non-WebSocket protocols', async () => {
     await expect(fetchGatewayUrl('https://evil.com/gateway')).rejects.toThrow();
     await expect(fetchGatewayUrl('http://proxy/gateway')).rejects.toThrow();
-    await expect(fetchGatewayUrl('ws://localhost:8080')).resolves.toBeDefined();
+    await expect(fetchGatewayUrl('ws://localhost:8080')).rejects.toThrow();
     await expect(
       fetchGatewayUrl('wss://api.sgroup.qq.com/'),
     ).resolves.toBeDefined();

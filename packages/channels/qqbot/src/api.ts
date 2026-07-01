@@ -61,7 +61,7 @@ export async function fetchAccessToken(
  */
 export function validateGatewayUrl(url: string): string {
   const parsed = new URL(url);
-  if (!['wss:', 'ws:'].includes(parsed.protocol)) {
+  if (!['wss:'].includes(parsed.protocol)) {
     throw new Error(
       `QQ Bot gateway URL has invalid protocol: ${parsed.protocol}`,
     );
