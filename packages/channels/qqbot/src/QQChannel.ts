@@ -438,7 +438,8 @@ export class QQChannel extends ChannelBase {
         const plainBody: Record<string, unknown> = { content: text, msg_type: 0 };
         if (msgId) {
           plainBody['msg_id'] = msgId;
-          plainBody['msg_seq'] = nextSeq;
+          // Don't set msg_seq — plain-text fallback uses the same msg_id
+          // but the rollback already consumed the old seq value.
         }
         const plainResp = await sendQQMessage(
           route.base,
@@ -1654,6 +1655,14 @@ export class QQChannel extends ChannelBase {
         // to the removed group, creating orphaned API calls.
         if (state.timer) clearTimeout(state.timer);
         this.streamState.delete(sid);
+      }
+    }
+    // Clean up cron buffers targeting this group
+    for (const [sid, entry] of this.cronBuffer) {
+      const target = this.router.getTarget(sid);
+      if (target?.chatId === groupId) {
+        if (entry.timer) clearTimeout(entry.timer);
+        this.cronBuffer.delete(sid);
       }
     }
     this.saveQQState();
