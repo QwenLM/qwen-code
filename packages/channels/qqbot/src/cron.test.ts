@@ -105,6 +105,7 @@ function makeChannel(): QQChannelClass {
       groups: {},
       appID: 'test-app-id',
       appSecret: 'test-secret',
+      experimental: true,
     },
     bridge as unknown as import('@qwen-code/channel-base').AcpBridge,
     { router } as unknown as Record<string, unknown>,
