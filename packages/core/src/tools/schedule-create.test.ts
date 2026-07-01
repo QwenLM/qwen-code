@@ -26,6 +26,7 @@ describe('ScheduleCreateTool', () => {
     process.env['QWEN_SCHEDULE_NO_AUTOSTART'] = '1';
     tool = new ScheduleCreateTool({
       getWorkingDir: () => '/tmp/default',
+      getApprovalMode: () => ApprovalMode.YOLO,
     } as unknown as Config);
   });
 
@@ -61,8 +62,42 @@ describe('ScheduleCreateTool', () => {
     const task = await readTask('daily-pr-review');
     expect(task).not.toBeNull();
     expect(task!.schedule.cron).toBe('0 9 * * 1-5');
-    expect(task!.approvalMode).toBe(ApprovalMode.AUTO);
+    // Inherits the user's session mode (yolo here), not a hardcoded 'auto'.
+    expect(task!.approvalMode).toBe(ApprovalMode.YOLO);
     expect(task!.cwd).toBe('/tmp/proj');
+  });
+
+  it('respects an explicit approvalMode over the inherited default', async () => {
+    await tool
+      .build({
+        name: 'explicit-mode',
+        description: 'd',
+        prompt: 'p',
+        cron: '0 9 * * *',
+        approvalMode: 'auto',
+      })
+      .execute(signal());
+    expect((await readTask('explicit-mode'))!.approvalMode).toBe(
+      ApprovalMode.AUTO,
+    );
+  });
+
+  it('falls back to default when the session is in plan mode', async () => {
+    const planTool = new ScheduleCreateTool({
+      getWorkingDir: () => '/tmp/default',
+      getApprovalMode: () => ApprovalMode.PLAN,
+    } as unknown as Config);
+    await planTool
+      .build({
+        name: 'plan-task',
+        description: 'd',
+        prompt: 'p',
+        cron: '0 9 * * *',
+      })
+      .execute(signal());
+    expect((await readTask('plan-task'))!.approvalMode).toBe(
+      ApprovalMode.DEFAULT,
+    );
   });
 
   it('creates a one-shot fireAt task', async () => {

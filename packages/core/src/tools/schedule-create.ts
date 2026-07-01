@@ -69,7 +69,10 @@ class ScheduleCreateInvocation extends BaseToolInvocation<
       const id = sanitizeTaskId(this.params.name);
       const existed = (await readTask(id)) !== null;
 
-      const approvalMode = resolveApprovalMode(this.params.approvalMode);
+      const approvalMode = resolveApprovalMode(
+        this.params.approvalMode,
+        this.config,
+      );
       const task: ScheduledTask = {
         id,
         name: id,
@@ -128,14 +131,26 @@ function daemonNote(state: EnsureDaemonResult): string {
   }
 }
 
-function resolveApprovalMode(raw: string | undefined): ApprovalMode {
-  if (raw === undefined) return ApprovalMode.AUTO;
-  if (!(APPROVAL_MODES as string[]).includes(raw)) {
-    throw new Error(
-      `Invalid approvalMode "${raw}". Use one of: ${APPROVAL_MODES.join(', ')}.`,
-    );
+function resolveApprovalMode(
+  raw: string | undefined,
+  config: Config,
+): ApprovalMode {
+  if (raw !== undefined) {
+    if (!(APPROVAL_MODES as string[]).includes(raw)) {
+      throw new Error(
+        `Invalid approvalMode "${raw}". Use one of: ${APPROVAL_MODES.join(', ')}.`,
+      );
+    }
+    return raw as ApprovalMode;
   }
-  return raw as ApprovalMode;
+  // Default to the user's configured autonomy so the task runs unattended the
+  // same way their session does (e.g. yolo). A hardcoded 'auto' silently blocked
+  // file-write / shell tools in headless runs — the classifier that 'auto'
+  // relies on isn't available there, so those tasks would fail quietly. 'plan'
+  // would make a scheduled task a no-op, so fall back to 'default' in that one
+  // case.
+  const inherited = config.getApprovalMode();
+  return inherited === ApprovalMode.PLAN ? ApprovalMode.DEFAULT : inherited;
 }
 
 function buildSchedule(
@@ -184,9 +199,12 @@ export class ScheduleCreateTool extends BaseDeclarativeTool<
         'Schedule: pass exactly one of `cron` (5-field, local time, e.g. "0 9 * * 1-5" = weekdays 9am) ' +
         'or `fireAt` (ISO 8601 for a one-shot, e.g. "2026-07-02T15:00:00+08:00"). Prefer off-:00/:30 ' +
         'minutes for approximate times to spread load.\n\n' +
-        'approvalMode controls the unattended run: "auto" (default; classifier auto-approves safe ' +
-        'actions, blocks risky ones), "yolo" (approve everything), "auto-edit", "default", or "plan". ' +
-        'A blocked action is recorded in the run summary, not prompted.\n\n' +
+        'approvalMode controls the unattended run. If omitted it INHERITS the user’s current ' +
+        'session mode (e.g. yolo). Because the run is headless with no one to approve, only ' +
+        '"yolo" (approve everything) reliably lets a task write files or run shell commands — ' +
+        '"auto", "default", and "plan" block those actions (auto’s classifier isn’t available ' +
+        'headless) and record them as blocked. **For any task that edits files, runs commands, ' +
+        'or opens PRs, prefer approvalMode "yolo"** (or confirm the user runs yolo globally).\n\n' +
         'After creating, tell the user to run `qwen schedule daemon` if it is not already running, ' +
         'and that they can manage tasks with /schedule list|run|delete.',
       Kind.Other,
@@ -230,7 +248,9 @@ export class ScheduleCreateTool extends BaseDeclarativeTool<
             type: 'string',
             enum: [...APPROVAL_MODES],
             description:
-              'Unattended approval posture. Default "auto". "yolo" approves everything.',
+              'Unattended approval posture. Omit to inherit the user’s current session mode. ' +
+              'Use "yolo" for tasks that write files or run commands — headless runs cannot ' +
+              'approve, so "auto"/"default"/"plan" block those actions.',
           },
           sandbox: {
             type: 'boolean',

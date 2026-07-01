@@ -49,10 +49,14 @@ you create it:
 4. **description** — a one-line summary for the list.
 5. **cwd** — default to the current working directory unless the user names
    another. Use an absolute path.
-6. **approvalMode** (optional) — how the unattended run is gated:
-   `auto` (default; safe actions auto-approved, risky ones blocked and recorded),
-   `yolo` (approve everything), `auto-edit`, `default`, or `plan`. Only raise it
-   above `auto` when the user asks for full autonomy.
+6. **approvalMode** (optional) — how the unattended run is gated. If omitted it
+   inherits the user's current session mode. Because the run is headless with no
+   one to approve, only `yolo` reliably lets a task **write files or run shell
+   commands**; `auto`, `default`, and `plan` block those actions (auto's
+   classifier isn't available headless) and record them as blocked. **If the
+   task edits files, runs commands, or opens PRs, set `approvalMode: yolo`** —
+   or, if the user's global mode is already `yolo`, omitting it is fine. Only use
+   the more restrictive modes for read-only/reporting tasks.
 7. **model** / **sandbox** (optional) — per-task model id; run inside the sandbox.
 
 Creating a task **auto-starts the background daemon**, so you do not need to

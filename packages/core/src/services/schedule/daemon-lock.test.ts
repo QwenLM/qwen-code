@@ -60,6 +60,16 @@ describe('schedule/daemon-lock', () => {
     expect(handle).not.toBeNull();
   });
 
+  it('grants the lock to exactly one of two concurrent acquirers', async () => {
+    const results = await Promise.all([
+      acquireDaemonLock(),
+      acquireDaemonLock(),
+      acquireDaemonLock(),
+    ]);
+    const winners = results.filter((r) => r !== null);
+    expect(winners).toHaveLength(1);
+  });
+
   it('isDaemonRunning reflects a live vs dead holder', async () => {
     expect(await isDaemonRunning()).toBe(false); // no lock
     await fs.mkdir(path.dirname(getDaemonLockPath()), { recursive: true });

@@ -96,13 +96,24 @@ export async function acquireDaemonLock(): Promise<DaemonLockHandle | null> {
   const pid = process.pid;
   const lockId = generateLockId();
   const payload = JSON.stringify({ pid, lockId, startedAt: Date.now() });
+  // Write the payload to a private temp file, then atomically `link()` it into
+  // place. link() fails with EEXIST if the lock already exists (exclusivity)
+  // AND the linked file is fully written (atomicity) — so a concurrent acquirer
+  // never reads a half-written lock and mistakes it for a stealable/malformed
+  // one. Plain `writeFile(..., 'wx')` creates the file before its content is
+  // flushed, leaving that TOCTOU window open (which let two auto-started
+  // daemons both "acquire" and double-fire).
+  const tmpPath = `${lockPath}.tmp.${pid}.${lockId}`;
 
   for (let attempt = 0; attempt < 2; attempt++) {
     try {
-      await fs.writeFile(lockPath, payload, { flag: 'wx' });
+      await fs.writeFile(tmpPath, payload);
+      await fs.link(tmpPath, lockPath);
+      await fs.unlink(tmpPath).catch(() => {});
       debugLogger.debug(`Acquired daemon lock (pid ${pid}, lockId ${lockId})`);
       return { path: lockPath, pid, lockId };
     } catch (err) {
+      await fs.unlink(tmpPath).catch(() => {});
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
     }
 
