@@ -238,8 +238,15 @@ function buildMarkdown(
       'The following issue comment is the most recent `/review` suggestion summary. Each row is a Suggestion-level finding that should be re-evaluated against the current code — do not skip them just because they appear here.',
     );
     parts.push('');
+    // Render the summary body verbatim (only stripping the locator marker):
+    // it is our own author-verified comment and is typically a multi-row
+    // Markdown table. Passing it through snippet() would collapse newlines
+    // and truncate at 500 chars, mangling the table into an unreadable line
+    // and dropping rows — defeating the "re-evaluate each row" purpose here.
     parts.push(
-      `- by @${latest.user?.login ?? '?'}: ${snippet(latest.body, 500)}`,
+      `- by @${latest.user?.login ?? '?'}:\n${(latest.body ?? '')
+        .replace(SUMMARY_MARKER, '')
+        .trim()}`,
     );
     parts.push('');
   }
