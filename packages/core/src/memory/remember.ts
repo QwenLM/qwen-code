@@ -80,7 +80,9 @@ async function buildCleanMemorySystemPrompt(
       memoryDir: getUserAutoMemoryRoot(),
       indexContent: userIndex,
     },
-    undefined,
+    /* teamSection */ undefined,
+    // The remember agent needs the full protocol (type definitions, scope routing,
+    // exclusion rules) to write correct memories — do not remove.
     { forceFullProtocol: true },
   );
 }

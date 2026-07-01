@@ -300,11 +300,17 @@ export function buildManagedAutoMemoryPrompt(
           '',
           'Two-step process:',
           '',
-          '**Step 1** — write the memory to its own file inside the directory chosen by its type scope, using this frontmatter format:',
+          `**Step 1** — write the memory to its own file (e.g., \`user/role.md\`, \`feedback/testing.md\`) inside the directory chosen by its type scope, using this frontmatter format:`,
           '',
           ...MEMORY_FRONTMATTER_EXAMPLE,
           '',
           '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to. Each entry: one line, under ~150 chars: `- [Title](file.md) — one-line hook`.',
+          ...(teamSection !== undefined
+            ? [
+                '',
+                'When a team directory is available, route project-wide conventions and shared references to TEAM instead of PROJECT. Never save secrets to TEAM. For TEAM memory, only write the file (Step 1) — its index is auto-generated; do NOT hand-edit the team MEMORY.md.',
+              ]
+            : []),
         ]
       : [
           '## How to save memories',
@@ -333,6 +339,16 @@ export function buildManagedAutoMemoryPrompt(
       );
     }
 
+    const condensedDoNotSave = [
+      '## Do not save',
+      '',
+      '- Code patterns, architecture, or file paths (read the project instead)',
+      '- Git history or debugging solutions',
+      '- MCP tool schemas or raw failed tool-call transcripts',
+      '- Ephemeral task state or current conversation context',
+      '- Content already in QWEN.md or AGENTS.md',
+    ];
+
     const condensedLines = [
       '# auto memory',
       '',
@@ -342,12 +358,8 @@ export function buildManagedAutoMemoryPrompt(
       '',
       ...condensedTypes,
       '',
-      ...(multiTier && teamSection !== undefined
-        ? [
-            'When a team directory is available, route project-wide conventions and shared references to TEAM instead of PROJECT. Never save secrets to TEAM.',
-            '',
-          ]
-        : []),
+      ...condensedDoNotSave,
+      '',
       ...condensedSave,
       '',
       ...indexSections,

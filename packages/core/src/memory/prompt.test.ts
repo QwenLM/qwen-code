@@ -210,6 +210,7 @@ describe('managed auto-memory prompt helpers', () => {
     // Uses condensed sections
     expect(prompt).toContain('## Memory types');
     expect(prompt).toContain('## How to save memories');
+    expect(prompt).toContain('## Do not save');
     // Omits verbose full-protocol sections
     expect(prompt).not.toContain('## Types of memory');
     expect(prompt).not.toContain('## What NOT to save in memory');
@@ -226,7 +227,13 @@ describe('managed auto-memory prompt helpers', () => {
     expect(prompt).toContain('three persistent, file-based memory directories');
     expect(prompt).toContain('TEAM memory');
     // Condensed team guidance is present
-    expect(prompt).toContain('route project-wide conventions and shared references to TEAM');
+    expect(prompt).toContain(
+      'route project-wide conventions and shared references to TEAM',
+    );
+    // Team auto-index guidance is present (do NOT hand-edit team MEMORY.md)
+    expect(prompt).toContain('do NOT hand-edit the team MEMORY.md');
+    // Condensed exclusion list is present
+    expect(prompt).toContain('## Do not save');
     // Full team scope section is omitted
     expect(prompt).not.toContain('## Saving to team memory');
   });
