@@ -327,7 +327,8 @@ export function buildManagedAutoMemoryPrompt(
           '',
           ...MEMORY_FRONTMATTER_EXAMPLE,
           '',
-          '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to. Each entry: one line, under ~150 chars: `- [Title](file.md) — one-line hook`.',
+          '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry: one line, under ~150 chars: `- [Title](file.md) — one-line hook`.',
+          '- Never write memory content directly into `MEMORY.md` — it is an index of one-line pointers, not a memory file. Do not write duplicate memories.',
           ...(teamSection !== undefined
             ? [
                 '',
