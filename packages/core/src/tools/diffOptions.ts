@@ -132,13 +132,7 @@ export function getDiffStat(
           removedChars: 0,
         }
       : getStats(
-          structuredPatchSmart(
-            fileName,
-            aiStr,
-            userStr,
-            'Proposed',
-            'User',
-          ),
+          structuredPatchSmart(fileName, aiStr, userStr, 'Proposed', 'User'),
         );
 
   return {

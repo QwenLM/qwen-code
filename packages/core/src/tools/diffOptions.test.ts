@@ -223,7 +223,15 @@ describe('getDiffStat', () => {
     const aiStr = '        foo();\n';
     const userStr = '        foo();\n';
     const diffStat = getDiffStat(fileName, oldStr, aiStr, userStr);
-    expect(diffStat.model_added_lines).toBeGreaterThan(0);
-    expect(diffStat.model_removed_lines).toBeGreaterThan(0);
+    expect(diffStat).toEqual({
+      model_added_lines: 1,
+      model_removed_lines: 1,
+      model_added_chars: expect.any(Number),
+      model_removed_chars: expect.any(Number),
+      user_added_lines: 0,
+      user_removed_lines: 0,
+      user_added_chars: 0,
+      user_removed_chars: 0,
+    });
   });
 });
