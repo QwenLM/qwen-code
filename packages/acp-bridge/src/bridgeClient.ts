@@ -283,6 +283,8 @@ export interface BridgeClientSessionEntry {
    * `extMethod` can splice it. See `SessionEntry.midTurnMessageQueue`.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  /** True while a prompt is executing for this session. */
+  promptActive?: boolean;
   activePromptOriginatorClientId?: string;
   /**
    * True while the bridge drives a model roundtrip; the
@@ -862,6 +864,12 @@ export class BridgeClient implements Client {
     if (!entry) {
       writeStderrLine(
         `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_not_found`,
+      );
+      return;
+    }
+    if (entry.promptActive !== true) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_idle`,
       );
       return;
     }

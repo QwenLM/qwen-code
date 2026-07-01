@@ -80,6 +80,7 @@ function cfgWithResources(): Config {
       registerResource: vi.fn(),
       removeResourcesByServer: vi.fn(),
     }),
+    getMcpToolIdleTimeoutMs: () => undefined,
   } as unknown as Config;
 }
 
@@ -1281,6 +1282,7 @@ describe('mcp-client', () => {
           registerResource,
           removeResourcesByServer,
         }),
+        getMcpToolIdleTimeoutMs: () => undefined,
       } as unknown as Config;
       const mockedClient = {
         connect: vi.fn(),
@@ -1334,6 +1336,7 @@ describe('mcp-client', () => {
           registerResource,
           removeResourcesByServer,
         }),
+        getMcpToolIdleTimeoutMs: () => undefined,
       } as unknown as Config;
       const mockedClient = {
         connect: vi.fn(),

@@ -149,7 +149,9 @@ function mockMcpSuccess(
 }
 
 describe('McpTransportPool', () => {
-  const cliConfig = {} as Config;
+  const cliConfig = {
+    getMcpToolIdleTimeoutMs: () => undefined,
+  } as unknown as Config;
 
   beforeEach(() => {
     vi.useFakeTimers();

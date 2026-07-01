@@ -577,17 +577,19 @@ export interface SessionArtifactInput extends ToolArtifact {
 }
 ```
 
-`trustedPublisher` 是 bridge 内部私有标志，不是 public schema 或外部 payload 字段。它只能由 ArtifactTool executor / daemon publisher 的 in-process adapter 在构造 `SessionArtifactInput` 时写入，用来证明该输入确实来自本进程的发布路径。
+`trustedPublisher` 是 bridge/store 内部输入标志，不是 public schema 或 client/hook 可设置字段。V1 的 daemon/ACP 部署里，`qwen --acp` 子进程由 daemon 启动并以同一用户运行；因此当前实现把 completed `ArtifactTool` session update（`tool_call_update`、`status: 'completed'`、`_meta.toolName: 'artifact'`）视作唯一 trusted publisher 信号。这个信号不从 artifact payload 本身读取，也不对 client POST、hook notification、`record_artifact` 或其它 tool result 开放。
+
+如果未来支持远端 sandbox、多方 ACP participant 或非同信任域 agent，应新增不可伪造的 transport / in-process publisher identity，再替换该 V1 信任信号；在那之前不要把 payload 内的 `trustedPublisher` / `source` / `storage` 当作授权依据。
 
 来源转换规则：
 
-- `ArtifactTool` / daemon publisher：executor 通过私有 in-process adapter 复制 `ToolArtifact` 字段，补 `source: 'tool'`、`toolCallId`、`toolName`、`trustedPublisher: true`。
+- `ArtifactTool` / daemon publisher：BridgeClient 只在 completed `ArtifactTool` session update 上补 `source: 'tool'`、`toolCallId`、`toolName`，并以内部 option 设置 `trustedPublisher: true`。
 - 其它 `ToolResult.artifacts`：复制 `ToolArtifact` 字段，补 `source: 'tool'`、`toolCallId`、`toolName`，但不设置 `trustedPublisher`。
 - `record_artifact`：作为 tool source 进入，同样补 `source: 'tool'`、`toolCallId`、`toolName: 'record_artifact'`，但不允许 `storage: 'published'`，也不能设置 `trustedPublisher`。
 - hook：复制 hook output artifacts，补 `source: 'hook'`、`hookName`、`extensionId`；如 hook 能拿到触发 tool context，也可补 `toolCallId` / `toolName`。Bridge 必须从 transport context 派生 `source: 'hook'`，不能信任 payload 里的 `source` 字段。
 - client POST：复制 body，补 `source: 'client'`、`clientId`，不允许 `storage: 'published'`，也不能设置 `trustedPublisher`。
 - `receivedSeq`：由 bridge/store 在接收输入时分配单调递增值，用于同一批内 deterministic ordering；外部输入不能指定该字段。
-- BridgeClient 不得根据 `toolName`、payload `source`、`storage`、`managedId`、`url` 或 `_meta.artifacts` 中的任意字段推断 `trustedPublisher`。如果某条 ACP `_meta.artifacts` 路径无法携带不可伪造的 in-process 标记，V1 必须把它当普通 tool artifact 处理，不能执行 `storage: 'published'` managed upgrade。
+- BridgeClient 不得根据 artifact payload 内的 `source`、`storage`、`managedId`、`url`、`trustedPublisher` 或其它 `_meta.artifacts[*]` 字段推断 `trustedPublisher`。V1 唯一例外是上述 completed `ArtifactTool` session update 信号。
 
 补全规则：
 
@@ -690,7 +692,7 @@ artifacts: [
 - `storage: 'published'`
 - `url`: 已发布的可打开 URL，也是 published artifact 的 primary locator
 - `managedId`: 可选的内部托管引用，不参与 identity
-- ArtifactTool executor / daemon publisher 的私有 in-process adapter 在构造 `SessionArtifactInput` 时设置内部 `trustedPublisher: true`。Bridge 不得从模型参数、`toolName`、hook payload、client POST body 或普通 `_meta.artifacts` 字段推断该标志。
+- BridgeClient 在 completed `ArtifactTool` session update 上通过内部 option 设置 `trustedPublisher: true`。Bridge 不得从模型参数、hook payload、client POST body 或普通 `_meta.artifacts[*]` 字段推断该标志。
 
 如果未来要让 daemon client 下载或预览托管内容，应新增专门的 managed artifact route，而不是把本机绝对路径塞进 public artifact。
 
@@ -1048,7 +1050,7 @@ BridgeClient：
 - 从 `session_update/tool_call_update._meta.artifacts` 提取 artifacts。
 - 从 `qwen/notify/session/artifact-event` 提取 explicit notification artifacts。
 - 所有输入都转换为同一个 `SessionArtifactInput[]`。
-- 基于 transport context 分配 `source`、`receivedSeq`。`trustedPublisher` 只能由 ArtifactTool executor / daemon publisher 的私有 in-process adapter 分配；BridgeClient 不得根据 `toolName`、payload 字段或普通 `_meta.artifacts` 内容推断。
+- 基于 transport context 分配 `source`、`receivedSeq`。`trustedPublisher` 只由 completed `ArtifactTool` session update 的 bridge-side ingest option 分配；BridgeClient 不得根据 artifact payload 字段或普通 `_meta.artifacts` 内容推断。
 - 统一调用 `ingestArtifacts()` / `SessionArtifactStore.upsertMany()`，不要为 notification artifacts 建第二套 validation 或 dedupe。
 - `upsertMany()` 返回 `DaemonSessionArtifactMutationResult`，包含 created/updated 以及 eviction 产生的 removed changes。
 - 对每个 change 发布 `artifact_changed`，先发布 created/updated，再发布 removed。
@@ -1327,7 +1329,7 @@ cd packages/core && npx vitest run src/tools/artifact/artifact-tool.test.ts
 
 - `ToolCallEmitter.emitResult()` 输出 `_meta.artifacts`。
 - `toolResult.artifacts` 被传给 `emitResult()`。
-- ArtifactTool executor / daemon publisher 的私有 in-process adapter 会设置内部 `trustedPublisher: true`；`record_artifact`、其它 tool result、hook payload、client POST 不会设置，BridgeClient 也不能通过 `toolName` 或 payload 字段推断。
+- completed `ArtifactTool` session update 会通过 bridge-side ingest option 设置内部 `trustedPublisher: true`；`record_artifact`、其它 tool result、hook payload、client POST 不会设置，BridgeClient 也不能通过 artifact payload 字段推断。
 - `write_file/edit/notebook_edit` 普通源码修改不自动派生 artifact。
 - `read_file/grep/glob/shell` 不派生 artifact。
 - 工具失败时不收集失败 tool result 的 artifacts；PostToolUse hook 显式返回的诊断 artifacts 仍可进入 store。

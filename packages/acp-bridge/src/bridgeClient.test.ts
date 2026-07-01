@@ -566,6 +566,7 @@ describe('BridgeClient — artifact ingress', () => {
         }),
         pendingPermissionIds: new Set<string>(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
+        promptActive: true,
       };
       const client = new BridgeClient(
         ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
@@ -644,6 +645,7 @@ describe('BridgeClient — artifact ingress', () => {
         }),
         pendingPermissionIds: new Set<string>(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
+        promptActive: true,
       };
       const client = new BridgeClient(
         ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
@@ -705,6 +707,7 @@ describe('BridgeClient — artifact ingress', () => {
         }),
         pendingPermissionIds: new Set<string>(),
         midTurnMessageQueue: [] as MidTurnQueueEntry[],
+        promptActive: true,
       };
       const client = new BridgeClient(
         ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
@@ -768,6 +771,7 @@ describe('BridgeClient — artifact ingress', () => {
       },
       pendingPermissionIds: new Set<string>(),
       midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: true,
     };
     const client = new BridgeClient(
       ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
@@ -791,6 +795,52 @@ describe('BridgeClient — artifact ingress', () => {
       expect(logged).toContain('artifact store unavailable');
     } finally {
       stderr.mockRestore();
+    }
+  });
+
+  it('logs and drops artifact events for idle sessions', async () => {
+    const sessionId = 'sess:idle-artifacts';
+    const publish = vi.fn().mockReturnValue(true);
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-bridge-artifacts-'),
+    );
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: new SessionArtifactStore({
+        sessionId,
+        workspaceCwd: workspace,
+      }),
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: false,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        client.extNotification('qwen/notify/session/artifact-event', {
+          sessionId,
+          artifacts: [{ title: 'Idle', url: 'https://example.com/idle' }],
+        }),
+      ).resolves.toBeUndefined();
+      expect(publish).not.toHaveBeenCalled();
+      await expect(fakeEntry.artifacts.list()).resolves.toMatchObject({
+        artifacts: [],
+      });
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('reason=session_idle');
+    } finally {
+      stderr.mockRestore();
+      await fsp.rm(workspace, { recursive: true, force: true });
     }
   });
 

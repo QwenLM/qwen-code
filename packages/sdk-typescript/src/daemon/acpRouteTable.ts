@@ -259,8 +259,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     mapping: {
       method: '_qwen/session/artifacts/add',
       extractParams: (segs, body) => ({
-        sessionId: segs[0],
         ...(isRecord(body) ? body : {}),
+        sessionId: segs[0],
       }),
     },
   },

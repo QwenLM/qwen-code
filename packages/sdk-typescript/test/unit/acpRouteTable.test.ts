@@ -247,7 +247,11 @@ describe('acpRouteTable – matchRoute', () => {
     expect(
       result!.mapping.extractParams(
         result!.segments,
-        { title: 'Lineage', url: 'https://example.com/lineage' },
+        {
+          sessionId: 'body-session',
+          title: 'Lineage',
+          url: 'https://example.com/lineage',
+        },
         'POST',
       ),
     ).toEqual({
