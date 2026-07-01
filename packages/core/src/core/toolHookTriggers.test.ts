@@ -502,6 +502,30 @@ describe('toolHookTriggers', () => {
       });
     });
 
+    it('does not return PostToolBatch artifacts in V1', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {
+          hookSpecificOutput: {
+            artifacts: [
+              {
+                title: 'Batch report',
+                workspacePath: 'batch.html',
+              },
+            ],
+          },
+        },
+      });
+
+      const result = await firePostToolBatchHook(mockMessageBus, []);
+
+      expect(result).toEqual({
+        shouldStop: false,
+        additionalContext: undefined,
+      });
+    });
+
     it('should stop on deny decisions', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({

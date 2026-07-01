@@ -205,10 +205,6 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
       return 'Provide exactly one of "workspacePath", "managedId", or "url"';
     }
 
-    if ((params as { storage?: string }).storage === 'published') {
-      return 'record_artifact cannot create published artifacts; use the Artifact tool instead';
-    }
-
     const inferredStorage = inferStorage(params);
     if (params.storage && params.storage !== inferredStorage) {
       return `"storage" must be "${inferredStorage}" for the provided locator`;
@@ -301,7 +297,19 @@ function validateString(
       return `"${field}" contains control characters`;
     }
   }
+  if (
+    (field === 'title' || field === 'description') &&
+    hasUnsafeDisplayPayload(trimmed)
+  ) {
+    return `"${field}" contains unsafe markup`;
+  }
   return null;
+}
+
+function hasUnsafeDisplayPayload(value: string): boolean {
+  return /<\s*(script|iframe|object|embed|img|svg)\b|javascript\s*:|on[a-z]+\s*=/i.test(
+    value,
+  );
 }
 
 function validateWorkspacePath(value: string): string | null {

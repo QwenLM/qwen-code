@@ -46,6 +46,8 @@ import type {
   SessionArtifactStore,
 } from './sessionArtifacts.js';
 
+const ARTIFACT_TOOL_NAME = 'artifact';
+
 /**
  * Duck-type check for `FsError` from `cli/src/serve/fs/errors.ts`.
  * FsError lives in `cli`, but this class lives in `acp-bridge` — a
@@ -79,6 +81,23 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function artifactPayloadFields(
+  artifact: Record<string, unknown>,
+): SessionArtifactInput {
+  return {
+    title: artifact['title'] as string,
+    kind: artifact['kind'] as SessionArtifactInput['kind'],
+    storage: artifact['storage'] as SessionArtifactInput['storage'],
+    description: artifact['description'] as string | undefined,
+    workspacePath: artifact['workspacePath'] as string | undefined,
+    managedId: artifact['managedId'] as string | undefined,
+    url: artifact['url'] as string | undefined,
+    mimeType: artifact['mimeType'] as string | undefined,
+    sizeBytes: artifact['sizeBytes'] as number | undefined,
+    metadata: artifact['metadata'] as SessionArtifactInput['metadata'],
+  };
+}
+
 function extractSessionUpdateArtifacts(
   params: SessionNotification,
   updateMeta: Record<string, unknown> | undefined,
@@ -94,14 +113,28 @@ function extractSessionUpdateArtifacts(
     typeof updateMeta?.['toolName'] === 'string'
       ? updateMeta['toolName']
       : undefined;
-  const trustedPublisher = updateMeta?.['artifactsTrustedPublisher'] === true;
   return rawArtifacts.filter(isRecord).map((artifact) => ({
-    ...(artifact as unknown as SessionArtifactInput),
+    ...artifactPayloadFields(artifact),
     source: 'tool' as const,
     toolCallId,
     toolName,
-    trustedPublisher,
+    trustedPublisher: false,
   }));
+}
+
+function isTrustedArtifactToolUpdate(
+  params: SessionNotification,
+  updateMeta: Record<string, unknown> | undefined,
+): boolean {
+  const update = params.update as {
+    sessionUpdate?: unknown;
+    status?: unknown;
+  };
+  return (
+    update.sessionUpdate === 'tool_call_update' &&
+    update.status === 'completed' &&
+    updateMeta?.['toolName'] === ARTIFACT_TOOL_NAME
+  );
 }
 
 /**
@@ -516,7 +549,9 @@ export class BridgeClient implements Client {
     if (entry) {
       const artifacts = extractSessionUpdateArtifacts(params, updateMeta);
       if (artifacts.length > 0) {
-        const result = await entry.artifacts.upsertMany(artifacts);
+        const result = await entry.artifacts.upsertMany(artifacts, {
+          trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
+        });
         this.publishArtifactChanges(entry, result.changes);
       }
     }
@@ -837,7 +872,7 @@ export class BridgeClient implements Client {
         ? params['toolCallId']
         : undefined;
     const artifacts = rawArtifacts.filter(isRecord).map((artifact) => ({
-      ...(artifact as unknown as SessionArtifactInput),
+      ...artifactPayloadFields(artifact),
       source: 'hook' as const,
       hookEventName,
       toolName,

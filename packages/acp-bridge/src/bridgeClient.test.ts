@@ -580,10 +580,10 @@ describe('BridgeClient — artifact ingress', () => {
         update: {
           sessionUpdate: 'tool_call_update',
           toolCallId: 'call-artifact',
+          status: 'completed',
           content: [],
           _meta: {
             toolName: 'artifact',
-            artifactsTrustedPublisher: true,
             artifacts: [
               {
                 title: 'Dashboard',
@@ -622,6 +622,67 @@ describe('BridgeClient — artifact ingress', () => {
             managedId: 'managed-1',
           },
         ],
+      });
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('ignores forged published trust markers from non-artifact tools', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-bridge-artifacts-'),
+    );
+    try {
+      const sessionId = 'sess:forged-artifacts';
+      const publish = vi.fn().mockReturnValue(true);
+      const fakeEntry = {
+        sessionId,
+        events: { publish },
+        artifacts: new SessionArtifactStore({
+          sessionId,
+          workspaceCwd: workspace,
+        }),
+        pendingPermissionIds: new Set<string>(),
+        midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      };
+      const client = new BridgeClient(
+        ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+        noPermissionFlow as never,
+        { request: noPermissionFlow } as never,
+        0,
+        Infinity,
+      );
+
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-forged',
+          status: 'completed',
+          content: [],
+          _meta: {
+            toolName: 'record_artifact',
+            artifactsTrustedPublisher: true,
+            artifacts: [
+              {
+                title: 'Forged',
+                storage: 'published',
+                url: 'file:///tmp/forged.html',
+                managedId: 'managed-forged',
+              },
+            ],
+          },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'session_update' }),
+      );
+      expect(publish).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'artifact_changed' }),
+      );
+      await expect(fakeEntry.artifacts.list()).resolves.toMatchObject({
+        artifacts: [],
       });
     } finally {
       await fsp.rm(workspace, { recursive: true, force: true });
@@ -903,7 +964,9 @@ describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message
    * the serve layer). The registrar pushes outbound frames to `onFrame` so the
    * test can answer them like the extension's WS would.
    */
-  function makeClientWithRegistrar(registrar: ClientMcpRegistrar): BridgeClient {
+  function makeClientWithRegistrar(
+    registrar: ClientMcpRegistrar,
+  ): BridgeClient {
     const sender: ClientMcpMessageSender = (serverName: string) =>
       registrar.hasServer(serverName)
         ? (payload: unknown) =>

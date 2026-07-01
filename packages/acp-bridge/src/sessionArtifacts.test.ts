@@ -219,6 +219,58 @@ describe('SessionArtifactStore', () => {
     );
   });
 
+  it('rejects unsafe display markup in title and description', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-markup',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [{ title: '<img src=x onerror=alert(1)>', url: 'https://example.com' }],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'title' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Report',
+            description: 'javascript:alert(1)',
+            url: 'https://example.com',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'description' });
+  });
+
+  it('does not create empty metadata or emit ghost updates', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-empty-metadata',
+      workspaceCwd: workspace,
+    });
+
+    const created = await store.upsertMany([
+      {
+        title: 'Link',
+        url: 'https://example.com/resource',
+        metadata: {},
+      },
+    ]);
+    expect(created.changes[0]?.artifact).not.toHaveProperty('metadata');
+
+    const repeated = await store.upsertMany([
+      {
+        title: 'Ignored later title',
+        url: 'https://example.com/resource',
+      },
+    ]);
+
+    expect(repeated.changes).toEqual([]);
+  });
+
   it('rejects existing workspace symlinks that escape the workspace', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's6',
@@ -333,5 +385,46 @@ describe('SessionArtifactStore', () => {
       }),
     );
     expect((await store.list()).artifacts).toHaveLength(200);
+  });
+
+  it('emits one net removed change when an updated artifact is evicted', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's10',
+      workspaceCwd: workspace,
+      maxArtifacts: 2,
+    });
+
+    const first = await store.upsertMany([
+      { title: 'First', url: 'https://example.com/first' },
+    ]);
+    await store.upsertMany([
+      { title: 'Second', url: 'https://example.com/second' },
+    ]);
+
+    const overflow = await store.upsertMany([
+      {
+        title: 'First renamed',
+        url: 'https://example.com/first',
+        metadata: { refreshed: true },
+      },
+      { title: 'Third', url: 'https://example.com/third' },
+    ]);
+    const firstId = first.changes[0]?.artifactId;
+
+    expect(
+      overflow.changes.filter((change) => change.artifactId === firstId),
+    ).toEqual([
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: firstId,
+        reason: 'eviction',
+      }),
+    ]);
+    expect(overflow.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'created',
+        artifact: expect.objectContaining({ title: 'Third' }),
+      }),
+    );
   });
 });

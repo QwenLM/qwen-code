@@ -179,7 +179,7 @@ describe('ToolCallEmitter', () => {
       );
     });
 
-    it('emits structured artifacts and the trusted publisher marker', async () => {
+    it('emits structured artifacts without a wire trust marker', async () => {
       await emitter.emitResult({
         toolName: ToolNames.ARTIFACT,
         callId: 'call-artifact',
@@ -194,7 +194,6 @@ describe('ToolCallEmitter', () => {
             managedId: 'managed-1',
           },
         ],
-        trustedPublisher: true,
       });
 
       expect(sendUpdateSpy).toHaveBeenCalledWith(
@@ -204,7 +203,6 @@ describe('ToolCallEmitter', () => {
           status: 'completed',
           _meta: expect.objectContaining({
             toolName: ToolNames.ARTIFACT,
-            artifactsTrustedPublisher: true,
             artifacts: [
               expect.objectContaining({
                 title: 'Dashboard',
@@ -214,6 +212,13 @@ describe('ToolCallEmitter', () => {
           }),
         }),
       );
+      expect(
+        (
+          sendUpdateSpy.mock.calls[0]?.[0] as {
+            _meta?: Record<string, unknown>;
+          }
+        )._meta,
+      ).not.toHaveProperty('artifactsTrustedPublisher');
     });
 
     it('should emit tool_call_update with failed status on failure', async () => {

@@ -105,6 +105,41 @@ describe('createAcpSessionBridge', () => {
     );
   });
 
+  it('sanitizes client artifact provenance fields', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Client link',
+          url: 'https://example.com/client',
+          toolName: 'artifact',
+          hookEventName: 'PostToolUse',
+          toolCallId: 'call-forged',
+          clientId: 'forged-client',
+        },
+        { clientId: session.clientId },
+      );
+
+      const snapshot = await bridge.getSessionArtifacts(session.sessionId);
+      expect(snapshot.artifacts).toMatchObject([
+        {
+          title: 'Client link',
+          source: 'client',
+          clientId: session.clientId,
+        },
+      ]);
+      expect(snapshot.artifacts[0]).not.toHaveProperty('toolName');
+      expect(snapshot.artifacts[0]).not.toHaveProperty('hookEventName');
+      expect(snapshot.artifacts[0]).not.toHaveProperty('toolCallId');
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('uses bridge telemetry for channel/session/prompt dispatch and prompt metadata injection', async () => {
     const handle = makeChannel();
     const operations: string[] = [];

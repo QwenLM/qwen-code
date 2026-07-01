@@ -94,8 +94,6 @@ export interface PostToolBatchHookResult {
   stopReason?: string;
   /** Additional context to append once for the whole batch */
   additionalContext?: string;
-  /** Structured artifacts returned by batch hooks. */
-  artifacts?: ToolArtifact[];
   /** See PreToolUseHookResult.hookError. */
   hookError?: string;
 }
@@ -296,11 +294,12 @@ export async function firePostToolUseHook(
 
     // Get additional context
     const additionalContext = postToolOutput.getAdditionalContext();
+    const artifacts = postToolOutput.getArtifacts();
 
     return {
       shouldStop: false,
-      additionalContext,
-      artifacts: postToolOutput.getArtifacts(),
+      ...(additionalContext !== undefined ? { additionalContext } : {}),
+      ...(artifacts.length > 0 ? { artifacts } : {}),
     };
   } catch (error) {
     // Hook errors should not affect tool result
@@ -380,10 +379,11 @@ export async function firePostToolUseFailureHook(
       response.output,
     ) as PostToolUseFailureHookOutput;
     const additionalContext = failureOutput.getAdditionalContext();
+    const artifacts = failureOutput.getArtifacts();
 
     return {
-      additionalContext,
-      artifacts: failureOutput.getArtifacts(),
+      ...(additionalContext !== undefined ? { additionalContext } : {}),
+      ...(artifacts.length > 0 ? { artifacts } : {}),
     };
   } catch (error) {
     // Hook errors should not affect error handling
@@ -446,7 +446,6 @@ export async function firePostToolBatchHook(
       shouldStop,
       stopReason: shouldStop ? batchOutput.getEffectiveReason() : undefined,
       additionalContext: batchOutput.getAdditionalContext(),
-      artifacts: batchOutput.getArtifacts(),
     };
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

@@ -16,6 +16,9 @@ import {
   PermissionRequestHookOutput,
 } from './types.js';
 import type { HookOutput, HookExecutionResult } from './types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('HOOK_AGGREGATOR');
 
 /**
  * Aggregated result from multiple hook executions
@@ -175,6 +178,10 @@ export class HookAggregator {
         for (const [key, value] of Object.entries(output.hookSpecificOutput)) {
           if (key === 'artifacts' && Array.isArray(value)) {
             artifacts.push(...value);
+          } else if (key === 'artifacts') {
+            debugLogger.warn(
+              'Dropped malformed hookSpecificOutput.artifacts; expected array',
+            );
           } else if (key !== 'additionalContext' && key !== 'artifacts') {
             otherHookSpecificFields[key] = value;
           }

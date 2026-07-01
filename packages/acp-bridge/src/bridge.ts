@@ -2289,6 +2289,30 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
   };
 
+  const makeClientArtifactInput = (
+    artifact: SessionArtifactInput,
+    clientId: string | undefined,
+  ): SessionArtifactInput => {
+    const input: SessionArtifactInput = {
+      title: artifact.title,
+      kind: artifact.kind,
+      storage: artifact.storage,
+      description: artifact.description,
+      workspacePath: artifact.workspacePath,
+      managedId: artifact.managedId,
+      url: artifact.url,
+      mimeType: artifact.mimeType,
+      sizeBytes: artifact.sizeBytes,
+      metadata: artifact.metadata,
+      source: 'client',
+      trustedPublisher: false,
+    };
+    if (clientId) {
+      input.clientId = clientId;
+    }
+    return input;
+  };
+
   // A5: seed the snapshot caches from the agent's session-create response
   // (`newSession` / `loadSession` / `resumeSession` all return `models` +
   // `modes`). Without this the caches stay unset until the first change, so a
@@ -3974,12 +3998,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
-      const input: SessionArtifactInput = {
-        ...artifact,
-        source: 'client',
-        clientId,
-        trustedPublisher: false,
-      };
+      const input = makeClientArtifactInput(artifact, clientId);
       const result: SessionArtifactMutationResult =
         await entry.artifacts.upsertMany([input], { strict: true });
       publishArtifactChanges(entry, result.changes, clientId);

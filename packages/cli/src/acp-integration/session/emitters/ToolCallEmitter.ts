@@ -170,7 +170,6 @@ export class ToolCallEmitter extends BaseEmitter {
         ...(params.artifacts && params.artifacts.length > 0
           ? { artifacts: params.artifacts }
           : {}),
-        ...(params.trustedPublisher ? { artifactsTrustedPublisher: true } : {}),
       },
     };
 

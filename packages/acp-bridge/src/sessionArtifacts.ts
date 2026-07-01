@@ -164,12 +164,18 @@ export class SessionArtifactStore {
 
   async upsertMany(
     inputs: SessionArtifactInput[],
-    options: { strict?: boolean } = {},
+    options: { strict?: boolean; trustedPublisher?: boolean } = {},
   ): Promise<SessionArtifactMutationResult> {
     const normalized: NormalizedArtifact[] = [];
     for (const input of inputs) {
       try {
-        normalized.push(await this.normalizeInput(input, ++this.receivedSeq));
+        normalized.push(
+          await this.normalizeInput(
+            input,
+            ++this.receivedSeq,
+            options.trustedPublisher === true,
+          ),
+        );
       } catch (error) {
         if (options.strict) {
           throw error;
@@ -244,6 +250,7 @@ export class SessionArtifactStore {
   private async normalizeInput(
     input: SessionArtifactInput,
     receivedSeq: number,
+    trustedPublisherFromCaller: boolean,
   ): Promise<NormalizedArtifact> {
     if (!input || typeof input !== 'object') {
       throw new SessionArtifactValidationError('Artifact must be an object');
@@ -263,7 +270,8 @@ export class SessionArtifactStore {
       );
     }
 
-    const trustedPublisher = input.trustedPublisher === true;
+    const trustedPublisher =
+      trustedPublisherFromCaller || input.trustedPublisher === true;
     const workspacePath = input.workspacePath
       ? normalizeWorkspacePath(input.workspacePath, this.workspaceCwd)
       : undefined;
@@ -393,6 +401,7 @@ export class SessionArtifactStore {
       );
       if (!artifact) break;
       this.artifacts.delete(artifact.id);
+      removePriorChange(changes, artifact.id);
       removed.push({
         action: 'removed',
         artifactId: artifact.id,
@@ -609,6 +618,16 @@ function compareOldest(a: StoredArtifact, b: StoredArtifact): number {
   const created = a.createdAt.localeCompare(b.createdAt);
   if (created !== 0) return created;
   return a.insertSeq - b.insertSeq;
+}
+
+function removePriorChange(
+  changes: SessionArtifactChange[],
+  artifactId: string,
+): void {
+  const index = changes.findIndex((change) => change.artifactId === artifactId);
+  if (index >= 0) {
+    changes.splice(index, 1);
+  }
 }
 
 function toPublicArtifact(
@@ -844,6 +863,15 @@ function normalizeString(
       field,
     );
   }
+  if (
+    (field === 'title' || field === 'description') &&
+    hasUnsafeDisplayPayload(trimmed)
+  ) {
+    throw new SessionArtifactValidationError(
+      `${field} contains unsafe markup`,
+      field,
+    );
+  }
   return trimmed;
 }
 
@@ -855,6 +883,12 @@ function hasControlCharacter(value: string): boolean {
     }
   }
   return false;
+}
+
+function hasUnsafeDisplayPayload(value: string): boolean {
+  return /<\s*(script|iframe|object|embed|img|svg)\b|javascript\s*:|on[a-z]+\s*=/i.test(
+    value,
+  );
 }
 
 function normalizeWorkspacePath(raw: unknown, workspaceCwd: string): string {
@@ -941,6 +975,9 @@ function normalizeMetadata(
       );
     }
     normalized[key] = value;
+  }
+  if (Object.keys(normalized).length === 0) {
+    return undefined;
   }
   if (Buffer.byteLength(JSON.stringify(normalized), 'utf8') > 4096) {
     throw new SessionArtifactValidationError(

@@ -111,8 +111,6 @@ export interface ToolCallResultParams {
   error?: Error;
   /** Structured artifacts produced by the tool result. */
   artifacts?: ToolArtifact[];
-  /** Internal marker for the built-in Artifact publisher path. */
-  trustedPublisher?: boolean;
   /** Original args (fallback for TodoWriteTool todos extraction) */
   args?: Record<string, unknown>;
   /** Optional subagent metadata */

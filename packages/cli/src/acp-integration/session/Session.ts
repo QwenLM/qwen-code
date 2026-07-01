@@ -5099,12 +5099,6 @@ export class Session implements SessionContext {
               error,
               success: succeeded,
               artifacts: succeeded ? toolResult.artifacts : undefined,
-              trustedPublisher:
-                succeeded &&
-                toolName === ToolNames.ARTIFACT &&
-                toolResult.artifacts?.some(
-                  (artifact) => artifact.storage === 'published',
-                ),
             });
           }
 

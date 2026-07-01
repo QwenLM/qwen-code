@@ -84,4 +84,15 @@ describe('RecordArtifactTool', () => {
       }),
     ).toThrow(/metadata/);
   });
+
+  it('rejects unsafe display markup before reporting success', () => {
+    const tool = new RecordArtifactTool();
+
+    expect(() =>
+      tool.build({
+        title: '<script>alert(1)</script>',
+        url: 'https://example.com/resource',
+      }),
+    ).toThrow(/unsafe markup/);
+  });
 });
