@@ -90,7 +90,7 @@ export interface WebShellComposerApi {
   submit(input?: WebShellComposerInput): void;
 }
 
-export interface WebShellComposerToolbarStartRenderInfo {
+export interface WebShellComposerToolbarRenderInfo {
   disabled: boolean;
   isRunning: boolean;
   currentMode: string;
@@ -98,14 +98,20 @@ export interface WebShellComposerToolbarStartRenderInfo {
   sessionName?: string;
 }
 
+export type WebShellComposerToolbarStartRenderInfo =
+  WebShellComposerToolbarRenderInfo;
+
+export type WebShellComposerToolbarRightRenderInfo =
+  WebShellComposerToolbarRenderInfo;
+
 export type ComposerToolbarStartRenderer =
   ComponentType<WebShellComposerToolbarStartRenderInfo>;
 
 export type ComposerToolbarEndRenderer =
-  ComponentType<WebShellComposerToolbarStartRenderInfo>;
+  ComponentType<WebShellComposerToolbarRenderInfo>;
 
 export type ComposerToolbarRightRenderer =
-  ComponentType<WebShellComposerToolbarStartRenderInfo>;
+  ComponentType<WebShellComposerToolbarRightRenderInfo>;
 
 // ---- Background task info (public type for footer renderer) ----
 

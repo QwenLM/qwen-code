@@ -414,16 +414,9 @@ function InlineCode({ children }: { children: ReactNode }) {
   return <code className={styles.inlineCode}>{children}</code>;
 }
 
-function PlainMarkdownTable({
-  children,
-  toggle,
-}: {
-  children?: ReactNode;
-  toggle?: ReactNode;
-}) {
+function PlainMarkdownTable({ children }: { children?: ReactNode }) {
   return (
     <div className={styles.tableWrapper}>
-      {toggle}
       <table className={styles.table}>{children}</table>
     </div>
   );

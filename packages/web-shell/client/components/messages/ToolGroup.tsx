@@ -1063,7 +1063,7 @@ export const ToolGroup = memo(function ToolGroup({
 
   if (!hasApprovalTool) {
     return (
-      <div className={styles.chatGroupWrap}>
+      <div>
         <button
           type="button"
           className={styles.chatSummary}

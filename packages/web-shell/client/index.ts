@@ -6,6 +6,7 @@ export type { WebShellLanguage } from './i18n';
 export type {
   MarkdownContentSource,
   MarkdownRenderContext,
+  MarkdownTableMode,
   ToolHeaderExtraRenderer,
   ToolHeaderExtraRenderInfo,
   ToolHeaderKind,
@@ -17,7 +18,9 @@ export type {
   WebShellComposerTag,
   WebShellComposerTagOptions,
   WebShellComposerTagPlacement,
+  WebShellComposerToolbarRenderInfo,
   WebShellComposerToolbarStartRenderInfo,
+  WebShellComposerToolbarRightRenderInfo,
   WebShellComposerTextOptions,
   WelcomeHeaderRenderer,
   WebShellMarkdownCustomization,
