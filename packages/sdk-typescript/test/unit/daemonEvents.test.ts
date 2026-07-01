@@ -188,6 +188,35 @@ describe('daemon event schema', () => {
     expect(isDaemonEventType(event, 'artifact_changed')).toBe(true);
   });
 
+  it('keeps artifact_changed events with future artifact literals', () => {
+    const event: DaemonEvent = {
+      id: 4,
+      v: 1,
+      type: 'artifact_changed',
+      data: {
+        sessionId: 's-1',
+        change: {
+          action: 'created',
+          artifactId: 'art-2',
+          artifact: {
+            id: 'art-2',
+            kind: 'diagram',
+            storage: 'remote_preview',
+            source: 'extension',
+            status: 'warming',
+            title: 'Future artifact',
+            url: 'https://example.com/future',
+            clientRetained: false,
+            createdAt: '2026-06-30T00:00:00.000Z',
+            updatedAt: '2026-06-30T00:00:00.000Z',
+          },
+        },
+      },
+    };
+
+    expect(asKnownDaemonEvent(event)).toBe(event);
+  });
+
   it('leaves malformed or unknown events on the raw DaemonEvent path', () => {
     expect(
       asKnownDaemonEvent({

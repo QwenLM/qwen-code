@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import path from 'node:path';
 import type {
   ToolArtifact,
   ToolArtifactKind,
@@ -157,6 +158,40 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
     params: RecordArtifactParams,
   ): string | null {
     params.title = (params.title ?? '').trim();
+    const titleError = validateString(params.title, 'title', 200, true);
+    if (titleError) {
+      return titleError;
+    }
+    const descriptionError = validateString(
+      params.description,
+      'description',
+      1000,
+      false,
+    );
+    if (descriptionError) {
+      return descriptionError;
+    }
+    const mimeTypeError = validateString(
+      params.mimeType,
+      'mimeType',
+      120,
+      false,
+    );
+    if (mimeTypeError) {
+      return mimeTypeError;
+    }
+    if (params.kind && !isArtifactKind(params.kind)) {
+      return '"kind" must be a supported artifact kind';
+    }
+    if (
+      params.storage &&
+      params.storage !== 'workspace' &&
+      params.storage !== 'external_url' &&
+      params.storage !== 'managed' &&
+      (params as { storage?: string }).storage !== 'published'
+    ) {
+      return '"storage" must be workspace, external_url, managed, or published';
+    }
     if (!params.title) {
       return 'Missing or empty "title"';
     }
@@ -179,15 +214,45 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
       return `"storage" must be "${inferredStorage}" for the provided locator`;
     }
 
+    if (params.workspacePath) {
+      const workspacePathError = validateWorkspacePath(params.workspacePath);
+      if (workspacePathError) {
+        return workspacePathError;
+      }
+    }
+    if (params.managedId) {
+      const managedIdError = validateString(
+        params.managedId,
+        'managedId',
+        200,
+        true,
+      );
+      if (managedIdError) {
+        return managedIdError;
+      }
+    }
     if (params.url) {
       try {
         const parsed = new URL(params.url);
+        if (parsed.username || parsed.password) {
+          return '"url" must not include credentials';
+        }
         if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
           return '"url" must use http or https';
         }
       } catch {
         return '"url" must be a valid URL';
       }
+    }
+    if (
+      params.sizeBytes !== undefined &&
+      (!Number.isSafeInteger(params.sizeBytes) || params.sizeBytes < 0)
+    ) {
+      return '"sizeBytes" must be a non-negative safe integer';
+    }
+    const metadataError = validateMetadata(params.metadata);
+    if (metadataError) {
+      return metadataError;
     }
 
     return null;
@@ -215,4 +280,92 @@ function inferStorage(
 function trimOptional(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   return trimmed ? trimmed : undefined;
+}
+
+function validateString(
+  value: string | undefined,
+  field: string,
+  maxLength: number,
+  required: boolean,
+): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return required ? `Missing or empty "${field}"` : null;
+  }
+  if (trimmed.length > maxLength) {
+    return `"${field}" exceeds ${maxLength} characters`;
+  }
+  for (let i = 0; i < trimmed.length; i++) {
+    const code = trimmed.charCodeAt(i);
+    if (code <= 0x1f || code === 0x7f) {
+      return `"${field}" contains control characters`;
+    }
+  }
+  return null;
+}
+
+function validateWorkspacePath(value: string): string | null {
+  const trimmed = value.trim();
+  const stringError = validateString(trimmed, 'workspacePath', 500, true);
+  if (stringError) {
+    return stringError;
+  }
+  if (path.isAbsolute(trimmed)) {
+    return '"workspacePath" must be relative to the workspace';
+  }
+  const normalized = path.normalize(trimmed);
+  if (
+    normalized === '..' ||
+    normalized.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(normalized)
+  ) {
+    return '"workspacePath" must stay inside the workspace';
+  }
+  return null;
+}
+
+function validateMetadata(
+  metadata: Record<string, string | number | boolean | null> | undefined,
+): string | null {
+  if (metadata === undefined) {
+    return null;
+  }
+  if (
+    typeof metadata !== 'object' ||
+    metadata === null ||
+    Array.isArray(metadata)
+  ) {
+    return '"metadata" must be an object';
+  }
+  for (const [key, value] of Object.entries(metadata)) {
+    if (key.length > 120) {
+      return '"metadata" keys must be 120 characters or fewer';
+    }
+    if (
+      value !== null &&
+      typeof value !== 'string' &&
+      typeof value !== 'number' &&
+      typeof value !== 'boolean'
+    ) {
+      return '"metadata" values must be primitive';
+    }
+  }
+  if (Buffer.byteLength(JSON.stringify(metadata), 'utf8') > 4096) {
+    return '"metadata" must be 4096 bytes or fewer';
+  }
+  return null;
+}
+
+function isArtifactKind(kind: string): kind is ToolArtifactKind {
+  return (
+    kind === 'file' ||
+    kind === 'link' ||
+    kind === 'html' ||
+    kind === 'image' ||
+    kind === 'video' ||
+    kind === 'audio' ||
+    kind === 'pdf' ||
+    kind === 'notebook' ||
+    kind === 'other'
+  );
 }

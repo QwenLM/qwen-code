@@ -218,7 +218,9 @@ export interface SessionMetadataResult {
   displayName?: string;
 }
 
-export type DaemonSessionArtifactKind =
+type OpenStringUnion<T extends string> = T | (string & {});
+
+export type KnownDaemonSessionArtifactKind =
   | 'file'
   | 'link'
   | 'html'
@@ -229,19 +231,31 @@ export type DaemonSessionArtifactKind =
   | 'notebook'
   | 'other';
 
-export type DaemonSessionArtifactStorage =
+export type DaemonSessionArtifactKind =
+  OpenStringUnion<KnownDaemonSessionArtifactKind>;
+
+export type KnownDaemonSessionArtifactStorage =
   | 'workspace'
   | 'external_url'
   | 'managed'
   | 'published';
 
-export type DaemonSessionArtifactSource = 'tool' | 'hook' | 'client';
+export type DaemonSessionArtifactStorage =
+  OpenStringUnion<KnownDaemonSessionArtifactStorage>;
 
-export type DaemonSessionArtifactStatus = 'available' | 'missing';
+export type KnownDaemonSessionArtifactSource = 'tool' | 'hook' | 'client';
+
+export type DaemonSessionArtifactSource =
+  OpenStringUnion<KnownDaemonSessionArtifactSource>;
+
+export type KnownDaemonSessionArtifactStatus = 'available' | 'missing';
+
+export type DaemonSessionArtifactStatus =
+  OpenStringUnion<KnownDaemonSessionArtifactStatus>;
 
 export interface DaemonSessionArtifactInput {
-  kind?: DaemonSessionArtifactKind;
-  storage?: Exclude<DaemonSessionArtifactStorage, 'published'>;
+  kind?: KnownDaemonSessionArtifactKind;
+  storage?: Exclude<KnownDaemonSessionArtifactStorage, 'published'>;
   title: string;
   description?: string;
   workspacePath?: string;

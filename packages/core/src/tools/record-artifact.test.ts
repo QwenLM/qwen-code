@@ -54,4 +54,34 @@ describe('RecordArtifactTool', () => {
       }),
     ).toThrow(/exactly one/);
   });
+
+  it('rejects workspace traversal and unsafe urls before reporting success', () => {
+    const tool = new RecordArtifactTool();
+
+    expect(() =>
+      tool.build({
+        title: 'Escape',
+        workspacePath: '../secret.txt',
+      }),
+    ).toThrow(/workspacePath/);
+
+    expect(() =>
+      tool.build({
+        title: 'Credentials',
+        url: 'https://user:pass@example.com/resource',
+      }),
+    ).toThrow(/credentials/);
+  });
+
+  it('rejects artifact metadata that the daemon store would drop', () => {
+    const tool = new RecordArtifactTool();
+
+    expect(() =>
+      tool.build({
+        title: 'Huge metadata',
+        url: 'https://example.com/resource',
+        metadata: { value: 'x'.repeat(4096) },
+      }),
+    ).toThrow(/metadata/);
+  });
 });

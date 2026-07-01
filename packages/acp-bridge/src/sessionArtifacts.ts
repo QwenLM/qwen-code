@@ -30,6 +30,12 @@ export type DaemonSessionArtifactSource = 'tool' | 'hook' | 'client';
 
 export type DaemonSessionArtifactStatus = 'available' | 'missing';
 
+const SOURCE_RESERVATIONS: Record<DaemonSessionArtifactSource, number> = {
+  tool: 100,
+  client: 50,
+  hook: 50,
+};
+
 export interface ToolArtifactLike {
   kind?: DaemonSessionArtifactKind;
   storage?: DaemonSessionArtifactStorage;
@@ -210,7 +216,7 @@ export class SessionArtifactStore {
         .filter((change) => change.action === 'created')
         .map((change) => change.artifactId),
     );
-    changes.push(...this.evictOverflow(createdIds, changes));
+    changes.push(...(await this.evictOverflow(createdIds, changes)));
 
     return { v: 1, sessionId: this.sessionId, changes };
   }
@@ -284,6 +290,12 @@ export class SessionArtifactStore {
     const workspaceStatus = workspacePath
       ? await getWorkspaceStatus(this.workspaceCwd, workspacePath)
       : undefined;
+    if (workspaceStatus?.escaped) {
+      throw new SessionArtifactValidationError(
+        'workspacePath must stay inside the workspace',
+        'workspacePath',
+      );
+    }
     const kind = normalizeKind(
       input.kind ?? inferKind({ storage, workspacePath, url }),
     );
@@ -337,35 +349,49 @@ export class SessionArtifactStore {
       if (!artifact.workspacePath) {
         continue;
       }
-      const status = await getWorkspaceStatus(
-        this.workspaceCwd,
-        artifact.workspacePath,
-      );
-      artifact.status = status.status;
-      if (status.sizeBytes !== undefined) {
-        artifact.sizeBytes = status.sizeBytes;
-      }
+      await this.refreshWorkspaceStatus(artifact);
     }
   }
 
-  private evictOverflow(
+  private async refreshWorkspaceStatus(
+    artifact: StoredArtifact,
+  ): Promise<void> {
+    if (!artifact.workspacePath) {
+      return;
+    }
+    const status = await getWorkspaceStatus(
+      this.workspaceCwd,
+      artifact.workspacePath,
+    );
+    artifact.status = status.status;
+    artifact.sizeBytes = status.sizeBytes;
+  }
+
+  private async evictOverflow(
     createdIds: Set<string>,
     changes: SessionArtifactChange[],
-  ): SessionArtifactChange[] {
+  ): Promise<SessionArtifactChange[]> {
     const removed: SessionArtifactChange[] = [];
     if (this.artifacts.size <= this.maxArtifacts) {
       return removed;
     }
 
     const createdInThisBatch = new Set(createdIds);
-    const candidates = Array.from(this.artifacts.values())
-      .filter((artifact) => !createdInThisBatch.has(artifact.id))
-      .sort(compareEvictionCandidate);
-
+    const candidates = Array.from(this.artifacts.values()).filter(
+      (artifact) => !createdInThisBatch.has(artifact.id),
+    );
     for (const artifact of candidates) {
-      if (this.artifacts.size <= this.maxArtifacts) {
-        break;
-      }
+      await this.refreshWorkspaceStatus(artifact);
+    }
+
+    while (this.artifacts.size > this.maxArtifacts) {
+      const artifact = selectEvictionCandidate(
+        Array.from(this.artifacts.values()).filter(
+          (candidate) => !createdInThisBatch.has(candidate.id),
+        ),
+        countByRetentionSource(this.artifacts.values()),
+      );
+      if (!artifact) break;
       this.artifacts.delete(artifact.id);
       removed.push({
         action: 'removed',
@@ -373,10 +399,6 @@ export class SessionArtifactStore {
         artifact: toPublicArtifact(artifact),
         reason: 'eviction',
       });
-    }
-
-    if (this.artifacts.size <= this.maxArtifacts) {
-      return removed;
     }
 
     const overflowCreated = Array.from(this.artifacts.values())
@@ -428,7 +450,17 @@ function mergeBatchArtifact(
   if (publishedUpgrade) {
     return {
       ...existing,
-      ...next,
+      kind: next.kind,
+      storage: 'published',
+      status: next.status,
+      title: next.title,
+      description: next.description,
+      managedId: next.managedId ?? existing.managedId,
+      url: next.url ?? existing.url,
+      mimeType: next.mimeType ?? existing.mimeType,
+      sizeBytes: next.sizeBytes ?? existing.sizeBytes,
+      metadata: mergeMetadata(existing.metadata, next),
+      trustedPublisher: true,
       createdAt: existing.createdAt,
       receivedSeq: existing.receivedSeq,
       retentionSource: existing.retentionSource,
@@ -437,9 +469,11 @@ function mergeBatchArtifact(
   }
   return {
     ...existing,
-    metadata: { ...existing.metadata, ...next.metadata },
-    description: existing.description ?? next.description,
+    status: next.status,
+    sizeBytes: mergeSizeBytes(existing, next),
+    metadata: mergeMetadata(existing.metadata, next),
     clientRetained: existing.clientRetained || next.clientRetained,
+    trustedPublisher: existing.trustedPublisher || next.trustedPublisher,
   };
 }
 
@@ -452,43 +486,30 @@ function mergeArtifact(
     existing.storage !== 'published' &&
     incoming.storage === 'published' &&
     incoming.trustedPublisher;
-  const canOverwriteDisplay =
-    incoming.source === 'client' ||
-    incoming.source === existing.source ||
-    publishedUpgrade;
   const next: StoredArtifact = {
     ...existing,
-    kind: publishedUpgrade ? incoming.kind : (incoming.kind ?? existing.kind),
+    kind: publishedUpgrade ? incoming.kind : existing.kind,
     storage: publishedUpgrade ? 'published' : existing.storage,
     status: incoming.status,
-    workspacePath: incoming.workspacePath ?? existing.workspacePath,
-    managedId:
-      publishedUpgrade || incoming.storage === existing.storage
-        ? (incoming.managedId ?? existing.managedId)
-        : existing.managedId,
-    url:
-      publishedUpgrade || incoming.storage === existing.storage
-        ? (incoming.url ?? existing.url)
-        : existing.url,
-    mimeType: incoming.mimeType ?? existing.mimeType,
-    sizeBytes: incoming.sizeBytes ?? existing.sizeBytes,
-    metadata: { ...existing.metadata, ...incoming.metadata },
+    managedId: publishedUpgrade
+      ? (incoming.managedId ?? existing.managedId)
+      : existing.managedId,
+    url: publishedUpgrade ? (incoming.url ?? existing.url) : existing.url,
+    mimeType: publishedUpgrade
+      ? (incoming.mimeType ?? existing.mimeType)
+      : existing.mimeType,
+    sizeBytes: mergeSizeBytes(existing, incoming),
+    metadata: mergeMetadata(existing.metadata, incoming),
     source: existing.source,
     retentionSource: existing.retentionSource,
     trustedPublisher: existing.trustedPublisher || incoming.trustedPublisher,
     clientRetained: existing.clientRetained || incoming.clientRetained,
-    toolCallId: incoming.toolCallId ?? existing.toolCallId,
-    toolName: incoming.toolName ?? existing.toolName,
-    hookEventName: incoming.hookEventName ?? existing.hookEventName,
-    clientId: incoming.clientId ?? existing.clientId,
     updatedAt: existing.updatedAt,
   };
 
-  if (canOverwriteDisplay) {
+  if (publishedUpgrade) {
     next.title = incoming.title;
     next.description = incoming.description;
-  } else {
-    next.description = existing.description ?? incoming.description;
   }
 
   const changed =
@@ -500,20 +521,94 @@ function mergeArtifact(
   return { artifact: changed ? next : existing, changed };
 }
 
-function compareEvictionCandidate(
-  a: StoredArtifact,
-  b: StoredArtifact,
-): number {
-  const rankA = evictionRank(a);
-  const rankB = evictionRank(b);
-  if (rankA !== rankB) return rankA - rankB;
-  return a.insertSeq - b.insertSeq;
+function mergeSizeBytes(
+  existing: DaemonSessionArtifact,
+  incoming: DaemonSessionArtifact,
+): number | undefined {
+  if (incoming.sizeBytes !== undefined) {
+    return incoming.sizeBytes;
+  }
+  if (incoming.workspacePath && incoming.status === 'missing') {
+    return undefined;
+  }
+  return existing.sizeBytes;
 }
 
-function evictionRank(artifact: StoredArtifact): number {
-  if (artifact.status === 'missing' && !artifact.clientRetained) return 0;
-  if (!artifact.clientRetained) return 1;
-  return 2;
+function mergeMetadata(
+  existing: Record<string, string | number | boolean | null> | undefined,
+  incoming: NormalizedArtifact,
+): Record<string, string | number | boolean | null> | undefined {
+  if (!incoming.metadata || incoming.source === 'hook') {
+    return existing;
+  }
+  const merged = { ...(existing ?? {}) };
+  let changed = false;
+  for (const [key, value] of Object.entries(incoming.metadata)) {
+    if (!(key in merged)) {
+      merged[key] = value;
+      changed = true;
+    }
+  }
+  if (!changed) {
+    return existing;
+  }
+  if (!isMetadataWithinLimit(merged)) {
+    return existing;
+  }
+  return merged;
+}
+
+function isMetadataWithinLimit(
+  metadata: Record<string, string | number | boolean | null>,
+): boolean {
+  return Buffer.byteLength(JSON.stringify(metadata), 'utf8') <= 4096;
+}
+
+function countByRetentionSource(
+  artifacts: Iterable<StoredArtifact>,
+): Record<DaemonSessionArtifactSource, number> {
+  const counts: Record<DaemonSessionArtifactSource, number> = {
+    tool: 0,
+    client: 0,
+    hook: 0,
+  };
+  for (const artifact of artifacts) {
+    counts[artifact.retentionSource]++;
+  }
+  return counts;
+}
+
+function selectEvictionCandidate(
+  candidates: StoredArtifact[],
+  sourceCounts: Record<DaemonSessionArtifactSource, number>,
+): StoredArtifact | undefined {
+  return (
+    oldest(
+      candidates.filter(
+        (artifact) => artifact.status === 'missing' && !artifact.clientRetained,
+      ),
+    ) ??
+    oldest(
+      candidates.filter(
+        (artifact) =>
+          !artifact.clientRetained &&
+          sourceCounts[artifact.retentionSource] >
+            SOURCE_RESERVATIONS[artifact.retentionSource],
+      ),
+    ) ??
+    oldest(candidates.filter((artifact) => !artifact.clientRetained)) ??
+    oldest(candidates)
+  );
+}
+
+function oldest(artifacts: StoredArtifact[]): StoredArtifact | undefined {
+  return artifacts.sort(compareOldest)[0];
+}
+
+function compareOldest(a: StoredArtifact, b: StoredArtifact): number {
+  const created = a.createdAt.localeCompare(b.createdAt);
+  if (created !== 0) return created;
+  return a.insertSeq - b.insertSeq;
 }
 
 function toPublicArtifact(
@@ -890,14 +985,18 @@ function inferKind(input: {
 async function getWorkspaceStatus(
   workspaceCwd: string,
   workspacePath: string,
-): Promise<{ status: DaemonSessionArtifactStatus; sizeBytes?: number }> {
+): Promise<{
+  status: DaemonSessionArtifactStatus;
+  sizeBytes?: number;
+  escaped?: boolean;
+}> {
   const absolutePath = path.resolve(workspaceCwd, workspacePath);
   try {
     const realWorkspace = await fs.realpath(workspaceCwd);
     const realPath = await fs.realpath(absolutePath);
     const relative = path.relative(realWorkspace, realPath);
     if (relative.startsWith('..') || path.isAbsolute(relative)) {
-      return { status: 'missing' };
+      return { status: 'missing', escaped: true };
     }
     const stat = await fs.stat(realPath);
     return {
