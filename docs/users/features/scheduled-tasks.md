@@ -40,6 +40,16 @@ The scheduled prompt can itself be a command or skill invocation. This is useful
 
 Each time the job fires, Qwen Code runs `/review-pr 1234` as if you had typed it.
 
+### Autonomous mode
+
+Running `/loop` with **no prompt** starts an autonomous loop instead of repeating a fixed prompt. Qwen Code acts as a steward of the work already established in the conversation — it keeps your work moving while you're away:
+
+```text
+/loop
+```
+
+A bare `/loop` (no prompt, no interval) runs a self-paced autonomous loop; `/loop <interval>` with no prompt runs the same autonomous loop on a fixed cadence (e.g. `/loop 10m`). On each fire it advances what the conversation already set up — finishing things you started, maintaining an in-progress PR (addressing review threads, fixing failing CI, resolving conflicts), and honoring follow-up commitments. It only acts on work the transcript already established: it never invents new work or makes irreversible changes (push, delete, send) without clear authorization, and it stops once everything is quiet.
+
 ### Manage loops
 
 `/loop` also supports two subcommands for managing existing jobs:
