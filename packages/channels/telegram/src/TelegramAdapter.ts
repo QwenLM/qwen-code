@@ -38,6 +38,7 @@ export class TelegramChannel extends ChannelBase {
   private bot: Bot;
   private botId: number = 0;
   private botUsername: string = '';
+  private hasConnectedOnce = false;
   private signalHandlersRegistered = false;
 
   constructor(
@@ -79,7 +80,10 @@ export class TelegramChannel extends ChannelBase {
   }
 
   async connect(): Promise<void> {
-    this.bot = this.createBot();
+    if (this.hasConnectedOnce) {
+      this.bot = this.createBot();
+    }
+    this.hasConnectedOnce = true;
     const botInfo = await this.bot.api.getMe();
     this.botId = botInfo.id;
     this.botUsername = botInfo.username ?? '';
