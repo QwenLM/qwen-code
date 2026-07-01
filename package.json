@@ -24,7 +24,6 @@
     "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.3"
   },
   "scripts": {
-    "audit:runtime:critical": "npm audit --omit=dev --audit-level=critical",
     "start": "node scripts/start.js",
     "dev": "node scripts/dev.js",
     "dev:daemon": "node scripts/daemon-dev.js",
