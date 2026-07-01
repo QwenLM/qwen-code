@@ -125,6 +125,9 @@ describe('<MarkdownDisplay />', () => {
       );
       const output = (lastFrame() ?? '').replace(/\n+$/, '');
       expect(output).toContain('just one short line');
+      // Not clipped → no "generating more" cue (a bug that always appends it
+      // would fail here).
+      expect(output).not.toContain('generating more');
       const lineCount = output.split('\n').length;
       expect(lineCount).toBeLessThan(20);
     });
@@ -166,8 +169,53 @@ describe('<MarkdownDisplay />', () => {
           availableTerminalHeight={10}
         />,
       );
-      const lineCount = (lastFrame() ?? '').split('\n').length;
-      expect(lineCount).toBeLessThanOrEqual(10);
+      const output = lastFrame() ?? '';
+      expect(output.split('\n').length).toBeLessThanOrEqual(10);
+      // The head-slice bounds code content to <= availableTerminalHeight - 2
+      // (= RenderCodeBlock's own inner budget), so the inner "generating more"
+      // never fires inside a slice — there is at most ONE cue, not two stacked.
+      expect(
+        (output.match(/generating more/g) ?? []).length,
+      ).toBeLessThanOrEqual(1);
+    });
+
+    it('does not clip a pending message when no height budget is given', () => {
+      // The clip is gated on availableTerminalHeight !== undefined; without a
+      // budget the full message renders (no clip, no cue).
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={undefined}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('line 60');
+      expect(output).not.toContain('generating more');
+    });
+
+    it('applies the minimum floor at a degenerate budget of 1', () => {
+      // Math.max(MIN_PENDING_CONTENT_LINES + 1, 1) - 1 = 1: keep one content
+      // line + the cue, never 0 or negative.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={1}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('line 1');
+      expect(output).not.toContain('line 2');
+      expect(output).toContain('generating more');
     });
 
     it('renders unordered lists with different markers', () => {
