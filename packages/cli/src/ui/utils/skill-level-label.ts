@@ -7,6 +7,7 @@
 import type { SkillLevel } from '@qwen-code/qwen-code-core';
 import { t } from '../../i18n/index.js';
 
+// Call at render/command time, not module-load, so `/language` switches take effect.
 export function levelLabel(level: SkillLevel): string {
   switch (level) {
     case 'project':
