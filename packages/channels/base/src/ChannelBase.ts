@@ -271,6 +271,13 @@ export abstract class ChannelBase {
     }
   }
 
+  private lifecycleError(err: unknown): string {
+    return sanitizeLogText(
+      err instanceof Error ? err.message : String(err),
+      200,
+    );
+  }
+
   private emitTaskCancellation(
     active: ActivePrompt,
     sessionId: string,
@@ -579,7 +586,7 @@ export abstract class ChannelBase {
           this.emitTaskLifecycle({
             ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
             type: 'failed',
-            error: err instanceof Error ? err.message : String(err),
+            error: this.lifecycleError(err),
           });
         } else if (
           promptState.cancelled &&
@@ -887,8 +894,8 @@ export abstract class ChannelBase {
           this.collectBuffers.delete(id);
           if (active) {
             // Bounded cancel + wind-down wait; purge regardless of the result.
-            const settled = await this.cancelAndAwaitActive(active, id);
             this.emitTaskCancellation(active, id, 'clear');
+            const settled = await this.cancelAndAwaitActive(active, id);
             if (!settled) {
               // Wedged: the turn never wound down within the bound. Surface it —
               // otherwise a zombie bridge.prompt() lingers in the child with zero
@@ -2456,8 +2463,14 @@ export abstract class ChannelBase {
               envelope.messageId,
             ),
             type: 'failed',
-            error: err instanceof Error ? err.message : String(err),
+            error: this.lifecycleError(err),
           });
+        } else {
+          const channel = sanitizeLogText(this.name, 64);
+          const safeSessionId = sanitizeLogText(sessionId, 64);
+          process.stderr.write(
+            `[${channel}] turn threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
+          );
         }
         throw err;
       } finally {
