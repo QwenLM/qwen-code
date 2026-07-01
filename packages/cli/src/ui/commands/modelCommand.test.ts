@@ -1277,6 +1277,33 @@ describe('modelCommand', () => {
     });
   });
 
+  it('should show a malformed vision model setting without hiding the empty selector', async () => {
+    mockContext = createMockCommandContext({
+      executionMode: 'non_interactive',
+      invocation: { args: '--vision' },
+      services: {
+        config: createMockConfig({
+          model: 'qwen-max',
+          authType: AuthType.USE_OPENAI,
+        }),
+        settings: {
+          merged: {
+            visionModel: '\0https://vision.example.com/v1',
+          } as Record<string, unknown>,
+        },
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, '--vision');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Current vision model: \\0https://vision.example.com/v1\nUse "/model --vision <model-id>" to set the vision bridge model.',
+    });
+  });
+
   it('should open the voice model dialog for /model --voice in interactive mode', async () => {
     const mockConfig = createMockConfig({
       model: 'qwen-plus',

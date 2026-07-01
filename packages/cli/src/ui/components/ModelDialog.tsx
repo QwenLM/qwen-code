@@ -14,6 +14,7 @@ import {
   logModelSlashCommand,
   MAINLINE_CODER_MODEL,
   isImageCapable,
+  parseVisionModelSetting,
   resolveModelId,
   type AvailableModel as CoreAvailableModel,
   type ContentGeneratorConfig,
@@ -107,21 +108,6 @@ function encodeVisionModelSelector(selected: string): string {
   const parsed = parseModelSelectionKey(selected);
   const selector = `${parsed.authType}:${parsed.modelId}`;
   return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
-}
-
-function parseVisionModelSetting(setting: string | undefined):
-  | {
-      selector: string;
-      baseUrl?: string;
-    }
-  | undefined {
-  if (!setting) return undefined;
-  const nullIdx = setting.indexOf('\0');
-  if (nullIdx < 0) return { selector: setting };
-  return {
-    selector: setting.slice(0, nullIdx),
-    baseUrl: setting.slice(nullIdx + 1) || undefined,
-  };
 }
 
 interface ModelDialogProps {
@@ -398,8 +384,7 @@ export function ModelDialog({
   const fastModelSetting = settings?.merged?.fastModel as string | undefined;
   const voiceModelSetting = settings?.merged?.voiceModel as string | undefined;
   const visionModelSetting = settings?.merged?.visionModel as
-    | string
-    | undefined;
+    string | undefined;
   const parsedVisionModelValue = parseVisionModelSetting(visionModelSetting);
   const parsedFastModelSetting = useMemo(() => {
     if (!isFastModelMode) return undefined;
@@ -719,8 +704,7 @@ export function ModelDialog({
         }
 
         after = config.getContentGeneratorConfig?.() as
-          | ContentGeneratorConfig
-          | undefined;
+          ContentGeneratorConfig | undefined;
         effectiveAuthType = after?.authType ?? selectedAuthType ?? authType;
         effectiveModelId = after?.model ?? modelId;
       } catch (e) {

@@ -19,6 +19,7 @@ import {
   type AvailableModel,
   type Config,
   isImageCapable,
+  parseVisionModelSetting,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -39,6 +40,14 @@ const FAST_MODEL_CONFIGURATION_HINT =
 
 const VISION_MODEL_CONFIGURATION_HINT =
   'Configure an image-capable model in settings.modelProviders and ensure the required environment variables are set. Run /model --vision <model-id> to set it, or leave it unset to auto-pick a same-provider vision model.';
+
+function formatVisionModelSettingForDisplay(setting: string): string {
+  const parsed = parseVisionModelSetting(setting);
+  if (!parsed) return setting.replace(/\0/g, '\\0');
+  return parsed.baseUrl
+    ? `${parsed.selector} (${parsed.baseUrl})`
+    : parsed.selector;
+}
 
 function persistSetting(
   settings: LoadedSettings,
@@ -499,12 +508,7 @@ export const modelCommand: SlashCommand = {
               'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
               {
                 visionModel: visionModel
-                  ? (() => {
-                      const [selector, baseUrl] = visionModel.split('\0');
-                      return baseUrl
-                        ? `${selector} (${baseUrl})`
-                        : selector || visionModel;
-                    })()
+                  ? formatVisionModelSettingForDisplay(visionModel)
                   : t('not set'),
               },
             ),
