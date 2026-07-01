@@ -286,6 +286,31 @@ describe('SessionArtifactStore', () => {
         { strict: true },
       ),
     ).rejects.toMatchObject({ field: 'description' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: '&lt;script&gt;alert(1)&lt;/script&gt;',
+            url: 'https://example.com/entity',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'title' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Report',
+            url: 'https://example.com/metadata',
+            metadata: { preview: '<iframe src="https://example.com">' },
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'metadata' });
   });
 
   it('does not create empty metadata or emit ghost updates', async () => {

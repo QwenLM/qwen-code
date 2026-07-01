@@ -688,6 +688,111 @@ describe('BridgeClient — artifact ingress', () => {
       await fsp.rm(workspace, { recursive: true, force: true });
     }
   });
+
+  it('stores hook artifact events and publishes artifact_changed', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-bridge-artifacts-'),
+    );
+    try {
+      const sessionId = 'sess:hook-artifacts';
+      const publish = vi.fn().mockReturnValue(true);
+      const fakeEntry = {
+        sessionId,
+        events: { publish },
+        artifacts: new SessionArtifactStore({
+          sessionId,
+          workspaceCwd: workspace,
+        }),
+        pendingPermissionIds: new Set<string>(),
+        midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      };
+      const client = new BridgeClient(
+        ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+        noPermissionFlow as never,
+        { request: noPermissionFlow } as never,
+        0,
+        Infinity,
+      );
+
+      await client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        hookEventName: 'PostToolUse',
+        artifacts: [
+          {
+            title: 'Hook dashboard',
+            url: 'https://example.com/hook-dashboard',
+          },
+        ],
+      });
+
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'artifact_changed',
+          data: {
+            sessionId,
+            change: expect.objectContaining({
+              action: 'created',
+              artifact: expect.objectContaining({
+                source: 'hook',
+                hookEventName: 'PostToolUse',
+                title: 'Hook dashboard',
+              }),
+            }),
+          },
+        }),
+      );
+      await expect(fakeEntry.artifacts.list()).resolves.toMatchObject({
+        artifacts: [
+          {
+            source: 'hook',
+            hookEventName: 'PostToolUse',
+            title: 'Hook dashboard',
+          },
+        ],
+      });
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('logs and drops artifact events when store ingestion fails', async () => {
+    const sessionId = 'sess:artifact-error';
+    const publish = vi.fn().mockReturnValue(true);
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: {
+        upsertMany: vi
+          .fn()
+          .mockRejectedValue(new Error('artifact store unavailable')),
+      },
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        client.extNotification('qwen/notify/session/artifact-event', {
+          sessionId,
+          artifacts: [{ title: 'Dropped', url: 'https://example.com/drop' }],
+        }),
+      ).resolves.toBeUndefined();
+      expect(publish).not.toHaveBeenCalled();
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('artifact store unavailable');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
 });
 
 /**

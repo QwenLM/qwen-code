@@ -549,10 +549,9 @@ export class BridgeClient implements Client {
     if (entry) {
       const artifacts = extractSessionUpdateArtifacts(params, updateMeta);
       if (artifacts.length > 0) {
-        const result = await entry.artifacts.upsertMany(artifacts, {
+        await this.upsertAndPublishArtifacts(entry, artifacts, {
           trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
         });
-        this.publishArtifactChanges(entry, result.changes);
       }
     }
   }
@@ -879,8 +878,25 @@ export class BridgeClient implements Client {
       toolCallId,
       trustedPublisher: false,
     }));
-    const result = await entry.artifacts.upsertMany(artifacts);
-    this.publishArtifactChanges(entry, result.changes);
+    await this.upsertAndPublishArtifacts(entry, artifacts);
+  }
+
+  private async upsertAndPublishArtifacts(
+    entry: BridgeClientSessionEntry,
+    artifacts: SessionArtifactInput[],
+    options?: Parameters<SessionArtifactStore['upsertMany']>[1],
+  ): Promise<void> {
+    try {
+      const result = await entry.artifacts.upsertMany(artifacts, options);
+      this.publishArtifactChanges(entry, result.changes);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      writeStderrLine(
+        `[artifacts] session=${entry.sessionId} action=dropped reason=${JSON.stringify(
+          message,
+        )}`,
+      );
+    }
   }
 
   private publishArtifactChanges(

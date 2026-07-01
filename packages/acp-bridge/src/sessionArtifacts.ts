@@ -458,6 +458,9 @@ export class SessionArtifactStore {
         break;
       }
       this.artifacts.delete(artifact.id);
+      writeStderrLine(
+        `[artifacts] session=${this.sessionId} action=dropped reason="max artifacts exceeded" artifactId=${artifact.id}`,
+      );
       const index = changes.findIndex(
         (change) =>
           change.action === 'created' && change.artifactId === artifact.id,
@@ -946,7 +949,7 @@ function hasControlCharacter(value: string): boolean {
 }
 
 function hasUnsafeDisplayPayload(value: string): boolean {
-  return /<\s*(script|iframe|object|embed|applet|img|svg|math|style|link|base|meta|form)\b|javascript\s*:|data\s*:\s*text\/html|on[a-z]+\s*=/i.test(
+  return /<\s*\/?[a-z!]|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);|javascript\s*:|data\s*:\s*text\/html|on[a-z]+\s*=/i.test(
     value,
   );
 }
@@ -1031,6 +1034,15 @@ function normalizeMetadata(
     ) {
       throw new SessionArtifactValidationError(
         'metadata values must be primitive',
+        'metadata',
+      );
+    }
+    if (
+      typeof value === 'string' &&
+      (hasControlCharacter(value) || hasUnsafeDisplayPayload(value))
+    ) {
+      throw new SessionArtifactValidationError(
+        'metadata string values contain unsafe content',
         'metadata',
       );
     }
