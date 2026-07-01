@@ -9657,6 +9657,87 @@ describe('Session', () => {
       };
     }
 
+    it('forwards PostToolBatch hook artifacts to the artifact event channel', async () => {
+      const messageBus = {
+        request: vi.fn().mockImplementation(async (request) => ({
+          success: true,
+          output:
+            request.eventName === 'PostToolBatch'
+              ? {
+                  hookSpecificOutput: {
+                    artifacts: [
+                      {
+                        title: 'Batch report',
+                        workspacePath: 'reports/batch.html',
+                      },
+                    ],
+                  },
+                }
+              : { decision: 'allow' },
+        })),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation(
+          (eventName: string) => eventName === 'PostToolBatch',
+        );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'tool output',
+        returnDisplay: 'tool output',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('read_file', execute),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-batch-artifacts',
+        [
+          {
+            id: 'read_call',
+            name: 'read_file',
+            args: { path: 'README.md' },
+          },
+        ],
+      );
+
+      expect(messageBus.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventName: 'PostToolBatch',
+          input: expect.objectContaining({
+            tool_calls: [
+              expect.objectContaining({
+                tool_name: 'read_file',
+                tool_input: { path: 'README.md' },
+                tool_use_id: 'read_call',
+                status: 'success',
+              }),
+            ],
+          }),
+        }),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
+        'qwen/notify/session/artifact-event',
+        expect.objectContaining({
+          sessionId: 'test-session-id',
+          source: 'hook',
+          hookEventName: 'PostToolBatch',
+          artifacts: [
+            {
+              title: 'Batch report',
+              workspacePath: 'reports/batch.html',
+            },
+          ],
+        }),
+      );
+    });
+
     it('marks cancelled ask_user_question as a turn stop', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'should not execute',

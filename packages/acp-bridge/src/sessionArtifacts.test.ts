@@ -81,9 +81,20 @@ describe('SessionArtifactStore', () => {
     ]);
     const artifactId = created.changes[0]!.artifactId;
 
-    await expect(
-      store.remove(artifactId, { clientId: 'client-b' }),
-    ).resolves.toMatchObject({ changes: [] });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        store.remove(artifactId, { clientId: 'client-b' }),
+      ).resolves.toMatchObject({ changes: [] });
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('remove_denied');
+      expect(logged).toContain('client-a');
+      expect(logged).toContain('client-b');
+    } finally {
+      stderr.mockRestore();
+    }
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [{ id: artifactId, clientId: 'client-a' }],
     });
@@ -663,10 +674,10 @@ describe('SessionArtifactStore', () => {
       const artifact = (await store.list()).artifacts[0];
       expect(artifact).toMatchObject({
         status: 'missing',
-        storage: 'external_url',
+        storage: 'workspace',
+        workspacePath: 'report.txt',
       });
       expect(artifact).not.toHaveProperty('sizeBytes');
-      expect(artifact).not.toHaveProperty('workspacePath');
     } finally {
       vi.useRealTimers();
       await fs.rm(outside, { recursive: true, force: true });

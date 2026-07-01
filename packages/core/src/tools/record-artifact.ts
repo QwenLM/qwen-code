@@ -187,10 +187,9 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
       params.storage &&
       params.storage !== 'workspace' &&
       params.storage !== 'external_url' &&
-      params.storage !== 'managed' &&
-      (params as { storage?: string }).storage !== 'published'
+      params.storage !== 'managed'
     ) {
-      return '"storage" must be workspace, external_url, managed, or published';
+      return '"storage" must be workspace, external_url, or managed';
     }
     const locators = [
       trimOptional(params.workspacePath),

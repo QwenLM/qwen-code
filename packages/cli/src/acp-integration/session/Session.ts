@@ -3970,6 +3970,112 @@ export class Session implements SessionContext {
       }
     };
 
+    const firePostToolBatchArtifacts = async (
+      resolvedParts: Part[],
+    ): Promise<void> => {
+      if (
+        this.config.getDisableAllHooks?.() ||
+        !(this.config.hasHooksForEvent?.('PostToolBatch') ?? false)
+      ) {
+        return;
+      }
+      const messageBus = this.config.getMessageBus?.();
+      if (!messageBus) {
+        return;
+      }
+
+      const batchToolCalls = resolvedParts.flatMap((part) => {
+        const response = part.functionResponse;
+        if (!response) {
+          return [];
+        }
+        const sourceCall =
+          dedupedFunctionCalls.find((call) => call.id === response.id) ??
+          dedupedFunctionCalls.find((call) => call.name === response.name);
+        const toolResponse = response.response as
+          | Record<string, unknown>
+          | undefined;
+        return [
+          {
+            tool_name: response.name ?? sourceCall?.name ?? 'unknown_tool',
+            tool_input: (sourceCall?.args ?? {}) as Record<string, unknown>,
+            tool_use_id:
+              response.id ??
+              sourceCall?.id ??
+              `${response.name ?? sourceCall?.name ?? 'unknown_tool'}-batch`,
+            tool_call_id: response.id ?? sourceCall?.id,
+            status: abortSignal.aborted
+              ? ('cancelled' as const)
+              : toolResponse?.['error'] !== undefined
+                ? ('error' as const)
+                : ('success' as const),
+            tool_response: {
+              response_parts: [part],
+              ...(toolResponse ? { response: toolResponse } : {}),
+            },
+          },
+        ];
+      });
+
+      if (batchToolCalls.length === 0) {
+        return;
+      }
+
+      try {
+        const response = await messageBus.request<
+          HookExecutionRequest,
+          HookExecutionResponse
+        >(
+          {
+            type: MessageBusType.HOOK_EXECUTION_REQUEST,
+            eventName: 'PostToolBatch',
+            input: {
+              permission_mode: String(this.config.getApprovalMode()),
+              tool_calls: batchToolCalls,
+            },
+            signal: abortSignal,
+          },
+          MessageBusType.HOOK_EXECUTION_RESPONSE,
+          15_000,
+          abortSignal,
+        );
+        if (!response.success || !response.output) {
+          debugLogger.warn('PostToolBatch hook returned no artifact output');
+          return;
+        }
+
+        const batchHookOutput = createHookOutput(
+          'PostToolBatch',
+          response.output,
+        );
+        const artifacts = batchHookOutput.getArtifacts();
+        const shouldStop = batchHookOutput.shouldStopExecution();
+        if (shouldStop) {
+          debugLogger.debug(
+            `PostToolBatch hook stop ignored in ACP artifact notification path: ${
+              batchHookOutput.getEffectiveReason() ?? 'no reason given'
+            }`,
+          );
+        }
+        const additionalContext = batchHookOutput.getAdditionalContext();
+        if (additionalContext) {
+          debugLogger.debug(
+            `PostToolBatch hook additional context ignored in ACP artifact notification path: ${additionalContext}`,
+          );
+        }
+        await this.emitHookArtifactsNotification({
+          hookEventName: 'PostToolBatch',
+          artifacts,
+        });
+      } catch (error) {
+        debugLogger.warn(
+          `PostToolBatch hook artifact notification failed: ${
+            error instanceof Error ? error.message : String(error)
+          }`,
+        );
+      }
+    };
+
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by
     // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
@@ -4195,6 +4301,7 @@ export class Session implements SessionContext {
         }
       }
     }
+    await firePostToolBatchArtifacts(parts);
     return {
       parts,
       stopAfterPermissionCancel: false,

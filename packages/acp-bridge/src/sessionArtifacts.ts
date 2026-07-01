@@ -275,6 +275,9 @@ export class SessionArtifactStore {
         options?.clientId !== undefined &&
         existing.clientId !== options.clientId
       ) {
+        writeStderrLine(
+          `[artifacts] session=${this.sessionId} action=remove_denied artifactId=${artifactId} owner=${existing.clientId} requester=${options.clientId}`,
+        );
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
       this.artifacts.delete(artifactId);
@@ -442,8 +445,7 @@ export class SessionArtifactStore {
       artifact.status = status.status;
       artifact.sizeBytes = status.sizeBytes;
       if (status.escaped) {
-        delete artifact.workspacePath;
-        artifact.storage = 'external_url';
+        artifact.status = 'missing';
       }
       artifact.lastStatAt = options.now ?? Date.now();
     } catch (error) {
