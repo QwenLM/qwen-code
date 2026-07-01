@@ -323,8 +323,10 @@ export abstract class ChannelBase {
           'loop dropped because it is no longer enabled',
         );
       }
+      let shouldClaimSessionContext = false;
       if (shouldPrependSessionContext) {
         const context: string[] = [];
+        let sessionContextReady = true;
         if (
           this.channelMemory &&
           this.isSenderAuthorizedForChannelMemory(job.target.senderId) &&
@@ -346,8 +348,10 @@ export abstract class ChannelBase {
             }
           } catch (error) {
             process.stderr.write(
-              `[${this.name}] channel memory read failed for loop ${job.id} chat ${sanitizeLogText(job.target.chatId, 64)}: ${this.channelMemoryErrorMessage(error)}\n`,
+              `[${this.name}] channel memory read failed for loop ${job.id} chat ${sanitizeLogText(job.target.chatId, 64)}: ${sanitizeLogText(this.channelMemoryErrorMessage(error), 200)}\n`,
             );
+            this.instructedSessions.delete(sessionId);
+            sessionContextReady = false;
           }
         }
         if (this.config.instructions) {
@@ -356,6 +360,19 @@ export abstract class ChannelBase {
         if (context.length > 0) {
           promptText = `${context.join('\n\n')}\n\n${promptText}`;
         }
+        if (sessionContextReady) {
+          shouldClaimSessionContext = true;
+        }
+      }
+      if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
+        process.stderr.write(
+          `[${this.name}] dropped loop ${job.id} for session ${sessionId}: session was cleared before it ran\n`,
+        );
+        throw new ChannelLoopSkippedError(
+          'loop dropped because session was cleared before it ran',
+        );
+      }
+      if (shouldClaimSessionContext) {
         this.instructedSessions.add(sessionId);
       }
 

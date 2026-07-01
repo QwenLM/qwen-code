@@ -6401,6 +6401,117 @@ describe('ChannelBase', () => {
       );
     });
 
+    it('retries loop channel memory injection after a transient read failure', async () => {
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const channelMemory = {
+        readChannelMemory: vi
+          .fn()
+          .mockRejectedValueOnce(new Error('temporary read failure'))
+          .mockResolvedValueOnce('Use staging.\n'),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel(
+        { instructions: 'Use repo conventions.', allowedUsers: ['alice'] },
+        { channelMemory },
+      );
+      ch.proactiveSupported = true;
+      const job: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+
+      await ch.runLoopPrompt(job);
+      await ch.runLoopPrompt(job);
+
+      expect(channelMemory.readChannelMemory).toHaveBeenCalledTimes(2);
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('channel memory read failed for loop job-1'),
+      );
+      const promptMock = bridge.prompt as ReturnType<typeof vi.fn>;
+      expect(promptMock.mock.calls[0]![1]).toBe(
+        [
+          'Use repo conventions.',
+          '[Loop "daily summary" created by Alice]\n\npost summary',
+        ].join('\n\n'),
+      );
+      expect(promptMock.mock.calls[1]![1]).toBe(
+        [
+          'Channel memory for this chat:\nUse staging.',
+          'Use repo conventions.',
+          '[Loop "daily summary" created by Alice]\n\npost summary',
+        ].join('\n\n'),
+      );
+    });
+
+    it('drops a loop prompt cleared during a slow memory read', async () => {
+      let resolveMemoryRead: (value: string) => void = () => {};
+      const channelMemory = {
+        readChannelMemory: vi.fn(
+          () =>
+            new Promise<string>((resolve) => {
+              resolveMemoryRead = resolve;
+            }),
+        ),
+        appendChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+        clearChannelMemory: vi.fn().mockResolvedValue({ changed: true }),
+      };
+      const ch = createChannel({ allowedUsers: ['alice'] }, { channelMemory });
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => {
+        expect(channelMemory.readChannelMemory).toHaveBeenCalled();
+      });
+
+      await ch.handleInbound(
+        envelope({ senderId: 'alice', chatId: 'chat1', text: '/clear' }),
+      );
+      resolveMemoryRead('Use staging.\n');
+
+      await expect(loopRun).rejects.toThrow(
+        'loop dropped because session was cleared before it ran',
+      );
+      expect(bridge.prompt).not.toHaveBeenCalled();
+    });
+
     it('disables single-scope loop prompts before they reach the agent', async () => {
       const disable = vi.fn().mockResolvedValue(true);
       const ch = createChannel(
