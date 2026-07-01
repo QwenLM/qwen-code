@@ -477,6 +477,7 @@ export * from './utils/yaml-parser.js';
 export * from './utils/btwUtils.js';
 export * from './utils/forkedAgent.js';
 export * from './utils/sideQuery.js';
+export * from './utils/naturalLanguageCron.js';
 
 // ============================================================================
 // OAuth & Authentication

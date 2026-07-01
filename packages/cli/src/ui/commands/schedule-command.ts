@@ -2,12 +2,17 @@
  * /schedule slash command — manage scheduled tasks from interactive TUI.
  */
 
-import type { SlashCommand, CommandContext, MessageActionReturn } from './types.js';
+import type {
+  SlashCommand,
+  CommandContext,
+  MessageActionReturn,
+} from './types.js';
 import { CommandKind } from './types.js';
 import {
   listScheduleTasks,
   formatScheduleTaskSummary,
   deleteScheduleTask,
+  updateScheduleTask,
   readScheduleTask,
   getScheduleRunRecords,
   type ScheduleTask,
@@ -21,7 +26,8 @@ export const scheduleCommand: SlashCommand = {
   name: 'schedule',
   description: 'Manage scheduled tasks and the always-on daemon',
   kind: CommandKind.BUILT_IN,
-  argumentHint: '[list|daemon status|daemon start|daemon stop|delete <id>|run <id>|logs <id>]',
+  argumentHint:
+    '[list|daemon status|daemon start|daemon stop|delete <id>|update <id> <field> <value>|run <id>|logs <id>]',
   supportedModes: ['interactive', 'non_interactive'],
   action: async (
     context: CommandContext,
@@ -36,7 +42,8 @@ export const scheduleCommand: SlashCommand = {
         return {
           type: 'message',
           messageType: 'info',
-          content: 'No scheduled tasks. Use `/schedule create` (coming soon) or `qwen schedule create --name ... --cron ... --prompt ...` from the shell.',
+          content:
+            'No scheduled tasks. Use `/schedule create` (coming soon) or `qwen schedule create --name ... --cron ... --prompt ...` from the shell.',
         };
       }
       return {
@@ -61,7 +68,8 @@ export const scheduleCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: 'Start the daemon from the shell: `qwen schedule daemon start`',
+        content:
+          'Start the daemon from the shell: `qwen schedule daemon start`',
       };
     }
 
@@ -90,6 +98,63 @@ export const scheduleCommand: SlashCommand = {
         messageType: ok ? 'info' : 'error',
         content: ok ? `Task ${taskId} deleted.` : `Task ${taskId} not found.`,
       };
+    }
+
+    // /schedule update <id> <field> <value>
+    if (args.startsWith('update ')) {
+      const rest = args.slice('update '.length).trim();
+      const parts = rest.split(/\s+/);
+      if (parts.length < 3) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: 'Usage: /schedule update <taskId> <field> <value>',
+        };
+      }
+      const taskId = parts[0];
+      const field = parts[1];
+      const value = parts.slice(2).join(' ');
+
+      const updates: Record<string, unknown> = {};
+      if (field === 'name') updates.name = value;
+      else if (field === 'cron') updates.cron = value;
+      else if (field === 'prompt') updates.prompt = value;
+      else if (field === 'cwd') updates.cwd = value;
+      else if (field === 'description') updates.description = value;
+      else if (field === 'model') updates.model = value;
+      else if (field === 'approvalMode') updates.approvalMode = value;
+      else if (field === 'enable') updates.enabled = value === 'true';
+      else if (field === 'disable') updates.enabled = value !== 'true';
+      else if (field === 'sandbox') updates.sandbox = value === 'true';
+      else {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `Unknown field: ${field}. Valid fields: name, cron, prompt, cwd, description, model, approvalMode, enable, disable, sandbox`,
+        };
+      }
+
+      try {
+        const task = await updateScheduleTask(taskId, updates);
+        if (!task) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: `Task ${taskId} not found.`,
+          };
+        }
+        return {
+          type: 'message',
+          messageType: 'info',
+          content: `Task ${taskId} updated.\\n${formatScheduleTaskSummary(task)}`,
+        };
+      } catch (err) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: `Error updating task: ${err instanceof Error ? err.message : String(err)}`,
+        };
+      }
     }
 
     // /schedule logs <id>

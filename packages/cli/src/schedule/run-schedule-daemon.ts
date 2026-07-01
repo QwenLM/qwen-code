@@ -8,12 +8,12 @@
  */
 
 import * as fs from 'node:fs';
+import * as fsp from 'node:fs/promises';
 import * as path from 'node:path';
 import { homedir } from 'node:os';
+import { spawn } from 'node:child_process';
 
-import {
-  ScheduleDaemon,
-} from '@qwen-code/qwen-code-core';
+import { ScheduleDaemon } from '@qwen-code/qwen-code-core';
 
 // ---------------------------------------------------------------------------
 // PID file
@@ -80,7 +80,9 @@ export async function runScheduleDaemon(): Promise<never> {
 
   // Graceful shutdown on signals
   const shutdown = async (signal: string) => {
-    process.stderr.write(`\nqwen schedule daemon: received ${signal}, shutting down...\n`);
+    process.stderr.write(
+      `\nqwen schedule daemon: received ${signal}, shutting down...\n`,
+    );
     await daemon.stop();
     removePidFile();
     process.exit(0);
@@ -149,4 +151,89 @@ export async function getScheduleDaemonStatus(): Promise<{
   // Can't introspect the remote daemon's internal state from another
   // process — just report that it's alive.
   return { running: true, pid, taskCount: -1, activeFires: [] };
+}
+
+// ---------------------------------------------------------------------------
+// Background daemon mode
+// ---------------------------------------------------------------------------
+
+function getLogDir(): string {
+  return path.join(homedir(), '.qwen', 'logs');
+}
+
+function getStdoutLogPath(): string {
+  return path.join(getLogDir(), 'schedule-daemon.log');
+}
+
+function getStderrLogPath(): string {
+  return path.join(getLogDir(), 'schedule-daemon.err.log');
+}
+
+/**
+ * Start the daemon in background mode.
+ * Spawns a detached child process that runs the daemon in foreground mode.
+ */
+export async function startDaemonInBackground(): Promise<void> {
+  // Check if already running
+  const existingPid = readPidFile();
+  if (existingPid !== null && isProcessAlive(existingPid)) {
+    throw new Error(
+      `Schedule daemon is already running (PID ${existingPid}). ` +
+        `Use 'qwen schedule daemon stop' first.`,
+    );
+  }
+
+  // Create log directory
+  const logDir = getLogDir();
+  await fsp.mkdir(logDir, { recursive: true });
+
+  // Determine the CLI entry point
+  const cliEntry = process.argv[1];
+  if (!cliEntry) {
+    throw new Error('Cannot determine CLI entry point for background daemon');
+  }
+
+  // Spawn detached child process
+  const child = spawn(
+    process.execPath,
+    [cliEntry, 'schedule', 'daemon', 'start', '--foreground'],
+    {
+      detached: true,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env: { ...process.env },
+    },
+  );
+
+  // Redirect output to log files
+  const stdoutLog = fs.createWriteStream(getStdoutLogPath(), { flags: 'a' });
+  const stderrLog = fs.createWriteStream(getStderrLogPath(), { flags: 'a' });
+
+  if (child.stdout) {
+    child.stdout.pipe(stdoutLog);
+  }
+  if (child.stderr) {
+    child.stderr.pipe(stderrLog);
+  }
+
+  // Detach from parent
+  child.unref();
+
+  // Wait a bit to ensure the child started successfully
+  await new Promise((resolve) => setTimeout(resolve, 500));
+
+  // Verify the daemon is running
+  const pid = readPidFile();
+  if (pid === null || !isProcessAlive(pid)) {
+    throw new Error(
+      'Failed to start background daemon. Check logs at ' + getStderrLogPath(),
+    );
+  }
+}
+
+/**
+ * Check if the daemon is currently running.
+ */
+export async function isDaemonRunning(): Promise<boolean> {
+  const pid = readPidFile();
+  return pid !== null && isProcessAlive(pid);
 }

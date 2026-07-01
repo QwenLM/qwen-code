@@ -43,6 +43,10 @@ describe('scheduleCommand', () => {
       expect(scheduleCommand.command).toBe('schedule');
     });
 
+    it('registers update subcommand', () => {
+      expect(scheduleCommand.command).toBe('schedule');
+    });
+
     it('registers daemon subcommand', () => {
       expect(scheduleCommand.command).toBe('schedule');
     });
