@@ -198,6 +198,11 @@ export function normalizeDaemonEvent(
     case 'mid_turn_message_injected':
       return normalizeMidTurnMessageInjected(event, base);
 
+    case 'pending_prompt_added':
+    case 'pending_prompt_started':
+    case 'pending_prompt_completed':
+      return [];
+
     case 'user_shell_command': {
       const command = getString(event.data, 'command');
       const cwd = getString(event.data, 'cwd');

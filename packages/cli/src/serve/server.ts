@@ -8,6 +8,7 @@ import express from 'express';
 import type { Application } from 'express';
 import type { DaemonLogger } from './daemon-logger.js';
 import type { DaemonStartupSnapshot } from './daemon-status.js';
+import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import {
   allowOriginCors,
   bearerAuth,
@@ -178,6 +179,7 @@ export interface ServeAppDeps {
    * and a stderr audit sink.
    */
   deviceFlowRegistry?: DeviceFlowRegistry;
+  maxExtensionOperationHistory?: number;
   /**
    * Extra device-flow providers for tests / future extensions.
    * Production builds register only `QwenOAuthDeviceFlowProvider`;
@@ -201,6 +203,7 @@ export interface ServeAppDeps {
    */
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
+  getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   workspace?: DaemonWorkspaceService;
   statusProvider?: DaemonStatusProvider;
   persistDisabledTools?: (
@@ -550,6 +553,7 @@ export function createServeApp(
     getSupportedDeviceFlowProviders,
     deviceFlowRegistry,
     sessionShellCommandEnabled,
+    getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
   });
 
   registerCapabilitiesRoutes(app, {
@@ -599,6 +603,9 @@ export function createServeApp(
     mutate,
     safeBody,
     sendBridgeError,
+    ...(deps.maxExtensionOperationHistory === undefined
+      ? {}
+      : { maxExtensionOperationHistory: deps.maxExtensionOperationHistory }),
   });
 
   // Workspace file routes (read-only + mutation).

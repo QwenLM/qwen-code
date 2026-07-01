@@ -12,6 +12,9 @@ import {
   DAEMON_KNOWN_EVENT_TYPE_VALUES,
   isDaemonEventType,
   MID_TURN_MESSAGE_INJECTED_EVENT,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
   reduceDaemonAuthEvent,
   reduceDaemonAuthEvents,
   reduceDaemonSessionEvent,
@@ -33,6 +36,84 @@ describe('MID_TURN_MESSAGE_INJECTED_EVENT (shared wire constant)', () => {
 });
 
 describe('daemon event schema', () => {
+  it('recognizes pending prompt queue events', () => {
+    const added: DaemonEvent = {
+      id: 10,
+      v: 1,
+      type: PENDING_PROMPT_ADDED_EVENT,
+      data: {
+        sessionId: 's-1',
+        promptId: 'p-1',
+        text: 'queued',
+        queuedAt: 1_700_000_000_000,
+      },
+    };
+    const started: DaemonEvent = {
+      id: 11,
+      v: 1,
+      type: PENDING_PROMPT_STARTED_EVENT,
+      data: { sessionId: 's-1', promptId: 'p-1', text: 'queued' },
+    };
+    const completed: DaemonEvent = {
+      id: 12,
+      v: 1,
+      type: PENDING_PROMPT_COMPLETED_EVENT,
+      data: { sessionId: 's-1', promptId: 'p-1', state: 'removed' },
+    };
+
+    expect(asKnownDaemonEvent(added)).toBe(added);
+    expect(asKnownDaemonEvent(started)).toBe(started);
+    expect(asKnownDaemonEvent(completed)).toBe(completed);
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(
+      PENDING_PROMPT_ADDED_EVENT,
+    );
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(
+      PENDING_PROMPT_STARTED_EVENT,
+    );
+    expect(DAEMON_KNOWN_EVENT_TYPE_VALUES).toContain(
+      PENDING_PROMPT_COMPLETED_EVENT,
+    );
+  });
+
+  it('rejects malformed pending prompt queue events', () => {
+    expect(
+      asKnownDaemonEvent({
+        id: 10,
+        v: 1,
+        type: PENDING_PROMPT_ADDED_EVENT,
+        data: { sessionId: 's-1', promptId: 'p-1', text: 'queued' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 11,
+        v: 1,
+        type: PENDING_PROMPT_STARTED_EVENT,
+        data: { sessionId: 's-1', text: 'queued' },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        id: 12,
+        v: 1,
+        type: PENDING_PROMPT_COMPLETED_EVENT,
+        data: { sessionId: 's-1', promptId: 'p-1', state: 'done' },
+      }),
+    ).toBeUndefined();
+  });
+
+  it('reduces pending prompt queue events without changing session view state', () => {
+    const state = createDaemonSessionViewState();
+    const next = reduceDaemonSessionEvent(state, {
+      id: 10,
+      v: 1,
+      type: PENDING_PROMPT_COMPLETED_EVENT,
+      data: { sessionId: 's-1', promptId: 'p-1', state: 'completed' },
+    });
+
+    expect(next).toEqual({ ...state, lastEventId: 10 });
+  });
+
   it('narrows known daemon events by discriminator', () => {
     const event: DaemonEvent = {
       id: 1,
