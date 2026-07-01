@@ -515,7 +515,11 @@ interface FakeBridgeOpts {
         toolCount: number;
         originatorClientId: string;
       }
-    | { name: string; skipped: true; reason: 'budget_warning_only' }
+    | {
+        name: string;
+        skipped: true;
+        reason: 'budget_warning_only' | 'runtime_name_conflict';
+      }
   >;
   removeRuntimeMcpServerImpl?: (
     name: string,

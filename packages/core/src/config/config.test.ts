@@ -412,6 +412,259 @@ describe('Server Config (config.ts)', () => {
     expect(config.getSystemPrompt()).toBeUndefined();
   });
 
+  describe('getDefaultVisionBridgeModel', () => {
+    // Primary is text-only and lives on the 'openai' provider.
+    const stubProvider = (config: Config, models: unknown[]) => {
+      vi.spyOn(config, 'getModel').mockReturnValue('text-primary');
+      vi.spyOn(config, 'getContentGeneratorConfig').mockReturnValue({
+        authType: AuthType.USE_OPENAI,
+        baseUrl: 'https://primary.example.com',
+      } as ContentGeneratorConfig);
+      vi.spyOn(config, 'getAllConfiguredModels').mockReturnValue(
+        models as never,
+      );
+    };
+
+    it('honors an explicit visionModel even across providers', () => {
+      const config = new Config({ ...baseParams, visionModel: 'vl-anthropic' });
+      stubProvider(config, [
+        {
+          id: 'vl-anthropic',
+          authType: AuthType.USE_ANTHROPIC,
+          baseUrl: 'https://api.anthropic.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-anthropic',
+        baseUrl: 'https://api.anthropic.com',
+      });
+    });
+
+    it('falls back to same-provider auto-select when the explicit model is not configured', () => {
+      const config = new Config({ ...baseParams, visionModel: 'ghost-model' });
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      // 'ghost-model' isn't configured, so the explicit pin is ignored and the
+      // same-provider candidate is auto-picked instead.
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
+    it('auto-selects a same-provider vision model when no explicit model is set', () => {
+      const config = new Config({ ...baseParams });
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
+    it('honors an authType-qualified visionModel against the matching provider only', () => {
+      // Same model id on two providers; the 'anthropic:' qualifier must bind to
+      // the anthropic row, not the same-provider openai one.
+      const config = new Config({
+        ...baseParams,
+        visionModel: 'anthropic:vl-shared',
+      });
+      stubProvider(config, [
+        {
+          id: 'vl-shared',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+        {
+          id: 'vl-shared',
+          authType: AuthType.USE_ANTHROPIC,
+          baseUrl: 'https://api.anthropic.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'anthropic:vl-shared',
+        baseUrl: 'https://api.anthropic.com',
+      });
+    });
+
+    it('uses the visionModel selector baseUrl to disambiguate duplicate same-provider vision models', () => {
+      const config = new Config({
+        ...baseParams,
+        visionModel: 'openai:qwen3.7-plus\0https://token-plan.example.com/v1',
+      });
+      stubProvider(config, [
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          isVision: true,
+        },
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'openai:qwen3.7-plus',
+        baseUrl: 'https://token-plan.example.com/v1',
+      });
+    });
+
+    it('falls back to auto-select when a legacy visionModel matches multiple endpoints', () => {
+      const config = new Config({
+        ...baseParams,
+        visionModel: 'openai:qwen3.7-plus',
+      });
+      stubProvider(config, [
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          isVision: true,
+        },
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          isVision: true,
+        },
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
+    it('falls back to auto-select on a malformed visionModel selector instead of throwing', () => {
+      // 'openai:' is a known authType with no model id — resolveModelId throws,
+      // and the guard must swallow it rather than take down every image request.
+      const config = new Config({ ...baseParams, visionModel: 'openai:' });
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(() => config.getDefaultVisionBridgeModel()).not.toThrow();
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
+    it('falls back to auto-select on a visionModel with no selector before the baseUrl delimiter', () => {
+      const config = new Config({
+        ...baseParams,
+        visionModel: '\0https://example.com/v1',
+      });
+      const warn = vi.spyOn(config.getDebugLogger(), 'warn');
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("'\\0https://example.com/v1'"),
+      );
+    });
+
+    it('drops a pin that points at the current primary model and auto-selects a same-provider VL model instead', () => {
+      // Pinning the primary itself is a dead pin: the bridge exists to work
+      // around the text-only primary, so routing back at it would defeat the
+      // purpose. The provider-aware primary guard must drop the pin and hand off
+      // to same-provider auto-select rather than ever returning the primary.
+      const config = new Config({ ...baseParams, visionModel: 'text-primary' });
+      stubProvider(config, [
+        {
+          // Same id/provider/endpoint as the primary — without the guard the
+          // pin would resolve straight back to this row.
+          id: 'text-primary',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+        },
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
+    it('setVisionModel("") clears the pin and reverts to same-provider auto-select', () => {
+      const config = new Config({ ...baseParams, visionModel: 'vl-anthropic' });
+      stubProvider(config, [
+        {
+          id: 'vl-anthropic',
+          authType: AuthType.USE_ANTHROPIC,
+          baseUrl: 'https://api.anthropic.com',
+          isVision: true,
+        },
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      // Pinned first.
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-anthropic',
+        baseUrl: 'https://api.anthropic.com',
+      });
+      // Cleared with '' — JSDoc promises a fall back to auto-select.
+      config.setVisionModel('');
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+      // undefined clears too.
+      config.setVisionModel('vl-anthropic');
+      config.setVisionModel(undefined);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+  });
+
   it('wires file history snapshot updates to chat recording', async () => {
     const projectDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-'));
     const storageDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-storage-'));
@@ -2661,8 +2914,7 @@ describe('Server Config (config.ts)', () => {
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     const options = lastCall?.at(-1) as
-      | LoadServerHierarchicalMemoryOptions
-      | undefined;
+      LoadServerHierarchicalMemoryOptions | undefined;
     expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
 
     await options?.onInstructionsLoaded?.({

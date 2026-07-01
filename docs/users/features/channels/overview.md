@@ -83,6 +83,18 @@ Controls how conversation sessions are managed:
 - **`thread`** — One session per thread/topic. Useful for group chats with threads.
 - **`single`** — One shared session for all users. Everyone shares the same conversation.
 
+### Channel Memory
+
+Channel memory lets an authorized channel member save stable context for one chat or thread. Qwen Code injects that memory when a fresh channel session starts, including after `/clear`.
+
+Commands:
+
+- `/remember-channel <text>` saves a memory line for the current chat or thread.
+- `/channel-memory` shows saved memory for the current chat or thread.
+- `/forget-channel confirm` clears saved memory for the current chat or thread.
+
+Only users listed in `allowedUsers` can read, write, or clear channel memory. If `allowedUsers` is empty, channel memory commands are disabled for everyone.
+
 ### Token Security
 
 Bot tokens should not be stored directly in `settings.json`. Instead, use environment variable references:
