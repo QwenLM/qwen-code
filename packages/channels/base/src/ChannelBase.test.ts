@@ -4938,6 +4938,7 @@ describe('ChannelBase', () => {
       );
       (bridge.cancelSession as ReturnType<typeof vi.fn>).mockImplementation(
         () => {
+          order.push('cancelSession');
           resolvePrompt('late');
           return Promise.resolve();
         },
@@ -4972,7 +4973,7 @@ describe('ChannelBase', () => {
       await ch.handleInbound(envelope({ text: '/clear' }));
       await prompt;
 
-      expect(order).toEqual(['cancelled', 'end']);
+      expect(order).toEqual(['cancelSession', 'cancelled', 'end']);
     });
 
     it('does not emit a second cancellation lifecycle event when /clear follows /cancel', async () => {

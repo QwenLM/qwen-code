@@ -966,7 +966,6 @@ export abstract class ChannelBase {
           this.collectBuffers.delete(id);
           if (active) {
             // Bounded cancel + wind-down wait; purge regardless of the result.
-            this.emitTaskCancellation(active, id, 'clear');
             const settled = await this.cancelAndAwaitActive(active, id);
             if (!settled) {
               // Wedged: the turn never wound down within the bound. Surface it —
@@ -1799,6 +1798,7 @@ export abstract class ChannelBase {
         `[${this.name}] cancelSession failed for session=${sessionId} (clear/await): ${err instanceof Error ? err.message : err}\n`,
       );
     });
+    this.emitTaskCancellation(active, sessionId, 'clear');
     let timer: ReturnType<typeof setTimeout> | undefined;
     const settled = await Promise.race([
       active.done.then(() => true),
