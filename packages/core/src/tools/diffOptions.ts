@@ -74,10 +74,18 @@ function structuredPatchSmart(
     return result;
   }
 
-  return Diff.structuredPatch(filename, filename, oldStr, newStr, oldHeader, newHeader, {
-    ...DEFAULT_DIFF_OPTIONS,
-    ignoreWhitespace: false,
-  });
+  return Diff.structuredPatch(
+    filename,
+    filename,
+    oldStr,
+    newStr,
+    oldHeader,
+    newHeader,
+    {
+      ...DEFAULT_DIFF_OPTIONS,
+      ignoreWhitespace: false,
+    },
+  );
 }
 
 export function getDiffStat(
