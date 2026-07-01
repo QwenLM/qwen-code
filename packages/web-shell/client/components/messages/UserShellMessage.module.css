@@ -1,6 +1,6 @@
 .message {
   color: var(--foreground);
-  overflow: scroll;
+  overflow: auto;
   margin-bottom: 12px;
   margin-left: 14px;
   padding: 8px 14px;

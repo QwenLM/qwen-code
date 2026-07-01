@@ -293,8 +293,10 @@ export async function runVisionBridge(params: {
   const intent = collectText(nonImageParts).slice(0, BRIDGE_INTENT_MAX_CHARS);
 
   const selection = config.getDefaultVisionBridgeModel?.();
-  const model = selection?.id;
-  if (!model) {
+  const modelId = selection?.id;
+  const baseUrl = selection?.baseUrl;
+  const modelForApi = baseUrl && modelId ? `${modelId}\0${baseUrl}` : modelId;
+  if (!modelForApi || !modelId) {
     return failure(
       'no image-capable model is available for the vision bridge',
       parts,
@@ -308,7 +310,7 @@ export async function runVisionBridge(params: {
         : 'no usable image could be read',
       parts,
       omittedCount,
-      { modelId: model },
+      { modelId },
     );
   }
 
@@ -320,18 +322,18 @@ export async function runVisionBridge(params: {
   ];
   // We are about to send the image(s); disclose egress conservatively from here
   // on (success and every failure/cancel after this point).
-  const modelEndpoint = hostOf(selection.baseUrl);
+  const modelEndpoint = hostOf(baseUrl);
   const egress = {
     egressOccurred: true,
     ...(modelEndpoint && { modelEndpoint }),
   } as const;
 
   try {
-    debugLogger.debug(`calling ${model} for ${toConvert.length} image(s)`);
+    debugLogger.debug(`calling ${modelId} for ${toConvert.length} image(s)`);
     const { text } = await runSideQuery(config, {
       contents: requestContents,
       abortSignal: combinedSignal,
-      model,
+      model: modelForApi,
       systemInstruction: BRIDGE_SYSTEM_INSTRUCTION,
       purpose: 'vision-bridge',
       maxAttempts: 2,
@@ -347,12 +349,12 @@ export async function runVisionBridge(params: {
 
     const description = stripThinkTags(text ?? '');
     if (description.length === 0) {
-      debugLogger.warn(`${model} returned an empty description`);
+      debugLogger.warn(`${modelId} returned an empty description`);
       return failure(
         'the vision model returned no description',
         parts,
         omittedCount,
-        { modelId: model, ...egress },
+        { modelId, ...egress },
       );
     }
 
@@ -361,7 +363,7 @@ export async function runVisionBridge(params: {
     // log only metadata (model + length), never the raw text. Trace a wrong
     // primary-model answer via the length/model here, not the content.
     debugLogger.debug(
-      `vision bridge transcription via ${model} (${description.length} chars)`,
+      `vision bridge transcription via ${modelId} (${description.length} chars)`,
     );
 
     return {
@@ -373,7 +375,7 @@ export async function runVisionBridge(params: {
       parts: replaceImagesWithText(
         parts,
         buildInterpretationBlock(
-          model,
+          modelId,
           description,
           toConvert.length,
           omittedCount,
@@ -381,18 +383,18 @@ export async function runVisionBridge(params: {
       ),
       convertedCount: toConvert.length,
       omittedCount,
-      modelId: model,
+      modelId,
       ...egress,
     };
   } catch (error) {
     if (signal.aborted) {
-      debugLogger.debug(`conversion cancelled via ${model}`);
+      debugLogger.debug(`conversion cancelled via ${modelId}`);
       return {
         applied: false,
         status: 'skipped',
         convertedCount: 0,
         omittedCount,
-        modelId: model,
+        modelId,
         ...egress,
       };
     }
@@ -402,9 +404,9 @@ export async function runVisionBridge(params: {
       : error instanceof Error
         ? error.message
         : String(error);
-    debugLogger.warn(`conversion failed via ${model}: ${reason}`);
+    debugLogger.warn(`conversion failed via ${modelId}: ${reason}`);
     return failure(reason, parts, omittedCount, {
-      modelId: model,
+      modelId,
       // The timeout message is safe to show; an arbitrary provider error is not
       // (it can carry a signed URL or token), so keep it generic for the model.
       noteReason: timedOut ? reason : 'the vision model request failed',

@@ -1,10 +1,20 @@
-import { basename } from 'node:path';
-import type { ChannelConfig, DispatchMode, Envelope } from './types.js';
+import { basename, join } from 'node:path';
+import type {
+  ChannelConfig,
+  ChannelMemoryCallbacks,
+  ChannelMemoryTarget,
+  DispatchMode,
+  Envelope,
+  SessionTarget,
+} from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
 import { GroupGate } from './GroupGate.js';
+import { GroupHistoryStore } from './group-history-store.js';
+import type { GroupHistoryEntry } from './group-history-store.js';
 import { SenderGate } from './SenderGate.js';
 import { PairingStore } from './PairingStore.js';
 import { SessionRouter } from './SessionRouter.js';
+import { getGlobalQwenDir } from './paths.js';
 import {
   sanitizeSenderName,
   sanitizeQuotedText,
@@ -18,6 +28,8 @@ import type {
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
+import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
 
 /**
  * Max time /clear waits for a cancelled in-flight turn to wind down before
@@ -28,15 +40,44 @@ import type {
  * later is already invalidated.
  */
 export const CLEAR_CANCEL_TIMEOUT_MS = 3000;
+const GROUP_HISTORY_CONTEXT_MARKER =
+  '[Chat messages since your last reply - for context]';
+const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
+const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
+const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
+const LOOP_CANCEL_GRACE_MS = 5000;
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
   proxy?: string;
+  channelMemory?: ChannelMemoryCallbacks;
   /**
    * Set when a channel owns a supplied router and should consume bridge
    * events directly.
    */
   registerBridgeEvents?: boolean;
+  groupHistoryPath?: string;
+  loopController?: ChannelLoopController;
+}
+
+export interface ChannelLoopController {
+  create(input: ChannelLoopInput): Promise<ChannelLoop>;
+  createForTarget?(
+    input: ChannelLoopInput,
+    maxEnabledLoops: number,
+  ): Promise<ChannelLoop | undefined>;
+  listForTarget(
+    channelName: string,
+    target: SessionTarget,
+  ): Promise<ChannelLoop[]>;
+  disable(id: string): Promise<boolean>;
+  validateCron(cron: string): void;
+  nextFireTime?(job: ChannelLoop): Date;
+}
+
+export interface ChannelLoopPromptOptions {
+  timeoutMs?: number;
+  shouldContinue?: () => Promise<boolean>;
 }
 
 /** Handler for a slash command. Return true if handled, false to forward to agent. */
@@ -75,6 +116,9 @@ const PARSE_COMMAND_RE = new RegExp(
 );
 /** isSlashCommand: the first whitespace-delimited token alone must be a pure command token. */
 const COMMAND_TOKEN_RE = new RegExp(`^[${COMMAND_TOKEN_CHARS}]+(?:@\\S+)?$`);
+const LOOP_ADD_RE = /^"([^"]+)"\s+(.+)$/su;
+const MAX_LOOP_JOBS_PER_TARGET = 10;
+const MAX_LOOP_PROMPT_CHARS = 4000;
 
 /**
  * The command-providing surface of a bridge. AcpBridge runs a single agent and
@@ -89,6 +133,16 @@ interface AgentCommandsProvider {
   availableCommands?: AvailableCommand[];
 }
 
+function parseLoopAddArgs(
+  args: string,
+): { cron: string; prompt: string } | null {
+  const match = args.trim().match(LOOP_ADD_RE);
+  if (!match) return null;
+  const cron = match[1].trim();
+  const prompt = match[2].trim();
+  return cron && prompt ? { cron, prompt } : null;
+}
+
 export abstract class ChannelBase {
   protected config: ChannelConfig;
   protected bridge: ChannelAgentBridge;
@@ -98,6 +152,9 @@ export abstract class ChannelBase {
   protected name: string;
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
+  private readonly channelMemory?: ChannelMemoryCallbacks;
+  private groupHistory: GroupHistoryStore;
+  private readonly loopController?: ChannelLoopController;
   private instructedSessions: Set<string> = new Set();
   private commands: Map<string, CommandHandler> = new Map();
   /** Per-session promise chain to serialize prompt + send (followup mode). */
@@ -139,6 +196,16 @@ export abstract class ChannelBase {
     this.config = config;
     this.bridge = bridge;
     this.proxy = options?.proxy;
+    this.channelMemory = options?.channelMemory;
+    this.groupHistory = new GroupHistoryStore(
+      options?.groupHistoryPath ??
+        join(
+          getGlobalQwenDir(),
+          'channels',
+          `${encodeURIComponent(name)}-group-history.jsonl`,
+        ),
+    );
+    this.loopController = options?.loopController;
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
 
@@ -168,6 +235,26 @@ export abstract class ChannelBase {
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void;
 
+  supportsProactiveSend(): boolean {
+    return false;
+  }
+
+  protected supportsProactiveTarget(target: SessionTarget): boolean {
+    return target.threadId === undefined;
+  }
+
+  protected async pushProactive(
+    target: SessionTarget,
+    text: string,
+  ): Promise<void> {
+    if (target.threadId) {
+      throw new Error(
+        'Channel does not support proactive loop messages for threaded targets.',
+      );
+    }
+    await this.sendMessage(target.chatId, text);
+  }
+
   /** Replace the bridge instance (used after crash recovery restart). */
   setBridge(bridge: ChannelAgentBridge): void {
     if (this.registerBridgeEvents) {
@@ -177,6 +264,278 @@ export abstract class ChannelBase {
     this.bridge = bridge;
     if (this.registerBridgeEvents) {
       this.attachBridgeEvents(bridge);
+    }
+  }
+
+  async runLoopPrompt(
+    job: ChannelLoop,
+    options: ChannelLoopPromptOptions = {},
+  ): Promise<string | undefined> {
+    if (!this.supportsProactiveSend()) {
+      throw new Error('Channel does not support proactive loop messages.');
+    }
+    if (this.config.sessionScope === 'single') {
+      await this.loopController?.disable(job.id);
+      throw new Error(
+        'Loop messages are not supported with single session scope.',
+      );
+    }
+    if (job.channelName !== this.name) {
+      throw new Error(
+        `Loop ${job.id} belongs to ${job.channelName}, not ${this.name}.`,
+      );
+    }
+    if (!this.supportsProactiveTarget(job.target)) {
+      throw new Error(
+        'Channel does not support proactive loop messages for this chat target.',
+      );
+    }
+    if (!this.isStoredLoopTargetAuthorized(job.target, job.createdBy)) {
+      await this.loopController?.disable(job.id);
+      throw new Error(`Loop ${job.id} target is no longer authorized.`);
+    }
+
+    const sessionId = await this.router.resolve(
+      this.name,
+      job.target.senderId,
+      job.target.chatId,
+      job.target.threadId,
+      job.cwd,
+    );
+    const label = sanitizeQuotedText(job.label || job.id, 80);
+    const createdBy = sanitizeSenderName(job.createdBy || 'unknown');
+    let promptText = `[Loop "${label}" created by ${createdBy}]\n\n${sanitizePromptText(job.prompt)}`;
+    const shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
+
+    const prev = this.sessionQueues.get(sessionId) ?? Promise.resolve();
+    const generation = this.sessionGenerations.get(sessionId) ?? 0;
+    const current = prev.then(async (): Promise<string | undefined> => {
+      if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
+        process.stderr.write(
+          `[${this.name}] dropped loop ${job.id} for session ${sessionId}: session was cleared before it ran\n`,
+        );
+        throw new ChannelLoopSkippedError(
+          'loop dropped because session was cleared before it ran',
+        );
+      }
+      if (options.shouldContinue && !(await options.shouldContinue())) {
+        throw new ChannelLoopSkippedError(
+          'loop dropped because it is no longer enabled',
+        );
+      }
+      let shouldClaimSessionContext = false;
+      if (shouldPrependSessionContext) {
+        const context: string[] = [];
+        let sessionContextReady = true;
+        if (
+          this.channelMemory &&
+          this.isSenderAuthorizedForChannelMemory(job.target.senderId) &&
+          (!this.isSharedSessionTarget(job.target) ||
+            this.config.senderPolicy === 'allowlist')
+        ) {
+          try {
+            const memoryText = (
+              await this.channelMemory.readChannelMemory({
+                channelName: this.name,
+                chatId: job.target.chatId,
+                threadId: job.target.threadId,
+              })
+            ).trim();
+            if (memoryText) {
+              context.push(
+                `Channel memory for this chat:\n${sanitizePromptText(memoryText)}`,
+              );
+            }
+          } catch (error) {
+            process.stderr.write(
+              `[${this.name}] channel memory read failed for loop ${job.id} chat ${sanitizeLogText(job.target.chatId, 64)}: ${sanitizeLogText(this.channelMemoryErrorMessage(error), 200)}\n`,
+            );
+            this.instructedSessions.delete(sessionId);
+            sessionContextReady = false;
+          }
+        }
+        if (this.config.instructions) {
+          context.push(this.config.instructions);
+        }
+        if (context.length > 0) {
+          promptText = `${context.join('\n\n')}\n\n${promptText}`;
+        }
+        if (sessionContextReady) {
+          shouldClaimSessionContext = true;
+        }
+      }
+      if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
+        process.stderr.write(
+          `[${this.name}] dropped loop ${job.id} for session ${sessionId}: session was cleared before it ran\n`,
+        );
+        throw new ChannelLoopSkippedError(
+          'loop dropped because session was cleared before it ran',
+        );
+      }
+      if (shouldClaimSessionContext) {
+        this.instructedSessions.add(sessionId);
+      }
+
+      let doneResolve: () => void = () => {};
+      const done = new Promise<void>((resolve) => {
+        doneResolve = resolve;
+      });
+      const promptState: ActivePrompt = {
+        cancelled: false,
+        done,
+        resolve: doneResolve,
+        chatId: job.target.chatId,
+        messageId: job.id,
+      };
+      this.activePrompts.set(sessionId, promptState);
+      this.onPromptStart(job.target.chatId, sessionId);
+
+      const onChunk = (sid: string, chunk: string) => {
+        if (sid === sessionId && !promptState.cancelled) {
+          this.onResponseChunk(job.target.chatId, chunk, sessionId);
+        }
+      };
+      const promptBridge = this.bridge;
+      promptBridge.on('textChunk', onChunk);
+
+      try {
+        const response = await this.runLoopBridgePrompt(
+          promptBridge,
+          sessionId,
+          promptText,
+          promptState,
+          job.id,
+          options.timeoutMs,
+        );
+        if (promptState.cancelRequested && !promptState.cancelled) {
+          const cancelled = await promptState.cancelRequested;
+          if (cancelled) {
+            promptState.cancelled = true;
+          }
+        }
+        if (promptState.cancelled) {
+          throw new ChannelLoopSkippedError('loop cancelled before delivery');
+        }
+        if (options.shouldContinue && !(await options.shouldContinue())) {
+          throw new ChannelLoopSkippedError('loop dropped before delivery');
+        }
+        if (response) {
+          await this.pushProactive(job.target, response);
+        }
+        return response;
+      } finally {
+        promptBridge.off('textChunk', onChunk);
+        const stillCurrent = this.activePrompts.get(sessionId) === promptState;
+        if (!promptState.clearEvicted) {
+          try {
+            this.onPromptEnd(job.target.chatId, sessionId);
+          } catch (err) {
+            process.stderr.write(
+              `[${this.name}] onPromptEnd threw in loop ${job.id} for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+            );
+          }
+        }
+        if (stillCurrent) {
+          this.activePrompts.delete(sessionId);
+        }
+        promptState.resolve();
+        const buffer = this.collectBuffers.get(sessionId);
+        if (stillCurrent && buffer && buffer.length > 0) {
+          this.collectBuffers.delete(sessionId);
+          const lost = buffer.length;
+          const coalesced = buffer.map((b) => b.text).join('\n\n');
+          const lastEnvelope = buffer[buffer.length - 1]!.envelope;
+          const syntheticEnvelope: Envelope = {
+            ...lastEnvelope,
+            text: coalesced,
+            alreadyPrefixed: true,
+            referencedText: undefined,
+            attachments: undefined,
+            imageBase64: undefined,
+            imageMimeType: undefined,
+          };
+          this.handleInbound(syntheticEnvelope).catch((err) => {
+            process.stderr.write(
+              `[${this.name}] dropped ${lost} buffered message(s) after loop ${job.id} for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
+                err instanceof Error ? err.message : String(err)
+              }\n`,
+            );
+          });
+        }
+      }
+    });
+    this.sessionQueues.set(
+      sessionId,
+      current.then(() => undefined).catch(() => {}),
+    );
+    return current;
+  }
+
+  private async runLoopBridgePrompt(
+    promptBridge: ChannelAgentBridge,
+    sessionId: string,
+    promptText: string,
+    promptState: ActivePrompt,
+    jobId: string,
+    timeoutMs: number | undefined,
+  ): Promise<string> {
+    const prompt = promptBridge.prompt(sessionId, promptText, {});
+    prompt.catch(() => {});
+    if (timeoutMs === undefined) {
+      return prompt;
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        prompt,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(new Error('loop timed out'));
+          }, timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } catch (err) {
+      if (err instanceof Error && err.message === 'loop timed out') {
+        promptState.cancelled = true;
+        await this.cancelTimedOutLoopPrompt(promptBridge, sessionId, jobId);
+      }
+      throw err;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private async cancelTimedOutLoopPrompt(
+    promptBridge: ChannelAgentBridge,
+    sessionId: string,
+    jobId: string,
+  ): Promise<void> {
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const cancelled = await Promise.race([
+        promptBridge.cancelSession(sessionId).then(() => true),
+        new Promise<boolean>((resolve) => {
+          graceTimer = setTimeout(() => resolve(false), LOOP_CANCEL_GRACE_MS);
+          graceTimer.unref?.();
+        }),
+      ]);
+      if (!cancelled) {
+        this.router.removeSessionId(sessionId);
+        this.instructedSessions.delete(sessionId);
+        process.stderr.write(
+          `[${this.name}] retired timed out loop ${jobId} session ${sessionId} after cancel did not settle\n`,
+        );
+      }
+    } catch (cancelErr) {
+      process.stderr.write(
+        `[${this.name}] cancelSession failed for timed out loop ${jobId} in session ${sessionId}: ${
+          cancelErr instanceof Error ? cancelErr.message : cancelErr
+        }\n`,
+      );
+    } finally {
+      clearTimeout(graceTimer);
     }
   }
 
@@ -322,6 +681,7 @@ export abstract class ChannelBase {
         envelope.chatId,
         envelope.threadId,
       );
+      this.clearPendingGroupHistory(envelope);
       if (removedIds.length > 0) {
         for (const id of removedIds) {
           // Audit: clearing a SHARED session wipes the conversation for every
@@ -499,6 +859,129 @@ export abstract class ChannelBase {
       return true;
     });
 
+    this.registerCommand('remember-channel', async (envelope, args) => {
+      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
+        return true;
+      }
+      if (envelope.isGroup) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Channel memory cannot be changed in group chats.',
+        );
+        return true;
+      }
+      if (args.trim() === '') {
+        await this.sendMessage(
+          envelope.chatId,
+          'Usage: /remember-channel <text>',
+        );
+        return true;
+      }
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) {
+        return true;
+      }
+      try {
+        await channelMemory.appendChannelMemory(
+          this.channelMemoryTarget(envelope),
+          args.trim(),
+        );
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError('save', envelope, message);
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to save channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return true;
+      }
+      this.invalidateSessionContext(envelope);
+      await this.sendMessage(envelope.chatId, 'Channel memory updated.');
+      return true;
+    });
+
+    this.registerCommand('channel-memory', async (envelope) => {
+      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
+        return true;
+      }
+      if (envelope.isGroup) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Channel memory cannot be shown in group chats.',
+        );
+        return true;
+      }
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) {
+        return true;
+      }
+      let text: string;
+      try {
+        text = (
+          await channelMemory.readChannelMemory(
+            this.channelMemoryTarget(envelope),
+          )
+        ).trim();
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError('read', envelope, message);
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to read channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return true;
+      }
+      await this.sendMessage(
+        envelope.chatId,
+        text === '' ? 'No channel memory saved.' : sanitizePromptText(text),
+      );
+      return true;
+    });
+
+    this.registerCommand('forget-channel', async (envelope, args) => {
+      if (!(await this.ensureChannelMemoryAuthorized(envelope))) {
+        return true;
+      }
+      if (envelope.isGroup) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Channel memory cannot be changed in group chats.',
+        );
+        return true;
+      }
+      if (args.toLowerCase() !== 'confirm') {
+        await this.sendMessage(
+          envelope.chatId,
+          'This clears channel memory for this chat. Re-send with "confirm" (e.g. /forget-channel confirm) to proceed.',
+        );
+        return true;
+      }
+      const channelMemory = await this.getChannelMemory(envelope);
+      if (!channelMemory) {
+        return true;
+      }
+      let result: { changed: boolean };
+      try {
+        result = await channelMemory.clearChannelMemory(
+          this.channelMemoryTarget(envelope),
+        );
+      } catch (error) {
+        const message = this.channelMemoryErrorMessage(error);
+        this.logChannelMemoryError('clear', envelope, message);
+        await this.sendMessage(
+          envelope.chatId,
+          `Failed to clear channel memory: ${this.channelMemoryUserErrorMessage()}`,
+        );
+        return true;
+      }
+      this.invalidateSessionContext(envelope);
+      await this.sendMessage(
+        envelope.chatId,
+        result.changed ? 'Channel memory cleared.' : 'No channel memory saved.',
+      );
+      return true;
+    });
+
     this.registerCommand('help', async (envelope) => {
       const lines = [
         'Commands:',
@@ -508,6 +991,9 @@ export abstract class ChannelBase {
           : '/clear — Clear your session (aliases: /reset, /new)',
         '/who — Show current session & workspace',
         '/status — Show session info',
+        '/remember-channel <text> — Save memory for this chat',
+        '/channel-memory — Show memory for this chat',
+        '/forget-channel confirm — Clear memory for this chat',
       ];
 
       // Platform-specific commands (registered by adapters, not shared ones)
@@ -518,6 +1004,9 @@ export abstract class ChannelBase {
         'new',
         'who',
         'status',
+        'remember-channel',
+        'channel-memory',
+        'forget-channel',
       ]);
       const platformCmds = [...this.commands.keys()].filter(
         (c) => !sharedCmds.has(c),
@@ -574,6 +1063,284 @@ export abstract class ChannelBase {
       await this.sendMessage(envelope.chatId, lines.join('\n'));
       return true;
     });
+
+    this.registerCommand('loop', async (envelope, args) =>
+      this.handleLoopCommand(envelope, args),
+    );
+  }
+
+  private async handleLoopCommand(
+    envelope: Envelope,
+    args: string,
+  ): Promise<boolean> {
+    if (!this.loopController) {
+      await this.sendMessage(envelope.chatId, 'Loops are not available.');
+      return true;
+    }
+    if (!this.isAuthorizedForSharedSession(envelope)) {
+      await this.sendMessage(
+        envelope.chatId,
+        'Only authorized members can use loops in this shared session.',
+      );
+      return true;
+    }
+
+    const [subcommand = '', ...rest] = args.trim().split(/\s+/u);
+    switch (subcommand.toLowerCase()) {
+      case 'add':
+        return this.handleLoopAdd(envelope, rest.join(' '));
+      case 'list':
+        return this.handleLoopList(envelope);
+      case 'inspect':
+        return this.handleLoopInspect(envelope, rest[0]);
+      case 'cancel':
+        return this.handleLoopCancel(envelope, rest[0]);
+      default:
+        await this.sendMessage(
+          envelope.chatId,
+          'Usage: /loop add "<cron>" <prompt> | /loop list | /loop inspect <id> | /loop cancel <id>',
+        );
+        return true;
+    }
+  }
+
+  private async handleLoopAdd(
+    envelope: Envelope,
+    args: string,
+  ): Promise<boolean> {
+    if (!this.loopController) return true;
+    if (!this.supportsProactiveSend()) {
+      await this.sendMessage(
+        envelope.chatId,
+        'This channel does not support proactive loop messages.',
+      );
+      return true;
+    }
+    if (this.config.sessionScope === 'single') {
+      await this.sendMessage(
+        envelope.chatId,
+        'Loops are not supported when sessionScope is single.',
+      );
+      return true;
+    }
+
+    const parsed = parseLoopAddArgs(args);
+    if (!parsed) {
+      await this.sendMessage(
+        envelope.chatId,
+        'Usage: /loop add "<cron>" <prompt>',
+      );
+      return true;
+    }
+
+    try {
+      this.loopController.validateCron(parsed.cron);
+    } catch (err) {
+      await this.sendMessage(
+        envelope.chatId,
+        `Invalid cron expression: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return true;
+    }
+
+    const target = this.loopTargetFromEnvelope(envelope);
+    if (!this.supportsProactiveTarget(target)) {
+      await this.sendMessage(
+        envelope.chatId,
+        'This channel does not support proactive loop messages for this chat target.',
+      );
+      return true;
+    }
+    const prompt = sanitizePromptText(parsed.prompt.trim());
+    if (Array.from(prompt).length > MAX_LOOP_PROMPT_CHARS) {
+      await this.sendMessage(
+        envelope.chatId,
+        `Loop prompt is too long; keep it under ${MAX_LOOP_PROMPT_CHARS} characters.`,
+      );
+      return true;
+    }
+    const input: ChannelLoopInput = {
+      channelName: this.name,
+      target,
+      cwd: this.config.cwd,
+      cron: parsed.cron,
+      prompt,
+      label: truncateLoopLabel(prompt),
+      recurring: true,
+      createdBy: sanitizeSenderName(
+        envelope.senderName || envelope.senderId || 'unknown',
+      ),
+    };
+    let job: ChannelLoop | undefined;
+    if (this.loopController.createForTarget) {
+      job = await this.loopController.createForTarget(
+        input,
+        MAX_LOOP_JOBS_PER_TARGET,
+      );
+    } else {
+      const existingJobs = await this.loopController.listForTarget(
+        this.name,
+        target,
+      );
+      if (
+        existingJobs.filter((existingJob) => existingJob.enabled).length <
+        MAX_LOOP_JOBS_PER_TARGET
+      ) {
+        job = await this.loopController.create(input);
+      }
+    }
+    if (!job) {
+      await this.sendMessage(
+        envelope.chatId,
+        `Too many loops for this chat. Cancel an existing loop before adding another.`,
+      );
+      return true;
+    }
+
+    await this.sendMessage(envelope.chatId, `Loop ${job.id}: ${job.cron}`);
+    return true;
+  }
+
+  private async handleLoopList(envelope: Envelope): Promise<boolean> {
+    if (!this.loopController) return true;
+    const jobs = await this.loopController.listForTarget(
+      this.name,
+      this.loopTargetFromEnvelope(envelope),
+    );
+    if (jobs.length === 0) {
+      await this.sendMessage(envelope.chatId, 'No loops.');
+      return true;
+    }
+    await this.sendMessage(
+      envelope.chatId,
+      jobs.map((job) => this.formatLoopListLine(job)).join('\n'),
+    );
+    return true;
+  }
+
+  private async handleLoopInspect(
+    envelope: Envelope,
+    id: string | undefined,
+  ): Promise<boolean> {
+    if (!this.loopController) return true;
+    if (!id) {
+      await this.sendMessage(envelope.chatId, 'Usage: /loop inspect <id>');
+      return true;
+    }
+    const jobs = await this.loopController.listForTarget(
+      this.name,
+      this.loopTargetFromEnvelope(envelope),
+    );
+    const job = jobs.find((candidate) => candidate.id === id);
+    if (!job) {
+      await this.sendMessage(envelope.chatId, `No loop ${id}.`);
+      return true;
+    }
+
+    const lines = [
+      `Loop ${job.id}`,
+      `Status: ${job.enabled ? 'enabled' : 'disabled'}, last=${this.lastLoopStatus(job)}`,
+      `Cron: ${job.cron}`,
+      `Next: ${this.formatNextFireTime(job)}`,
+      `Runs: ${job.runCount}`,
+      `Created by: ${job.createdBy}`,
+      `Created: ${job.createdAt}`,
+    ];
+    if (job.lastFinishedAt) {
+      lines.push(`Last finished: ${job.lastFinishedAt}`);
+    }
+    if (job.lastError) {
+      lines.push(`Last error: ${job.lastError}`);
+    }
+    if (job.lastResultPreview) {
+      lines.push(`Last result: ${job.lastResultPreview}`);
+    }
+    lines.push(`Prompt: ${job.prompt}`);
+    await this.sendMessage(envelope.chatId, lines.join('\n'));
+    return true;
+  }
+
+  private formatLoopListLine(job: ChannelLoop): string {
+    const fields = [
+      job.id,
+      job.cron,
+      job.enabled ? 'enabled' : 'disabled',
+      `last=${this.lastLoopStatus(job)}`,
+      `next=${this.formatNextFireTime(job)}`,
+      `runs=${job.runCount}`,
+    ];
+    if (job.label) fields.push(job.label);
+    return fields.join(' ');
+  }
+
+  private lastLoopStatus(job: ChannelLoop): string {
+    if (job.runningSince) return 'running';
+    return job.lastStatus ?? 'never';
+  }
+
+  private formatNextFireTime(job: ChannelLoop): string {
+    try {
+      return this.loopController?.nextFireTime?.(job).toISOString() ?? 'n/a';
+    } catch {
+      return 'invalid cron';
+    }
+  }
+
+  private async handleLoopCancel(
+    envelope: Envelope,
+    id: string | undefined,
+  ): Promise<boolean> {
+    if (!this.loopController) return true;
+    if (!id) {
+      await this.sendMessage(envelope.chatId, 'Usage: /loop cancel <id>');
+      return true;
+    }
+    const jobs = await this.loopController.listForTarget(
+      this.name,
+      this.loopTargetFromEnvelope(envelope),
+    );
+    const match = jobs.find((job) => job.id === id);
+    const disabled = match ? await this.loopController.disable(id) : false;
+    await this.sendMessage(
+      envelope.chatId,
+      disabled ? `Cancelled loop ${id}.` : `No loop ${id}.`,
+    );
+    return true;
+  }
+
+  private loopTargetFromEnvelope(envelope: Envelope): SessionTarget {
+    return {
+      channelName: this.name,
+      senderId: envelope.senderId,
+      chatId: envelope.chatId,
+      threadId: envelope.threadId,
+      isGroup: envelope.isGroup === true,
+    };
+  }
+
+  private isStoredLoopTargetAuthorized(
+    target: SessionTarget,
+    senderName: string,
+  ): boolean {
+    if (target.isGroup === undefined) {
+      return false;
+    }
+    const envelope: Envelope = {
+      channelName: this.name,
+      senderId: target.senderId,
+      senderName,
+      chatId: target.chatId,
+      text: '',
+      threadId: target.threadId,
+      isGroup: target.isGroup === true,
+      isMentioned: true,
+      isReplyToBot: true,
+    };
+    return (
+      this.groupGate.check(envelope).allowed &&
+      this.gate.isAllowed(target.senderId) &&
+      this.isAuthorizedForSharedSession(envelope)
+    );
   }
 
   /** Check if a message text matches a registered local command. */
@@ -594,6 +1361,112 @@ export abstract class ChannelBase {
       : undefined;
   }
 
+  private channelMemoryTarget(envelope: Envelope): ChannelMemoryTarget {
+    return {
+      channelName: this.name,
+      chatId: envelope.chatId,
+      threadId: envelope.threadId,
+    };
+  }
+
+  private invalidateSessionContext(envelope: Envelope): void {
+    const sessionId = this.router.getSession(
+      this.name,
+      envelope.senderId,
+      envelope.chatId,
+      envelope.threadId,
+    );
+    if (sessionId) {
+      this.instructedSessions.delete(sessionId);
+    }
+  }
+
+  private dropQueuedTurnIfStale(
+    sessionId: string,
+    generation: number,
+    envelope: Envelope,
+  ): boolean {
+    if ((this.sessionGenerations.get(sessionId) ?? 0) === generation) {
+      return false;
+    }
+
+    // Surface the drop — otherwise an unanswered queued message vanishes
+    // silently, making "my message was never answered" undiagnosable.
+    // envelope.text is attacker-controlled, so neutralize it with the shared
+    // log sanitizer: it renders newlines visibly and strips the C0/DEL controls
+    // PLUS PROMPT_UNSAFE_INVISIBLES — the C1 block (notably NEL U+0085, a line
+    // break that could forge an extra [channel] log line), the Unicode line/
+    // paragraph separators U+2028/U+2029, and the bidi overrides — any of which
+    // would otherwise inject, overwrite, or reorder an operator's audit line.
+    // Same helper as the QQ audit log, so the defense can't drift between sites.
+    const loggedText = sanitizeLogText(envelope.text, 80);
+    process.stderr.write(
+      `[${this.name}] dropped queued turn from ${envelope.senderId} for session ${sessionId}: session was cleared before it ran (text: ${loggedText})\n`,
+    );
+    return true;
+  }
+
+  private isAuthorizedForChannelMemory(envelope: Envelope): boolean {
+    return this.isSenderAuthorizedForChannelMemory(envelope.senderId);
+  }
+
+  private isSenderAuthorizedForChannelMemory(senderId: string): boolean {
+    return (
+      this.config.allowedUsers.length > 0 &&
+      this.config.allowedUsers.includes(senderId)
+    );
+  }
+
+  private async ensureChannelMemoryAuthorized(
+    envelope: Envelope,
+  ): Promise<boolean> {
+    if (!this.isAuthorizedForChannelMemory(envelope)) {
+      await this.sendMessage(
+        envelope.chatId,
+        'Only authorized members can manage channel memory.',
+      );
+      return false;
+    }
+    return true;
+  }
+
+  private async getChannelMemory(
+    envelope: Envelope,
+  ): Promise<ChannelMemoryCallbacks | undefined> {
+    if (!this.channelMemory) {
+      await this.sendMessage(
+        envelope.chatId,
+        'Channel memory is not configured for this channel.',
+      );
+      return undefined;
+    }
+    return this.channelMemory;
+  }
+
+  private channelMemoryErrorMessage(error: unknown): string {
+    return error instanceof Error ? error.message : String(error);
+  }
+
+  private channelMemoryUserErrorMessage(): string {
+    return 'An error occurred while accessing channel memory.';
+  }
+
+  private logChannelMemoryError(
+    action: 'save' | 'read' | 'clear',
+    envelope: Envelope,
+    message: string,
+  ): void {
+    process.stderr.write(
+      `[${this.name}] channel memory ${action} failed for sender=${sanitizeLogText(
+        envelope.senderId,
+        80,
+      )} chat=${sanitizeLogText(envelope.chatId, 80)} thread=${sanitizeLogText(
+        envelope.threadId ?? '',
+        80,
+      )}: ${sanitizeLogText(message, 200)}\n`,
+    );
+  }
+
   /**
    * Whether the resolved session is SHARED across senders. `single` collapses
    * the whole channel to one `__single__` session for EVERY sender — group OR
@@ -603,9 +1476,13 @@ export abstract class ChannelBase {
    * and the host-shell (`!`) gate.
    */
   private isSharedSession(envelope: Envelope): boolean {
+    return this.isSharedSessionTarget(envelope);
+  }
+
+  private isSharedSessionTarget(target: { isGroup?: boolean }): boolean {
     return (
       this.config.sessionScope === 'single' ||
-      (envelope.isGroup && this.config.sessionScope === 'thread')
+      (target.isGroup === true && this.config.sessionScope === 'thread')
     );
   }
 
@@ -795,10 +1672,126 @@ export abstract class ChannelBase {
     return bridge.availableCommands ?? [];
   }
 
+  private groupHistoryKey(envelope: Envelope): string {
+    return JSON.stringify([
+      this.name,
+      envelope.chatId,
+      envelope.threadId ?? null,
+    ]);
+  }
+
+  private groupHistoryLimit(envelope: Envelope): number {
+    if (!envelope.isGroup) {
+      return 0;
+    }
+    const groupCfg = this.config.groups[envelope.chatId];
+    const wildcardGroupCfg = this.config.groups['*'];
+    const configured =
+      groupCfg?.groupHistoryLimit ??
+      wildcardGroupCfg?.groupHistoryLimit ??
+      this.config.groupHistoryLimit ??
+      0;
+    if (!Number.isFinite(configured) || configured <= 0) {
+      return 0;
+    }
+    return Math.floor(configured);
+  }
+
+  private recordPendingGroupHistory(envelope: Envelope): void {
+    const limit = this.groupHistoryLimit(envelope);
+    if (limit <= 0 || envelope.text.trim().length === 0) {
+      return;
+    }
+    const senderId = truncateGroupHistoryField(envelope.senderId);
+    if (!this.gate.isAllowed(senderId)) {
+      return;
+    }
+
+    const entry: GroupHistoryEntry = {
+      senderId,
+      senderName: truncateGroupHistoryField(envelope.senderName),
+      text: envelope.text.slice(0, GROUP_HISTORY_ENTRY_TEXT_LIMIT),
+      messageId:
+        envelope.messageId === undefined
+          ? undefined
+          : truncateGroupHistoryField(envelope.messageId),
+      timestamp: Date.now(),
+    };
+    try {
+      this.groupHistory.record(this.groupHistoryKey(envelope), entry, limit);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to record group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private drainPendingGroupHistory(envelope: Envelope): GroupHistoryEntry[] {
+    const limit = this.groupHistoryLimit(envelope);
+    if (limit <= 0) {
+      return [];
+    }
+    try {
+      return this.groupHistory.drain(this.groupHistoryKey(envelope), limit);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to drain group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
+      return [];
+    }
+  }
+
+  private clearPendingGroupHistory(envelope: Envelope): void {
+    if (!envelope.isGroup && this.config.sessionScope !== 'single') {
+      return;
+    }
+    try {
+      if (this.config.sessionScope === 'single') {
+        this.groupHistory.clearAll();
+      } else {
+        this.groupHistory.clear(this.groupHistoryKey(envelope));
+      }
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] failed to clear group history for chat ${sanitizeLogText(envelope.chatId, 64)}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private prependGroupHistoryContext(
+    promptText: string,
+    entries: GroupHistoryEntry[],
+  ): string {
+    if (entries.length === 0) {
+      return promptText;
+    }
+
+    const lines = entries.filter((entry) =>
+      this.gate.isAllowed(entry.senderId),
+    );
+    if (lines.length === 0) {
+      return promptText;
+    }
+
+    const formatted = lines.map((entry) => {
+      const who = sanitizeSenderName(entry.senderName || entry.senderId);
+      const text = sanitizeQuotedText(
+        entry.text,
+        GROUP_HISTORY_ENTRY_TEXT_LIMIT,
+      );
+      return `- [${who}] ${text}`;
+    });
+
+    return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
+  }
+
   async handleInbound(envelope: Envelope): Promise<void> {
     // 1. Group gate: policy + allowlist + mention gating
     const groupResult = this.groupGate.check(envelope);
     if (!groupResult.allowed) {
+      if (groupResult.reason === 'mention_required') {
+        this.recordPendingGroupHistory(envelope);
+      }
       return; // silently drop — no pairing, no reply
     }
 
@@ -874,7 +1867,7 @@ export abstract class ChannelBase {
       const bridgeShellCommand = this.bridge.shellCommand;
       if (cmd && bridgeShellCommand) {
         try {
-          const result = await this.bridge.shellCommand!(sessionId, cmd);
+          const result = await bridgeShellCommand(sessionId, cmd);
           const longestRun = Math.max(
             0,
             ...Array.from(
@@ -904,6 +1897,9 @@ export abstract class ChannelBase {
       }
     }
 
+    const recognizedSlashCommand =
+      this.isSlashCommand(envelope.text) &&
+      this.isRecognizedCommand(envelope.text, sessionId);
     // Prepend referenced (quoted) message text for reply context
     let promptText = envelope.text;
 
@@ -931,10 +1927,7 @@ export abstract class ChannelBase {
     if (
       (envelope.isGroup || this.config.sessionScope === 'single') &&
       !envelope.alreadyPrefixed &&
-      !(
-        this.isSlashCommand(envelope.text) &&
-        this.isRecognizedCommand(envelope.text, sessionId)
-      )
+      !recognizedSlashCommand
     ) {
       const who = sanitizeSenderName(
         envelope.senderName || envelope.senderId || 'unknown',
@@ -985,12 +1978,6 @@ export abstract class ChannelBase {
       if (filePaths.length > 0) {
         promptText = promptText + '\n\n' + filePaths.join('\n');
       }
-    }
-
-    // Prepend channel instructions on first message of a session
-    if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
-      promptText = `${this.config.instructions}\n\n${promptText}`;
-      this.instructedSessions.add(sessionId);
     }
 
     // Resolve dispatch mode: per-group override → channel config → default
@@ -1105,6 +2092,11 @@ export abstract class ChannelBase {
       }
     }
 
+    let shouldPrependSessionContext = !this.instructedSessions.has(sessionId);
+    if (shouldPrependSessionContext) {
+      this.instructedSessions.add(sessionId);
+    }
+
     // Run the prompt with per-session serialization. followup AND steer both chain
     // onto the existing queue tail; steer additionally best-effort cancelled the
     // running turn above so the tail resolves sooner. Chaining (rather than seeding
@@ -1125,21 +2117,61 @@ export abstract class ChannelBase {
       clearTimeout(steerWatchdog);
       // A /clear (or reset/new) while we were queued bumps the generation; the
       // captured session is cleared, so don't run the prompt against it.
-      if ((this.sessionGenerations.get(sessionId) ?? 0) !== generation) {
-        // Surface the drop — otherwise an unanswered queued message vanishes
-        // silently, making "my message was never answered" undiagnosable.
-        // envelope.text is attacker-controlled, so neutralize it with the shared
-        // log sanitizer: it renders newlines visibly and strips the C0/DEL controls
-        // PLUS PROMPT_UNSAFE_INVISIBLES — the C1 block (notably NEL U+0085, a line
-        // break that could forge an extra [channel] log line), the Unicode line/
-        // paragraph separators U+2028/U+2029, and the bidi overrides — any of which
-        // would otherwise inject, overwrite, or reorder an operator's audit line.
-        // Same helper as the QQ audit log, so the defense can't drift between sites.
-        const loggedText = sanitizeLogText(envelope.text, 80);
-        process.stderr.write(
-          `[${this.name}] dropped queued turn from ${envelope.senderId} for session ${sessionId}: session was cleared before it ran (text: ${loggedText})\n`,
-        );
+      if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
         return;
+      }
+      if (
+        !shouldPrependSessionContext &&
+        !this.instructedSessions.has(sessionId)
+      ) {
+        shouldPrependSessionContext = true;
+        this.instructedSessions.add(sessionId);
+      }
+      const sessionContext: string[] = [];
+      if (shouldPrependSessionContext) {
+        let memoryText: string | undefined;
+        if (
+          this.channelMemory &&
+          this.isAuthorizedForChannelMemory(envelope) &&
+          (!this.isSharedSession(envelope) ||
+            this.config.senderPolicy === 'allowlist')
+        ) {
+          try {
+            memoryText = (
+              await this.channelMemory.readChannelMemory(
+                this.channelMemoryTarget(envelope),
+              )
+            )?.trim();
+          } catch (error) {
+            this.logChannelMemoryError(
+              'read',
+              envelope,
+              this.channelMemoryErrorMessage(error),
+            );
+            this.instructedSessions.delete(sessionId);
+          }
+        }
+        if (memoryText) {
+          sessionContext.push(
+            `Channel memory for this chat:\n${sanitizePromptText(memoryText)}`,
+          );
+        }
+        if (this.config.instructions) {
+          sessionContext.push(this.config.instructions);
+        }
+      }
+      if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
+        return;
+      }
+      const groupHistoryEntries = recognizedSlashCommand
+        ? []
+        : this.drainPendingGroupHistory(envelope);
+      let promptToSend = this.prependGroupHistoryContext(
+        promptText,
+        groupHistoryEntries,
+      );
+      if (sessionContext.length > 0) {
+        promptToSend = `${sessionContext.join('\n\n')}\n\n${promptToSend}`;
       }
       // Register this prompt as active
       let doneResolve: () => void = () => {};
@@ -1180,13 +2212,16 @@ export abstract class ChannelBase {
       promptBridge.on('textChunk', onChunk);
 
       try {
-        const response = await promptBridge.prompt(sessionId, promptText, {
+        const response = await promptBridge.prompt(sessionId, promptToSend, {
           imageBase64,
           imageMimeType,
         });
 
         if (promptState.cancelRequested && !promptState.cancelled) {
-          promptState.cancelled = await promptState.cancelRequested;
+          const cancelled = await promptState.cancelRequested;
+          if (cancelled) {
+            promptState.cancelled = true;
+          }
         }
 
         // If cancelled, skip sending the response
@@ -1306,4 +2341,13 @@ export abstract class ChannelBase {
       );
     }
   }
+}
+
+function truncateGroupHistoryField(value: string): string {
+  return value.slice(0, GROUP_HISTORY_ENTRY_METADATA_LIMIT);
+}
+
+function truncateLoopLabel(prompt: string): string {
+  const chars = Array.from(prompt);
+  return chars.length > 60 ? `${chars.slice(0, 57).join('')}...` : prompt;
 }

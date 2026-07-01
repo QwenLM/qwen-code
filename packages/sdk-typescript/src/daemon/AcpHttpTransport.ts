@@ -19,7 +19,7 @@ import {
 import {
   matchRoute,
   synthesizeResponse,
-  jsonRpcErrorToHttpStatus,
+  jsonRpcErrorToHttpStatusWithData,
   isRecord,
   composeAbortSignals,
   mergeHeaders,
@@ -284,7 +284,10 @@ export class AcpHttpTransport implements DaemonTransport {
       const httpStatus =
         isRecord(errorData) && typeof errorData['httpStatus'] === 'number'
           ? errorData['httpStatus']
-          : jsonRpcErrorToHttpStatus(response.error.code);
+          : jsonRpcErrorToHttpStatusWithData(
+              response.error.code,
+              response.error.data,
+            );
       return synthesizeResponse(httpStatus, {
         error: response.error.message,
         ...(response.error.data != null ? { data: response.error.data } : {}),

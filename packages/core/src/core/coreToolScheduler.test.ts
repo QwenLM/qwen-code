@@ -60,6 +60,8 @@ import { WriteFileTool } from '../tools/write-file.js';
 import { ShellTool, ShellToolInvocation } from '../tools/shell.js';
 import type { ShellToolParams } from '../tools/shell.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 type ToolSpanRecord = {
   name: string;
@@ -5861,6 +5863,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
     tool: MockTool,
     onAllToolCallsComplete: ReturnType<typeof vi.fn>,
     onToolCallsUpdate: ReturnType<typeof vi.fn>,
+    options: { sdkMode?: boolean } = {},
   ) {
     const mockToolRegistry = {
       getTool: () => tool,
@@ -5882,6 +5885,7 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.PLAN,
+      getSdkMode: () => options.sdkMode ?? false,
       getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({
         model: 'test-model',
@@ -6053,8 +6057,83 @@ describe('CoreToolScheduler plan mode with ask_user_question', () => {
       expect(completedCalls[0].response.resultDisplay).toBe(
         'Plan mode blocked a non-read-only tool call.',
       );
+      expect(
+        JSON.stringify(completedCalls[0].response.responseParts),
+      ).toContain('exit_plan_mode tool');
     }
   });
+
+  it.each([
+    {
+      label: 'subagents',
+      promptId: 'prompt-plan-subagent-blocked',
+      run: (schedule: () => Promise<void>) =>
+        runWithAgentContext('agent-1', schedule),
+    },
+    {
+      label: 'teammates',
+      promptId: 'prompt-plan-teammate-blocked',
+      run: (schedule: () => Promise<void>) =>
+        runWithTeammateIdentity(
+          {
+            agentId: 'agent@test',
+            agentName: 'agent',
+            teamName: 'test',
+            isTeamLead: false,
+          },
+          schedule,
+        ),
+    },
+    {
+      label: 'SDK callers',
+      promptId: 'prompt-plan-sdk-blocked',
+      schedulerOptions: { sdkMode: true },
+      run: (schedule: () => Promise<void>) => schedule(),
+    },
+  ])(
+    'should tell $label to return the plan directly when plan mode blocks a tool',
+    async ({ promptId, run, schedulerOptions }) => {
+      const editTool = new MockTool({
+        name: 'write_file',
+        getDefaultPermission: MOCK_TOOL_GET_DEFAULT_PERMISSION,
+        getConfirmationDetails: MOCK_TOOL_GET_CONFIRMATION_DETAILS,
+      });
+      const onAllToolCallsComplete = vi.fn();
+      const onToolCallsUpdate = vi.fn();
+      const scheduler = createPlanModeScheduler(
+        editTool,
+        onAllToolCallsComplete,
+        onToolCallsUpdate,
+        schedulerOptions,
+      );
+
+      const abortController = new AbortController();
+      const request = {
+        callId: '1',
+        name: 'write_file',
+        args: {},
+        isClientInitiated: false,
+        prompt_id: promptId,
+      };
+
+      await run(() => scheduler.schedule([request], abortController.signal));
+
+      await vi.waitFor(() => {
+        expect(onAllToolCallsComplete).toHaveBeenCalled();
+      });
+
+      const completedCalls = onAllToolCallsComplete.mock
+        .calls[0][0] as ToolCall[];
+      expect(completedCalls[0].status).toBe('error');
+      if (completedCalls[0].status === 'error') {
+        const responseText = JSON.stringify(
+          completedCalls[0].response.responseParts,
+        );
+        expect(responseText).toContain('Present your plan directly');
+        expect(responseText).not.toContain('exit_plan_mode tool');
+      }
+    },
+  );
 
   it('should allow info confirmation tools in plan mode after approval', async () => {
     const onConfirmSpy = vi.fn().mockResolvedValue(undefined);
@@ -8157,6 +8236,7 @@ describe('CoreToolScheduler telemetry spans', () => {
       getUsageStatisticsEnabled: () => true,
       getDebugMode: () => false,
       getApprovalMode: () => ApprovalMode.PLAN,
+      getSdkMode: () => false,
       getPermissionsAllow: () => [],
       getContentGeneratorConfig: () => ({}),
       getShellExecutionConfig: () => ({
