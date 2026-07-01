@@ -241,7 +241,7 @@ export class QQChannel extends ChannelBase {
                 })
                 .catch((err) => {
                   process.stderr.write(`[QQ:${this.name}] Cron flush send error: ${err}\n`);
-                  // Keep the entry on failure so text isn't lost
+                  entry!.buffer = toFlush + (entry!.buffer || '');
                 });
               return; // deletion is handled in .then
             }
@@ -1336,7 +1336,7 @@ export class QQChannel extends ChannelBase {
         d: {
           token: `QQBot ${this.accessToken}`,
           intents:
-            Intent.C2C_MESSAGE | Intent.GROUP_AT_MESSAGE | Intent.GROUP_MESSAGE,
+            Intent.C2C_MESSAGE | Intent.GROUP_AT_MESSAGE | (this.qqConfig.groupAllPolicy !== 'log' ? Intent.GROUP_MESSAGE : 0),
           shard: [0, 1],
           properties: {},
         },
