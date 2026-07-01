@@ -172,6 +172,16 @@ export function attachCdpClient(
     }
   };
 
+  link.onAttachFailure = (reason: string) => {
+    log(`qwen serve: /cdp attach failed (${reason}); closing puppeteer socket`);
+    dispose(`cdp_attach failed: ${reason}`, false);
+    try {
+      ws.close(CLOSE_NO_BRIDGE, 'cdp attach failed');
+    } catch {
+      // already closing
+    }
+  };
+
   ws.on('pong', () => {
     heartbeatAlive = true;
   });
@@ -218,31 +228,8 @@ export function attachCdpClient(
     dispose('puppeteer /cdp socket error');
   });
 
-  // Kick the extension to attach its active tab. Best-effort: the emulator
-  // serves browser-level topology regardless; page-domain forwards will fail
-  // cleanly if the attach never lands. Refresh tab metadata when it resolves.
-  void link
-    .attach()
-    .then((info) => emulator.setTabInfo(info))
-    .catch((err) => {
-      log(
-        `qwen serve: /cdp attach failed: ${
-          err && typeof err === 'object' && 'message' in err
-            ? String((err as { message?: unknown }).message)
-            : String(err)
-        }; closing puppeteer socket so a reconnect can retry attach`,
-      );
-      // `bridge.cdpBound` was set before attach. Without closing here, the
-      // single-client guard above rejects every reconnect while page-domain
-      // commands keep failing "not attached" — a stuck tunnel until daemon
-      // restart. Closing triggers ws.on('close') -> dispose(), which clears
-      // cdpBound and routeInbound so the next /cdp client re-attempts attach.
-      try {
-        ws.close(CLOSE_NO_BRIDGE, 'cdp_attach failed');
-      } catch {
-        // already closing
-      }
-    });
+  // Lazy attach: tools can load over `/cdp` without immediately putting Chrome
+  // into debugging mode. The first page-domain command attaches the active tab.
 
   log('qwen serve: /cdp puppeteer client bound to extension bridge');
 }

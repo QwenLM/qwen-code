@@ -38,6 +38,7 @@ import {
   listMcpResources,
   MCPServerStatus,
   McpClient,
+  discoverTools,
   populateMcpServerCommand,
   removeMCPServerStatus,
   removeMCPStatusChangeListener,
@@ -989,6 +990,31 @@ describe('mcp-client', () => {
       // The critical assertion: registries untouched.
       expect(toolRegistry.registerTool).not.toHaveBeenCalled();
       expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
+    });
+
+    it('marks discovered tools alwaysLoad when the MCP server config requests it', async () => {
+      const mockedClient = {
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+      } as unknown as ClientLib.Client;
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'chrome_tool' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const tools = await discoverTools(
+        'chrome-devtools',
+        {
+          command: 'test-command',
+          alwaysLoadTools: true,
+        },
+        mockedClient,
+        cfgWithResources(),
+      );
+
+      expect(tools).toHaveLength(1);
+      expect(tools[0].alwaysLoad).toBe(true);
     });
 
     it('discoverAndReturn with { applyConfigFilters: false } ignores config filters and trust for shared pool snapshots', async () => {

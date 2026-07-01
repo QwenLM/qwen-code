@@ -616,6 +616,64 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  async function readBrowserMcpFeatureFlagsForEnv(
+    raw: string | undefined,
+    origin = 'chrome-extension://qwen-test-extension',
+  ) {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),
+    );
+    const originalClientMcpOverWs =
+      process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+    const originalCdpTunnelOverWs =
+      process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+    if (raw === undefined) {
+      delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+      delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+    } else {
+      process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'] = raw;
+      process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = raw;
+    }
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
+      throw new Error('runtime boom');
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        allowOrigins: [origin],
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await expect(handle.runtimeReady).rejects.toThrow('runtime boom');
+      const capabilitiesRes = await fetch(`${handle.url}/capabilities`, {
+        headers: { Origin: origin },
+      });
+      expect(capabilitiesRes.status).toBe(200);
+      return ((await capabilitiesRes.json()) as { features: string[] })
+        .features;
+    } finally {
+      if (originalClientMcpOverWs === undefined) {
+        delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+      } else {
+        process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'] = originalClientMcpOverWs;
+      }
+      if (originalCdpTunnelOverWs === undefined) {
+        delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+      } else {
+        process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = originalCdpTunnelOverWs;
+      }
+      await handle.close();
+    }
+  }
+
   it('rejects the embedded run handle by default when the runtime fails to mount', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),
@@ -661,6 +719,100 @@ describe('runQwenServe runtime startup failures', () => {
         signal: AbortSignal.timeout(1000),
       }),
     ).rejects.toThrow();
+  });
+
+  it.each([
+    ['0', false],
+    ['false', false],
+    ['FALSE', false],
+    [' 0 ', false],
+    ['1', true],
+    ['true', true],
+    ['anything', true],
+  ] as const)(
+    'normalizes browser MCP env flag %j',
+    async (raw, shouldEnable) => {
+      const features = await readBrowserMcpFeatureFlagsForEnv(raw);
+
+      if (shouldEnable) {
+        expect(features).toEqual(
+          expect.arrayContaining(['client_mcp_over_ws', 'cdp_tunnel_over_ws']),
+        );
+      } else {
+        expect(features).not.toContain('client_mcp_over_ws');
+        expect(features).not.toContain('cdp_tunnel_over_ws');
+      }
+    },
+  );
+
+  it('auto-enables only the CDP tunnel for Chrome extension origins when the env flag is unset', async () => {
+    const features = await readBrowserMcpFeatureFlagsForEnv(undefined);
+
+    expect(features).toContain('cdp_tunnel_over_ws');
+    expect(features).not.toContain('client_mcp_over_ws');
+  });
+
+  it('forwards auto-enabled CDP tunnel state to the ACP child env', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-child-env-')),
+    );
+    const originalClientMcpOverWs =
+      process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+    const originalCdpTunnelOverWs =
+      process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+    delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+    delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+    const bridge = makeRuntimeBridge();
+    const createBridge = vi
+      .spyOn(acpBridge, 'createAcpSessionBridge')
+      .mockReturnValue(
+        bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        allowOrigins: ['chrome-extension://qwen-test-extension'],
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await handle.runtimeReady;
+      const bridgeOptions = createBridge.mock.calls[0]?.[0] as
+        | { childEnvOverrides?: Record<string, string | undefined> }
+        | undefined;
+      expect(bridgeOptions?.childEnvOverrides).toMatchObject({
+        QWEN_SERVE_CDP_TUNNEL_OVER_WS: '1',
+      });
+    } finally {
+      if (originalClientMcpOverWs === undefined) {
+        delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+      } else {
+        process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'] = originalClientMcpOverWs;
+      }
+      if (originalCdpTunnelOverWs === undefined) {
+        delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+      } else {
+        process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = originalCdpTunnelOverWs;
+      }
+      await handle.close();
+    }
+  });
+
+  it('keeps browser MCP features disabled for non-extension origins when the env flag is unset', async () => {
+    const features = await readBrowserMcpFeatureFlagsForEnv(
+      undefined,
+      'https://example.com',
+    );
+
+    expect(features).not.toContain('client_mcp_over_ws');
+    expect(features).not.toContain('cdp_tunnel_over_ws');
   });
 
   it('bounds shutdown waiting when runtime startup never settles', async () => {
@@ -1619,6 +1771,12 @@ describe('runQwenServe runtime startup failures', () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-fail-')),
     );
+    const originalClientMcpOverWs =
+      process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+    const originalCdpTunnelOverWs =
+      process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+    delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+    delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
     const boundWorkspace = canonicalizeWorkspace(tmpDir);
     vi.spyOn(acpBridge, 'createAcpSessionBridge').mockImplementation(() => {
       throw new Error('runtime boom');
@@ -1655,7 +1813,8 @@ describe('runQwenServe runtime startup failures', () => {
         headers: { Origin: handle.url },
       });
       expect(capabilitiesRes.status).toBe(200);
-      expect(await capabilitiesRes.json()).toMatchObject({
+      const capabilitiesBody = await capabilitiesRes.json();
+      expect(capabilitiesBody).toMatchObject({
         v: 1,
         protocolVersions: { current: 'v1', supported: ['v1'] },
         mode: 'http-bridge',
@@ -1671,6 +1830,8 @@ describe('runQwenServe runtime startup failures', () => {
         policy: { permission: 'first-responder' },
         limits: { maxPendingPromptsPerSession: 5 },
       });
+      expect(capabilitiesBody.features).not.toContain('client_mcp_over_ws');
+      expect(capabilitiesBody.features).not.toContain('cdp_tunnel_over_ws');
 
       const port = new URL(handle.url).port;
       for (const origin of [
@@ -1760,6 +1921,16 @@ describe('runQwenServe runtime startup failures', () => {
         },
       });
     } finally {
+      if (originalClientMcpOverWs === undefined) {
+        delete process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'];
+      } else {
+        process.env['QWEN_SERVE_CLIENT_MCP_OVER_WS'] = originalClientMcpOverWs;
+      }
+      if (originalCdpTunnelOverWs === undefined) {
+        delete process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'];
+      } else {
+        process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = originalCdpTunnelOverWs;
+      }
       await handle.close();
     }
   });
@@ -2789,6 +2960,7 @@ describe('runQwenServe startup observability', () => {
         workspace: tmpDir,
         maxSessions: 1,
         serveWebShell: false,
+        allowOrigins: ['chrome-extension://qwen-test-extension'],
       },
       { bridge: makeFakeBridge() },
     );
@@ -2803,6 +2975,9 @@ describe('runQwenServe startup observability', () => {
       );
       expect(stderrWrites.join('')).toMatch(
         /qwen serve: startup timing: processToListenMs=\d+ runQwenServeToListenMs=\d+/,
+      );
+      expect(stderrWrites.join('')).not.toContain(
+        'qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth.',
       );
 
       expect(await readStartup(handle)).toMatchObject({

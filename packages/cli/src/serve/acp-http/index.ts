@@ -6,10 +6,13 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
+import { createRequire } from 'node:module';
+import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
@@ -61,6 +64,92 @@ const CDP_PATH = '/cdp';
  * packages can't share a module).
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
+const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
+const RUNTIME_MCP_RETRY_DELAY_MS = 250;
+const RUNTIME_MCP_RETRY_ATTEMPTS = 20;
+const requireFromHere = createRequire(import.meta.url);
+
+function formatCdpEndpointHost(hostname: string | undefined): string {
+  const host = hostname?.trim() || '127.0.0.1';
+  if (host === '0.0.0.0' || host === '::' || host === '[::]') {
+    return '127.0.0.1';
+  }
+  const unbracketed =
+    host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  return unbracketed.includes(':') ? `[${unbracketed}]` : unbracketed;
+}
+
+function isAcpChannelUnavailable(err: unknown): boolean {
+  return (
+    (err as { data?: { errorKind?: unknown } } | undefined)?.data?.errorKind ===
+    'acp_channel_unavailable'
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export function buildChromeDevToolsMcpRuntimeConfigFromPackage(
+  localPort: number | undefined,
+  pkgJsonPath: string,
+  pkgBin: string | Record<string, string> | undefined,
+  hostname?: string,
+): Record<string, unknown> | undefined {
+  if (
+    localPort === undefined ||
+    !Number.isInteger(localPort) ||
+    localPort <= 0
+  ) {
+    return undefined;
+  }
+  const binRel =
+    typeof pkgBin === 'string' ? pkgBin : Object.values(pkgBin ?? {})[0];
+  if (!binRel) return undefined;
+  const pkgDir = path.dirname(pkgJsonPath);
+  const binPath = path.resolve(pkgDir, binRel);
+  const binRelToPkg = path.relative(pkgDir, binPath);
+  if (binRelToPkg.startsWith('..') || path.isAbsolute(binRelToPkg)) {
+    return undefined;
+  }
+  return {
+    command: process.execPath,
+    args: [
+      binPath,
+      '--wsEndpoint',
+      `ws://${formatCdpEndpointHost(hostname)}:${localPort}/cdp`,
+    ],
+    alwaysLoadTools: true,
+    [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
+  };
+}
+
+function buildChromeDevToolsMcpRuntimeConfig(
+  localPort: number | undefined,
+  hostname: string | undefined,
+): Record<string, unknown> | undefined {
+  try {
+    const pkgJsonPath = requireFromHere.resolve(
+      'chrome-devtools-mcp/package.json',
+    );
+    const pkg = requireFromHere('chrome-devtools-mcp/package.json') as {
+      bin?: string | Record<string, string>;
+    };
+    return buildChromeDevToolsMcpRuntimeConfigFromPackage(
+      localPort,
+      pkgJsonPath,
+      pkg.bin,
+      hostname,
+    );
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: chrome-devtools-mcp package not resolvable: ${
+        err instanceof Error ? err.message : String(err)
+      }`,
+    );
+    return undefined;
+  }
+}
 
 /**
  * Browsers cannot set an `Authorization` header on a WebSocket, so the Web
@@ -193,6 +282,8 @@ export interface MountAcpHttpOptions {
    * tool channel. Mirrors the REST CORS allowlist (`allowOriginCors`).
    */
   allowedOrigins?: ParsedAllowOriginPatterns;
+  /** Hostname the daemon is listening on; used by local MCP child processes. */
+  hostname?: string;
   /** Effective direct session shell policy for ACP initialize/dispatch. */
   sessionShellCommandEnabled?: boolean;
   archiveCoordinator?: SessionArchiveCoordinator;
@@ -318,6 +409,127 @@ export function mountAcpHttp(
     },
     opts.maxConnections,
   );
+  let cdpMcpRegistered = false;
+  let cdpMcpRegistering: Promise<void> | undefined;
+  let cdpMcpTerminalSkipLogged = false;
+
+  async function removeChromeDevToolsMcp(
+    originatorClientId: string,
+  ): Promise<void> {
+    if (!cdpMcpRegistered) return;
+    cdpMcpRegistered = false;
+    try {
+      await bridge.removeRuntimeMcpServer(
+        CHROME_DEVTOOLS_MCP_SERVER_NAME,
+        originatorClientId,
+      );
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: failed to remove ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  function removeChromeDevToolsMcpIfUnused(originatorClientId: string): void {
+    void (async () => {
+      if (opts.cdpTunnelRegistry?.hasActive()) return;
+      if (cdpMcpRegistering) await cdpMcpRegistering;
+      if (opts.cdpTunnelRegistry?.hasActive()) return;
+      await removeChromeDevToolsMcp(originatorClientId);
+    })().catch((err) => {
+      writeStderrLine(
+        `qwen serve: failed to clean up ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+  }
+
+  function ensureChromeDevToolsMcpRegistered(
+    localPort: number | undefined,
+    originatorClientId: string,
+  ): void {
+    if (opts.token) {
+      if (!cdpMcpTerminalSkipLogged) {
+        writeStderrLine(
+          `qwen serve: ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP skipped because /cdp requires bearer auth`,
+        );
+        cdpMcpTerminalSkipLogged = true;
+      }
+      return;
+    }
+    if (cdpMcpRegistered || cdpMcpRegistering || cdpMcpTerminalSkipLogged) {
+      return;
+    }
+    const runtimeConfig = buildChromeDevToolsMcpRuntimeConfig(
+      localPort,
+      opts.hostname,
+    );
+    if (!runtimeConfig) {
+      cdpMcpTerminalSkipLogged = true;
+      return;
+    }
+    cdpMcpRegistering = (async () => {
+      try {
+        let result: Awaited<ReturnType<typeof bridge.addRuntimeMcpServer>>;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            result = await bridge.addRuntimeMcpServer(
+              CHROME_DEVTOOLS_MCP_SERVER_NAME,
+              runtimeConfig,
+              originatorClientId,
+            );
+            break;
+          } catch (err) {
+            if (
+              !isAcpChannelUnavailable(err) ||
+              attempt >= RUNTIME_MCP_RETRY_ATTEMPTS ||
+              !opts.cdpTunnelRegistry?.hasActive()
+            ) {
+              throw err;
+            }
+            await delay(RUNTIME_MCP_RETRY_DELAY_MS);
+          }
+        }
+        if ((result as { skipped?: boolean }).skipped) {
+          writeStderrLine(
+            `qwen serve: ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP skipped: ${
+              (result as { reason?: string }).reason ?? 'unknown'
+            }`,
+          );
+          return;
+        }
+        if ((result as { shadowedSettings?: boolean }).shadowedSettings) {
+          await bridge
+            .removeRuntimeMcpServer(
+              CHROME_DEVTOOLS_MCP_SERVER_NAME,
+              originatorClientId,
+            )
+            .catch(() => {});
+          cdpMcpTerminalSkipLogged = true;
+          writeStderrLine(
+            `qwen serve: ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP skipped because settings already define it`,
+          );
+          return;
+        }
+        cdpMcpRegistered = true;
+        if (!opts.cdpTunnelRegistry?.hasActive()) {
+          await removeChromeDevToolsMcp(originatorClientId);
+        }
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: failed to add ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      } finally {
+        cdpMcpRegistering = undefined;
+      }
+    })();
+  }
+
   const dispatcher = new AcpDispatcher(
     bridge,
     opts.boundWorkspace,
@@ -706,6 +918,7 @@ export function mountAcpHttp(
       const rawAddr =
         (socket as unknown as { remoteAddress?: string }).remoteAddress ??
         'ws-unknown';
+      const localPort = (socket as { localPort?: number }).localPort;
       const logReject = (reason: string) => {
         writeStderrLine(
           `qwen serve: WebSocket upgrade rejected (${reason}) from ${rawAddr}`,
@@ -748,7 +961,6 @@ export function mountAcpHttp(
       // the REST middleware does; extract port from the socket.
       if (fromLoopback) {
         const host = (req.headers['host'] ?? '').toLowerCase();
-        const localPort = (socket as { localPort?: number }).localPort;
         const allowed = new Set([
           `localhost:${localPort}`,
           `127.0.0.1:${localPort}`,
@@ -769,7 +981,6 @@ export function mountAcpHttp(
       const origin = req.headers['origin'];
       if (origin) {
         try {
-          const localPort = (socket as { localPort?: number }).localPort;
           const isLoopbackOrigin = isSameLoopbackOrigin(origin, localPort);
           // `--allow-origin` allowlist (same match semantics as the REST
           // `allowOriginCors`): lets an explicitly permitted non-loopback
@@ -883,6 +1094,9 @@ export function mountAcpHttp(
           if (cdpBridgeUnregister) {
             cdpBridgeUnregister();
             cdpBridgeUnregister = undefined;
+            removeChromeDevToolsMcpIfUnused(
+              connRef?.connectionId ?? 'cdp-bridge',
+            );
           }
         });
 
@@ -1219,6 +1433,7 @@ export function mountAcpHttp(
               };
               cdpBridgeUnregister =
                 opts.cdpTunnelRegistry.register(cdpEndpoint);
+              ensureChromeDevToolsMcpRegistered(localPort, conn.connectionId);
               writeStderrLine(
                 `qwen serve: /acp connection ${conn.connectionId.slice(0, 8)} registered as CDP bridge`,
               );

@@ -5445,7 +5445,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       type AddSkip = {
         name: string;
         skipped: true;
-        reason: 'budget_warning_only';
+        reason: 'budget_warning_only' | 'runtime_name_conflict';
       };
       const response = (await Promise.race([
         withTimeout(

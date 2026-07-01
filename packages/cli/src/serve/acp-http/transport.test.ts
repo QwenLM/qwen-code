@@ -27,7 +27,11 @@ import {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import { SessionService, Storage } from '@qwen-code/qwen-code-core';
+import {
+  RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG,
+  SessionService,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import {
   resetHomeEnvBootstrapForTesting,
   SettingScope,
@@ -49,7 +53,12 @@ import {
   WorkspaceSettingsPartialPersistError,
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
-import { mountAcpHttp, type AcpHttpHandle } from './index.js';
+import {
+  buildChromeDevToolsMcpRuntimeConfigFromPackage,
+  type AcpHttpHandle,
+  mountAcpHttp,
+} from './index.js';
+import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
   WorkspaceRememberTaskLane,
@@ -79,6 +88,70 @@ vi.mock('../../services/setup-github.js', async () => {
     ...actual,
     setupGithub: setupGithubMocks.setupGithub,
   };
+});
+
+describe('buildChromeDevToolsMcpRuntimeConfigFromPackage', () => {
+  const pkgJsonPath = path.join('/tmp/chrome-devtools-mcp', 'package.json');
+
+  it.each([undefined, 0, -1, 1.5] as const)(
+    'rejects invalid localPort=%s',
+    (localPort) => {
+      expect(
+        buildChromeDevToolsMcpRuntimeConfigFromPackage(
+          localPort,
+          pkgJsonPath,
+          'bin/cli.js',
+        ),
+      ).toBeUndefined();
+    },
+  );
+
+  it('rejects missing and escaping bin paths', () => {
+    expect(
+      buildChromeDevToolsMcpRuntimeConfigFromPackage(4170, pkgJsonPath, {}),
+    ).toBeUndefined();
+    expect(
+      buildChromeDevToolsMcpRuntimeConfigFromPackage(
+        4170,
+        pkgJsonPath,
+        '../evil.js',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('builds the stdio config for a package-local bin', () => {
+    expect(
+      buildChromeDevToolsMcpRuntimeConfigFromPackage(4170, pkgJsonPath, {
+        cli: 'bin/cli.js',
+      }),
+    ).toEqual({
+      command: process.execPath,
+      args: [
+        path.join('/tmp/chrome-devtools-mcp', 'bin/cli.js'),
+        '--wsEndpoint',
+        'ws://127.0.0.1:4170/cdp',
+      ],
+      alwaysLoadTools: true,
+      [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
+    });
+  });
+
+  it('uses the listening host for a specific non-wildcard bind', () => {
+    expect(
+      buildChromeDevToolsMcpRuntimeConfigFromPackage(
+        4170,
+        pkgJsonPath,
+        { cli: 'bin/cli.js' },
+        '192.168.1.20',
+      ),
+    ).toMatchObject({
+      args: [
+        path.join('/tmp/chrome-devtools-mcp', 'bin/cli.js'),
+        '--wsEndpoint',
+        'ws://192.168.1.20:4170/cdp',
+      ],
+    });
+  });
 });
 
 /**
@@ -406,22 +479,44 @@ class FakeBridge {
   async getWorkspaceMcpResourcesStatus(serverName: string) {
     return { v: 1, serverName, resources: [] };
   }
-  async addRuntimeMcpServer(name: string) {
+  runtimeMcpAdds: Array<{
+    name: string;
+    config: Record<string, unknown>;
+    originatorClientId: string;
+  }> = [];
+  runtimeMcpRemoves: Array<{ name: string; originatorClientId: string }> = [];
+  runtimeMcpAddResult: {
+    shadowedSettings?: boolean;
+    skipped?: boolean;
+    reason?: string;
+  } = {};
+  runtimeMcpAddError: Error | undefined;
+  runtimeMcpBeforeAddResolve: (() => Promise<void>) | undefined;
+  async addRuntimeMcpServer(
+    name: string,
+    config: Record<string, unknown>,
+    originatorClientId: string,
+  ) {
+    this.runtimeMcpAdds.push({ name, config, originatorClientId });
+    if (this.runtimeMcpAddError) throw this.runtimeMcpAddError;
+    await this.runtimeMcpBeforeAddResolve?.();
     return {
       name,
       transport: 'stdio',
       replaced: false,
       shadowedSettings: false,
       toolCount: 0,
-      originatorClientId: 'c',
+      originatorClientId,
+      ...this.runtimeMcpAddResult,
     };
   }
-  async removeRuntimeMcpServer(name: string) {
+  async removeRuntimeMcpServer(name: string, originatorClientId: string) {
+    this.runtimeMcpRemoves.push({ name, originatorClientId });
     return {
       name,
       removed: true,
       wasShadowingSettings: false,
-      originatorClientId: 'c',
+      originatorClientId,
     };
   }
   async runWorkspaceMemoryRemember() {
@@ -6541,6 +6636,7 @@ describe('ACP WebSocket transport security', () => {
       token?: string;
       allowedOrigins?: { allowAny: boolean; origins: Set<string> };
       checkRate?: (key: string, tier: string) => boolean;
+      cdpTunnelOverWs?: boolean;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -6558,6 +6654,12 @@ describe('ACP WebSocket transport security', () => {
         ),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
+        ...(opts.cdpTunnelOverWs
+          ? {
+              cdpTunnelOverWs: true,
+              cdpTunnelRegistry: new CdpTunnelRegistry(),
+            }
+          : {}),
       });
       const listeningServer = app.listen(0, '127.0.0.1', () => {
         port = (listeningServer.address() as AddressInfo).port;
@@ -6615,6 +6717,17 @@ describe('ACP WebSocket transport security', () => {
     });
   }
 
+  function initializeCdpBridge(ws: WebSocket, id = 1): Promise<unknown> {
+    return sendRpc(ws, {
+      jsonrpc: '2.0',
+      id,
+      method: 'initialize',
+      params: {
+        clientInfo: { name: 'qwen-cdp-bridge', version: '1.0.0' },
+      },
+    });
+  }
+
   // ── Host allowlist ──────────────────────────────────────────────────
   it('accepts WS upgrade with loopback Host header', async () => {
     await startServer();
@@ -6655,6 +6768,222 @@ describe('ACP WebSocket transport security', () => {
       { Authorization: 'Bearer secret-token-123' },
     );
     expect(result.code).toBe(101);
+  });
+
+  it('dynamically registers chrome-devtools MCP for an active CDP bridge', async () => {
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+    expect(bridge.runtimeMcpAdds[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: expect.any(String),
+    });
+    expect(bridge.runtimeMcpAdds[0]?.config).toMatchObject({
+      command: process.execPath,
+      args: expect.arrayContaining([
+        expect.stringContaining('chrome-devtools-mcp'),
+        '--wsEndpoint',
+        `ws://127.0.0.1:${port}/cdp`,
+      ]),
+    });
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: bridge.runtimeMcpAdds[0]?.originatorClientId,
+    });
+  });
+
+  it('keeps chrome-devtools MCP registered while a replacement CDP bridge is active', async () => {
+    await startServer({ cdpTunnelOverWs: true });
+    const first = await wsConnect();
+    await initializeCdpBridge(first, 1);
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+
+    const second = await wsConnect();
+    await initializeCdpBridge(second, 2);
+
+    first.close();
+    await new Promise<void>((resolve) => first.once('close', () => resolve()));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(bridge.runtimeMcpRemoves).toHaveLength(0);
+
+    second.close();
+    await new Promise<void>((resolve) => second.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: expect.any(String),
+    });
+  });
+
+  it('removes chrome-devtools MCP when settings already define it', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddResult = { shadowedSettings: true };
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: bridge.runtimeMcpAdds[0]?.originatorClientId,
+    });
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: chrome-devtools runtime MCP skipped because settings already define it',
+    );
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
+  it('retries chrome-devtools MCP registration after a skipped result', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddResult = {
+      skipped: true,
+      reason: 'budget_exceeded',
+    };
+
+    const first = await wsConnect();
+    await initializeCdpBridge(first, 1);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves).toHaveLength(0);
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: chrome-devtools runtime MCP skipped: budget_exceeded',
+    );
+
+    bridge.runtimeMcpAddResult = {};
+    const second = await wsConnect();
+    await initializeCdpBridge(second, 2);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(2));
+    second.close();
+    await new Promise<void>((resolve) => second.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    first.close();
+    await new Promise<void>((resolve) => first.once('close', () => resolve()));
+  });
+
+  it('removes chrome-devtools MCP if the CDP bridge disconnects during registration', async () => {
+    await startServer({ cdpTunnelOverWs: true });
+    let releaseAdd: (() => void) | undefined;
+    bridge.runtimeMcpBeforeAddResolve = () =>
+      new Promise<void>((resolve) => {
+        releaseAdd = resolve;
+      });
+
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    releaseAdd?.();
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: bridge.runtimeMcpAdds[0]?.originatorClientId,
+    });
+  });
+
+  it('retries chrome-devtools MCP registration after add failure', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddError = new Error('add failed');
+    const first = await wsConnect();
+    await initializeCdpBridge(first, 1);
+
+    await vi.waitFor(() => {
+      expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+        'qwen serve: failed to add chrome-devtools runtime MCP: add failed',
+      );
+    });
+
+    bridge.runtimeMcpAddError = undefined;
+    const second = await wsConnect();
+    await initializeCdpBridge(second, 2);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(2));
+    second.close();
+    await new Promise<void>((resolve) => second.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    first.close();
+    await new Promise<void>((resolve) => first.once('close', () => resolve()));
+  });
+
+  it('retries chrome-devtools MCP registration while the ACP channel is unavailable', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddError = Object.assign(new Error('no channel'), {
+      data: { errorKind: 'acp_channel_unavailable' },
+    });
+
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(2), {
+      timeout: 1_500,
+    });
+    bridge.runtimeMcpAddError = undefined;
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(3), {
+      timeout: 1_500,
+    });
+    expect(stdioMocks.writeStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('failed to add chrome-devtools runtime MCP'),
+    );
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+  });
+
+  it('stops retrying chrome-devtools MCP registration after ACP channel retry exhaustion', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddError = Object.assign(new Error('no channel'), {
+      data: { errorKind: 'acp_channel_unavailable' },
+    });
+
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(
+      () => {
+        expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+          'qwen serve: failed to add chrome-devtools runtime MCP: no channel',
+        );
+      },
+      { timeout: 7_000 },
+    );
+    expect(bridge.runtimeMcpAdds).toHaveLength(21);
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  }, 10_000);
+
+  it('skips chrome-devtools MCP registration when /cdp requires auth', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({
+      cdpTunnelOverWs: true,
+      token: 'secret-token-123',
+    });
+    const ws = await wsConnect({
+      headers: { Authorization: 'Bearer secret-token-123' },
+    });
+    await initializeCdpBridge(ws);
+
+    expect(bridge.runtimeMcpAdds).toHaveLength(0);
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: chrome-devtools runtime MCP skipped because /cdp requires bearer auth',
+    );
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
   });
 
   it('rejects WS upgrade with a loopback Origin header on a different port', async () => {
