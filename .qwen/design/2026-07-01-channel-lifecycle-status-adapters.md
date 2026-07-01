@@ -27,11 +27,10 @@ available without changing the shared channel contract again.
 ## References and Alignment
 
 The design follows the current Qwen channel adapter capabilities first.
-Lifecycle semantics are aligned with task/session status concepts from
-OpenClaw/acpx where they are useful: a task can start, run, complete, be
-cancelled, or fail. Hermes is not used as a direct UI/status reference in this
-scope because no concrete channel lifecycle display surface has been identified
-for this feature.
+Lifecycle semantics stay aligned with the existing task/session status model
+already used in this repository: a task can start, run, complete, be
+cancelled, or fail. No additional external status model is introduced in this
+scope because each channel already has a clear native surface for these states.
 
 ## Current State
 
