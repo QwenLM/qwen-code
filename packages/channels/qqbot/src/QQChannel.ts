@@ -240,6 +240,24 @@ export class QQChannel extends ChannelBase {
     this.bridge.on?.('textChunk', this._cronTextHandler);
   }
 
+  /**
+   * Override setBridge to re-attach the permanent `_cronTextHandler`
+   * after bridge crash-recovery. ChannelBase.setBridge detaches only
+   * toolCall/sessionDied listeners; the cron handler would stay bound
+   * to the dead bridge without this override.
+   */
+  override setBridge(bridge: ChannelAgentBridge): void {
+    // Detach from old bridge before swap
+    if (this._cronTextHandler) {
+      this.bridge.off?.('textChunk', this._cronTextHandler);
+    }
+    super.setBridge(bridge);
+    // Re-attach to new bridge
+    if (this._cronTextHandler) {
+      bridge.on?.('textChunk', this._cronTextHandler);
+    }
+  }
+
   // ── ChannelBase interface ──────────────────────────────────────
 
   async connect(): Promise<void> {
@@ -912,7 +930,11 @@ export class QQChannel extends ChannelBase {
               this.disconnect();
               setTimeout(() => {
                 this.isReconnecting = false;
-                this.connect();
+                this.connect().catch((err: unknown) => {
+                  process.stderr.write(
+                    `[QQ:${this.name}] FATAL: reconnect after token exhaustion failed: ${err instanceof Error ? err.stack ?? err.message : String(err)}\n`,
+                  );
+                });
               }, 1000);
               return;
             }
