@@ -105,6 +105,28 @@ export interface SessionTarget {
   isGroup?: boolean;
 }
 
+export interface ChannelMemoryTarget {
+  channelName: string;
+  chatId: string;
+  threadId?: string;
+}
+
+export interface ChannelMemoryWriteResult {
+  changed: boolean;
+  filePath?: string;
+}
+
+export interface ChannelMemoryCallbacks {
+  readChannelMemory(target: ChannelMemoryTarget): Promise<string>;
+  appendChannelMemory(
+    target: ChannelMemoryTarget,
+    text: string,
+  ): Promise<ChannelMemoryWriteResult>;
+  clearChannelMemory(
+    target: ChannelMemoryTarget,
+  ): Promise<ChannelMemoryWriteResult>;
+}
+
 /**
  * A channel plugin registers a channel type and provides a factory
  * to create adapter instances. Both built-in adapters and external
