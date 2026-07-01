@@ -634,6 +634,7 @@ export class QQChannel extends ChannelBase {
     }
     state.timer = setTimeout(() => {
       const s = state!;
+      const flushedEntry = s;
       s.timer = null;
       const toFlush = s.buffer;
       if (!toFlush) return;
@@ -653,7 +654,9 @@ export class QQChannel extends ChannelBase {
               );
             }
             this.pendingStreamDelete.delete(sessionId);
-            this.streamState.delete(sessionId);
+            if (this.streamState.get(sessionId) === flushedEntry) {
+              this.streamState.delete(sessionId);
+            }
           }
         })
         .catch((err) => {
@@ -670,7 +673,9 @@ export class QQChannel extends ChannelBase {
           this.flushingSessions.delete(sessionId);
           if (this.pendingStreamDelete.has(sessionId)) {
             this.pendingStreamDelete.delete(sessionId);
-            this.streamState.delete(sessionId);
+            if (this.streamState.get(sessionId) === flushedEntry) {
+              this.streamState.delete(sessionId);
+            }
           }
         });
     }, 2000);
