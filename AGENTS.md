@@ -30,7 +30,8 @@ Core modules — `packages/core/src/**`, `packages/*/src/auth/**`,
 backbone. External PRs touching them face a two-tier gate (maintainer-authored
 PRs are exempt):
 
-1. **Large-scope changes (500+ changed lines in core) → hard block.**
+1. **Large-scope changes (500+ changed lines in core, additions +
+   deletions combined) → hard block.**
    No evaluation, no exceptions. Large-scale core refactors must be
    maintainer-initiated. Breadth alone is not size — a low-risk sweep that
    touches 10+ files but changes a line or two each is escalated to a

@@ -57,7 +57,7 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "This change t
 
 Then **stop**. This is a wall, not a guideline.
 
-**Breadth ≠ size.** A uniform, low-risk sweep — renaming a symbol, updating an import path, a lint/format autofix, the same null-guard at many call sites — can touch **10+ files** while changing only a line or two each. Don't auto-reject on file count alone: **escalate to the maintainer**, and otherwise let it proceed to Stage 1 under Tier 2's 100%-confidence bar, judged on the actual diff rather than the file count. (A deep rewrite concentrated in a few files still trips the 500-line threshold above, so depth isn't ignored.)
+**Breadth ≠ size.** A uniform, low-risk sweep — renaming a symbol, updating an import path, a lint/format autofix, the same null-guard at many call sites — can touch **10+ files** while changing only a line or two each. Don't auto-reject on file count alone: **flag it for the maintainer's awareness**, and otherwise let it proceed to Stage 1 under Tier 2's 100%-confidence bar, judged on the actual diff rather than the file count. (A deep rewrite concentrated in a few files still trips the 500-line threshold above, so depth isn't ignored.)
 
 **Tier 2 — Small-scope changes to core → evaluate with 100% confidence.** If the PR touches fewer files but still hits core paths, you MAY proceed to Stage 1 — but only if you are **100% confident** the change is correct and safe. If there is any doubt at all — "the direction looks correct" is NOT 100% confidence — escalate to maintainer before proceeding. You must be able to name every downstream consumer affected; if you cannot, escalate.
 
@@ -139,7 +139,6 @@ Direction: <state your honest assessment — aligned and why, or concerns and wh
 Approach: <state your honest assessment — the scope feels right / feels like it could be much simpler / here's what I'd consider cutting>. <If you see a simpler path, name it: "Have you considered just X? It might cover most of the use case with a fraction of the complexity."> <If the diff carries unrelated changes or drive-by refactors, name them and suggest splitting them out.>
 
 <If passing:> Moving on to code review. 🔍
-<If problem does not exist:> Requesting changes — no demonstrated failure. Please provide a reproduction case to proceed.
 <If concerns:> Flagging these for discussion before diving deeper.
 
 <details>
@@ -156,7 +155,6 @@ Approach: <state your honest assessment — the scope feels right / feels like i
 方案：<范围合理 / 感觉可以大幅简化 / 建议砍掉的部分>。<如果看到更简路径，点名：有没有考虑过直接 X？可能用很小的复杂度覆盖大部分场景。><如果 diff 夹带了无关改动或顺手重构，点名并建议拆成单独 PR。>
 
 <如果通过：> 进入代码审查 🔍
-<如果问题不存在：> 请求修改——未展示实际故障。请提供复现案例后继续。
 <如果有顾虑：> 先提出来讨论，再深入看代码。
 
 </details>
