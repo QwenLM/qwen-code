@@ -32,6 +32,7 @@ import {
   parseConfiguredChannels,
   registerSessionCleanup,
   registerToolCallDispatch,
+  selectFirstModel,
   type ParsedChannel,
 } from './runtime.js';
 
@@ -181,19 +182,6 @@ function selectedChannelNames(
   return names;
 }
 
-function firstModel(parsed: ParsedChannel[]): string | undefined {
-  const models = [
-    ...new Set(parsed.map((p) => p.config.model).filter(Boolean)),
-  ] as string[];
-  if (models.length > 1) {
-    writeStderrLine(
-      `[Channel] Warning: Multiple models configured (${models.join(', ')}). ` +
-        `Daemon worker will use "${models[0]}".`,
-    );
-  }
-  return models[0];
-}
-
 function validateChannelWorkspaces(
   parsed: ParsedChannel[],
   daemonWorkspace: string,
@@ -293,7 +281,7 @@ export async function runChannelDaemonWorker(
     startupSignal,
   );
   validateChannelWorkspaces(parsed, daemonWorkspace);
-  const modelServiceId = firstModel(parsed);
+  const modelServiceId = selectFirstModel(parsed, 'Daemon worker');
 
   const bridge = new DaemonChannelBridge({
     cwd: daemonWorkspace,

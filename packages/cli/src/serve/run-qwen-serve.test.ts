@@ -23,6 +23,7 @@ import {
   waitForRuntimeStartingForShutdown,
 } from './run-qwen-serve.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
+import { isLoopbackBind } from './loopback-binds.js';
 import * as acpBridge from '@qwen-code/acp-bridge/bridge';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import type {
@@ -167,6 +168,13 @@ describe('formatChannelWorkerDaemonUrl', () => {
 
   it('formats concrete IPv6 hosts for URLs', () => {
     expect(formatChannelWorkerDaemonUrl('::1', 4170)).toBe('http://[::1]:4170');
+  });
+
+  it('preserves and accepts concrete IPv4 loopback hosts in 127/8', () => {
+    expect(formatChannelWorkerDaemonUrl('127.0.0.2', 4170)).toBe(
+      'http://127.0.0.2:4170',
+    );
+    expect(isLoopbackBind('127.0.0.2')).toBe(true);
   });
 });
 
@@ -2520,6 +2528,52 @@ describe('runQwenServe channel worker supervisor', () => {
     });
   });
 
+  it('removes the channel pidfile reservation when listener startup fails', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-listen-')),
+    );
+    const listenError = new Error('listen failed') as NodeJS.ErrnoException;
+    listenError.code = 'EADDRINUSE';
+    const fakeServer = createServer();
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue({
+      listen: vi.fn(() => {
+        setImmediate(() => fakeServer.emit('error', listenError));
+        return fakeServer;
+      }),
+    } as unknown as express.Application);
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+
+    await expect(
+      runQwenServe(
+        {
+          port: 4170,
+          hostname: '127.0.0.1',
+          mode: 'http-bridge',
+          workspace: tmpDir,
+          serveWebShell: false,
+          channelSelection: { mode: 'names', names: ['telegram'] },
+        },
+        {
+          bridge: makeFakeBridge(),
+          channelWorkerSupervisorFactory: vi.fn(() => worker),
+          channelServicePidfile: pidfile,
+        },
+      ),
+    ).rejects.toBe(listenError);
+
+    expect(pidfile.reserveServeServiceInfo).toHaveBeenCalledWith({
+      channels: ['telegram'],
+      servePid: process.pid,
+    });
+    expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+  });
+
   it('does not remove the channel pidfile reservation for handled uncaught exceptions', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-crash-')),
@@ -2574,6 +2628,68 @@ describe('runQwenServe channel worker supervisor', () => {
       );
     } finally {
       process.removeListener('uncaughtException', uncaughtExceptionHandler);
+      await handle.close();
+    }
+  });
+
+  it('removes the channel pidfile reservation for unhandled uncaught exceptions', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-channel-worker-unhandled-')),
+    );
+    const worker = makeWorker({
+      enabled: true,
+      state: 'running',
+      pid: 1234,
+      channels: ['telegram'],
+    });
+    const pidfile = makePidfileDeps();
+    const existingMonitorListeners = new Set(
+      process.rawListeners('uncaughtExceptionMonitor'),
+    );
+    const originalListenerCount = process.listenerCount.bind(process);
+    const listenerCountSpy = vi
+      .spyOn(process, 'listenerCount')
+      .mockImplementation(
+        (...args: Parameters<typeof process.listenerCount>) => {
+          const [eventName] = args;
+          if (eventName === 'uncaughtException') {
+            return 0;
+          }
+          return originalListenerCount(...args);
+        },
+      );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        serveWebShell: false,
+        channelSelection: { mode: 'names', names: ['telegram'] },
+      },
+      {
+        bridge: makeFakeBridge(),
+        channelWorkerSupervisorFactory: vi.fn(() => worker),
+        channelServicePidfile: pidfile,
+      },
+    );
+
+    try {
+      const monitorListeners = process.rawListeners(
+        'uncaughtExceptionMonitor',
+      ) as Array<(error: Error, origin: 'uncaughtException') => void>;
+      const newMonitorListeners = monitorListeners.filter(
+        (listener) => !existingMonitorListeners.has(listener),
+      );
+      expect(newMonitorListeners).toHaveLength(1);
+      for (const listener of newMonitorListeners) {
+        listener(new Error('boom'), 'uncaughtException');
+      }
+
+      expect(pidfile.removeServeServiceInfo).toHaveBeenCalledWith(process.pid);
+    } finally {
+      listenerCountSpy.mockRestore();
       await handle.close();
     }
   });

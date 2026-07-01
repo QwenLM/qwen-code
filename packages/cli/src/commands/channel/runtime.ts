@@ -123,6 +123,26 @@ export async function createChannel(
   return channelPlugin.createChannel(name, config, bridge, options);
 }
 
+export function selectFirstModel(
+  parsed: ParsedChannel[],
+  bridgeLabel: string,
+): string | undefined {
+  const models = [
+    ...new Set(
+      parsed
+        .map((channel) => channel.config.model)
+        .filter((model): model is string => Boolean(model)),
+    ),
+  ];
+  if (models.length > 1) {
+    writeStderrLine(
+      `[Channel] Warning: Multiple models configured (${models.join(', ')}). ` +
+        `${bridgeLabel} will use "${models[0]}".`,
+    );
+  }
+  return models[0];
+}
+
 export function registerToolCallDispatch(
   bridge: ChannelAgentBridge,
   router: SessionRouter,

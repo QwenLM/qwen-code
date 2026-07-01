@@ -18,6 +18,29 @@ const mockResolveProxyUrl = vi.hoisted(() =>
 );
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 const mockWriteStdoutLine = vi.hoisted(() => vi.fn());
+const mockSelectFirstModel = vi.hoisted(() =>
+  vi.fn(
+    (
+      parsed: Array<{ config: { model?: string } }>,
+      bridgeLabel: string,
+    ): string | undefined => {
+      const models = [
+        ...new Set(
+          parsed
+            .map((channel) => channel.config.model)
+            .filter((model): model is string => Boolean(model)),
+        ),
+      ];
+      if (models.length > 1) {
+        mockWriteStderrLine(
+          `[Channel] Warning: Multiple models configured (${models.join(', ')}). ` +
+            `${bridgeLabel} will use "${models[0]}".`,
+        );
+      }
+      return models[0];
+    },
+  ),
+);
 const mockSanitizeLogText = vi.hoisted(() =>
   vi.fn((value: unknown) => String(value).replace(/[\r\n]/g, ' ')),
 );
@@ -107,6 +130,7 @@ vi.mock('./runtime.js', () => ({
   parseConfiguredChannels: mockParseConfiguredChannels,
   registerSessionCleanup: mockRegisterSessionCleanup,
   registerToolCallDispatch: mockRegisterToolCallDispatch,
+  selectFirstModel: mockSelectFirstModel,
   sessionsPath: mockSessionsPath,
 }));
 

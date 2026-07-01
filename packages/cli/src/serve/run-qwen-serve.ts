@@ -2764,6 +2764,8 @@ export async function runQwenServe(
                   rl.setDraining(true);
                   rl.dispose();
                 }
+                // The worker owns daemon-backed sessions; disconnect it before
+                // tearing down the ACP bridge it is attached to.
                 await channelWorker.stop().catch((err) => {
                   daemonLog.error(
                     'channel worker stop error',

@@ -17,6 +17,7 @@ import {
   parseConfiguredChannels,
   registerSessionCleanup,
   registerToolCallDispatch,
+  selectFirstModel,
   sessionsPath,
 } from './runtime.js';
 
@@ -250,20 +251,10 @@ async function startAll(proxy?: string): Promise<void> {
   let shuttingDown = false;
   const crashTimestamps: number[] = [];
 
-  // All channels share one bridge process. Use the first channel's model.
-  const models = [
-    ...new Set(parsed.map((p) => p.config.model).filter(Boolean)),
-  ];
-  if (models.length > 1) {
-    writeStderrLine(
-      `[Channel] Warning: Multiple models configured (${models.join(', ')}). ` +
-        `Shared bridge will use "${models[0]}".`,
-    );
-  }
   const bridgeOpts = {
     cliEntryPath,
     cwd: defaultCwd,
-    model: models[0],
+    model: selectFirstModel(parsed, 'Shared bridge'),
   };
   let bridge = new AcpBridge(bridgeOpts);
   await bridge.start();

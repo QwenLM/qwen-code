@@ -233,6 +233,29 @@ describe('writeServiceInfo + readServiceInfo', () => {
     });
   });
 
+  it('does not let serve metadata updates overwrite corrupt pidfiles', () => {
+    const filePath = getPidFilePath();
+    fsStore[filePath] = 'not-json!!!';
+
+    let thrown: NodeJS.ErrnoException | undefined;
+    try {
+      writeServeServiceInfo({
+        channels: ['telegram'],
+        servePid: 4321,
+        workerPid: 8765,
+      });
+    } catch (err) {
+      thrown = err as NodeJS.ErrnoException;
+    }
+
+    expect(thrown).toBeDefined();
+    expect(thrown?.code).toBe('EEXIST');
+    expect(thrown?.message).toBe(
+      'Channel service pidfile is owned by another process.',
+    );
+    expect(fsStore[filePath]).toBe('not-json!!!');
+  });
+
   it('reserves serve-owned service info with exclusive create', () => {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     process.kill = vi.fn(() => true) as any;
