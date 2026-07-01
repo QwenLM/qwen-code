@@ -518,6 +518,8 @@ After submitting the review, publish the Suggestion-level findings as a single u
      <!-- qwen-review-suggestion-summary -->
 
      _No new Suggestion-level findings this round — all prior suggestions have been addressed or superseded._
+
+     _— YOUR_MODEL_ID via Qwen Code /review_
      ```
 
    - If no prior summary exists and there are no suggestions, SKIP this step entirely.
