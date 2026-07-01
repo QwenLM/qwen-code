@@ -1795,6 +1795,7 @@ export class QQChannel extends ChannelBase {
         this.streamState.delete(sid);
       }
     }
+    this.botOpenIdByGroup.delete(groupId);
     // Clean up cron buffers targeting this group (experimental only)
     if (this.qqConfig['cron-msg-experimental']) {
       for (const [sid, entry] of this.cronBuffer) {
