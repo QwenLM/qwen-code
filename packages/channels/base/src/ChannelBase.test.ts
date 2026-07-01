@@ -4717,10 +4717,16 @@ describe('ChannelBase', () => {
 
       const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
 
       const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
       await Promise.resolve();
-      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'late part');
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sessionId,
+        'late part',
+      );
       resolvePrompt('late response');
       await Promise.resolve();
       expect(ch.taskEvents).not.toEqual(
