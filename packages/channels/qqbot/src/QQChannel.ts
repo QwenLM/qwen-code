@@ -461,6 +461,7 @@ export class QQChannel extends ChannelBase {
         };
         if (msgId) {
           plainBody['msg_id'] = msgId;
+          plainBody['msg_seq'] = nextSeq;
         }
         const plainResp = await sendQQMessage(
           route.base,
@@ -667,6 +668,10 @@ export class QQChannel extends ChannelBase {
         })
         .finally(() => {
           this.flushingSessions.delete(sessionId);
+          if (this.pendingStreamDelete.has(sessionId)) {
+            this.pendingStreamDelete.delete(sessionId);
+            this.streamState.delete(sessionId);
+          }
         });
     }, 2000);
     state.timer.unref?.();
@@ -1663,6 +1668,12 @@ export class QQChannel extends ChannelBase {
     }
 
     const isSlash = isAtBot && cleanText.startsWith('/');
+    // Deliberately NOT hard-blocking bot messages — QQ Bot API may deliver
+    // self-echoes or other bot messages. Instead, tag with [bot] prefix so the
+    // model can judge relevance and decide whether to respond. Hard-blocking
+    // would prevent intentional bot-to-bot interactions that the operator
+    // explicitly configures. The [bot] prefix gives the model enough context
+    // to ignore irrelevant bot traffic.
     const isBot = event.author?.bot === true;
     const botTag = isBot ? '[bot] ' : '';
 
