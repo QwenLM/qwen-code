@@ -440,24 +440,47 @@ export const MainContent = () => {
       </Static>
       <OverflowProvider>
         <Box flexDirection="column">
-          {pendingHistoryItemsWithSourceCopyOffsets.map(
-            ({ item, sourceCopyIndexOffsets }, i) => (
-              <HistoryItemDisplay
-                key={i}
-                availableTerminalHeight={
-                  uiState.constrainHeight ? availableTerminalHeight : undefined
-                }
-                terminalWidth={terminalWidth}
-                mainAreaWidth={mainAreaWidth}
-                item={{ ...item, id: 0 }}
-                isPending={true}
-                isFocused={!uiState.isEditorDialogOpen}
-                activeShellPtyId={uiState.activePtyId}
-                embeddedShellFocused={uiState.embeddedShellFocused}
-                sourceCopyIndexOffsets={sourceCopyIndexOffsets}
-              />
-            ),
-          )}
+          {/* Backstop: bound the TOTAL pending (non-`<Static>`) height to the
+              viewport. Each item is capped individually, but several tall
+              pending items (a long thought + a long reply, or a reply + a tool
+              group) can still sum past the terminal height — at which point ink
+              clears and re-streams the whole transcript on every repaint (the
+              tab-switch scroll replay). `overflow="hidden"` keeps the most
+              recent rows (the tail) so interactive prompts / embedded shell,
+              which live at the bottom, stay visible; only the oldest rows are
+              dropped. Applies only while constrainHeight is on; the committed
+              transcript is uncapped in `<Static>`, and ShowMoreLines (Ctrl+S)
+              still reveals the rest. */}
+          <Box
+            flexDirection="column"
+            maxHeight={
+              uiState.constrainHeight
+                ? Math.max(1, availableTerminalHeight)
+                : undefined
+            }
+            overflow={uiState.constrainHeight ? 'hidden' : 'visible'}
+          >
+            {pendingHistoryItemsWithSourceCopyOffsets.map(
+              ({ item, sourceCopyIndexOffsets }, i) => (
+                <HistoryItemDisplay
+                  key={i}
+                  availableTerminalHeight={
+                    uiState.constrainHeight
+                      ? availableTerminalHeight
+                      : undefined
+                  }
+                  terminalWidth={terminalWidth}
+                  mainAreaWidth={mainAreaWidth}
+                  item={{ ...item, id: 0 }}
+                  isPending={true}
+                  isFocused={!uiState.isEditorDialogOpen}
+                  activeShellPtyId={uiState.activePtyId}
+                  embeddedShellFocused={uiState.embeddedShellFocused}
+                  sourceCopyIndexOffsets={sourceCopyIndexOffsets}
+                />
+              ),
+            )}
+          </Box>
           <ShowMoreLines constrainHeight={uiState.constrainHeight} />
         </Box>
       </OverflowProvider>
