@@ -37,6 +37,10 @@ const EFFICIENCY_CHROME_ROWS = 24;
 // The tool leaderboard, when present, adds its data rows plus 3 fixed rows
 // (title + column header + marginBottom); when empty it renders nothing.
 const TOOL_LEADERBOARD_FIXED_ROWS = 3;
+// In embedded (height-limited) mode the tool leaderboard is itself capped so a
+// long tool list can't eat the entire height budget and force the model table
+// to overflow. Mirrors how the model table is capped via maxModelRows.
+const MAX_EMBEDDED_TOOL_ROWS = 5;
 // The Code Impact section, rendered only when there are line changes, occupies
 // one row below the model table. Subtract it when present so the model list
 // can't overestimate its available space and overflow the host view.
@@ -240,7 +244,11 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({
         >
           <StatsTabs
             activeTab={activeTab}
-            hint={availableHeight != null ? t('(Tab to switch)') : undefined}
+            hint={
+              availableHeight != null && isFocused
+                ? t('(Tab to switch)')
+                : undefined
+            }
           />
 
           <Box marginTop={1}>
@@ -265,6 +273,9 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({
               <EfficiencyTab
                 data={data}
                 bodyWidth={bodyWidth}
+                maxToolRows={
+                  availableHeight != null ? MAX_EMBEDDED_TOOL_ROWS : undefined
+                }
                 maxModelRows={
                   availableHeight != null
                     ? Math.max(
@@ -272,8 +283,18 @@ export const StatsDialog: React.FC<StatsDialogProps> = ({
                         availableHeight -
                           EFFICIENCY_CHROME_ROWS -
                           (data.toolLeaderboard.length > 0
-                            ? data.toolLeaderboard.length +
-                              TOOL_LEADERBOARD_FIXED_ROWS
+                            ? // The tool leaderboard is capped in embedded mode,
+                              // so only the visible rows (plus a "+N more" line
+                              // when truncated) consume height here.
+                              Math.min(
+                                data.toolLeaderboard.length,
+                                MAX_EMBEDDED_TOOL_ROWS,
+                              ) +
+                              TOOL_LEADERBOARD_FIXED_ROWS +
+                              (data.toolLeaderboard.length >
+                              MAX_EMBEDDED_TOOL_ROWS
+                                ? 1
+                                : 0)
                             : 0) -
                           (data.report.files.linesAdded > 0 ||
                           data.report.files.linesRemoved > 0

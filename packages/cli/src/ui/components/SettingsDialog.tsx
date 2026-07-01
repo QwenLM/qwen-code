@@ -38,6 +38,7 @@ import { useUIActions } from '../contexts/UIActionsContext.js';
 import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
 import { useKeypress } from '../hooks/useKeypress.js';
 import {
+  isDeletionKey,
   isPrintableSearchChar,
   removeLastGrapheme,
 } from '../hooks/useSessionSearchInput.js';
@@ -163,6 +164,11 @@ export function SettingsDialog({
   const [searchQuery, setSearchQuery] = useState('');
   // Lazily-loaded system info for the Status tab (mirrors `/status`).
   const [systemInfo, setSystemInfo] = useState<ExtendedSystemInfo | null>(null);
+  // Set when the Status tab's info fetch rejects, so the tab can render a
+  // visible failure line instead of an indefinite "Loading status…" spinner.
+  const [statusError, setStatusError] = useState(false);
+  // Bumped by the `r` retry affordance on the Status tab to re-run the fetch.
+  const [statusReloadNonce, setStatusReloadNonce] = useState(0);
 
   // Local pending settings state for the selected scope
   const [pendingSettings, setPendingSettings] = useState<Settings>(() =>
@@ -357,12 +363,23 @@ export function SettingsDialog({
   // description still get hits.
   const normalizedQuery = searchQuery.trim().toLowerCase();
   const items = normalizedQuery
-    ? allItems.filter(
-        (item) =>
+    ? allItems.filter((item) => {
+        // Each row also shows a scope qualifier (e.g. "workspace only"), so
+        // include it in the predicate — otherwise typing "workspace" returns
+        // nothing despite the word being visible on the row.
+        const scopeMsg = getScopeMessageForSetting(
+          item.value,
+          selectedScope,
+          settings,
+        );
+        return (
           item.label.toLowerCase().includes(normalizedQuery) ||
           item.value.toLowerCase().includes(normalizedQuery) ||
-          (item.description?.toLowerCase().includes(normalizedQuery) ?? false),
-      )
+          (item.description?.toLowerCase().includes(normalizedQuery) ??
+            false) ||
+          (scopeMsg?.toLowerCase().includes(normalizedQuery) ?? false)
+        );
+      })
     : allItems;
 
   // Generic edit state
@@ -387,6 +404,11 @@ export function SettingsDialog({
   useEffect(() => {
     if (activeTab !== 'settings') {
       setMode('settings');
+      // The 'search' zone only exists on the Settings tab. If focus was in the
+      // search box when the user cycled to another tab, drop it to 'list' so the
+      // embedded data view (which receives isFocused={focusZone === 'list'})
+      // actually reacts to keys instead of becoming a silent dead zone.
+      setFocusZone((z) => (z === 'search' ? 'list' : z));
     }
   }, [activeTab]);
 
@@ -415,9 +437,11 @@ export function SettingsDialog({
       // Clear stale info when leaving so a revisit shows the loading line and
       // refetches, rather than briefly flashing the previous visit's data.
       setSystemInfo(null);
+      setStatusError(false);
       return;
     }
     let cancelled = false;
+    setStatusError(false);
     const ctx = {
       services: { config, settings },
     };
@@ -428,13 +452,17 @@ export function SettingsDialog({
         }
       })
       .catch((err) => {
-        // Leave systemInfo null; the tab renders a short fallback line.
-        debugLogger.debug('Failed to load system info:', err);
+        // Surface the failure so the tab shows an error line with a retry hint
+        // instead of an indefinite loading spinner.
+        debugLogger.error('Failed to load system info:', err);
+        if (!cancelled) {
+          setStatusError(true);
+        }
       });
     return () => {
       cancelled = true;
     };
-  }, [activeTab, config, settings]);
+  }, [activeTab, config, settings, statusReloadNonce]);
 
   const startEditing = (key: string, initial?: string) => {
     setEditingKey(key);
@@ -674,9 +702,11 @@ export function SettingsDialog({
       // While the top tab bar has focus, keys only drive tab switching.
       if (focusZone === 'tabs') {
         if (name === 'left' || (name === 'tab' && key.shift)) {
+          // Left / Shift+Tab cycles backwards, matching the embedded Stats
+          // sub-tabs.
           cycleTab(-1);
         } else if (name === 'right' || (name === 'tab' && !key.shift)) {
-          // Shift+Tab cycles backwards, matching the embedded Stats sub-tabs.
+          // Right / Tab cycles forwards.
           cycleTab(1);
         } else if (name === 'down' || name === 'return') {
           // Move down into the tab's content: the search box on the Settings
@@ -696,8 +726,15 @@ export function SettingsDialog({
           return;
         }
         // The Stats tab embeds StatsDialog, which handles Tab/Esc/r/←→ itself
-        // while focused; don't double-handle those keys here.
+        // while focused; don't double-handle those keys here. (Its Escape is
+        // wired to defocus to the tab bar rather than close — see onClose below.)
         if (activeTab === 'stats') {
+          return;
+        }
+        // Status tab: `r` retries the info fetch after a failure.
+        if (statusError && name === 'r') {
+          setStatusError(false);
+          setStatusReloadNonce((n) => n + 1);
           return;
         }
         if (name === 'escape') {
@@ -727,9 +764,11 @@ export function SettingsDialog({
           } else {
             onSelect(undefined, selectedScope);
           }
-        } else if (name === 'backspace') {
+        } else if (isDeletionKey(key)) {
           // Grapheme-aware so Backspace deletes a whole emoji / surrogate pair
-          // rather than leaving a dangling code unit.
+          // rather than leaving a dangling code unit. Uses the shared deletion
+          // predicate so terminals that emit raw DEL/BS bytes (no normalized
+          // `name`) can still delete.
           setSearchQuery((q) => removeLastGrapheme(q));
         } else if (isPrintableSearchChar(key) || (!ctrl && name === 'space')) {
           // Reuse the shared printable predicate (excludes DEL/C1/pastes and
@@ -1044,8 +1083,10 @@ export function SettingsDialog({
               );
             }
           }
-        } else if (name === 'backspace' && searchQuery.length > 0) {
-          // Editing the query moves focus up into the search box.
+        } else if (isDeletionKey(key) && searchQuery.length > 0) {
+          // Editing the query moves focus up into the search box. Uses the
+          // shared deletion predicate so raw DEL/BS bytes (terminals that don't
+          // normalize the key name) also delete rather than being swallowed.
           setFocusZone('search');
           setSearchQuery((q) => removeLastGrapheme(q));
         } else if (showRestartPrompt && name === 'r') {
@@ -1074,6 +1115,10 @@ export function SettingsDialog({
       if (name === 'escape') {
         if (editingKey) {
           commitEdit(editingKey);
+        } else if (mode === 'scope') {
+          // Esc backs out of the scope selector to the settings list rather
+          // than dismissing the whole dialog.
+          setMode('settings');
         } else if (
           activeTab === 'settings' &&
           mode === 'settings' &&
@@ -1103,7 +1148,13 @@ export function SettingsDialog({
         <Box flexDirection="column" flexGrow={1}>
           {activeTab === 'status' ? (
             systemInfo ? (
-              <AboutBox {...systemInfo} />
+              // Outer Box: border (2) + padding (2) = 4 columns of chrome,
+              // matching the embedded StatsDialog width below.
+              <AboutBox {...systemInfo} width={width ? width - 4 : undefined} />
+            ) : statusError ? (
+              <Text color={theme.status.error}>
+                {t('Failed to load status. Press r to retry.')}
+              </Text>
             ) : (
               <Text color={theme.text.secondary}>{t('Loading status…')}</Text>
             )
@@ -1112,7 +1163,13 @@ export function SettingsDialog({
             // Activity / Efficiency sub-tabs). It only consumes keyboard input
             // while this tab's content is focused.
             <StatsDialog
-              onClose={() => onSelect(undefined, selectedScope)}
+              // StatsDialog fires onClose only on Escape. Embedded, we want the
+              // Stats tab to mirror the other tabs: the first Escape defocuses
+              // back to the tab bar (both this parent and StatsDialog have live
+              // keypress handlers, so intercepting Escape here alone wouldn't
+              // stop StatsDialog from closing — redirecting its onClose does).
+              // A second Escape from the tab bar then closes the dialog.
+              onClose={() => setFocusZone('tabs')}
               isFocused={focusZone === 'list'}
               // Outer Box: border (2) + padding (2) = 4 columns of chrome.
               width={width ? width - 4 : undefined}
@@ -1143,7 +1200,9 @@ export function SettingsDialog({
           >
             <Text color={theme.text.secondary}>{'⌕ '}</Text>
             {searchQuery ? (
-              <Text color={theme.text.primary}>{searchQuery}</Text>
+              <Text color={theme.text.primary} wrap="truncate">
+                {searchQuery}
+              </Text>
             ) : (
               <Text color={theme.text.secondary}>{t('Search settings…')}</Text>
             )}
@@ -1311,13 +1370,16 @@ export function SettingsDialog({
           </Text>
         </Box>
       )}
-      {activeTab === 'settings' && mode === 'settings' && showRestartPrompt && (
-        <Text color={theme.status.warning}>
-          {t(
-            'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',
-          )}
-        </Text>
-      )}
+      {activeTab === 'settings' &&
+        mode === 'settings' &&
+        focusZone === 'list' &&
+        showRestartPrompt && (
+          <Text color={theme.status.warning}>
+            {t(
+              'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.',
+            )}
+          </Text>
+        )}
     </Box>
   );
 }
