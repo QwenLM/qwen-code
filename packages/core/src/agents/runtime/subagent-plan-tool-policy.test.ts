@@ -161,6 +161,14 @@ describe('subagent plan tool policy', () => {
             },
             expected: false,
           },
+          {
+            params: {
+              taskId: 'TASK-1',
+              status: 'in_progress',
+              addBlockedBy: ['TASK-2'],
+            },
+            expected: false,
+          },
           { params: null, expected: false },
         ];
 
