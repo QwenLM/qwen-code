@@ -56,6 +56,11 @@ export class ErrorBoundary extends Component<
       if (this.props.fallback) {
         return this.props.fallback(error, this.reset);
       }
+      // Intentionally un-translated: this is a generic last-resort message for
+      // callers that pass no `fallback` (the transcript passes its own,
+      // localized one). It renders while the subtree is already crashing —
+      // pulling in the i18n layer here risks a second failure inside the
+      // boundary — so keep it a plain, dependency-free English string.
       return (
         <Box flexDirection="column">
           <Text color={theme.status.error} bold>
