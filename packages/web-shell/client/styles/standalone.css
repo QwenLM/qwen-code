@@ -77,12 +77,11 @@ html *::after {
 /*
  * Re-enable selection on user-facing text regions: message bodies, code
  * blocks, the editor's contenteditable surface, and any dialog / panel
- * whose root opts in via `data-user-selectable`. `:where()` keeps
- * specificity at 0 so these rules win over the blanket `html *` block
- * above without needing `!important`.
+ * whose root opts in via `data-user-selectable`. Plain attribute selectors
+ * have specificity (0,1,0) which beats the blanket `html *` at (0,0,1).
  */
-:where([data-user-selectable]),
-:where([data-user-selectable] *),
+[data-user-selectable],
+[data-user-selectable] *,
 .cm-content,
 .cm-line,
 input,

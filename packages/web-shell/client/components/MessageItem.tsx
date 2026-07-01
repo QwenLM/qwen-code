@@ -167,8 +167,9 @@ export const MessageItem = memo(function MessageItem({
     );
   }
 
-  // The cancellation marker is a right-aligned, full-width turn-terminal row; a
-  // hover timestamp would overlap its text, so render it without the wrapper.
+  // The cancellation marker is a right-aligned, full-width turn-terminal row;
+  // a hover timestamp would overlap its text, so skip the MessageTimestamp
+  // wrapper. The data-user-selectable div is still applied for consistency.
   if (message.role === 'system' && message.source === 'prompt_cancelled') {
     return selectableSafeBody;
   }

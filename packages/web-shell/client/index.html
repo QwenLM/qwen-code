@@ -2,6 +2,12 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
+    <!--
+      `interactive-widget=resizes-content` is Chrome-on-Android-only (108+);
+      iOS Safari silently ignores it — the virtual keyboard always overlays
+      the viewport there. Keyboard-aware layout on iOS requires the
+      VirtualKeyboard API or `visualViewport` resize events instead.
+    -->
     <meta
       name="viewport"
       content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
@@ -21,7 +27,7 @@
       THEME_STORAGE_KEY in main.tsx.
     -->
     <script>
-      !function(){try{var k='qwen-code-web-shell-theme',p=new URLSearchParams(location.search),t=p.get('theme');if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem(k)}catch(_){t=null}}if(t!=='dark'&&t!=='light')t='dark';document.documentElement.classList.add('theme-'+t);var m=document.querySelector('meta[name=theme-color]');if(m)m.setAttribute('content',t==='light'?'#ffffff':'#0d0d0d')}catch(_){}}();
+      !function(){try{var k='qwen-code-web-shell-theme',p=new URLSearchParams(location.search),t=p.get('theme');if(t!=='dark'&&t!=='light'){try{t=localStorage.getItem(k)}catch(_){t=null}}if(t!=='dark'&&t!=='light')t='dark';document.documentElement.classList.add('theme-'+t);var m=document.querySelector('meta[name=theme-color]');if(m)m.setAttribute('content',t==='light'?'#ffffff':'#0d0d0d')}catch(e){console.warn('theme-init:',e)}}();
     </script>
     <!--
       Favicon is inlined as a data: URI rather than a /favicon.svg file because

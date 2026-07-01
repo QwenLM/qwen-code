@@ -112,9 +112,7 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   // consistent when the user toggles or when ?theme= lands via URL.
   useEffect(() => {
     const root = document.documentElement;
-    for (const cls of Array.from(root.classList)) {
-      if (cls.startsWith('theme-')) root.classList.remove(cls);
-    }
+    root.classList.remove('theme-dark', 'theme-light');
     root.classList.add(`theme-${theme}`);
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) {
