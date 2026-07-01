@@ -56,6 +56,11 @@ function createChannel(
   );
 }
 
+function deferredPromise<T>() {
+  const { promise, resolve, reject } = Promise.withResolvers<T>();
+  return { promise, resolve, reject };
+}
+
 describe('WeixinChannel', () => {
   beforeEach(() => {
     apiMocks.getConfig.mockReset();
@@ -120,6 +125,39 @@ describe('WeixinChannel', () => {
     await vi.waitFor(() => {
       expect(apiMocks.sendTyping).toHaveBeenCalledTimes(2);
       expect(activeTypingChats.has(chatId)).toBe(true);
+    });
+  });
+
+  it('stops typing again when a late lifecycle start resolves after terminal cleanup', async () => {
+    const channel = createChannel();
+    const start = deferredPromise<boolean>();
+    const setTyping = vi
+      .fn()
+      .mockReturnValueOnce(start.promise)
+      .mockResolvedValueOnce(true);
+    (channel as unknown as { setTyping: typeof setTyping }).setTyping =
+      setTyping;
+
+    const baseEvent = {
+      channelName: 'weixin',
+      chatId: 'user-late-start',
+      sessionId: 'session-3',
+      messageId: 'message-3',
+      identity: { id: 'channel:weixin', displayName: 'weixin' },
+      memoryScope: { namespace: 'channel:weixin', mode: 'metadata-only' },
+    } satisfies Omit<ChannelTaskLifecycleEvent, 'type'>;
+
+    channel.emitLifecycle({ ...baseEvent, type: 'started' });
+    channel.emitLifecycle({ ...baseEvent, type: 'completed' });
+
+    expect(setTyping).toHaveBeenNthCalledWith(1, 'user-late-start', true);
+    expect(setTyping).toHaveBeenNthCalledWith(2, 'user-late-start', false);
+
+    start.resolve(true);
+
+    await vi.waitFor(() => {
+      expect(setTyping).toHaveBeenNthCalledWith(3, 'user-late-start', false);
+      expect(setTyping).toHaveBeenCalledTimes(3);
     });
   });
 });

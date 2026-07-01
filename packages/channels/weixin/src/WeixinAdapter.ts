@@ -301,6 +301,10 @@ export class WeixinChannel extends ChannelBase {
     void this.setTyping(chatId, true).then((started) => {
       if (!started) {
         this.activeTypingChats.delete(chatId);
+        return;
+      }
+      if (!this.activeTypingChats.has(chatId)) {
+        void this.setTyping(chatId, false);
       }
     });
   }

@@ -397,9 +397,15 @@ export class DingtalkChannel extends ChannelBase {
     const key = this.reactionKey(messageId, chatId);
     if (this.activeReactionKeys.has(key)) return;
     this.activeReactionKeys.add(key);
-    this.attachReaction(messageId, chatId).catch(() => {
-      this.activeReactionKeys.delete(key);
-    });
+    this.attachReaction(messageId, chatId)
+      .then(() => {
+        if (!this.activeReactionKeys.has(key)) {
+          void this.recallReaction(messageId, chatId).catch(() => {});
+        }
+      })
+      .catch(() => {
+        this.activeReactionKeys.delete(key);
+      });
   }
 
   private stopReaction(chatId: string, messageId?: string): void {

@@ -113,6 +113,11 @@ function getLifecycleHook(
   return fn.bind(channel);
 }
 
+function deferredPromise<T>() {
+  const { promise, resolve, reject } = Promise.withResolvers<T>();
+  return { promise, resolve, reject };
+}
+
 describe('DingtalkChannel prompt reactions', () => {
   it('maps lifecycle start and terminal events to the eye reaction', () => {
     const channel = createChannel();
@@ -150,6 +155,55 @@ describe('DingtalkChannel prompt reactions', () => {
     expect(attachReaction).toHaveBeenCalledWith('message-1', 'cid-123');
     expect(recallReaction).toHaveBeenCalledOnce();
     expect(recallReaction).toHaveBeenCalledWith('message-1', 'cid-123');
+  });
+
+  it('recalls again when a late lifecycle attach resolves after terminal cleanup', async () => {
+    const channel = createChannel();
+    const attach = deferredPromise<void>();
+    const attachReaction = vi
+      .fn()
+      .mockReturnValueOnce(attach.promise)
+      .mockResolvedValueOnce(undefined);
+    const recallReaction = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
+
+    const event = {
+      channelName: 'dingtalk',
+      chatId: 'cid-456',
+      sessionId: 'session-2',
+      messageId: 'message-2',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    } satisfies Omit<ChannelTaskLifecycleEvent, 'type'>;
+
+    const lifecycle = getLifecycleHook(channel);
+    lifecycle({ ...event, type: 'started' });
+    lifecycle({ ...event, type: 'cancelled', reason: 'done' });
+
+    expect(attachReaction).toHaveBeenNthCalledWith(1, 'message-2', 'cid-456');
+    expect(recallReaction).toHaveBeenNthCalledWith(1, 'message-2', 'cid-456');
+
+    attach.resolve();
+
+    await vi.waitFor(() => {
+      expect(recallReaction).toHaveBeenNthCalledWith(
+        2,
+        'message-2',
+        'cid-456',
+      );
+      expect(recallReaction).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('does not attach lifecycle reactions without a conversation id', () => {
