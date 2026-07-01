@@ -806,6 +806,9 @@ export class TeamManager {
     }
 
     const requestId = randomBytes(12).toString('hex');
+    debug.info(
+      `Created plan approval request ${requestId} for teammate "${member.name}"`,
+    );
     return new Promise<TeamPlanApprovalDecision>((resolve, reject) => {
       const pending: PendingPlanApproval = {
         teammateName: member.name,
@@ -857,6 +860,9 @@ export class TeamManager {
       );
     }
     this.clearPlanApprovalRequest(requestId, pending);
+    debug.info(
+      `Resolved plan approval request ${requestId} for teammate "${pending.teammateName}" with action "${decision.action}"`,
+    );
     pending.resolve(decision);
   }
 
@@ -1766,6 +1772,7 @@ export class TeamManager {
     const pending = this.pendingPlanApprovals.get(requestId);
     if (!pending) return;
     this.clearPlanApprovalRequest(requestId, pending);
+    this.logRejectedPlanApprovalRequest(requestId, pending, error);
     pending.reject(error);
   }
 
@@ -1776,6 +1783,7 @@ export class TeamManager {
     for (const [requestId, pending] of this.pendingPlanApprovals) {
       if (pending.teammateName === teammateName) {
         this.clearPlanApprovalRequest(requestId, pending);
+        this.logRejectedPlanApprovalRequest(requestId, pending, error);
         pending.reject(error);
       }
     }
@@ -1784,8 +1792,19 @@ export class TeamManager {
   private rejectAllPlanApprovalRequests(error: Error): void {
     for (const [requestId, pending] of this.pendingPlanApprovals) {
       this.clearPlanApprovalRequest(requestId, pending);
+      this.logRejectedPlanApprovalRequest(requestId, pending, error);
       pending.reject(error);
     }
+  }
+
+  private logRejectedPlanApprovalRequest(
+    requestId: string,
+    pending: PendingPlanApproval,
+    error: Error,
+  ): void {
+    debug.info(
+      `Rejected plan approval request ${requestId} for teammate "${pending.teammateName}": ${error.message}`,
+    );
   }
 
   /**
