@@ -2676,6 +2676,49 @@ describe('ChannelBase', () => {
       );
     });
 
+    it('/cancel still delivers the response when cancellation fails after the response settles', async () => {
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let rejectCancel!: (err: Error) => void;
+      const pendingCancel = new Promise<void>((_resolve, reject) => {
+        rejectCancel = reject;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      resolvePrompt('agent response');
+      rejectCancel(new Error('session not found'));
+      await Promise.all([prompt, cancel]);
+
+      expect(ch.sent).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            text: 'Failed to cancel current request.',
+          }),
+          expect.objectContaining({ text: 'agent response' }),
+        ]),
+      );
+      expect(ch.sent).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ text: 'Cancelled current request.' }),
+        ]),
+      );
+    });
+
     it('/cancel retries after a failed cancellation while the prompt is still active', async () => {
       let resolvePrompt!: (v: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {
@@ -4682,9 +4725,14 @@ describe('ChannelBase', () => {
       const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
       await Promise.resolve();
       resolvePrompt('late response');
-      await prompt;
+      await Promise.resolve();
+      expect(ch.taskEvents).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'completed' }),
+        ]),
+      );
       resolveCancel();
-      await cancel;
+      await Promise.all([prompt, cancel]);
 
       expect(ch.sent).toEqual([
         { chatId: 'chat1', text: 'Cancelled current request.' },
