@@ -37,8 +37,10 @@ const rootDir = join(__dirname, '..');
 // Bumped from 130KB to 131KB for the workspace MCP resources drill-down
 // (workspaceMcpResources client method + route + resource status types).
 // Bumped from 131KB to 132KB for the pending prompt queue feature.
-// Bumped from 132KB to 133KB for session archive/unarchive APIs.
-const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 133 * 1024;
+// Bumped from 132KB to 133KB for session archive/unarchive APIs and sessionless
+// workspace remember (managed memory client methods + event validation).
+// Bumped from 133KB to 134KB after merging both surfaces with main.
+const MAX_DAEMON_BROWSER_BUNDLE_BYTES = 134 * 1024;
 // The opt-in `daemon/transports` browser bundle legitimately ships the concrete
 // ACP transports (AcpHttpTransport/AcpWsTransport/AutoReconnect + negotiate), so
 // it's larger than the default barrel — but still budgeted so a future PR can't

@@ -197,6 +197,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'workspace_providers',
   'auth_provider_install',
   'workspace_memory',
+  'workspace_memory_remember',
   'workspace_agents',
   'workspace_agent_generate',
   'workspace_env',
@@ -546,6 +547,14 @@ interface FakeBridgeOpts {
     signal?: AbortSignal,
     context?: BridgeClientRequestContext,
   ) => Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
+  workspaceMemoryRememberImpl?: (request: {
+    content: string;
+    contextMode: 'workspace' | 'clean';
+  }) => Promise<{
+    summary?: string;
+    filesTouched: string[];
+    touchedScopes: Array<'user' | 'project'>;
+  }>;
   daemonStatusSnapshotImpl?: () => BridgeDaemonStatusSnapshot;
 }
 
@@ -663,6 +672,10 @@ interface FakeBridge extends AcpSessionBridge {
     directive: string;
     context?: BridgeClientRequestContext;
   }>;
+  workspaceMemoryRememberCalls: Array<{
+    content: string;
+    contextMode: 'workspace' | 'clean';
+  }>;
   setToolEnabledCalls: Array<{
     toolName: string;
     enabled: boolean;
@@ -753,6 +766,8 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const sessionHooksCalls: string[] = [];
   const setModelCalls: FakeBridge['setModelCalls'] = [];
+  const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
+    [];
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
@@ -788,6 +803,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     }));
   const promptImpl =
     opts.promptImpl ?? (async () => ({ stopReason: 'end_turn' }));
+  const workspaceMemoryRememberImpl =
+    opts.workspaceMemoryRememberImpl ??
+    (async () => ({
+      summary: 'remembered',
+      filesTouched: [],
+      touchedScopes: [],
+    }));
   const cancelImpl = opts.cancelImpl ?? (async () => {});
   const respondImpl = opts.respondImpl ?? (() => true);
   const sessionRespondImpl = opts.sessionRespondImpl ?? (() => true);
@@ -1167,6 +1189,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     shellCalls,
     generateSessionRecapCalls,
     forkCalls,
+    workspaceMemoryRememberCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
@@ -1421,6 +1444,13 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return launchSessionForkAgentImpl(sessionId, directive, context);
+    },
+    async runWorkspaceMemoryRemember(request) {
+      workspaceMemoryRememberCalls.push(request);
+      return workspaceMemoryRememberImpl(request);
+    },
+    async isWorkspaceMemoryRememberAvailable() {
+      return true;
     },
     enqueueMidTurnMessage(sessionId, message, context) {
       enqueueMidTurnCalls.push({
@@ -9397,6 +9427,67 @@ describe('createServeApp', () => {
       ).resolves.toBeUndefined();
     });
 
+    it('deletes available sessions when another id is being loaded', async () => {
+      const sidOk = 'aaaa4444-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const sidBusy = 'aaaa5555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeSession(sidOk);
+      await writeSession(sidBusy);
+      let loadStarted!: () => void;
+      let releaseLoad!: () => void;
+      const loadStartedPromise = new Promise<void>((resolve) => {
+        loadStarted = resolve;
+      });
+      const loadReleasedPromise = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      const bridge = fakeBridge({
+        loadImpl: async (req) => {
+          if (req.sessionId === sidBusy) {
+            loadStarted();
+            await loadReleasedPromise;
+          }
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: req.workspaceCwd,
+            attached: false,
+            clientId: 'client-load',
+            state: {},
+            hasActivePrompt: false,
+          };
+        },
+      });
+      const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge,
+        boundWorkspace: wsDir,
+      });
+
+      const loadPromise = request(app)
+        .post(`/session/${sidBusy}/load`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({})
+        .then((res) => res);
+      await loadStartedPromise;
+
+      const res = await request(app)
+        .post('/sessions/delete')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ sessionIds: [sidOk, sidBusy] });
+
+      expect(res.status).toBe(200);
+      expect(res.body.removed).toEqual([sidOk]);
+      expect(res.body.notFound).toEqual([]);
+      expect(
+        res.body.errors.map((e: { sessionId: string }) => e.sessionId),
+      ).toEqual([sidBusy]);
+      await expect(fsp.access(sessionFilePath(sidOk))).rejects.toThrow();
+      await expect(
+        fsp.access(sessionFilePath(sidBusy)),
+      ).resolves.toBeUndefined();
+
+      releaseLoad();
+      await expect(loadPromise).resolves.toMatchObject({ status: 200 });
+    });
+
     it('400 when sessionIds exceeds max 100', async () => {
       const bridge = fakeBridge();
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
@@ -9535,9 +9626,9 @@ describe('createServeApp', () => {
       }
     });
 
-    it('returns 500 when removeSessions throws unexpectedly', async () => {
+    it('returns per-id errors when removeSession throws unexpectedly', async () => {
       const spy = vi
-        .spyOn(SessionService.prototype, 'removeSessions')
+        .spyOn(SessionService.prototype, 'removeSession')
         .mockRejectedValueOnce(new Error('disk on fire'));
       const bridge = fakeBridge();
       const app = createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
@@ -9548,8 +9639,13 @@ describe('createServeApp', () => {
         .post('/sessions/delete')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ sessionIds: ['aaaa0000-bbbb-cccc-dddd-eeeeeeeeeeee'] });
-      expect(res.status).toBe(500);
-      expect(res.body.code).toBe('sessions_delete_failed');
+      expect(res.status).toBe(200);
+      expect(res.body.errors).toEqual([
+        {
+          sessionId: 'aaaa0000-bbbb-cccc-dddd-eeeeeeeeeeee',
+          error: 'disk on fire',
+        },
+      ]);
       spy.mockRestore();
     });
   });

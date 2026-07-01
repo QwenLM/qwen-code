@@ -49,7 +49,11 @@ import {
   WorkspaceSettingsPartialPersistError,
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
-import { mountAcpHttp } from './index.js';
+import { mountAcpHttp, type AcpHttpHandle } from './index.js';
+import {
+  mountWorkspaceMemoryRememberRoutes,
+  WorkspaceRememberTaskLane,
+} from '../workspace-remember.js';
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
@@ -144,6 +148,7 @@ class FakeBridge {
   killed: string[] = [];
   cancelled: string[] = [];
   workspaceEvents: BridgeEvent[] = [];
+  knownClientIdSet = new Set<string>();
   /** When set, spawnOrAttach/loadSession await it (to simulate a slow bridge). */
   gate: Promise<void> | undefined;
   /** `attached` value loadSession returns (false = spawned-from-disk). */
@@ -374,11 +379,17 @@ class FakeBridge {
       originatorClientId: 'c',
     };
   }
+  async runWorkspaceMemoryRemember() {
+    return { summary: 'remembered', filesTouched: [], touchedScopes: [] };
+  }
+  async isWorkspaceMemoryRememberAvailable() {
+    return true;
+  }
   publishWorkspaceEvent(event: BridgeEvent) {
     this.workspaceEvents.push(event);
   }
   knownClientIds() {
-    return new Set<string>();
+    return new Set(this.knownClientIdSet);
   }
 }
 
@@ -670,6 +681,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   let server: Server;
   let base: string;
   let bridge: FakeBridge;
+  let acpHandle: AcpHttpHandle | undefined;
 
   beforeEach(async () => {
     stdioMocks.writeStderrLine.mockClear();
@@ -687,10 +699,39 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     bridge = new FakeBridge();
     const app = express();
     app.use(express.json());
-    mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
+    const workspaceRememberLane = new WorkspaceRememberTaskLane(
+      bridge as unknown as HttpAcpBridge,
+    );
+    mountWorkspaceMemoryRememberRoutes(app, {
+      bridge: bridge as unknown as HttpAcpBridge,
+      lane: workspaceRememberLane,
+      mutate: () => (_req, _res, next) => next(),
+      parseClientId: (req, res) => {
+        const raw = req.get('x-qwen-client-id');
+        if (raw === undefined || raw === '') return undefined;
+        if (!bridge.knownClientIdSet.has(raw)) {
+          res.status(400).json({
+            error: `Client id "${raw}" is not registered for this workspace`,
+            code: 'invalid_client_id',
+            clientId: raw,
+          });
+          return null;
+        }
+        return raw;
+      },
+      safeBody: (req) => {
+        const raw = req.body;
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+          return Object.create(null) as Record<string, unknown>;
+        }
+        return raw as Record<string, unknown>;
+      },
+    });
+    acpHandle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
       boundWorkspace: '/ws',
       workspace: fakeWorkspace,
       enabled: true,
+      workspaceRememberLane,
     });
     await new Promise<void>((resolve) => {
       server = app.listen(0, '127.0.0.1', () => resolve());
@@ -724,6 +765,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       enabled: true,
       fsFactory: opts.fsFactory,
       sessionShellCommandEnabled: opts.sessionShellCommandEnabled,
+      workspaceRememberLane: new WorkspaceRememberTaskLane(
+        bridge as unknown as HttpAcpBridge,
+      ),
     });
     await new Promise<void>((resolve) => {
       server = app.listen(0, '127.0.0.1', () => resolve());
@@ -753,6 +797,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const result = body['result'] as { protocolVersion: number };
     expect(result.protocolVersion).toBe(1);
     return connId;
+  }
+
+  function clientIdForConnection(connId: string): string {
+    const clientId = acpHandle?.registry.get(connId)?.clientId;
+    expect(clientId).toBeTruthy();
+    return clientId!;
   }
 
   function post(connId: string, msg: unknown) {
@@ -893,6 +943,21 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     };
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/workspace/setup-github',
+    );
+  });
+
+  it('initialize advertises workspace memory remember methods', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/remember',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/remember/get',
     );
   });
 
@@ -3681,6 +3746,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       workspace: fakeWorkspace,
       enabled: true,
       maxConnections: 1,
+      workspaceRememberLane: new WorkspaceRememberTaskLane(
+        bridge as unknown as HttpAcpBridge,
+      ),
     });
     const srv = app2.listen(0, '127.0.0.1');
     await new Promise((r) => srv.once('listening', r));
@@ -5402,18 +5470,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const bidiOverride = '\u202e';
       const sessionId = `sess${lineSep}FAKE\r\x1b[31m`;
       const removeError = `remove\nFAILED\r\x1b[31m${lineSep}${bidiOverride}`;
-      const removeSessionsSpy = vi
-        .spyOn(SessionService.prototype, 'removeSessions')
-        .mockResolvedValueOnce({
-          removed: [],
-          notFound: [],
-          errors: [
-            {
-              sessionId,
-              error: removeError as unknown as Error,
-            },
-          ],
-        });
+      const removeSessionSpy = vi
+        .spyOn(SessionService.prototype, 'removeSession')
+        .mockRejectedValueOnce(new Error(removeError));
 
       try {
         const connId = await initialize();
@@ -5433,13 +5492,13 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             errors: [{ sessionId, error: removeError }],
           },
         });
-        expect(removeSessionsSpy).toHaveBeenCalledWith([sessionId]);
+        expect(removeSessionSpy).toHaveBeenCalledWith(sessionId);
 
         const deleteLog = stdioMocks.writeStderrLine.mock.calls
           .map(([line]) => line)
           .find((line) => line.includes('sessions/delete'));
         expect(deleteLog).toContain(
-          'removeSessions(sess FAK) failed: remove FAILED  [31m',
+          'removeSession(sess FAK) failed: remove FAILED  [31m',
         );
         expect(deleteLog).not.toContain('\n');
         expect(deleteLog).not.toContain('\r');
@@ -5447,8 +5506,72 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(deleteLog).not.toContain(lineSep);
         expect(deleteLog).not.toContain(bidiOverride);
       } finally {
-        removeSessionsSpy.mockRestore();
+        removeSessionSpy.mockRestore();
       }
+    });
+
+    it('_qwen/sessions/delete deletes available ids when another id is loading', async () => {
+      await withRuntimeDir(async () => {
+        const sidOk = '550e8400-e29b-41d4-a716-446655440128';
+        const sidBusy = '550e8400-e29b-41d4-a716-446655440129';
+        await writeStoredSession(sidOk);
+        await writeStoredSession(sidBusy);
+        let loadStarted!: () => void;
+        let releaseLoad!: () => void;
+        const loadStartedPromise = new Promise<void>((resolve) => {
+          loadStarted = resolve;
+        });
+        const loadReleasedPromise = new Promise<void>((resolve) => {
+          releaseLoad = resolve;
+        });
+        bridge.loadSession = async (req) => {
+          if (req.sessionId === sidBusy) {
+            loadStarted();
+            await loadReleasedPromise;
+          }
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: '/ws',
+            attached: true,
+            clientId: 'client-load',
+            state: { replayed: true },
+          };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 70,
+          method: 'session/load',
+          params: { sessionId: sidBusy },
+        });
+        await loadStartedPromise;
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 71,
+          method: '_qwen/sessions/delete',
+          params: { sessionIds: [sidOk, sidBusy] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 71,
+          result: {
+            removed: [sidOk],
+            notFound: [],
+            errors: [expect.objectContaining({ sessionId: sidBusy })],
+          },
+        });
+        expect(bridge.closedSessions).toEqual([sidOk]);
+
+        releaseLoad();
+        expect(await reader.next()).toMatchObject({
+          id: 70,
+          result: { replayed: true },
+        });
+        reader.close();
+      });
     });
 
     it('_qwen/sessions/delete does not make missing archive ids wait on live close', async () => {
@@ -5555,6 +5678,111 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   describe('memory methods', () => {
+    it('_qwen/workspace/memory/remember queues and polls hidden tasks', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 79,
+          method: '_qwen/workspace/memory/remember',
+          params: { content: 'remember this', contextMode: 'clean' },
+        });
+        const queued = (await reader.next()) as {
+          result: { taskId: string; status: string; contextMode: string };
+        };
+        expect(queued.result).toMatchObject({
+          status: 'queued',
+          contextMode: 'clean',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 80,
+          method: '_qwen/workspace/memory/remember/get',
+          params: { taskId: queued.result.taskId },
+        });
+        const completed = (await reader.next()) as {
+          result: { status: string; result: { summary: string } };
+        };
+        expect(completed.result).toMatchObject({
+          status: 'completed',
+          result: { summary: 'No memory files updated.' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('shares remember task state between REST and ACP transports', async () => {
+      const connId = await initialize();
+      const clientId = clientIdForConnection(connId);
+      bridge.knownClientIdSet.add(clientId);
+
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        const restRes = await fetch(`${base}/workspace/memory/remember`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-qwen-client-id': clientId,
+          },
+          body: JSON.stringify({
+            content: 'remember via rest',
+            contextMode: 'workspace',
+          }),
+        });
+        expect(restRes.status).toBe(202);
+        const restTask = (await restRes.json()) as {
+          taskId: string;
+          status: string;
+        };
+        expect(restTask.status).toBe('queued');
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 81,
+          method: '_qwen/workspace/memory/remember/get',
+          params: { taskId: restTask.taskId },
+        });
+        let completed:
+          | {
+              result: {
+                taskId: string;
+                status: string;
+                result: { summary: string };
+              };
+            }
+          | undefined;
+        for (let i = 0; i < 3; i++) {
+          const frame = (await reader.next()) as {
+            id?: number;
+            result?: {
+              taskId: string;
+              status: string;
+              result: { summary: string };
+            };
+          };
+          if (frame.id === 81) {
+            completed = frame as typeof completed;
+            break;
+          }
+        }
+        expect(completed).toBeDefined();
+        expect(completed!.result).toMatchObject({
+          taskId: restTask.taskId,
+          status: 'completed',
+          result: { summary: 'No memory files updated.' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
     it('_qwen/workspace/memory/write rejects non-string content', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -5969,6 +6197,9 @@ describe('ACP WebSocket transport security', () => {
         enabled: true,
         token: opts.token,
         allowedOrigins: opts.allowedOrigins,
+        workspaceRememberLane: new WorkspaceRememberTaskLane(
+          bridge as unknown as HttpAcpBridge,
+        ),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
       });

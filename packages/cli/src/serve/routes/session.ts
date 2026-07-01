@@ -802,31 +802,28 @@ export function registerSessionRoutes(
     const uniqueIds = parseSessionIdsBody(req, res);
     if (uniqueIds === undefined) return;
     try {
-      // Keep close+remove under one gate so a load/resume cannot recreate the
-      // same live session between the bridge close and transcript deletion.
-      const deleteResponse = await archiveCoordinator.runExclusiveMany(
-        uniqueIds,
-        async () => {
+      const service = new SessionService(boundWorkspace);
+      const closeErrors: Array<{ sessionId: string; error: string }> = [];
+      const removed: string[] = [];
+      const notFound: string[] = [];
+      const removeErrors: Array<{ sessionId: string; error: string }> = [];
+      await Promise.all(
+        uniqueIds.map(async (id) => {
           try {
-            const closeResults = await Promise.allSettled(
-              uniqueIds.map(async (id) => {
+            // Keep each close+remove under one gate so a load/resume cannot
+            // recreate that same live session between bridge close and
+            // transcript deletion. Gate per id so one busy session does not
+            // make the whole batch fail.
+            await archiveCoordinator.runExclusiveMany([id], async () => {
+              let shouldRemove = false;
+              try {
                 // Intentional: no clientId — batch delete bypasses per-tab ownership.
                 await bridge.closeSession(id);
-                return id;
-              }),
-            );
-            const closeErrors: Array<{ sessionId: string; error: string }> = [];
-            const closedIds: string[] = [];
-            for (let i = 0; i < closeResults.length; i++) {
-              const r = closeResults[i];
-              const id = uniqueIds[i];
-              if (r.status === 'fulfilled') {
-                closedIds.push(id);
-              } else {
-                const closeErr = r.reason;
+                shouldRemove = true;
+              } catch (closeErr) {
                 if (closeErr instanceof SessionNotFoundError) {
                   // Session not active in bridge — still attempt to remove its transcript file
-                  closedIds.push(id);
+                  shouldRemove = true;
                 } else {
                   const msg =
                     closeErr instanceof Error
@@ -838,50 +835,38 @@ export function registerSessionRoutes(
                   closeErrors.push({ sessionId: id, error: msg });
                 }
               }
-            }
-            const result = await new SessionService(
-              boundWorkspace,
-            ).removeSessions(closedIds);
-            for (const e of result.errors) {
-              const msg =
-                e.error instanceof Error ? e.error.message : String(e.error);
-              writeStderrLine(
-                `qwen serve: removeSession failed for ${safeLogValue(e.sessionId)}: ${safeLogValue(msg)}`,
-              );
-            }
-            return {
-              status: 200,
-              body: {
-                removed: result.removed,
-                notFound: result.notFound,
-                errors: [
-                  ...closeErrors,
-                  ...result.errors.map((e) => ({
-                    sessionId: e.sessionId,
-                    error:
-                      e.error instanceof Error
-                        ? e.error.message
-                        : String(e.error),
-                  })),
-                ],
-              },
-            };
+              if (!shouldRemove) return;
+              try {
+                if (await service.removeSession(id)) {
+                  removed.push(id);
+                } else {
+                  notFound.push(id);
+                }
+              } catch (removeErr) {
+                const msg =
+                  removeErr instanceof Error
+                    ? removeErr.message
+                    : String(removeErr);
+                writeStderrLine(
+                  `qwen serve: removeSession failed for ${safeLogValue(id)}: ${safeLogValue(msg)}`,
+                );
+                removeErrors.push({ sessionId: id, error: msg });
+              }
+            });
           } catch (err) {
             const message = err instanceof Error ? err.message : String(err);
             writeStderrLine(
-              `qwen serve: failed to batch delete sessions: ${safeLogValue(message)}`,
+              `qwen serve: deleteSession failed for ${safeLogValue(id)}: ${safeLogValue(message)}`,
             );
-            return {
-              status: 500,
-              body: {
-                error: 'Failed to delete sessions',
-                code: 'sessions_delete_failed',
-              },
-            };
+            closeErrors.push({ sessionId: id, error: message });
           }
-        },
+        }),
       );
-      res.status(deleteResponse.status).json(deleteResponse.body);
+      res.status(200).json({
+        removed,
+        notFound,
+        errors: [...closeErrors, ...removeErrors],
+      });
     } catch (err) {
       sendBridgeError(res, err, { route: 'POST /sessions/delete' });
     }

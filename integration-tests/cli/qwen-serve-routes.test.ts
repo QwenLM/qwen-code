@@ -258,6 +258,7 @@ describe('qwen serve — capabilities envelope', () => {
       'workspace_providers',
       'auth_provider_install',
       'workspace_memory',
+      'workspace_memory_remember',
       'workspace_agents',
       'workspace_agent_generate',
       'workspace_env',

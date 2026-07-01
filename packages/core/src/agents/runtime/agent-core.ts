@@ -376,9 +376,7 @@ export class AgentCore {
     // When initialMessages is set, the caller owns the full prior history
     // (including any env bootstrap it wants). Fork relies on this to inherit
     // the parent conversation verbatim without duplicating env messages.
-    const hasInitialMessages =
-      !!this.promptConfig.initialMessages &&
-      this.promptConfig.initialMessages.length > 0;
+    const hasInitialMessages = this.promptConfig.initialMessages !== undefined;
     const hasSkillTool = this.willHaveSkillTool();
     const [envHistory] = hasInitialMessages
       ? [[]]

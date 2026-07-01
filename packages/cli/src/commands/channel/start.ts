@@ -1,195 +1,91 @@
-import * as path from 'node:path';
-import { pathToFileURL } from 'node:url';
 import type { CommandModule } from 'yargs';
-import { ProxyAgent, setGlobalDispatcher } from 'undici';
-import { normalizeProxyUrl, Storage } from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
-import type {
-  ChannelAgentBridge,
-  ChannelBase,
-  ChannelPlugin,
-  ToolCallEvent,
-} from '@qwen-code/channel-base';
-import { getPlugin, registerPlugin } from './channel-registry.js';
+import type { ChannelBase } from '@qwen-code/channel-base';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
+import { resolveProxy } from './proxy.js';
 import {
   readServiceInfo,
   writeServiceInfo,
   removeServiceInfo,
 } from './pidfile.js';
-import { getExtensionManager } from '../extensions/utils.js';
+import {
+  createChannel,
+  loadChannelsConfig,
+  loadChannelsFromExtensions,
+  parseConfiguredChannels,
+  registerSessionCleanup,
+  registerToolCallDispatch,
+  selectFirstModel,
+  sessionsPath,
+} from './runtime.js';
+
+export { resolveExtensionChannelEntrySpecifier } from './runtime.js';
+export { resolveProxy } from './proxy.js';
 
 const MAX_CRASH_RESTARTS = 3;
 const CRASH_WINDOW_MS = 5 * 60 * 1000; // 5-minute window for counting crashes
 const RESTART_DELAY_MS = 3000;
 
-/**
- * Resolve and apply proxy settings for the channel service process.
- *
- * The normal CLI path applies proxy via loadCliConfig → Config constructor →
- * setGlobalDispatcher, but `channel start` never calls loadCliConfig. This
- * replicates the same resolution logic (--proxy flag → settings.proxy →
- * HTTPS_PROXY → HTTP_PROXY) and applies the global dispatcher for native
- * fetch() calls. The resolved URL is also passed to channels via
- * ChannelBaseOptions so adapters can configure their own HTTP clients (e.g.
- * grammy uses node-fetch which needs a separate agent).
- */
-export function resolveProxy(
-  cliProxy?: string,
-  settingsProxy?: string,
-): string | undefined {
-  const proxyUrl = normalizeProxyUrl(
-    cliProxy ||
-      settingsProxy ||
-      process.env['HTTPS_PROXY'] ||
-      process.env['https_proxy'] ||
-      process.env['HTTP_PROXY'] ||
-      process.env['http_proxy'],
+function isFileExistsError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    (err as NodeJS.ErrnoException).code === 'EEXIST'
   );
-  if (proxyUrl) {
-    setGlobalDispatcher(new ProxyAgent(proxyUrl));
-  }
-  return proxyUrl;
 }
 
-function sessionsPath(): string {
-  return path.join(Storage.getGlobalQwenDir(), 'channels', 'sessions.json');
-}
-
-function loadChannelsConfig(): Record<string, unknown> {
-  const settings = loadSettings(process.cwd());
-  const channels = (
-    settings.merged as unknown as { channels?: Record<string, unknown> }
-  ).channels;
-  return channels || {};
-}
-
-export function resolveExtensionChannelEntrySpecifier(
-  extensionPath: string,
-  entry: string,
-): string {
-  return pathToFileURL(path.join(extensionPath, entry)).href;
-}
-
-/**
- * Load channel plugins from active extensions.
- * Extensions declare channels in their qwen-extension.json manifest.
- */
-async function loadChannelsFromExtensions(): Promise<number> {
-  let loaded = 0;
+function writeServiceInfoOrExit(channels: string[], cleanup: () => void): void {
   try {
-    const extensionManager = await getExtensionManager();
-    const extensions = extensionManager
-      .getLoadedExtensions()
-      .filter((e) => e.isActive && e.channels);
-
-    for (const ext of extensions) {
-      for (const [channelType, channelDef] of Object.entries(ext.channels!)) {
-        if (await getPlugin(channelType)) {
-          writeStderrLine(
-            `[Extensions] Skipping channel "${channelType}" from "${ext.name}": type already registered`,
-          );
-          continue;
-        }
-
-        const entrySpecifier = resolveExtensionChannelEntrySpecifier(
-          ext.path,
-          channelDef.entry,
-        );
-        try {
-          const module = (await import(entrySpecifier)) as {
-            plugin?: ChannelPlugin;
-          };
-          const plugin = module.plugin;
-
-          if (!plugin || typeof plugin.createChannel !== 'function') {
-            writeStderrLine(
-              `[Extensions] "${ext.name}": channel entry point does not export a valid plugin object`,
-            );
-            continue;
-          }
-
-          if (plugin.channelType !== channelType) {
-            writeStderrLine(
-              `[Extensions] "${ext.name}": channelType mismatch — manifest says "${channelType}", plugin says "${plugin.channelType}"`,
-            );
-            continue;
-          }
-
-          registerPlugin(plugin);
-          loaded++;
-          writeStdoutLine(
-            `[Extensions] Loaded channel "${channelType}" from "${ext.name}"`,
-          );
-        } catch (err) {
-          writeStderrLine(
-            `[Extensions] Failed to load channel "${channelType}" from "${ext.name}": ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-      }
-    }
+    writeServiceInfo(channels);
   } catch (err) {
-    writeStderrLine(
-      `[Extensions] Failed to load extensions: ${err instanceof Error ? err.message : String(err)}`,
-    );
-  }
-  return loaded;
-}
-
-async function createChannel(
-  name: string,
-  config: Awaited<ReturnType<typeof parseChannelConfig>>,
-  bridge: ChannelAgentBridge,
-  options?: { router?: SessionRouter; proxy?: string },
-): Promise<ChannelBase> {
-  const channelPlugin = await getPlugin(config.type);
-  if (!channelPlugin) {
-    throw new Error(`Unknown channel type: "${config.type}".`);
-  }
-  return channelPlugin.createChannel(name, config, bridge, options);
-}
-
-function registerToolCallDispatch(
-  bridge: ChannelAgentBridge,
-  router: SessionRouter,
-  channels: Map<string, ChannelBase>,
-): void {
-  bridge.on('toolCall', (event: ToolCallEvent) => {
-    const target = router.getTarget(event.sessionId);
-    if (target) {
-      const channel = channels.get(target.channelName);
-      if (channel) {
-        channel.onToolCall(target.chatId, event);
-      }
+    cleanup();
+    if (isFileExistsError(err)) {
+      writeStderrLine(
+        'Error: Channel service was started concurrently. Use "qwen channel status" to inspect it.',
+      );
+      process.exit(1);
     }
-  });
+    throw err;
+  }
 }
 
-function registerSessionCleanup(
-  bridge: ChannelAgentBridge,
+function cleanupStartedChannels(
+  channels: Iterable<ChannelBase>,
+  bridge: AcpBridge,
   router: SessionRouter,
-  channels: Map<string, ChannelBase>,
 ): void {
-  bridge.on('sessionDied', (event: { sessionId: string; reason?: string }) => {
-    writeStderrLine(
-      `[Channel] Session ${event.sessionId} died${event.reason ? ` (${event.reason})` : ''}, removing routing state`,
-    );
-    const target = router.getTarget(event.sessionId);
-    const channel = target ? channels.get(target.channelName) : undefined;
-    if (channel) {
-      channel.onSessionDied(event.sessionId);
-    } else {
-      router.removeSessionId(event.sessionId);
+  for (const channel of channels) {
+    try {
+      channel.disconnect();
+    } catch {
+      // best-effort
     }
-  });
+  }
+  try {
+    bridge.stop();
+  } catch {
+    // best-effort
+  }
+  try {
+    router.clearAll();
+  } catch {
+    // best-effort
+  }
 }
 
 /** Check for duplicate instance and abort if one is already running. */
 function checkDuplicateInstance(): void {
   const existing = readServiceInfo();
   if (existing) {
+    if (existing.owner === 'serve') {
+      writeStderrLine(
+        `Error: Channel service is managed by qwen serve (PID ${existing.pid}, started ${existing.startedAt}).`,
+      );
+      writeStderrLine('Stop the qwen serve process to stop managed channels.');
+      process.exit(1);
+    }
     writeStderrLine(
       `Error: Channel service is already running (PID ${existing.pid}, started ${existing.startedAt}).`,
     );
@@ -256,7 +152,9 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
     process.exit(1);
   }
 
-  writeServiceInfo([name]);
+  writeServiceInfoOrExit([name], () =>
+    cleanupStartedChannels([channel], bridge, router),
+  );
   writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
 
   const attachDisconnectHandler = (b: AcpBridge): void => {
@@ -337,22 +235,15 @@ async function startAll(proxy?: string): Promise<void> {
   }
 
   // Parse all configs upfront — fail fast on bad config
-  const parsed: Array<{
-    name: string;
-    config: Awaited<ReturnType<typeof parseChannelConfig>>;
-  }> = [];
-  for (const [name, raw] of Object.entries(channelsConfig)) {
-    try {
-      parsed.push({
-        name,
-        config: await parseChannelConfig(name, raw as Record<string, unknown>),
-      });
-    } catch (err) {
-      writeStderrLine(
-        `Error in channel "${name}": ${err instanceof Error ? err.message : String(err)}`,
-      );
-      process.exit(1);
-    }
+  let parsed;
+  try {
+    parsed = await parseConfiguredChannels(
+      channelsConfig,
+      Object.keys(channelsConfig),
+    );
+  } catch (err) {
+    writeStderrLine(err instanceof Error ? err.message : String(err));
+    process.exit(1);
   }
 
   const cliEntryPath = findCliEntryPath();
@@ -360,20 +251,10 @@ async function startAll(proxy?: string): Promise<void> {
   let shuttingDown = false;
   const crashTimestamps: number[] = [];
 
-  // All channels share one bridge process. Use the first channel's model.
-  const models = [
-    ...new Set(parsed.map((p) => p.config.model).filter(Boolean)),
-  ];
-  if (models.length > 1) {
-    writeStderrLine(
-      `[Channel] Warning: Multiple models configured (${models.join(', ')}). ` +
-        `Shared bridge will use "${models[0]}".`,
-    );
-  }
   const bridgeOpts = {
     cliEntryPath,
     cwd: defaultCwd,
-    model: models[0],
+    model: selectFirstModel(parsed, 'Shared bridge'),
   };
   let bridge = new AcpBridge(bridgeOpts);
   await bridge.start();
@@ -418,7 +299,10 @@ async function startAll(proxy?: string): Promise<void> {
     process.exit(1);
   }
 
-  writeServiceInfo(parsed.map((p) => p.name));
+  writeServiceInfoOrExit(
+    parsed.map((p) => p.name),
+    () => cleanupStartedChannels(channels.values(), bridge, router),
+  );
   writeStdoutLine(
     `[Channel] Running ${connectedCount} channel(s). Press Ctrl+C to stop.`,
   );

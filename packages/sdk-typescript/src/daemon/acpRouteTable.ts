@@ -501,6 +501,24 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (_s, body) => (isRecord(body) ? body : {}),
     },
   },
+  // POST /workspace/memory/remember → _qwen/workspace/memory/remember
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/memory\/remember\/?$/,
+    mapping: {
+      method: '_qwen/workspace/memory/remember',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
+  // GET /workspace/memory/remember/:taskId → _qwen/workspace/memory/remember/get
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/memory\/remember\/([^/]+)$/,
+    mapping: {
+      method: '_qwen/workspace/memory/remember/get',
+      extractParams: (segs) => ({ taskId: segs[0] }),
+    },
+  },
   // GET /workspace/agents → _qwen/workspace/agents/list
   {
     httpMethod: 'GET',

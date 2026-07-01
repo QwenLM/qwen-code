@@ -210,10 +210,14 @@ export class AcpWsTransport implements DaemonTransport {
     );
 
     if (response.error) {
-      const status = jsonRpcErrorToHttpStatusWithData(
-        response.error.code,
-        response.error.data,
-      );
+      const errorData = response.error.data;
+      const status =
+        isRecord(errorData) && typeof errorData['httpStatus'] === 'number'
+          ? errorData['httpStatus']
+          : jsonRpcErrorToHttpStatusWithData(
+              response.error.code,
+              response.error.data,
+            );
       return synthesizeResponse(status, {
         error: response.error.message,
         ...(response.error.data != null ? { data: response.error.data } : {}),

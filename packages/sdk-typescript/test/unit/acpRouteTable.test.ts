@@ -439,6 +439,30 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ content: 'hi' });
   });
 
+  it('POST /workspace/memory/remember maps to _qwen/workspace/memory/remember', () => {
+    const result = matchRoute('/workspace/memory/remember', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/remember');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { content: 'hi', contextMode: 'clean' },
+      'POST',
+    );
+    expect(params).toEqual({ content: 'hi', contextMode: 'clean' });
+  });
+
+  it('GET /workspace/memory/remember/:taskId maps to _qwen/workspace/memory/remember/get', () => {
+    const result = matchRoute('/workspace/memory/remember/remember%2Fa', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/remember/get');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ taskId: 'remember/a' });
+  });
+
   it('GET /workspace/agents maps to _qwen/workspace/agents/list', () => {
     const result = matchRoute('/workspace/agents', 'GET');
     expect(result).not.toBeNull();

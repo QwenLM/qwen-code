@@ -185,6 +185,10 @@ export const AskUserQuestionDialog: React.FC<AskUserQuestionDialogProps> = ({
           void onConfirm(ToolConfirmationOutcome.Cancel);
           return;
         }
+        if (key.name === 'return') {
+          handleCustomInputSubmit();
+          return;
+        }
         return;
       }
 

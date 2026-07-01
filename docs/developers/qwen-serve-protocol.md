@@ -303,6 +303,11 @@ Response shape:
     "sessions": { "active": 0 },
     "permissions": { "pending": 0, "policy": "first-responder" },
     "channel": { "live": false },
+    "channelWorker": {
+      "enabled": false,
+      "state": "disabled",
+      "channels": []
+    },
     "transport": {
       "restSseActive": 0,
       "acp": {
@@ -323,11 +328,18 @@ Response shape:
 warning severity, otherwise `ok`. Issue codes are stable and include
 `session_capacity_high`, `connection_capacity_high`, `pending_permissions`,
 `acp_channel_down`, `preflight_error`, `mcp_budget_warning`,
-`mcp_budget_exhausted`, `rate_limit_hits`, and
+`mcp_budget_exhausted`, `rate_limit_hits`, `channel_worker_exited`, and
 `workspace_status_unavailable`. During the short window after the listener is
 ready but before the full runtime is mounted, `/daemon/status` may report
 `daemon_runtime_starting`; if the async runtime mount fails, it reports
 `daemon_runtime_failed` while non-status runtime routes return `503`.
+
+`runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
+not the channel-adapter worker. Daemon-managed channels use
+`runtime.channelWorker`, whose `state` is one of `disabled`, `starting`,
+`running`, `exited`, `failed`, or `stopped`. When a worker reaches `running`
+and then exits, `/daemon/status` keeps the daemon online and reports warning
+issue code `channel_worker_exited`.
 
 Security: the response never includes bearer tokens, client ids, full ACP
 connection ids, device-flow user codes, or verification URLs. `summary` omits
