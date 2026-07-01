@@ -3,6 +3,7 @@ import { FeishuChannel } from './FeishuAdapter.js';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
+  ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
 
 function createMockBridge(): ChannelAgentBridge {
@@ -871,6 +872,96 @@ describe('FeishuChannel', () => {
         expect.stringContaining('partial response text'),
       );
     });
+
+    it('records failed lifecycle state for prompt-end card finalization', async () => {
+      const channel = createChannel();
+      const cardSessions = getPrivateMethod<Map<string, unknown>>(
+        channel,
+        'cardSessions',
+      );
+      cardSessions.set('inbound_1', {
+        messageId: 'om_valid_message_id',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'partial answer',
+        lastUpdateAt: Date.now(),
+      });
+
+      const updateCard = vi.fn().mockResolvedValue(true);
+      (channel as unknown as { updateCard: typeof updateCard }).updateCard =
+        updateCard;
+
+      getPrivateMethod<(event: ChannelTaskLifecycleEvent) => void>(
+        channel,
+        'onTaskLifecycle',
+      ).call(channel, {
+        type: 'failed',
+        channelName: 'feishu',
+        chatId: 'oc_chat_id',
+        sessionId: 'session_1',
+        messageId: 'inbound_1',
+        error: 'boom',
+        identity: { id: 'channel:feishu', displayName: 'feishu' },
+        memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
+      });
+
+      await getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => Promise<void>
+      >(channel, 'onPromptEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+
+      expect(updateCard.mock.calls[0]![1]).toContain('已失败，请重试');
+    });
+
+    it('records cancelled lifecycle state for prompt-end card finalization', async () => {
+      const channel = createChannel();
+      const cardSessions = getPrivateMethod<Map<string, unknown>>(
+        channel,
+        'cardSessions',
+      );
+      cardSessions.set('inbound_1', {
+        messageId: 'om_valid_message_id',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'partial answer',
+        lastUpdateAt: Date.now(),
+      });
+
+      const updateCard = vi.fn().mockResolvedValue(true);
+      (channel as unknown as { updateCard: typeof updateCard }).updateCard =
+        updateCard;
+
+      getPrivateMethod<(event: ChannelTaskLifecycleEvent) => void>(
+        channel,
+        'onTaskLifecycle',
+      ).call(channel, {
+        type: 'cancelled',
+        reason: 'cancel_command',
+        channelName: 'feishu',
+        chatId: 'oc_chat_id',
+        sessionId: 'session_1',
+        messageId: 'inbound_1',
+        identity: { id: 'channel:feishu', displayName: 'feishu' },
+        memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
+      });
+
+      await getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => Promise<void>
+      >(channel, 'onPromptEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+
+      expect(updateCard.mock.calls[0]![1]).toContain('已取消');
+    });
   });
 
   describe('onResponseComplete: stopped card cleanup', () => {
@@ -913,6 +1004,42 @@ describe('FeishuChannel', () => {
       expect(sendMessageSpy).not.toHaveBeenCalled();
       // Card session should be cleaned up
       expect(cardSessions.has('inbound_1')).toBe(false);
+    });
+
+    it('marks completed cards with the completed status label', async () => {
+      const channel = createChannel();
+      const sessionToInboundMsg = getPrivateMethod<Map<string, string>>(
+        channel,
+        'sessionToInboundMsg',
+      );
+      const cardSessions = getPrivateMethod<Map<string, unknown>>(
+        channel,
+        'cardSessions',
+      );
+      sessionToInboundMsg.set('session_1', 'inbound_1');
+      cardSessions.set('inbound_1', {
+        messageId: 'om_valid_message_id',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'answer',
+        lastUpdateAt: Date.now(),
+      });
+
+      const updateCard = vi.fn().mockResolvedValue(true);
+      (channel as unknown as { updateCard: typeof updateCard }).updateCard =
+        updateCard;
+
+      await getPrivateMethod<
+        (chatId: string, fullText: string, sessionId: string) => Promise<void>
+      >(channel, 'onResponseComplete').call(
+        channel,
+        'oc_chat_id',
+        'final answer',
+        'session_1',
+      );
+
+      expect(updateCard.mock.calls[0]![1]).toContain('已完成');
     });
   });
 

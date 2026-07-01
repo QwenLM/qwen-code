@@ -13,6 +13,7 @@ import type {
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
+  ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
 
 /** Feishu message event data shape. */
@@ -44,6 +45,8 @@ interface FeishuMessageEvent {
 }
 
 /** Track per-session interactive card state. */
+type FeishuTerminalStatus = 'completed' | 'cancelled' | 'failed';
+
 interface CardSessionState {
   messageId: string;
   created: boolean;
@@ -67,6 +70,7 @@ interface CardSessionState {
   /** Set synchronously in onCardAction so .then() callbacks can detect stop intent
    *  before cancelSession resolves. Cleared on cancelSession failure. */
   cancelling?: boolean;
+  terminalStatus?: FeishuTerminalStatus;
 }
 
 /** Track seen message IDs to deduplicate retried events. */
@@ -692,6 +696,7 @@ export class FeishuChannel extends ChannelBase {
       title: cardTitle,
       showStopButton: true,
       isStreaming: true,
+      statusLabel: this.statusLabelFor(),
       collapsible: this.collapsible,
       collapsibleThreshold: this.collapsibleThreshold,
     });
@@ -744,6 +749,7 @@ export class FeishuChannel extends ChannelBase {
     text: string,
     finished = false,
     inboundMsgId?: string,
+    statusLabel?: string,
   ): Promise<boolean> {
     const token = await this.getTenantAccessToken();
     if (!token) return false;
@@ -755,6 +761,7 @@ export class FeishuChannel extends ChannelBase {
       title: cardTitle,
       showStopButton: !finished,
       isStreaming: !finished,
+      statusLabel: statusLabel ?? (!finished ? this.statusLabelFor() : undefined),
       collapsible: this.collapsible,
       collapsibleThreshold: this.collapsibleThreshold,
     });
@@ -980,6 +987,38 @@ export class FeishuChannel extends ChannelBase {
     }
   }
 
+  private statusLabelFor(terminalStatus?: FeishuTerminalStatus): string {
+    switch (terminalStatus) {
+      case 'completed':
+        return '已完成';
+      case 'cancelled':
+        return '已取消';
+      case 'failed':
+        return '已失败，请重试';
+      default:
+        return '运行中...';
+    }
+  }
+
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    if (
+      event.type !== 'completed' &&
+      event.type !== 'cancelled' &&
+      event.type !== 'failed'
+    ) {
+      return;
+    }
+
+    const inboundMsgId =
+      event.messageId || this.sessionToInboundMsg.get(event.sessionId);
+    if (!inboundMsgId) return;
+
+    const cardState = this.cardSessions.get(inboundMsgId);
+    if (!cardState) return;
+
+    cardState.terminalStatus = event.type;
+  }
+
   protected override async onResponseComplete(
     chatId: string,
     fullText: string,
@@ -1006,6 +1045,7 @@ export class FeishuChannel extends ChannelBase {
     // Prepend greeting with sender name
     const atSender = this.msgToSenderName.get(inboundMsgId);
     let displayText = atSender ? `${atSender}\n\n${fullText}` : fullText;
+    const completedLabel = this.statusLabelFor('completed');
     // Enforce card size limit to avoid wasted API round-trips
     const MAX_FINAL_CARD_CHARS = 20_000;
     if (displayText.length > MAX_FINAL_CARD_CHARS) {
@@ -1066,14 +1106,14 @@ export class FeishuChannel extends ChannelBase {
     if (cardState?.created) {
       const updated = await this.updateCard(
         cardState.messageId,
-        displayText,
+        `${displayText}\n\n---\n*${completedLabel}*`,
         true,
         inboundMsgId,
       );
       if (!updated) {
         // Fallback: try without tables (card table number limit, code-fence aware)
         const noTableText = this.stripTables(
-          displayText,
+          `${displayText}\n\n---\n*${completedLabel}*`,
           '(表格内容请查看原文)',
         );
         const retried = await this.updateCard(
@@ -1088,7 +1128,8 @@ export class FeishuChannel extends ChannelBase {
           if (this.countFences(truncated) % 2 === 1) truncated += '\n```';
           const lastResort = await this.updateCard(
             cardState.messageId,
-            truncated + '\n\n---\n*内容过长，已截断*',
+            truncated +
+              `\n\n---\n*内容过长，已截断*\n*${completedLabel}*`,
             true,
             inboundMsgId,
           );
@@ -1119,7 +1160,7 @@ export class FeishuChannel extends ChannelBase {
     if (result.success) {
       const finalized = await this.updateCard(
         result.messageId,
-        displayText,
+        `${displayText}\n\n---\n*${completedLabel}*`,
         true,
         inboundMsgId,
       );
@@ -1248,17 +1289,15 @@ export class FeishuChannel extends ChannelBase {
         } else if (cs.created) {
           cs.stopped = true;
           const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
-          // Distinguish backend error (user didn't cancel) from user cancellation.
-          // User cancellation sets cs.stopped via onCardAction before onPromptEnd,
-          // so reaching here with !cs.stopped means the prompt failed unexpectedly.
-          const errorLabel = '*出错了，请重试*';
+          const terminalStatus = cs.terminalStatus || 'failed';
+          const terminalLabel = this.statusLabelFor(terminalStatus);
           const text = cs.accumulatedText
             ? (atPrefix
                 ? `${atPrefix}\n\n${cs.accumulatedText}`
                 : cs.accumulatedText) +
               '\n\n---\n' +
-              errorLabel
-            : (atPrefix ? `${atPrefix}\n\n` : '') + errorLabel;
+              `*${terminalLabel}*`
+            : (atPrefix ? `${atPrefix}\n\n` : '') + `*${terminalLabel}*`;
           // Must await updateCard before cleanupCard — updateCard reads
           // msgToQuestion after an await, which cleanupCard would delete.
           await this.updateCard(cs.messageId, text, true, inboundMsgId).catch(
