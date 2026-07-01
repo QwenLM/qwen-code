@@ -31,7 +31,9 @@ import type { Config } from '../config/config.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
+  getLeaderOnlyToolUnavailableMessage,
   getSubagentPlanToolUnavailableMessage,
+  isLeaderOnlyToolUnavailableInSubagent,
   isPlanLifecycleToolUnavailableInSubagent,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
 
@@ -289,7 +291,10 @@ class ToolSearchInvocation extends BaseToolInvocation<
         missing.push(requested);
         continue;
       }
-      if (isPlanLifecycleToolUnavailableInSubagent(canonical)) {
+      if (
+        isPlanLifecycleToolUnavailableInSubagent(canonical) ||
+        isLeaderOnlyToolUnavailableInSubagent(canonical)
+      ) {
         blocked.push(canonical);
         continue;
       }
@@ -438,7 +443,9 @@ class ToolSearchInvocation extends BaseToolInvocation<
     let blockedErrorMessage: string | undefined;
     if (blocked.length > 0) {
       const blockedMessages = blocked.map((name) =>
-        getSubagentPlanToolUnavailableMessage(name),
+        isLeaderOnlyToolUnavailableInSubagent(name)
+          ? getLeaderOnlyToolUnavailableMessage(name)
+          : getSubagentPlanToolUnavailableMessage(name),
       );
       blockedErrorMessage = blockedMessages.join('\n');
       const header = llmContent ? '\n\n' : '';

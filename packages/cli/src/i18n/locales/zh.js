@@ -196,6 +196,7 @@ export default {
   'toolDisplayName.TaskStop': '停止任务',
   'toolDisplayName.TeamCreate': '创建团队',
   'toolDisplayName.TeamDelete': '删除团队',
+  'toolDisplayName.TeamPlanApproval': '团队计划审批',
   'toolDisplayName.SendMessage': '发送消息',
   'toolDisplayName.StructuredOutput': '结构化输出',
   'toolDisplayName.Monitor': '监控',

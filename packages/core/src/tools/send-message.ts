@@ -24,6 +24,10 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { getAgentName, isTeammate } from '../agents/team/identity.js';
 import { LEADER_NAME } from '../agents/team/types.js';
 import {
+  getPlanRequiredTeammatePreApprovalMessage,
+  isPlanRequiredTeammateAwaitingApproval,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
+import {
   BaseDeclarativeTool,
   BaseToolInvocation,
   Kind,
@@ -77,6 +81,17 @@ class SendMessageInvocation extends BaseToolInvocation<
   }
 
   async execute(_signal: AbortSignal): Promise<ToolResult> {
+    if (isPlanRequiredTeammateAwaitingApproval(this.config)) {
+      const msg = getPlanRequiredTeammatePreApprovalMessage(
+        ToolNames.SEND_MESSAGE,
+      );
+      return {
+        llmContent: msg,
+        returnDisplay: msg,
+        error: { message: msg },
+      };
+    }
+
     // Route 1: background task by task_id.
     if (this.params.task_id) {
       const registry = this.config.getBackgroundTaskRegistry();

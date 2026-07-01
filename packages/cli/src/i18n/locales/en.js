@@ -204,6 +204,7 @@ export default {
   'toolDisplayName.TaskStop': 'toolDisplayName.TaskStop',
   'toolDisplayName.TeamCreate': 'toolDisplayName.TeamCreate',
   'toolDisplayName.TeamDelete': 'toolDisplayName.TeamDelete',
+  'toolDisplayName.TeamPlanApproval': 'toolDisplayName.TeamPlanApproval',
   'toolDisplayName.SendMessage': 'toolDisplayName.SendMessage',
   'toolDisplayName.StructuredOutput': 'toolDisplayName.StructuredOutput',
   'toolDisplayName.Monitor': 'toolDisplayName.Monitor',
