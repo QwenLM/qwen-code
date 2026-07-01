@@ -45,7 +45,7 @@ describe('modelCommand', () => {
   it('should have the correct name and description', () => {
     expect(modelCommand.name).toBe('model');
     expect(modelCommand.description).toBe(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
   });
 
@@ -196,6 +196,231 @@ describe('modelCommand', () => {
       messageType: 'info',
       content: 'Model: qwen-max',
     });
+  });
+
+  it('runs a trailing prompt on the given model inline without switching or persisting', async () => {
+    const setValue = vi.fn();
+    const switchModel = vi.fn().mockResolvedValue(undefined);
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model qwen-max explain this code',
+        name: 'model',
+        args: 'qwen-max explain this code',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+          switchModel,
+        },
+        settings: createMockSettings(setValue),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'qwen-max explain this code',
+    );
+
+    // Inline override is per-turn: no session switch, no persistence.
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(setValue).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'explain this code',
+      modelOverride: 'qwen-max',
+    });
+  });
+
+  it('rejects an inline prompt when the model id is not available', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model missing-model hello',
+        name: 'model',
+        args: 'missing-model hello',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          switchModel,
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'missing-model hello',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
+  });
+
+  it('rejects an inline prompt that targets a different provider', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model gpt-4(openai) hello',
+        name: 'model',
+        args: 'gpt-4(openai) hello',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          switchModel,
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'gpt-4', label: 'GPT-4' }]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'gpt-4(openai) hello',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('different provider'),
+    });
+  });
+
+  it('rejects an inline prompt whose model belongs to a same-auth-type provider with a different endpoint/credentials', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model shared-id hello',
+        name: 'model',
+        args: 'shared-id hello',
+      },
+      services: {
+        config: {
+          // Active provider: one OpenAI-compatible endpoint/credential.
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'shared-id',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://provider-a.example/v1',
+            apiKeyEnvKey: 'PROVIDER_A_KEY',
+          }),
+          switchModel,
+          // Same id + auth type, but a different provider's endpoint/credential.
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'shared-id',
+              label: 'Shared',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://provider-b.example/v1',
+              envKey: 'PROVIDER_B_KEY',
+            },
+          ]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(mockContext, 'shared-id hello');
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({
+      type: 'message',
+      messageType: 'error',
+      content: expect.stringContaining('different provider'),
+    });
+  });
+
+  it('runs an inline prompt when the model matches the active provider endpoint/credentials', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      invocation: {
+        raw: '/model shared-id hello there',
+        name: 'model',
+        args: 'shared-id hello there',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'other',
+            authType: AuthType.USE_OPENAI,
+            baseUrl: 'https://provider-a.example/v1',
+            apiKeyEnvKey: 'PROVIDER_A_KEY',
+          }),
+          switchModel,
+          getAvailableModelsForAuthType: vi.fn().mockReturnValue([
+            {
+              id: 'shared-id',
+              label: 'Shared',
+              authType: AuthType.USE_OPENAI,
+              baseUrl: 'https://provider-a.example/v1',
+              envKey: 'PROVIDER_A_KEY',
+            },
+          ]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'shared-id hello there',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toEqual({
+      type: 'submit_prompt',
+      content: 'hello there',
+      modelOverride: 'shared-id',
+    });
+  });
+
+  it('rejects an inline prompt in ACP mode (no per-turn override pipeline)', async () => {
+    const switchModel = vi.fn();
+    mockContext = createMockCommandContext({
+      executionMode: 'acp',
+      invocation: {
+        raw: '/model qwen-max explain this',
+        name: 'model',
+        args: 'qwen-max explain this',
+      },
+      services: {
+        config: {
+          getContentGeneratorConfig: vi.fn().mockReturnValue({
+            model: 'qwen-plus',
+            authType: AuthType.QWEN_OAUTH,
+          }),
+          switchModel,
+          getAvailableModelsForAuthType: vi
+            .fn()
+            .mockReturnValue([{ id: 'qwen-max', label: 'Qwen Max' }]),
+        },
+        settings: createMockSettings(vi.fn()),
+      },
+    });
+
+    const result = await modelCommand.action!(
+      mockContext,
+      'qwen-max explain this',
+    );
+
+    expect(switchModel).not.toHaveBeenCalled();
+    expect(result).toMatchObject({ type: 'message', messageType: 'error' });
   });
 
   it('should not persist the model when direct model validation fails', async () => {
