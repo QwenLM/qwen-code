@@ -316,6 +316,32 @@ describe('getDisplayItemVirtualKey', () => {
       }),
     ).toBe('group:header');
   });
+
+  it('keys live turn rows by their start time', () => {
+    expect(
+      getDisplayItemVirtualKey({
+        type: 'turn_collapse',
+        key: 'u1',
+        turnCollapse: {
+          turnId: 'u1',
+          collapsed: false,
+          hiddenCount: 0,
+          liveStartedAt: 1_000,
+        },
+      }),
+    ).toBe('tc:u1:1000');
+    expect(
+      getDisplayItemVirtualKey({
+        type: 'turn_collapse',
+        key: 'u1',
+        turnCollapse: {
+          turnId: 'u1',
+          collapsed: true,
+          hiddenCount: 1,
+        },
+      }),
+    ).toBe('tc:u1');
+  });
 });
 
 describe('shouldUseVirtualScroll', () => {
