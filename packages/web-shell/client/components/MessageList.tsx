@@ -282,7 +282,12 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
 
 export function getDisplayItemVirtualKey(item: DisplayItem): string {
   if (item.type === 'parallel_agents') return `group:${item.key}`;
-  if (item.type === 'turn_collapse') return `tc:${item.key}`;
+  if (item.type === 'turn_collapse') {
+    const liveKey = item.turnCollapse.liveStartedAt;
+    return liveKey === undefined
+      ? `tc:${item.key}`
+      : `tc:${item.key}:${liveKey}`;
+  }
   if (item.type === 'turn_content') return `turn-content:${item.key}`;
   return `msg:${item.key}`;
 }
@@ -925,6 +930,11 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
 
   const now = useSharedNow(liveStartedAt !== undefined && showMetadataRow);
   const elapsedSeenRef = useRef(0);
+  const previousLiveStartedAtRef = useRef<number | undefined>(liveStartedAt);
+  if (previousLiveStartedAtRef.current !== liveStartedAt) {
+    previousLiveStartedAtRef.current = liveStartedAt;
+    elapsedSeenRef.current = 0;
+  }
   let displayElapsedMs: number | undefined;
   if (liveStartedAt !== undefined && showMetadataRow) {
     elapsedSeenRef.current = Math.max(
