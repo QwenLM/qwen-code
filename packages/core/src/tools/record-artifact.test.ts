@@ -31,6 +31,44 @@ describe('RecordArtifactTool', () => {
     ]);
   });
 
+  it('records workspace and managed artifacts with inferred storage', async () => {
+    const tool = new RecordArtifactTool();
+
+    await expect(
+      tool
+        .build({
+          title: 'Workspace report',
+          workspacePath: 'reports/summary.html',
+        })
+        .execute(signal),
+    ).resolves.toMatchObject({
+      artifacts: [
+        {
+          title: 'Workspace report',
+          storage: 'workspace',
+          workspacePath: 'reports/summary.html',
+        },
+      ],
+    });
+
+    await expect(
+      tool
+        .build({
+          title: 'Managed preview',
+          managedId: 'ext-123',
+        })
+        .execute(signal),
+    ).resolves.toMatchObject({
+      artifacts: [
+        {
+          title: 'Managed preview',
+          storage: 'managed',
+          managedId: 'ext-123',
+        },
+      ],
+    });
+  });
+
   it('rejects published storage', () => {
     const tool = new RecordArtifactTool();
 
@@ -83,6 +121,20 @@ describe('RecordArtifactTool', () => {
         metadata: { value: 'x'.repeat(4096) },
       }),
     ).toThrow(/metadata/);
+  });
+
+  it('rejects invalid artifact sizes before reporting success', () => {
+    const tool = new RecordArtifactTool();
+
+    for (const sizeBytes of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(() =>
+        tool.build({
+          title: 'Sized artifact',
+          url: 'https://example.com/resource',
+          sizeBytes,
+        }),
+      ).toThrow(/sizeBytes/);
+    }
   });
 
   it('rejects unsafe display markup before reporting success', () => {

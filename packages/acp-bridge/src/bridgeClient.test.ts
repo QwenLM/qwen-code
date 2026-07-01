@@ -920,6 +920,53 @@ describe('BridgeClient — artifact ingress', () => {
       stderr.mockRestore();
     }
   });
+
+  it('logs and drops malformed artifact events before resolving a session', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const resolveEntry = vi.fn(() => ({
+      sessionId: 'sess:malformed',
+      events: { publish },
+      artifacts: new SessionArtifactStore({
+        sessionId: 'sess:malformed',
+        workspaceCwd: process.cwd(),
+      }),
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: true,
+    }));
+    const client = new BridgeClient(
+      resolveEntry as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        client.extNotification('qwen/notify/session/artifact-event', {
+          artifacts: [{ title: 'Missing session' }],
+        }),
+      ).resolves.toBeUndefined();
+      await expect(
+        client.extNotification('qwen/notify/session/artifact-event', {
+          sessionId: 'sess:malformed',
+          artifacts: 'not-array',
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(resolveEntry).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('reason=malformed');
+      expect(logged).toContain('session=<missing>');
+      expect(logged).toContain('session=sess:malformed');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
 });
 
 /**
