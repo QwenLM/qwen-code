@@ -556,6 +556,7 @@ function isTurnStartMessage(message: Message): boolean {
 function timelineDetailSnippetForMessage(message: Message): string {
   switch (message.role) {
     case 'thinking':
+      return SESSION_TIMELINE_KIND_LABEL.thought;
     case 'assistant':
       return compactTimelineText(message.content, 120);
     case 'tool_group': {

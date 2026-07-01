@@ -443,7 +443,7 @@ describe('getSessionTimelineEntries', () => {
       {
         id: 'u1',
         label: 'hello',
-        detail: 'pondering · 2 tool calls · plan update',
+        detail: 'thinking · 2 tool calls · plan update',
         timestamp: undefined,
         nodeKinds: ['thought', 'tool', 'plan'],
       },
@@ -469,11 +469,22 @@ describe('getSessionTimelineEntries', () => {
       {
         id: 'u1',
         label: 'hello',
-        detail: 'response · pondering',
+        detail: 'response · thinking',
         timestamp: undefined,
         nodeKinds: ['commentary', 'thought'],
       },
     ]);
+  });
+
+  it('summarizes thinking without exposing its content', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      makeThinkingMessage('think', 'private reasoning details'),
+      makeAssistantMessage('final'),
+    ]);
+
+    expect(entry?.detail).toBe('thinking');
+    expect(entry?.detail).not.toContain('private');
   });
 
   it('keeps streaming assistant content in the active turn detail', () => {
