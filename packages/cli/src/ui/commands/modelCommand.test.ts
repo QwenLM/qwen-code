@@ -1273,7 +1273,7 @@ describe('modelCommand', () => {
       type: 'message',
       messageType: 'info',
       content:
-        'Current vision model: qwen-vl-max\nUse "/model --vision <model-id>" to set the vision bridge model.',
+        'Current vision model: qwen-vl-max (https://vision.example.com/v1)\nUse "/model --vision <model-id>" to set the vision bridge model.',
     });
   });
 

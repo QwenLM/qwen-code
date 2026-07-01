@@ -749,6 +749,7 @@ describe('Server Config (config.ts)', () => {
         ...baseParams,
         visionModel: '\0https://example.com/v1',
       });
+      const warn = vi.spyOn(config.getDebugLogger(), 'warn');
       stubProvider(config, [
         {
           id: 'vl-same-provider',
@@ -762,6 +763,9 @@ describe('Server Config (config.ts)', () => {
         id: 'vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("'\\0https://example.com/v1'"),
+      );
     });
 
     it('drops a pin that points at the current primary model and auto-selects a same-provider VL model instead', () => {

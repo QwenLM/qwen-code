@@ -42,7 +42,7 @@ function splitModelBaseUrl(model: string): { model: string; baseUrl?: string } {
   const idx = model.indexOf('\0');
   if (idx < 0) return { model };
   const modelPart = model.slice(0, idx);
-  if (!modelPart) return { model };
+  if (!modelPart) return { model: modelPart };
   return {
     model: modelPart,
     baseUrl: model.slice(idx + 1) || undefined,
@@ -625,7 +625,9 @@ export class BaseLlmClient {
     modelBaseUrl?: string,
   ): Promise<ContentGenerator> {
     const cacheKey = selector
-      ? `${selector.authType ?? ''}:${selector.modelId}:${modelBaseUrl ?? ''}`
+      ? modelBaseUrl === undefined
+        ? `${selector.authType ?? ''}:${selector.modelId}`
+        : `${selector.authType ?? ''}:${selector.modelId}\0${modelBaseUrl}`
       : model;
     const cached = this.perModelGeneratorCache.get(cacheKey);
     if (cached) return cached;
@@ -640,8 +642,10 @@ export class BaseLlmClient {
       // failClosed callers (vision bridge) must NOT silently run on the main
       // generator — that would send image payloads to the text-only primary.
       if (failClosed) {
+        const baseUrlMessage =
+          modelBaseUrl === undefined ? '' : ` at baseUrl "${modelBaseUrl}"`;
         throw new Error(
-          `Model "${model}" is not registered across any auth type; ` +
+          `Model "${model}"${baseUrlMessage} is not registered across any auth type; ` +
             `refusing to fall back to the main generator.`,
         );
       }

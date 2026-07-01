@@ -1003,7 +1003,9 @@ describe('BaseLlmClient', () => {
         c.resolveForModel('openai:real-model\0https://wrong-url.example.com', {
           failClosed: true,
         }),
-      ).rejects.toThrow(/not registered/i);
+      ).rejects.toThrow(
+        'Model "openai:real-model" at baseUrl "https://wrong-url.example.com" is not registered',
+      );
       expect(mockCreateContentGenerator).not.toHaveBeenCalled();
     });
 

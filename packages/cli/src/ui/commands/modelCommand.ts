@@ -499,7 +499,12 @@ export const modelCommand: SlashCommand = {
               'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
               {
                 visionModel: visionModel
-                  ? visionModel.split('\0')[0] || visionModel
+                  ? (() => {
+                      const [selector, baseUrl] = visionModel.split('\0');
+                      return baseUrl
+                        ? `${selector} (${baseUrl})`
+                        : selector || visionModel;
+                    })()
                   : t('not set'),
               },
             ),
