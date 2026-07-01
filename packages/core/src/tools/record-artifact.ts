@@ -286,7 +286,7 @@ function validateString(
   if (trimmed.length > maxLength) {
     return `"${field}" exceeds ${maxLength} characters`;
   }
-  if (hasControlCharacter(trimmed)) {
+  if (hasControlCharacter(trimmed, field === 'description')) {
     return `"${field}" contains control characters`;
   }
   if (
@@ -298,9 +298,18 @@ function validateString(
   return null;
 }
 
-function hasControlCharacter(value: string): boolean {
+function hasControlCharacter(
+  value: string,
+  allowLineWhitespace = false,
+): boolean {
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
+    if (
+      allowLineWhitespace &&
+      (code === 0x09 || code === 0x0a || code === 0x0d)
+    ) {
+      continue;
+    }
     if (
       code <= 0x1f ||
       code === 0x7f ||

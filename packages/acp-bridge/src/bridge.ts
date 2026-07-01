@@ -2321,7 +2321,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       sizeBytes: artifact.sizeBytes,
       metadata: artifact.metadata,
       source: 'client',
-      trustedPublisher: false,
     };
     if (clientId) {
       input.clientId = clientId;

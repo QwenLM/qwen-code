@@ -220,4 +220,31 @@ describe('RecordArtifactTool', () => {
       }),
     ).toThrow(/metadata/);
   });
+
+  it('accepts line whitespace in descriptions but not titles', async () => {
+    const tool = new RecordArtifactTool();
+
+    await expect(
+      tool
+        .build({
+          title: 'Multiline report',
+          description: 'Line one\nLine two\tindented\r\nLine three',
+          url: 'https://example.com/resource',
+        })
+        .execute(signal),
+    ).resolves.toMatchObject({
+      artifacts: [
+        {
+          description: 'Line one\nLine two\tindented\r\nLine three',
+        },
+      ],
+    });
+
+    expect(() =>
+      tool.build({
+        title: 'Bad\nTitle',
+        url: 'https://example.com/resource',
+      }),
+    ).toThrow(/control characters/);
+  });
 });

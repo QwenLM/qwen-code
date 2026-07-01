@@ -56,7 +56,6 @@ export interface SessionArtifactInput extends ToolArtifactLike {
   toolName?: string;
   hookEventName?: string;
   clientId?: string;
-  trustedPublisher?: boolean;
 }
 
 export interface DaemonSessionArtifact {
@@ -270,17 +269,16 @@ export class SessionArtifactStore {
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
-      // Client-created artifacts are owner-protected when the route has a
-      // daemon client id. Tool/hook artifacts are session-scoped outputs and
-      // may be removed by any caller that already passed session mutation auth.
+      // Client-created artifacts with an owner require the same client id.
+      // Tool/hook artifacts are session-scoped outputs and may be removed by
+      // any caller that already passed session mutation auth.
       if (
         existing.source === 'client' &&
         existing.clientId !== undefined &&
-        options?.clientId !== undefined &&
-        existing.clientId !== options.clientId
+        existing.clientId !== options?.clientId
       ) {
         writeStderrLine(
-          `[artifacts] session=${this.sessionId} action=remove_denied artifactId=${artifactId} owner=${existing.clientId} requester=${options.clientId}`,
+          `[artifacts] session=${this.sessionId} action=remove_denied artifactId=${artifactId} owner=${existing.clientId} requester=${options?.clientId ?? '<anonymous>'}`,
         );
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
@@ -1027,7 +1025,7 @@ function normalizeString(
       field,
     );
   }
-  if (hasControlCharacter(trimmed)) {
+  if (hasControlCharacter(trimmed, field === 'description')) {
     throw new SessionArtifactValidationError(
       `${field} contains control characters`,
       field,
@@ -1045,9 +1043,18 @@ function normalizeString(
   return trimmed;
 }
 
-function hasControlCharacter(value: string): boolean {
+function hasControlCharacter(
+  value: string,
+  allowLineWhitespace = false,
+): boolean {
   for (let i = 0; i < value.length; i++) {
     const code = value.charCodeAt(i);
+    if (
+      allowLineWhitespace &&
+      (code === 0x09 || code === 0x0a || code === 0x0d)
+    ) {
+      continue;
+    }
     if (
       code <= 0x1f ||
       code === 0x7f ||

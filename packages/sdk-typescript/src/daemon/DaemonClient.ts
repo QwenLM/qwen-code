@@ -2943,10 +2943,12 @@ export class DaemonClient {
 
   async listSessionArtifacts(
     sessionId: string,
+    clientId?: string,
   ): Promise<DaemonSessionArtifactsEnvelope> {
     return await this.jsonRequest<DaemonSessionArtifactsEnvelope>(
       `/session/${encodeURIComponent(sessionId)}/artifacts`,
       'GET /session/:id/artifacts',
+      { clientId },
     );
   }
 

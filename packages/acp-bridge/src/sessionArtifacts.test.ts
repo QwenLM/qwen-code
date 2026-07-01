@@ -88,10 +88,14 @@ describe('SessionArtifactStore', () => {
       await expect(
         store.remove(artifactId, { clientId: 'client-b' }),
       ).resolves.toMatchObject({ changes: [] });
+      await expect(store.remove(artifactId)).resolves.toMatchObject({
+        changes: [],
+      });
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('remove_denied');
       expect(logged).toContain('client-a');
       expect(logged).toContain('client-b');
+      expect(logged).toContain('<anonymous>');
     } finally {
       stderr.mockRestore();
     }
@@ -176,20 +180,6 @@ describe('SessionArtifactStore', () => {
         { strict: true },
       ),
     ).rejects.toBeInstanceOf(SessionArtifactValidationError);
-    await expect(
-      store.upsertMany(
-        [
-          {
-            title: 'Forged with flag',
-            storage: 'published',
-            url: 'https://example.com/flag',
-            trustedPublisher: true,
-          },
-        ],
-        { strict: true },
-      ),
-    ).rejects.toBeInstanceOf(SessionArtifactValidationError);
-
     await store.upsertMany([
       { title: 'Link', url: 'https://example.com/artifact' },
     ]);
@@ -604,6 +594,46 @@ describe('SessionArtifactStore', () => {
         { strict: true },
       ),
     ).rejects.toMatchObject({ field: 'metadata' });
+  });
+
+  it('accepts line whitespace in descriptions but not titles', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-line-whitespace',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Multiline report',
+            description: 'Line one\nLine two\tindented\r\nLine three',
+            url: 'https://example.com/multiline',
+          },
+        ],
+        { strict: true },
+      ),
+    ).resolves.toMatchObject({
+      changes: [
+        {
+          artifact: {
+            description: 'Line one\nLine two\tindented\r\nLine three',
+          },
+        },
+      ],
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Bad\nTitle',
+            url: 'https://example.com/bad-title',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'title' });
   });
 
   it('does not create empty metadata or emit ghost updates', async () => {

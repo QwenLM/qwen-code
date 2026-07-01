@@ -163,6 +163,9 @@ describe('createAcpSessionBridge', () => {
         }),
       ).resolves.toMatchObject({ changes: [] });
       await expect(
+        bridge.removeSessionArtifact(first.sessionId, artifactId),
+      ).resolves.toMatchObject({ changes: [] });
+      await expect(
         bridge.getSessionArtifacts(first.sessionId),
       ).resolves.toMatchObject({
         artifacts: [{ id: artifactId, clientId: first.clientId }],

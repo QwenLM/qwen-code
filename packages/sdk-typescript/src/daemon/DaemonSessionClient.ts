@@ -411,7 +411,10 @@ export class DaemonSessionClient {
   }
 
   async artifacts(): Promise<DaemonSessionArtifactsEnvelope> {
-    return await this.client.listSessionArtifacts(this.sessionId);
+    return await this.client.listSessionArtifacts(
+      this.sessionId,
+      this.clientId,
+    );
   }
 
   async addArtifact(
