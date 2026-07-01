@@ -215,8 +215,6 @@ const EN: Messages = {
   'code.copy': 'Copy',
   'code.copied': 'Copied!',
   'markdownTable.blank': '(blank)',
-  'markdownTable.toggleAdvanced': 'Switch to advanced table',
-  'markdownTable.toggleBasic': 'Switch to basic table',
   'markdownTable.column': (v) => `Column ${v?.index ?? ''}`,
   'markdownTable.rows': (v) => {
     const count = Number(v?.count ?? 0);
@@ -1161,6 +1159,7 @@ const EN: Messages = {
   'tool.collapse': '▲ Collapse',
   'tool.expand': 'Expand',
   'tool.collapseHint': 'Collapse',
+  'tool.status.failed': 'Failed',
   'tool.showAll': (v) => `▼ Show all (${v?.count ?? 0} lines)`,
   'tool.showLess': '▲ Show less',
   'tool.showFullLines': '▼ Show full lines',
@@ -1451,8 +1450,6 @@ const ZH: Messages = {
   'code.copy': '复制',
   'code.copied': '已复制！',
   'markdownTable.blank': '(空白)',
-  'markdownTable.toggleAdvanced': '切换到高级表格',
-  'markdownTable.toggleBasic': '切换到基础表格',
   'markdownTable.column': (v) => `第 ${v?.index ?? ''} 列`,
   'markdownTable.rows': (v) => `${v?.count ?? 0} 行`,
   'markdownTable.rowsFiltered': (v) => `${v?.visible ?? 0}/${v?.total ?? 0} 行`,
@@ -2326,6 +2323,7 @@ const ZH: Messages = {
   'tool.collapse': '▲ 收起',
   'tool.expand': '展开',
   'tool.collapseHint': '收起',
+  'tool.status.failed': '执行失败',
   'tool.showAll': (v) => `▼ 显示全部（${v?.count ?? 0} 行）`,
   'tool.showLess': '▲ 显示更少',
   'tool.showFullLines': '▼ 显示完整行',

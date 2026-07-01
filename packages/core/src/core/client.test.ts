@@ -55,7 +55,11 @@ vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
   isUnattendedMode: vi.fn(() => false),
 }));
-import { getCoreSystemPrompt, getCustomSystemPrompt } from './prompts.js';
+import {
+  getCoreSystemPrompt,
+  getCustomSystemPrompt,
+  getPlanModeSystemReminder,
+} from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
@@ -75,6 +79,7 @@ import {
   setActiveGoal,
 } from '../goals/activeGoalStore.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -482,6 +487,7 @@ describe('Gemini Client (client.ts)', () => {
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getSdkMode: vi.fn().mockReturnValue(false),
       getIdeModeFeature: vi.fn().mockReturnValue(false),
       getIdeMode: vi.fn().mockReturnValue(true),
       getDebugMode: vi.fn().mockReturnValue(false),
@@ -3095,14 +3101,14 @@ describe('Gemini Client (client.ts)', () => {
 
       await client.tryCompressChat('p1', true, signal);
 
-      // 5th arg is the `options` bag for `customInstructions` plumbing;
-      // omitted here means undefined which is the correct contract.
+      // 5th arg is the `options` bag — always includes reservedOutputTokens
+      // now; no customInstructions when omitted by the caller.
       expect(tryCompress).toHaveBeenCalledWith(
         'p1',
         'the-model',
         true,
         signal,
-        undefined,
+        { reservedOutputTokens: expect.any(Number) },
       );
     });
 
@@ -3125,7 +3131,10 @@ describe('Gemini Client (client.ts)', () => {
         'the-model',
         true,
         undefined,
-        { customInstructions: 'focus on auth bug' },
+        {
+          customInstructions: 'focus on auth bug',
+          reservedOutputTokens: expect.any(Number),
+        },
       );
     });
 
@@ -4701,6 +4710,89 @@ hello
         ],
         expect.any(AbortSignal),
       );
+    });
+
+    it('uses the subagent plan reminder when a subagent inherits PLAN mode', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      vi.mocked(mockConfig.getSdkMode).mockReturnValue(false);
+      vi.mocked(getPlanModeSystemReminder).mockReturnValue(
+        '<system-reminder>return plan to caller</system-reminder>',
+      );
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Plan ready' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      await runWithAgentContext('agent-1', async () => {
+        const stream = client.sendMessageStream(
+          [{ text: 'Plan this change' }],
+          new AbortController().signal,
+          'prompt-id-subagent-plan-reminder',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+      });
+
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(true);
+    });
+
+    it('uses the subagent plan reminder when SDK mode is active', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      vi.mocked(mockConfig.getSdkMode).mockReturnValue(true);
+      vi.mocked(getPlanModeSystemReminder).mockReturnValue(
+        '<system-reminder>return plan to caller</system-reminder>',
+      );
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Plan ready' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Plan this change' }],
+        new AbortController().signal,
+        'prompt-id-sdk-plan-reminder',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(true);
+    });
+
+    it('uses the main-session plan reminder outside subagent and SDK mode', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      vi.mocked(mockConfig.getSdkMode).mockReturnValue(false);
+      vi.mocked(getPlanModeSystemReminder).mockReturnValue(
+        '<system-reminder>call exit_plan_mode</system-reminder>',
+      );
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Plan ready' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Plan this change' }],
+        new AbortController().signal,
+        'prompt-id-main-plan-reminder',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(false);
     });
 
     it('should not inject duplicate date on the same day', async () => {

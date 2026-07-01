@@ -21,12 +21,18 @@
 
 .summary:hover,
 .summary:focus-visible {
-  color: var(--muted-foreground);
+  color: var(--primary);
   outline: none;
 }
 
+.summary:hover .summaryTextActive,
+.summary:focus-visible .summaryTextActive {
+  background-image: none;
+  -webkit-text-fill-color: currentColor;
+}
+
 .summaryIcon {
-  width: 14px;
+  min-width: 14px;
   height: 14px;
   display: inline-flex;
   align-items: center;
@@ -37,6 +43,13 @@
 
 .summaryIcon svg {
   display: block;
+}
+
+.summaryStatus {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  line-height: 1;
 }
 
 .summaryToolIcon {
