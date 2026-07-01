@@ -1156,6 +1156,7 @@ export class SessionService {
           sessionId,
           'active',
         );
+        fs.mkdirSync(path.dirname(targetPath), { recursive: true });
         fs.renameSync(sourcePath, targetPath);
         try {
           this.moveOptionalFile(archivedSidecar, activeSidecar);

@@ -3009,6 +3009,73 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('session/prompt holds archive gate while prompt is in flight', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440127';
+      await writeStoredSession(sessionId);
+      let promptStarted!: () => void;
+      let releasePrompt!: () => void;
+      const promptStartedPromise = new Promise<void>((resolve) => {
+        promptStarted = resolve;
+      });
+      const promptReleasedPromise = new Promise<void>((resolve) => {
+        releasePrompt = resolve;
+      });
+      bridge.promptBehavior = async () => {
+        promptStarted();
+        await promptReleasedPromise;
+        return { stopReason: 'end_turn' };
+      };
+
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const connReader = frameReader(connStream);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 217,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      expect(await connReader.next()).toMatchObject({ id: 217 });
+
+      const sessionStream = await openStream(connId, sessionId);
+      const sessionReader = frameReader(sessionStream);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 218,
+        method: 'session/prompt',
+        params: {
+          sessionId,
+          prompt: [{ type: 'text', text: 'hold archive gate' }],
+        },
+      });
+      await promptStartedPromise;
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 219,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      expect(await connReader.next()).toMatchObject({
+        id: 219,
+        error: {
+          code: -32603,
+          data: { errorKind: 'session_archiving', sessionId },
+        },
+      });
+      expect(bridge.closedSessions).toEqual([]);
+
+      releasePrompt();
+      expect(await sessionReader.next()).toMatchObject({
+        id: 218,
+        result: { stopReason: 'end_turn' },
+      });
+      connReader.close();
+      sessionReader.close();
+    });
+  });
+
   it('session/load allows concurrent restores for the same session', async () => {
     await withRuntimeDir(async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440126';
@@ -5384,7 +5451,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       }
     });
 
-    it('_qwen/sessions/delete serializes archive for the same session', async () => {
+    it('_qwen/sessions/delete does not make missing archive ids wait on live close', async () => {
       const sessionId = 'delete-archive-race';
       let firstCloseStarted!: () => void;
       let releaseFirstClose!: () => void;
@@ -5445,12 +5512,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             }),
             expect.objectContaining({
               id: 70,
-              error: expect.objectContaining({
-                data: expect.objectContaining({
-                  errorKind: 'session_archiving',
-                  sessionId,
-                }),
-              }),
+              result: expect.objectContaining({ notFound: [sessionId] }),
             }),
           ]),
         );

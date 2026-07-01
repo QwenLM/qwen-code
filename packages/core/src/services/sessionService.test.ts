@@ -1226,6 +1226,22 @@ describe('SessionService', () => {
       );
     });
 
+    it('should recreate active chats directory before moving archived sessions', async () => {
+      mockArchivedSessionOnly();
+
+      const result = await sessionService.unarchiveSessions([sessionIdA]);
+
+      expect(result.unarchived).toEqual([sessionIdA]);
+      expect(mkdirSyncSpy).toHaveBeenCalledWith(
+        expect.stringMatching(/\/chats$/),
+        { recursive: true },
+      );
+      expect(renameSyncSpy).toHaveBeenCalledWith(
+        expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
+        expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
+      );
+    });
+
     it('should report not found when neither active nor archived file exists', async () => {
       vi.mocked(jsonl.readLines).mockImplementation(async () => {
         const error = new Error('ENOENT') as NodeJS.ErrnoException;
