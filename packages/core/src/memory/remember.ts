@@ -80,6 +80,8 @@ async function buildCleanMemorySystemPrompt(
       memoryDir: getUserAutoMemoryRoot(),
       indexContent: userIndex,
     },
+    undefined,
+    { forceFullProtocol: true },
   );
 }
 

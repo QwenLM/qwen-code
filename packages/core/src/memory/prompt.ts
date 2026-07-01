@@ -230,11 +230,30 @@ function renderIndexBlock(
   ];
 }
 
+export interface BuildMemoryPromptOptions {
+  forceFullProtocol?: boolean;
+}
+
+function allIndexesEmpty(
+  indexContent: string | null | undefined,
+  userSection: UserAutoMemorySection | undefined,
+  teamSection: TeamAutoMemorySection | undefined,
+): boolean {
+  const isEmpty = (s: string | null | undefined) =>
+    s === null || s === undefined || s.trim() === '';
+  return (
+    isEmpty(indexContent) &&
+    (userSection === undefined || isEmpty(userSection.indexContent)) &&
+    (teamSection === undefined || isEmpty(teamSection.indexContent))
+  );
+}
+
 export function buildManagedAutoMemoryPrompt(
   memoryDir: string,
   indexContent?: string | null,
   userSection?: UserAutoMemorySection,
   teamSection?: TeamAutoMemorySection,
+  options?: BuildMemoryPromptOptions,
 ): string {
   const tierLines: string[] = [];
   if (userSection !== undefined) {
@@ -251,6 +270,91 @@ export function buildManagedAutoMemoryPrompt(
     );
   }
   const multiTier = tierLines.length > 1;
+
+  if (
+    allIndexesEmpty(indexContent, userSection, teamSection) &&
+    !options?.forceFullProtocol
+  ) {
+    const condensedIntro = multiTier
+      ? [
+          `You have ${NUMBER_WORDS[tierLines.length] ?? String(tierLines.length)} persistent, file-based memory directories. ${DIR_EXISTS_GUIDANCE}`,
+          '',
+          ...tierLines,
+        ]
+      : [
+          `You have a persistent, file-based memory system at \`${memoryDir}\`. ${DIR_EXISTS_GUIDANCE}`,
+        ];
+
+    const condensedTypes = [
+      '## Memory types',
+      '',
+      "- **user** — the user's role, goals, responsibilities, and knowledge (always user-scoped)",
+      '- **feedback** — guidance on how to approach work: corrections AND confirmed approaches',
+      '- **project** — ongoing work, goals, initiatives, bugs, or incidents not derivable from code/git',
+      '- **reference** — pointers to where information lives in external systems',
+    ];
+
+    const condensedSave = multiTier
+      ? [
+          '## How to save memories',
+          '',
+          'Two-step process:',
+          '',
+          '**Step 1** — write the memory to its own file inside the directory chosen by its type scope, using this frontmatter format:',
+          '',
+          ...MEMORY_FRONTMATTER_EXAMPLE,
+          '',
+          '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to. Each entry: one line, under ~150 chars: `- [Title](file.md) — one-line hook`.',
+        ]
+      : [
+          '## How to save memories',
+          '',
+          'Two-step process:',
+          '',
+          `**Step 1** — write the memory to its own file (e.g., \`user/role.md\`, \`feedback/testing.md\`) using this frontmatter format:`,
+          '',
+          ...MEMORY_FRONTMATTER_EXAMPLE,
+          '',
+          `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\`. Each entry: one line, under ~150 chars: \`- [Title](file.md) — one-line hook\`.`,
+        ];
+
+    const indexSections: string[] = [];
+    if (userSection !== undefined) {
+      indexSections.push(
+        ...renderIndexBlock(userSection.memoryDir, userSection.indexContent),
+        '',
+      );
+    }
+    indexSections.push(...renderIndexBlock(memoryDir, indexContent));
+    if (teamSection !== undefined) {
+      indexSections.push(
+        '',
+        ...renderIndexBlock(teamSection.memoryDir, teamSection.indexContent),
+      );
+    }
+
+    const condensedLines = [
+      '# auto memory',
+      '',
+      ...condensedIntro,
+      '',
+      'Your memory is currently empty. When you learn something worth remembering across conversations, save it using the process below.',
+      '',
+      ...condensedTypes,
+      '',
+      ...(multiTier && teamSection !== undefined
+        ? [
+            'When a team directory is available, route project-wide conventions and shared references to TEAM instead of PROJECT. Never save secrets to TEAM.',
+            '',
+          ]
+        : []),
+      ...condensedSave,
+      '',
+      ...indexSections,
+    ];
+
+    return condensedLines.join('\n');
+  }
 
   const intro = multiTier
     ? [
@@ -351,12 +455,14 @@ export function appendManagedAutoMemoryToUserMemory(
   indexContent?: string | null,
   userSection?: UserAutoMemorySection,
   teamSection?: TeamAutoMemorySection,
+  options?: BuildMemoryPromptOptions,
 ): string {
   const managedPrompt = buildManagedAutoMemoryPrompt(
     memoryDir,
     indexContent,
     userSection,
     teamSection,
+    options,
   );
   const trimmedUserMemory = userMemory.trim();
 

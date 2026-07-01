@@ -12,13 +12,18 @@ import {
 } from './prompt.js';
 
 describe('managed auto-memory prompt helpers', () => {
-  it('builds the memory mechanics prompt even when MEMORY.md is empty', () => {
+  it('builds a condensed memory prompt when MEMORY.md is empty', () => {
     const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
 
     expect(prompt).toContain('# auto memory');
     expect(prompt).toContain('persistent, file-based memory system');
     expect(prompt).toContain('/tmp/project/.qwen/memory');
-    expect(prompt).toContain('Your MEMORY.md is currently empty');
+    expect(prompt).toContain('currently empty');
+    // Condensed prompt omits verbose sections
+    expect(prompt).not.toContain('## What NOT to save in memory');
+    expect(prompt).not.toContain('## When to access memories');
+    expect(prompt).not.toContain('## Before recommending from memory');
+    expect(prompt).not.toContain('## Memory and other forms of persistence');
   });
 
   it('embeds the current MEMORY.md index content', () => {
@@ -33,7 +38,10 @@ describe('managed auto-memory prompt helpers', () => {
   });
 
   it('warns extraction not to save MCP tool schemas or failed calls', () => {
-    const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      '- [Note](note.md) — a note.',
+    );
 
     expect(prompt).toContain(
       'MCP tool names, parameter schemas, field mappings, guessed tool-call formats, or raw failed tool-call transcripts',
@@ -145,5 +153,103 @@ describe('managed auto-memory prompt helpers', () => {
       'WARNING: MEMORY.md is 250 lines (limit: 200). Only part of it was loaded.',
     );
     expect(result.split('\n').length).toBeLessThan(400);
+  });
+
+  it('condensed prompt with empty indexes is significantly shorter than full', () => {
+    const condensed = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
+    const full = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      undefined,
+      undefined,
+      undefined,
+      { forceFullProtocol: true },
+    );
+
+    // Condensed should be less than half the length of full
+    expect(condensed.length).toBeLessThan(full.length / 2);
+  });
+
+  it('emits full prompt when at least one index has content', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      '- [User Memory](user/terse.md) — User prefers terse responses.',
+    );
+
+    expect(prompt).toContain('## Types of memory');
+    expect(prompt).toContain('## What NOT to save in memory');
+    expect(prompt).toContain('## When to access memories');
+    expect(prompt).toContain('## Before recommending from memory');
+  });
+
+  it('emits full prompt with forceFullProtocol even when all indexes are empty', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      null,
+      undefined,
+      undefined,
+      { forceFullProtocol: true },
+    );
+
+    expect(prompt).toContain('## Types of memory');
+    expect(prompt).toContain('## What NOT to save in memory');
+    expect(prompt).toContain('## When to access memories');
+    expect(prompt).toContain('## Before recommending from memory');
+  });
+
+  it('emits condensed prompt for multi-tier setup when all indexes are empty', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      null,
+      { memoryDir: '/home/u/.qwen/memories', indexContent: null },
+    );
+
+    // Condensed multi-tier still shows both dirs
+    expect(prompt).toContain('two persistent, file-based memory directories');
+    expect(prompt).toContain('/home/u/.qwen/memories');
+    expect(prompt).toContain('/tmp/project/.qwen/memory');
+    // Uses condensed sections
+    expect(prompt).toContain('## Memory types');
+    expect(prompt).toContain('## How to save memories');
+    // Omits verbose full-protocol sections
+    expect(prompt).not.toContain('## Types of memory');
+    expect(prompt).not.toContain('## What NOT to save in memory');
+  });
+
+  it('emits condensed prompt for three-tier setup with team section when all indexes are empty', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      null,
+      { memoryDir: '/home/u/.qwen/memories', indexContent: null },
+      { memoryDir: '/tmp/project/.qwen/team-memory', indexContent: null },
+    );
+
+    expect(prompt).toContain('three persistent, file-based memory directories');
+    expect(prompt).toContain('TEAM memory');
+    // Condensed team guidance is present
+    expect(prompt).toContain('route project-wide conventions and shared references to TEAM');
+    // Full team scope section is omitted
+    expect(prompt).not.toContain('## Saving to team memory');
+  });
+
+  it('appendManagedAutoMemoryToUserMemory passes through options', () => {
+    const withOptions = appendManagedAutoMemoryToUserMemory(
+      '',
+      '/tmp/project/.qwen/memory',
+      null,
+      undefined,
+      undefined,
+      { forceFullProtocol: true },
+    );
+    const without = appendManagedAutoMemoryToUserMemory(
+      '',
+      '/tmp/project/.qwen/memory',
+      null,
+    );
+
+    // With forceFullProtocol, full verbose sections are present
+    expect(withOptions).toContain('## Types of memory');
+    // Without it, condensed prompt is returned
+    expect(without).not.toContain('## Types of memory');
+    expect(without).toContain('## Memory types');
   });
 });
