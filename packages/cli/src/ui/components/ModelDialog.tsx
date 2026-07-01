@@ -134,6 +134,10 @@ function resolvePersistScope(
   settings: ReturnType<typeof useSettings>,
   persistScope: 'workspace' | 'user' | undefined,
 ): SettingScope {
+  // Workspace settings are ignored when untrusted, so fall back to user scope.
+  if (persistScope === 'workspace' && !settings.isTrusted) {
+    return SettingScope.User;
+  }
   if (persistScope === 'workspace') return SettingScope.Workspace;
   if (persistScope === 'user') return SettingScope.User;
   return getPersistScopeForModelSelection(settings);

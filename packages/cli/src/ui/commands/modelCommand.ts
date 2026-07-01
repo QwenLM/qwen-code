@@ -415,6 +415,19 @@ export const modelCommand: SlashCommand = {
         ),
       };
     }
+    // Reject --project when workspace is untrusted — workspace settings are
+    // ignored on merge, so the save would silently not take effect.
+    if (
+      scopeOverride === SettingScope.Workspace &&
+      settings &&
+      !settings.isTrusted
+    ) {
+      return {
+        type: 'message',
+        messageType: 'error',
+        content: t('Workspace is untrusted; run /trust first or use --global.'),
+      };
+    }
     const scopeSuffix =
       scopeOverride === SettingScope.Workspace
         ? t(' (this project)')

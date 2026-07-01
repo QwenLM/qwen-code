@@ -2106,6 +2106,7 @@ describe('modelCommand', () => {
         ...createMockSettings(setValue),
         _merged: {},
         computeMergedSettings: vi.fn(),
+        isTrusted: true,
       } as unknown as LoadedSettings;
       const ctx = setupContext();
       ctx.services.settings = settings;
@@ -2166,12 +2167,32 @@ describe('modelCommand', () => {
       );
     });
 
+    it('should reject --project when workspace is untrusted', async () => {
+      const setValue = vi.fn();
+      const settings = {
+        ...createMockSettings(setValue),
+        _merged: {},
+        computeMergedSettings: vi.fn(),
+        isTrusted: false,
+      } as unknown as LoadedSettings;
+      const ctx = setupContext();
+      ctx.services.settings = settings;
+      const result = await modelCommand.action!(ctx, '--project qwen-max');
+      expect(result).toMatchObject({
+        type: 'message',
+        messageType: 'error',
+        content: expect.stringContaining('untrusted'),
+      });
+      expect(setValue).not.toHaveBeenCalled();
+    });
+
     it('should show scope suffix in main model confirmation', async () => {
       const setValue = vi.fn();
       const settings = {
         ...createMockSettings(setValue),
         _merged: {},
         computeMergedSettings: vi.fn(),
+        isTrusted: true,
       } as unknown as LoadedSettings;
       const mockGenerator = {
         authType: AuthType.USE_OPENAI,
