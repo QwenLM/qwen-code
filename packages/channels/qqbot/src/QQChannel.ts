@@ -717,16 +717,13 @@ export class QQChannel extends ChannelBase {
     }
     if (state.buffer) {
       const toFlush = state.buffer;
-      this.sendMessage(state.chatId, toFlush)
-        .then(() => {
-          state.buffer = '';
-        })
-        .catch((err) => {
-          state.buffer = toFlush + (state.buffer || '');
-          process.stderr.write(
-            `[QQ:${this.name}] toolCallFlush send failed: ${err}\n`,
-          );
-        });
+      state.buffer = '';
+      this.sendMessage(state.chatId, toFlush).catch((err) => {
+        state.buffer = toFlush + (state.buffer || '');
+        process.stderr.write(
+          `[QQ:${this.name}] toolCallFlush send failed: ${err}\n`,
+        );
+      });
     }
   }
 
