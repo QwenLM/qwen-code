@@ -467,8 +467,6 @@ export class QQChannel extends ChannelBase {
         };
         if (msgId) {
           plainBody['msg_id'] = msgId;
-          // Don't set msg_seq — plain-text fallback uses the same msg_id
-          // but the rollback already consumed the old seq value.
         }
         const plainResp = await sendQQMessage(
           route.base,
@@ -476,7 +474,10 @@ export class QQChannel extends ChannelBase {
           this.accessToken,
           plainBody,
         );
-        if (plainResp.ok && msgId) this.saveQQState();
+        if (plainResp.ok && msgId) {
+          this.msgSeqMap.set(msgId, nextSeq);
+          this.saveQQState();
+        }
         return;
       }
 
