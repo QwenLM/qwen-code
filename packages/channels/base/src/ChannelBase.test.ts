@@ -7437,6 +7437,51 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('suppresses loop chunks while cancellation is pending', async () => {
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(
+        (sid: string) => {
+          const active = (
+            ch as unknown as {
+              activePrompts: Map<string, { cancelPending?: boolean }>;
+            }
+          ).activePrompts.get(sid)!;
+          active.cancelPending = true;
+          (bridge as unknown as EventEmitter).emit('textChunk', sid, 'part');
+          active.cancelPending = false;
+          return Promise.resolve('loop response');
+        },
+      );
+
+      await ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
+      ]);
+      expect(ch.responseChunks).toEqual([]);
+    });
+
     it('emits a terminal lifecycle event when a loop is disabled after the agent response', async () => {
       const shouldContinue = vi
         .fn()

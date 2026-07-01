@@ -532,7 +532,11 @@ export abstract class ChannelBase {
       this.onPromptStart(job.target.chatId, sessionId);
 
       const onChunk = (sid: string, chunk: string) => {
-        if (sid === sessionId && !promptState.cancelled) {
+        if (
+          sid === sessionId &&
+          !promptState.cancelled &&
+          !promptState.cancelPending
+        ) {
           this.emitTaskLifecycle({
             ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
             type: 'text_chunk',

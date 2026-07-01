@@ -480,6 +480,75 @@ describe('FeishuChannel', () => {
       expect(state?.['cancelling']).toBe(false);
     });
 
+    it('keeps user stop label when cancellation lifecycle marks the card cancelled', async () => {
+      const cardSessions = getPrivateMethod<
+        Map<string, Record<string, unknown>>
+      >(channel, 'cardSessions');
+      cardSessions.set('inbound_1', {
+        messageId: 'card_1',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'partial text',
+        lastUpdateAt: Date.now(),
+      });
+
+      const updateCard = vi.fn().mockResolvedValue(true);
+      (channel as unknown as { updateCard: typeof updateCard }).updateCard =
+        updateCard;
+      (
+        channel as unknown as {
+          requestActivePromptCancellation: (
+            sessionId: string,
+          ) => Promise<boolean>;
+        }
+      ).requestActivePromptCancellation = vi
+        .fn()
+        .mockImplementation(async () => {
+          getPrivateMethod<(event: ChannelTaskLifecycleEvent) => void>(
+            channel,
+            'onTaskLifecycle',
+          ).call(channel, {
+            type: 'cancelled',
+            reason: 'cancel_command',
+            channelName: 'feishu',
+            chatId: 'oc_chat_id',
+            sessionId: 'session_abc',
+            messageId: 'inbound_1',
+            identity: { id: 'channel:feishu', displayName: 'feishu' },
+            memoryScope: {
+              namespace: 'channel:feishu',
+              mode: 'metadata-only',
+            },
+          });
+          return true;
+        });
+
+      getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
+        'session_abc',
+        'inbound_1',
+      );
+      getPrivateMethod<Map<string, string>>(channel, 'msgToSenderId').set(
+        'inbound_1',
+        'user_open_id',
+      );
+
+      getPrivateMethod<(data: Record<string, unknown>) => boolean>(
+        channel,
+        'onCardAction',
+      ).call(channel, {
+        action: { value: { action: 'stop' } },
+        context: { open_message_id: 'card_1' },
+        operator: { open_id: 'user_open_id' },
+      });
+
+      await vi.waitFor(() => {
+        expect(updateCard).toHaveBeenCalledTimes(1);
+      });
+      expect(updateCard.mock.calls[0]![1]).toContain('已停止生成');
+      expect(updateCard.mock.calls[0]![1]).not.toContain('已取消');
+    });
+
     it('rejects stop from a different user (operator mismatch)', () => {
       const cardSessions = getPrivateMethod<
         Map<string, Record<string, unknown>>
@@ -1082,6 +1151,9 @@ describe('FeishuChannel', () => {
 
     it('keeps the first terminal lifecycle state for prompt-end card finalization', async () => {
       const channel = createChannel();
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
       const cardSessions = getPrivateMethod<Map<string, unknown>>(
         channel,
         'cardSessions',
@@ -1129,6 +1201,12 @@ describe('FeishuChannel', () => {
 
       expect(updateCard.mock.calls[0]![1]).toContain('已完成');
       expect(updateCard.mock.calls[0]![1]).not.toContain('已取消');
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining(
+          'conflicting terminal event cancelled after completed',
+        ),
+      );
+      stderr.mockRestore();
     });
 
     it('treats prompt-end during stop cancellation as cancelled', async () => {

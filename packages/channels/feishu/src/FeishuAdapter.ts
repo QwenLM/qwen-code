@@ -1037,7 +1037,11 @@ export class FeishuChannel extends ChannelBase {
     }
   }
 
-  private stopLabelFor(terminalStatus?: FeishuTerminalStatus): string {
+  private stopLabelFor(
+    terminalStatus?: FeishuTerminalStatus,
+    userInitiated = false,
+  ): string {
+    if (userInitiated) return '已停止生成';
     switch (terminalStatus) {
       case 'completed':
       case 'cancelled':
@@ -1064,6 +1068,11 @@ export class FeishuChannel extends ChannelBase {
     const cardState = this.cardSessions.get(inboundMsgId);
     if (!cardState) return;
 
+    if (cardState.terminalStatus && cardState.terminalStatus !== event.type) {
+      process.stderr.write(
+        `[Feishu:${this.name}] conflicting terminal event ${event.type} after ${cardState.terminalStatus} for inbound=${inboundMsgId}\n`,
+      );
+    }
     cardState.terminalStatus ??= event.type;
   }
 
@@ -1369,9 +1378,12 @@ export class FeishuChannel extends ChannelBase {
             // No accumulated text (e.g. immediate LLM error before first chunk)
             // — send a generic error so the user isn't left without feedback.
             const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
+            const fallbackLabel = cs.terminalStatus
+              ? this.statusLabelFor(cs.terminalStatus)
+              : '出错了，请重试';
             const errorText = atPrefix
-              ? `${atPrefix}\n\n*出错了，请重试*`
-              : '*出错了，请重试*';
+              ? `${atPrefix}\n\n*${fallbackLabel}*`
+              : `*${fallbackLabel}*`;
             this.sendMessage(_chatId, errorText).catch(() => {});
             process.stderr.write(
               `[Feishu:${this.name}] onPromptEnd: no card and no accumulated text for inbound=${inboundMsgId}, sent error fallback\n`,
@@ -1553,6 +1565,7 @@ export class FeishuChannel extends ChannelBase {
       const inboundId = targetInboundMsgId;
 
       const handleStop = async () => {
+        const wasUserStop = !cardState.terminalStatus;
         const cancelSucceeded = sessionId
           ? await this.requestActivePromptCancellation(
               sessionId,
@@ -1577,7 +1590,7 @@ export class FeishuChannel extends ChannelBase {
           const prefix =
             cardState.atPrefix || this.msgToSenderName.get(inboundId) || '';
           const stopLabel = cancelSucceeded
-            ? `*${this.stopLabelFor(cardState.terminalStatus)}*`
+            ? `*${this.stopLabelFor(cardState.terminalStatus, wasUserStop)}*`
             : `*${this.statusLabelFor('failed')}*`;
           const contentPart = cardState.accumulatedText.trim()
             ? cardState.accumulatedText + '\n\n---\n' + stopLabel
