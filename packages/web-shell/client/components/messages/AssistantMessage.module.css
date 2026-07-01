@@ -104,7 +104,6 @@
 .thinkingSummary {
   width: 100%;
   margin: 0;
-  padding: 2px 0;
   border: none;
   border-radius: 0;
   background: transparent;
@@ -120,8 +119,14 @@
 
 .thinkingSummary:hover,
 .thinkingSummary:focus-visible {
-  color: var(--muted-foreground);
+  color: var(--primary);
   outline: none;
+}
+
+.thinkingSummary:hover .thinkingSummaryTextActive,
+.thinkingSummary:focus-visible .thinkingSummaryTextActive {
+  background-image: none;
+  -webkit-text-fill-color: currentColor;
 }
 
 .thinkingSummaryIcon {

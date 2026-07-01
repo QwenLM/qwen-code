@@ -80,7 +80,7 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
-  it('reports failed channel worker snapshots in runtime status', async () => {
+  it('reports permanently failed channel worker snapshots as errors', async () => {
     const response = await buildDaemonStatusResponse(
       'summary',
       makeOptions({
@@ -90,17 +90,22 @@ describe('buildDaemonStatusResponse', () => {
           channels: ['telegram'],
           pid: 1234,
           error: 'ipc failed',
+          restartCount: 2,
+          lastExitAt: '2026-07-01T01:00:00.000Z',
+          lastRestartAt: '2026-07-01T01:00:05.000Z',
+          lastHeartbeatAt: '2026-07-01T00:59:50.000Z',
         },
       }),
     );
 
     expect(response).toMatchObject({
-      status: 'warning',
+      status: 'error',
       issues: expect.arrayContaining([
         expect.objectContaining({
           code: 'channel_worker_exited',
-          severity: 'warning',
-          message: 'Channel worker is failed (pid=1234): ipc failed.',
+          severity: 'error',
+          message:
+            'Channel worker is failed (pid=1234, restarts=2, lastExitAt=2026-07-01T01:00:00.000Z, lastRestartAt=2026-07-01T01:00:05.000Z, lastHeartbeatAt=2026-07-01T00:59:50.000Z): ipc failed.',
           section: 'runtime.channelWorker',
         }),
       ]),
@@ -111,6 +116,72 @@ describe('buildDaemonStatusResponse', () => {
           channels: ['telegram'],
           pid: 1234,
           error: 'ipc failed',
+          restartCount: 2,
+          lastExitAt: '2026-07-01T01:00:00.000Z',
+          lastRestartAt: '2026-07-01T01:00:05.000Z',
+          lastHeartbeatAt: '2026-07-01T00:59:50.000Z',
+        },
+      },
+    });
+  });
+
+  it('warns for failed channel worker snapshots that still have a scheduled restart', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        channelWorkerSnapshot: {
+          enabled: true,
+          state: 'failed',
+          channels: ['telegram'],
+          error: 'restart failed',
+          restartCount: 1,
+          nextRestartAt: '2026-07-01T01:01:00.000Z',
+        },
+      }),
+    );
+
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'channel_worker_exited',
+          severity: 'warning',
+          message:
+            'Channel worker is failed (restarts=1, nextRestartAt=2026-07-01T01:01:00.000Z): restart failed.',
+          section: 'runtime.channelWorker',
+        }),
+      ]),
+    });
+  });
+
+  it('does not warn for a running channel worker that restarted successfully', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        channelWorkerSnapshot: {
+          enabled: true,
+          state: 'running',
+          channels: ['telegram'],
+          requestedChannels: ['telegram'],
+          pid: 2345,
+          restartCount: 1,
+          lastRestartAt: '2026-07-01T01:00:00.000Z',
+          lastHeartbeatAt: '2026-07-01T01:00:10.000Z',
+        },
+      }),
+    );
+
+    expect(response).toMatchObject({
+      status: 'ok',
+      issues: [],
+      runtime: {
+        channelWorker: {
+          enabled: true,
+          state: 'running',
+          pid: 2345,
+          restartCount: 1,
+          lastRestartAt: '2026-07-01T01:00:00.000Z',
+          lastHeartbeatAt: '2026-07-01T01:00:10.000Z',
         },
       },
     });
@@ -126,6 +197,8 @@ describe('buildDaemonStatusResponse', () => {
           channels: ['telegram'],
           requestedChannels: ['telegram', 'feishu', 'dingtalk'],
           pid: 1234,
+          restartCount: 1,
+          lastHeartbeatAt: '2026-07-01T01:00:10.000Z',
         },
       }),
     );

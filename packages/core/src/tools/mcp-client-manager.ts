@@ -40,6 +40,7 @@ import {
 } from './mcp-errors.js';
 
 const debugLogger = createDebugLogger('MCP');
+export const RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG = '__qwenRuntimeMcpIfAbsent';
 
 /**
  * Configuration for MCP health monitoring
@@ -2877,6 +2878,30 @@ export class McpClientManager {
     // no pool churn needed. Compare against the existing pooled
     // connection (if any).
     const newConnId = connectionIdOf(name, config);
+    const ifAbsent =
+      (config as MCPServerConfig & Record<string, unknown>)[
+        RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG
+      ] === true;
+    if (ifAbsent) {
+      const existingRuntimeConfig = this.cliConfig.getRuntimeMcpServers()[name];
+      const existingIsIfAbsent =
+        (
+          existingRuntimeConfig as
+            | (MCPServerConfig & Record<string, unknown>)
+            | undefined
+        )?.[RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG] === true;
+      if (
+        existingRuntimeConfig &&
+        (!existingIsIfAbsent ||
+          connectionIdOf(name, existingRuntimeConfig) !== newConnId)
+      ) {
+        return {
+          name,
+          skipped: true,
+          reason: 'runtime_name_conflict',
+        };
+      }
+    }
     const existingConn = this.pooledConnections.get(name);
     if (existingConn && existingConn.id === newConnId) {
       // Same fingerprint — no transport churn, just update Config overlay
@@ -3162,7 +3187,7 @@ export type AddRuntimeMcpServerResult =
   | {
       name: string;
       skipped: true;
-      reason: 'budget_warning_only';
+      reason: 'budget_warning_only' | 'runtime_name_conflict';
     };
 
 export type RemoveRuntimeMcpServerResult =
