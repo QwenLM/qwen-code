@@ -5875,20 +5875,18 @@ describe('ACP WebSocket transport security', () => {
 
   it('removes chrome-devtools MCP if the CDP bridge disconnects during registration', async () => {
     await startServer({ cdpTunnelOverWs: true });
-    let ws: WebSocket | undefined;
-    bridge.runtimeMcpBeforeAddResolve = async () => {
-      ws?.close();
-      await new Promise<void>((resolve) => {
-        if (!ws) {
-          resolve();
-          return;
-        }
-        ws.once('close', () => resolve());
+    let releaseAdd: (() => void) | undefined;
+    bridge.runtimeMcpBeforeAddResolve = () =>
+      new Promise<void>((resolve) => {
+        releaseAdd = resolve;
       });
-    };
 
-    ws = await wsConnect();
+    const ws = await wsConnect();
     await initializeCdpBridge(ws);
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    releaseAdd?.();
 
     await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
     expect(bridge.runtimeMcpRemoves[0]).toMatchObject({
