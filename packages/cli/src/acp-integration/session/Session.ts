@@ -550,6 +550,8 @@ export function resolveHomeLoopResolverRoots({
   homeDir?: string;
   qwenHome?: string;
 } = {}): { homeDir: string; homeQwenDir: string } {
+  // qwenHome truthy → QWEN_HOME is itself the global dir, so confine within
+  // homeQwenDir; the homeDir param is only consulted when qwenHome is unset.
   return {
     homeDir: (qwenHome ? homeQwenDir : homeDir) || path.dirname(homeQwenDir),
     homeQwenDir,
