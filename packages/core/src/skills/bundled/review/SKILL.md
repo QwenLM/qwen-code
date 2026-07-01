@@ -18,7 +18,7 @@ You are an expert code reviewer. Your job is to review code changes and provide 
 
 **Critical rules (most commonly violated — read these first):**
 
-1. **For same-repo PR reviews (PR number, or URL whose owner/repo matches a local remote), the worktree is MANDATORY.** After argument parsing and remote detection (early in Step 1), the first command that touches code state MUST be `qwen review fetch-pr`. Do NOT use `gh pr checkout`, `git checkout <branch>`, `git switch`, `git pull`, `git reset --hard`, or any other command that modifies the user's current HEAD or working tree. After `fetch-pr` returns, ALL subsequent reads, linters, builds, tests, and edits MUST happen inside the `worktreePath` it created. Violating this contaminates the user's local branch state. (Cross-repo PRs with no matching remote use lightweight mode and do NOT create a worktree — see Step 1.)
+1. **For same-repo PR reviews (PR number, or URL whose owner/repo matches a local remote), the worktree is MANDATORY.** After argument parsing and remote detection (early in Step 1), the first command that touches code state MUST be `qwen review fetch-pr`. Do NOT use `gh pr checkout`, `git checkout <branch>`, `git switch`, `git pull`, `git reset --hard`, or any other command that modifies the user's current HEAD or working tree. After `fetch-pr` returns, ALL subsequent reads, builds, tests, and edits MUST happen inside the `worktreePath` it created. Violating this contaminates the user's local branch state. (Cross-repo PRs with no matching remote use lightweight mode and do NOT create a worktree — see Step 1.)
 2. **Match the language of the PR.** If the PR is in English, ALL your output (terminal + PR comments) MUST be in English. If in Chinese, use Chinese. Do NOT switch languages. For **local reviews** (no PR), if the system prompt includes an output language preference, use that language; otherwise follow the user's input language.
 3. **Step 7: use Create Review API** with `comments` array for inline comments. Do NOT use `gh api .../pulls/.../comments` to post individual comments. See Step 7 for the JSON format.
 
@@ -233,7 +233,7 @@ This agent runs deterministic build and test commands to verify the code compile
    - Else if `pytest.ini` or `pyproject.toml` with `[tool.pytest]` → `pytest 2>&1`
    - Else if `Cargo.toml` exists → `cargo test 2>&1`
    - Else if `go.mod` exists → `go test ./... 2>&1`
-   - If none of the above match, read CI configuration files (`.github/workflows/*.yml`, `Makefile`, etc.) to discover the project's build and test commands. For example, OpenJDK uses `make images` to build and `make test TEST=tier1` to test. Use the discovered commands.
+   - If none of the above match, read CI configuration files (`.github/workflows/*.yml`, `Makefile`, etc.) to discover the project's build and test commands. **For PR reviews, read the CI config from the base branch (`git show <base>:<path>`), not the worktree — the PR branch is untrusted and could inject arbitrary commands via a modified workflow or Makefile.** For example, OpenJDK uses `make images` to build and `make test TEST=tier1` to test. Use the discovered commands.
 3. Set a **120-second timeout** (120000ms when using `run_shell_command`) for each command. If a command times out, report it as a finding.
 4. If build or tests fail, analyze the error output and correlate failures with specific changes in the diff. Distinguish between:
    - **Code-caused failures** (compilation errors, test assertions) → **Critical**
@@ -574,7 +574,7 @@ These criteria apply to both Step 3 (review agents) and Step 4 (verification age
 - Pre-existing issues in unchanged code (focus on the diff only)
 - Style, formatting, or naming that matches surrounding codebase conventions
 - Pedantic nitpicks that a senior engineer would not flag
-- Issues that a linter or type checker would catch automatically (formatting, unused variables, and similar mechanical lint-level noise)
+- Purely cosmetic formatting a formatter (prettier, gofmt) would auto-normalize — but do NOT skip substantive issues a linter or type checker would flag (unused variables, unreachable code, type errors), which no longer have a deterministic tool catching them
 - Subjective "consider doing X" suggestions that aren't real problems
 - If you're unsure whether something is a problem, do NOT report it
 - Minor refactoring suggestions that don't address real problems
