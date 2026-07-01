@@ -289,7 +289,9 @@ export const ToolGroupMessage: React.FC<ToolGroupMessageProps> = ({
         // (>=100) here — forwarding that would let the cap fire on scrollback
         // and permanently hide completed agents behind "+N more". Pass
         // undefined (no cap) when committed, per the component's contract.
-        availableTerminalHeight={isPending ? availableTerminalHeight : undefined}
+        availableTerminalHeight={
+          isPending ? availableTerminalHeight : undefined
+        }
       />
     );
   }

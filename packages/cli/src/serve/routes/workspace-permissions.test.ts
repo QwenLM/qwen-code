@@ -345,6 +345,9 @@ describe('workspace permissions routes', () => {
   });
 
   it('POST preserves already-stored malformed permission rules', async () => {
+    await teardown(h);
+    const live = vi.fn();
+    h = await makeHarness({ setWorkspacePermissionRules: live });
     const acpResponse = {
       v: 1,
       user: {
@@ -358,7 +361,7 @@ describe('workspace permissions routes', () => {
       merged: { allow: ['Bash(git *', 'Bash(git status)'], ask: [], deny: [] },
       isTrusted: true,
     };
-    h.setWorkspacePermissionRules.mockResolvedValueOnce(acpResponse);
+    live.mockResolvedValueOnce(acpResponse);
     await writeJson(path.join(h.home, 'settings.json'), {
       permissions: {
         allow: ['Bash(git *'],
@@ -374,14 +377,11 @@ describe('workspace permissions routes', () => {
       });
 
     expect(res.status).toBe(200);
-    expect(h.setWorkspacePermissionRules).toHaveBeenCalledWith(
-      expect.any(Object),
-      {
-        scope: 'user',
-        ruleType: 'allow',
-        rules: ['Bash(git *', 'Bash(git status)'],
-      },
-    );
+    expect(live).toHaveBeenCalledWith(expect.any(Object), {
+      scope: 'user',
+      ruleType: 'allow',
+      rules: ['Bash(git *', 'Bash(git status)'],
+    });
   });
 
   it('POST still rejects newly malformed permission rules', async () => {

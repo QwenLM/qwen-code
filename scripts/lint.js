@@ -68,6 +68,7 @@ const LINTERS = {
         -ignore 'SC2002:' \
         -ignore 'SC2016:' \
         -ignore 'SC2129:' \
+        -ignore 'unexpected key "deployment" for "environment" section' \
         -ignore 'label ".+" is unknown'
     `,
   },

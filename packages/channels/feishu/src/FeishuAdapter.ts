@@ -13,6 +13,7 @@ import type {
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
+  SessionTarget,
 } from '@qwen-code/channel-base';
 
 /** Feishu message event data shape. */
@@ -123,6 +124,10 @@ export class FeishuChannel extends ChannelBase {
     this.collapsible = (feishuCfg['collapsible'] as boolean) || false;
     this.collapsibleThreshold =
       (feishuCfg['collapsibleThreshold'] as number) || 500;
+  }
+
+  override supportsProactiveSend(): boolean {
+    return true;
   }
 
   /** Build the event handler map shared between WebSocket and webhook modes. */
@@ -620,11 +625,29 @@ export class FeishuChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    await this.sendMessageInternal(chatId, text, false);
+  }
+
+  protected override async pushProactive(
+    target: SessionTarget,
+    text: string,
+  ): Promise<void> {
+    await this.sendMessageInternal(target.chatId, text, true);
+  }
+
+  private async sendMessageInternal(
+    chatId: string,
+    text: string,
+    throwOnFailure: boolean,
+  ): Promise<void> {
     const token = await this.getTenantAccessToken();
     if (!token) {
       process.stderr.write(
         `[Feishu:${this.name}] Cannot send: no access token.\n`,
       );
+      if (throwOnFailure) {
+        throw new Error('Feishu sendMessage failed: no access token');
+      }
       return;
     }
 
@@ -666,11 +689,24 @@ export class FeishuChannel extends ChannelBase {
           process.stderr.write(
             `[Feishu:${this.name}] sendMessage failed: HTTP ${resp.status} ${detail}\n`,
           );
+          if (throwOnFailure) {
+            throw new Error(`Feishu sendMessage failed: HTTP ${resp.status}`);
+          }
         }
       } catch (err) {
+        if (
+          throwOnFailure &&
+          err instanceof Error &&
+          err.message.startsWith('Feishu sendMessage failed:')
+        ) {
+          throw err;
+        }
         process.stderr.write(
           `[Feishu:${this.name}] sendMessage error: ${err}\n`,
         );
+        if (throwOnFailure) {
+          throw err;
+        }
       }
     }
   }
