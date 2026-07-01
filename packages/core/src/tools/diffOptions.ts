@@ -12,6 +12,74 @@ export const DEFAULT_DIFF_OPTIONS: Diff.PatchOptions = {
   ignoreWhitespace: true,
 };
 
+/**
+ * Returns true when the unified diff patch string contains at least one hunk.
+ */
+export function hasHunks(patch: string): boolean {
+  return patch.includes('\n@@ ');
+}
+
+/**
+ * Creates a unified diff patch with smart whitespace handling.
+ *
+ * Uses ignoreWhitespace:true first to produce clean diffs when content and
+ * whitespace change together. Falls back to ignoreWhitespace:false when no
+ * hunks are found, so that whitespace-only edits (e.g. re-indentation) still
+ * produce a visible diff instead of "No changes detected".
+ */
+export function createPatchSmart(
+  filename: string,
+  oldStr: string,
+  newStr: string,
+  oldHeader?: string,
+  newHeader?: string,
+): string {
+  const cleanPatch = Diff.createPatch(
+    filename,
+    oldStr,
+    newStr,
+    oldHeader,
+    newHeader,
+    DEFAULT_DIFF_OPTIONS,
+  );
+
+  if (hasHunks(cleanPatch)) {
+    return cleanPatch;
+  }
+
+  return Diff.createPatch(filename, oldStr, newStr, oldHeader, newHeader, {
+    ...DEFAULT_DIFF_OPTIONS,
+    ignoreWhitespace: false,
+  });
+}
+
+function structuredPatchSmart(
+  filename: string,
+  oldStr: string,
+  newStr: string,
+  oldHeader?: string,
+  newHeader?: string,
+): Diff.ParsedDiff {
+  const result = Diff.structuredPatch(
+    filename,
+    filename,
+    oldStr,
+    newStr,
+    oldHeader,
+    newHeader,
+    DEFAULT_DIFF_OPTIONS,
+  );
+
+  if (result.hunks.length > 0) {
+    return result;
+  }
+
+  return Diff.structuredPatch(filename, filename, oldStr, newStr, oldHeader, newHeader, {
+    ...DEFAULT_DIFF_OPTIONS,
+    ignoreWhitespace: false,
+  });
+}
+
 export function getDiffStat(
   fileName: string,
   oldStr: string,
@@ -38,14 +106,12 @@ export function getDiffStat(
     return { addedLines, removedLines, addedChars, removedChars };
   };
 
-  const modelPatch = Diff.structuredPatch(
-    fileName,
+  const modelPatch = structuredPatchSmart(
     fileName,
     oldStr,
     aiStr,
     'Current',
     'Proposed',
-    DEFAULT_DIFF_OPTIONS,
   );
   const modelStats = getStats(modelPatch);
 
@@ -58,14 +124,12 @@ export function getDiffStat(
           removedChars: 0,
         }
       : getStats(
-          Diff.structuredPatch(
-            fileName,
+          structuredPatchSmart(
             fileName,
             aiStr,
             userStr,
             'Proposed',
             'User',
-            DEFAULT_DIFF_OPTIONS,
           ),
         );
 

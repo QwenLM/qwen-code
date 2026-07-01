@@ -9,7 +9,6 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
-import * as Diff from 'diff';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
@@ -79,7 +78,7 @@ import {
   detectLineEnding,
   type ReadTextFileResponse,
 } from '../services/fileSystemService.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
 
@@ -1614,13 +1613,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       edit.newContent,
     );
     return {
-      fileDiff: Diff.createPatch(
+      fileDiff: createPatchSmart(
         edit.fileName,
         edit.originalContent,
         edit.newContent,
         'Current',
         'Proposed',
-        DEFAULT_DIFF_OPTIONS,
       ),
       fileName: edit.fileName,
       originalContent: edit.originalContent,
