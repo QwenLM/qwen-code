@@ -647,9 +647,12 @@ export function SettingsDialog({
     scrollOffset,
     scrollOffset + effectiveMaxItemsToShow,
   );
-  // Show arrows if there are more items than can be displayed
-  const showScrollUp = items.length > effectiveMaxItemsToShow;
-  const showScrollDown = items.length > effectiveMaxItemsToShow;
+  // Show each arrow only when there are items hidden in that direction, so the
+  // affordance matches what a keypress would actually do (no misleading up
+  // arrow at the top, where ↑ exits to the search box, or down arrow at the
+  // bottom).
+  const showScrollUp = scrollOffset > 0;
+  const showScrollDown = scrollOffset + effectiveMaxItemsToShow < items.length;
 
   useKeypress(
     (key) => {
@@ -699,6 +702,16 @@ export function SettingsDialog({
         if (onRestartRequest) onRestartRequest();
       };
 
+      // The Status tab advertises `r` to retry a failed info fetch. Handle it
+      // before the tab-bar early return so the shortcut works from either focus
+      // zone — otherwise pressing `r` right after switching to Status (focus
+      // still on the tab bar) does nothing despite the on-screen hint.
+      if (activeTab === 'status' && statusError && name === 'r') {
+        setStatusError(false);
+        setStatusReloadNonce((n) => n + 1);
+        return;
+      }
+
       // While the top tab bar has focus, keys only drive tab switching.
       if (focusZone === 'tabs') {
         if (name === 'left' || (name === 'tab' && key.shift)) {
@@ -731,12 +744,8 @@ export function SettingsDialog({
         if (activeTab === 'stats') {
           return;
         }
-        // Status tab: `r` retries the info fetch after a failure.
-        if (statusError && name === 'r') {
-          setStatusError(false);
-          setStatusReloadNonce((n) => n + 1);
-          return;
-        }
+        // Status tab: `r` retry is handled ahead of the tab-bar early return
+        // above so it fires from either focus zone.
         if (name === 'escape') {
           onSelect(undefined, selectedScope);
         }
