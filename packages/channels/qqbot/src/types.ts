@@ -79,8 +79,8 @@ export interface QQChannelConfig {
    *  Essential for cron/scheduled messages to known groups.
    */
   chatTypes?: Record<string, string>;
-  /** Enable experimental features (cron, streaming edge cases). Use at your own risk. */
-  experimental?: boolean;
+  /** Enable experimental cron-msg features. Use at your own risk. */
+  'cron-msg-experimental'?: boolean;
 }
 
 /** Robot added to a group. */

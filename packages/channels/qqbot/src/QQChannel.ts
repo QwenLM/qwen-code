@@ -207,7 +207,7 @@ export class QQChannel extends ChannelBase {
     // normal prompt and we skip.
     // During session restore (startup), textChunk events from replayed
     // old sessions are silently ignored to prevent stale output.
-    if (this.qqConfig.experimental) {
+    if (this.qqConfig['cron-msg-experimental']) {
       this._cronTextHandler = (sessionId: string, text: string) => {
         setImmediate(() => {
           if (!this._ready) return; // during session restore — ignore
@@ -265,12 +265,12 @@ export class QQChannel extends ChannelBase {
    */
   override setBridge(bridge: ChannelAgentBridge): void {
     // Detach from old bridge before swap
-    if (this.qqConfig.experimental && this._cronTextHandler) {
+    if (this.qqConfig['cron-msg-experimental'] && this._cronTextHandler) {
       this.bridge.off?.('textChunk', this._cronTextHandler);
     }
     super.setBridge(bridge);
     // Re-attach to new bridge
-    if (this.qqConfig.experimental && this._cronTextHandler) {
+    if (this.qqConfig['cron-msg-experimental'] && this._cronTextHandler) {
       bridge.on?.('textChunk', this._cronTextHandler);
     }
   }
@@ -529,7 +529,7 @@ export class QQChannel extends ChannelBase {
     }
     this.streamState.clear();
     // Clean up cron buffers (experimental only)
-    if (this.qqConfig.experimental) {
+    if (this.qqConfig['cron-msg-experimental']) {
       for (const [, entry] of this.cronBuffer) {
         if (entry.timer) clearTimeout(entry.timer);
       }
@@ -545,7 +545,7 @@ export class QQChannel extends ChannelBase {
       this.connectReject(new Error('Channel disconnected'));
       this.connectReject = null;
     }
-    if (this.qqConfig.experimental && this._cronTextHandler && this.cronTextHandlerAttached) {
+    if (this.qqConfig['cron-msg-experimental'] && this._cronTextHandler && this.cronTextHandlerAttached) {
       this.bridge.off?.('textChunk', this._cronTextHandler);
       this.cronTextHandlerAttached = false;
     }
@@ -1202,7 +1202,7 @@ export class QQChannel extends ChannelBase {
                 this.connectReject = null;
                 this._ready = true;
                 this.coldStart = false;
-                if (this.qqConfig.experimental && this._cronTextHandler && !this.cronTextHandlerAttached) {
+                if (this.qqConfig['cron-msg-experimental'] && this._cronTextHandler && !this.cronTextHandlerAttached) {
                   this.bridge.on?.('textChunk', this._cronTextHandler);
                   this.cronTextHandlerAttached = true;
                 }
@@ -1215,7 +1215,7 @@ export class QQChannel extends ChannelBase {
                 this.connectReject = null;
                 this._ready = true;
                 this.coldStart = false;
-                if (this.qqConfig.experimental && this._cronTextHandler && !this.cronTextHandlerAttached) {
+                if (this.qqConfig['cron-msg-experimental'] && this._cronTextHandler && !this.cronTextHandlerAttached) {
                   this.bridge.on?.('textChunk', this._cronTextHandler);
                   this.cronTextHandlerAttached = true;
                 }
@@ -1661,7 +1661,7 @@ export class QQChannel extends ChannelBase {
       }
     }
     // Clean up cron buffers targeting this group (experimental only)
-    if (this.qqConfig.experimental) {
+    if (this.qqConfig['cron-msg-experimental']) {
       for (const [sid, entry] of this.cronBuffer) {
         const target = this.router.getTarget(sid);
         if (target?.chatId === groupId) {
