@@ -4676,6 +4676,21 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     expect(loadReply?.result?.replayed).toBe(true);
     expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(false);
     expect(bridge.killed).not.toContain('sess-1');
+
+    const retryCloseStream = await openStream(connId);
+    const retryCloseReader = frameReader(retryCloseStream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 342,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+    expect(await retryCloseReader.next()).toMatchObject({
+      id: 342,
+      result: {},
+    });
+    retryCloseReader.close();
+    expect(bridge.closedSessions).toEqual(['sess-1']);
   });
 
   it('double-failure permission vote → pending retained + retried on teardown', async () => {
