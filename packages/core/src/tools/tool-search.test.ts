@@ -12,12 +12,14 @@ import { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
+import type { ToolResult } from './tools.js';
 import { CronCreateTool } from './cron-create.js';
 import { CronDeleteTool } from './cron-delete.js';
 import { CronListTool } from './cron-list.js';
 import { LoopWakeupTool } from './loop-wakeup.js';
 import { ToolNames } from './tool-names.js';
 import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 const baseConfigParams: ConfigParameters = {
   cwd: '/tmp',
@@ -633,7 +635,7 @@ describe('ToolSearchTool', () => {
       alwaysLoad: true,
     },
   ])(
-    'select: rejects $toolName inside subagent context without revealing or syncing tools',
+    'select: rejects $toolName inside subagent-like context without revealing or syncing tools',
     async ({ toolName, shouldDefer, alwaysLoad }) => {
       registry.registerTool(
         new MockTool({
@@ -649,22 +651,46 @@ describe('ToolSearchTool', () => {
       } as never);
 
       const tool = new ToolSearchTool(config);
-      const result = await runWithAgentContext('agent-1', () =>
-        tool
-          .build({ query: `select:${toolName}` })
-          .execute(new AbortController().signal),
-      );
+      const contextCases: Array<{
+        run: (callback: () => Promise<ToolResult>) => Promise<ToolResult>;
+      }> = [
+        {
+          run: (callback) => runWithAgentContext('agent-1', callback),
+        },
+        {
+          run: (callback) =>
+            runWithTeammateIdentity(
+              {
+                agentId: 'agent@test',
+                agentName: 'agent',
+                teamName: 'test',
+                isTeamLead: false,
+              },
+              callback,
+            ),
+        },
+      ];
 
-      expect(String(result.llmContent)).toContain(
-        'not available inside subagents',
-      );
-      expect(String(result.llmContent)).toContain('return your plan');
-      expect(result.error?.message).toContain('not available inside subagents');
-      expect(result.error?.message).toContain('return your plan');
-      expect(String(result.returnDisplay)).toContain('1 unavailable');
-      expect(String(result.llmContent)).not.toContain(`"name":"${toolName}"`);
-      expect(registry.isDeferredToolRevealed(toolName)).toBe(false);
-      expect(setToolsSpy).not.toHaveBeenCalled();
+      for (const { run } of contextCases) {
+        const result = await run(() =>
+          tool
+            .build({ query: `select:${toolName}` })
+            .execute(new AbortController().signal),
+        );
+
+        expect(String(result.llmContent)).toContain(
+          'not available inside subagents',
+        );
+        expect(String(result.llmContent)).toContain('return your plan');
+        expect(result.error?.message).toContain(
+          'not available inside subagents',
+        );
+        expect(result.error?.message).toContain('return your plan');
+        expect(String(result.returnDisplay)).toContain('1 unavailable');
+        expect(String(result.llmContent)).not.toContain(`"name":"${toolName}"`);
+        expect(registry.isDeferredToolRevealed(toolName)).toBe(false);
+        expect(setToolsSpy).not.toHaveBeenCalled();
+      }
     },
   );
 

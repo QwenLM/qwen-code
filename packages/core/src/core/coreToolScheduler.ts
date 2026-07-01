@@ -2269,9 +2269,12 @@ export class CoreToolScheduler {
                 responseParts: convertToFunctionResponse(
                   reqInfo.name,
                   reqInfo.callId,
-                  // Main SDK sessions can still exit plan mode explicitly;
-                  // subagents cannot, so only subagents get plan-only guidance.
-                  getPlanModeSystemReminder(isSubagentLikeExecutionContext()),
+                  // SDK and subagent-like callers should return the plan
+                  // directly instead of entering an interactive approval flow.
+                  getPlanModeSystemReminder(
+                    isSubagentLikeExecutionContext() ||
+                      this.config.getSdkMode(),
+                  ),
                 ),
                 resultDisplay: 'Plan mode blocked a non-read-only tool call.',
                 error: undefined,
