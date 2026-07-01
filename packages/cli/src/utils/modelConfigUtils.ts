@@ -10,6 +10,7 @@ import {
   type ContentGeneratorConfig,
   type ContentGeneratorConfigSources,
   normalizeReasoningEffort,
+  REASONING_EFFORT_TIERS,
   resolveModelConfig,
   resolveProviderProtocol,
   type ModelConfigSourcesInput,
@@ -421,9 +422,15 @@ export function resolveCliGenerationConfig(
   // set via /effort) onto the unified reasoning config. Skip when thinking is
   // explicitly disabled (reasoning === false) so effort never silently
   // re-enables it; provider adapters clamp the tier to the active model.
-  const reasoningEffort = normalizeReasoningEffort(
-    settings.model?.reasoningEffort,
-  );
+  const rawReasoningEffort = settings.model?.reasoningEffort;
+  const reasoningEffort = normalizeReasoningEffort(rawReasoningEffort);
+  // A configured-but-unrecognized value (e.g. a "hihg" typo in settings.json)
+  // normalizes to undefined and is silently skipped below. Surface it as a
+  // warning so the user isn't left wondering why /effort had no effect.
+  const invalidReasoningEffortWarning =
+    rawReasoningEffort && !reasoningEffort
+      ? `Ignoring invalid model.reasoningEffort "${rawReasoningEffort}"; expected one of: ${REASONING_EFFORT_TIERS.join(', ')}.`
+      : undefined;
   if (reasoningEffort && generationConfig.reasoning !== false) {
     generationConfig.reasoning = {
       ...(generationConfig.reasoning ?? {}),
@@ -439,6 +446,7 @@ export function resolveCliGenerationConfig(
     sources: resolved.sources,
     warnings: [
       ...resolved.warnings,
+      ...(invalidReasoningEffortWarning ? [invalidReasoningEffortWarning] : []),
       ...(disambiguationWarning ? [disambiguationWarning] : []),
       ...(ignoredGenerationConfigWarning
         ? [ignoredGenerationConfigWarning]

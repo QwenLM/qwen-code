@@ -3244,6 +3244,11 @@ export class Config {
       );
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
+      // Deliberately does NOT copy `reasoning`: it is a global, model-independent
+      // preference captured in `priorReasoningEffort` above and re-applied via
+      // setReasoningEffort() below. Do not add `reasoning` here — that would
+      // overwrite the live tier with the new model's default and make the
+      // restore a no-op.
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
