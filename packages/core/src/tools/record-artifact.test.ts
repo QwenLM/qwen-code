@@ -148,6 +148,20 @@ describe('RecordArtifactTool', () => {
 
     expect(() =>
       tool.build({
+        title: 'safe\u2028evil',
+        url: 'https://example.com/resource',
+      }),
+    ).toThrow(/control characters/);
+
+    expect(() =>
+      tool.build({
+        title: 'safe\u2066evil',
+        url: 'https://example.com/resource',
+      }),
+    ).toThrow(/control characters/);
+
+    expect(() =>
+      tool.build({
         title: 'Metadata key',
         url: 'https://example.com/resource',
         metadata: { 'preview\u200b': 'hidden' },

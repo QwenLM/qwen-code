@@ -305,7 +305,10 @@ function hasControlCharacter(value: string): boolean {
       code <= 0x1f ||
       code === 0x7f ||
       (code >= 0x200b && code <= 0x200f) ||
+      code === 0x2028 ||
+      code === 0x2029 ||
       (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069) ||
       code === 0xfeff
     ) {
       return true;

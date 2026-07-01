@@ -765,6 +765,7 @@ describe('BridgeClient — artifact ingress', () => {
       sessionId,
       events: { publish },
       artifacts: {
+        inputBatchLimit: () => 400,
         upsertMany: vi
           .fn()
           .mockRejectedValue(new Error('artifact store unavailable')),
@@ -793,6 +794,56 @@ describe('BridgeClient — artifact ingress', () => {
       expect(publish).not.toHaveBeenCalled();
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('artifact store unavailable');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('caps oversized artifact event batches before store ingestion', async () => {
+    const sessionId = 'sess:artifact-batch-cap';
+    const publish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: {
+        inputBatchLimit: () => 2,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        artifacts: [
+          { title: 'One', url: 'https://example.com/1' },
+          { title: 'Two', url: 'https://example.com/2' },
+          { title: 'Three', url: 'https://example.com/3' },
+        ],
+      });
+
+      expect(upsertMany).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({ title: 'One' }),
+          expect.objectContaining({ title: 'Two' }),
+        ],
+        undefined,
+      );
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('artifact batch limit exceeded');
+      expect(logged).toContain('dropped=1');
     } finally {
       stderr.mockRestore();
     }

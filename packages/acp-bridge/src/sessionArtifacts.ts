@@ -153,6 +153,10 @@ export class SessionArtifactStore {
     this.maxArtifacts = options.maxArtifacts ?? 200;
   }
 
+  inputBatchLimit(): number {
+    return this.maxArtifacts * 2;
+  }
+
   async list(): Promise<SessionArtifactsEnvelope> {
     return this.enqueue(async () => {
       await this.refreshWorkspaceStatuses();
@@ -707,7 +711,7 @@ function mergeMetadata(
   const merged = { ...(existing ?? {}) };
   let changed = false;
   for (const [key, value] of Object.entries(incoming.metadata)) {
-    if (!(key in merged)) {
+    if (!Object.hasOwn(merged, key)) {
       merged[key] = value;
       changed = true;
     }
@@ -1048,7 +1052,10 @@ function hasControlCharacter(value: string): boolean {
       code <= 0x1f ||
       code === 0x7f ||
       (code >= 0x200b && code <= 0x200f) ||
+      code === 0x2028 ||
+      code === 0x2029 ||
       (code >= 0x202a && code <= 0x202e) ||
+      (code >= 0x2066 && code <= 0x2069) ||
       code === 0xfeff
     ) {
       return true;

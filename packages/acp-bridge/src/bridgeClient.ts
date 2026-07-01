@@ -98,6 +98,21 @@ function artifactPayloadFields(
   };
 }
 
+function truncateArtifactInputs(
+  artifacts: SessionArtifactInput[],
+  limit: number,
+  sessionId: string,
+  source: 'tool' | 'hook',
+): SessionArtifactInput[] {
+  if (artifacts.length <= limit) {
+    return artifacts;
+  }
+  writeStderrLine(
+    `[artifacts] session=${sessionId} action=dropped reason="artifact batch limit exceeded" source=${source} dropped=${artifacts.length - limit}`,
+  );
+  return artifacts.slice(0, limit);
+}
+
 function extractSessionUpdateArtifacts(
   params: SessionNotification,
   updateMeta: Record<string, unknown> | undefined,
@@ -553,9 +568,18 @@ export class BridgeClient implements Client {
     if (entry) {
       const artifacts = extractSessionUpdateArtifacts(params, updateMeta);
       if (artifacts.length > 0) {
-        await this.upsertAndPublishArtifacts(entry, artifacts, {
-          trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
-        });
+        await this.upsertAndPublishArtifacts(
+          entry,
+          truncateArtifactInputs(
+            artifacts,
+            entry.artifacts.inputBatchLimit(),
+            entry.sessionId,
+            'tool',
+          ),
+          {
+            trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
+          },
+        );
       }
     }
   }
@@ -896,7 +920,15 @@ export class BridgeClient implements Client {
       toolCallId,
       trustedPublisher: false,
     }));
-    await this.upsertAndPublishArtifacts(entry, artifacts);
+    await this.upsertAndPublishArtifacts(
+      entry,
+      truncateArtifactInputs(
+        artifacts,
+        entry.artifacts.inputBatchLimit(),
+        entry.sessionId,
+        'hook',
+      ),
+    );
   }
 
   private async upsertAndPublishArtifacts(

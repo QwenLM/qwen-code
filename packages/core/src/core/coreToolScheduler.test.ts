@@ -6221,9 +6221,14 @@ describe('CoreToolScheduler telemetry spans', () => {
   }
 
   function buildScheduler(options: {
-    execute?: () => Promise<ToolResult>;
+    execute?: (
+      params: { [key: string]: unknown },
+      signal?: AbortSignal,
+      updateOutput?: (output: string) => void,
+    ) => Promise<ToolResult>;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     disableHooks?: boolean;
+    canUpdateOutput?: boolean;
     includeSensitiveSpanAttributes?: boolean;
     sensitiveSpanAttributeMaxLength?: number;
   }): {
@@ -6232,6 +6237,7 @@ describe('CoreToolScheduler telemetry spans', () => {
   } {
     const mockTool = new MockTool({
       name: 'mockTool',
+      canUpdateOutput: options.canUpdateOutput,
       execute:
         options.execute ??
         vi.fn().mockResolvedValue({
@@ -6297,10 +6303,15 @@ describe('CoreToolScheduler telemetry spans', () => {
 
   async function runSingleTool(
     options: {
-      execute?: () => Promise<ToolResult>;
+      execute?: (
+        params: { [key: string]: unknown },
+        signal?: AbortSignal,
+        updateOutput?: (output: string) => void,
+      ) => Promise<ToolResult>;
       messageBus?: { request: ReturnType<typeof vi.fn> };
       disableHooks?: boolean;
       abortController?: AbortController;
+      canUpdateOutput?: boolean;
       throwSpanSetAttribute?: boolean;
       throwSpanSetStatus?: boolean;
       includeSensitiveSpanAttributes?: boolean;
@@ -7312,6 +7323,56 @@ describe('CoreToolScheduler telemetry spans', () => {
     const completedCall = completedCalls[0];
     expect(completedCall.status).toBe('cancelled');
     if (completedCall.status === 'cancelled') {
+      expect(completedCall.response.artifacts).toEqual([
+        {
+          title: 'Cancel report',
+          workspacePath: 'reports/cancel.html',
+        },
+      ]);
+    }
+  });
+
+  it('preserves live output when hook artifacts are attached to user-abort cancellations', async () => {
+    const abortController = new AbortController();
+    const messageBus = {
+      request: vi.fn(async (req: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${req.eventName}-hook`,
+        success: true,
+        output:
+          req.eventName === 'PostToolUseFailure'
+            ? {
+                hookSpecificOutput: {
+                  artifacts: [
+                    {
+                      title: 'Cancel report',
+                      workspacePath: 'reports/cancel.html',
+                    },
+                  ],
+                },
+              }
+            : { decision: 'allow' },
+      })),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      messageBus,
+      disableHooks: false,
+      canUpdateOutput: true,
+      execute: vi.fn(async (_params, _signal, updateOutput) => {
+        updateOutput?.('live output before abort');
+        abortController.abort();
+        throw new Error('aborted');
+      }),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('cancelled');
+    if (completedCall.status === 'cancelled') {
+      expect(completedCall.response.resultDisplay).toBe(
+        'live output before abort',
+      );
       expect(completedCall.response.artifacts).toEqual([
         {
           title: 'Cancel report',

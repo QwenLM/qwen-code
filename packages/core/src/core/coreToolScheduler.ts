@@ -1330,10 +1330,17 @@ export class CoreToolScheduler {
             }
           }
 
+          const preservedResultDisplay =
+            this.compactResultDisplayForInteractiveHistory(resultDisplay);
           const errorMessage = `[Operation Cancelled] Reason: ${auxiliaryData}`;
           const response =
             typeof auxiliaryData === 'object' && auxiliaryData !== null
-              ? (auxiliaryData as ToolCallResponseInfo)
+              ? {
+                  ...(auxiliaryData as ToolCallResponseInfo),
+                  resultDisplay:
+                    (auxiliaryData as ToolCallResponseInfo).resultDisplay ??
+                    preservedResultDisplay,
+                }
               : {
                   callId: currentCall.request.callId,
                   responseParts: [
@@ -1347,10 +1354,7 @@ export class CoreToolScheduler {
                       },
                     },
                   ],
-                  resultDisplay:
-                    this.compactResultDisplayForInteractiveHistory(
-                      resultDisplay,
-                    ),
+                  resultDisplay: preservedResultDisplay,
                   error: undefined,
                   errorType: undefined,
                   contentLength: errorMessage.length,

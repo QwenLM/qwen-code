@@ -419,7 +419,7 @@ describe('SessionArtifactStore', () => {
         source: 'tool',
         toolName: 'second_tool',
         url: 'https://example.com/resource',
-        metadata: { toolKey: 'added' },
+        metadata: { toolKey: 'added', toString: 'own-key' },
       },
     ]);
     expect(repeatedTool.changes[0]?.artifact).toMatchObject({
@@ -430,8 +430,15 @@ describe('SessionArtifactStore', () => {
         owner: 'first',
         retainedBy: 'client',
         toolKey: 'added',
+        toString: 'own-key',
       },
     });
+    expect(
+      Object.hasOwn(
+        repeatedTool.changes[0]?.artifact?.metadata ?? {},
+        'toString',
+      ),
+    ).toBe(true);
     expect(repeatedTool.changes[0]?.artifact?.metadata).not.toHaveProperty(
       'hookKey',
     );
@@ -469,6 +476,30 @@ describe('SessionArtifactStore', () => {
           {
             title: '<style>body{background:url(https://example.com/x)}</style>',
             url: 'https://example.com/style',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'title' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'safe\u2028evil',
+            url: 'https://example.com/line-separator',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'title' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'safe\u2066evil',
+            url: 'https://example.com/bidi-isolate',
           },
         ],
         { strict: true },
