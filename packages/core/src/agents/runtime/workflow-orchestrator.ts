@@ -156,12 +156,14 @@ const WORKFLOW_SUBAGENT_MAX_TIME_MINUTES = 10;
  * disallowedTools mirror the upstream `Tg8` workflow-subagent config. These
  * tools would let a subagent break the "final text IS the return value"
  * contract: SendMessage would deliver the answer to the user instead of
- * the calling script, and plan lifecycle tools would interrupt the workflow's
- * plan-mode intent. Defense-in-depth alongside the §XmO system prompt that
- * already documents these restrictions.
+ * the calling script, plan lifecycle tools would interrupt the workflow's
+ * plan-mode intent, and MonitorTool depends on AgentTool-owned notification
+ * callbacks that workflow subagents do not register. Defense-in-depth alongside
+ * the workflow system prompt's return-value contract.
  */
 const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
   ToolNames.SEND_MESSAGE,
+  ToolNames.MONITOR,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
 ];
 

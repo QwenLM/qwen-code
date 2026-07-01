@@ -1160,13 +1160,15 @@ describe('createProductionDispatch', () => {
     });
   });
 
-  // T11: disallow SendMessage plus plan lifecycle tools to mirror upstream Tg8.
-  it('disallows SendMessage and plan lifecycle tools for workflow subagents', async () => {
+  // T11: disallow SendMessage plus tools that break workflow return/cleanup
+  // contracts.
+  it('disallows workflow-only floor tools for workflow subagents', async () => {
     const dispatch = createProductionDispatch(fakeConfig());
     await dispatch('hello', { label: 'h1' });
     expect(created[0]!.toolConfig?.tools).toEqual(['*']);
     expect(created[0]!.toolConfig?.disallowedTools).toEqual([
       'send_message',
+      'monitor',
       'enter_plan_mode',
       'exit_plan_mode',
     ]);
@@ -1946,10 +1948,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
     expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{8}$/);
-    // Workflow floor [SendMessage, EnterPlanMode, ExitPlanMode] must be unioned in.
+    // Workflow floor [SendMessage, Monitor, EnterPlanMode, ExitPlanMode] must
+    // be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
       expect.arrayContaining([
         'send_message',
+        'monitor',
         'enter_plan_mode',
         'exit_plan_mode',
       ]),
@@ -2026,11 +2030,12 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     const dispatch = createProductionDispatch(config);
     await dispatch('hi', { agentType: 'Permissive' });
     const disallowed = calls[0].config.disallowedTools ?? [];
-    // Union: Foo (from agentType) + send_message + plan lifecycle floor.
+    // Union: Foo (from agentType) + workflow-only floor.
     expect(disallowed).toEqual(
       expect.arrayContaining([
         'Foo',
         'send_message',
+        'monitor',
         'enter_plan_mode',
         'exit_plan_mode',
       ]),
@@ -2430,6 +2435,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
       expect.arrayContaining([
         'Foo',
         'send_message',
+        'monitor',
         'enter_plan_mode',
         'exit_plan_mode',
       ]),
