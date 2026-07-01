@@ -12,15 +12,26 @@ import type { AddressInfo } from 'node:net';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import WebSocket from 'ws';
-import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import type {
+  BridgeSessionSummary,
+  HttpAcpBridge,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
+  CancelSentinelCollisionError,
   InvalidClientIdError,
+  InvalidPermissionOptionError,
+  PermissionForbiddenError,
+  PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import { SessionService } from '@qwen-code/qwen-code-core';
+import {
+  RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG,
+  SessionService,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import {
   resetHomeEnvBootstrapForTesting,
   SettingScope,
@@ -42,7 +53,16 @@ import {
   WorkspaceSettingsPartialPersistError,
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
-import { mountAcpHttp } from './index.js';
+import {
+  buildChromeDevToolsMcpRuntimeConfigFromPackage,
+  type AcpHttpHandle,
+  mountAcpHttp,
+} from './index.js';
+import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
+import {
+  mountWorkspaceMemoryRememberRoutes,
+  WorkspaceRememberTaskLane,
+} from '../workspace-remember.js';
 import {
   MAX_TRUST_REASON_LENGTH,
   MAX_VOICE_MODEL_LENGTH,
@@ -68,6 +88,70 @@ vi.mock('../../services/setup-github.js', async () => {
     ...actual,
     setupGithub: setupGithubMocks.setupGithub,
   };
+});
+
+describe('buildChromeDevToolsMcpRuntimeConfigFromPackage', () => {
+  const pkgJsonPath = path.join('/tmp/chrome-devtools-mcp', 'package.json');
+
+  it.each([undefined, 0, -1, 1.5] as const)(
+    'rejects invalid localPort=%s',
+    (localPort) => {
+      expect(
+        buildChromeDevToolsMcpRuntimeConfigFromPackage(
+          localPort,
+          pkgJsonPath,
+          'bin/cli.js',
+        ),
+      ).toBeUndefined();
+    },
+  );
+
+  it('rejects missing and escaping bin paths', () => {
+    expect(
+      buildChromeDevToolsMcpRuntimeConfigFromPackage(4170, pkgJsonPath, {}),
+    ).toBeUndefined();
+    expect(
+      buildChromeDevToolsMcpRuntimeConfigFromPackage(
+        4170,
+        pkgJsonPath,
+        '../evil.js',
+      ),
+    ).toBeUndefined();
+  });
+
+  it('builds the stdio config for a package-local bin', () => {
+    expect(
+      buildChromeDevToolsMcpRuntimeConfigFromPackage(4170, pkgJsonPath, {
+        cli: 'bin/cli.js',
+      }),
+    ).toEqual({
+      command: process.execPath,
+      args: [
+        path.join('/tmp/chrome-devtools-mcp', 'bin/cli.js'),
+        '--wsEndpoint',
+        'ws://127.0.0.1:4170/cdp',
+      ],
+      alwaysLoadTools: true,
+      [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
+    });
+  });
+
+  it('uses the listening host for a specific non-wildcard bind', () => {
+    expect(
+      buildChromeDevToolsMcpRuntimeConfigFromPackage(
+        4170,
+        pkgJsonPath,
+        { cli: 'bin/cli.js' },
+        '192.168.1.20',
+      ),
+    ).toMatchObject({
+      args: [
+        path.join('/tmp/chrome-devtools-mcp', 'bin/cli.js'),
+        '--wsEndpoint',
+        'ws://192.168.1.20:4170/cdp',
+      ],
+    });
+  });
 });
 
 /**
@@ -137,6 +221,7 @@ class FakeBridge {
   killed: string[] = [];
   cancelled: string[] = [];
   workspaceEvents: BridgeEvent[] = [];
+  knownClientIdSet = new Set<string>();
   /** When set, spawnOrAttach/loadSession await it (to simulate a slow bridge). */
   gate: Promise<void> | undefined;
   /** `attached` value loadSession returns (false = spawned-from-disk). */
@@ -184,9 +269,19 @@ class FakeBridge {
   }
 
   subscribeThrows = false;
+  /** Records every subscribeEvents call so tests can assert the resume cursor. */
+  subscribeCalls: Array<{ sessionId: string; lastEventId?: number }> = [];
+  /** Parallel to `subscribeCalls`: each subscription's abort signal, so a test
+   * can detect when a closed stream's pump has actually stopped server-side. */
+  subscribeSignals: Array<AbortSignal | undefined> = [];
 
-  subscribeEvents(sessionId: string, opts?: { signal?: AbortSignal }) {
+  subscribeEvents(
+    sessionId: string,
+    opts?: { signal?: AbortSignal; lastEventId?: number },
+  ) {
     if (this.subscribeThrows) throw new Error('subscribe failed');
+    this.subscribeCalls.push({ sessionId, lastEventId: opts?.lastEventId });
+    this.subscribeSignals.push(opts?.signal);
     const q = pushQueue(opts?.signal);
     this.queues.set(sessionId, q);
     return q.iterable;
@@ -198,6 +293,18 @@ class FakeBridge {
       return Promise.resolve(this.promptBehavior(sessionId, q, signal));
     }
     return Promise.resolve({ stopReason: 'end_turn' });
+  }
+
+  /**
+   * Bus head id the daemon stamps as a deferred reply's WATERMARK (`anchorId`)
+   * in `replySession`. Configurable per test so the watermark-ordering path can
+   * be exercised end-to-end with a REAL anchor (without this method the daemon's
+   * try/catch fell back to `anchorId = undefined`, so every integration test
+   * only ever hit the unanchored path).
+   */
+  sessionLastEventId: number | undefined = undefined;
+  getSessionLastEventId(_sessionId: string): number | undefined {
+    return this.sessionLastEventId;
   }
 
   respondToSessionPermission() {
@@ -246,8 +353,10 @@ class FakeBridge {
     return { sessionId: 'sess-1', lastSeenAt: Date.now() };
   }
 
+  workspaceSessions: BridgeSessionSummary[] = [];
+
   listWorkspaceSessions() {
-    return [];
+    return this.workspaceSessions;
   }
 
   detached: Array<{ sessionId: string; clientId?: string }> = [];
@@ -325,29 +434,57 @@ class FakeBridge {
   async getWorkspaceMcpResourcesStatus(serverName: string) {
     return { v: 1, serverName, resources: [] };
   }
-  async addRuntimeMcpServer(name: string) {
+  runtimeMcpAdds: Array<{
+    name: string;
+    config: Record<string, unknown>;
+    originatorClientId: string;
+  }> = [];
+  runtimeMcpRemoves: Array<{ name: string; originatorClientId: string }> = [];
+  runtimeMcpAddResult: {
+    shadowedSettings?: boolean;
+    skipped?: boolean;
+    reason?: string;
+  } = {};
+  runtimeMcpAddError: Error | undefined;
+  runtimeMcpBeforeAddResolve: (() => Promise<void>) | undefined;
+  async addRuntimeMcpServer(
+    name: string,
+    config: Record<string, unknown>,
+    originatorClientId: string,
+  ) {
+    this.runtimeMcpAdds.push({ name, config, originatorClientId });
+    if (this.runtimeMcpAddError) throw this.runtimeMcpAddError;
+    await this.runtimeMcpBeforeAddResolve?.();
     return {
       name,
       transport: 'stdio',
       replaced: false,
       shadowedSettings: false,
       toolCount: 0,
-      originatorClientId: 'c',
+      originatorClientId,
+      ...this.runtimeMcpAddResult,
     };
   }
-  async removeRuntimeMcpServer(name: string) {
+  async removeRuntimeMcpServer(name: string, originatorClientId: string) {
+    this.runtimeMcpRemoves.push({ name, originatorClientId });
     return {
       name,
       removed: true,
       wasShadowingSettings: false,
-      originatorClientId: 'c',
+      originatorClientId,
     };
+  }
+  async runWorkspaceMemoryRemember() {
+    return { summary: 'remembered', filesTouched: [], touchedScopes: [] };
+  }
+  async isWorkspaceMemoryRememberAvailable() {
+    return true;
   }
   publishWorkspaceEvent(event: BridgeEvent) {
     this.workspaceEvents.push(event);
   }
   knownClientIds() {
-    return new Set<string>();
+    return new Set(this.knownClientIdSet);
   }
 }
 
@@ -529,6 +666,53 @@ async function* readSse(
   }
 }
 
+/**
+ * Like `readSse` but yields the RAW frame text (so the `id:` resume-cursor
+ * line is visible — `readSse` only keeps the parsed `data:` payload).
+ */
+async function* readSseRaw(
+  res: Response,
+  signal: AbortSignal,
+): AsyncGenerator<string> {
+  const reader = res.body!.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  signal.addEventListener('abort', () => void reader.cancel().catch(() => {}));
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) return;
+    buf += decoder.decode(value, { stream: true });
+    let idx: number;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      // Skip the `retry:` hint and comment-only heartbeats (no `data:` line).
+      if (frame.split('\n').some((l) => l.startsWith('data: '))) yield frame;
+    }
+  }
+}
+
+/** Read the next N RAW data frames (with `id:` lines) from an SSE response. */
+async function takeRawFrames(
+  res: Response,
+  n: number,
+  timeoutMs = 2000,
+): Promise<string[]> {
+  const out: string[] = [];
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
+  try {
+    for await (const f of readSseRaw(res, ac.signal)) {
+      out.push(f);
+      if (out.length >= n) break;
+    }
+  } finally {
+    clearTimeout(timer);
+    ac.abort();
+  }
+  return out;
+}
+
 /** Read the next N data frames from an SSE response, then abort. */
 async function takeFrames(
   res: Response,
@@ -592,6 +776,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   let server: Server;
   let base: string;
   let bridge: FakeBridge;
+  let acpHandle: AcpHttpHandle | undefined;
 
   beforeEach(async () => {
     stdioMocks.writeStderrLine.mockClear();
@@ -609,10 +794,39 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     bridge = new FakeBridge();
     const app = express();
     app.use(express.json());
-    mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
+    const workspaceRememberLane = new WorkspaceRememberTaskLane(
+      bridge as unknown as HttpAcpBridge,
+    );
+    mountWorkspaceMemoryRememberRoutes(app, {
+      bridge: bridge as unknown as HttpAcpBridge,
+      lane: workspaceRememberLane,
+      mutate: () => (_req, _res, next) => next(),
+      parseClientId: (req, res) => {
+        const raw = req.get('x-qwen-client-id');
+        if (raw === undefined || raw === '') return undefined;
+        if (!bridge.knownClientIdSet.has(raw)) {
+          res.status(400).json({
+            error: `Client id "${raw}" is not registered for this workspace`,
+            code: 'invalid_client_id',
+            clientId: raw,
+          });
+          return null;
+        }
+        return raw;
+      },
+      safeBody: (req) => {
+        const raw = req.body;
+        if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+          return Object.create(null) as Record<string, unknown>;
+        }
+        return raw as Record<string, unknown>;
+      },
+    });
+    acpHandle = mountAcpHttp(app, bridge as unknown as HttpAcpBridge, {
       boundWorkspace: '/ws',
       workspace: fakeWorkspace,
       enabled: true,
+      workspaceRememberLane,
     });
     await new Promise<void>((resolve) => {
       server = app.listen(0, '127.0.0.1', () => resolve());
@@ -646,6 +860,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       enabled: true,
       fsFactory: opts.fsFactory,
       sessionShellCommandEnabled: opts.sessionShellCommandEnabled,
+      workspaceRememberLane: new WorkspaceRememberTaskLane(
+        bridge as unknown as HttpAcpBridge,
+      ),
     });
     await new Promise<void>((resolve) => {
       server = app.listen(0, '127.0.0.1', () => resolve());
@@ -675,6 +892,12 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const result = body['result'] as { protocolVersion: number };
     expect(result.protocolVersion).toBe(1);
     return connId;
+  }
+
+  function clientIdForConnection(connId: string): string {
+    const clientId = acpHandle?.registry.get(connId)?.clientId;
+    expect(clientId).toBeTruthy();
+    return clientId!;
   }
 
   function post(connId: string, msg: unknown) {
@@ -707,6 +930,51 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       params: {},
     });
     await new Promise((r) => setTimeout(r, 30)); // let handle() register ownership
+  }
+
+  async function withRuntimeDir<T>(
+    fn: (runtimeDir: string) => Promise<T>,
+  ): Promise<T> {
+    const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+    const runtimeDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-acp-archive-'),
+    );
+    process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+    try {
+      return await fn(runtimeDir);
+    } finally {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      await fs.rm(runtimeDir, { recursive: true, force: true });
+    }
+  }
+
+  async function writeStoredSession(
+    sessionId: string,
+    state: 'active' | 'archived' = 'active',
+  ): Promise<void> {
+    const chatsDir = path.join(
+      new Storage('/ws').getProjectDir(),
+      'chats',
+      ...(state === 'archived' ? ['archive'] : []),
+    );
+    await fs.mkdir(chatsDir, { recursive: true });
+    await fs.writeFile(
+      path.join(chatsDir, `${sessionId}.jsonl`),
+      `${JSON.stringify({
+        uuid: `${sessionId}-user-1`,
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-06-30T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'hello' }] },
+        cwd: '/ws',
+      })}\n`,
+      'utf8',
+    );
   }
 
   it('initialize → 200 + Acp-Connection-Id; unknown conn → 404', async () => {
@@ -770,6 +1038,21 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     };
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/workspace/setup-github',
+    );
+  });
+
+  it('initialize advertises workspace memory remember methods', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/remember',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/remember/get',
     );
   });
 
@@ -853,6 +1136,397 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     ).toBe('end_turn');
   });
 
+  it('live session/update frames carry an SSE `id:` resume cursor', async () => {
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'session_update',
+        data: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk' },
+        },
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sessStream = await openStream(connId, 'sess-1');
+    const got = takeRawFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    const frames = await got;
+    // `pushQueue` stamps bus ids from 1, so the first session_update is id 1.
+    // The frame MUST carry `id: 1` before its `data:` line — that is the
+    // cursor an SSE client echoes as `Last-Event-ID` on reconnect.
+    expect(frames[0]).toMatch(/(^|\n)id: 1\ndata: /);
+    expect(frames[0]).toContain('"method":"session/update"');
+  });
+
+  it('GET Last-Event-ID flows to subscribeEvents as the resume cursor', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+
+    // Reconnect carrying a cursor → subscribeEvents gets lastEventId=42.
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '42',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 42,
+    });
+    await resumed.body?.cancel().catch(() => {});
+
+    // A non-numeric header is rejected (logged) → live-only (undefined).
+    const bad = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': 'not-a-number',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: undefined,
+    });
+    await bad.body?.cancel().catch(() => {});
+
+    // A fresh stream with no header → live-only (undefined), as before.
+    const fresh = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 3);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: undefined,
+    });
+    await fresh.body?.cancel().catch(() => {});
+  });
+
+  it('real close-then-reconnect order keeps ownership (no 403) + prompt alive, resumes via Last-Event-ID', async () => {
+    let promptSignal: AbortSignal | undefined;
+    bridge.promptBehavior = async (_s, q, signal) => {
+      promptSignal = signal;
+      q.push({
+        type: 'session_update',
+        data: {
+          sessionId: 'sess-1',
+          update: { sessionUpdate: 'agent_message_chunk' },
+        },
+      });
+      // Keep the prompt running across the disconnect + reconnect.
+      await new Promise((r) => setTimeout(r, 1000));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const s1 = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1); // pump subscribed
+    const r1 = frameReader(s1);
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'hi' }] },
+    });
+    expect(ack.status).toBe(202);
+    await r1.next(); // first content frame (bus id 1)
+
+    // Close the OLD stream FIRST — the real EventSource/proxy order (the
+    // existing reconnect tests overlap streams, hiding this).
+    r1.close();
+    await s1.body?.cancel().catch(() => {});
+    // Wait until the daemon has PROCESSED the close (old pump's signal aborted).
+    await waitUntil(() => bridge.subscribeSignals[0]?.aborted === true);
+
+    // Detach-with-grace, NOT teardown: the in-flight prompt must survive.
+    expect(promptSignal?.aborted).toBe(false);
+
+    // Reconnect carrying the cursor — must be 200 (ownership kept), not 403.
+    const s2 = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '1',
+      },
+    });
+    expect(s2.status).toBe(200);
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: 1,
+    });
+    expect(promptSignal?.aborted).toBe(false); // still alive after reconnect
+    await s2.body?.cancel().catch(() => {});
+  });
+
+  it('on resume, a reply buffered during the gap is flushed on replay_complete — AFTER replayed content, NOT on the pre-replay state_resync_required frame', async () => {
+    // Guards the core §1.8 ordering invariant end-to-end through the pump:
+    // the EventBus emits `state_resync_required` BEFORE the replay frames (then
+    // `replay_complete` at the end). If the deferred id-less reply were flushed
+    // on the resync frame it would land ahead of the replayed content — the
+    // truncated-body failure this PR fixes. It must flush on `replay_complete`.
+    let openGate: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      openGate = r;
+    });
+    bridge.promptBehavior = async (_s, _q) => {
+      // Hold the prompt open across the disconnect; its result is produced
+      // only after the gate opens (i.e. during the detach gap) → buffered.
+      await gate;
+      return { stopReason: 'end_turn' };
+    };
+
+    const connId = await initialize();
+    await newSession(connId);
+    const s1 = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'go' }] },
+    });
+    expect(ack.status).toBe(202);
+
+    // Close s1 → detach-with-grace (old pump's signal aborts).
+    await s1.body?.cancel().catch(() => {});
+    await waitUntil(() => bridge.subscribeSignals[0]?.aborted === true);
+
+    // Now release the prompt: its result is sent while detached → buffered as an
+    // id-less reply. Settle briefly so it lands in the buffer before reconnect
+    // (same in-process settle idiom the harness uses elsewhere).
+    openGate();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Reconnect carrying a cursor → the buffered id-less reply is DEFERRED.
+    const s2 = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '0',
+      },
+    });
+    expect(s2.status).toBe(200);
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+
+    // Drive the resume sequence the real EventBus would: resync FIRST, then the
+    // replayed content, then replay_complete.
+    const q2 = bridge.queues.get('sess-1')!;
+    q2.push({
+      type: 'state_resync_required',
+      data: { reason: 'ring_evicted' },
+    });
+    q2.push({
+      type: 'session_update',
+      data: {
+        sessionId: 'sess-1',
+        update: { sessionUpdate: 'agent_message_chunk', text: 'REPLAYED' },
+      },
+    });
+    q2.push({ type: 'replay_complete', data: { replayedCount: 1 } });
+
+    const r2 = frameReader(s2);
+    const order: string[] = [];
+    try {
+      // Read until we've seen the deferred reply (or a safety cap).
+      for (let i = 0; i < 8 && !order.includes('reply'); i++) {
+        const f = (await r2.next()) as {
+          method?: string;
+          result?: unknown;
+          params?: { kind?: string; update?: { text?: string } };
+        };
+        if (f.method === undefined && 'result' in f) order.push('reply');
+        else if (f.params?.kind === 'state_resync_required')
+          order.push('resync');
+        else if (f.params?.update?.text === 'REPLAYED') order.push('content');
+        else if (f.params?.kind === 'replay_complete')
+          order.push('replay_complete');
+      }
+    } finally {
+      r2.close();
+    }
+
+    // The reply must arrive AFTER the replayed content (and thus after the
+    // pre-replay resync frame) — not flushed early on state_resync_required.
+    expect(order).toContain('reply');
+    expect(order).toContain('content');
+    expect(order.indexOf('content')).toBeLessThan(order.indexOf('reply'));
+    expect(order.indexOf('resync')).toBeLessThan(order.indexOf('content'));
+  });
+
+  it('on resume, an ANCHORED deferred reply releases mid-replay at its watermark — after the anchor content, BEFORE replay_complete (end-to-end through getSessionLastEventId)', async () => {
+    // Exercises the anchored watermark path end-to-end: `replySession` stamps
+    // the reply with `anchorId = getSessionLastEventId(sessionId)` (a real
+    // number here, not the undefined fallback), so the reply is held until the
+    // pump has DELIVERED content through that id — then released MID-replay,
+    // before `replay_complete`. This distinguishes the watermark release from
+    // the unanchored "release at replay_complete" path (covered above): the
+    // reply must land between the anchor content and the replay boundary, and
+    // NOT before the content that precedes its watermark.
+    bridge.sessionLastEventId = 2; // reply's watermark anchors at bus id 2.
+    let openGate: () => void = () => {};
+    const gate = new Promise<void>((r) => {
+      openGate = r;
+    });
+    bridge.promptBehavior = async (_s, _q) => {
+      await gate; // result produced during the detach gap → buffered.
+      return { stopReason: 'end_turn' };
+    };
+
+    const connId = await initialize();
+    await newSession(connId);
+    const s1 = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    const ack = await post(connId, {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'go' }] },
+    });
+    expect(ack.status).toBe(202);
+
+    // Close s1 → detach-with-grace; release the prompt while detached so its
+    // reply buffers as a deferred reply WITH anchorId=2.
+    await s1.body?.cancel().catch(() => {});
+    await waitUntil(() => bridge.subscribeSignals[0]?.aborted === true);
+    openGate();
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Reconnect carrying a cursor → replay in flight, the reply is DEFERRED.
+    const s2 = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '0',
+      },
+    });
+    expect(s2.status).toBe(200);
+    await waitUntil(() => bridge.subscribeCalls.length >= 2);
+
+    // Clean replay (no eviction): two id-bearing content frames straddling the
+    // watermark, then replay_complete. The reply must release on id=2, NOT id=1.
+    const q2 = bridge.queues.get('sess-1')!;
+    q2.push({
+      type: 'session_update',
+      id: 1,
+      data: {
+        sessionId: 'sess-1',
+        update: { sessionUpdate: 'agent_message_chunk', text: 'C1' },
+      },
+    });
+    q2.push({
+      type: 'session_update',
+      id: 2,
+      data: {
+        sessionId: 'sess-1',
+        update: { sessionUpdate: 'agent_message_chunk', text: 'C2' },
+      },
+    });
+    q2.push({ type: 'replay_complete', data: { replayedCount: 2 } });
+
+    const r2 = frameReader(s2);
+    const order: string[] = [];
+    try {
+      // Read past the reply through to the replay boundary so the ordering of
+      // reply vs replay_complete is observable (the distinguishing assertion).
+      for (let i = 0; i < 12 && !order.includes('replay_complete'); i++) {
+        const f = (await r2.next()) as {
+          method?: string;
+          result?: unknown;
+          params?: { kind?: string; update?: { text?: string } };
+        };
+        if (f.method === undefined && 'result' in f) order.push('reply');
+        else if (f.params?.update?.text === 'C1') order.push('c1');
+        else if (f.params?.update?.text === 'C2') order.push('c2');
+        else if (f.params?.kind === 'replay_complete')
+          order.push('replay_complete');
+      }
+    } finally {
+      r2.close();
+    }
+
+    // Held through the pre-watermark content (c1), released ON the watermark
+    // (c2) MID-replay, and BEFORE the replay boundary — the anchor, not the
+    // replay_complete boundary, gated the release.
+    expect(order).toContain('reply');
+    expect(order).toContain('c1');
+    expect(order).toContain('c2');
+    expect(order).toContain('replay_complete');
+    expect(order.indexOf('c1')).toBeLessThan(order.indexOf('c2'));
+    expect(order.indexOf('c2')).toBeLessThan(order.indexOf('reply'));
+    expect(order.indexOf('reply')).toBeLessThan(
+      order.indexOf('replay_complete'),
+    );
+  });
+
+  it('GET Last-Event-ID past MAX_SAFE_INTEGER → live-only (undefined)', async () => {
+    const connId = await initialize();
+    await newSession(connId);
+    const overflow = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'sess-1',
+        'last-event-id': '9007199254740992', // MAX_SAFE_INTEGER + 1
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'sess-1',
+      lastEventId: undefined,
+    });
+    await overflow.body?.cancel().catch(() => {});
+  });
+
+  it('a replayed permission_request reuses the pending entry (idempotent, same outbound id)', async () => {
+    bridge.promptBehavior = async (_s, q) => {
+      const perm = {
+        requestId: 'perm-1',
+        sessionId: 'sess-1',
+        toolCall: { name: 'shell' },
+        options: [{ optionId: 'allow', name: 'Allow' }],
+      };
+      q.push({ type: 'permission_request', data: perm });
+      // Simulate a ring replay re-delivering the SAME bridge request (a
+      // reconnect whose Last-Event-ID precedes the still-pending permission).
+      q.push({ type: 'permission_request', data: perm });
+      await new Promise((r) => setTimeout(r, 50));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const sess = await openStream(connId, 'sess-1');
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    const reader = frameReader(sess);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 5,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'go' }] },
+    });
+    const f1 = (await reader.next()) as { method: string; id: unknown };
+    const f2 = (await reader.next()) as { method: string; id: unknown };
+    expect(f1.method).toBe('session/request_permission');
+    expect(f2.method).toBe('session/request_permission');
+    // SAME outbound JSON-RPC id ⇒ one pending entry reused, not a 2nd orphan.
+    expect(f1.id).toBe(f2.id);
+    reader.close();
+  });
+
   it('permission request round-trips agent→client→agent', async () => {
     let resolvedWith: unknown;
     bridge.respondToSessionPermission = ((
@@ -913,6 +1587,1186 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }
   });
 
+  it('cross-connection permission response resolves for a co-owned session', async () => {
+    let resolvedWith: unknown;
+    let voteCount = 0;
+    bridge.respondToSessionPermission = ((
+      sessionId: string,
+      requestId: string,
+      resp: unknown,
+    ) => {
+      voteCount += 1;
+      resolvedWith = { sessionId, requestId, resp };
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-cross',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      return { stopReason: 'end_turn' };
+    };
+    const streamConnId = await initialize();
+    await newSession(streamConnId);
+    const voterConnId = await initialize();
+    await newSession(voterConnId, 100);
+    const sessStream = await openStream(streamConnId, 'sess-1');
+    const reader = frameReader(sessStream);
+    try {
+      await post(streamConnId, {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'rm' }],
+        },
+      });
+      const reqFrame = (await reader.next()) as { id: string };
+      await post(voterConnId, {
+        jsonrpc: '2.0',
+        id: reqFrame.id,
+        result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      await waitUntil(() => resolvedWith !== undefined);
+      expect(resolvedWith).toEqual({
+        sessionId: 'sess-1',
+        requestId: 'perm-cross',
+        resp: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      expect(voteCount).toBe(1);
+      // The resolved entry must be removed so a duplicate vote on the same id
+      // can't reach the bridge again — locks down the cross-connection cleanup
+      // (dropResolvedPermission) that is the core of this PR.
+      await post(voterConnId, {
+        jsonrpc: '2.0',
+        id: reqFrame.id,
+        result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(voteCount).toBe(1);
+    } finally {
+      reader.close();
+    }
+  });
+
+  it('session/permission method resolves cross-connection for a co-owned session', async () => {
+    let resolvedWith: unknown;
+    let voteCount = 0;
+    bridge.respondToSessionPermission = ((
+      sessionId: string,
+      requestId: string,
+      resp: unknown,
+    ) => {
+      voteCount += 1;
+      resolvedWith = { sessionId, requestId, resp };
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-cross-method',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 300));
+      return { stopReason: 'end_turn' };
+    };
+    const streamConnId = await initialize();
+    await newSession(streamConnId);
+    const voterConnId = await initialize();
+    await newSession(voterConnId, 100); // co-owns sess-1
+    const sessStream = await openStream(streamConnId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    const voterConnStream = await openStream(voterConnId);
+    const voterReader = frameReader(voterConnStream);
+    try {
+      await voterReader.next(); // buffered session/new response on B
+      await post(streamConnId, {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next(); // request_permission registers the entry on A
+      // Connection B (co-owner) votes via the session/permission method.
+      await post(voterConnId, {
+        jsonrpc: '2.0',
+        id: 41,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-cross-method',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      // Ack {} is delivered on B's connection stream.
+      const ack = (await voterReader.next()) as {
+        id: number;
+        result?: unknown;
+      };
+      expect(ack).toEqual({ jsonrpc: '2.0', id: 41, result: {} });
+      expect(resolvedWith).toEqual({
+        sessionId: 'sess-1',
+        requestId: 'perm-cross-method',
+        resp: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      expect(voteCount).toBe(1);
+      // B has no pending entry of its own (only A streamed the request), so its
+      // vote must NOT delete A's sibling entry — under the consensus policy that
+      // would drop a still-needed co-owner request. A's entry therefore survives,
+      // and a second vote still routes through to the bridge (rather than the
+      // handler 404-ing on a wrongly-deleted entry).
+      await post(voterConnId, {
+        jsonrpc: '2.0',
+        id: 42,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-cross-method',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const ack2 = (await voterReader.next()) as {
+        id: number;
+        result?: unknown;
+      };
+      expect(ack2).toEqual({ jsonrpc: '2.0', id: 42, result: {} });
+      expect(voteCount).toBe(2);
+    } finally {
+      sessReader.close();
+      voterReader.close();
+    }
+  });
+
+  it('session/permission forwards AskUserQuestion answers and drops unknown fields', async () => {
+    let forwarded: unknown;
+    bridge.respondToSessionPermission = ((
+      _sessionId: string,
+      _requestId: string,
+      resp: unknown,
+    ) => {
+      forwarded = resp;
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-ans',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 43,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next(); // request_permission
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 44,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-ans',
+          // Extra outcome sub-field (`force`) and top-level junk (`bogus`) must
+          // be stripped; the AskUserQuestion `answers` map must be forwarded.
+          outcome: { outcome: 'selected', optionId: 'allow', force: true },
+          answers: { q1: 'a1', q2: 'a2' },
+          bogus: 'nope',
+        },
+      });
+      const ack = (await connReader.next()) as { id: number; result?: unknown };
+      expect(ack).toEqual({ jsonrpc: '2.0', id: 44, result: {} });
+      expect(forwarded).toEqual({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+        answers: { q1: 'a1', q2: 'a2' },
+      });
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('session/permission drops a malformed answers payload (non-string values)', async () => {
+    let forwarded: unknown;
+    bridge.respondToSessionPermission = ((
+      _sessionId: string,
+      _requestId: string,
+      resp: unknown,
+    ) => {
+      forwarded = resp;
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-bad-ans',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 51,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next(); // request_permission
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 52,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-bad-ans',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+          // Non-string value → not an object map of strings → dropped.
+          answers: { q1: 42 },
+        },
+      });
+      expect((await connReader.next()) as unknown).toMatchObject({ id: 52 });
+      // The vote still lands, but the malformed answers are not forwarded.
+      expect(forwarded).toEqual({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('session/permission forwards an object _meta and drops a non-object _meta', async () => {
+    const seen: unknown[] = [];
+    bridge.respondToSessionPermission = ((
+      _sessionId: string,
+      _requestId: string,
+      resp: unknown,
+    ) => {
+      seen.push(resp);
+      return true;
+    }) as never;
+    let nextReq = 0;
+    bridge.promptBehavior = async (_s, q) => {
+      nextReq += 1;
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: `perm-meta-${nextReq}`,
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      // Round 1: object _meta is preserved verbatim (nested shape survives).
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 45,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'a' }] },
+      });
+      await sessReader.next();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 46,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-meta-1',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+          _meta: { qwen: { trace: 't1' } },
+        },
+      });
+      expect((await connReader.next()) as unknown).toMatchObject({ id: 46 });
+      expect(seen.at(-1)).toEqual({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+        _meta: { qwen: { trace: 't1' } },
+      });
+      // Round 2: a non-object _meta (string) is dropped, not forwarded.
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 47,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'b' }] },
+      });
+      await sessReader.next();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 48,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-meta-2',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+          _meta: 'not-an-object',
+        },
+      });
+      expect((await connReader.next()) as unknown).toMatchObject({ id: 48 });
+      expect(seen.at(-1)).toEqual({
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      });
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('session/permission runs the cancel fallback and rethrows on an unexpected bridge error', async () => {
+    const calls: Array<{ requestId: string; resp: unknown }> = [];
+    bridge.respondToSessionPermission = ((
+      _sessionId: string,
+      requestId: string,
+      resp: unknown,
+    ) => {
+      calls.push({ requestId, resp });
+      // First call (the vote) throws an unmapped error; the cancel fallback's
+      // call (cancelled outcome) is allowed through.
+      if (
+        (resp as { outcome?: { outcome?: string } })?.outcome?.outcome !==
+        'cancelled'
+      ) {
+        throw new Error('unexpected bridge failure');
+      }
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-boom',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 49,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next(); // request_permission
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 50,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-boom',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const frame = (await connReader.next()) as {
+        id: number;
+        error: { code: number };
+      };
+      // Unmapped error → generic INTERNAL_ERROR from the outer dispatcher catch.
+      expect(frame.id).toBe(50);
+      expect(frame.error.code).toBe(-32603);
+      // The cancel fallback ran: the bridge saw a second call carrying the
+      // cancelled outcome.
+      expect(
+        calls.some(
+          (c) =>
+            (c.resp as { outcome?: { outcome?: string } })?.outcome?.outcome ===
+            'cancelled',
+        ),
+      ).toBe(true);
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('ignores cross-connection permission responses for unowned sessions', async () => {
+    const votes: unknown[] = [];
+    bridge.respondToSessionPermission = ((
+      _sessionId: string,
+      _requestId: string,
+      resp: unknown,
+    ) => {
+      votes.push(resp);
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-unowned',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 60));
+      return { stopReason: 'end_turn' };
+    };
+    const streamConnId = await initialize();
+    await newSession(streamConnId);
+    const voterConnId = await initialize();
+    const sessStream = await openStream(streamConnId, 'sess-1');
+    const reader = frameReader(sessStream);
+    try {
+      await post(streamConnId, {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'rm' }],
+        },
+      });
+      const reqFrame = (await reader.next()) as { id: string };
+      await post(voterConnId, {
+        jsonrpc: '2.0',
+        id: reqFrame.id,
+        result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(votes).toEqual([]);
+
+      await post(streamConnId, {
+        jsonrpc: '2.0',
+        id: reqFrame.id,
+        result: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+      await waitUntil(() => votes.length === 1);
+    } finally {
+      reader.close();
+    }
+  });
+
+  it('session/permission resolves by bridge request id and replies on the connection stream', async () => {
+    let resolvedWith: unknown;
+    bridge.respondToSessionPermission = ((
+      sessionId: string,
+      requestId: string,
+      resp: unknown,
+    ) => {
+      resolvedWith = { sessionId, requestId, resp };
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-route',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 7,
+        method: 'session/prompt',
+        params: {
+          sessionId: 'sess-1',
+          prompt: [{ type: 'text', text: 'rm' }],
+        },
+      });
+      await sessReader.next();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 8,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-route',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const ack = (await connReader.next()) as {
+        id: number;
+        result?: unknown;
+      };
+      expect(ack).toEqual({ jsonrpc: '2.0', id: 8, result: {} });
+      expect(resolvedWith).toEqual({
+        sessionId: 'sess-1',
+        requestId: 'perm-route',
+        resp: { outcome: { outcome: 'selected', optionId: 'allow' } },
+      });
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('session/permission without requestId → INVALID_PARAMS', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/permission',
+      params: { outcome: { outcome: 'selected', optionId: 'allow' } },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string; data?: { httpStatus?: number } };
+    }>;
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain('`requestId` is required');
+    expect(frame.error.data?.httpStatus).toBe(400);
+  });
+
+  it.each([
+    ['non-object outcome', 'nope'],
+    ['unrecognized outcome value', { outcome: 'maybe' }],
+    ['selected missing optionId', { outcome: 'selected' }],
+    ['selected empty optionId', { outcome: 'selected', optionId: '' }],
+    ['selected non-string optionId', { outcome: 'selected', optionId: 123 }],
+  ])(
+    'session/permission rejects %s → INVALID_PARAMS',
+    async (_label, outcome) => {
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 21,
+        method: 'session/permission',
+        params: { requestId: 'perm-bad', outcome },
+      });
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { httpStatus?: number };
+        };
+      }>;
+      expect(frame.error.code).toBe(-32602);
+      expect(frame.error.message).toContain('`outcome` must be');
+      // Carries the same { httpStatus: 400 } envelope as the handler's other
+      // error paths, not a bare INVALID_PARAMS from the outer catch.
+      expect(frame.error.data?.httpStatus).toBe(400);
+    },
+  );
+
+  it('session/permission with outcome `cancelled` resolves the bridge', async () => {
+    let resolvedWith: unknown;
+    bridge.respondToSessionPermission = ((
+      sessionId: string,
+      requestId: string,
+      resp: unknown,
+    ) => {
+      resolvedWith = { sessionId, requestId, resp };
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-cancel',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 22,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next();
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 23,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-cancel',
+          outcome: { outcome: 'cancelled' },
+        },
+      });
+      const ack = (await connReader.next()) as { id: number; result?: unknown };
+      expect(ack).toEqual({ jsonrpc: '2.0', id: 23, result: {} });
+      expect(resolvedWith).toEqual({
+        sessionId: 'sess-1',
+        requestId: 'perm-cancel',
+        resp: { outcome: { outcome: 'cancelled' } },
+      });
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('session/permission infers sessionId and retains the entry when the bridge rejects the vote', async () => {
+    // The bridge mediator has nothing to resolve (already voted/cancelled).
+    bridge.respondToSessionPermission = (() => false) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-rej',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 300));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 24,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next();
+      // No `sessionId` param: the handler must infer it from the pending
+      // entry (the `sessionId === undefined` lookup branch).
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 25,
+        method: 'session/permission',
+        params: {
+          requestId: 'perm-rej',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const first = (await connReader.next()) as {
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { httpStatus?: number };
+        };
+      };
+      expect(first.id).toBe(25);
+      expect(first.error.code).toBe(-32602);
+      expect(first.error.message).toContain('not accepted');
+      expect(first.error.data?.httpStatus).toBe(409);
+      // A rejected vote must NOT delete the pending entry. A retry on the same
+      // requestId (still no sessionId) must therefore still resolve to the
+      // entry and hit the bridge again (409), NOT fall through to the 404
+      // "no pending permission request" path.
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 26,
+        method: 'session/permission',
+        params: {
+          requestId: 'perm-rej',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const second = (await connReader.next()) as {
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { httpStatus?: number };
+        };
+      };
+      expect(second.id).toBe(26);
+      expect(second.error.data?.httpStatus).toBe(409);
+      expect(second.error.message).toContain('not accepted');
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('session/permission rejects a sessionId that does not match the pending requestId', async () => {
+    const resolved: unknown[] = [];
+    bridge.respondToSessionPermission = ((
+      _s: string,
+      _r: string,
+      resp: unknown,
+    ) => {
+      resolved.push(resp);
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-mismatch',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 30,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next();
+      // requestId belongs to sess-1, but the client claims sess-WRONG.
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 31,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-WRONG',
+          requestId: 'perm-mismatch',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const frame = (await connReader.next()) as {
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { httpStatus?: number };
+        };
+      };
+      expect(frame.id).toBe(31);
+      expect(frame.error.code).toBe(-32602);
+      expect(frame.error.data?.httpStatus).toBe(409);
+      expect(frame.error.message).toContain('does not belong');
+      // The mismatched vote must not have reached the bridge.
+      expect(resolved).toEqual([]);
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('session/permission returns 404 when no pending request matches the requestId', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 27,
+      method: 'session/permission',
+      params: {
+        requestId: 'does-not-exist',
+        outcome: { outcome: 'selected', optionId: 'allow' },
+      },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string; data?: { httpStatus?: number } };
+    }>;
+    expect(frame.id).toBe(27);
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.data?.httpStatus).toBe(404);
+    expect(frame.error.message).toContain('No pending permission request');
+  });
+
+  it('session/permission returns 404 (not 409) when requestId misses on an owned session', async () => {
+    // Regression: in the scoped route a sessionId is always supplied, so an
+    // unknown/stale requestId must still resolve to 404 (which DaemonClient/
+    // REST translate to `false`) rather than falling through to the bridge and
+    // surfacing its `false` as a thrown 409.
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 32,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'unknown-req',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const frame = (await connReader.next()) as {
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { httpStatus?: number };
+        };
+      };
+      expect(frame.id).toBe(32);
+      expect(frame.error.data?.httpStatus).toBe(404);
+      expect(frame.error.message).toContain('No pending permission request');
+    } finally {
+      connReader.close();
+    }
+  });
+
+  it('session/permission maps InvalidPermissionOptionError to a 400 invalid_option_id', async () => {
+    bridge.respondToSessionPermission = (() => {
+      throw new InvalidPermissionOptionError('perm-opt', 'forged');
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-opt',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 33,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next(); // request_permission
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 34,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-opt',
+          outcome: { outcome: 'selected', optionId: 'forged' },
+        },
+      });
+      const frame = (await connReader.next()) as {
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: {
+            httpStatus?: number;
+            code?: string;
+            optionId?: string;
+            requestId?: string;
+          };
+        };
+      };
+      expect(frame.id).toBe(34);
+      expect(frame.error.code).toBe(-32602);
+      expect(frame.error.data?.httpStatus).toBe(400);
+      expect(frame.error.data?.code).toBe('invalid_option_id');
+      expect(frame.error.data?.optionId).toBe('forged');
+      expect(frame.error.data?.requestId).toBe('perm-opt');
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('session/permission maps PermissionForbiddenError to a 403 permission_forbidden', async () => {
+    bridge.respondToSessionPermission = (() => {
+      throw new PermissionForbiddenError(
+        'perm-fbd',
+        'sess-1',
+        'designated_mismatch',
+      );
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-fbd',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 35,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next(); // request_permission
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 36,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-fbd',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const frame = (await connReader.next()) as {
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: {
+            httpStatus?: number;
+            code?: string;
+            reason?: string;
+            sessionId?: string;
+            requestId?: string;
+          };
+        };
+      };
+      expect(frame.id).toBe(36);
+      expect(frame.error.data?.httpStatus).toBe(403);
+      expect(frame.error.data?.code).toBe('permission_forbidden');
+      expect(frame.error.data?.reason).toBe('designated_mismatch');
+      expect(frame.error.data?.sessionId).toBe('sess-1');
+      expect(frame.error.data?.requestId).toBe('perm-fbd');
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it.each([
+    {
+      name: 'PermissionPolicyNotImplementedError to a 501 permission_policy_not_implemented',
+      reqId: 'perm-pol',
+      makeErr: () => new PermissionPolicyNotImplementedError('future_policy'),
+      httpStatus: 501,
+      code: 'permission_policy_not_implemented',
+      check: (data: Record<string, unknown>) =>
+        expect(data['policy']).toBe('future_policy'),
+    },
+    {
+      name: 'CancelSentinelCollisionError to a 500 cancel_sentinel_collision',
+      reqId: 'perm-sent',
+      makeErr: () =>
+        new CancelSentinelCollisionError('perm-sent', '__cancel__'),
+      httpStatus: 500,
+      code: 'cancel_sentinel_collision',
+      check: (data: Record<string, unknown>) => {
+        expect(data['requestId']).toBe('perm-sent');
+        expect(data['sentinel']).toBe('__cancel__');
+      },
+    },
+  ])('session/permission maps $name', async (tc) => {
+    bridge.respondToSessionPermission = (() => {
+      throw tc.makeErr();
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: tc.reqId,
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const connId = await initialize();
+    await newSession(connId);
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    const sessStream = await openStream(connId, 'sess-1');
+    const sessReader = frameReader(sessStream);
+    try {
+      await connReader.next(); // buffered session/new response
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 37,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      await sessReader.next(); // request_permission
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 38,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: tc.reqId,
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const frame = (await connReader.next()) as {
+        id: number;
+        error: { code: number; data?: Record<string, unknown> };
+      };
+      expect(frame.id).toBe(38);
+      expect(frame.error.data?.['httpStatus']).toBe(tc.httpStatus);
+      expect(frame.error.data?.['code']).toBe(tc.code);
+      tc.check(frame.error.data ?? {});
+    } finally {
+      connReader.close();
+      sessReader.close();
+    }
+  });
+
+  it('session/permission rejects a vote from a connection that does not own the session', async () => {
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-unowned-method',
+          sessionId: 'sess-1',
+          toolCall: { name: 'shell' },
+          options: [{ optionId: 'allow', name: 'Allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 200));
+      return { stopReason: 'end_turn' };
+    };
+    const ownerConnId = await initialize();
+    await newSession(ownerConnId);
+    const voterConnId = await initialize();
+    const ownerSess = await openStream(ownerConnId, 'sess-1');
+    const ownerReader = frameReader(ownerSess);
+    const voterStream = await openStream(voterConnId);
+    const voterGot = takeFrames(voterStream, 1);
+    try {
+      await post(ownerConnId, {
+        jsonrpc: '2.0',
+        id: 28,
+        method: 'session/prompt',
+        params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'rm' }] },
+      });
+      // Wait for the request_permission frame so the pending entry is
+      // registered on the owner connection before the unowned vote arrives.
+      await ownerReader.next();
+      await post(voterConnId, {
+        jsonrpc: '2.0',
+        id: 29,
+        method: 'session/permission',
+        params: {
+          sessionId: 'sess-1',
+          requestId: 'perm-unowned-method',
+          outcome: { outcome: 'selected', optionId: 'allow' },
+        },
+      });
+      const [frame] = (await voterGot) as Array<{
+        id: number;
+        error: {
+          code: number;
+          message: string;
+          data?: { httpStatus?: number };
+        };
+      }>;
+      expect(frame.id).toBe(29);
+      expect(frame.error.code).toBe(-32602);
+      expect(frame.error.message).toContain('not owned by this connection');
+      expect(frame.error.data?.httpStatus).toBe(403);
+    } finally {
+      ownerReader.close();
+    }
+  });
+
   it('standard session/set_config_option (model) routes to the bridge', async () => {
     const connId = await initialize();
     await newSession(connId);
@@ -965,6 +2819,102 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }>;
     expect(frame.id).toBe(12);
     expect(frame.result.ok).toBe(true);
+  });
+
+  it('session/list returns REST-compatible session summary fields', async () => {
+    bridge.workspaceSessions = [
+      {
+        sessionId: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
+        workspaceCwd: '/ws',
+        createdAt: '2026-06-30T00:00:00.000Z',
+        updatedAt: '2026-06-30T00:01:00.000Z',
+        displayName: 'Listed Session',
+        clientCount: 1,
+        hasActivePrompt: false,
+        isArchived: false,
+      },
+    ];
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 13,
+      method: 'session/list',
+      params: { workspaceCwd: '/ws' },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: { sessions: Array<Record<string, unknown>> };
+    }>;
+    expect(frame.id).toBe(13);
+    expect(frame.result.sessions[0]).toMatchObject({
+      sessionId: '11111111-bbbb-cccc-dddd-eeeeeeeeeeee',
+      workspaceCwd: '/ws',
+      cwd: '/ws',
+      createdAt: '2026-06-30T00:00:00.000Z',
+      updatedAt: '2026-06-30T00:01:00.000Z',
+      displayName: 'Listed Session',
+      title: 'Listed Session',
+      clientCount: 1,
+      hasActivePrompt: false,
+      isArchived: false,
+    });
+  });
+
+  it('_qwen/sessions/archive rejects invalid batch params', async () => {
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 14,
+      method: '_qwen/sessions/archive',
+      params: { sessionIds: 'not-an-array' },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      error: { code: number; message: string };
+    }>;
+    expect(frame.id).toBe(14);
+    expect(frame.error.code).toBe(-32602);
+    expect(frame.error.message).toContain('sessionIds');
+  });
+
+  it('_qwen/sessions/unarchive returns per-id result buckets', async () => {
+    const sessionId = '22222222-bbbb-cccc-dddd-eeeeeeeeeeee';
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 15,
+      method: '_qwen/sessions/unarchive',
+      params: { sessionIds: [sessionId] },
+    });
+
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: {
+        unarchived: string[];
+        alreadyActive: string[];
+        notFound: string[];
+        errors: unknown[];
+      };
+    }>;
+    expect(frame.id).toBe(15);
+    expect(frame.result).toEqual({
+      unarchived: [],
+      alreadyActive: [],
+      notFound: [sessionId],
+      errors: [],
+    });
   });
 
   it('unknown method → JSON-RPC method-not-found on conn stream', async () => {
@@ -1073,6 +3023,466 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     }>;
     expect(frame.id).toBe(21);
     expect(frame.result.resumed).toBe(true);
+  });
+
+  it.each(['session/load', 'session/resume'])(
+    '%s rejects archived sessions',
+    async (method) => {
+      const previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      const runtimeDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-archive-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+      const sessionId = '550e8400-e29b-41d4-a716-446655440123';
+      try {
+        const chatsDir = path.join(
+          new Storage('/ws').getProjectDir(),
+          'chats',
+          'archive',
+        );
+        await fs.mkdir(chatsDir, { recursive: true });
+        await fs.writeFile(
+          path.join(chatsDir, `${sessionId}.jsonl`),
+          `${JSON.stringify({
+            uuid: `${sessionId}-user-1`,
+            parentUuid: null,
+            sessionId,
+            timestamp: '2026-06-30T00:00:00.000Z',
+            type: 'user',
+            message: { role: 'user', parts: [{ text: 'archived' }] },
+            cwd: '/ws',
+          })}\n`,
+          'utf8',
+        );
+
+        const connId = await initialize();
+        const connStream = await openStream(connId);
+        const got = takeFrames(connStream, 1);
+        await new Promise((r) => setTimeout(r, 50));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 211,
+          method,
+          params: { sessionId },
+        });
+
+        const [frame] = (await got) as Array<{
+          id: number;
+          error: { code: number; data?: { errorKind?: string } };
+        }>;
+        expect(frame.id).toBe(211);
+        expect(frame.error.code).toBe(-32603);
+        expect(frame.error.data?.errorKind).toBe('session_archived');
+      } finally {
+        if (previousRuntimeDir === undefined) {
+          delete process.env['QWEN_RUNTIME_DIR'];
+        } else {
+          process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+        }
+        await fs.rm(runtimeDir, { recursive: true, force: true });
+      }
+    },
+  );
+
+  it('session/load rejects active/archive conflicts', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440321';
+      await writeStoredSession(sessionId);
+      await writeStoredSession(sessionId, 'archived');
+
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const got = takeFrames(connStream, 1);
+      await new Promise((r) => setTimeout(r, 50));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 212,
+        method: 'session/load',
+        params: { sessionId },
+      });
+
+      const [frame] = (await got) as Array<{
+        id: number;
+        error: { code: number; data?: { errorKind?: string } };
+      }>;
+      expect(frame.id).toBe(212);
+      expect(frame.error.code).toBe(-32603);
+      expect(frame.error.data?.errorKind).toBe('session_conflict');
+    });
+  });
+
+  it('session/load holds archive gate while restore is in flight', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440124';
+      await writeStoredSession(sessionId);
+      let loadStarted!: () => void;
+      let releaseLoad!: () => void;
+      const loadStartedPromise = new Promise<void>((resolve) => {
+        loadStarted = resolve;
+      });
+      const loadReleasedPromise = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+      bridge.loadSession = async (req) => {
+        loadStarted();
+        await loadReleasedPromise;
+        return {
+          sessionId: req.sessionId,
+          workspaceCwd: '/ws',
+          attached: true,
+          clientId: 'client-load',
+          state: { replayed: true },
+        };
+      };
+
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 212,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      await loadStartedPromise;
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 213,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 213,
+        error: {
+          code: -32603,
+          data: { errorKind: 'session_archiving', sessionId },
+        },
+      });
+
+      releaseLoad();
+      expect(await reader.next()).toMatchObject({
+        id: 212,
+        result: { replayed: true },
+      });
+      reader.close();
+    });
+  });
+
+  it('session/prompt holds archive gate while prompt is in flight', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440127';
+      await writeStoredSession(sessionId);
+      let promptStarted!: () => void;
+      let releasePrompt!: () => void;
+      const promptStartedPromise = new Promise<void>((resolve) => {
+        promptStarted = resolve;
+      });
+      const promptReleasedPromise = new Promise<void>((resolve) => {
+        releasePrompt = resolve;
+      });
+      bridge.promptBehavior = async () => {
+        promptStarted();
+        await promptReleasedPromise;
+        return { stopReason: 'end_turn' };
+      };
+
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const connReader = frameReader(connStream);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 217,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      expect(await connReader.next()).toMatchObject({ id: 217 });
+
+      const sessionStream = await openStream(connId, sessionId);
+      const sessionReader = frameReader(sessionStream);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 218,
+        method: 'session/prompt',
+        params: {
+          sessionId,
+          prompt: [{ type: 'text', text: 'hold archive gate' }],
+        },
+      });
+      await promptStartedPromise;
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 219,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      expect(await connReader.next()).toMatchObject({
+        id: 219,
+        error: {
+          code: -32603,
+          data: { errorKind: 'session_archiving', sessionId },
+        },
+      });
+      expect(bridge.closedSessions).toEqual([]);
+
+      releasePrompt();
+      expect(await sessionReader.next()).toMatchObject({
+        id: 218,
+        result: { stopReason: 'end_turn' },
+      });
+      connReader.close();
+      sessionReader.close();
+    });
+  });
+
+  it('_qwen/session/heartbeat does not wait for archive gate', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440130';
+      await writeStoredSession(sessionId);
+      let closeStarted!: () => void;
+      let releaseClose!: () => void;
+      const closeStartedPromise = new Promise<void>((resolve) => {
+        closeStarted = resolve;
+      });
+      const closeReleasedPromise = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      bridge.closeSession = async (sid: string) => {
+        bridge.closedSessions.push(sid);
+        closeStarted();
+        await closeReleasedPromise;
+      };
+
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 220,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      expect(await reader.next()).toMatchObject({ id: 220 });
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 221,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      await closeStartedPromise;
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 222,
+        method: '_qwen/session/heartbeat',
+        params: { sessionId },
+      });
+      expect(await reader.next()).toMatchObject({
+        id: 222,
+        result: { sessionId: 'sess-1' },
+      });
+
+      releaseClose();
+      expect(await reader.next()).toMatchObject({
+        id: 221,
+        result: { archived: [sessionId], errors: [] },
+      });
+      reader.close();
+    });
+  });
+
+  it('session/load allows concurrent restores for the same session', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440126';
+      await writeStoredSession(sessionId);
+      let releaseLoad!: () => void;
+      bridge.gate = new Promise<void>((resolve) => {
+        releaseLoad = resolve;
+      });
+
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const got = takeFrames(stream, 2);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 214,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 215,
+        method: 'session/load',
+        params: { sessionId },
+      });
+
+      releaseLoad();
+      const frames = (await got) as Array<{
+        id: number;
+        result?: { replayed?: boolean };
+        error?: { data?: { errorKind?: string } };
+      }>;
+      expect(frames.map((frame) => frame.id).sort()).toEqual([214, 215]);
+      expect(frames).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: 214,
+            result: expect.objectContaining({ replayed: true }),
+          }),
+          expect.objectContaining({
+            id: 215,
+            result: expect.objectContaining({ replayed: true }),
+          }),
+        ]),
+      );
+      expect(frames.some((frame) => frame.error)).toBe(false);
+    });
+  });
+
+  it('session/close holds archive gate while close is in flight', async () => {
+    await withRuntimeDir(async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440125';
+      await writeStoredSession(sessionId);
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 214,
+        method: 'session/load',
+        params: { sessionId },
+      });
+      expect(await reader.next()).toMatchObject({ id: 214 });
+
+      let closeStarted!: () => void;
+      let releaseClose!: () => void;
+      let secondCloseStarted!: () => void;
+      const closeStartedPromise = new Promise<void>((resolve) => {
+        closeStarted = resolve;
+      });
+      const closeReleasedPromise = new Promise<void>((resolve) => {
+        releaseClose = resolve;
+      });
+      const secondCloseStartedPromise = new Promise<void>((resolve) => {
+        secondCloseStarted = resolve;
+      });
+      let closeCount = 0;
+      bridge.closeSession = async (sid: string) => {
+        bridge.closedSessions.push(sid);
+        closeCount++;
+        if (closeCount === 1) {
+          closeStarted();
+          await closeReleasedPromise;
+        } else {
+          secondCloseStarted();
+        }
+      };
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 215,
+        method: 'session/close',
+        params: { sessionId },
+      });
+      await closeStartedPromise;
+
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 216,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      const archiveFrame = await reader.next();
+      const raceResult = await Promise.race([
+        secondCloseStartedPromise.then(() => 'second-close-started'),
+        new Promise((resolve) => setTimeout(() => resolve('blocked'), 25)),
+      ]);
+      expect(archiveFrame).toMatchObject({
+        id: 216,
+        error: {
+          code: -32603,
+          data: { errorKind: 'session_archiving', sessionId },
+        },
+      });
+      expect(raceResult).toBe('blocked');
+
+      releaseClose();
+      expect(await reader.next()).toMatchObject({
+        id: 215,
+        result: {},
+      });
+      reader.close();
+    });
+  });
+
+  it('session/close falls back to the shared gate for its own in-flight prompt', async () => {
+    let promptStarted!: () => void;
+    let promptAborted!: () => void;
+    const promptStartedPromise = new Promise<void>((resolve) => {
+      promptStarted = resolve;
+    });
+    const promptAbortedPromise = new Promise<void>((resolve) => {
+      promptAborted = resolve;
+    });
+    bridge.promptBehavior = async (_s, _q, signal) => {
+      promptStarted();
+      if (signal === undefined) throw new Error('missing prompt signal');
+      await new Promise<void>((resolve) => {
+        signal.addEventListener(
+          'abort',
+          () => {
+            promptAborted();
+            resolve();
+          },
+          { once: true },
+        );
+      });
+      return { stopReason: 'cancelled' };
+    };
+
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const connReader = frameReader(connStream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 230,
+      method: 'session/new',
+      params: {},
+    });
+    expect(await connReader.next()).toMatchObject({ id: 230 });
+    const sessionStream = await openStream(connId, 'sess-1');
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 231,
+      method: 'session/prompt',
+      params: {
+        sessionId: 'sess-1',
+        prompt: [{ type: 'text', text: 'hold shared gate' }],
+      },
+    });
+    await promptStartedPromise;
+
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 232,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+
+    await promptAbortedPromise;
+    const frames = [await connReader.next(), await connReader.next()];
+    expect(frames).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: 231 }),
+        expect.objectContaining({ id: 232, result: {} }),
+      ]),
+    );
+    expect(bridge.closedSessions).toEqual(['sess-1']);
+    connReader.close();
+    await sessionStream.body?.cancel().catch(() => {});
   });
 
   it('session/close reaches the bridge + replies on the conn stream', async () => {
@@ -1195,6 +3605,54 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     // Client answers with a malformed result (no outcome) → bridge throws →
     // fallback must still cancel so the mediator is released.
     await post(connId, { jsonrpc: '2.0', id: reqFrame.id, result: {} });
+    await new Promise((r) => setTimeout(r, 50));
+    expect(votes).toContainEqual({ outcome: { outcome: 'cancelled' } });
+  });
+
+  it('cross-connection malformed permission result still releases the bridge (cancel fallback)', async () => {
+    const votes: Array<{ outcome?: { outcome?: string } }> = [];
+    bridge.respondToSessionPermission = ((
+      _s: string,
+      _r: string,
+      resp: unknown,
+    ) => {
+      const r = resp as { outcome?: { outcome?: string } };
+      if (!r?.outcome?.outcome) throw new Error('invalid permission response');
+      votes.push(r);
+      return true;
+    }) as never;
+    bridge.promptBehavior = async (_s, q) => {
+      q.push({
+        type: 'permission_request',
+        data: {
+          requestId: 'perm-xc',
+          sessionId: 'sess-1',
+          toolCall: {},
+          options: [{ optionId: 'allow' }],
+        },
+      });
+      await new Promise((r) => setTimeout(r, 60));
+      return { stopReason: 'end_turn' };
+    };
+    const streamConnId = await initialize();
+    await newSession(streamConnId);
+    const voterConnId = await initialize();
+    await newSession(voterConnId, 100); // co-owns sess-1
+    const sessStream = await openStream(streamConnId, 'sess-1');
+    const got = takeFrames(sessStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(streamConnId, {
+      jsonrpc: '2.0',
+      id: 7,
+      method: 'session/prompt',
+      params: { sessionId: 'sess-1', prompt: [{ type: 'text', text: 'x' }] },
+    });
+    const [reqFrame] = (await got) as Array<{ id: string }>;
+    // Connection B (a co-owner) answers connection A's request via the legacy
+    // path with a malformed result. parsePermissionResponse — added for this
+    // path so co-owners can't bypass the whitelist — throws, and the cancel
+    // fallback must still release the mediator.
+    await post(voterConnId, { jsonrpc: '2.0', id: reqFrame.id, result: {} });
     await new Promise((r) => setTimeout(r, 50));
     expect(votes).toContainEqual({ outcome: { outcome: 'cancelled' } });
   });
@@ -1508,6 +3966,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       workspace: fakeWorkspace,
       enabled: true,
       maxConnections: 1,
+      workspaceRememberLane: new WorkspaceRememberTaskLane(
+        bridge as unknown as HttpAcpBridge,
+      ),
     });
     const srv = app2.listen(0, '127.0.0.1');
     await new Promise((r) => srv.once('listening', r));
@@ -2393,22 +4854,18 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     releaseClose();
   });
 
-  it('session/load while close races DURING loadSession → post-await reject + rollback', async () => {
-    // Distinct from the pre-await guard above: here the pre-await
-    // `closingSessions` check passes, then a `session/close` for the same id
-    // starts WHILE `loadSession` is awaiting. The post-await re-check
-    // (dispatch.ts) must detect `closeRaced`, roll back the just-restored
-    // attach (detachClient, since loadAttached=true), and reply INTERNAL_ERROR.
+  it('session/close while load is in-flight → close rejected by archive gate', async () => {
+    // The archive coordinator now covers the whole load/restore await, so a
+    // same-id close that starts during load is rejected before it can mark the
+    // session closing or tear down the just-restored binding.
     let releaseLoad: () => void = () => {};
-    let releaseClose: () => void = () => {};
     const connId = await initialize();
     await newSession(connId); // own sess-1 so session/close passes requireOwned
     // Arm the gates only AFTER ownership is established — otherwise newSession's
     // own spawnOrAttach would block on bridge.gate and never grant ownership.
     bridge.gate = new Promise<void>((r) => (releaseLoad = r));
-    bridge.closeGate = new Promise<void>((r) => (releaseClose = r));
     const connStream = await openStream(connId);
-    const got = takeFrames(connStream, 2); // buffered session/new reply + load reject
+    const got = takeFrames(connStream, 3); // session/new + close reject + load success
     await new Promise((r) => setTimeout(r, 50));
     // Load goes in-flight (awaits bridge.gate); pre-await closingSessions empty.
     void post(connId, {
@@ -2426,18 +4883,34 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       params: { sessionId: 'sess-1' },
     });
     await new Promise((r) => setTimeout(r, 20));
-    releaseLoad(); // loadSession resolves → post-await sees closeRaced
+    releaseLoad(); // loadSession resolves after close has been rejected.
     const frames = (await got) as Array<{
       id: number;
-      error?: { code: number; message: string };
+      result?: { replayed?: boolean };
+      error?: { code: number; message: string; data?: { errorKind?: string } };
     }>;
+    const closeReply = frames.find((f) => f.id === 341);
+    expect(closeReply?.error?.code).toBe(-32603);
+    expect(closeReply?.error?.data?.errorKind).toBe('session_archiving');
     const loadReply = frames.find((f) => f.id === 340);
-    expect(loadReply?.error?.code).toBe(-32603);
-    expect(loadReply?.error?.message).toContain('closed during load');
-    // attached:true → rollback is a detach, NOT a kill.
-    expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(true);
+    expect(loadReply?.result?.replayed).toBe(true);
+    expect(bridge.detached.some((d) => d.sessionId === 'sess-1')).toBe(false);
     expect(bridge.killed).not.toContain('sess-1');
-    releaseClose();
+
+    const retryCloseStream = await openStream(connId);
+    const retryCloseReader = frameReader(retryCloseStream);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 342,
+      method: 'session/close',
+      params: { sessionId: 'sess-1' },
+    });
+    expect(await retryCloseReader.next()).toMatchObject({
+      id: 342,
+      result: {},
+    });
+    retryCloseReader.close();
+    expect(bridge.closedSessions).toEqual(['sess-1']);
   });
 
   it('double-failure permission vote → pending retained + retried on teardown', async () => {
@@ -3232,18 +5705,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const bidiOverride = '\u202e';
       const sessionId = `sess${lineSep}FAKE\r\x1b[31m`;
       const removeError = `remove\nFAILED\r\x1b[31m${lineSep}${bidiOverride}`;
-      const removeSessionsSpy = vi
-        .spyOn(SessionService.prototype, 'removeSessions')
-        .mockResolvedValueOnce({
-          removed: [],
-          notFound: [],
-          errors: [
-            {
-              sessionId,
-              error: removeError as unknown as Error,
-            },
-          ],
-        });
+      const removeSessionSpy = vi
+        .spyOn(SessionService.prototype, 'removeSession')
+        .mockRejectedValueOnce(new Error(removeError));
 
       try {
         const connId = await initialize();
@@ -3263,13 +5727,13 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             errors: [{ sessionId, error: removeError }],
           },
         });
-        expect(removeSessionsSpy).toHaveBeenCalledWith([sessionId]);
+        expect(removeSessionSpy).toHaveBeenCalledWith(sessionId);
 
         const deleteLog = stdioMocks.writeStderrLine.mock.calls
           .map(([line]) => line)
           .find((line) => line.includes('sessions/delete'));
         expect(deleteLog).toContain(
-          'removeSessions(sess FAK) failed: remove FAILED  [31m',
+          'removeSession(sess FAK) failed: remove FAILED  [31m',
         );
         expect(deleteLog).not.toContain('\n');
         expect(deleteLog).not.toContain('\r');
@@ -3277,8 +5741,195 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(deleteLog).not.toContain(lineSep);
         expect(deleteLog).not.toContain(bidiOverride);
       } finally {
-        removeSessionsSpy.mockRestore();
+        removeSessionSpy.mockRestore();
       }
+    });
+
+    it('_qwen/sessions/delete deletes available ids when another id is loading', async () => {
+      await withRuntimeDir(async () => {
+        const sidOk = '550e8400-e29b-41d4-a716-446655440128';
+        const sidBusy = '550e8400-e29b-41d4-a716-446655440129';
+        await writeStoredSession(sidOk);
+        await writeStoredSession(sidBusy);
+        let loadStarted!: () => void;
+        let releaseLoad!: () => void;
+        const loadStartedPromise = new Promise<void>((resolve) => {
+          loadStarted = resolve;
+        });
+        const loadReleasedPromise = new Promise<void>((resolve) => {
+          releaseLoad = resolve;
+        });
+        bridge.loadSession = async (req) => {
+          if (req.sessionId === sidBusy) {
+            loadStarted();
+            await loadReleasedPromise;
+          }
+          return {
+            sessionId: req.sessionId,
+            workspaceCwd: '/ws',
+            attached: true,
+            clientId: 'client-load',
+            state: { replayed: true },
+          };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 70,
+          method: 'session/load',
+          params: { sessionId: sidBusy },
+        });
+        await loadStartedPromise;
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 71,
+          method: '_qwen/sessions/delete',
+          params: { sessionIds: [sidOk, sidBusy] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 71,
+          result: {
+            removed: [sidOk],
+            notFound: [],
+            errors: [expect.objectContaining({ sessionId: sidBusy })],
+          },
+        });
+        expect(bridge.closedSessions).toEqual([sidOk]);
+
+        releaseLoad();
+        expect(await reader.next()).toMatchObject({
+          id: 70,
+          result: { replayed: true },
+        });
+        reader.close();
+      });
+    });
+
+    it('_qwen/sessions/delete does not make missing archive ids wait on live close', async () => {
+      const sessionId = 'delete-archive-race';
+      let firstCloseStarted!: () => void;
+      let releaseFirstClose!: () => void;
+      let secondCloseStarted!: () => void;
+      const firstCloseStartedPromise = new Promise<void>((resolve) => {
+        firstCloseStarted = resolve;
+      });
+      const firstCloseReleasedPromise = new Promise<void>((resolve) => {
+        releaseFirstClose = resolve;
+      });
+      const secondCloseStartedPromise = new Promise<void>((resolve) => {
+        secondCloseStarted = resolve;
+      });
+      let closeCount = 0;
+      bridge.closeSession = async (sid: string) => {
+        bridge.closedSessions.push(sid);
+        closeCount++;
+        if (closeCount === 1) {
+          firstCloseStarted();
+          await firstCloseReleasedPromise;
+        } else {
+          secondCloseStarted();
+        }
+      };
+      const connId = await initialize();
+      const stream = await openStream(connId);
+      const reader = frameReader(stream);
+      const deletePost = post(connId, {
+        jsonrpc: '2.0',
+        id: 69,
+        method: '_qwen/sessions/delete',
+        params: { sessionIds: [sessionId] },
+      });
+      await deletePost;
+      await firstCloseStartedPromise;
+
+      const archivePost = post(connId, {
+        jsonrpc: '2.0',
+        id: 70,
+        method: '_qwen/sessions/archive',
+        params: { sessionIds: [sessionId] },
+      });
+      await archivePost;
+      const raceResult = await Promise.race([
+        secondCloseStartedPromise.then(() => 'archive-started'),
+        new Promise((resolve) => setTimeout(() => resolve('blocked'), 25)),
+      ]);
+
+      releaseFirstClose();
+      try {
+        expect(raceResult).toBe('blocked');
+        const frames = [await reader.next(), await reader.next()];
+        expect(frames).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              id: 69,
+              result: expect.objectContaining({ notFound: [sessionId] }),
+            }),
+            expect.objectContaining({
+              id: 70,
+              result: expect.objectContaining({ notFound: [sessionId] }),
+            }),
+          ]),
+        );
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/sessions/delete returns session_archiving during archive gate', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440132';
+        await writeStoredSession(sessionId);
+        let closeStarted!: () => void;
+        let releaseClose!: () => void;
+        const closeStartedPromise = new Promise<void>((resolve) => {
+          closeStarted = resolve;
+        });
+        const closeReleasedPromise = new Promise<void>((resolve) => {
+          releaseClose = resolve;
+        });
+        bridge.closeSession = async (sid: string) => {
+          bridge.closedSessions.push(sid);
+          closeStarted();
+          await closeReleasedPromise;
+        };
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 72,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        await closeStartedPromise;
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 73,
+          method: '_qwen/sessions/delete',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 73,
+          error: {
+            data: { errorKind: 'session_archiving', sessionId },
+          },
+        });
+
+        releaseClose();
+        try {
+          expect(await reader.next()).toMatchObject({
+            id: 72,
+            result: expect.objectContaining({ archived: [sessionId] }),
+          });
+        } finally {
+          reader.close();
+        }
+      });
     });
   });
 
@@ -3315,6 +5966,111 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
   });
 
   describe('memory methods', () => {
+    it('_qwen/workspace/memory/remember queues and polls hidden tasks', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 79,
+          method: '_qwen/workspace/memory/remember',
+          params: { content: 'remember this', contextMode: 'clean' },
+        });
+        const queued = (await reader.next()) as {
+          result: { taskId: string; status: string; contextMode: string };
+        };
+        expect(queued.result).toMatchObject({
+          status: 'queued',
+          contextMode: 'clean',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 80,
+          method: '_qwen/workspace/memory/remember/get',
+          params: { taskId: queued.result.taskId },
+        });
+        const completed = (await reader.next()) as {
+          result: { status: string; result: { summary: string } };
+        };
+        expect(completed.result).toMatchObject({
+          status: 'completed',
+          result: { summary: 'No memory files updated.' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('shares remember task state between REST and ACP transports', async () => {
+      const connId = await initialize();
+      const clientId = clientIdForConnection(connId);
+      bridge.knownClientIdSet.add(clientId);
+
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        const restRes = await fetch(`${base}/workspace/memory/remember`, {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            'x-qwen-client-id': clientId,
+          },
+          body: JSON.stringify({
+            content: 'remember via rest',
+            contextMode: 'workspace',
+          }),
+        });
+        expect(restRes.status).toBe(202);
+        const restTask = (await restRes.json()) as {
+          taskId: string;
+          status: string;
+        };
+        expect(restTask.status).toBe('queued');
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 81,
+          method: '_qwen/workspace/memory/remember/get',
+          params: { taskId: restTask.taskId },
+        });
+        let completed:
+          | {
+              result: {
+                taskId: string;
+                status: string;
+                result: { summary: string };
+              };
+            }
+          | undefined;
+        for (let i = 0; i < 3; i++) {
+          const frame = (await reader.next()) as {
+            id?: number;
+            result?: {
+              taskId: string;
+              status: string;
+              result: { summary: string };
+            };
+          };
+          if (frame.id === 81) {
+            completed = frame as typeof completed;
+            break;
+          }
+        }
+        expect(completed).toBeDefined();
+        expect(completed!.result).toMatchObject({
+          taskId: restTask.taskId,
+          status: 'completed',
+          result: { summary: 'No memory files updated.' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
     it('_qwen/workspace/memory/write rejects non-string content', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -3717,6 +6473,7 @@ describe('ACP WebSocket transport security', () => {
       token?: string;
       allowedOrigins?: { allowAny: boolean; origins: Set<string> };
       checkRate?: (key: string, tier: string) => boolean;
+      cdpTunnelOverWs?: boolean;
     } = {},
   ) {
     return new Promise<void>((resolve) => {
@@ -3729,8 +6486,17 @@ describe('ACP WebSocket transport security', () => {
         enabled: true,
         token: opts.token,
         allowedOrigins: opts.allowedOrigins,
+        workspaceRememberLane: new WorkspaceRememberTaskLane(
+          bridge as unknown as HttpAcpBridge,
+        ),
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         checkRate: opts.checkRate as any,
+        ...(opts.cdpTunnelOverWs
+          ? {
+              cdpTunnelOverWs: true,
+              cdpTunnelRegistry: new CdpTunnelRegistry(),
+            }
+          : {}),
       });
       const listeningServer = app.listen(0, '127.0.0.1', () => {
         port = (listeningServer.address() as AddressInfo).port;
@@ -3788,6 +6554,17 @@ describe('ACP WebSocket transport security', () => {
     });
   }
 
+  function initializeCdpBridge(ws: WebSocket, id = 1): Promise<unknown> {
+    return sendRpc(ws, {
+      jsonrpc: '2.0',
+      id,
+      method: 'initialize',
+      params: {
+        clientInfo: { name: 'qwen-cdp-bridge', version: '1.0.0' },
+      },
+    });
+  }
+
   // ── Host allowlist ──────────────────────────────────────────────────
   it('accepts WS upgrade with loopback Host header', async () => {
     await startServer();
@@ -3828,6 +6605,222 @@ describe('ACP WebSocket transport security', () => {
       { Authorization: 'Bearer secret-token-123' },
     );
     expect(result.code).toBe(101);
+  });
+
+  it('dynamically registers chrome-devtools MCP for an active CDP bridge', async () => {
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+    expect(bridge.runtimeMcpAdds[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: expect.any(String),
+    });
+    expect(bridge.runtimeMcpAdds[0]?.config).toMatchObject({
+      command: process.execPath,
+      args: expect.arrayContaining([
+        expect.stringContaining('chrome-devtools-mcp'),
+        '--wsEndpoint',
+        `ws://127.0.0.1:${port}/cdp`,
+      ]),
+    });
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: bridge.runtimeMcpAdds[0]?.originatorClientId,
+    });
+  });
+
+  it('keeps chrome-devtools MCP registered while a replacement CDP bridge is active', async () => {
+    await startServer({ cdpTunnelOverWs: true });
+    const first = await wsConnect();
+    await initializeCdpBridge(first, 1);
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+
+    const second = await wsConnect();
+    await initializeCdpBridge(second, 2);
+
+    first.close();
+    await new Promise<void>((resolve) => first.once('close', () => resolve()));
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(bridge.runtimeMcpRemoves).toHaveLength(0);
+
+    second.close();
+    await new Promise<void>((resolve) => second.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: expect.any(String),
+    });
+  });
+
+  it('removes chrome-devtools MCP when settings already define it', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddResult = { shadowedSettings: true };
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: bridge.runtimeMcpAdds[0]?.originatorClientId,
+    });
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: chrome-devtools runtime MCP skipped because settings already define it',
+    );
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
+  it('retries chrome-devtools MCP registration after a skipped result', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddResult = {
+      skipped: true,
+      reason: 'budget_exceeded',
+    };
+
+    const first = await wsConnect();
+    await initializeCdpBridge(first, 1);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves).toHaveLength(0);
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: chrome-devtools runtime MCP skipped: budget_exceeded',
+    );
+
+    bridge.runtimeMcpAddResult = {};
+    const second = await wsConnect();
+    await initializeCdpBridge(second, 2);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(2));
+    second.close();
+    await new Promise<void>((resolve) => second.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    first.close();
+    await new Promise<void>((resolve) => first.once('close', () => resolve()));
+  });
+
+  it('removes chrome-devtools MCP if the CDP bridge disconnects during registration', async () => {
+    await startServer({ cdpTunnelOverWs: true });
+    let releaseAdd: (() => void) | undefined;
+    bridge.runtimeMcpBeforeAddResolve = () =>
+      new Promise<void>((resolve) => {
+        releaseAdd = resolve;
+      });
+
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    releaseAdd?.();
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    expect(bridge.runtimeMcpRemoves[0]).toMatchObject({
+      name: 'chrome-devtools',
+      originatorClientId: bridge.runtimeMcpAdds[0]?.originatorClientId,
+    });
+  });
+
+  it('retries chrome-devtools MCP registration after add failure', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddError = new Error('add failed');
+    const first = await wsConnect();
+    await initializeCdpBridge(first, 1);
+
+    await vi.waitFor(() => {
+      expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+        'qwen serve: failed to add chrome-devtools runtime MCP: add failed',
+      );
+    });
+
+    bridge.runtimeMcpAddError = undefined;
+    const second = await wsConnect();
+    await initializeCdpBridge(second, 2);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(2));
+    second.close();
+    await new Promise<void>((resolve) => second.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+    first.close();
+    await new Promise<void>((resolve) => first.once('close', () => resolve()));
+  });
+
+  it('retries chrome-devtools MCP registration while the ACP channel is unavailable', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddError = Object.assign(new Error('no channel'), {
+      data: { errorKind: 'acp_channel_unavailable' },
+    });
+
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(2), {
+      timeout: 1_500,
+    });
+    bridge.runtimeMcpAddError = undefined;
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(3), {
+      timeout: 1_500,
+    });
+    expect(stdioMocks.writeStderrLine).not.toHaveBeenCalledWith(
+      expect.stringContaining('failed to add chrome-devtools runtime MCP'),
+    );
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+    await vi.waitFor(() => expect(bridge.runtimeMcpRemoves).toHaveLength(1));
+  });
+
+  it('stops retrying chrome-devtools MCP registration after ACP channel retry exhaustion', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    bridge.runtimeMcpAddError = Object.assign(new Error('no channel'), {
+      data: { errorKind: 'acp_channel_unavailable' },
+    });
+
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(
+      () => {
+        expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+          'qwen serve: failed to add chrome-devtools runtime MCP: no channel',
+        );
+      },
+      { timeout: 7_000 },
+    );
+    expect(bridge.runtimeMcpAdds).toHaveLength(21);
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  }, 10_000);
+
+  it('skips chrome-devtools MCP registration when /cdp requires auth', async () => {
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({
+      cdpTunnelOverWs: true,
+      token: 'secret-token-123',
+    });
+    const ws = await wsConnect({
+      headers: { Authorization: 'Bearer secret-token-123' },
+    });
+    await initializeCdpBridge(ws);
+
+    expect(bridge.runtimeMcpAdds).toHaveLength(0);
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: chrome-devtools runtime MCP skipped because /cdp requires bearer auth',
+    );
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
   });
 
   it('rejects WS upgrade with a loopback Origin header on a different port', async () => {

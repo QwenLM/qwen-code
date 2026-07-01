@@ -40,7 +40,6 @@ function getModeIndicator(
 }
 
 interface StatusBarProps {
-  escapeHint?: boolean;
   onSelectMode: () => void;
   /** Open the model picker so the model can be chosen with the mouse. */
   onSelectModel: () => void;
@@ -159,7 +158,6 @@ function formatGoalElapsed(ms: number): string {
 export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
   function StatusBar(
     {
-      escapeHint,
       onSelectMode,
       onSelectModel,
       onShowContext,
@@ -197,15 +195,14 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
     }, [activeGoal]);
 
     const taskPillLabel = useMemo(() => getTaskPillLabel(tasks, t), [tasks, t]);
-    const hasLeftPrefix =
-      !!escapeHint || (!compact && (connected || !!modeIndicator));
+    const hasLeftPrefix = !compact && (connected || !!modeIndicator);
     const goalElapsed = activeGoal
       ? formatGoalElapsed(Date.now() - activeGoal.setAt)
       : '';
     const goalLabel = activeGoal
       ? `◎ ${t('goal.statusActive')}${goalElapsed ? ` (${goalElapsed})` : ''}`
       : '';
-    const hasLeftContent = !!escapeHint || !!taskPillLabel || !compact;
+    const hasLeftContent = !!taskPillLabel || !compact;
     const hasRightContent =
       (!compact && !!currentModel) ||
       (!compact && contextWindow > 0 && tokenCount > 0) ||
@@ -277,52 +274,42 @@ export const StatusBar = forwardRef<StatusBarHandle, StatusBarProps>(
               <GearIcon />
             </button>
           )}
-          {escapeHint ? (
-            <span className={styles.escapeHint}>
-              {t('editor.escClearHint')}
-            </span>
-          ) : (
+          {modeIndicator && !compact && (
+            <button
+              type="button"
+              className={styles.modeButton}
+              onClick={onSelectMode}
+              onMouseDown={(e) => e.stopPropagation()}
+              onTouchStart={(e) => e.stopPropagation()}
+              title={t('mode.select')}
+              aria-haspopup="listbox"
+            >
+              <span
+                className={`${styles.modeLabel} ${modeIndicator.className}`}
+              >
+                {modeIndicator.label}
+              </span>
+              {!compact && (
+                <span className={styles.modeHint}>{t('status.modeHint')}</span>
+              )}
+            </button>
+          )}
+          {!compact && (
             <>
-              {modeIndicator && !compact && (
+              {onToggleShortcuts ? (
                 <button
                   type="button"
-                  className={styles.modeButton}
-                  onClick={onSelectMode}
+                  className={styles.shortcutsButton}
+                  onClick={onToggleShortcuts}
                   onMouseDown={(e) => e.stopPropagation()}
                   onTouchStart={(e) => e.stopPropagation()}
-                  title={t('mode.select')}
-                  aria-haspopup="listbox"
+                  aria-haspopup="dialog"
+                  aria-label={t('status.shortcuts')}
                 >
-                  <span
-                    className={`${styles.modeLabel} ${modeIndicator.className}`}
-                  >
-                    {modeIndicator.label}
-                  </span>
-                  {!compact && (
-                    <span className={styles.modeHint}>
-                      {t('status.modeHint')}
-                    </span>
-                  )}
+                  {t('status.shortcuts')}
                 </button>
-              )}
-              {!compact && (
-                <>
-                  {onToggleShortcuts ? (
-                    <button
-                      type="button"
-                      className={styles.shortcutsButton}
-                      onClick={onToggleShortcuts}
-                      onMouseDown={(e) => e.stopPropagation()}
-                      onTouchStart={(e) => e.stopPropagation()}
-                      aria-haspopup="dialog"
-                      aria-label={t('status.shortcuts')}
-                    >
-                      {t('status.shortcuts')}
-                    </button>
-                  ) : (
-                    <span>{t('status.shortcuts')}</span>
-                  )}
-                </>
+              ) : (
+                <span>{t('status.shortcuts')}</span>
               )}
             </>
           )}

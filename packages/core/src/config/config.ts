@@ -215,6 +215,27 @@ import {
 import { resolveModelId } from '../utils/modelId.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
+export function parseVisionModelSetting(setting: string | undefined):
+  | {
+      selector: string;
+      baseUrl?: string;
+    }
+  | undefined {
+  if (!setting) return undefined;
+  const nullIdx = setting.indexOf('\0');
+  if (nullIdx < 0) return { selector: setting };
+  const selector = setting.slice(0, nullIdx);
+  if (!selector) return undefined;
+  return {
+    selector,
+    baseUrl: setting.slice(nullIdx + 1) || undefined,
+  };
+}
+
+function formatVisionModelSettingForLog(setting: string): string {
+  return setting.replace(/\0/g, '\\0');
+}
+
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
 export {
@@ -339,6 +360,12 @@ export interface AutoModeSettings {
   };
   /** Environment / context lines injected into the classifier's system prompt. */
   environment?: string[];
+  /**
+   * When true, ALL shell commands are routed through the auto-mode
+   * classifier, including read-only commands that would otherwise be
+   * auto-approved. Default false.
+   */
+  classifyAllShell?: boolean;
 }
 
 export interface AccessibilitySettings {
@@ -616,10 +643,7 @@ export type McpServerScope = 'project' | 'workspace' | 'system';
  * - `pending_approval`: a gated server awaiting approval (#4615).
  */
 export type McpServerUnavailableReason =
-  | 'removed'
-  | 'not_allowed'
-  | 'excluded'
-  | 'pending_approval';
+  'removed' | 'not_allowed' | 'excluded' | 'pending_approval';
 
 /**
  * Scopes whose servers are checked-in / shareable and therefore untrusted: they
@@ -629,6 +653,55 @@ export type McpServerUnavailableReason =
  */
 export function isGatedMcpScope(scope: McpServerScope | undefined): boolean {
   return scope === 'project' || scope === 'workspace';
+}
+
+/**
+ * Test whether a server name matches a single pattern. Patterns use simple
+ * glob semantics: `*` matches any sequence of characters (including empty),
+ * `?` matches exactly one character. A pattern without glob characters is
+ * compared as an exact string (no behavior change for existing configs).
+ * Uses an iterative two-pointer algorithm — O(n×m) worst case, no regex,
+ * no backtracking vulnerability.
+ */
+export function matchesServerPattern(name: string, pattern: string): boolean {
+  if (!pattern.includes('*') && !pattern.includes('?')) {
+    return name === pattern;
+  }
+  let ni = 0;
+  let pi = 0;
+  let starNi = -1;
+  let starPi = -1;
+  while (ni < name.length) {
+    if (
+      pi < pattern.length &&
+      (pattern[pi] === '?' || pattern[pi] === name[ni])
+    ) {
+      ni++;
+      pi++;
+    } else if (pi < pattern.length && pattern[pi] === '*') {
+      starPi = pi++;
+      starNi = ni;
+    } else if (starPi !== -1) {
+      pi = starPi + 1;
+      ni = ++starNi;
+    } else {
+      return false;
+    }
+  }
+  while (pi < pattern.length && pattern[pi] === '*') pi++;
+  return pi === pattern.length;
+}
+
+/**
+ * Test whether a server name matches any pattern in the given list.
+ * Returns false for an empty or undefined list.
+ */
+export function matchesAnyServerPattern(
+  name: string,
+  patterns: string[] | undefined,
+): boolean {
+  if (!patterns || patterns.length === 0) return false;
+  return patterns.some((p) => matchesServerPattern(name, p));
 }
 
 export class MCPServerConfig {
@@ -682,6 +755,7 @@ export class MCPServerConfig {
      * `new MCPServerConfig(...)` call sites. See issue #4615.
      */
     readonly scope?: McpServerScope,
+    readonly alwaysLoadTools?: boolean,
   ) {}
 }
 
@@ -907,6 +981,13 @@ export interface ConfigParameters {
    */
   cliAllowedMcpServerNames?: string[];
   excludedMcpServers?: string[];
+  /**
+   * Idle timeout in milliseconds for MCP tool calls. If the MCP server does
+   * not produce any response or progress update within this time, the call
+   * is aborted. Default: 300000 (5 minutes). Can be overridden via
+   * QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.
+   */
+  mcpToolIdleTimeoutMs?: number;
   /**
    * Names of project-scoped (`.mcp.json`) servers that are NOT yet approved
    * (pending or rejected). These are loaded so they can be listed, but the
@@ -1261,8 +1342,7 @@ export class Config {
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
   private modelInvocableCommandsProvider:
-    | (() => ReadonlyArray<{ name: string; description: string }>)
-    | null = null;
+    (() => ReadonlyArray<{ name: string; description: string }>) | null = null;
   private modelInvocableCommandsExecutor:
     | ((
         name: string,
@@ -1297,8 +1377,7 @@ export class Config {
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
   private readonly disabledSkillNamesProvider:
-    | (() => ReadonlySet<string>)
-    | null;
+    (() => ReadonlySet<string>) | null;
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
   // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
@@ -1326,8 +1405,7 @@ export class Config {
    */
   private readonly recentlyRemovedMcpServers = new Set<string>();
   private readonly topTierMcpServers:
-    | Record<string, MCPServerConfig>
-    | undefined;
+    Record<string, MCPServerConfig> | undefined;
   private readonly runtimeMcpServers = new Map<string, MCPServerConfig>();
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
@@ -1337,6 +1415,7 @@ export class Config {
   private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
+  private readonly mcpToolIdleTimeoutMs: number;
   /**
    * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
    * `/reload`). `SettingsWatcher` serializes its own listeners, but `/reload`
@@ -1437,8 +1516,7 @@ export class Config {
   private shellExecutionConfig: ShellExecutionConfig;
   private arenaManager: ArenaManager | null = null;
   private arenaManagerChangeCallback:
-    | ((manager: ArenaManager | null) => void)
-    | null = null;
+    ((manager: ArenaManager | null) => void) | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
   private teamManager: TeamManager | null = null;
   private teamManagerChangeCallbacks = new Set<
@@ -1562,6 +1640,11 @@ export class Config {
     this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
+    const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
+    const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
+    this.mcpToolIdleTimeoutMs =
+      params.mcpToolIdleTimeoutMs ??
+      (Number.isFinite(parsedEnv) && parsedEnv >= 0 ? parsedEnv : 300000); // 5 minutes default
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
@@ -1954,8 +2037,7 @@ export class Config {
                   (input['permission_mode'] as PermissionMode) ||
                     PermissionMode.Default,
                   (input['permission_suggestions'] as
-                    | PermissionSuggestion[]
-                    | undefined) || undefined,
+                    PermissionSuggestion[] | undefined) || undefined,
                   signal,
                 );
                 break;
@@ -2991,21 +3073,28 @@ export class Config {
    * the bridge at an unreachable, or non-image-capable, model.
    */
   private resolveVisionModelSelection():
-    | VisionBridgeModelSelection
-    | undefined {
+    VisionBridgeModelSelection | undefined {
     if (!this.visionModel) return undefined;
+    const visionModelForLog = formatVisionModelSettingForLog(this.visionModel);
+    const parsedSetting = parseVisionModelSetting(this.visionModel);
+    if (!parsedSetting) {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' could not be parsed; falling back to auto-select`,
+      );
+      return undefined;
+    }
     let selector;
     try {
-      selector = resolveModelId(this.visionModel);
+      selector = resolveModelId(parsedSetting.selector);
     } catch {
       this.debugLogger.warn(
-        `vision model pin '${this.visionModel}' could not be parsed; falling back to auto-select`,
+        `vision model pin '${visionModelForLog}' could not be parsed; falling back to auto-select`,
       );
       return undefined;
     }
     if (!selector) {
       this.debugLogger.warn(
-        `vision model pin '${this.visionModel}' resolved to no selector; falling back to auto-select`,
+        `vision model pin '${visionModelForLog}' resolved to no selector; falling back to auto-select`,
       );
       return undefined;
     }
@@ -3015,24 +3104,34 @@ export class Config {
     // the primary entry itself (the text-only model the bridge works around) —
     // via the provider-aware identity check so a cross-provider namesake stays
     // eligible.
-    const match = this.getAllConfiguredModels().find(
+    const matches = this.getAllConfiguredModels().filter(
       (m) =>
         m.id === selector.modelId &&
         (!selector.authType || m.authType === selector.authType) &&
+        (!parsedSetting.baseUrl || m.baseUrl === parsedSetting.baseUrl) &&
         !m.fastOnly &&
         !m.voiceOnly &&
         !this.isCurrentPrimaryModel(m),
     );
+    if (!parsedSetting.baseUrl && matches.length > 1) {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' matched multiple configured endpoints; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    const match = matches[0];
     if (!match) {
       this.debugLogger.warn(
-        `vision model pin '${this.visionModel}' did not match a usable configured model ` +
+        `vision model pin '${visionModelForLog}' did not match a usable configured model ` +
           `(removed, mistyped, fast/voice-only, or the primary itself); falling back to auto-select`,
       );
       return undefined;
     }
     return {
-      id: this.visionModel,
-      ...(match.baseUrl && { baseUrl: match.baseUrl }),
+      id: parsedSetting.selector,
+      ...((parsedSetting.baseUrl ?? match.baseUrl) && {
+        baseUrl: parsedSetting.baseUrl ?? match.baseUrl,
+      }),
     };
   }
 
@@ -3692,8 +3791,7 @@ export class Config {
   }
 
   getMcpTransportPool():
-    | import('../tools/mcp-transport-pool.js').McpTransportPool
-    | undefined {
+    import('../tools/mcp-transport-pool.js').McpTransportPool | undefined {
     return this.mcpTransportPool;
   }
 
@@ -3755,7 +3853,7 @@ export class Config {
     if (this.allowedMcpServers) {
       mcpServers = Object.fromEntries(
         Object.entries(mcpServers).filter(([key]) =>
-          this.allowedMcpServers?.includes(key),
+          matchesAnyServerPattern(key, this.allowedMcpServers),
         ),
       );
     }
@@ -3775,8 +3873,13 @@ export class Config {
     this.excludedMcpServers = excluded;
   }
 
+  getMcpToolIdleTimeoutMs(): number {
+    return this.mcpToolIdleTimeoutMs;
+  }
+
   isMcpServerDisabled(serverName: string): boolean {
-    if (this.excludedMcpServers?.includes(serverName)) return true;
+    if (matchesAnyServerPattern(serverName, this.excludedMcpServers))
+      return true;
     // Extension-bundled servers can be disabled individually via extension
     // preferences. Only the extension that actually contributed the server is
     // consulted, so a same-named server from another source (e.g. a shadowing
@@ -3928,11 +4031,12 @@ export class Config {
     if (!(serverName in this.getMergedMcpServers())) return undefined;
     if (
       this.allowedMcpServers &&
-      !this.allowedMcpServers.includes(serverName)
+      !matchesAnyServerPattern(serverName, this.allowedMcpServers)
     ) {
       return 'not_allowed';
     }
-    if (this.excludedMcpServers?.includes(serverName)) return 'excluded';
+    if (matchesAnyServerPattern(serverName, this.excludedMcpServers))
+      return 'excluded';
     if (this.isMcpServerPendingApproval(serverName)) return 'pending_approval';
     return undefined;
   }
@@ -5092,7 +5196,7 @@ export class Config {
 
     if (this.allowedMcpServers) {
       Object.entries(mcpServers).forEach(([key, server]) => {
-        const isAllowed = this.allowedMcpServers?.includes(key);
+        const isAllowed = matchesAnyServerPattern(key, this.allowedMcpServers);
         if (!isAllowed) {
           blockedMcpServers.push({
             name: key,
@@ -5514,8 +5618,7 @@ export class Config {
    * has been registered (e.g., in SDK mode).
    */
   getModelInvocableCommandsProvider():
-    | (() => ReadonlyArray<{ name: string; description: string }>)
-    | null {
+    (() => ReadonlyArray<{ name: string; description: string }>) | null {
     return this.modelInvocableCommandsProvider;
   }
 
@@ -5649,9 +5752,8 @@ export class Config {
       if (options?.forSubAgent) return;
       const schema = this.jsonSchema;
       await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
-        const { SyntheticOutputTool } = await import(
-          '../tools/syntheticOutput.js'
-        );
+        const { SyntheticOutputTool } =
+          await import('../tools/syntheticOutput.js');
         return new SyntheticOutputTool(schema);
       });
     };
@@ -5686,9 +5788,8 @@ export class Config {
       return new ToolSearchTool(this);
     });
     await registerLazy(ToolNames.READ_MCP_RESOURCE, async () => {
-      const { ReadMcpResourceTool } = await import(
-        '../tools/read-mcp-resource.js'
-      );
+      const { ReadMcpResourceTool } =
+        await import('../tools/read-mcp-resource.js');
       return new ReadMcpResourceTool(this);
     });
     await registerLazy(ToolNames.AGENT, async () => {
@@ -5776,9 +5877,8 @@ export class Config {
       return new TodoWriteTool(this);
     });
     await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
-      const { AskUserQuestionTool } = await import(
-        '../tools/askUserQuestion.js'
-      );
+      const { AskUserQuestionTool } =
+        await import('../tools/askUserQuestion.js');
       return new AskUserQuestionTool(this);
     });
     if (!this.sdkMode) {
@@ -5805,9 +5905,8 @@ export class Config {
     });
     if (this.isArtifactEnabled()) {
       await registerLazy(ToolNames.ARTIFACT, async () => {
-        const { ArtifactTool } = await import(
-          '../tools/artifact/artifact-tool.js'
-        );
+        const { ArtifactTool } =
+          await import('../tools/artifact/artifact-tool.js');
         return new ArtifactTool(this);
       });
     }
@@ -5890,9 +5989,8 @@ export class Config {
     // built-in also gates these. Direct registry.registerFactory() would
     // bypass coreTools allowlist + whole-tool deny rules.
     if (this.isComputerUseEnabled()) {
-      const { registerComputerUseTools } = await import(
-        '../tools/computer-use/index.js'
-      );
+      const { registerComputerUseTools } =
+        await import('../tools/computer-use/index.js');
       await registerComputerUseTools(registerLazy, this);
     }
 

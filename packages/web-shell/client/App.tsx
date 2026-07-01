@@ -13,7 +13,6 @@ import {
   useActions,
   useConnection,
   useDaemonFollowupSuggestion,
-  useDaemonMidTurnInjected,
   useSettings,
   useSessionNotices,
   useStreamingState,
@@ -30,7 +29,6 @@ import type {
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
 import { extractPendingPermission } from './adapters/transcriptAdapter';
-import { removeInjectedFromQueue } from './midTurnDedup';
 import { MessageList, type MessageListHandle } from './components/MessageList';
 import { extractVoiceModels, type VoiceModelOption } from './voice/voiceModels';
 import {
@@ -80,10 +78,6 @@ import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
 import { useMessages } from './hooks/useMessages';
 import { useShallowMemo, useStableArray } from './hooks/useShallowMemo';
-import deleteIconUrl from './assets/icons/delete.svg';
-import editIconUrl from './assets/icons/edit.svg';
-import insertIconUrl from './assets/icons/insert.svg';
-import queueIconUrl from './assets/icons/queue.svg';
 import {
   I18nProvider,
   getTranslator,
@@ -96,15 +90,15 @@ import {
   copyFromLastAssistantMessage,
   COPY_MESSAGES,
 } from './utils/copyCommand';
-import { cssUrlVar } from './utils/cssUrlVar';
+import { isEditableTarget } from './utils/dom';
 import { getModelDisplayName } from './utils/modelDisplay';
 import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
+import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
-import {
-  appendOrDeferLocalUserMessage,
-  isCommandPrompt,
-} from './utils/localCommandQueue';
+import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
+import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
+import { useQueuedPrompts } from './hooks/useQueuedPrompts';
 import {
   TasksStatusMessage,
   type SerializedTasksMessage,
@@ -159,8 +153,10 @@ import {
   type WelcomeFooterRenderer,
   type ComposerToolbarStartRenderer,
   type ComposerToolbarEndRenderer,
+  type ComposerToolbarRightRenderer,
   type FooterRenderer,
   type LoadingPhrasesResolver,
+  type MarkdownTableMode,
   type WebShellTaskInfo,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
@@ -211,7 +207,6 @@ function TodoContextsProvider({
 }
 
 const MODES_CYCLE = DAEMON_APPROVAL_MODES;
-const MAX_QUEUED_PROMPT_PREVIEW_CHARS = 240;
 const MAX_TOASTS = 4;
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
@@ -241,14 +236,6 @@ function isGoalClearCommand(text: string): boolean {
     .trim()
     .toLowerCase();
   return GOAL_CLEAR_KEYWORDS.has(goalArg);
-}
-
-interface QueuedPrompt {
-  id: number;
-  sessionId?: string;
-  text: string;
-  images?: PromptImage[];
-  onComplete?: () => void;
 }
 
 interface ActiveGoalStatus {
@@ -369,12 +356,16 @@ export interface WebShellProps {
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   /** Custom renderer inserted after the built-in composer toolbar controls. */
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
+  /** Custom renderer inserted into the composer toolbar's right-side action area. */
+  renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   /** Custom component for the footer area below the Editor. Replaces the built-in StatusBar. */
   renderFooter?: FooterRenderer;
   /** Collapse thinking blocks to 5 lines with a click-to-expand toggle. */
   compactThinking?: boolean;
   /** Auto-collapse completed turns to just the prompt and final answer, with a per-turn toggle. Defaults to true. */
   collapseCompletedTurns?: boolean;
+  /** Markdown table rendering mode. Defaults to basic. */
+  markdownTableMode?: MarkdownTableMode;
   /** Enable virtual scrolling only when rendered transcript rows exceed this threshold. Defaults to 200. */
   virtualScrollThreshold?: number;
   /** Custom Markdown behavior for assistant content only. */
@@ -576,14 +567,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
 }
 
-function formatModelAuthType(authType: string): string {
-  const normalized = authType.trim();
-  if (normalized.startsWith('USE_')) {
-    return normalized.slice(4).toLowerCase().replace(/_/g, '-');
-  }
-  return normalized.toLowerCase();
-}
-
 function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
   if (!isRecord(result)) return null;
   const meta = result._meta;
@@ -614,12 +597,7 @@ function getModelSwitchSummary(result: unknown): ModelSwitchSummary | null {
 }
 
 function serializeModelSwitchSummary(summary: ModelSwitchSummary): string {
-  return (
-    `AuthType: ${formatModelAuthType(summary.authType)}` +
-    `\nUsing ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}` +
-    `\nBase URL: ${summary.baseUrl}` +
-    `\nAPI key: ${summary.apiKey}`
-  );
+  return `Using ${summary.isRuntime ? 'runtime ' : ''}model: ${summary.modelId}`;
 }
 
 function isDaemonApprovalMode(mode: string): mode is DaemonApprovalMode {
@@ -757,102 +735,6 @@ function translateCopyMessage(
   return message;
 }
 
-function QueuedPromptDisplay({
-  prompts,
-  t,
-  onDelete,
-  onInsert,
-  onEdit,
-}: {
-  prompts: readonly QueuedPrompt[];
-  t: ReturnType<typeof getTranslator>;
-  onDelete: (id: number) => void;
-  onInsert: (id: number) => void;
-  onEdit: (id: number) => void;
-}) {
-  if (prompts.length === 0) return null;
-
-  return (
-    <div className={styles.queuedPrompts}>
-      {prompts.map((prompt) => {
-        const normalizedPreview = prompt.text.replace(/\s+/g, ' ').trim();
-        const preview =
-          normalizedPreview.length > MAX_QUEUED_PROMPT_PREVIEW_CHARS
-            ? `${normalizedPreview.slice(0, MAX_QUEUED_PROMPT_PREVIEW_CHARS)}...`
-            : normalizedPreview;
-        const imageCount = prompt.images?.length ?? 0;
-        // A command (/… or !…) can't be inserted into the running turn — insert
-        // injects raw text the model would see literally, never running the
-        // command. Show the action disabled so it stays visible but inert.
-        const isCommand = isCommandPrompt(prompt.text);
-        return (
-          <div key={prompt.id} className={styles.queuedPrompt}>
-            <span className={styles.queuedPromptIcon} aria-hidden="true">
-              <span
-                className={styles.queuedPromptMaskIcon}
-                style={cssUrlVar('--queued-icon-url', queueIconUrl)}
-              />
-            </span>
-            <span className={styles.queuedPromptText}>
-              {preview}
-              {imageCount > 0
-                ? ` ${t('queue.imageCount', { count: imageCount })}`
-                : ''}
-            </span>
-            <span className={styles.queuedPromptActions}>
-              {imageCount === 0 && (
-                <button
-                  type="button"
-                  className={styles.queuedPromptAction}
-                  onClick={() => onInsert(prompt.id)}
-                  disabled={isCommand}
-                  title={
-                    isCommand ? t('queue.insertCommandDisabled') : undefined
-                  }
-                >
-                  <span
-                    className={styles.queuedPromptActionIcon}
-                    style={cssUrlVar('--queued-icon-url', insertIconUrl)}
-                    aria-hidden="true"
-                  />
-                  {t('queue.insert')}
-                </button>
-              )}
-              <button
-                type="button"
-                className={styles.queuedPromptAction}
-                onClick={() => onDelete(prompt.id)}
-                aria-label={t('queue.delete')}
-                title={t('queue.delete')}
-              >
-                <span
-                  className={styles.queuedPromptActionIcon}
-                  style={cssUrlVar('--queued-icon-url', deleteIconUrl)}
-                  aria-hidden="true"
-                />
-              </button>
-              <button
-                type="button"
-                className={styles.queuedPromptAction}
-                onClick={() => onEdit(prompt.id)}
-                aria-label={t('queue.edit')}
-                title={t('queue.edit')}
-              >
-                <span
-                  className={styles.queuedPromptActionIcon}
-                  style={cssUrlVar('--queued-icon-url', editIconUrl)}
-                  aria-hidden="true"
-                />
-              </button>
-            </span>
-          </div>
-        );
-      })}
-      <div className={styles.queuedHint}>{t('queue.footer')}</div>
-    </div>
-  );
-}
-
 export function App({
   onSessionIdChange,
   theme: providedTheme,
@@ -872,12 +754,14 @@ export function App({
   renderWelcomeFooter,
   renderComposerToolbarStart,
   renderComposerToolbarEnd,
+  renderComposerToolbarRight,
   renderFooter,
   chatMaxWidth,
   sidebar,
   composerToolbarActions,
   compactThinking = false,
   collapseCompletedTurns = true,
+  markdownTableMode = 'basic',
   virtualScrollThreshold,
   markdown,
   loadingPhrases,
@@ -907,6 +791,63 @@ export function App({
   const [sidebarSwitchingSessionId, setSidebarSwitchingSessionId] = useState<
     string | null
   >(null);
+  const [mobileDrawerOpen, setMobileDrawerOpen] = useState(false);
+  const closeMobileDrawer = useCallback(() => setMobileDrawerOpen(false), []);
+
+  useEffect(() => {
+    const mql = window.matchMedia('(max-width: 760px)');
+    const handler = (e: MediaQueryListEvent) => {
+      if (!e.matches) setMobileDrawerOpen(false);
+    };
+    mql.addEventListener('change', handler);
+    return () => mql.removeEventListener('change', handler);
+  }, []);
+
+  useEffect(() => {
+    if (!mobileDrawerOpen) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== 'Escape') return;
+      // A pending tool/permission approval owns Escape (it rejects the call),
+      // so don't let the drawer swallow it while a prompt is visible.
+      if (pendingApprovalRef.current) return;
+      const target = e.target as HTMLElement | null;
+      // Only let an editable element keep Escape for itself when it lives
+      // outside the drawer; the drawer's own search input should still close
+      // the drawer on the first Escape.
+      if (
+        isEditableTarget(target) &&
+        !target?.closest('[data-mobile-drawer]')
+      ) {
+        return;
+      }
+      e.stopPropagation();
+      e.preventDefault();
+      closeMobileDrawer();
+    };
+    const prevOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    const preventScroll = (e: TouchEvent) => {
+      // Allow native scrolling inside the drawer panel (e.g. the session list).
+      // The dim backdrop also lives under [data-mobile-drawer], so exclude it:
+      // a touchmove starting on the backdrop must still be blocked, otherwise
+      // iOS Safari scrolls the page behind the open drawer.
+      const el = e.target as HTMLElement | null;
+      if (
+        el?.closest('[data-mobile-drawer]') &&
+        !el.closest(`.${styles.mobileBackdrop}`)
+      ) {
+        return;
+      }
+      e.preventDefault();
+    };
+    document.addEventListener('touchmove', preventScroll, { passive: false });
+    window.addEventListener('keydown', onKey, true);
+    return () => {
+      document.body.style.overflow = prevOverflow;
+      document.removeEventListener('touchmove', preventScroll);
+      window.removeEventListener('keydown', onKey, true);
+    };
+  }, [mobileDrawerOpen, closeMobileDrawer]);
   const handleSidebarCollapsedChange = useCallback((collapsed: boolean) => {
     setSidebarCollapsed(collapsed);
     writeSidebarCollapsed(collapsed);
@@ -918,9 +859,11 @@ export function App({
       renderWelcomeFooter,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
+      renderComposerToolbarRight,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
+      markdownTableMode,
       markdown,
       loadingPhrases,
     }),
@@ -930,9 +873,11 @@ export function App({
       renderWelcomeFooter,
       renderComposerToolbarStart,
       renderComposerToolbarEnd,
+      renderComposerToolbarRight,
       renderFooter,
       compactThinking,
       collapseCompletedTurns,
+      markdownTableMode,
       markdown,
       loadingPhrases,
     ],
@@ -979,10 +924,6 @@ export function App({
   const nextRecapMessageIdRef = useRef(1);
   const nextBtwMessageIdRef = useRef(1);
   const btwAbortControllerRef = useRef<AbortController | null>(null);
-  // Scopes explicit "insert queued message" POST(s) to the current turn.
-  // Aborted when the turn settles so a slow/late insert can't arrive during a
-  // subsequent turn and get injected in the wrong place.
-  const midTurnEnqueueAbortRef = useRef<AbortController | null>(null);
   const activeSessionIdRef = useRef(connection.sessionId);
   const displayMessages = useMemo(() => {
     const localMessages = [recapMessage].filter(
@@ -1314,7 +1255,11 @@ export function App({
   const [agentsDialogMode, setAgentsDialogMode] =
     useState<AgentsInitialMode | null>(null);
   const [escapeHintVisible, setEscapeHintVisible] = useState(false);
-  const escPressCountRef = useRef(0);
+  // Whether the first Esc has armed a stream cancellation; the composer's send
+  // button shows an "Esc again to stop" affordance while true.
+  const [cancelArmed, setCancelArmed] = useState(false);
+  // Which action the pending second Esc would perform, or null when idle.
+  const escArmedActionRef = useRef<'cancel' | 'clear' | null>(null);
   const escapeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [tasksDialogMessage, setTasksDialogMessage] =
     useState<SerializedTasksMessage | null>(null);
@@ -1328,11 +1273,6 @@ export function App({
   connectionRef.current = connection;
   const sessionDisplayName = connection.displayName;
   const [currentMode, setCurrentMode] = useState('default');
-  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
-  const queuedTexts = useMemo(
-    () => queuedPrompts.map((prompt) => prompt.text),
-    [queuedPrompts],
-  );
   const availableModels = useMemo(
     () =>
       (connection.models ?? []).filter(isVisibleComposerModel).map((m) => ({
@@ -1341,9 +1281,6 @@ export function App({
       })),
     [connection.models],
   );
-  const queuedPromptsRef = useRef<QueuedPrompt[]>([]);
-  const nextQueuedPromptIdRef = useRef(1);
-  const drainingQueueRef = useRef(false);
   const dialogOpen =
     showResumeDialog ||
     showDeleteDialog ||
@@ -1380,6 +1317,32 @@ export function App({
     },
     [pushToast],
   );
+  const notifySuccess = useCallback(
+    (message: string) => pushToast('success', message),
+    [pushToast],
+  );
+
+  const {
+    queuedPrompts,
+    queuedTexts,
+    enqueuePrompt,
+    removeQueuedPrompt,
+    insertQueuedPrompt,
+    editQueuedPrompt,
+    editLastQueuedPrompt,
+    clearQueuedPrompts,
+  } = useQueuedPrompts({
+    connected,
+    sessionId: connection.sessionId,
+    clientId: connection.clientId,
+    streamingState,
+    sessionActions,
+    store,
+    editorRef,
+    reportError,
+    notifySuccess,
+    t,
+  });
 
   useEffect(() => {
     logSessionNoticesHook(notices);
@@ -1400,11 +1363,6 @@ export function App({
 
   useEffect(() => {
     activeSessionIdRef.current = connection.sessionId;
-    queuedPromptsRef.current = [];
-    setQueuedPrompts([]);
-    drainingQueueRef.current = false;
-    midTurnEnqueueAbortRef.current?.abort();
-    midTurnEnqueueAbortRef.current = null;
     btwAbortControllerRef.current?.abort();
     btwAbortControllerRef.current = null;
     setRecapMessage(null);
@@ -1424,7 +1382,7 @@ export function App({
       message: {
         id: messageId,
         role: 'system',
-        content: `※ recap: ${t('recap.loading')}`,
+        content: `※ ${t('recap.label')}: ${t('recap.loading')}`,
         variant: 'info',
         source: 'recap',
       },
@@ -1439,7 +1397,7 @@ export function App({
             id: messageId,
             role: 'system',
             content: result.recap
-              ? `※ recap: ${result.recap}`
+              ? `※ ${t('recap.label')}: ${result.recap}`
               : t('recap.empty'),
             variant: 'info',
             source: 'recap',
@@ -1555,31 +1513,9 @@ export function App({
     return () => window.removeEventListener('keydown', onBtwShortcut, true);
   }, [interactionBlocked, btwMessage, dismissBtwMessage, pendingApproval]);
 
-  useEffect(() => {
-    queuedPromptsRef.current = queuedPrompts;
-  }, [queuedPrompts]);
-
-  const enqueuePrompt = useCallback(
-    (text: string, images?: PromptImage[], onComplete?: () => void) => {
-      const trimmed = text.trim();
-      if (!trimmed) return true;
-      const nextPrompt: QueuedPrompt = {
-        id: nextQueuedPromptIdRef.current++,
-        sessionId: activeSessionIdRef.current,
-        text: trimmed,
-        images: images ? [...images] : undefined,
-        onComplete,
-      };
-      queuedPromptsRef.current = [...queuedPromptsRef.current, nextPrompt];
-      setQueuedPrompts(queuedPromptsRef.current);
-      return true;
-    },
-    [],
-  );
-
-  // Echo a local command into the transcript, or defer it to the queue when a
-  // turn is streaming so the injected user row can't split the active turn (see
-  // appendOrDeferLocalUserMessage). Returns true when deferred — callers must
+  // Echo a local command into the transcript, or suppress it while a turn is
+  // streaming so the injected user row can't split the active turn (see
+  // appendOrDeferLocalUserMessage). Returns true when suppressed — callers must
   // then stop and not run the command's inline side effects.
   const echoOrDeferLocalCommand = useCallback(
     (text: string, images?: PromptImage[]): boolean =>
@@ -1589,176 +1525,15 @@ export function App({
         images,
         {
           append: (value: string) => store.appendLocalUserMessage(value),
-          enqueue: enqueuePrompt,
         },
       ),
-    [enqueuePrompt, store],
+    [store],
   );
 
-  // When the turn settles, abort any still-in-flight explicit insert so it can't
-  // arrive during the next turn (see midTurnEnqueueAbortRef). If aborted, the
-  // message remains in queuedPrompts.
-  useEffect(() => {
-    if (streamingState !== 'idle') return;
-    const ctrl = midTurnEnqueueAbortRef.current;
-    if (!ctrl) return;
-    // A controller exists ⇒ at least one mid-turn push was issued this turn.
-    // Cancel it so a still-in-flight push can't land in the next turn (a
-    // completed one makes this a no-op). Debug-only, mirrors the server-side
-    // mid-turn observability.
-    console.debug('[mid-turn] turn settled; cancelling any in-flight push');
-    ctrl.abort();
-    midTurnEnqueueAbortRef.current = null;
-  }, [streamingState]);
-
-  const popNextQueuedPrompt = useCallback((): QueuedPrompt | null => {
-    const [nextPrompt, ...rest] = queuedPromptsRef.current;
-    if (!nextPrompt) return null;
-    queuedPromptsRef.current = rest;
-    setQueuedPrompts(rest);
-    return nextPrompt;
-  }, []);
-
-  const peekNextQueuedPrompt = useCallback(
-    (): QueuedPrompt | null => queuedPromptsRef.current[0] ?? null,
-    [],
-  );
-
-  const popQueuedPromptForEdit = useCallback((id?: number): string | null => {
-    const current = queuedPromptsRef.current;
-    if (current.length === 0) return null;
-    const index =
-      id === undefined
-        ? current.length - 1
-        : current.findIndex((prompt) => prompt.id === id);
-    if (index < 0) return null;
-    const prompt = current[index];
-    const next = current.filter((_, i) => i !== index);
-    queuedPromptsRef.current = next;
-    setQueuedPrompts(next);
-    return prompt?.text ?? null;
-  }, []);
-
-  const removeQueuedPrompt = useCallback((id: number) => {
-    const next = queuedPromptsRef.current.filter((prompt) => prompt.id !== id);
-    if (next.length === queuedPromptsRef.current.length) return;
-    queuedPromptsRef.current = next;
-    setQueuedPrompts(next);
-  }, []);
-
-  const insertQueuedPrompt = useCallback(
-    async (id: number) => {
-      const prompt = queuedPromptsRef.current.find((item) => item.id === id);
-      if (!prompt || (prompt.images?.length ?? 0) > 0) return;
-      // Commands can't be inserted into the running turn (the model would see
-      // the raw text and never run them); they re-dispatch on drain instead.
-      if (isCommandPrompt(prompt.text)) return;
-      let abort = midTurnEnqueueAbortRef.current;
-      if (!abort) {
-        abort = new AbortController();
-        midTurnEnqueueAbortRef.current = abort;
-      }
-      let result: Awaited<
-        ReturnType<typeof sessionActions.enqueueMidTurnMessage>
-      >;
-      try {
-        result = await sessionActions.enqueueMidTurnMessage(prompt.text, {
-          signal: abort.signal,
-        });
-      } catch (error) {
-        reportError(error, t('queue.insertFailed'));
-        return;
-      }
-      if (!result.accepted) return;
-      const next = queuedPromptsRef.current.filter((item) => item.id !== id);
-      queuedPromptsRef.current = next;
-      setQueuedPrompts(next);
-    },
-    [reportError, sessionActions, t],
-  );
-
-  const editQueuedPrompt = useCallback(
-    (id: number) => {
-      const queuedText = popQueuedPromptForEdit(id);
-      if (!queuedText) return;
-      const current = editorRef.current?.getText() ?? '';
-      const next = current.trim() ? `${queuedText}\n${current}` : queuedText;
-      editorRef.current?.setText(next);
-      editorRef.current?.focus();
-    },
-    [popQueuedPromptForEdit],
-  );
-
-  const popLastQueuedPromptText = useCallback(
-    () => popQueuedPromptForEdit(),
-    [popQueuedPromptForEdit],
-  );
-
-  const clearQueuedPrompts = useCallback((): boolean => {
-    if (queuedPromptsRef.current.length === 0) return false;
-    queuedPromptsRef.current = [];
-    setQueuedPrompts([]);
-    store.dispatch([{ type: 'status', text: t('queue.cleared') }]);
-    return true;
-  }, [store, t]);
-
-  // When the daemon drains queued messages into the running turn it emits
-  // `mid_turn_message_injected` (one frame per tool batch). Drop the matching
-  // (text-only) entries from the local queue so the idle-time drain doesn't ALSO
-  // resend them as the next turn. Reconcile EVERY accumulated batch, not just the
-  // newest — a multi-batch turn can publish several frames back-to-back, and the
-  // first must not be lost before this runs. The frames arrive in-order ahead of
-  // the turn-complete frame that flips streamingState to idle, so this runs
-  // before that resend fires; `consume()` then clears the reconciled batches.
-  const { batches: midTurnInjectedBatches, consume: consumeMidTurnInjected } =
-    useDaemonMidTurnInjected();
-  useEffect(() => {
-    const sessionId = connection.sessionId;
-    if (!sessionId || midTurnInjectedBatches.length === 0) return;
-    // Pass OUR client id so only batches the daemon stamped with it (or
-    // anonymous ones) are deduped. The daemon stamps every drained frame with
-    // the originator's client id, and the web-shell always sends one, so
-    // omitting this would skip every batch — leaving our own messages in the
-    // queue to be resent next turn (double delivery). A peer on the same
-    // session keeps its own coincidentally-equal entry.
-    if (
-      connection.clientId === undefined &&
-      midTurnInjectedBatches.some(
-        (b) => b.sessionId === sessionId && b.originatorClientId !== undefined,
-      )
-    ) {
-      // Edge: stamped batches but no client id yet (older daemon / reconnect
-      // timing). Dedupe skips them, so they may be resent next turn — make it
-      // diagnosable rather than a silent double-delivery.
-      console.debug(
-        '[mid-turn] originator-stamped batches but no client id; dedupe skipped (may resend next turn)',
-      );
-    }
-    const next = removeInjectedFromQueue(
-      queuedPromptsRef.current,
-      midTurnInjectedBatches,
-      sessionId,
-      connection.clientId,
-    );
-    if (next) {
-      queuedPromptsRef.current = next;
-      setQueuedPrompts(next);
-    }
-    // Consume ONLY this session's batches. The reconcile above is session-
-    // scoped, so a batch for another session (a late frame after an in-place
-    // session switch) must NOT be cleared here — it was never reconciled and
-    // would otherwise be lost on switch-back (resent next turn = double
-    // delivery). Identity-removal also leaves any frame that arrived after this
-    // render's snapshot for the next effect run.
-    consumeMidTurnInjected(
-      midTurnInjectedBatches.filter((b) => b.sessionId === sessionId),
-    );
-  }, [
-    midTurnInjectedBatches,
-    connection.sessionId,
-    connection.clientId,
-    consumeMidTurnInjected,
-  ]);
+  const blockLocalCommandDuringTurn = useCallback((): false => {
+    pushToast('error', t('queue.commandBlocked'));
+    return false;
+  }, [pushToast, t]);
 
   const handleThemeChange = useCallback(
     (nextTheme: WebShellTheme) => {
@@ -1846,7 +1621,8 @@ export function App({
         ]);
       };
       if (streamingStateRef.current !== 'idle') {
-        enqueuePrompt(command, undefined, refreshSettings);
+        handleLanguageChange(previousLanguage);
+        blockLocalCommandDuringTurn();
         return;
       }
       sendPrompt(command)
@@ -1857,7 +1633,7 @@ export function App({
         });
     },
     [
-      enqueuePrompt,
+      blockLocalCommandDuringTurn,
       handleLanguageChange,
       reloadWorkspaceSettings,
       reportError,
@@ -2063,7 +1839,7 @@ export function App({
             store.dispatch([
               {
                 type: 'status',
-                text: `※ recap: ${result.recap}`,
+                text: `※ ${t('recap.label')}: ${result.recap}`,
                 source: 'recap',
               },
             ]);
@@ -2077,7 +1853,7 @@ export function App({
     document.addEventListener('visibilitychange', onVisibilityChange);
     return () =>
       document.removeEventListener('visibilitychange', onVisibilityChange);
-  }, [connection.sessionId, sessionActions, store]);
+  }, [connection.sessionId, sessionActions, store, t]);
 
   const handleCycleMode = useCallback(() => {
     const idx = isDaemonApprovalMode(currentMode)
@@ -2151,6 +1927,9 @@ export function App({
   }, [branchCurrentSession]);
 
   const createNewSession = useCallback(async () => {
+    // Close the drawer before awaiting so a failed createSession() doesn't leave
+    // it stuck open with the page scroll still locked, matching loadSidebarSession.
+    closeMobileDrawer();
     try {
       const session = await (
         sessionActions as typeof sessionActions & SessionActionsWithCreate
@@ -2169,11 +1948,15 @@ export function App({
       reportError(error, 'Failed to create a new session');
       return false;
     }
-  }, [onSessionIdChange, reportError, sessionActions]);
+  }, [closeMobileDrawer, onSessionIdChange, reportError, sessionActions]);
 
   const loadSidebarSession = useCallback(
     async (sessionId: string) => {
       setSidebarSwitchingSessionId(sessionId);
+      // Close the drawer before awaiting the load so it doesn't linger over the
+      // old transcript while the new session streams in, matching the other
+      // session-switch paths (/resume, ResumeDialog).
+      closeMobileDrawer();
       try {
         await sessionActions.loadSession(sessionId, {
           deferTranscriptReset: true,
@@ -2185,7 +1968,7 @@ export function App({
         throw error;
       }
     },
-    [sessionActions],
+    [closeMobileDrawer, sessionActions],
   );
 
   useEffect(() => {
@@ -2344,7 +2127,7 @@ export function App({
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             sendPrompt(text, images).catch((error: unknown) =>
               reportError(error, 'Failed to send hidden slash command'),
             );
@@ -2363,7 +2146,7 @@ export function App({
               if (isGoalClearCommand(text)) {
                 return handleBusyGoalClear(text);
               }
-              return enqueuePrompt(text, images);
+              return blockLocalCommandDuringTurn();
             }
             return handleGoalSlashCommand(text, images);
           }
@@ -2465,13 +2248,13 @@ export function App({
             return true;
           }
           if (cmd === 'branch') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const branchName = text.slice(match[0].length).trim();
             branchCurrentSession(branchName || undefined);
             return true;
           }
           if (cmd === 'fork') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const directive = text.slice(match[0].length).trim();
             if (!directive) {
               pushToast('error', t('fork.empty'));
@@ -2508,7 +2291,7 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /model --fast'),
               );
@@ -2528,7 +2311,7 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--voice ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /model --voice'),
               );
@@ -2549,7 +2332,7 @@ export function App({
             return true;
           }
           if (cmd === 'plan') {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) return blockLocalCommandDuringTurn();
             const prompt = text.slice(match[0].length).trim();
             sessionActions
               .setApprovalMode('plan')
@@ -2635,7 +2418,7 @@ export function App({
           if (cmd === 'skills') {
             const skillArg = text.slice(match[0].length).trim();
             if (skillArg) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /skills command'),
               );
@@ -2767,9 +2550,8 @@ export function App({
             }
             if (subCommand === 'install') {
               // Install echoes into the transcript (and its error/usage replies
-              // do too); defer the whole command mid-turn so it can't split the
-              // active turn. It re-dispatches here once the turn settles.
-              if (promptBlocked) return enqueuePrompt(text, images);
+              // do too); block it mid-turn so it can't split the active turn.
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               const tokens = args.slice('install'.length).trim().split(/\s+/);
               let source = '';
               let ref: string | undefined;
@@ -2886,7 +2668,7 @@ export function App({
           if (cmd === 'rename') {
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) return blockLocalCommandDuringTurn();
               sendPrompt(text, images).catch((error: unknown) =>
                 reportError(error, 'Failed to send /rename command'),
               );
@@ -2915,10 +2697,12 @@ export function App({
           if (cmd === 'resume') {
             const sessionId = text.slice(match[0].length).trim();
             if (sessionId) {
+              closeMobileDrawer();
               sessionActions.loadSession(sessionId).catch((error: unknown) => {
                 reportError(error, 'Failed to load session');
               });
             } else {
+              closeMobileDrawer();
               setShowResumeDialog(true);
             }
             return true;
@@ -3076,7 +2860,10 @@ export function App({
         );
         return true;
       } else if (text.startsWith('!')) {
-        if (promptBlocked) return enqueuePrompt(text, images);
+        if (promptBlocked) {
+          pushToast('error', t('queue.shellBlocked'));
+          return false;
+        }
         const cmd = text.slice(1).trim();
         if (!cmd) return false;
         sessionActions.sendShellCommand(cmd).catch((error: unknown) => {
@@ -3098,12 +2885,14 @@ export function App({
       enqueuePrompt,
       echoOrDeferLocalCommand,
       branchCurrentSession,
+      closeMobileDrawer,
       createNewSession,
       handleBusyGoalClear,
       handleGoalSlashCommand,
       handleThemeChange,
       handleSetMode,
       handleLanguageChange,
+      blockLocalCommandDuringTurn,
       openTasksPanel,
       hiddenCommands,
       pushToast,
@@ -3128,59 +2917,6 @@ export function App({
     },
     [handleSubmit, resumeChatBottomFollow],
   );
-
-  useEffect(() => {
-    if (drainingQueueRef.current) return;
-    if (!connected) return;
-    if (streamingState !== 'idle') return;
-    if (interactionBlocked) return;
-    if (pendingApproval) return;
-    if (queuedPrompts.length === 0) return;
-
-    const nextPrompt = peekNextQueuedPrompt();
-    if (!nextPrompt) return;
-    if (
-      nextPrompt.sessionId !== undefined &&
-      nextPrompt.sessionId !== connection.sessionId
-    ) {
-      return;
-    }
-    popNextQueuedPrompt();
-
-    drainingQueueRef.current = true;
-    let sent = false;
-    const timer = window.setTimeout(() => {
-      sent = true;
-      try {
-        handleSubmit(nextPrompt.text, nextPrompt.images);
-        nextPrompt.onComplete?.();
-      } finally {
-        drainingQueueRef.current = false;
-      }
-    }, 0);
-    return () => {
-      if (!sent) {
-        // Cleanup ran before timeout fired — put the prompt back at the
-        // front of the queue so it's not lost. This can happen when any
-        // dependency (e.g. handleSubmit, streamingState) changes between
-        // popNextQueuedPrompt() and the setTimeout firing.
-        queuedPromptsRef.current = [nextPrompt, ...queuedPromptsRef.current];
-        setQueuedPrompts(queuedPromptsRef.current);
-      }
-      window.clearTimeout(timer);
-      drainingQueueRef.current = false;
-    };
-  }, [
-    connected,
-    connection.sessionId,
-    interactionBlocked,
-    handleSubmit,
-    pendingApproval,
-    peekNextQueuedPrompt,
-    popNextQueuedPrompt,
-    queuedPrompts,
-    streamingState,
-  ]);
 
   const handleConfirm = useCallback(
     (id: string, selectedOption: string, answers?: Record<string, string>) => {
@@ -3270,81 +3006,107 @@ export function App({
     t,
   ]);
 
+  const resetEscapeState = useCallback(() => {
+    escArmedActionRef.current = null;
+    setEscapeHintVisible(false);
+    setCancelArmed(false);
+    if (escapeTimerRef.current) {
+      clearTimeout(escapeTimerRef.current);
+      escapeTimerRef.current = null;
+    }
+  }, []);
+
+  // The Esc handler reads live state, but its global keydown listener must mount
+  // ONCE: streamingState flips among 'waiting'/'responding'/'thinking' mid-turn,
+  // and if it were an effect dep each flip would tear the listener down and run
+  // resetEscapeState(), wiping a half-armed two-press cancel. Read live values
+  // through a ref so the listener stays put across re-renders.
+  const escLiveRef = useRef({
+    streamingState,
+    pendingApproval,
+    interactionBlocked,
+    handleCancel,
+    handleCycleMode,
+  });
+  escLiveRef.current = {
+    streamingState,
+    pendingApproval,
+    interactionBlocked,
+    handleCancel,
+    handleCycleMode,
+  };
+
+  // Clear a half-armed two-press whenever the streaming/idle boundary flips — the
+  // relevant action (cancel vs clear) changes with it, so a leftover arm is now
+  // stale. Keyed on the boolean, so intra-turn sub-state flips don't reset it.
+  const escStreamingBoundary = streamingState !== 'idle';
   useEffect(() => {
-    const resetEscapeState = () => {
-      escPressCountRef.current = 0;
-      setEscapeHintVisible(false);
-      if (escapeTimerRef.current) {
-        clearTimeout(escapeTimerRef.current);
-        escapeTimerRef.current = null;
-      }
+    resetEscapeState();
+  }, [escStreamingBoundary, resetEscapeState]);
+
+  useEffect(() => {
+    // Arm a two-press action: the first Esc shows the affordance and starts a
+    // confirm window; a second Esc within it confirms, any other key resets it.
+    const ESC_CANCEL_CONFIRM_WINDOW_MS = 2000;
+    const ESC_CLEAR_CONFIRM_WINDOW_MS = 500;
+    const armEscape = (action: 'cancel' | 'clear', windowMs: number) => {
+      escArmedActionRef.current = action;
+      if (action === 'cancel') setCancelArmed(true);
+      else setEscapeHintVisible(true);
+      if (escapeTimerRef.current) clearTimeout(escapeTimerRef.current);
+      escapeTimerRef.current = setTimeout(resetEscapeState, windowMs);
     };
 
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.defaultPrevented || e.isComposing) return;
+      const live = escLiveRef.current;
 
       if (e.key !== 'Escape') {
-        if (escPressCountRef.current > 0) {
+        if (escArmedActionRef.current !== null) {
           resetEscapeState();
         }
-        if (e.key === 'Tab' && e.shiftKey && !interactionBlocked) {
+        if (e.key === 'Tab' && e.shiftKey && !live.interactionBlocked) {
           e.preventDefault();
-          handleCycleMode();
+          live.handleCycleMode();
         }
         return;
       }
 
-      if (pendingApproval || interactionBlocked) return;
-
-      if (clearQueuedPrompts()) {
-        e.preventDefault();
-        resetEscapeState();
-        return;
-      }
-
-      if (editorRef.current?.hasInput()) {
-        e.preventDefault();
-        if (escPressCountRef.current === 0) {
-          escPressCountRef.current = 1;
-          setEscapeHintVisible(true);
-          if (escapeTimerRef.current) {
-            clearTimeout(escapeTimerRef.current);
-          }
-          escapeTimerRef.current = setTimeout(() => {
-            resetEscapeState();
-          }, 500);
-        } else {
+      // Streaming takes priority over clearing text (queued prompts stay intact
+      // and drain after the turn settles); see decideEscapeIntent for the rules.
+      const intent = decideEscapeIntent({
+        blocked: !!live.pendingApproval || live.interactionBlocked,
+        streaming: live.streamingState !== 'idle',
+        hasInput: !!editorRef.current?.hasInput(),
+        armed: escArmedActionRef.current,
+      });
+      if (intent.kind === 'ignore') return;
+      e.preventDefault();
+      switch (intent.kind) {
+        case 'cancel':
+          live.handleCancel();
+          resetEscapeState();
+          break;
+        case 'clear':
           editorRef.current?.clear();
           resetEscapeState();
-        }
-        return;
-      }
-
-      if (streamingState !== 'idle') {
-        e.preventDefault();
-        handleCancel();
-        resetEscapeState();
-        return;
+          break;
+        case 'arm':
+          armEscape(
+            intent.action,
+            intent.action === 'cancel'
+              ? ESC_CANCEL_CONFIRM_WINDOW_MS
+              : ESC_CLEAR_CONFIRM_WINDOW_MS,
+          );
+          break;
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => {
       window.removeEventListener('keydown', onKeyDown);
-      escPressCountRef.current = 0;
-      setEscapeHintVisible(false);
-      if (escapeTimerRef.current) {
-        clearTimeout(escapeTimerRef.current);
-        escapeTimerRef.current = null;
-      }
+      resetEscapeState();
     };
-  }, [
-    streamingState,
-    handleCancel,
-    handleCycleMode,
-    pendingApproval,
-    interactionBlocked,
-    clearQueuedPrompts,
-  ]);
+  }, [resetEscapeState]);
 
   const isDisabled = !connected || connection.catchingUp;
 
@@ -3374,14 +3136,14 @@ export function App({
   const handleFastModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') {
-        enqueuePrompt(`/model --fast ${modelId}`);
+        blockLocalCommandDuringTurn();
         return;
       }
       sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
     },
-    [enqueuePrompt, sendPrompt, streamingState, reportError],
+    [blockLocalCommandDuringTurn, sendPrompt, streamingState, reportError],
   );
 
   // Persist via the prompt channel (like `/model --fast`): the daemon's command
@@ -3391,14 +3153,14 @@ export function App({
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
       if (streamingState !== 'idle') {
-        enqueuePrompt(`/model --voice ${modelId}`);
+        blockLocalCommandDuringTurn();
         return;
       }
       sendPrompt(`/model --voice ${modelId}`).catch((error: unknown) => {
         reportError(error, t('model.setVoice'));
       });
     },
-    [enqueuePrompt, sendPrompt, streamingState, reportError, t],
+    [blockLocalCommandDuringTurn, sendPrompt, streamingState, reportError, t],
   );
 
   const commands = useMemo(() => {
@@ -3521,6 +3283,7 @@ export function App({
             >
               <ResumeDialog
                 onSelect={(sessionId) => {
+                  closeMobileDrawer();
                   sessionActions
                     .loadSession(sessionId)
                     .catch((error: unknown) => {
@@ -3793,16 +3556,62 @@ export function App({
 
           <div className={styles.appShell}>
             {sidebarOptions.enabled && (
-              <WebShellSidebar
-                collapsed={sidebarCollapsed}
-                onCollapsedChange={handleSidebarCollapsedChange}
-                onOpenSettings={() => setShowSettingsDialog(true)}
-                onNewSession={createNewSession}
-                onLoadSession={loadSidebarSession}
-                onError={reportError}
-              />
+              <div
+                data-mobile-drawer=""
+                {...(mobileDrawerOpen
+                  ? { role: 'dialog', 'aria-modal': 'true' as const }
+                  : {})}
+                aria-label={t('sidebar.label')}
+                className={[
+                  styles.mobileDrawer,
+                  mobileDrawerOpen ? styles.mobileDrawerOpen : undefined,
+                ]
+                  .filter(Boolean)
+                  .join(' ')}
+              >
+                <div
+                  className={styles.mobileBackdrop}
+                  onClick={closeMobileDrawer}
+                  aria-hidden="true"
+                />
+                <WebShellSidebar
+                  collapsed={sidebarCollapsed && !mobileDrawerOpen}
+                  onCollapsedChange={handleSidebarCollapsedChange}
+                  onOpenSettings={() => {
+                    closeMobileDrawer();
+                    setShowSettingsDialog(true);
+                  }}
+                  onNewSession={createNewSession}
+                  onLoadSession={loadSidebarSession}
+                  onError={reportError}
+                  mobileOpen={mobileDrawerOpen}
+                />
+              </div>
             )}
             <div className={styles.chatPane}>
+              {sidebarOptions.enabled && (
+                <button
+                  type="button"
+                  className={styles.hamburgerButton}
+                  onClick={() => setMobileDrawerOpen((open) => !open)}
+                  aria-label={t('sidebar.toggleMenu')}
+                  aria-expanded={mobileDrawerOpen}
+                >
+                  <svg
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <line x1="3" y1="6" x2="21" y2="6" />
+                    <line x1="3" y1="12" x2="21" y2="12" />
+                    <line x1="3" y1="18" x2="21" y2="18" />
+                  </svg>
+                </button>
+              )}
               <WebShellCustomizationProvider value={customization}>
                 <CompactModeContext.Provider value={compactMode}>
                   <TodoContextsProvider
@@ -3911,6 +3720,11 @@ export function App({
                   )}
                   <div className={styles.composer}>
                     <StreamingStatus startedAt={activeTurnStartedAt} />
+                    {escapeHintVisible && streamingState === 'idle' && (
+                      <div className={styles.escClearStatus} role="status">
+                        {t('editor.escClearHint')}
+                      </div>
+                    )}
                     <QueuedPromptDisplay
                       prompts={queuedPrompts}
                       t={t}
@@ -3925,13 +3739,14 @@ export function App({
                       onToggleShortcuts={handleToggleShortcuts}
                       onCancel={handleCancel}
                       isRunning={streamingState !== 'idle'}
+                      cancelArmed={cancelArmed}
                       disabled={isDisabled || pendingApproval !== null}
                       commands={commands}
                       skills={loadedSkills}
                       slashCommandCategoryOrder={slashCommandCategoryOrder}
                       queuedMessages={queuedTexts}
                       onFocusFooter={handleFocusTaskPill}
-                      onPopQueuedMessages={popLastQueuedPromptText}
+                      onPopQueuedMessages={editLastQueuedPrompt}
                       onClearQueuedMessages={clearQueuedPrompts}
                       currentMode={currentMode}
                       currentModel={currentModel}
@@ -3987,7 +3802,6 @@ export function App({
                     />
                   ) : (
                     <StatusBar
-                      escapeHint={escapeHintVisible}
                       onSelectMode={() => setShowApprovalModeDialog((v) => !v)}
                       onSelectModel={() =>
                         setModelDialogMode((v) => (v ? null : 'main'))

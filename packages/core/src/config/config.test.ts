@@ -15,6 +15,8 @@ import {
   APPROVAL_MODE_INFO,
   MCPServerConfig,
   TrustGateError,
+  matchesServerPattern,
+  matchesAnyServerPattern,
 } from './config.js';
 import { Storage } from './storage.js';
 import * as fs from 'node:fs';
@@ -344,6 +346,92 @@ vi.mock('../core/toolHookTriggers.js', () => ({
   fireNotificationHook: vi.fn().mockResolvedValue({}),
 }));
 
+describe('matchesServerPattern', () => {
+  it('exact match when no glob characters', () => {
+    expect(matchesServerPattern('puppeteer', 'puppeteer')).toBe(true);
+    expect(matchesServerPattern('puppeteer', 'playwright')).toBe(false);
+  });
+
+  it('* matches any sequence including empty', () => {
+    expect(matchesServerPattern('puppeteer', '*puppeteer*')).toBe(true);
+    expect(matchesServerPattern('my-puppeteer-server', '*puppeteer*')).toBe(
+      true,
+    );
+    expect(matchesServerPattern('playwright', '*puppeteer*')).toBe(false);
+    expect(matchesServerPattern('anything', '*')).toBe(true);
+    expect(matchesServerPattern('prefix-suffix', 'prefix*')).toBe(true);
+    expect(matchesServerPattern('prefix-suffix', '*suffix')).toBe(true);
+  });
+
+  it('? matches exactly one character', () => {
+    expect(matchesServerPattern('abc', 'a?c')).toBe(true);
+    expect(matchesServerPattern('ac', 'a?c')).toBe(false);
+    expect(matchesServerPattern('axc', 'a?c')).toBe(true);
+  });
+
+  it('escapes regex special characters', () => {
+    expect(matchesServerPattern('my.server', 'my.server')).toBe(true);
+    expect(matchesServerPattern('myXserver', 'my.server')).toBe(false);
+    expect(matchesServerPattern('a+b', 'a+b')).toBe(true);
+    expect(matchesServerPattern('a^b', 'a^b')).toBe(true);
+    expect(matchesServerPattern('a$b', 'a$b')).toBe(true);
+    expect(matchesServerPattern('aXb', 'a$b')).toBe(false);
+  });
+
+  it('combines glob with exact segments', () => {
+    expect(matchesServerPattern('foo-bar-baz', 'foo-*-baz')).toBe(true);
+    expect(matchesServerPattern('foo-bar-qux', 'foo-*-baz')).toBe(false);
+  });
+
+  it('handles empty name', () => {
+    expect(matchesServerPattern('', '*')).toBe(true);
+    expect(matchesServerPattern('', '?')).toBe(false);
+    expect(matchesServerPattern('', '')).toBe(true);
+  });
+
+  it('handles consecutive * in pattern', () => {
+    expect(matchesServerPattern('puppeteer', '**puppeteer**')).toBe(true);
+    expect(matchesServerPattern('abc', 'a**c')).toBe(true);
+  });
+
+  it('handles ? at pattern boundaries', () => {
+    expect(matchesServerPattern('abc', '?bc')).toBe(true);
+    expect(matchesServerPattern('abc', 'ab?')).toBe(true);
+    expect(matchesServerPattern('abc', '???')).toBe(true);
+    expect(matchesServerPattern('ab', '???')).toBe(false);
+  });
+
+  it('rejects when pattern is longer than name', () => {
+    expect(matchesServerPattern('ab', 'a*b*c')).toBe(false);
+    expect(matchesServerPattern('abc', 'a*b*c')).toBe(true);
+  });
+});
+
+describe('matchesAnyServerPattern', () => {
+  it('returns false for undefined or empty list', () => {
+    expect(matchesAnyServerPattern('puppeteer', undefined)).toBe(false);
+    expect(matchesAnyServerPattern('puppeteer', [])).toBe(false);
+  });
+
+  it('matches if any pattern matches', () => {
+    expect(
+      matchesAnyServerPattern('puppeteer', ['playwright', '*puppeteer*']),
+    ).toBe(true);
+    expect(
+      matchesAnyServerPattern('chrome', ['playwright', '*puppeteer*']),
+    ).toBe(false);
+  });
+
+  it('works with mixed exact and glob patterns', () => {
+    expect(
+      matchesAnyServerPattern('playwright', ['playwright', '*puppeteer*']),
+    ).toBe(true);
+    expect(
+      matchesAnyServerPattern('my-puppeteer', ['playwright', '*puppeteer*']),
+    ).toBe(true);
+  });
+});
+
 describe('Server Config (config.ts)', () => {
   const MODEL = 'qwen3-coder-plus';
 
@@ -612,6 +700,62 @@ describe('Server Config (config.ts)', () => {
       });
     });
 
+    it('uses the visionModel selector baseUrl to disambiguate duplicate same-provider vision models', () => {
+      const config = new Config({
+        ...baseParams,
+        visionModel: 'openai:qwen3.7-plus\0https://token-plan.example.com/v1',
+      });
+      stubProvider(config, [
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          isVision: true,
+        },
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'openai:qwen3.7-plus',
+        baseUrl: 'https://token-plan.example.com/v1',
+      });
+    });
+
+    it('falls back to auto-select when a legacy visionModel matches multiple endpoints', () => {
+      const config = new Config({
+        ...baseParams,
+        visionModel: 'openai:qwen3.7-plus',
+      });
+      stubProvider(config, [
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+          isVision: true,
+        },
+        {
+          id: 'qwen3.7-plus',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://token-plan.example.com/v1',
+          isVision: true,
+        },
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+    });
+
     it('falls back to auto-select on a malformed visionModel selector instead of throwing', () => {
       // 'openai:' is a known authType with no model id — resolveModelId throws,
       // and the guard must swallow it rather than take down every image request.
@@ -629,6 +773,30 @@ describe('Server Config (config.ts)', () => {
         id: 'vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
+    });
+
+    it('falls back to auto-select on a visionModel with no selector before the baseUrl delimiter', () => {
+      const config = new Config({
+        ...baseParams,
+        visionModel: '\0https://example.com/v1',
+      });
+      const warn = vi.spyOn(config.getDebugLogger(), 'warn');
+      stubProvider(config, [
+        {
+          id: 'vl-same-provider',
+          authType: AuthType.USE_OPENAI,
+          baseUrl: 'https://primary.example.com',
+          isVision: true,
+        },
+      ]);
+
+      expect(config.getDefaultVisionBridgeModel()).toEqual({
+        id: 'vl-same-provider',
+        baseUrl: 'https://primary.example.com',
+      });
+      expect(warn).toHaveBeenCalledWith(
+        expect.stringContaining("'\\0https://example.com/v1'"),
+      );
     });
 
     it('drops a pin that points at the current primary model and auto-selects a same-provider VL model instead', () => {
@@ -1059,6 +1227,125 @@ describe('Server Config (config.ts)', () => {
         pending: ['z'],
       });
       expect(config.getAllowedMcpServers()).toEqual(['y']);
+    });
+
+    it('getMcpServers filters by glob pattern in allowedMcpServers', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          puppeteer: srvA,
+          'my-puppeteer-server': srvB,
+          playwright: srvA,
+        },
+      });
+      config.setAllowedMcpServers(['*puppeteer*']);
+      const result = config.getMcpServers();
+      expect(Object.keys(result!)).toEqual([
+        'puppeteer',
+        'my-puppeteer-server',
+      ]);
+      expect(Object.keys(result!)).not.toContain('playwright');
+    });
+
+    it('isMcpServerDisabled supports glob patterns in excludedMcpServers', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          puppeteer: srvA,
+          'my-puppeteer': srvA,
+          playwright: srvB,
+        },
+      });
+      config.setExcludedMcpServers(['*puppeteer*']);
+      expect(config.isMcpServerDisabled('puppeteer')).toBe(true);
+      expect(config.isMcpServerDisabled('my-puppeteer')).toBe(true);
+      expect(config.isMcpServerDisabled('playwright')).toBe(false);
+      expect(config.getMcpServers()!['puppeteer']).toBeDefined();
+      expect(config.getMcpServers()!['my-puppeteer']).toBeDefined();
+    });
+
+    it('getMcpServerUnavailableReason classifies by glob match', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          puppeteer: srvA,
+          playwright: srvB,
+          chrome: srvA,
+        },
+      });
+      await config.reinitializeMcpServers({
+        puppeteer: srvA,
+        playwright: srvB,
+        chrome: srvA,
+      });
+
+      config.setAllowedMcpServers(['play*']);
+      expect(config.getMcpServerUnavailableReason('puppeteer')).toBe(
+        'not_allowed',
+      );
+      expect(
+        config.getMcpServerUnavailableReason('playwright'),
+      ).toBeUndefined();
+
+      // Clear allow-list so the excluded check is reached.
+      config.setAllowedMcpServers(undefined);
+      config.setExcludedMcpServers(['*chrome*']);
+      expect(config.getMcpServerUnavailableReason('chrome')).toBe('excluded');
+    });
+
+    it('exclude takes precedence over allow with glob patterns', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { puppeteer: srvA, playwright: srvB },
+      });
+      await config.reinitializeMcpServers({
+        puppeteer: srvA,
+        playwright: srvB,
+      });
+
+      config.setAllowedMcpServers(['*']);
+      config.setExcludedMcpServers(['puppeteer']);
+      expect(config.getMcpServerUnavailableReason('puppeteer')).toBe(
+        'excluded',
+      );
+      expect(
+        config.getMcpServerUnavailableReason('playwright'),
+      ).toBeUndefined();
+    });
+
+    it('exclude takes precedence when both lists use globs', async () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: { puppeteer: srvA, playwright: srvB },
+      });
+      await config.reinitializeMcpServers({
+        puppeteer: srvA,
+        playwright: srvB,
+      });
+
+      config.setAllowedMcpServers(['*puppeteer*']);
+      config.setExcludedMcpServers(['puppeteer']);
+      expect(config.getMcpServerUnavailableReason('puppeteer')).toBe(
+        'excluded',
+      );
+      expect(config.isMcpServerDisabled('puppeteer')).toBe(true);
+    });
+
+    it('getBlockedMcpServers returns servers not matching allowed glob', () => {
+      const config = new Config({
+        ...baseParams,
+        mcpServers: {
+          puppeteer: srvA,
+          'my-puppeteer': srvA,
+          playwright: srvB,
+        },
+      });
+      config.setAllowedMcpServers(['*puppeteer*']);
+      const blocked = config.getBlockedMcpServers();
+      const blockedNames = blocked.map((s) => s.name);
+      expect(blockedNames).toContain('playwright');
+      expect(blockedNames).not.toContain('puppeteer');
+      expect(blockedNames).not.toContain('my-puppeteer');
     });
   });
 
@@ -3118,8 +3405,7 @@ describe('Server Config (config.ts)', () => {
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     const options = lastCall?.at(-1) as
-      | LoadServerHierarchicalMemoryOptions
-      | undefined;
+      LoadServerHierarchicalMemoryOptions | undefined;
     expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
 
     await options?.onInstructionsLoaded?.({
@@ -5463,9 +5749,8 @@ describe('Model Switching and Config Updates', () => {
     }
 
     it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
-      const { runWithRuntimeContentGenerator } = await import(
-        '../agents/runtime/agent-context.js'
-      );
+      const { runWithRuntimeContentGenerator } =
+        await import('../agents/runtime/agent-context.js');
       const config = new Config(baseParams);
       const parentGenerator = {
         generateContentStream: vi.fn(),
@@ -5512,9 +5797,8 @@ describe('Model Switching and Config Updates', () => {
     });
 
     it('falls back to the parent model id when the runtime view config has no model', async () => {
-      const { runWithRuntimeContentGenerator } = await import(
-        '../agents/runtime/agent-context.js'
-      );
+      const { runWithRuntimeContentGenerator } =
+        await import('../agents/runtime/agent-context.js');
       const config = new Config(baseParams);
       setInstanceFields(
         config,

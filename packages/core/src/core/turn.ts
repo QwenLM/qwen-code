@@ -6,6 +6,7 @@
 
 import {
   FinishReason,
+  type Content,
   type Part,
   type PartListUnion,
   type GenerateContentResponse,
@@ -36,6 +37,9 @@ import {
 import type { LoopType } from '../telemetry/types.js';
 import type { ActiveGoal } from '../goals/activeGoalStore.js';
 import { getProviderToolCallId } from './toolCallIdUtils.js';
+
+const ERROR_REPORT_HISTORY_TAIL_COUNT = 8;
+const ERROR_REPORT_TEXT_PREVIEW_CHARS = 200;
 
 // Define a structure for tools passed to the server
 export interface ServerTool {
@@ -121,6 +125,63 @@ export interface ToolCallResponseInfo {
   errorType: ToolErrorType | undefined;
   contentLength?: number;
   modelOverride?: string;
+}
+
+function normalizeRequestParts(req: PartListUnion): Part[] {
+  const parts = Array.isArray(req) ? req : [req];
+  return parts.map((part) =>
+    typeof part === 'string' ? { text: part } : (part as Part),
+  );
+}
+
+function summarizeParts(parts: Part[]): {
+  partCount: number;
+  functionCalls: string[];
+  functionResponses: string[];
+  textPreview: string;
+} {
+  return {
+    partCount: parts.length,
+    functionCalls: parts
+      .map((part) => part.functionCall?.name)
+      .filter((name): name is string => typeof name === 'string'),
+    functionResponses: parts
+      .map((part) => part.functionResponse?.name)
+      .filter((name): name is string => typeof name === 'string'),
+    textPreview: (() => {
+      let textPreview = '';
+      for (const part of parts) {
+        if (typeof part.text !== 'string' || part.thought) continue;
+        const remaining = ERROR_REPORT_TEXT_PREVIEW_CHARS - textPreview.length;
+        if (remaining <= 0) break;
+        textPreview += part.text.slice(0, remaining);
+      }
+      return textPreview;
+    })(),
+  };
+}
+
+function summarizeHistoryEntry(content: Content) {
+  return {
+    role: content.role,
+    ...summarizeParts(content.parts ?? []),
+  };
+}
+
+function buildApiErrorReportContext(chat: GeminiChat, req: PartListUnion) {
+  const requestParts = normalizeRequestParts(req);
+  return {
+    history: {
+      rawLength: chat.getHistoryLength(),
+      tail: chat
+        .getHistoryTailShallow(
+          ERROR_REPORT_HISTORY_TAIL_COUNT,
+          /* curated */ true,
+        )
+        .map(summarizeHistoryEntry),
+    },
+    request: summarizeParts(requestParts),
+  };
 }
 
 function duplicateProviderToolCallMessage(providerCallId: string): string {
@@ -495,7 +556,21 @@ export class Turn {
         throw error;
       }
 
-      const contextForReport = [...this.chat.getHistory(/*curated*/ true), req];
+      let contextForReport: Record<string, unknown>;
+      try {
+        contextForReport = buildApiErrorReportContext(this.chat, req);
+      } catch (diagError) {
+        contextForReport = {
+          history: {
+            error: 'failed to build diagnostic summary',
+            cause:
+              diagError instanceof Error
+                ? { message: diagError.message, stack: diagError.stack }
+                : String(diagError),
+          },
+          request: summarizeParts(normalizeRequestParts(req)),
+        };
+      }
       await reportError(
         error,
         'Error when talking to API',

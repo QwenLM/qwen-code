@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { AuthType } from '@qwen-code/qwen-code-core';
+import { AuthType, type Config } from '@qwen-code/qwen-code-core';
 import { z } from 'zod';
 
 /**
@@ -132,4 +132,39 @@ export function parseAcpModelOption(input: string): {
     }
   }
   return { modelId: trimmed };
+}
+
+/**
+ * Whether a bare `modelId` resolves to the SAME provider identity as the active
+ * content generator — same auth type, base URL, and credential env key.
+ *
+ * A per-turn inline `modelOverride` reuses the active provider's endpoint and
+ * credentials and only swaps the model id; it cannot rebuild baseUrl/envKey for
+ * a different provider. Any consumer that applies a `submit_prompt` result's
+ * `modelOverride` must gate on this so an override naming a same-id model owned
+ * by a different provider (or a different auth type) is never silently sent to
+ * the active endpoint/account — even if a future (or untrusted) slash command
+ * produces the override instead of the validated `/model` command. `modelId` is
+ * the bare id without any `(authType)` suffix.
+ */
+export function isInlineModelOverrideAllowed(
+  config: Config,
+  modelId: string,
+): boolean {
+  const contentGeneratorConfig = config.getContentGeneratorConfig();
+  const authType = contentGeneratorConfig?.authType;
+  if (!authType) {
+    return false;
+  }
+  const activeBaseUrl = contentGeneratorConfig.baseUrl;
+  const activeEnvKey = contentGeneratorConfig.apiKeyEnvKey;
+  return config
+    .getAvailableModelsForAuthType(authType)
+    .filter((m) => !m.fastOnly && !m.voiceOnly)
+    .some(
+      (m) =>
+        m.id === modelId &&
+        (m.baseUrl ?? undefined) === (activeBaseUrl ?? undefined) &&
+        (m.envKey ?? undefined) === (activeEnvKey ?? undefined),
+    );
 }
