@@ -10050,6 +10050,7 @@ describe('createServeApp', () => {
         code: 'session_archiving',
         sessionId: sid,
       });
+      expect(archiveRes.body.error).toContain('locked by another operation');
 
       releaseLoad();
       const loadRes = await loadPromise;
