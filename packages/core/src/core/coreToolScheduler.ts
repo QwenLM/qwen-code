@@ -17,6 +17,7 @@ import type {
   AnyDeclarativeTool,
   AnyToolInvocation,
   ChatRecordingService,
+  ToolArtifact,
 } from '../index.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { compactToolResultDisplayForHistory } from '../utils/toolResultDisplayCompaction.js';
@@ -966,6 +967,32 @@ function withPostToolBatchAdditionalContext(
       additionalContext,
     ),
   } as CompletedToolCall;
+  return calls;
+}
+
+function withPostToolBatchArtifacts(
+  completedCalls: CompletedToolCall[],
+  artifacts: ToolArtifact[] | undefined,
+): CompletedToolCall[] {
+  if (!artifacts || artifacts.length === 0 || completedCalls.length === 0) {
+    return completedCalls;
+  }
+
+  const calls = [...completedCalls];
+  const lastIndex = calls.length - 1;
+  const lastCall = calls[lastIndex];
+  if (!lastCall) {
+    return completedCalls;
+  }
+
+  const existingArtifacts = lastCall.response.artifacts ?? [];
+  calls[lastIndex] = {
+    ...lastCall,
+    response: {
+      ...lastCall.response,
+      artifacts: [...existingArtifacts, ...artifacts],
+    },
+  };
   return calls;
 }
 
@@ -3692,6 +3719,9 @@ export class CoreToolScheduler {
           ...('modelOverride' in toolResult
             ? { modelOverride: toolResult.modelOverride }
             : {}),
+          ...(toolResult.artifacts && toolResult.artifacts.length > 0
+            ? { artifacts: toolResult.artifacts }
+            : {}),
         };
         this.setStatusInternal(callId, 'success', successResponse);
         safeSetStatus(span, { code: SpanStatusCode.OK });
@@ -3945,6 +3975,7 @@ export class CoreToolScheduler {
                     success: true,
                     shouldStop: r.shouldStop,
                     hasAdditionalContext: !!r.additionalContext,
+                    hasArtifacts: !!r.artifacts?.length,
                     blockType: r.shouldStop ? 'stop' : undefined,
                     postBatchStop: r.shouldStop,
                     postBatchStopReason: r.shouldStop
@@ -3971,6 +4002,10 @@ export class CoreToolScheduler {
           completedCalls = withPostToolBatchAdditionalContext(
             completedCalls,
             batchHookResult.additionalContext,
+          );
+          completedCalls = withPostToolBatchArtifacts(
+            completedCalls,
+            batchHookResult.artifacts,
           );
         }
 

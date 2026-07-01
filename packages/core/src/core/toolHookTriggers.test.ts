@@ -502,7 +502,7 @@ describe('toolHookTriggers', () => {
       });
     });
 
-    it('does not return PostToolBatch artifacts in V1', async () => {
+    it('returns PostToolBatch artifacts', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
         success: true,
@@ -523,6 +523,12 @@ describe('toolHookTriggers', () => {
       expect(result).toEqual({
         shouldStop: false,
         additionalContext: undefined,
+        artifacts: [
+          {
+            title: 'Batch report',
+            workspacePath: 'batch.html',
+          },
+        ],
       });
     });
 

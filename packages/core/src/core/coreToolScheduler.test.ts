@@ -2124,6 +2124,12 @@ describe('CoreToolScheduler', () => {
                       hookSpecificOutput: {
                         hookEventName: 'PostToolBatch',
                         additionalContext: 'batch context',
+                        artifacts: [
+                          {
+                            title: 'Batch report',
+                            workspacePath: 'batch.html',
+                          },
+                        ],
                       },
                     }
                   : { decision: 'allow' },
@@ -2221,13 +2227,20 @@ describe('CoreToolScheduler', () => {
       .calls as unknown as Array<[ToolCall[]]>;
     const completedCalls = completionCalls[0]?.[0];
     const lastCompletedCall = completedCalls?.at(-1);
-    const lastResponse =
+    const lastCompletedResponse =
       lastCompletedCall && 'response' in lastCompletedCall
-        ? lastCompletedCall.response.responseParts.at(-1)
+        ? lastCompletedCall.response
         : undefined;
+    const lastResponse = lastCompletedResponse?.responseParts.at(-1);
     expect(lastResponse?.functionResponse?.response?.['output']).toContain(
       'batch context',
     );
+    expect(lastCompletedResponse?.artifacts).toEqual([
+      {
+        title: 'Batch report',
+        workspacePath: 'batch.html',
+      },
+    ]);
     expect(
       (
         scheduler as unknown as {
