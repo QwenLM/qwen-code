@@ -131,7 +131,11 @@ export const ExtensionActionsView = ({
               );
             }
             setEnabled(!enabled);
-            await clearPluginCaches(config);
+            try {
+              await clearPluginCaches(config);
+            } catch {
+              // Cache refresh failure is recoverable via /reload-plugins.
+            }
             markPluginsChanged('extension enablement changed');
             onStatus({
               type: 'success',
@@ -210,7 +214,11 @@ export const ExtensionActionsView = ({
               () => {},
               false,
             );
-            await clearPluginCaches(config);
+            try {
+              await clearPluginCaches(config);
+            } catch {
+              // Cache refresh failure is recoverable via /reload-plugins.
+            }
             markPluginsChanged('extension updated');
             onStatus({
               type: 'success',
@@ -284,7 +292,11 @@ export const ExtensionActionsView = ({
         manager.setExtensionScope(name, newScope);
         setScope(newScope);
         setEnabled(true);
-        await clearPluginCaches(config);
+        try {
+          await clearPluginCaches(config);
+        } catch {
+          // Cache refresh failure is recoverable via /reload-plugins.
+        }
         markPluginsChanged('extension scope changed');
         onStatus({
           type: 'success',
@@ -311,7 +323,11 @@ export const ExtensionActionsView = ({
         await manager.uninstallExtension(ext.name, false, undefined, {
           refreshTools: false,
         });
-        await clearPluginCaches(config);
+        try {
+          await clearPluginCaches(config);
+        } catch {
+          // Cache refresh failure is recoverable via /reload-plugins.
+        }
         markPluginsChanged('extension uninstalled');
         onStatus({
           type: 'success',

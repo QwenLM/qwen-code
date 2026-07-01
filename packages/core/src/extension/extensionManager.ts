@@ -112,7 +112,7 @@ export enum SettingScope {
   SystemDefaults = 'SystemDefaults',
 }
 
-interface ExtensionRuntimeRefreshOptions {
+export interface ExtensionRuntimeRefreshOptions {
   refreshTools?: boolean;
 }
 

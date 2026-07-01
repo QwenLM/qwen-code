@@ -251,7 +251,11 @@ async function installAction(context: CommandContext, args: string) {
       Date.now(),
     );
     if (context.services.config) {
-      await clearPluginCaches(context.services.config);
+      try {
+        await clearPluginCaches(context.services.config);
+      } catch {
+        // Cache refresh failure is recoverable via /reload-plugins.
+      }
     }
     markPluginsChanged('extension installed');
   } catch (error) {

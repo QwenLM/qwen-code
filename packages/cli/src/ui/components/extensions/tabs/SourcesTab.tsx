@@ -216,7 +216,11 @@ export const SourcesTab = ({
         type: 'success',
         text: t('Installed extension "{{name}}".', { name: ext.name }),
       });
-      await clearPluginCaches(config);
+      try {
+        await clearPluginCaches(config);
+      } catch {
+        // Cache refresh failure is recoverable via /reload-plugins.
+      }
       markPluginsChanged('extension installed');
       await load();
       onChanged();
