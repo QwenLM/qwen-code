@@ -138,6 +138,8 @@ describe('parseChannelConfig', () => {
       cwd: '/custom',
       approvalMode: 'auto',
       instructions: 'Be helpful',
+      identity: { id: 'ops-agent', displayName: 'Ops Agent' },
+      memoryScope: { namespace: 'qwen-tag:ops', mode: 'metadata-only' },
       model: 'qwen-coder',
       groupPolicy: 'open',
       groups: { g1: { mentionKeywords: ['@bot'] } },
@@ -150,6 +152,14 @@ describe('parseChannelConfig', () => {
     expect(result.cwd).toBe('/custom');
     expect(result.approvalMode).toBe('auto');
     expect(result.instructions).toBe('Be helpful');
+    expect(result.identity).toEqual({
+      id: 'ops-agent',
+      displayName: 'Ops Agent',
+    });
+    expect(result.memoryScope).toEqual({
+      namespace: 'qwen-tag:ops',
+      mode: 'metadata-only',
+    });
     expect(result.model).toBe('qwen-coder');
     expect(result.groupPolicy).toBe('open');
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });

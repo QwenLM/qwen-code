@@ -94,9 +94,10 @@ same namespace into core memory paths without changing channel config shape.
 
 ### Prompt Boundary Injection
 
-`ChannelBase` already prepends `config.instructions` once per session. Extend
-that first-message injection to include a generated boundary note before custom
-instructions:
+`ChannelBase` already prepends `config.instructions` once per session. When a
+channel opts into channel-specific prompt context via `instructions`, `identity`,
+or `memoryScope`, extend that first-message injection to include a generated
+boundary note before custom instructions:
 
 ```text
 Channel identity:
@@ -116,6 +117,10 @@ over-promising isolation. If no description exists, omit that line.
 This note is injected once per agent session, like existing instructions. When
 the bridge reports a session death, the existing `instructedSessions` cleanup
 continues to allow reinjection for the next session.
+
+For compatibility, channels with no `instructions`, `identity`, or `memoryScope`
+configuration keep the existing raw prompt shape. Runtime identity and memory
+metadata are still derived for lifecycle events and status commands.
 
 ### Status Visibility
 
@@ -262,4 +267,3 @@ npm run typecheck
 None for this PR. Real core-memory namespace enforcement, daemon publication,
 adapter UI, tool/data ACLs, budgets, and proactive follow-up are explicitly
 future work.
-

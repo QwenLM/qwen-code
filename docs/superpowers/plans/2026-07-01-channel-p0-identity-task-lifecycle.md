@@ -348,6 +348,14 @@ Expected: fails because prompt boundary and status lines are not implemented.
 Add private method near metadata resolvers:
 
 ```ts
+  private shouldPrependChannelBoundaryPrompt(): boolean {
+    return Boolean(
+      this.config.instructions ||
+        this.config.identity ||
+        this.config.memoryScope,
+    );
+  }
+
   private channelBoundaryPrompt(): string {
     const identityLines = [
       'Channel identity:',
@@ -379,7 +387,10 @@ Replace the existing instruction block:
 with:
 
 ```ts
-    if (!this.instructedSessions.has(sessionId)) {
+    if (
+      this.shouldPrependChannelBoundaryPrompt() &&
+      !this.instructedSessions.has(sessionId)
+    ) {
       const prefix = this.config.instructions
         ? `${this.channelBoundaryPrompt()}\n\n${this.config.instructions}`
         : this.channelBoundaryPrompt();
@@ -722,4 +733,3 @@ git commit -m "feat(channels): add identity and task lifecycle metadata"
 ```
 
 Expected: commit contains no `package-lock.json`, generated assets, or platform adapter UI changes.
-

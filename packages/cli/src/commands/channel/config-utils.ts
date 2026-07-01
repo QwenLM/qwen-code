@@ -87,6 +87,8 @@ export async function parseChannelConfig(
     cwd: resolvePath((rawConfig['cwd'] as string) || defaultCwd),
     approvalMode: rawConfig['approvalMode'] as string | undefined,
     instructions: rawConfig['instructions'] as string | undefined,
+    identity: rawConfig['identity'] as ChannelConfig['identity'],
+    memoryScope: rawConfig['memoryScope'] as ChannelConfig['memoryScope'],
     model: rawConfig['model'] as string | undefined,
     groupPolicy:
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',

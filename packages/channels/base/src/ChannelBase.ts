@@ -1,5 +1,12 @@
 import { basename } from 'node:path';
-import type { ChannelConfig, DispatchMode, Envelope } from './types.js';
+import type {
+  ChannelConfig,
+  ChannelRuntimeIdentity,
+  ChannelRuntimeMemoryScope,
+  ChannelTaskLifecycleEvent,
+  DispatchMode,
+  Envelope,
+} from './types.js';
 import { BlockStreamer } from './BlockStreamer.js';
 import { GroupGate } from './GroupGate.js';
 import { SenderGate } from './SenderGate.js';
@@ -43,6 +50,7 @@ export interface ChannelBaseOptions {
 type CommandHandler = (envelope: Envelope, args: string) => Promise<boolean>;
 type ActivePrompt = {
   cancelled: boolean;
+  cancellationEmitted?: boolean;
   cancelRequested?: Promise<boolean>;
   done: Promise<void>;
   resolve: () => void;
@@ -96,6 +104,8 @@ export abstract class ChannelBase {
   protected gate: SenderGate;
   protected router: SessionRouter;
   protected name: string;
+  private readonly identity: ChannelRuntimeIdentity;
+  private readonly memoryScope: ChannelRuntimeMemoryScope;
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
   private instructedSessions: Set<string> = new Set();
@@ -120,6 +130,11 @@ export abstract class ChannelBase {
   private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
     const target = this.router.getTarget(event.sessionId);
     if (target) {
+      this.emitTaskLifecycle({
+        ...this.lifecycleBase(target.chatId, event.sessionId),
+        type: 'tool_call',
+        toolCall: event,
+      });
       this.onToolCall(target.chatId, event);
     }
   };
@@ -139,6 +154,8 @@ export abstract class ChannelBase {
     this.config = config;
     this.bridge = bridge;
     this.proxy = options?.proxy;
+    this.identity = this.resolveIdentity(name, config);
+    this.memoryScope = this.resolveMemoryScope(name, config);
 
     this.groupGate = new GroupGate(config.groupPolicy, config.groups);
 
@@ -167,6 +184,114 @@ export abstract class ChannelBase {
   abstract connect(): Promise<void>;
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void;
+
+  protected onTaskLifecycle(_event: ChannelTaskLifecycleEvent): void {}
+
+  private emitTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    try {
+      this.onTaskLifecycle(event);
+    } catch (err) {
+      const channel = sanitizeLogText(this.name, 64);
+      const sessionId = sanitizeLogText(event.sessionId, 64);
+      const message = sanitizeLogText(
+        err instanceof Error ? err.message : String(err),
+        256,
+      );
+      process.stderr.write(
+        `[${channel}] onTaskLifecycle threw for ${event.type} session ${sessionId}: ${message}\n`,
+      );
+    }
+  }
+
+  private emitTaskCancellation(
+    active: ActivePrompt,
+    sessionId: string,
+    reason: 'cancel_command' | 'clear' | 'steer',
+  ): boolean {
+    if (active.cancellationEmitted) {
+      return false;
+    }
+    active.cancellationEmitted = true;
+    this.emitTaskLifecycle({
+      ...this.lifecycleBase(active.chatId, sessionId, active.messageId),
+      type: 'cancelled',
+      reason,
+    });
+    return true;
+  }
+
+  private resolveIdentity(
+    name: string,
+    config: ChannelConfig,
+  ): ChannelRuntimeIdentity {
+    return {
+      id: config.identity?.id || `channel:${name}`,
+      displayName: config.identity?.displayName || name,
+      ...(config.identity?.description
+        ? { description: config.identity.description }
+        : {}),
+    };
+  }
+
+  private resolveMemoryScope(
+    name: string,
+    config: ChannelConfig,
+  ): ChannelRuntimeMemoryScope {
+    return {
+      namespace: config.memoryScope?.namespace || `channel:${name}`,
+      mode: 'metadata-only',
+    };
+  }
+
+  private channelBoundaryPrompt(): string {
+    const identityLines = [
+      'Channel identity:',
+      `- id: ${sanitizeQuotedText(this.identity.id, 128)}`,
+      `- display name: ${sanitizeQuotedText(this.identity.displayName, 128)}`,
+      ...(this.identity.description
+        ? [
+            `- description: ${sanitizeQuotedText(this.identity.description, 256)}`,
+          ]
+        : []),
+    ];
+    const memoryLines = [
+      'Memory scope:',
+      `- namespace: ${sanitizeQuotedText(this.memoryScope.namespace, 128)}`,
+      `- mode: ${this.memoryScope.mode}`,
+      '- storage isolation: not enforced by this version.',
+    ];
+    return [...identityLines, '', ...memoryLines].join('\n');
+  }
+
+  private shouldPrependChannelBoundaryPrompt(): boolean {
+    return Boolean(
+      this.config.instructions ||
+        this.config.identity ||
+        this.config.memoryScope,
+    );
+  }
+
+  private lifecycleBase(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): {
+    channelName: string;
+    chatId: string;
+    sessionId: string;
+    messageId?: string;
+    identity: ChannelRuntimeIdentity;
+    memoryScope: ChannelRuntimeMemoryScope;
+  } {
+    return {
+      channelName: this.name,
+      chatId,
+      sessionId,
+      ...(messageId ? { messageId } : {}),
+      identity: this.identity,
+      memoryScope: this.memoryScope,
+    };
+  }
 
   /** Replace the bridge instance (used after crash recovery restart). */
   setBridge(bridge: ChannelAgentBridge): void {
@@ -306,8 +431,9 @@ export abstract class ChannelBase {
       }
 
       active.cancelled = true;
-      active.stopStreaming?.();
+      this.stopActiveStreaming(active, activeSessionId, 'cancel');
       this.collectBuffers.delete(activeSessionId);
+      this.emitTaskCancellation(active, activeSessionId, 'cancel_command');
       await this.sendMessage(envelope.chatId, 'Cancelled current request.');
       return true;
     });
@@ -351,6 +477,7 @@ export abstract class ChannelBase {
           if (active) {
             // Bounded cancel + wind-down wait; purge regardless of the result.
             const settled = await this.cancelAndAwaitActive(active, id);
+            this.emitTaskCancellation(active, id, 'clear');
             if (!settled) {
               // Wedged: the turn never wound down within the bound. Surface it —
               // otherwise a zombie bridge.prompt() lingers in the child with zero
@@ -491,6 +618,8 @@ export abstract class ChannelBase {
         envelope.chatId,
         [
           `Channel: ${this.name}`,
+          `Identity: ${sanitizeQuotedText(this.identity.displayName, 128)}`,
+          `Memory: ${sanitizeQuotedText(this.memoryScope.namespace, 128)}`,
           // Only the basename — don't leak the absolute cwd to group members.
           `Workspace: ${basename(this.config.cwd)}`,
           `Session: ${active ? 'active' : 'none'}${scopeNote}`,
@@ -570,6 +699,8 @@ export abstract class ChannelBase {
         `Session: ${hasSession ? 'active' : 'none'}`,
         `Access: ${policy}`,
         `Channel: ${this.name}`,
+        `Identity: ${sanitizeQuotedText(this.identity.id, 128)}`,
+        `Memory: ${this.memoryScope.mode}`,
       ];
       await this.sendMessage(envelope.chatId, lines.join('\n'));
       return true;
@@ -987,9 +1118,15 @@ export abstract class ChannelBase {
       }
     }
 
-    // Prepend channel instructions on first message of a session
-    if (this.config.instructions && !this.instructedSessions.has(sessionId)) {
-      promptText = `${this.config.instructions}\n\n${promptText}`;
+    // Prepend channel boundary and instructions on first message of a session.
+    if (
+      this.shouldPrependChannelBoundaryPrompt() &&
+      !this.instructedSessions.has(sessionId)
+    ) {
+      const prefix = this.config.instructions
+        ? `${this.channelBoundaryPrompt()}\n\n${this.config.instructions}`
+        : this.channelBoundaryPrompt();
+      promptText = `${prefix}\n\n${promptText}`;
       this.instructedSessions.add(sessionId);
     }
 
@@ -1063,18 +1200,22 @@ export abstract class ChannelBase {
           // turn that runs without waiting for a wedged predecessor) is the
           // deferred fix — it needs an API change across every adapter and is out
           // of scope for this phase (wenshao option (b)).
+          const firstCancellation = !active.cancelled;
           active.cancelled = true;
-          process.stderr.write(
-            `[${this.name}] steer: cancelled active turn for ${envelope.senderId} in session ${sessionId}\n`,
-          );
-          this.stopActiveStreaming(active, sessionId, 'steer');
-          // Fire-and-forget, but LOG the IPC failure rather than swallow it, so a
-          // best-effort cancel that fails isn't silently invisible to operators.
-          void this.bridge.cancelSession(sessionId).catch((err) => {
+          this.emitTaskCancellation(active, sessionId, 'steer');
+          if (firstCancellation) {
             process.stderr.write(
-              `[${this.name}] cancelSession failed for session=${sessionId} (steer): ${err instanceof Error ? err.message : err}\n`,
+              `[${this.name}] steer: cancelled active turn for ${envelope.senderId} in session ${sessionId}\n`,
             );
-          });
+            this.stopActiveStreaming(active, sessionId, 'steer');
+            // Fire-and-forget, but LOG the IPC failure rather than swallow it, so a
+            // best-effort cancel that fails isn't silently invisible to operators.
+            void this.bridge.cancelSession(sessionId).catch((err) => {
+              process.stderr.write(
+                `[${this.name}] cancelSession failed for session=${sessionId} (steer): ${err instanceof Error ? err.message : err}\n`,
+              );
+            });
+          }
           // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
           // after the wind-down bound, this steered turn is wedged behind a hung
           // bridge.prompt() — surface it (the chained `.then()` clears it once the
@@ -1157,6 +1298,10 @@ export abstract class ChannelBase {
       // (Steer no longer hands a still-active session to a replacement; only
       // /clear evicts, and it gives the next turn a fresh session.)
       this.activePrompts.set(sessionId, promptState);
+      this.emitTaskLifecycle({
+        ...this.lifecycleBase(envelope.chatId, sessionId, envelope.messageId),
+        type: 'started',
+      });
 
       this.onPromptStart(envelope.chatId, sessionId, envelope.messageId);
 
@@ -1172,6 +1317,15 @@ export abstract class ChannelBase {
 
       const onChunk = (sid: string, chunk: string) => {
         if (sid === sessionId && !promptState.cancelled) {
+          this.emitTaskLifecycle({
+            ...this.lifecycleBase(
+              envelope.chatId,
+              sessionId,
+              envelope.messageId,
+            ),
+            type: 'text_chunk',
+            chunk,
+          });
           this.onResponseChunk(envelope.chatId, chunk, sessionId);
           streamer?.push(chunk);
         }
@@ -1197,6 +1351,32 @@ export abstract class ChannelBase {
             await this.onResponseComplete(envelope.chatId, response, sessionId);
           }
         }
+        if (!promptState.cancelled) {
+          this.emitTaskLifecycle({
+            ...this.lifecycleBase(
+              envelope.chatId,
+              sessionId,
+              envelope.messageId,
+            ),
+            type: 'completed',
+          });
+        }
+      } catch (err) {
+        if (promptState.cancelRequested && !promptState.cancelled) {
+          promptState.cancelled = await promptState.cancelRequested;
+        }
+        if (!promptState.cancelled) {
+          this.emitTaskLifecycle({
+            ...this.lifecycleBase(
+              envelope.chatId,
+              sessionId,
+              envelope.messageId,
+            ),
+            type: 'failed',
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        throw err;
       } finally {
         promptBridge.off('textChunk', onChunk);
         streamer?.stop();

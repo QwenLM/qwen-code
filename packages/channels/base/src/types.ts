@@ -1,4 +1,7 @@
-import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
+import type {
+  ChannelAgentBridge,
+  ToolCallEvent,
+} from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
 
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
@@ -6,6 +9,30 @@ export type SessionScope = 'user' | 'thread' | 'single';
 export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
+
+export interface ChannelIdentityConfig {
+  id?: string;
+  displayName?: string;
+  description?: string;
+}
+
+export interface ChannelRuntimeIdentity {
+  id: string;
+  displayName: string;
+  description?: string;
+}
+
+export type ChannelMemoryScopeMode = 'metadata-only';
+
+export interface ChannelMemoryScopeConfig {
+  namespace?: string;
+  mode?: ChannelMemoryScopeMode;
+}
+
+export interface ChannelRuntimeMemoryScope {
+  namespace: string;
+  mode: ChannelMemoryScopeMode;
+}
 
 export interface GroupConfig {
   requireMention?: boolean; // default: true
@@ -35,6 +62,8 @@ export interface ChannelConfig {
   cwd: string;
   approvalMode?: string;
   instructions?: string;
+  identity?: ChannelIdentityConfig;
+  memoryScope?: ChannelMemoryScopeConfig;
   model?: string;
   groupPolicy: GroupPolicy; // default: "disabled"
   groups: Record<string, GroupConfig>; // "*" for defaults, group IDs for overrides
@@ -101,6 +130,29 @@ export interface SessionTarget {
   chatId: string;
   threadId?: string;
 }
+
+interface ChannelTaskLifecycleBase {
+  channelName: string;
+  chatId: string;
+  sessionId: string;
+  messageId?: string;
+  identity: ChannelRuntimeIdentity;
+  memoryScope: ChannelRuntimeMemoryScope;
+}
+
+export type ChannelTaskLifecycleEvent =
+  | (ChannelTaskLifecycleBase & { type: 'started' })
+  | (ChannelTaskLifecycleBase & { type: 'text_chunk'; chunk: string })
+  | (Omit<ChannelTaskLifecycleBase, 'messageId'> & {
+      type: 'tool_call';
+      toolCall: ToolCallEvent;
+    })
+  | (ChannelTaskLifecycleBase & {
+      type: 'cancelled';
+      reason: 'cancel_command' | 'clear' | 'steer';
+    })
+  | (ChannelTaskLifecycleBase & { type: 'completed' })
+  | (ChannelTaskLifecycleBase & { type: 'failed'; error: string });
 
 /**
  * A channel plugin registers a channel type and provides a factory
