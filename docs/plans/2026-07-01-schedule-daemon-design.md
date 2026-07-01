@@ -136,18 +136,23 @@ Be fully self-contained — assume no memory of any prior conversation.
 
 ## Command surface
 
-Built with the existing `SlashCommand.subCommands` pattern
-(`packages/cli/src/ui/commands/`).
+`/schedule` is a **bundled skill** (`packages/core/src/skills/bundled/schedule/SKILL.md`),
+mirroring `/loop`: the SKILL.md drives the model, which acts through dedicated
+model-invokable tools (registered gated with the cron family). This replaced the initial
+hardcoded `SlashCommand`, so there is a single `/schedule` and no name collision.
 
 - `/schedule <natural language>` — e.g. `/schedule review new PRs at 9am on weekdays`.
-  The model resolves it to cron + prompt + cwd + model and **confirms before writing**
-  the `SKILL.md` (parity with `create_scheduled_task`'s "approval is the confirmation").
-- `/schedule list` — id / schedule / enabled / nextRun / lastRun / cwd.
-- `/schedule update <id>` — change schedule / prompt / model / approvalMode / enabled.
-- `/schedule run <id>` — fire once immediately.
-- `/schedule delete <id>` — remove.
-- `/schedule logs <id>` — show recent run records.
-- `/schedule daemon status | start | stop` — manage the host.
+  The skill has the model resolve it to cron/fireAt + a self-contained prompt + cwd +
+  model and call `schedule_create`, **confirming the schedule** as it creates it.
+- `/schedule list` — `schedule_list`: id / schedule / enabled / cwd / approval / last run.
+- `/schedule run <id>` — `schedule_run`: fire once immediately (background child).
+- `/schedule delete <id>` — `schedule_delete`: remove.
+
+Model tools: `schedule_create`, `schedule_list`, `schedule_run`, `schedule_delete`
+(all default `getDefaultPermission: 'ask'` inherited from the base except where noted;
+`schedule_create` explicitly returns `'ask'`). Deferred: `/schedule update`, a detailed
+`/schedule logs`, and `/schedule daemon status|start|stop` (the daemon is `qwen schedule
+daemon`; the run-delivery core already reads run records for a future logs view).
 
 ## Daemon lifecycle
 

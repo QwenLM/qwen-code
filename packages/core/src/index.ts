@@ -180,6 +180,18 @@ export type {
   ScheduleCreateTool,
   ScheduleCreateParams,
 } from './tools/schedule-create.js';
+export type {
+  ScheduleListTool,
+  ScheduleListParams,
+} from './tools/schedule-list.js';
+export type {
+  ScheduleRunTool,
+  ScheduleRunParams,
+} from './tools/schedule-run.js';
+export type {
+  ScheduleDeleteTool,
+  ScheduleDeleteParams,
+} from './tools/schedule-delete.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
@@ -226,6 +238,7 @@ export {
 export * from './services/schedule/schedule-daemon.js';
 export * from './services/schedule/daemon-lock.js';
 export * from './services/schedule/run-delivery.js';
+export * from './services/schedule/run-scheduled-task.js';
 export { humanReadableCron } from './utils/cronDisplay.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';

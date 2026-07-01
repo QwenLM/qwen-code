@@ -4,9 +4,11 @@
  * command so it is unit-testable without the blocking foreground loop.
  */
 
-import { ScheduleDaemon, type FireCallback } from '@qwen-code/qwen-code-core';
-
-import { runScheduledTask } from './run-scheduled-task.js';
+import {
+  ScheduleDaemon,
+  runScheduledTask,
+  type FireCallback,
+} from '@qwen-code/qwen-code-core';
 
 export interface StartDaemonDeps {
   /** Override the fire action (tests inject a no-op to avoid real spawns). */

@@ -5,14 +5,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import {
-  ApprovalMode,
-  getTaskRunsDir,
-  type FireContext,
-  type ScheduledTask,
-} from '@qwen-code/qwen-code-core';
+import { ApprovalMode } from '../../config/config.js';
+import { getTaskRunsDir, type ScheduledTask } from './task-store.js';
+import type { FireContext } from './schedule-daemon.js';
+import type { TaskRunRecord } from './run-delivery.js';
 
-import { runScheduledTask, type TaskRunRecord } from './run-scheduled-task.js';
+import { runScheduledTask } from './run-scheduled-task.js';
 
 function makeTask(overrides?: Partial<ScheduledTask>): ScheduledTask {
   return {

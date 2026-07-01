@@ -13,19 +13,25 @@ import { createWriteStream } from 'node:fs';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
-import {
-  atomicWriteJSON,
-  getTaskRunsDir,
-  type FireContext,
-  type TaskRunRecord,
-} from '@qwen-code/qwen-code-core';
-
-export type { TaskRunRecord };
+import { atomicWriteJSON } from '../../utils/atomicFileWrite.js';
+import { getTaskRunsDir } from './task-store.js';
+import type { FireContext } from './schedule-daemon.js';
+import type { TaskRunRecord } from './run-delivery.js';
 
 /** Wall-clock safety cap for an unattended run. */
 const DEFAULT_MAX_WALL_TIME = '30m';
 /** How much stderr tail to keep for a failure summary. */
 const STDERR_TAIL_BYTES = 2000;
+
+/** 8-char run id, shared by the daemon and manual `schedule_run`. */
+export function generateRunId(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let id = '';
+  for (let i = 0; i < 8; i++) {
+    id += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return id;
+}
 
 export interface RunScheduledTaskDeps {
   /** Injectable spawn for tests. */

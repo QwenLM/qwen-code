@@ -5808,6 +5808,20 @@ export class Config {
         );
         return new ScheduleCreateTool(this);
       });
+      await registerLazy(ToolNames.SCHEDULE_LIST, async () => {
+        const { ScheduleListTool } = await import('../tools/schedule-list.js');
+        return new ScheduleListTool(this);
+      });
+      await registerLazy(ToolNames.SCHEDULE_RUN, async () => {
+        const { ScheduleRunTool } = await import('../tools/schedule-run.js');
+        return new ScheduleRunTool(this);
+      });
+      await registerLazy(ToolNames.SCHEDULE_DELETE, async () => {
+        const { ScheduleDeleteTool } = await import(
+          '../tools/schedule-delete.js'
+        );
+        return new ScheduleDeleteTool(this);
+      });
       // Reuses the cron scheduler's session-only one-shot path, so it is
       // gated on the same flag as the cron tools.
       await registerLazy(ToolNames.LOOP_WAKEUP, async () => {
