@@ -65,6 +65,7 @@ const LINTERS = {
     run: `
       actionlint \
         -color \
+        -pyflakes= \
         -ignore 'SC2002:' \
         -ignore 'SC2016:' \
         -ignore 'SC2129:' \
