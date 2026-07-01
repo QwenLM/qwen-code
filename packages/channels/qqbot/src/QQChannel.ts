@@ -76,6 +76,8 @@ export class QQChannel extends ChannelBase {
   private sessionId: string = '';
   /** Bot's own QQ OPENID, extracted from the first inbound @mention targeting us. */
   private botOpenId: string = '';
+  /** Per-group bot OPENID map for multi-group support (member_openid is group-scoped). */
+  private botOpenIdByGroup: Map<string, string> = new Map();
   /** Set to true after first READY + session restore completes. Guards
    *  against stale textChunk events during startup reconnection. */
   private _ready = false;
@@ -577,6 +579,7 @@ export class QQChannel extends ChannelBase {
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
     this.msgSeqMap.clear();
+    this.botOpenIdByGroup.clear();
     this.seenMessages.clear();
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
@@ -771,6 +774,7 @@ export class QQChannel extends ChannelBase {
       replyMsgId: Array.from(this.replyMsgId.entries()),
       msgSeqMap: Array.from(this.msgSeqMap.entries()),
       groupActiveMsgEnabled: Array.from(this.groupActiveMsgEnabled.entries()),
+      botOpenIdByGroup: Array.from(this.botOpenIdByGroup.entries()),
     });
   }
 
@@ -864,6 +868,14 @@ export class QQChannel extends ChannelBase {
             ([, v]) => typeof v === 'boolean',
           ),
         ) as Map<string, boolean>;
+      }
+      if (raw.botOpenIdByGroup) {
+        // Validate: values must be valid OPENID format.
+        this.botOpenIdByGroup = new Map(
+          (raw.botOpenIdByGroup as Array<[string, unknown]>).filter(
+            ([, v]) => typeof v === 'string' && /^[A-F0-9]{32}$/i.test(v),
+          ),
+        ) as Map<string, string>;
       }
       return true;
     } catch (e) {
@@ -1519,7 +1531,10 @@ export class QQChannel extends ChannelBase {
    * validates format, writes invalid-format diagnostic to stderr.
    * Returns the validated id or empty string.
    */
-  private extractBotOpenId(mentions: QQGroupMessageEvent['mentions']): string {
+  private extractBotOpenId(
+    mentions: QQGroupMessageEvent['mentions'],
+    chatId?: string,
+  ): string {
     const selfMention = mentions?.find((m) => m.is_you);
     if (!selfMention?.id) return '';
     // For QQ group messages, use member_openid (group-specific OPENID)
@@ -1532,10 +1547,11 @@ export class QQChannel extends ChannelBase {
       return '';
     }
     this.botOpenId = botOpenId;
-    if (this.qqConfig.allowMention !== false) {
-      this.config.instructions += `\n\n机器人 OPENID: ${this.botOpenId}`;
+    if (chatId) {
+      this.botOpenIdByGroup.set(chatId, botOpenId);
+      this.saveQQState();
     }
-    return this.botOpenId;
+    return botOpenId;
   }
 
   // ── Message Handlers ───────────────────────────────────────────
@@ -1649,9 +1665,9 @@ export class QQChannel extends ChannelBase {
     // itself is the direct target.
     const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
 
-    // Extract bot's own OPENID from mentions
-    if (isAtBot && !this.botOpenId) {
-      this.extractBotOpenId(event.mentions);
+    // Extract bot's own OPENID from mentions (per-group)
+    if (isAtBot && !this.botOpenIdByGroup.has(chatId)) {
+      this.extractBotOpenId(event.mentions, chatId);
     }
 
     const isSlash = isAtBot && cleanText.startsWith('/');
@@ -1679,9 +1695,13 @@ export class QQChannel extends ChannelBase {
       return;
     }
 
+    // Inject per-group OPENID into the message prefix instead of global instructions
+    const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
+    const openIdSuffix = groupBotOpenId ? ` [botOpenId:${groupBotOpenId}]` : '';
+
     const text = isSlash
       ? sanitizePromptText(cleanText)
-      : `[atMention=${isAtBot}] ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? (event.content?.trim() ?? '') : cleanText)}`;
+      : `[atMention=${isAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? (event.content?.trim() ?? '') : cleanText)}`;
     this.handleInbound({
       channelName: this.name,
       senderId:
@@ -1839,9 +1859,9 @@ export class QQChannel extends ChannelBase {
     // 只有 @机器人本人 + 斜杠 才是 slash command
     const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
 
-    // Extract bot's own OPENID from mentions
-    if (isAtBot && !this.botOpenId) {
-      this.extractBotOpenId(event.mentions);
+    // Extract bot's own OPENID from mentions (per-group)
+    if (isAtBot && !this.botOpenIdByGroup.has(chatId)) {
+      this.extractBotOpenId(event.mentions, chatId);
     }
 
     const isSlash = isAtBot && cleanText.startsWith('/');
@@ -1856,9 +1876,13 @@ export class QQChannel extends ChannelBase {
     // When allowMention is enabled (default), preserve raw <@OPENID> tags so
     // the model can @mention group members. When disabled, strip tags before
     // the content reaches the LLM to prevent prompt-injection-based @mentions.
+    // Inject per-group OPENID into the message prefix instead of global instructions
+    const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
+    const openIdSuffix = groupBotOpenId ? ` [botOpenId:${groupBotOpenId}]` : '';
+
     const text = isSlash
       ? sanitizePromptText(cleanText)
-      : `[atMention=${isAtBot}] ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
+      : `[atMention=${isAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
 
     // Only track replyMsgId for at-mention messages — non-@messages should
     // not clobber a preceding @mention's replyMsgId, or the bot's response
