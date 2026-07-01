@@ -6207,6 +6207,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     | ((conn: AgentSideConnectionLike) => AgentLike)
     | undefined;
   let mockConfig: Config;
+  let liveCancelPendingPrompt: ReturnType<typeof vi.fn>;
 
   // Live session sessionId is whatever `getSessionId()` on the inner config
   // returns; matches the existing test scaffolding.
@@ -6216,6 +6217,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     vi.clearAllMocks();
     mockConnectionState.reset();
     capturedAgentFactory = undefined;
+    liveCancelPendingPrompt = vi.fn().mockResolvedValue(undefined);
 
     vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
       capturedAgentFactory = factory as typeof capturedAgentFactory;
@@ -6302,7 +6304,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
         ({
           getId: vi.fn().mockReturnValue(liveSessionId),
           getConfig: vi.fn().mockReturnValue(innerConfig),
-          cancelPendingPrompt: vi.fn().mockResolvedValue(undefined),
+          cancelPendingPrompt: liveCancelPendingPrompt,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -6440,6 +6442,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
         .map((session) => session.getId()),
     ).toContain(liveSessionId);
     expect(recording.flush).toHaveBeenCalledOnce();
+    expect(liveCancelPendingPrompt).not.toHaveBeenCalled();
     expect(toolRegistry.stop).not.toHaveBeenCalled();
 
     await expect(
@@ -6448,7 +6451,8 @@ describe('QwenAgent extMethod renameSession routing', () => {
         requireFlush: true,
       }),
     ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
-    expect(recording.flush).toHaveBeenCalledTimes(2);
+    expect(recording.flush).toHaveBeenCalledTimes(3);
+    expect(liveCancelPendingPrompt).toHaveBeenCalledOnce();
     expect(toolRegistry.stop).toHaveBeenCalledOnce();
     expect(
       (

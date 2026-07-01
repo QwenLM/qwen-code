@@ -1110,7 +1110,10 @@ describe('SessionService', () => {
     it('should not move worktree sidecar when archiving JSONL fails', async () => {
       mockActiveSessionOnly();
       mockActiveWorktreeSidecarOnly();
-      const jsonlError = new Error('jsonl move failed');
+      const jsonlError = new Error(
+        `EACCES: permission denied, rename '/tmp/runtime/chats/${sessionIdA}.jsonl' -> '/tmp/runtime/chats/archive/${sessionIdA}.jsonl'`,
+      ) as NodeJS.ErrnoException;
+      jsonlError.code = 'EACCES';
       renameSyncSpy.mockImplementation((sourcePath) => {
         if (sourcePath.toString().endsWith('.jsonl')) {
           throw jsonlError;
@@ -1121,9 +1124,11 @@ describe('SessionService', () => {
       const result = await sessionService.archiveSessions([sessionIdA]);
 
       expect(result.archived).toEqual([]);
-      expect(result.errors).toEqual([
-        { sessionId: sessionIdA, error: jsonlError },
-      ]);
+      expect(result.errors[0]?.sessionId).toBe(sessionIdA);
+      expect(result.errors[0]?.error.message).toBe(
+        'Failed to archive session file: EACCES',
+      );
+      expect(result.errors[0]?.error.message).not.toContain('/tmp/runtime');
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
@@ -1332,7 +1337,10 @@ describe('SessionService', () => {
     it('should not move worktree sidecar when unarchiving JSONL fails', async () => {
       mockArchivedSessionOnly();
       mockArchivedWorktreeSidecarOnly();
-      const jsonlError = new Error('jsonl move failed');
+      const jsonlError = new Error(
+        `ENOSPC: no space left on device, rename '/tmp/runtime/chats/archive/${sessionIdA}.jsonl' -> '/tmp/runtime/chats/${sessionIdA}.jsonl'`,
+      ) as NodeJS.ErrnoException;
+      jsonlError.code = 'ENOSPC';
       renameSyncSpy.mockImplementation((sourcePath) => {
         if (
           sourcePath.toString().endsWith('.jsonl') &&
@@ -1346,9 +1354,11 @@ describe('SessionService', () => {
       const result = await sessionService.unarchiveSessions([sessionIdA]);
 
       expect(result.unarchived).toEqual([]);
-      expect(result.errors).toEqual([
-        { sessionId: sessionIdA, error: jsonlError },
-      ]);
+      expect(result.errors[0]?.sessionId).toBe(sessionIdA);
+      expect(result.errors[0]?.error.message).toBe(
+        'Failed to unarchive session file: ENOSPC',
+      );
+      expect(result.errors[0]?.error.message).not.toContain('/tmp/runtime');
       expect(renameSyncSpy).toHaveBeenCalledWith(
         expect.stringContaining(`/chats/archive/${sessionIdA}.jsonl`),
         expect.stringContaining(`/chats/${sessionIdA}.jsonl`),

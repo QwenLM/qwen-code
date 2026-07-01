@@ -2626,6 +2626,28 @@ class QwenAgent implements Agent {
       return;
     }
 
+    const requireFlush = opts?.requireFlush === true;
+    const flushRecording = async (): Promise<unknown> => {
+      try {
+        await session.getConfig().getChatRecordingService()?.flush();
+        return undefined;
+      } catch (err) {
+        debugLogger.debug(
+          `Session ${sessionId} chat recording flush during close failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return err;
+      }
+    };
+
+    if (requireFlush) {
+      const preCancelFlushError = await flushRecording();
+      if (preCancelFlushError !== undefined) {
+        throw preCancelFlushError;
+      }
+    }
+
     try {
       await session.cancelPendingPrompt();
     } catch (err) {
@@ -2636,19 +2658,8 @@ class QwenAgent implements Agent {
       );
     }
 
-    let flushError: unknown;
-    try {
-      await session.getConfig().getChatRecordingService()?.flush();
-    } catch (err) {
-      flushError = err;
-      debugLogger.debug(
-        `Session ${sessionId} chat recording flush during close failed: ${
-          err instanceof Error ? err.message : String(err)
-        }`,
-      );
-    }
-
-    if (flushError !== undefined && opts?.requireFlush === true) {
+    const flushError = await flushRecording();
+    if (flushError !== undefined && requireFlush) {
       throw flushError;
     }
 

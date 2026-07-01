@@ -26,6 +26,7 @@ import {
   InvalidPermissionOptionError,
   PermissionForbiddenError,
   PermissionPolicyNotImplementedError,
+  SessionArchivingError,
 } from '../acp-session-bridge.js';
 import { FsError } from '../fs/errors.js';
 import {
@@ -1185,8 +1186,8 @@ export class AcpDispatcher {
             } catch (err) {
               const promptAbort = conn.sessions.get(sessionId)?.promptAbort;
               if (
-                err instanceof Error &&
-                err.name === 'SessionArchivingError' &&
+                err instanceof SessionArchivingError &&
+                err.lockKind === 'shared' &&
                 promptAbort !== undefined
               ) {
                 await this.archiveCoordinator.runSharedMany(

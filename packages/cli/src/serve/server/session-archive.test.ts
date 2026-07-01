@@ -11,6 +11,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionService, Storage } from '@qwen-code/qwen-code-core';
 import {
   SessionArchivedError,
+  SessionArchivingError,
   SessionConflictError,
 } from '../acp-session-bridge.js';
 import {
@@ -80,6 +81,69 @@ describe('assertSessionLoadable', () => {
     } finally {
       fs.rmSync(otherWorkspace, { recursive: true, force: true });
     }
+  });
+});
+
+describe('SessionArchiveCoordinator', () => {
+  it('rejects shared access while an exclusive lock is held', async () => {
+    const coordinator = new SessionArchiveCoordinator();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440020';
+
+    await coordinator.runExclusiveMany([sessionId], async () => {
+      await expect(
+        coordinator.runSharedMany([sessionId], async () => 'shared'),
+      ).rejects.toThrow(SessionArchivingError);
+    });
+  });
+
+  it('allows concurrent shared access and reference-counts release', async () => {
+    const coordinator = new SessionArchiveCoordinator();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440021';
+    let releaseFirst!: () => void;
+    const firstReleased = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const first = coordinator.runSharedMany([sessionId], async () => {
+      await firstReleased;
+      return 'first';
+    });
+
+    await expect(
+      coordinator.runSharedMany([sessionId], async () => 'second'),
+    ).resolves.toBe('second');
+    await expect(
+      coordinator.runExclusiveMany([sessionId], async () => 'exclusive'),
+    ).rejects.toThrow(SessionArchivingError);
+    releaseFirst();
+    await expect(first).resolves.toBe('first');
+    await expect(
+      coordinator.runExclusiveMany([sessionId], async () => 'exclusive'),
+    ).resolves.toBe('exclusive');
+  });
+
+  it('assertNotTransitioning throws during exclusive access', async () => {
+    const coordinator = new SessionArchiveCoordinator();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440022';
+
+    await coordinator.runExclusiveMany([sessionId], async () => {
+      expect(() => coordinator.assertNotTransitioning(sessionId)).toThrow(
+        SessionArchivingError,
+      );
+    });
+  });
+
+  it('releases exclusive locks when the callback throws', async () => {
+    const coordinator = new SessionArchiveCoordinator();
+    const sessionId = '550e8400-e29b-41d4-a716-446655440023';
+
+    await expect(
+      coordinator.runExclusiveMany([sessionId], async () => {
+        throw new Error('boom');
+      }),
+    ).rejects.toThrow('boom');
+    await expect(
+      coordinator.runExclusiveMany([sessionId], async () => 'ok'),
+    ).resolves.toBe('ok');
   });
 });
 

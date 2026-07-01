@@ -421,6 +421,14 @@ export class SessionService {
     return true;
   }
 
+  private sessionFileMoveError(
+    action: 'archive' | 'unarchive',
+    error: unknown,
+  ): Error {
+    const code = (error as NodeJS.ErrnoException).code ?? 'unknown error';
+    return new Error(`Failed to ${action} session file: ${code}`);
+  }
+
   /**
    * Reads the session title from a JSONL file.
    *
@@ -1103,7 +1111,11 @@ export class SessionService {
           sessionId,
           'archived',
         );
-        fs.renameSync(sourcePath, targetPath);
+        try {
+          fs.renameSync(sourcePath, targetPath);
+        } catch (error) {
+          throw this.sessionFileMoveError('archive', error);
+        }
         try {
           this.moveOptionalFile(activeSidecar, archivedSidecar);
         } catch (sidecarError) {
@@ -1164,7 +1176,11 @@ export class SessionService {
           'active',
         );
         fs.mkdirSync(path.dirname(targetPath), { recursive: true });
-        fs.renameSync(sourcePath, targetPath);
+        try {
+          fs.renameSync(sourcePath, targetPath);
+        } catch (error) {
+          throw this.sessionFileMoveError('unarchive', error);
+        }
         try {
           this.moveOptionalFile(archivedSidecar, activeSidecar);
         } catch (sidecarError) {
