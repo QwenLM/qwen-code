@@ -5172,7 +5172,7 @@ describe('ChannelBase', () => {
         const loopResult = loopRun.catch((error: unknown) => error);
         await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
 
-        await vi.advanceTimersByTimeAsync(1000);
+        await vi.advanceTimersByTimeAsync(6000);
 
         await expect(loopResult).resolves.toMatchObject({
           message: 'loop timed out',

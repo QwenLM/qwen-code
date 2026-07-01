@@ -198,7 +198,7 @@ export class ChannelLoopStore {
     for (const [index, value] of parsed.entries()) {
       if (!isChannelLoop(value)) {
         process.stderr.write(
-          `Invalid channel loop at index ${index} in ${this.filePath}.\n`,
+          `Invalid channel loop at index ${index} in ${this.filePath}: ${JSON.stringify(value)}\n`,
         );
         continue;
       }

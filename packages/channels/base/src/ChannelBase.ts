@@ -35,6 +35,7 @@ import { ChannelLoopSkippedError } from './ChannelLoopScheduler.js';
  * later is already invalidated.
  */
 export const CLEAR_CANCEL_TIMEOUT_MS = 3000;
+const LOOP_CANCEL_GRACE_MS = 5000;
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
@@ -423,17 +424,43 @@ export abstract class ChannelBase {
     } catch (err) {
       if (err instanceof Error && err.message === 'loop timed out') {
         promptState.cancelled = true;
-        promptBridge.cancelSession(sessionId).catch((cancelErr) => {
-          process.stderr.write(
-            `[${this.name}] cancelSession failed for timed out loop ${jobId} in session ${sessionId}: ${
-              cancelErr instanceof Error ? cancelErr.message : cancelErr
-            }\n`,
-          );
-        });
+        await this.cancelTimedOutLoopPrompt(promptBridge, sessionId, jobId);
       }
       throw err;
     } finally {
       clearTimeout(timer);
+    }
+  }
+
+  private async cancelTimedOutLoopPrompt(
+    promptBridge: ChannelAgentBridge,
+    sessionId: string,
+    jobId: string,
+  ): Promise<void> {
+    let graceTimer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const cancelled = await Promise.race([
+        promptBridge.cancelSession(sessionId).then(() => true),
+        new Promise<boolean>((resolve) => {
+          graceTimer = setTimeout(() => resolve(false), LOOP_CANCEL_GRACE_MS);
+          graceTimer.unref?.();
+        }),
+      ]);
+      if (!cancelled) {
+        this.router.removeSessionId(sessionId);
+        this.instructedSessions.delete(sessionId);
+        process.stderr.write(
+          `[${this.name}] retired timed out loop ${jobId} session ${sessionId} after cancel did not settle\n`,
+        );
+      }
+    } catch (cancelErr) {
+      process.stderr.write(
+        `[${this.name}] cancelSession failed for timed out loop ${jobId} in session ${sessionId}: ${
+          cancelErr instanceof Error ? cancelErr.message : cancelErr
+        }\n`,
+      );
+    } finally {
+      clearTimeout(graceTimer);
     }
   }
 

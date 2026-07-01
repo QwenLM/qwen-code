@@ -337,6 +337,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         await bridge.start();
         router.setBridge(bridge);
         channel.setBridge(bridge);
+        channel.disconnect();
         await channel.connect();
         registerToolCallDispatch(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
@@ -531,8 +532,23 @@ async function startAll(proxy?: string): Promise<void> {
         for (const channel of channels.values()) {
           channel.setBridge(bridge);
         }
-        for (const channel of connectedChannels.values()) {
-          await channel.connect();
+        for (const [name, channel] of connectedChannels) {
+          try {
+            channel.disconnect();
+            await channel.connect();
+          } catch (err) {
+            writeStderrLine(
+              `[Channel] "${name}" failed to reconnect: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            connectedChannels.delete(name);
+          }
+        }
+        if (connectedChannels.size === 0) {
+          writeStderrLine('[Channel] No channels reconnected. Exiting.');
+          bridge.stop();
+          router.clearAll();
+          removeServiceInfo();
+          process.exit(1);
         }
         registerToolCallDispatch(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);

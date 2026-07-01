@@ -51,9 +51,13 @@ export class ChannelLoopScheduler {
 
   start(): void {
     if (this.timer) return;
+    const generation = this.generation;
     const startup = this.reconcileStartupState();
     void startup
-      .then(() => this.tick())
+      .then(() => {
+        if (!this.timer || this.generation !== generation) return;
+        return this.tick();
+      })
       .catch((err) => {
         process.stderr.write(`[scheduler] initial tick failed: ${err}\n`);
       });
@@ -121,9 +125,7 @@ export class ChannelLoopScheduler {
 
   private isDue(job: ChannelLoop, now: Date): boolean {
     try {
-      const after = new Date(
-        job.lastFinishedAt ?? job.lastFiredAt ?? job.createdAt,
-      );
+      const after = new Date(lastAnchor(job));
       return this.nextFireTime(job.cron, after).getTime() <= now.getTime();
     } catch (err) {
       process.stderr.write(
@@ -166,14 +168,15 @@ export class ChannelLoopScheduler {
     if (!latestJob?.enabled) return;
     if (this.generation !== generation) return;
 
+    const runningSince = now.toISOString();
     let resultPreview: string | undefined;
     try {
       await this.store.update(latestJob.id, {
-        runningSince: now.toISOString(),
-        lastFiredAt: now.toISOString(),
+        runningSince,
+        lastFiredAt: runningSince,
       });
       if (this.generation !== generation) {
-        await this.clearRunningSince(latestJob.id);
+        await this.clearRunningSince(latestJob.id, runningSince);
         return;
       }
       resultPreview = await channel.runLoopPrompt(latestJob, {
@@ -188,12 +191,12 @@ export class ChannelLoopScheduler {
       });
     } catch (err) {
       if (err instanceof ChannelLoopSkippedError) {
-        await this.clearRunningSince(latestJob.id);
+        await this.recordSkipped(latestJob.id, runningSince);
         return;
       }
       const currentJob = await this.findJob(latestJob.id);
       if (this.generation !== generation || !currentJob?.enabled) {
-        await this.clearRunningSince(latestJob.id);
+        await this.clearRunningSince(latestJob.id, runningSince);
         return;
       }
       await this.recordFailure(
@@ -203,23 +206,24 @@ export class ChannelLoopScheduler {
       );
       return;
     }
-    if (this.generation !== generation) {
-      await this.clearRunningSince(latestJob.id);
+
+    const currentJob = await this.findJob(latestJob.id);
+    if (!currentJob || currentJob.runningSince !== runningSince) {
       return;
     }
 
     const finishedAt = this.now();
     const patch: ChannelLoopPatch = {
-      lastFiredAt: now.toISOString(),
+      lastFiredAt: runningSince,
       lastFinishedAt: finishedAt.toISOString(),
       lastResultPreview: truncateResultPreview(resultPreview),
       lastStatus: 'ok',
       lastError: undefined,
       consecutiveFailures: 0,
       runningSince: undefined,
-      runCount: latestJob.runCount + 1,
+      runCount: currentJob.runCount + 1,
     };
-    if (!latestJob.recurring) {
+    if (!currentJob.recurring) {
       patch.enabled = false;
     }
     try {
@@ -228,7 +232,7 @@ export class ChannelLoopScheduler {
       process.stderr.write(
         `[scheduler] loop ${latestJob.id} succeeded but status persist failed: ${err instanceof Error ? err.message : String(err)}\n`,
       );
-      await this.clearRunningSince(latestJob.id);
+      await this.clearRunningSince(latestJob.id, runningSince);
     }
   }
 
@@ -237,12 +241,39 @@ export class ChannelLoopScheduler {
     return jobs.find((job) => job.id === id);
   }
 
-  private async clearRunningSince(id: string): Promise<void> {
+  private async clearRunningSince(
+    id: string,
+    expectedRunningSince?: string,
+  ): Promise<void> {
     try {
+      if (expectedRunningSince) {
+        const currentJob = await this.findJob(id);
+        if (currentJob?.runningSince !== expectedRunningSince) return;
+      }
       await this.store.update(id, { runningSince: undefined });
     } catch (err) {
       process.stderr.write(
         `[scheduler] failed to clear running state for loop ${id}: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
+    }
+  }
+
+  private async recordSkipped(
+    id: string,
+    expectedRunningSince: string,
+  ): Promise<void> {
+    try {
+      const currentJob = await this.findJob(id);
+      if (!currentJob || currentJob.runningSince !== expectedRunningSince) {
+        return;
+      }
+      await this.store.update(id, {
+        lastFinishedAt: this.now().toISOString(),
+        runningSince: undefined,
+      });
+    } catch (err) {
+      process.stderr.write(
+        `[scheduler] failed to record skipped loop ${id}: ${err instanceof Error ? err.message : String(err)}\n`,
       );
     }
   }
@@ -281,6 +312,16 @@ export class ChannelLoopScheduler {
       await this.clearRunningSince(job.id);
     }
   }
+}
+
+function lastAnchor(job: ChannelLoop): string {
+  if (job.lastFiredAt && job.lastFinishedAt) {
+    return new Date(job.lastFiredAt).getTime() >
+      new Date(job.lastFinishedAt).getTime()
+      ? job.lastFiredAt
+      : job.lastFinishedAt;
+  }
+  return job.lastFinishedAt ?? job.lastFiredAt ?? job.createdAt;
 }
 
 function truncateResultPreview(text: string | undefined): string | undefined {

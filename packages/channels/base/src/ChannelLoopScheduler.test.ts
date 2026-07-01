@@ -139,15 +139,17 @@ describe('ChannelLoopScheduler', () => {
     await scheduler.tick();
 
     expect(runLoopPrompt).toHaveBeenCalledWith(baseJob, runOptions());
-    expect(store.update).toHaveBeenCalledWith('job-1', {
-      lastFiredAt: '2026-06-30T01:05:30.000Z',
-      lastFinishedAt: '2026-06-30T01:05:30.000Z',
-      lastResultPreview: 'done summary',
-      lastStatus: 'ok',
-      lastError: undefined,
-      consecutiveFailures: 0,
-      runningSince: undefined,
-      runCount: 1,
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledWith('job-1', {
+        lastFiredAt: '2026-06-30T01:05:30.000Z',
+        lastFinishedAt: '2026-06-30T01:05:30.000Z',
+        lastResultPreview: 'done summary',
+        lastStatus: 'ok',
+        lastError: undefined,
+        consecutiveFailures: 0,
+        runningSince: undefined,
+        runCount: 1,
+      });
     });
   });
 
@@ -162,12 +164,14 @@ describe('ChannelLoopScheduler', () => {
 
     await scheduler.tick();
 
-    expect(store.update).toHaveBeenCalledWith(
-      'job-1',
-      expect.objectContaining({
-        lastResultPreview: 'x'.repeat(500),
-      }),
-    );
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledWith(
+        'job-1',
+        expect.objectContaining({
+          lastResultPreview: 'x'.repeat(500),
+        }),
+      );
+    });
   });
 
   it('does not replay a recurring job again after recording the catch-up fire', async () => {
@@ -199,16 +203,18 @@ describe('ChannelLoopScheduler', () => {
 
     await scheduler.tick();
 
-    expect(store.update).toHaveBeenCalledWith('job-1', {
-      lastFiredAt: '2026-06-30T01:05:30.000Z',
-      lastFinishedAt: '2026-06-30T01:05:30.000Z',
-      lastResultPreview: 'done summary',
-      lastStatus: 'ok',
-      lastError: undefined,
-      consecutiveFailures: 0,
-      runningSince: undefined,
-      runCount: 1,
-      enabled: false,
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledWith('job-1', {
+        lastFiredAt: '2026-06-30T01:05:30.000Z',
+        lastFinishedAt: '2026-06-30T01:05:30.000Z',
+        lastResultPreview: 'done summary',
+        lastStatus: 'ok',
+        lastError: undefined,
+        consecutiveFailures: 0,
+        runningSince: undefined,
+        runCount: 1,
+        enabled: false,
+      });
     });
     expect(store.disable).not.toHaveBeenCalled();
   });
@@ -248,9 +254,13 @@ describe('ChannelLoopScheduler', () => {
       'job-1',
       expect.objectContaining({ lastResultPreview: 'stale result' }),
     );
-    expect(store.update).toHaveBeenCalledWith('job-1', {
-      runningSince: undefined,
-    });
+    expect(store.update).toHaveBeenCalledWith(
+      'job-1',
+      expect.objectContaining({
+        lastResultPreview: 'second result',
+        runningSince: undefined,
+      }),
+    );
   });
 
   it('uses lastFinishedAt as the recurrence anchor', async () => {
@@ -488,10 +498,11 @@ describe('ChannelLoopScheduler', () => {
   });
 
   it('logs success persistence failures without recording a job failure', async () => {
-    store.update = vi.fn(async (_id, patch) => {
+    store.update = vi.fn(async (id, patch) => {
       if (patch.lastStatus === 'ok') {
         throw new Error('disk full');
       }
+      jobs = jobs.map((job) => (job.id === id ? { ...job, ...patch } : job));
       return true;
     });
     const writeSpy = vi
@@ -506,7 +517,9 @@ describe('ChannelLoopScheduler', () => {
 
     await scheduler.tick();
 
-    expect(store.update).toHaveBeenCalledTimes(3);
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledTimes(3);
+    });
     expect(store.disable).not.toHaveBeenCalled();
     expect(store.update).toHaveBeenCalledWith('job-1', {
       runningSince: undefined,
@@ -560,8 +573,11 @@ describe('ChannelLoopScheduler', () => {
 
     await scheduler.tick();
 
-    expect(store.update).toHaveBeenCalledWith('job-1', {
-      runningSince: undefined,
+    await vi.waitFor(() => {
+      expect(store.update).toHaveBeenCalledWith('job-1', {
+        lastFinishedAt: '2026-06-30T01:05:30.000Z',
+        runningSince: undefined,
+      });
     });
     expect(store.update).not.toHaveBeenCalledWith(
       'job-1',
