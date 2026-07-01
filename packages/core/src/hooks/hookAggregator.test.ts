@@ -218,6 +218,8 @@ describe('HookAggregator', () => {
                 title: 'Report',
                 workspacePath: 'report.html',
               },
+              { workspacePath: 'missing-title.html' },
+              null,
             ],
           },
         },

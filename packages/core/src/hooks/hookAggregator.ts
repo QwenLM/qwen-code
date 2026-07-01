@@ -14,6 +14,7 @@ import {
   PostToolBatchHookOutput,
   StopHookOutput,
   PermissionRequestHookOutput,
+  isToolArtifactLike,
 } from './types.js';
 import type { HookOutput, HookExecutionResult } from './types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -177,7 +178,13 @@ export class HookAggregator {
       if (output.hookSpecificOutput) {
         for (const [key, value] of Object.entries(output.hookSpecificOutput)) {
           if (key === 'artifacts' && Array.isArray(value)) {
-            artifacts.push(...value);
+            const validArtifacts = value.filter(isToolArtifactLike);
+            artifacts.push(...validArtifacts);
+            if (validArtifacts.length !== value.length) {
+              debugLogger.warn(
+                'Dropped malformed hookSpecificOutput.artifacts entries',
+              );
+            }
           } else if (key === 'artifacts') {
             debugLogger.warn(
               'Dropped malformed hookSpecificOutput.artifacts; expected array',

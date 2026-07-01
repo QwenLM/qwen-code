@@ -444,6 +444,29 @@ describe('SessionArtifactStore', () => {
     );
   });
 
+  it('infers artifact kind from storage and workspace extensions', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-kind',
+      workspaceCwd: workspace,
+    });
+
+    const result = await store.upsertMany([
+      { title: 'Page', workspacePath: 'reports/index.html' },
+      { title: 'Image', workspacePath: 'screenshots/app.png' },
+      { title: 'Notebook', workspacePath: 'analysis/run.ipynb' },
+      { title: 'Unknown file', workspacePath: 'artifacts/blob.unknown' },
+      { title: 'Managed item', managedId: 'ext-123' },
+    ]);
+
+    expect(result.changes.map((change) => change.artifact?.kind)).toEqual([
+      'html',
+      'image',
+      'notebook',
+      'file',
+      'other',
+    ]);
+  });
+
   it('rejects unsafe display markup in title and description', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's5-markup',

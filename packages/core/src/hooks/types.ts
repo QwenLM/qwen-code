@@ -289,7 +289,7 @@ export interface HookOutput {
   hookSpecificOutput?: Record<string, unknown>;
 }
 
-function isToolArtifactLike(value: unknown): value is ToolArtifact {
+export function isToolArtifactLike(value: unknown): value is ToolArtifact {
   if (typeof value !== 'object' || value === null) {
     return false;
   }

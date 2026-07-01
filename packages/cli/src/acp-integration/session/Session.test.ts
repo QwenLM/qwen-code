@@ -9738,6 +9738,125 @@ describe('Session', () => {
       );
     });
 
+    it('does not emit hook artifact notifications for empty artifact batches', async () => {
+      const messageBus = {
+        request: vi.fn().mockImplementation(async (request) => ({
+          success: true,
+          output:
+            request.eventName === 'PostToolBatch'
+              ? {
+                  hookSpecificOutput: {
+                    artifacts: [],
+                  },
+                }
+              : { decision: 'allow' },
+        })),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation(
+          (eventName: string) => eventName === 'PostToolBatch',
+        );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(
+          'read_file',
+          vi.fn().mockResolvedValue({
+            llmContent: 'tool output',
+            returnDisplay: 'tool output',
+          }),
+        ),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-empty-batch-artifacts',
+        [
+          {
+            id: 'read_call',
+            name: 'read_file',
+            args: { path: 'README.md' },
+          },
+        ],
+      );
+
+      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+        'qwen/notify/session/artifact-event',
+        expect.anything(),
+      );
+    });
+
+    it('logs and continues when hook artifact notification fails', async () => {
+      debugLoggerWarnSpy.mockClear();
+      (
+        mockClient.extNotification as ReturnType<typeof vi.fn>
+      ).mockRejectedValueOnce(new Error('notification unavailable'));
+      const messageBus = {
+        request: vi.fn().mockImplementation(async (request) => ({
+          success: true,
+          output:
+            request.eventName === 'PostToolBatch'
+              ? {
+                  hookSpecificOutput: {
+                    artifacts: [
+                      {
+                        title: 'Batch report',
+                        workspacePath: 'reports/batch.html',
+                      },
+                    ],
+                  },
+                }
+              : { decision: 'allow' },
+        })),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation(
+          (eventName: string) => eventName === 'PostToolBatch',
+        );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool(
+          'read_file',
+          vi.fn().mockResolvedValue({
+            llmContent: 'tool output',
+            returnDisplay: 'tool output',
+          }),
+        ),
+      );
+
+      await expect(
+        (session as unknown as ToolCallInternals).runToolCalls(
+          new AbortController().signal,
+          'prompt-failed-batch-artifacts',
+          [
+            {
+              id: 'read_call',
+              name: 'read_file',
+              args: { path: 'README.md' },
+            },
+          ],
+        ),
+      ).resolves.toMatchObject({
+        parts: [
+          {
+            functionResponse: {
+              id: 'read_call',
+              name: 'read_file',
+            },
+          },
+        ],
+      });
+
+      expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('notification unavailable'),
+      );
+    });
+
     it('marks cancelled ask_user_question as a turn stop', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'should not execute',
