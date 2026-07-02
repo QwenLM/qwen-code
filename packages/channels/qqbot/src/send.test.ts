@@ -283,7 +283,7 @@ describe('sendMessage', () => {
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { content: '**bold**', msg_type: 0, msg_id: 'msg-001', msg_seq: 1 },
+      { content: '**bold**', msg_type: 0, msg_id: 'msg-001', msg_seq: 2 },
     );
   });
 
@@ -325,6 +325,27 @@ describe('sendMessage', () => {
     expect(mockSendQQMessage).toHaveBeenCalledWith(
       'https://api.sgroup.qq.com',
       '/v2/users/unknown-chat/messages',
+      'test-token',
+      { markdown: { content: 'hello' }, msg_type: 2 },
+    );
+  });
+
+  it('uses chatTypes config fallback when chatTypeMap has no entry', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    // Set chatTypes config on the qqConfig to provide a fallback for
+    // a chatId not in chatTypeMap.
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['qqConfig'] as Record<string, unknown>)['chatTypes'] = {
+      'group-fallback-id': 'group',
+    };
+    // Remove chatTypeMap entry for this id so fallback is exercised
+    (chp['chatTypeMap'] as Map<string, string>).delete('test-chat-id');
+
+    await ch.sendMessage('group-fallback-id', 'hello');
+
+    expect(mockSendQQMessage).toHaveBeenCalledWith(
+      'https://api.sgroup.qq.com',
+      '/v2/groups/group-fallback-id/messages',
       'test-token',
       { markdown: { content: 'hello' }, msg_type: 2 },
     );

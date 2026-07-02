@@ -76,6 +76,12 @@ export class QQChannel extends ChannelBase {
   private sessionId: string = '';
   /** Per-group bot OPENID map for multi-group support (member_openid is group-scoped). */
   private botOpenIdByGroup: Map<string, string> = new Map();
+  /**
+   * Bot OPENID suffix, set in extractBotOpenId and appended at send time
+   * rather than mutating config.instructions. This avoids mutating the
+   * shared config object when a per-group OPENID is discovered.
+   */
+  private _botOpenIdSuffix: string = '';
   /** Set to true after first READY + session restore completes. Guards
    *  against stale textChunk events during startup reconnection. */
   private _ready = false;
@@ -104,6 +110,10 @@ export class QQChannel extends ChannelBase {
   private isReconnecting: boolean = false;
   /** Whether this process has never received READY (cold start vs RESUME fallback). */
   private coldStart: boolean = true;
+  /** Monotonic counter incremented on each connect/disconnect cycle.
+   *  Captured in async closures (token refresh retry) to detect stale
+   *  callbacks after reconnection. */
+  private _reconnectId: number = 0;
 
   /** Named handler for permanent textChunk listener (cron/non-prompt messages). */
   private _cronTextHandler: ((sessionId: string, text: string) => void) | null =
@@ -270,19 +280,30 @@ export class QQChannel extends ChannelBase {
    */
   override setBridge(bridge: ChannelAgentBridge): void {
     // Detach from old bridge before swap
-    if (this.qqConfig['cron-msg-experimental'] && this._cronTextHandler) {
+    if (
+      this.qqConfig['cron-msg-experimental'] &&
+      this._cronTextHandler &&
+      this.cronTextHandlerAttached
+    ) {
       this.bridge.off?.('textChunk', this._cronTextHandler);
+      this.cronTextHandlerAttached = false;
     }
     super.setBridge(bridge);
     // Re-attach to new bridge
-    if (this.qqConfig['cron-msg-experimental'] && this._cronTextHandler) {
+    if (
+      this.qqConfig['cron-msg-experimental'] &&
+      this._cronTextHandler &&
+      !this.cronTextHandlerAttached
+    ) {
       bridge.on?.('textChunk', this._cronTextHandler);
+      this.cronTextHandlerAttached = true;
     }
   }
 
   // ── ChannelBase interface ──────────────────────────────────────
 
   async connect(): Promise<void> {
+    this._reconnectId++;
     this.disposed = false;
     this.isReconnecting = false;
     this.reconnectAttempts = 0;
@@ -432,7 +453,7 @@ export class QQChannel extends ChannelBase {
             content: text,
             msg_type: 0,
             msg_id: msgId,
-            msg_seq: nextSeq,
+            msg_seq: nextSeq + 1, // increment for retry (initial markdown already used nextSeq)
           };
           const activeResp = await sendQQMessage(
             route.base,
@@ -480,6 +501,11 @@ export class QQChannel extends ChannelBase {
       if (msgId && !rollbackApplied) {
         this.msgSeqMap.set(msgId, nextSeq - 1);
         this.saveQQState();
+      }
+      if (String(e).includes('429')) {
+        process.stderr.write(
+          `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on all send attempts for ${sanitizeLogText(chatId, 64)}\n`,
+        );
       }
       process.stderr.write(
         `[QQ:${this.name}] Send error: ${sanitizeLogText(String(e), 200)}\n`,
@@ -645,16 +671,15 @@ export class QQChannel extends ChannelBase {
       this.flushingSessions.add(sessionId);
       this.sendMessage(s.chatId, toFlush)
         .then(() => {
-          // Only delete streamState on success (moved from .finally so a
-          // failed idle-flush doesn't orphan the session).
+          // Only delete streamState on success. If onResponseComplete
+          // deferred cleanup via pendingStreamDelete, leave a non-empty
+          // buffer intact for the next flush cycle.
           if (this.pendingStreamDelete.has(sessionId)) {
-            if (s.buffer) {
-              process.stderr.write(
-                `[QQ:${this.name}] pendingStreamDelete discarding non-empty buffer (${s.buffer.length} chars) for ${sessionId}\n`,
-              );
-            }
             this.pendingStreamDelete.delete(sessionId);
-            if (this.streamState.get(sessionId) === flushedEntry) {
+            if (
+              this.streamState.get(sessionId) === flushedEntry &&
+              !s.buffer
+            ) {
               this.streamState.delete(sessionId);
             }
           }
@@ -737,13 +762,31 @@ export class QQChannel extends ChannelBase {
     }
     if (state.buffer) {
       const toFlush = state.buffer;
-      state.buffer = '';
-      this.sendMessage(state.chatId, toFlush).catch((err) => {
-        state.buffer = toFlush + (state.buffer || '');
-        process.stderr.write(
-          `[QQ:${this.name}] toolCallFlush send failed: ${err}\n`,
-        );
-      });
+      // Prevent onResponseComplete from firing during tool-call send.
+      this.flushingSessions.add(event.sessionId);
+      this.sendMessage(state.chatId, toFlush)
+        .then(() => {
+          state.buffer = '';
+          // Check for pendingStreamDelete (onResponseComplete deferred)
+          if (this.pendingStreamDelete.has(event.sessionId)) {
+            this.pendingStreamDelete.delete(event.sessionId);
+            if (
+              this.streamState.get(event.sessionId) === state &&
+              !state.buffer
+            ) {
+              this.streamState.delete(event.sessionId);
+            }
+          }
+        })
+        .catch((err) => {
+          state.buffer = toFlush + (state.buffer || '');
+          process.stderr.write(
+            `[QQ:${this.name}] toolCallFlush send failed: ${err}\n`,
+          );
+        })
+        .finally(() => {
+          this.flushingSessions.delete(event.sessionId);
+        });
     }
   }
 
@@ -794,6 +837,7 @@ export class QQChannel extends ChannelBase {
   /** Debounced state persistence. Writes to a temp file then renames for
    * crash-safety — a mid-write crash will not corrupt the real state file. */
   private saveQQState(): void {
+    if (this.disposed) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
       try {
@@ -1032,9 +1076,10 @@ export class QQChannel extends ChannelBase {
     // Refresh at 80% of TTL, at least 10s before expiry, at most ttl-30s
     const delay = Math.min(ttl * 0.8, Math.max(ttl - 30_000, 10_000));
     if (delay > 0) {
+      const tokenReconnectId = this._reconnectId;
       this.tokenRefreshTimer = setTimeout(() => {
         this.fetchToken().catch((e) => {
-          if (this.disposed) return;
+          if (this.disposed || this._reconnectId !== tokenReconnectId) return;
           process.stderr.write(
             `[QQ:${this.name}] Token refresh failed: ${e}, will retry\n`,
           );
@@ -1046,7 +1091,7 @@ export class QQChannel extends ChannelBase {
           // where the WS stays connected but outbound messages are dropped.
           let retryCount = 0;
           const retry = () => {
-            if (this.disposed) return;
+            if (this.disposed || this._reconnectId !== tokenReconnectId) return;
             if (++retryCount > 10) {
               process.stderr.write(
                 `[QQ:${this.name}] FATAL: token refresh exhausted, reconnecting\n`,
@@ -1070,7 +1115,11 @@ export class QQChannel extends ChannelBase {
             }
             this.tokenRefreshTimer = setTimeout(() => {
               this.fetchToken().catch((e2) => {
-                if (this.disposed) return;
+                if (
+                  this.disposed ||
+                  this._reconnectId !== tokenReconnectId
+                )
+                  return;
                 process.stderr.write(
                   `[QQ:${this.name}] Token refresh retry failed (attempt ${retryCount}): ${e2}\n`,
                 );
@@ -1568,6 +1617,7 @@ export class QQChannel extends ChannelBase {
     }
     if (chatId) {
       this.botOpenIdByGroup.set(chatId, botOpenId);
+      this._botOpenIdSuffix = `\n机器人 OPENID: ${botOpenId}`;
       this.saveQQState();
     }
     return botOpenId;
@@ -1712,7 +1762,7 @@ export class QQChannel extends ChannelBase {
 
     const text = isSlash
       ? sanitizePromptText(cleanText)
-      : `[atMention=${isAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
+      : `[atMention=${isAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}${this._botOpenIdSuffix}`;
 
     return {
       isAtBot,
@@ -1740,17 +1790,36 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
+    // Drop messages from other bots to prevent bot-loop amplification.
+    if (event.author.bot) return;
     const chatId = event.group_openid;
     this.chatTypeMap.set(chatId, 'group');
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
     const { isAtBot, isSlash, text, senderName } = result;
 
+    // GROUP_AT_MESSAGE_CREATE only fires when the bot IS @mentioned.
+    // If mentions were absent or malformed, default to true to prevent
+    // silent message drops on platform-side mention detection quirks.
+    if (!isAtBot) {
+      process.stderr.write(
+        `[QQ:${this.name}] GROUP_AT_MESSAGE_CREATE with isAtBot=false, forcing true (event type guarantees @-bot)\n`,
+      );
+    }
+    const finalIsAtBot = isAtBot || true;
+
+    // When isAtBot was false but finalIsAtBot was forced true, ensure
+    // replyMsgId is set (prepareGroupMessage skips it when isAtBot is false).
+    if (finalIsAtBot && !isAtBot) {
+      this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
+      this.saveQQState();
+    }
+
     // Only block non-@-bot messages — passive replies to @-mentions
     // must still be delivered. Outbound sendMessage already has a more
     // precise guard (!msgId + groupActiveMsgEnabled === false).
     if (this.groupActiveMsgEnabled.get(chatId) === false) {
-      if (!isAtBot) {
+      if (!finalIsAtBot) {
         process.stderr.write(
           `[QQ:${this.name}] handleGroup blocked: active messages disabled for ${sanitizeLogText(chatId, 64)}\n`,
         );
@@ -1761,9 +1830,9 @@ export class QQChannel extends ChannelBase {
       );
     }
 
-    if (!isAtBot) {
+    if (!finalIsAtBot) {
       process.stderr.write(
-        `[QQ:${this.name}] @all msg in ${sanitizeLogText(chatId, 32)} (isAtBot=false), returning to handleGroupAll\n`,
+        `[QQ:${this.name}] @all msg in ${sanitizeLogText(chatId, 32)} (finalIsAtBot=false), returning to handleGroupAll\n`,
       );
       return;
     }
@@ -1774,18 +1843,21 @@ export class QQChannel extends ChannelBase {
 
     this.handleInbound({
       channelName: this.name,
+      // Use event.author.id (global OPENID) for session routing so the
+      // same user has a consistent session across groups. member_openid
+      // is group-scoped and kept only for display/mention purposes.
       senderId:
-        event.author.member_openid ||
-        event.author.user_openid ||
         event.author.id ||
+        event.author.user_openid ||
+        event.author.member_openid ||
         'unknown',
       senderName,
       chatId,
       text,
       messageId: event.id,
       isGroup: true,
-      isMentioned: isAtBot,
-      isReplyToBot: isAtBot,
+      isMentioned: finalIsAtBot,
+      isReplyToBot: finalIsAtBot,
       alreadyPrefixed: !isSlash || undefined,
     }).catch((err: unknown) =>
       process.stderr.write(
@@ -1884,6 +1956,8 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
+    // Drop messages from other bots to prevent bot-loop amplification.
+    if (event.author.bot) return;
 
     // Validate groupAllPolicy — unknown values default to 'log'.
     const rawPolicy = this.qqConfig.groupAllPolicy;
@@ -1915,10 +1989,11 @@ export class QQChannel extends ChannelBase {
       channelName: this.name,
       chatId,
       text,
+      // Use event.author.id (global OPENID) for session routing.
       senderId:
-        event.author.member_openid ||
-        event.author.user_openid ||
         event.author.id ||
+        event.author.user_openid ||
+        event.author.member_openid ||
         'unknown',
       senderName,
       messageId: event.id,

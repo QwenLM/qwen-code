@@ -463,6 +463,46 @@ describe('onResponseComplete', () => {
       { markdown: { content: 'text-a' }, msg_type: 2 },
     );
   });
+
+  it('defers cleanup via pendingStreamDelete when idle-flush is in flight', async () => {
+    const ch = makeChannel();
+    // Set idle-flush to resolve slowly
+    const sendPromise = Promise.resolve(mockResponse(true));
+    mockSendQQMessage.mockReturnValue(sendPromise);
+
+    // Start streaming → idle timer will fire
+    onResponseChunk(ch, 'test-chat', 'streaming text', 'sess-1');
+
+    // Advance to fire the idle timer (2s)
+    vi.advanceTimersByTime(2000);
+    await Promise.resolve();
+
+    // The idle-flush should have sent the text; flushingSessions has the session
+    const chp = ch as unknown as Record<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Set<string>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    expect(flushingSessions.has('sess-1')).toBe(true);
+
+    // Now onResponseComplete fires while idle-flush is in-flight
+    await onResponseComplete(ch, 'test-chat', 'streaming text', 'sess-1');
+
+    // Should defer through pendingStreamDelete — streamState still exists
+    expect(pendingStreamDelete.has('sess-1')).toBe(true);
+    expect(streamState(ch).has('sess-1')).toBe(true);
+
+    // Let the idle-flush send promise resolve
+    await sendPromise;
+    // Drain the .then() and .finally() microtasks
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // StreamState should now be cleaned up
+    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    expect(streamState(ch).has('sess-1')).toBe(false);
+    expect(flushingSessions.has('sess-1')).toBe(false);
+  });
 });
 
 describe('idleFlush timeout', () => {

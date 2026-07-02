@@ -455,33 +455,34 @@ describe('handleGroup', () => {
     expect(mockHandleInbound).not.toHaveBeenCalled();
   });
 
-  it('@all (isAtBot=false) 时 handleGroup 直接 return，消息由 handleGroupAll 处理', async () => {
+  it('@all (isAtBot=false) with no mentions defaults to isAtBot=true for GROUP_AT_MESSAGE_CREATE', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
-    // Pre-populate replyMsgId to verify it is NOT clobbered
+    // Pre-populate replyMsgId to verify it IS updated because
+    // GROUP_AT_MESSAGE_CREATE guarantees @-bot
     const replyMsgId = (ch as unknown as Record<string, unknown>)[
       'replyMsgId'
     ] as Map<string, { msgId: string; timestamp: number }>;
     replyMsgId.set('group-openid-1', { msgId: 'old-msg', timestamp: 0 });
 
-    // Trigger handleGroup with @all mention (is_you: false)
+    // Trigger handleGroup with @all mention (is_you: false) and no mentions
     pvt['handleGroup'](
       makeGroupEvent({
         content: '<@all> 大家看看',
-        mentions: [{ scope: 'all' as const, is_you: false }],
+        mentions: undefined,
       }),
     );
 
     await vi.advanceTimersByTimeAsync(600);
 
-    // handleGroup returns early for non-@bot messages — they go through handleGroupAll
-    expect(mockHandleInbound).not.toHaveBeenCalled();
+    // GROUP_AT_MESSAGE_CREATE guarantees @-bot, so handleInbound IS called
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
 
-    // replyMsgId should NOT have been updated
-    expect(replyMsgId.get('group-openid-1')!.msgId).toBe('old-msg');
+    // replyMsgId should have been updated
+    expect(replyMsgId.get('group-openid-1')!.msgId).toBe('msg-group-001');
   });
 
-  it('groupActiveMsgEnabled=false 时不触发 handleInbound', async () => {
+  it('groupActiveMsgEnabled=false 时 @bot 消息仍能通过（被动回复）', async () => {
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     const groupActiveMsgEnabled = (ch as unknown as Record<string, unknown>)[
@@ -489,13 +490,21 @@ describe('handleGroup', () => {
     ] as Map<string, boolean>;
     groupActiveMsgEnabled.set('group-openid-1', false);
 
+    // GROUP_AT_MESSAGE_CREATE guarantees @bot, so message passes through
+    // even when active messages are disabled (passive replies allowed).
     pvt['handleGroup'](
       makeGroupEvent({
-        mentions: [],
+        mentions: [
+          {
+            member_openid: 'bot-openid',
+            is_you: true,
+            scope: 'single' as const,
+          },
+        ],
       }),
     );
     await vi.advanceTimersByTimeAsync(600);
-    expect(mockHandleInbound).not.toHaveBeenCalled();
+    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -622,7 +631,7 @@ describe('handleGroupAll', () => {
     expect(env['text']).toBe('/help');
   });
 
-  it('bot 消息带有 [bot] 前缀透传给模型', async () => {
+  it('bot 消息被 handleGroupAll 跳过（防 bot 循环）', async () => {
     const ch = makeChannel({ groupAllPolicy: 'all' });
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroupAll'](
@@ -632,10 +641,7 @@ describe('handleGroupAll', () => {
       }),
     );
     await vi.advanceTimersByTimeAsync(600);
-    expect(mockHandleInbound).toHaveBeenCalledTimes(1);
-    const env = mockHandleInbound.mock.calls[0][0] as Record<string, unknown>;
-    expect(env['text']).toContain('[bot]');
-    expect(env['text']).toContain('auto reply');
+    expect(mockHandleInbound).not.toHaveBeenCalled();
   });
 
   it('groupActiveMsgEnabled=false 时被阻断', async () => {
