@@ -33,6 +33,7 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../../core/contentGenerator.js';
+import { AgentEventEmitter, AgentEventType } from './agent-events.js';
 import { ToolNames } from '../../tools/tool-names.js';
 
 describe('AgentCore.runInAgentFrames', () => {
@@ -607,4 +608,24 @@ describe('AgentCore.prepareTools', () => {
       expect(response?.error).not.toContain('not found');
     },
   );
+});
+
+
+describe('AgentCore STREAM_TEXT batching (#2928)', () => {
+  it('batches thought and response text separately per chunk', () => {
+    const emitter = new AgentEventEmitter();
+    const events = [];
+    emitter.on(AgentEventType.STREAM_TEXT, (e) => {
+      events.push({ text: e.text, thought: e.thought });
+    });
+    emitter.emit(AgentEventType.STREAM_TEXT, {
+      subagentId: 'test', round: 1, text: 'reasoning', thought: true, timestamp: Date.now(),
+    });
+    emitter.emit(AgentEventType.STREAM_TEXT, {
+      subagentId: 'test', round: 1, text: 'output', thought: false, timestamp: Date.now(),
+    });
+    expect(events).toHaveLength(2);
+    expect(events[0].thought).toBe(true);
+    expect(events[1].thought).toBe(false);
+  });
 });
