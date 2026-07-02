@@ -65,6 +65,11 @@ export function validateGatewayUrl(url: string): string {
       `QQ Bot gateway URL has invalid protocol: ${parsed.protocol}`,
     );
   }
+  // Validate hostname to avoid connecting to unexpected endpoints
+  const ALLOWED_GW_HOSTS = ['api.sgroup.qq.com', 'sandbox.api.sgroup.qq.com'];
+  if (!ALLOWED_GW_HOSTS.some(h => parsed.hostname === h || parsed.hostname.endsWith('.' + h))) {
+    process.stderr.write(`[QQ] Unexpected gateway hostname: ${parsed.hostname}\n`);
+  }
   return url;
 }
 

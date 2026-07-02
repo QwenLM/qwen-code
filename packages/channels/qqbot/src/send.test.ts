@@ -350,13 +350,14 @@ describe('sendMessage', () => {
     expect(mockFetchAccessToken).toHaveBeenCalled();
   });
 
-  it('catches thrown sendQQMessage errors and stops sending', async () => {
+  it('catches and re-throws sendQQMessage errors so callers can handle them', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
     mockSendQQMessage.mockRejectedValue(new Error('network down'));
 
-    await ch.sendMessage('test-chat-id', 'hello');
+    // sendMessage now re-throws so callers (cron, idle-flush, toolCall) can handle it
+    await expect(ch.sendMessage('test-chat-id', 'hello')).rejects.toThrow('network down');
 
-    // No crash, and the catch+break prevents further attempts
+    // No crash, and the catch prevents further attempts
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
   });
 

@@ -124,6 +124,9 @@ export class QQChannel extends ChannelBase {
   /** Track per-group active message permission. */
   private groupActiveMsgEnabled: Map<string, boolean> = new Map();
 
+  /** Lazy cache for filtered, lowercased keyword triggers. */
+  private _keywordTriggerCache: string[] | null = null;
+
   /** Path to persisted QQ routing state: chatTypeMap, replyMsgId, msgSeqMap. */
   private readonly qqStatePath: string;
   /**
@@ -454,25 +457,21 @@ export class QQChannel extends ChannelBase {
           }
         }
 
-        // Plain-text fallback for ALL markdown rejections (with or without msgId)
+        // Active retry already tried the same (msg_id, msg_seq) — plain-text fallback
+        // would be a byte-identical duplicate. Skip it for passive replies.
+        if (msgId) return;
+
+        // Plain-text fallback ONLY when there's no msgId (active messages without reply context)
         const plainBody: Record<string, unknown> = {
           content: text,
           msg_type: 0,
         };
-        if (msgId) {
-          plainBody['msg_id'] = msgId;
-          plainBody['msg_seq'] = nextSeq;
-        }
-        const plainResp = await sendQQMessage(
+        await sendQQMessage(
           route.base,
           route.path,
           this.accessToken,
           plainBody,
         );
-        if (plainResp.ok && msgId) {
-          this.msgSeqMap.set(msgId, nextSeq);
-          this.saveQQState();
-        }
         return;
       }
 
@@ -485,6 +484,7 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] Send error: ${sanitizeLogText(String(e), 200)}\n`,
       );
+      throw e;
     }
   }
 
@@ -506,7 +506,7 @@ export class QQChannel extends ChannelBase {
         await this.fetchToken();
       } catch (_e) {
         process.stderr.write(
-          `[QQ:${this.name}] resolveRoute: token refresh failed, dropping message to ${chatId}\n`,
+          `[QQ:${this.name}] resolveRoute: token refresh failed (${_e instanceof Error ? _e.message : String(_e)}), dropping message to ${chatId}\n`,
         );
         return null;
       }
@@ -1897,12 +1897,14 @@ export class QQChannel extends ChannelBase {
     const { isSlash, cleanText, text, senderName, isAtBot } = result;
 
     if (policy === 'keyword') {
-      const triggers = (this.qqConfig.keywordTriggers ?? []).filter(
-        (kw) => kw.length > 0,
-      );
-      if (triggers.length === 0) return;
+      if (!this._keywordTriggerCache) {
+        this._keywordTriggerCache = (this.qqConfig.keywordTriggers ?? [])
+          .filter((kw) => kw.length > 0)
+          .map((kw) => kw.toLowerCase());
+      }
+      if (this._keywordTriggerCache.length === 0) return;
       const lower = cleanText.toLowerCase();
-      const matched = triggers.some((kw) => lower.includes(kw.toLowerCase()));
+      const matched = this._keywordTriggerCache.some((kw) => lower.includes(kw));
       if (!matched) return;
     }
 
