@@ -368,6 +368,57 @@ describe('createDaemonChannelBridgeFacade', () => {
     ]);
     expect(getAvailableCommands).toHaveBeenCalledWith('session-1');
   });
+
+  it('forwards listSessions when present on bridge', () => {
+    const listSessions = vi.fn(() => [
+      {
+        sessionId: 'sess-1',
+        workspaceCwd: '/repo',
+        hasActivePrompt: false,
+      },
+    ]);
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+      listSessions,
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    expect(facade.listSessions?.()).toEqual([
+      {
+        sessionId: 'sess-1',
+        workspaceCwd: '/repo',
+        hasActivePrompt: false,
+      },
+    ]);
+    expect(listSessions).toHaveBeenCalled();
+  });
+
+  it('omits listSessions when absent on bridge', () => {
+    const bridge = {
+      availableCommands: [],
+      on: mockBridgeOn,
+      off: mockBridgeOff,
+      newSession: mockBridgeNewSession,
+      loadSession: mockBridgeLoadSession,
+      prompt: mockBridgePrompt,
+      cancelSession: mockBridgeCancelSession,
+    };
+
+    const facade = createDaemonChannelBridgeFacade(bridge, {
+      exposeShellCommand: false,
+    });
+
+    expect('listSessions' in facade).toBe(false);
+  });
 });
 
 describe('runChannelDaemonWorker', () => {

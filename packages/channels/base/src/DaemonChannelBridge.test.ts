@@ -1275,4 +1275,192 @@ describe('DaemonChannelBridge', () => {
     events.close();
     bridge.stop();
   });
+
+  it('listSessions returns empty array when no sessions are attached', async () => {
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn(),
+    });
+    await bridge.start();
+
+    expect(bridge.listSessions()).toEqual([]);
+
+    bridge.stop();
+  });
+
+  it('listSessions returns attached sessions with hasActivePrompt status', async () => {
+    const firstEvents = new EventQueue();
+    const secondEvents = new EventQueue();
+    const firstSession = createFakeSession(firstEvents, 'session-1');
+    const secondSession = createFakeSession(secondEvents, 'session-2');
+    let resolvePrompt: () => void = () => {};
+    firstSession.prompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePrompt = () => resolve({ stopReason: 'end_turn' });
+        }),
+    );
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi
+        .fn()
+        .mockResolvedValueOnce(firstSession)
+        .mockResolvedValueOnce(secondSession),
+    });
+    await bridge.start();
+
+    await bridge.newSession('/repo');
+    await bridge.newSession('/repo');
+
+    const sessions = bridge.listSessions();
+    expect(sessions).toHaveLength(2);
+    expect(sessions).toEqual(
+      expect.arrayContaining([
+        {
+          sessionId: 'session-1',
+          workspaceCwd: '/repo',
+          hasActivePrompt: false,
+        },
+        {
+          sessionId: 'session-2',
+          workspaceCwd: '/repo',
+          hasActivePrompt: false,
+        },
+      ]),
+    );
+
+    const promptPromise = bridge.prompt('session-1', 'hello');
+    await waitFor(() => expect(firstSession.prompt).toHaveBeenCalledOnce());
+
+    const during = bridge.listSessions();
+    expect(
+      during.find((s) => s.sessionId === 'session-1')?.hasActivePrompt,
+    ).toBe(true);
+    expect(
+      during.find((s) => s.sessionId === 'session-2')?.hasActivePrompt,
+    ).toBe(false);
+
+    resolvePrompt();
+    await promptPromise;
+
+    expect(
+      bridge.listSessions().find((s) => s.sessionId === 'session-1')
+        ?.hasActivePrompt,
+    ).toBe(false);
+
+    firstEvents.close();
+    secondEvents.close();
+    bridge.stop();
+  });
+
+  it('listSessions excludes dropped sessions', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    await bridge.start();
+
+    await bridge.newSession('/repo');
+    expect(bridge.listSessions()).toHaveLength(1);
+
+    events.push({
+      id: 1,
+      v: 1,
+      type: 'session_died',
+      data: { reason: 'gone' },
+    });
+    await waitFor(() => expect(bridge.listSessions()).toEqual([]));
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('listSessions shows hasActivePrompt false after cancelSession', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    let resolvePrompt: () => void = () => {};
+    session.prompt.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolvePrompt = () => resolve({ stopReason: 'cancelled' });
+        }),
+    );
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    await bridge.start();
+    await bridge.newSession('/repo');
+
+    const promptPromise = bridge.prompt('session-1', 'hello');
+    await waitFor(() => expect(session.prompt).toHaveBeenCalledOnce());
+    expect(
+      bridge.listSessions().find((s) => s.sessionId === 'session-1')
+        ?.hasActivePrompt,
+    ).toBe(true);
+
+    await bridge.cancelSession('session-1');
+    resolvePrompt();
+    await promptPromise;
+
+    expect(
+      bridge.listSessions().find((s) => s.sessionId === 'session-1')
+        ?.hasActivePrompt,
+    ).toBe(false);
+
+    events.close();
+    bridge.stop();
+  });
+
+  it('listSessions returns empty after bridge stop', async () => {
+    const events = new EventQueue();
+    const session = createFakeSession(events);
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi.fn().mockResolvedValue(session),
+    });
+    await bridge.start();
+    await bridge.newSession('/repo');
+    expect(bridge.listSessions()).toHaveLength(1);
+
+    bridge.stop();
+
+    expect(bridge.listSessions()).toEqual([]);
+    events.close();
+  });
+
+  it('listSessions reflects session replacement with same ID', async () => {
+    const firstEvents = new EventQueue();
+    const secondEvents = new EventQueue();
+    const firstSession = createFakeSession(firstEvents, 'session-1');
+    const secondSession = createFakeSession(secondEvents, 'session-1');
+    (secondSession as { workspaceCwd: string }).workspaceCwd = '/other';
+    const bridge = new DaemonChannelBridge({
+      cwd: '/repo',
+      sessionFactory: vi
+        .fn()
+        .mockResolvedValueOnce(firstSession)
+        .mockResolvedValueOnce(secondSession),
+    });
+    await bridge.start();
+    await bridge.newSession('/repo');
+    expect(bridge.listSessions()).toEqual([
+      { sessionId: 'session-1', workspaceCwd: '/repo', hasActivePrompt: false },
+    ]);
+
+    await bridge.newSession('/other');
+    const sessions = bridge.listSessions();
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0]).toEqual({
+      sessionId: 'session-1',
+      workspaceCwd: '/other',
+      hasActivePrompt: false,
+    });
+
+    firstEvents.close();
+    secondEvents.close();
+    bridge.stop();
+  });
 });
