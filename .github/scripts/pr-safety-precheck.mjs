@@ -64,11 +64,19 @@ function checkPatterns(text, patterns, reasons) {
   }
 }
 
-export function assessPullRequestSafety({ pr, diff }) {
+export function assessPullRequestSafety({ pr, diff, trustedAuthor = false }) {
   const reasons = [];
   const headSha = typeof pr?.headRefOid === 'string' ? pr.headRefOid : '';
   const diffText = typeof diff === 'string' ? diff : '';
   let addedText = '';
+
+  if (trustedAuthor) {
+    return {
+      decision: 'allow_triage',
+      head_sha: headSha,
+      reason_codes: [],
+    };
+  }
 
   if (!headSha) addReason(reasons, 'input:missing_head_sha');
 
@@ -138,7 +146,8 @@ function main() {
 
   const pr = JSON.parse(readFileSync(args.pr, 'utf8'));
   const diff = readFileSync(args.diff, 'utf8');
-  const result = assessPullRequestSafety({ pr, diff });
+  const trustedAuthor = args['trusted-author'] === 'true';
+  const result = assessPullRequestSafety({ pr, diff, trustedAuthor });
 
   if (args.comment) {
     writeFileSync(
