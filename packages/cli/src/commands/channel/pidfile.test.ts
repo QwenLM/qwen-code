@@ -119,6 +119,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   process.kill = originalKill;
 });
 
@@ -199,6 +200,33 @@ describe('writeServiceInfo + readServiceInfo', () => {
       channels: ['telegram'],
     });
     expect(fsFds.openedFlags).toContain(2 | 0x20000);
+  });
+
+  it('preserves the serve reservation start time when worker metadata changes', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-01T01:00:00.000Z'));
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    process.kill = vi.fn(() => true) as any;
+
+    reserveServeServiceInfo({
+      channels: ['telegram'],
+      servePid: 4321,
+    });
+    vi.setSystemTime(new Date('2026-07-01T01:05:00.000Z'));
+    writeServeServiceInfo({
+      channels: ['telegram'],
+      servePid: 4321,
+      workerPid: 8765,
+    });
+
+    expect(readServiceInfo()).toMatchObject({
+      owner: 'serve',
+      pid: 4321,
+      servePid: 4321,
+      workerPid: 8765,
+      channels: ['telegram'],
+      startedAt: '2026-07-01T01:00:00.000Z',
+    });
   });
 
   it('does not let serve metadata updates overwrite standalone pidfiles', () => {

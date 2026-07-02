@@ -63,7 +63,15 @@ interface MessageListProps {
 function getLastUserMessageId(messages: Message[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
-    if (msg.role === 'user') return msg.id;
+    if (msg?.role === 'user') return msg.id;
+  }
+  return null;
+}
+
+function getLastTurnStartMessageId(messages: Message[]): string | null {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    if (msg && isTurnStartMessage(msg)) return msg.id;
   }
   return null;
 }
@@ -98,6 +106,35 @@ export type DisplayItem =
        */
       timestamp?: number;
     };
+
+export type TurnTimelineNodeKind =
+  | 'thought'
+  | 'commentary'
+  | 'tool'
+  | 'agents'
+  | 'plan'
+  | 'status'
+  | 'none';
+
+export interface TurnTimelineNode {
+  kind: TurnTimelineNodeKind;
+  timestamp?: number;
+  label?: string;
+}
+
+export interface SessionTimelineEntry {
+  id: string;
+  label: string;
+  detail: string;
+  timestamp?: number;
+  nodeKinds: TurnTimelineNodeKind[];
+}
+
+export interface SessionTimelineRange {
+  startIndex: number;
+  endIndex: number;
+  currentIndex: number;
+}
 
 function isAgentOnlyToolGroup(msg: Message): boolean {
   return (
@@ -282,7 +319,12 @@ export function groupParallelAgents(messages: Message[]): DisplayItem[] {
 
 export function getDisplayItemVirtualKey(item: DisplayItem): string {
   if (item.type === 'parallel_agents') return `group:${item.key}`;
-  if (item.type === 'turn_collapse') return `tc:${item.key}`;
+  if (item.type === 'turn_collapse') {
+    const liveKey = item.turnCollapse.liveStartedAt;
+    return liveKey === undefined
+      ? `tc:${item.key}`
+      : `tc:${item.key}:${liveKey}`;
+  }
   if (item.type === 'turn_content') return `turn-content:${item.key}`;
   return `msg:${item.key}`;
 }
@@ -341,6 +383,33 @@ function findFinalAnswerIndex(
   return -1;
 }
 
+function collectFinalAssistantIdsByTurn(
+  items: readonly DisplayItem[],
+  isResponding: boolean,
+): ReadonlySet<string> {
+  const userIdxs: number[] = [];
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
+      userIdxs.push(i);
+    }
+  }
+
+  const ids = new Set<string>();
+  for (let k = 0; k < userIdxs.length; k++) {
+    if (k === userIdxs.length - 1 && isResponding) continue;
+    const start = userIdxs[k];
+    const end = (k + 1 < userIdxs.length ? userIdxs[k + 1] : items.length) - 1;
+    const answerIdx = findFinalAnswerIndex(items, start, end);
+    if (answerIdx < 0) continue;
+    const item = items[answerIdx];
+    if (item.type === 'message' && item.message.role === 'assistant') {
+      ids.add(item.message.id);
+    }
+  }
+  return ids;
+}
+
 /**
  * A turn's hideable "steps": tool activity, plans, and mid-turn assistant text.
  * The final answer and any system/shell/insight rows (errors, cancellations,
@@ -391,6 +460,289 @@ function isMidTurnInjectedDebugMessage(message: {
       'mid_turn_message_injected (unrecognized daemon event):',
     ) === true
   );
+}
+
+export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
+  if (item.type === 'parallel_agents') {
+    return {
+      kind: 'agents',
+      timestamp: item.timestamp,
+      label: 'Parallel agents',
+    };
+  }
+  if (item.type !== 'message') return { kind: 'none' };
+
+  const { message } = item;
+  switch (message.role) {
+    case 'thinking':
+      return {
+        kind: 'thought',
+        timestamp: message.timestamp,
+        label: 'Thinking',
+      };
+    case 'assistant':
+      if (item.turnCollapse)
+        return { kind: 'none', timestamp: message.timestamp };
+      if (!compactTimelineText(message.content, 1))
+        return { kind: 'none', timestamp: message.timestamp };
+      return {
+        kind: 'commentary',
+        timestamp: message.timestamp,
+        label: 'Assistant update',
+      };
+    case 'tool_group': {
+      const count = message.tools.length;
+      return {
+        kind: 'tool',
+        timestamp: message.timestamp,
+        label: `${count} tool call${count === 1 ? '' : 's'}`,
+      };
+    }
+    case 'plan':
+      return {
+        kind: 'plan',
+        timestamp: message.timestamp,
+        label: 'Plan update',
+      };
+    case 'system':
+      return isMidTurnInjectedDebugMessage(message)
+        ? {
+            kind: 'status',
+            timestamp: message.timestamp,
+            label: 'Status update',
+          }
+        : { kind: 'none', timestamp: message.timestamp };
+    case 'user':
+    case 'user_shell':
+    case 'btw':
+    case 'insight_progress':
+    case 'insight_ready':
+    case 'insight_error':
+      return { kind: 'none', timestamp: message.timestamp };
+    default: {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _exhaustive: never = message;
+      return { kind: 'none' };
+    }
+  }
+}
+
+function compactTimelineText(
+  raw: string | null | undefined,
+  maxLength: number,
+): string {
+  const compact = raw?.replace(/\s+/g, ' ').trim() ?? '';
+  if (maxLength <= 0) return '';
+  if (!compact) return '';
+  const chars = Array.from(compact);
+  return chars.length > maxLength
+    ? `${chars.slice(0, maxLength - 1).join('')}…`
+    : compact;
+}
+
+function timelineLabelForTurn(message: Message): string {
+  const raw =
+    message.role === 'user'
+      ? message.content
+      : message.role === 'user_shell'
+        ? message.command
+        : '';
+  const compact = compactTimelineText(raw, 32);
+  if (!compact) return 'User turn';
+  return compact;
+}
+
+// Collapse and timeline turns start at chat prompts and shell prompts; new-chat
+// auto-follow still uses getLastUserMessageId so shell prompts do not jump.
+function isTurnStartMessage(message: Message): boolean {
+  return message.role === 'user' || message.role === 'user_shell';
+}
+
+function timelineDetailSnippetForMessage(message: Message): string {
+  switch (message.role) {
+    case 'thinking':
+      // Thinking content may include private model reasoning; keep details label-only.
+      return SESSION_TIMELINE_KIND_LABEL.thought;
+    case 'assistant':
+      return compactTimelineText(message.content, 120);
+    case 'tool_group': {
+      const count = message.tools.length;
+      return `${count} tool call${count === 1 ? '' : 's'}`;
+    }
+    case 'plan':
+      return 'plan update';
+    case 'system':
+      return isMidTurnInjectedDebugMessage(message)
+        ? compactTimelineText(message.content, 120)
+        : '';
+    case 'user':
+    case 'user_shell':
+    case 'btw':
+    case 'insight_progress':
+    case 'insight_ready':
+    case 'insight_error':
+      return '';
+    default: {
+      // eslint-disable-next-line @typescript-eslint/no-unused-vars
+      const _exhaustive: never = message;
+      return '';
+    }
+  }
+}
+
+function timelineDetailSnippetForItem(item: DisplayItem): string {
+  if (item.type === 'parallel_agents') {
+    const count = item.agents.length;
+    return `${count} parallel agent${count === 1 ? '' : 's'}`;
+  }
+  if (item.type !== 'message') return '';
+  return timelineDetailSnippetForMessage(item.message);
+}
+
+function timelineDetailForTurn(
+  turnItems: readonly DisplayItem[],
+  finalAssistantId: string | null,
+  nodeKinds: readonly TurnTimelineNodeKind[],
+): string {
+  const snippets: string[] = [];
+  for (let i = 0; i < turnItems.length; i += 1) {
+    const item = turnItems[i]!;
+    if (
+      item.type === 'message' &&
+      finalAssistantId !== null &&
+      item.message.id === finalAssistantId
+    ) {
+      continue;
+    }
+    const snippet = timelineDetailSnippetForItem(item);
+    if (snippet) snippets.push(snippet);
+  }
+
+  const detail = compactTimelineText(snippets.join(' · '), 180);
+  if (detail) return detail;
+  if (nodeKinds.length > 0) {
+    return nodeKinds
+      .map((kind) => SESSION_TIMELINE_KIND_LABEL[kind])
+      .join(' · ');
+  }
+  return 'No activity';
+}
+
+export function getSessionTimelineEntries(
+  messages: readonly Message[],
+): SessionTimelineEntry[] {
+  const entries: SessionTimelineEntry[] = [];
+  let turnStart: Message | null = null;
+  let turnItems: Message[] = [];
+
+  const pushTurn = () => {
+    if (!turnStart) return;
+    let finalAssistantId: string | null = null;
+    for (let i = turnItems.length - 1; i >= 0; i -= 1) {
+      const item = turnItems[i];
+      if (
+        item?.role === 'assistant' &&
+        compactTimelineText(item.content, 1).length > 0 &&
+        !item.isStreaming
+      ) {
+        finalAssistantId = item.id;
+        break;
+      }
+    }
+
+    const timelineItems = groupParallelAgents(turnItems);
+    const nodeKinds: TurnTimelineNodeKind[] = [];
+    for (const item of timelineItems) {
+      if (
+        item.type === 'message' &&
+        finalAssistantId !== null &&
+        item.message.id === finalAssistantId
+      ) {
+        continue;
+      }
+      const node = getTurnTimelineNode(item);
+      if (node.kind !== 'none' && !nodeKinds.includes(node.kind)) {
+        nodeKinds.push(node.kind);
+      }
+    }
+
+    entries.push({
+      id: turnStart.id,
+      label: timelineLabelForTurn(turnStart),
+      detail: timelineDetailForTurn(timelineItems, finalAssistantId, nodeKinds),
+      timestamp: turnStart.timestamp,
+      nodeKinds,
+    });
+  };
+
+  for (const message of messages) {
+    if (isTurnStartMessage(message)) {
+      pushTurn();
+      turnStart = message;
+      turnItems = [];
+      continue;
+    }
+    if (turnStart) {
+      turnItems.push(message);
+    }
+  }
+  pushTurn();
+
+  return entries;
+}
+
+function toolTimelineSignature(tool: ACPToolCall): string {
+  const rawOutput =
+    tool.rawOutput && typeof tool.rawOutput === 'object'
+      ? (tool.rawOutput as Record<string, unknown>)
+      : undefined;
+  return [
+    tool.callId,
+    tool.toolName,
+    tool.kind ?? '',
+    tool.status,
+    tool.parentToolCallId ?? '',
+    tool.subContent ? 'sub-content' : '',
+    tool.subTools?.length ?? 0,
+    String(tool.args?.subagent_type ?? ''),
+    tool.args?.run_in_background === true ? 'background' : '',
+    String(rawOutput?.['type'] ?? ''),
+    String(rawOutput?.['status'] ?? ''),
+  ].join(':');
+}
+
+export function getSessionTimelineSignature(
+  messages: readonly Message[],
+): string {
+  return messages
+    .map((message) => {
+      const base = `${message.id}:${message.role}:${message.timestamp ?? ''}`;
+      switch (message.role) {
+        case 'assistant':
+        case 'thinking':
+          return `${base}:${message.isStreaming ? 'streaming' : message.content}`;
+        case 'tool_group':
+          return `${base}:${message.tools.map(toolTimelineSignature).join(',')}`;
+        case 'system':
+          return `${base}:${message.variant}:${message.source ?? ''}:${message.content}`;
+        case 'user':
+          return `${base}:${message.content}`;
+        case 'user_shell':
+          return `${base}:${message.command}`;
+        case 'plan':
+        case 'btw':
+        case 'insight_progress':
+        case 'insight_ready':
+        case 'insight_error':
+          return base;
+        default: {
+          // eslint-disable-next-line @typescript-eslint/no-unused-vars
+          const _exhaustive: never = message;
+          return base;
+        }
+      }
+    })
+    .join('|');
 }
 
 function isExecutionWorkStep(item: DisplayItem): boolean {
@@ -506,11 +858,90 @@ export function findTurnIdForIndex(
 ): string | null {
   for (let i = Math.min(index, items.length - 1); i >= 0; i--) {
     const item = items[i];
-    if (item.type === 'message' && item.message.role === 'user') {
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
       return item.message.id;
     }
   }
   return null;
+}
+
+export function getTurnIdByDisplayIndex(
+  items: readonly DisplayItem[],
+): Array<string | null> {
+  const turnIds: Array<string | null> = [];
+  let currentTurnId: string | null = null;
+  for (const item of items) {
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
+      currentTurnId = item.message.id;
+    }
+    turnIds.push(currentTurnId);
+  }
+  return turnIds;
+}
+
+function timelineIndexForDisplayIndex(
+  visibleItems: readonly DisplayItem[],
+  index: number,
+  entryIndexById: ReadonlyMap<string, number>,
+  turnIdByDisplayIndex?: readonly (string | null)[],
+): number | null {
+  const turnId =
+    turnIdByDisplayIndex === undefined
+      ? findTurnIdForIndex(visibleItems, index)
+      : (turnIdByDisplayIndex[index] ?? null);
+  if (!turnId) return null;
+  return entryIndexById.get(turnId) ?? null;
+}
+
+export function getSessionTimelineRangeForIndexes(
+  visibleItems: readonly DisplayItem[],
+  visibleItemIndexes: readonly number[],
+  entryIndexById: ReadonlyMap<string, number>,
+  currentItemIndex?: number | null,
+  turnIdByDisplayIndex: readonly (string | null)[] = getTurnIdByDisplayIndex(
+    visibleItems,
+  ),
+): SessionTimelineRange | null {
+  let startIndex = Number.POSITIVE_INFINITY;
+  let endIndex = -1;
+
+  for (const visibleItemIndex of visibleItemIndexes) {
+    if (visibleItemIndex < 0 || visibleItemIndex >= visibleItems.length) {
+      continue;
+    }
+    const timelineIndex = timelineIndexForDisplayIndex(
+      visibleItems,
+      visibleItemIndex,
+      entryIndexById,
+      turnIdByDisplayIndex,
+    );
+    if (timelineIndex === null) continue;
+    startIndex = Math.min(startIndex, timelineIndex);
+    endIndex = Math.max(endIndex, timelineIndex);
+  }
+
+  if (endIndex < 0) return null;
+
+  const currentIndex =
+    currentItemIndex === undefined || currentItemIndex === null
+      ? null
+      : timelineIndexForDisplayIndex(
+          visibleItems,
+          currentItemIndex,
+          entryIndexById,
+          turnIdByDisplayIndex,
+        );
+
+  return {
+    startIndex,
+    endIndex,
+    currentIndex:
+      currentIndex !== null &&
+      currentIndex >= startIndex &&
+      currentIndex <= endIndex
+        ? currentIndex
+        : endIndex,
+  };
 }
 
 /**
@@ -562,7 +993,7 @@ export function applyTurnCollapse(
   const userIdxs: number[] = [];
   for (let i = 0; i < items.length; i++) {
     const item = items[i];
-    if (item.type === 'message' && item.message.role === 'user') {
+    if (item.type === 'message' && isTurnStartMessage(item.message)) {
       userIdxs.push(i);
     }
   }
@@ -898,6 +1329,11 @@ const TurnCollapseRow = memo(function TurnCollapseRow({
 
   const now = useSharedNow(liveStartedAt !== undefined && showMetadataRow);
   const elapsedSeenRef = useRef(0);
+  const previousLiveStartedAtRef = useRef<number | undefined>(liveStartedAt);
+  if (previousLiveStartedAtRef.current !== liveStartedAt) {
+    previousLiveStartedAtRef.current = liveStartedAt;
+    elapsedSeenRef.current = 0;
+  }
   let displayElapsedMs: number | undefined;
   if (liveStartedAt !== undefined && showMetadataRow) {
     elapsedSeenRef.current = Math.max(
@@ -1037,6 +1473,100 @@ const TurnContent = memo(function TurnContent({
   );
 });
 
+const SESSION_TIMELINE_KIND_LABEL: Record<TurnTimelineNodeKind, string> = {
+  thought: 'thinking',
+  commentary: 'assistant update',
+  tool: 'tool calls',
+  agents: 'parallel agents',
+  plan: 'plan update',
+  status: 'status update',
+  none: 'turn',
+};
+
+const SessionTimeline = memo(function SessionTimeline({
+  entries,
+  currentTurnId,
+  currentRange,
+  hidden,
+  onSelect,
+}: {
+  entries: readonly SessionTimelineEntry[];
+  currentTurnId: string | null;
+  currentRange: SessionTimelineRange | null;
+  hidden: boolean;
+  onSelect: (turnId: string) => void;
+}) {
+  if (hidden || entries.length === 0) return null;
+
+  return (
+    <div className={styles.sessionTimelineLayer} aria-hidden="false">
+      <nav
+        className={styles.sessionTimelinePanel}
+        aria-label="Session timeline"
+        data-testid="session-timeline"
+      >
+        <ol className={styles.sessionTimelineList}>
+          {entries.map((entry, index) => {
+            const isInCurrentRange =
+              currentRange !== null &&
+              index >= currentRange.startIndex &&
+              index <= currentRange.endIndex;
+            const isCurrent =
+              currentRange !== null
+                ? index === currentRange.currentIndex
+                : entry.id === currentTurnId;
+            const nodeKinds = entry.nodeKinds.join(',');
+            const titleParts = [
+              `Turn ${index + 1}: ${entry.label}`,
+              entry.detail,
+            ];
+            const ariaLabel = [
+              `Turn ${index + 1}: ${entry.label}`,
+              isCurrent ? 'Current turn' : null,
+            ]
+              .filter(Boolean)
+              .join('. ');
+            return (
+              <li
+                key={entry.id}
+                className={styles.sessionTimelineItem}
+                data-testid="session-timeline-entry"
+                data-turn-id={entry.id}
+                data-node-kinds={nodeKinds}
+                data-in-current-range={isInCurrentRange ? 'true' : undefined}
+              >
+                <button
+                  type="button"
+                  className={joinClassNames(
+                    styles.sessionTimelineButton,
+                    isInCurrentRange
+                      ? styles.sessionTimelineButtonInRange
+                      : undefined,
+                    isCurrent ? styles.sessionTimelineButtonCurrent : undefined,
+                  )}
+                  aria-current={isCurrent ? 'step' : undefined}
+                  aria-label={ariaLabel}
+                  title={titleParts.join(' · ')}
+                  onClick={() => onSelect(entry.id)}
+                >
+                  <span className={styles.sessionTimelineTick} />
+                  <span
+                    className={styles.sessionTimelineDetails}
+                    data-testid="session-timeline-detail"
+                    data-title={entry.label}
+                    data-detail={entry.detail}
+                    aria-hidden="true"
+                  />
+                </button>
+              </li>
+            );
+          })}
+        </ol>
+      </nav>
+    </div>
+  );
+});
+
 function joinClassNames(
   ...classNames: Array<string | undefined>
 ): string | undefined {
@@ -1079,6 +1609,37 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       () => groupParallelAgents(mergedMessages),
       [mergedMessages],
     );
+    const sessionTimelineSignature =
+      getSessionTimelineSignature(mergedMessages);
+    const sessionTimelineCache = useRef<{
+      signature: string;
+      entries: SessionTimelineEntry[];
+    } | null>(null);
+    if (sessionTimelineCache.current?.signature !== sessionTimelineSignature) {
+      sessionTimelineCache.current = {
+        signature: sessionTimelineSignature,
+        entries: getSessionTimelineEntries(mergedMessages),
+      };
+    }
+    const sessionTimelineEntries = sessionTimelineCache.current.entries;
+    const sessionTimelineEntryIndexById = useMemo(
+      () =>
+        new Map(
+          sessionTimelineEntries.map((entry, index) => [entry.id, index]),
+        ),
+      [sessionTimelineEntries],
+    );
+    const fallbackCurrentTimelineTurnId = useMemo(
+      () => getLastTurnStartMessageId(mergedMessages),
+      [mergedMessages],
+    );
+    const [sessionTimelineRange, setSessionTimelineRange] =
+      useState<SessionTimelineRange | null>(null);
+    const currentTimelineTurnId =
+      sessionTimelineRange !== null
+        ? (sessionTimelineEntries[sessionTimelineRange.currentIndex]?.id ??
+          fallbackCurrentTimelineTurnId)
+        : fallbackCurrentTimelineTurnId;
     const lastCompletedAssistantId = useMemo(() => {
       if (isResponding) return null;
       for (let i = mergedMessages.length - 1; i >= 0; i -= 1) {
@@ -1099,6 +1660,10 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       }
       return null;
     }, [isResponding, mergedMessages]);
+    const finalAssistantIdsByTurn = useMemo(
+      () => collectFinalAssistantIdsByTurn(displayItems, isResponding),
+      [displayItems, isResponding],
+    );
 
     // ── Per-turn collapse ────────────────────────────────────────────────
     // Completed turns fold down to their prompt + final answer (toggle on the
@@ -1116,6 +1681,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const lastScrollTop = useRef(0);
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
+    const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedFollow = useRef(true);
     const prevLastUserMsgId = useRef<string | null>(null);
     const prevActiveExecutionKey = useRef<string | null>(null);
@@ -1123,7 +1689,11 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       useRef(catchingUp);
     const catchingUpRef = useRef(catchingUp);
     const prevHasTailContent = useRef(false);
+    const pendingFollowRecheck = useRef(false);
+    const pendingFollowRecheckFrame = useRef<number | undefined>(undefined);
+    const pendingFollowRecheckTimer = useRef<number | undefined>(undefined);
     catchingUpRef.current = catchingUp;
+    const containerRef = useRef<HTMLDivElement>(null);
 
     const setShouldFollow = useCallback(
       (value: boolean) => {
@@ -1152,8 +1722,32 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         collapseEnabled,
       ],
     );
+    const visibleTurnIdByDisplayIndex = useMemo(
+      () => getTurnIdByDisplayIndex(visibleItems),
+      [visibleItems],
+    );
 
-    const containerRef = useRef<HTMLDivElement>(null);
+    const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
+      useState(false);
+
+    useLayoutEffect(() => {
+      const el = containerRef.current;
+      if (!el) return;
+
+      const updateVisibility = () => {
+        const width = el.getBoundingClientRect().width;
+        const nextVisible = width >= 1160;
+        setIsSessionTimelineVisible((prev) =>
+          prev === nextVisible ? prev : nextVisible,
+        );
+      };
+
+      updateVisibility();
+      if (typeof ResizeObserver === 'undefined') return;
+      const observer = new ResizeObserver(updateVisibility);
+      observer.observe(el);
+      return () => observer.disconnect();
+    }, []);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //
@@ -1213,19 +1807,69 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       return containerRef.current;
     }, []);
 
+    const recheckFollowFromScrollGeometry = useCallback(() => {
+      const el = containerRef.current;
+      if (!el) return;
+      const distanceFromBottom =
+        el.scrollHeight - el.scrollTop - el.clientHeight;
+      setShouldFollow(distanceFromBottom < 30);
+    }, [setShouldFollow]);
+
+    const scheduleFollowRecheck = useCallback(() => {
+      pendingFollowRecheck.current = true;
+      if (pendingFollowRecheckFrame.current !== undefined) {
+        window.cancelAnimationFrame(pendingFollowRecheckFrame.current);
+      }
+      if (pendingFollowRecheckTimer.current !== undefined) {
+        window.clearTimeout(pendingFollowRecheckTimer.current);
+      }
+      pendingFollowRecheckFrame.current = window.requestAnimationFrame(
+        recheckFollowFromScrollGeometry,
+      );
+      // Turn content uses a 180ms grid transition. The real scrollHeight can
+      // cross the overflow threshold only after the animation advances, so do a
+      // final geometry read once the expansion has settled.
+      pendingFollowRecheckTimer.current = window.setTimeout(() => {
+        pendingFollowRecheck.current = false;
+        pendingFollowRecheckFrame.current = undefined;
+        pendingFollowRecheckTimer.current = undefined;
+        recheckFollowFromScrollGeometry();
+      }, 220);
+    }, [recheckFollowFromScrollGeometry]);
+
+    useEffect(
+      () => () => {
+        if (pendingFollowRecheckFrame.current !== undefined) {
+          window.cancelAnimationFrame(pendingFollowRecheckFrame.current);
+        }
+        if (pendingFollowRecheckTimer.current !== undefined) {
+          window.clearTimeout(pendingFollowRecheckTimer.current);
+        }
+      },
+      [],
+    );
+
     const handleToggleCollapse = useCallback(
       (turnId: string, nextExpanded: boolean) => {
         // Expanding/collapsing a turn is an explicit reading action. Pause
         // follow so streaming output does not yank the viewport back to the
         // tail while the user is inspecting history.
-        setShouldFollow(false);
+        const el = containerRef.current;
+        if (el && el.scrollHeight <= el.clientHeight + 1) {
+          // If there is no scrollbar yet, there is no meaningful "not at
+          // bottom" state to report. The toggle may create overflow though, so
+          // re-check after the expanded/collapsed rows have been laid out.
+          scheduleFollowRecheck();
+        } else {
+          setShouldFollow(false);
+        }
         setCollapseOverrides((prev) => {
           const next = new Map(prev);
           next.set(turnId, nextExpanded);
           return next;
         });
       },
-      [setShouldFollow],
+      [scheduleFollowRecheck, setShouldFollow],
     );
 
     const getItemKey = useCallback(
@@ -1308,6 +1952,119 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     });
     const virtualItems = virtualizer.getVirtualItems();
     const totalVirtualSize = virtualizer.getTotalSize();
+    const sessionTimelineRangeState = useRef<{
+      entryIndexById: ReadonlyMap<string, number>;
+      headerOffset: number;
+      isVisible: boolean;
+      turnIdByDisplayIndex: readonly (string | null)[];
+      visibleItems: readonly DisplayItem[];
+    }>({
+      entryIndexById: new Map(),
+      headerOffset: 0,
+      isVisible: false,
+      turnIdByDisplayIndex: [],
+      visibleItems: [],
+    });
+    sessionTimelineRangeState.current = {
+      entryIndexById: sessionTimelineEntryIndexById,
+      headerOffset,
+      isVisible: isSessionTimelineVisible,
+      turnIdByDisplayIndex: visibleTurnIdByDisplayIndex,
+      visibleItems,
+    };
+
+    const updateSessionTimelineRange = useCallback(() => {
+      const el = getScrollElement();
+      const state = sessionTimelineRangeState.current;
+      if (!el || !state.isVisible || state.entryIndexById.size === 0) {
+        setSessionTimelineRange((prev) => (prev === null ? prev : null));
+        return;
+      }
+
+      const viewportRect = el.getBoundingClientRect();
+      const viewportTop = viewportRect.top;
+      const viewportBottom = viewportRect.bottom;
+      const viewportCenter = viewportTop + (viewportBottom - viewportTop) / 2;
+      const visibleItemIndexes: number[] = [];
+      let currentItemIndex: number | null = null;
+      let closestDistance = Number.POSITIVE_INFINITY;
+
+      el.querySelectorAll<HTMLElement>('[data-index]').forEach((row) => {
+        const rawIndex = row.dataset.index;
+        if (rawIndex === undefined) return;
+        const rowIndex = Number(rawIndex);
+        if (!Number.isFinite(rowIndex)) return;
+        const visibleItemIndex = rowIndex - state.headerOffset;
+        if (
+          visibleItemIndex < 0 ||
+          visibleItemIndex >= state.visibleItems.length
+        ) {
+          return;
+        }
+
+        const rowRect = row.getBoundingClientRect();
+        if (rowRect.bottom < viewportTop || rowRect.top > viewportBottom) {
+          return;
+        }
+
+        visibleItemIndexes.push(visibleItemIndex);
+        const rowCenter = rowRect.top + (rowRect.bottom - rowRect.top) / 2;
+        const distance = Math.abs(rowCenter - viewportCenter);
+        if (distance < closestDistance) {
+          closestDistance = distance;
+          currentItemIndex = visibleItemIndex;
+        }
+      });
+
+      const next = getSessionTimelineRangeForIndexes(
+        state.visibleItems,
+        visibleItemIndexes,
+        state.entryIndexById,
+        currentItemIndex,
+        state.turnIdByDisplayIndex,
+      );
+      setSessionTimelineRange((prev) => {
+        if (
+          prev?.startIndex === next?.startIndex &&
+          prev?.endIndex === next?.endIndex &&
+          prev?.currentIndex === next?.currentIndex
+        ) {
+          return prev;
+        }
+        return next;
+      });
+    }, [getScrollElement]);
+
+    const scheduleSessionTimelineRangeUpdate = useCallback(() => {
+      if (sessionTimelineFrame.current !== null) {
+        cancelAnimationFrame(sessionTimelineFrame.current);
+      }
+      sessionTimelineFrame.current = requestAnimationFrame(() => {
+        sessionTimelineFrame.current = null;
+        updateSessionTimelineRange();
+      });
+    }, [updateSessionTimelineRange]);
+
+    useEffect(
+      () => () => {
+        if (sessionTimelineFrame.current !== null) {
+          cancelAnimationFrame(sessionTimelineFrame.current);
+          sessionTimelineFrame.current = null;
+        }
+      },
+      [],
+    );
+
+    useEffect(() => {
+      scheduleSessionTimelineRangeUpdate();
+    }, [
+      scheduleSessionTimelineRangeUpdate,
+      totalCount,
+      totalVirtualSize,
+      useVirtualScroll,
+      virtualItems.length,
+      isSessionTimelineVisible,
+    ]);
 
     // Imperative scroll-to-message (e.g. the floating TodoPanel's "show in
     // transcript" button) with a brief highlight on the target row.
@@ -1345,14 +2102,39 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         setTimeout(() => {
           if (scrollCooldownCount.current === gen) {
             scrollCooldown.current = false;
+            scheduleSessionTimelineRangeUpdate();
           }
         }, 150);
         const key = getItemKey(rowIndex);
         setFlashKey(null);
         requestAnimationFrame(() => setFlashKey(key));
       },
-      [useVirtualScroll, virtualizer, getItemKey, setShouldFollow],
+      [
+        useVirtualScroll,
+        virtualizer,
+        getItemKey,
+        setShouldFollow,
+        scheduleSessionTimelineRangeUpdate,
+      ],
     );
+
+    const scrollToMessageState = useRef<{
+      visibleItems: readonly DisplayItem[];
+      displayItems: readonly DisplayItem[];
+      headerOffset: number;
+      performScrollToRow: (rowIndex: number) => void;
+    }>({
+      visibleItems: [],
+      displayItems: [],
+      headerOffset: 0,
+      performScrollToRow: () => {},
+    });
+    scrollToMessageState.current = {
+      visibleItems,
+      displayItems,
+      headerOffset,
+      performScrollToRow,
+    };
 
     // A scroll target that currently sits inside a collapsed turn: expand the
     // turn, then finish the scroll once its rows materialize in `visibleItems`.
@@ -1363,6 +2145,8 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
     const scrollToMessage = useCallback(
       (messageId: string, callId?: string): boolean => {
+        const { visibleItems, displayItems, headerOffset, performScrollToRow } =
+          scrollToMessageState.current;
         const visibleIndex = findDisplayItemIndex(
           visibleItems,
           messageId,
@@ -1399,7 +2183,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         });
         return true;
       },
-      [visibleItems, displayItems, headerOffset, performScrollToRow],
+      [],
     );
 
     useImperativeHandle(
@@ -1432,6 +2216,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         lastScrollTop.current = el.scrollTop;
         return;
       }
+      scheduleSessionTimelineRangeUpdate();
       const prev = lastScrollTop.current;
       const curr = el.scrollTop;
       lastScrollTop.current = curr;
@@ -1450,7 +2235,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       if (distanceFromBottom < 30) {
         setShouldFollow(true);
       }
-    }, [getScrollElement, setShouldFollow]);
+    }, [getScrollElement, scheduleSessionTimelineRangeUpdate, setShouldFollow]);
 
     useEffect(() => {
       const el = getScrollElement();
@@ -1478,6 +2263,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       const el = containerRef.current;
       if (!el) return;
       const observer = new ResizeObserver(() => {
+        scheduleSessionTimelineRangeUpdate();
         if (catchingUpRef.current) return;
         if (!shouldFollow.current) return;
         requestAnimationFrame(() => {
@@ -1488,7 +2274,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       });
       observer.observe(el);
       return () => observer.disconnect();
-    }, [scrollToBottom]);
+    }, [scrollToBottom, scheduleSessionTimelineRangeUpdate]);
 
     // Rule 4: new user message → force follow on so the model's reply
     // scrolls into view as it streams in.
@@ -1623,7 +2409,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
               onBranchSession={onBranchSession}
               showAssistantActions={
                 displayItem.message.role === 'assistant' &&
-                displayItem.message.id === lastCompletedAssistantId
+                finalAssistantIdsByTurn.has(displayItem.message.id)
               }
               showAssistantBranch={
                 displayItem.message.role === 'assistant' &&
@@ -1658,6 +2444,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         onShowContextDetail,
         headerOffset,
         visibleItems,
+        finalAssistantIdsByTurn,
         lastCompletedAssistantId,
         workspaceCwd,
         showRetryHint,
@@ -1691,6 +2478,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     useLayoutEffect(() => {
       if (catchingUp) return;
       if (scrollCooldown.current) return;
+      if (pendingFollowRecheck.current) return;
       if (shouldFollow.current) {
         const lastId = getLastUserMessageId(messages);
         const isNewUserMessage =
@@ -1701,6 +2489,13 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
     return (
       <div ref={containerRef} className={styles.list}>
+        <SessionTimeline
+          entries={sessionTimelineEntries}
+          currentTurnId={currentTimelineTurnId}
+          currentRange={sessionTimelineRange}
+          hidden={!isSessionTimelineVisible}
+          onSelect={scrollToMessage}
+        />
         {useVirtualScroll ? (
           <div
             style={{

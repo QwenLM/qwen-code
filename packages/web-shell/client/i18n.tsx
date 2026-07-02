@@ -215,8 +215,6 @@ const EN: Messages = {
   'code.copy': 'Copy',
   'code.copied': 'Copied!',
   'markdownTable.blank': '(blank)',
-  'markdownTable.toggleAdvanced': 'Switch to advanced table',
-  'markdownTable.toggleBasic': 'Switch to basic table',
   'markdownTable.column': (v) => `Column ${v?.index ?? ''}`,
   'markdownTable.rows': (v) => {
     const count = Number(v?.count ?? 0);
@@ -299,6 +297,8 @@ const EN: Messages = {
   'contextUsage.messages': 'Messages',
   'contextUsage.mcpTools': 'MCP tools',
   'contextUsage.model': 'Model',
+  'contextUsage.noSession':
+    'No active session yet. Send your first message before viewing context usage.',
   'contextUsage.noApiResponse':
     'No API response yet. Send a message to see actual usage.',
   'contextUsage.overLimit':
@@ -542,6 +542,8 @@ const EN: Messages = {
   'language.options': 'Available options:',
   'language.set': 'Set UI language',
   'language.usage': 'Usage: /language ui [en|zh-CN]',
+  'localCommand.noSession':
+    'No active session yet. Send your first message before using this command.',
   'local.agents': 'Manage subagents',
   'local.approvalMode': 'Change approval mode',
   'local.auth': 'Connect an LLM provider',
@@ -609,6 +611,7 @@ const EN: Messages = {
   'local.plan': 'Enter Plan mode',
   'local.goal': 'Set a goal and keep working until it is met',
   'local.recap': 'Generate a session recap',
+  'recap.label': 'Recap',
   'recap.loading': 'Generating recap...',
   'recap.empty': 'Not enough conversation context for a recap yet.',
   'recap.failed': 'Failed to generate recap',
@@ -1161,6 +1164,7 @@ const EN: Messages = {
   'tool.collapse': '▲ Collapse',
   'tool.expand': 'Expand',
   'tool.collapseHint': 'Collapse',
+  'tool.status.failed': 'Failed',
   'tool.showAll': (v) => `▼ Show all (${v?.count ?? 0} lines)`,
   'tool.showLess': '▲ Show less',
   'tool.showFullLines': '▼ Show full lines',
@@ -1451,8 +1455,6 @@ const ZH: Messages = {
   'code.copy': '复制',
   'code.copied': '已复制！',
   'markdownTable.blank': '(空白)',
-  'markdownTable.toggleAdvanced': '切换到高级表格',
-  'markdownTable.toggleBasic': '切换到基础表格',
   'markdownTable.column': (v) => `第 ${v?.index ?? ''} 列`,
   'markdownTable.rows': (v) => `${v?.count ?? 0} 行`,
   'markdownTable.rowsFiltered': (v) => `${v?.visible ?? 0}/${v?.total ?? 0} 行`,
@@ -1517,6 +1519,8 @@ const ZH: Messages = {
   'contextUsage.messages': '消息',
   'contextUsage.mcpTools': 'MCP 工具',
   'contextUsage.model': '模型',
+  'contextUsage.noSession':
+    '当前还没有会话。请先发送第一条消息，再查看上下文使用情况。',
   'contextUsage.noApiResponse':
     '尚无 API 响应。发送一条消息后可查看实际使用量。',
   'contextUsage.overLimit':
@@ -1745,6 +1749,8 @@ const ZH: Messages = {
   'language.options': '可用选项：',
   'language.set': '设置 UI 语言',
   'language.usage': '用法：/language ui [en|zh-CN]',
+  'localCommand.noSession':
+    '当前还没有会话。请先发送第一条消息，再使用这个命令。',
   'local.agents': '管理智能体',
   'local.approvalMode': '切换审批模式',
   'local.auth': '连接 LLM provider',
@@ -1809,6 +1815,7 @@ const ZH: Messages = {
   'local.plan': '进入 Plan 模式',
   'local.goal': '设置目标并持续工作直到完成',
   'local.recap': '生成会话摘要',
+  'recap.label': '回顾',
   'recap.loading': '正在生成摘要...',
   'recap.empty': '对话内容还不够，暂时无法生成摘要。',
   'recap.failed': '生成摘要失败',
@@ -2326,6 +2333,7 @@ const ZH: Messages = {
   'tool.collapse': '▲ 收起',
   'tool.expand': '展开',
   'tool.collapseHint': '收起',
+  'tool.status.failed': '执行失败',
   'tool.showAll': (v) => `▼ 显示全部（${v?.count ?? 0} 行）`,
   'tool.showLess': '▲ 显示更少',
   'tool.showFullLines': '▼ 显示完整行',

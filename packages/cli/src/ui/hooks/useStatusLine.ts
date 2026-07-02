@@ -271,6 +271,12 @@ export function useStatusLine(): {
   const totalLinesRemoved =
     uiState.sessionStats.metrics.files.totalLinesRemoved;
   const effectiveVim = vimEnabled ? vimMode : undefined;
+  // Reasoning effort lives on the content-generator config, not uiState, so it
+  // isn't a natural render trigger. Track it as a string key so the status line
+  // recomputes immediately when `/effort` changes it mid-session.
+  const reasoningConfig = config.getContentGeneratorConfig()?.reasoning;
+  const reasoningEffortKey =
+    reasoningConfig === false ? 'off' : (reasoningConfig?.effort ?? '');
   const prevStateRef = useRef<{
     promptTokenCount: number;
     currentModel: string;
@@ -281,6 +287,7 @@ export function useStatusLine(): {
     totalLinesAdded: number;
     totalLinesRemoved: number;
     streamingState: string;
+    reasoningEffortKey: string;
   }>({
     promptTokenCount: lastPromptTokenCount,
     currentModel,
@@ -291,6 +298,7 @@ export function useStatusLine(): {
     totalLinesAdded,
     totalLinesRemoved,
     streamingState,
+    reasoningEffortKey,
   });
 
   // Guard: when true, the mount effect has already called doUpdate so the
@@ -592,7 +600,8 @@ export function useStatusLine(): {
       totalToolCalls !== prev.totalToolCalls ||
       totalLinesAdded !== prev.totalLinesAdded ||
       totalLinesRemoved !== prev.totalLinesRemoved ||
-      streamingState !== prev.streamingState
+      streamingState !== prev.streamingState ||
+      reasoningEffortKey !== prev.reasoningEffortKey
     ) {
       prev.promptTokenCount = lastPromptTokenCount;
       prev.currentModel = currentModel;
@@ -603,6 +612,7 @@ export function useStatusLine(): {
       prev.totalLinesAdded = totalLinesAdded;
       prev.totalLinesRemoved = totalLinesRemoved;
       prev.streamingState = streamingState;
+      prev.reasoningEffortKey = reasoningEffortKey;
       scheduleUpdate();
     }
   }, [
@@ -620,6 +630,7 @@ export function useStatusLine(): {
     totalLinesAdded,
     totalLinesRemoved,
     streamingState,
+    reasoningEffortKey,
     scheduleUpdate,
     updatePullRequestNumber,
   ]);

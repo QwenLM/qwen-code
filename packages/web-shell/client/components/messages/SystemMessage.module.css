@@ -110,7 +110,7 @@
   justify-content: flex-end;
   width: 100%;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
-  padding-bottom: 10px;
+  padding: 10px 0;
   margin-bottom: 5px;
   font-size: 14px;
   line-height: 1.4;

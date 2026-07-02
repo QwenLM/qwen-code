@@ -21,6 +21,7 @@ import type {
   InputModalities,
 } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
+import type { ReasoningEffort } from '../core/reasoning-effort.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
@@ -78,6 +79,7 @@ import type {
 } from '../tools/artifact/publisher.js';
 import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
 import type { InstructionLoadReason } from '../hooks/types.js';
+import { ApprovalMode } from './approval-mode.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -215,6 +217,27 @@ import {
 import { resolveModelId } from '../utils/modelId.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
+export function parseVisionModelSetting(setting: string | undefined):
+  | {
+      selector: string;
+      baseUrl?: string;
+    }
+  | undefined {
+  if (!setting) return undefined;
+  const nullIdx = setting.indexOf('\0');
+  if (nullIdx < 0) return { selector: setting };
+  const selector = setting.slice(0, nullIdx);
+  if (!selector) return undefined;
+  return {
+    selector,
+    baseUrl: setting.slice(nullIdx + 1) || undefined,
+  };
+}
+
+function formatVisionModelSettingForLog(setting: string): string {
+  return setting.replace(/\0/g, '\\0');
+}
+
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
 export {
@@ -224,15 +247,7 @@ export {
 
 export type ModelInvocableCommandExecutorResult = string | { error: string };
 
-export enum ApprovalMode {
-  PLAN = 'plan',
-  DEFAULT = 'default',
-  AUTO_EDIT = 'auto-edit',
-  AUTO = 'auto',
-  YOLO = 'yolo',
-}
-
-export const APPROVAL_MODES = Object.values(ApprovalMode);
+export { ApprovalMode, APPROVAL_MODES } from './approval-mode.js';
 
 /**
  * Thrown by `Config.setApprovalMode` when the requested mode would grant
@@ -339,6 +354,12 @@ export interface AutoModeSettings {
   };
   /** Environment / context lines injected into the classifier's system prompt. */
   environment?: string[];
+  /**
+   * When true, ALL shell commands are routed through the auto-mode
+   * classifier, including read-only commands that would otherwise be
+   * auto-approved. Default false.
+   */
+  classifyAllShell?: boolean;
 }
 
 export interface AccessibilitySettings {
@@ -616,10 +637,7 @@ export type McpServerScope = 'project' | 'workspace' | 'system';
  * - `pending_approval`: a gated server awaiting approval (#4615).
  */
 export type McpServerUnavailableReason =
-  | 'removed'
-  | 'not_allowed'
-  | 'excluded'
-  | 'pending_approval';
+  'removed' | 'not_allowed' | 'excluded' | 'pending_approval';
 
 /**
  * Scopes whose servers are checked-in / shareable and therefore untrusted: they
@@ -731,6 +749,7 @@ export class MCPServerConfig {
      * `new MCPServerConfig(...)` call sites. See issue #4615.
      */
     readonly scope?: McpServerScope,
+    readonly alwaysLoadTools?: boolean,
   ) {}
 }
 
@@ -956,6 +975,13 @@ export interface ConfigParameters {
    */
   cliAllowedMcpServerNames?: string[];
   excludedMcpServers?: string[];
+  /**
+   * Idle timeout in milliseconds for MCP tool calls. If the MCP server does
+   * not produce any response or progress update within this time, the call
+   * is aborted. Default: 300000 (5 minutes). Can be overridden via
+   * QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.
+   */
+  mcpToolIdleTimeoutMs?: number;
   /**
    * Names of project-scoped (`.mcp.json`) servers that are NOT yet approved
    * (pending or rejected). These are loaded so they can be listed, but the
@@ -1310,8 +1336,7 @@ export class Config {
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
   private modelInvocableCommandsProvider:
-    | (() => ReadonlyArray<{ name: string; description: string }>)
-    | null = null;
+    (() => ReadonlyArray<{ name: string; description: string }>) | null = null;
   private modelInvocableCommandsExecutor:
     | ((
         name: string,
@@ -1346,8 +1371,7 @@ export class Config {
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
   private readonly disabledSkillNamesProvider:
-    | (() => ReadonlySet<string>)
-    | null;
+    (() => ReadonlySet<string>) | null;
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
   // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
@@ -1375,8 +1399,7 @@ export class Config {
    */
   private readonly recentlyRemovedMcpServers = new Set<string>();
   private readonly topTierMcpServers:
-    | Record<string, MCPServerConfig>
-    | undefined;
+    Record<string, MCPServerConfig> | undefined;
   private readonly runtimeMcpServers = new Map<string, MCPServerConfig>();
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
@@ -1386,6 +1409,7 @@ export class Config {
   private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
+  private readonly mcpToolIdleTimeoutMs: number;
   /**
    * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
    * `/reload`). `SettingsWatcher` serializes its own listeners, but `/reload`
@@ -1486,8 +1510,7 @@ export class Config {
   private shellExecutionConfig: ShellExecutionConfig;
   private arenaManager: ArenaManager | null = null;
   private arenaManagerChangeCallback:
-    | ((manager: ArenaManager | null) => void)
-    | null = null;
+    ((manager: ArenaManager | null) => void) | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
   private teamManager: TeamManager | null = null;
   private teamManagerChangeCallbacks = new Set<
@@ -1611,6 +1634,11 @@ export class Config {
     this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
+    const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
+    const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
+    this.mcpToolIdleTimeoutMs =
+      params.mcpToolIdleTimeoutMs ??
+      (Number.isFinite(parsedEnv) && parsedEnv >= 0 ? parsedEnv : 300000); // 5 minutes default
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
@@ -2003,8 +2031,7 @@ export class Config {
                   (input['permission_mode'] as PermissionMode) ||
                     PermissionMode.Default,
                   (input['permission_suggestions'] as
-                    | PermissionSuggestion[]
-                    | undefined) || undefined,
+                    PermissionSuggestion[] | undefined) || undefined,
                   signal,
                 );
                 break;
@@ -2642,6 +2669,20 @@ export class Config {
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    // The global reasoning effort (settings.model.reasoningEffort, seeded into
+    // the generation config by the CLI) is NOT a provider field, but
+    // syncAfterAuthRefresh → applyResolvedModelDefaults overwrites every
+    // MODEL_GENERATION_CONFIG_FIELDS entry — including `reasoning` — with the
+    // provider preset's value (undefined for reasoning). Capture the effort
+    // before the sync wipes it and re-apply it after the config is rebuilt, so
+    // /effort survives an auth refresh, including the initial one at startup.
+    // `reasoning` is `false | { effort?, ... } | undefined`; the truthy check
+    // already excludes both `false` and `undefined`.
+    const priorReasoning = this.modelsConfig.getGenerationConfig().reasoning;
+    const priorReasoningEffort = priorReasoning
+      ? priorReasoning.effort
+      : undefined;
+
     // Sync modelsConfig state for this auth refresh
     const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
@@ -2668,6 +2709,11 @@ export class Config {
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
     this.contentGeneratorConfigSources = sources;
+
+    // Re-apply the user's reasoning effort that the provider sync above wiped.
+    if (priorReasoningEffort) {
+      this.setReasoningEffort(priorReasoningEffort);
+    }
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
@@ -3007,6 +3053,63 @@ export class Config {
   }
 
   /**
+   * Read the active reasoning-effort tier from the live content-generator
+   * config. Returns undefined when thinking is disabled (`reasoning: false`) or
+   * no tier is set (the model/provider default applies).
+   */
+  getReasoningEffort(): ReasoningEffort | undefined {
+    const reasoning = this.getContentGeneratorConfig()?.reasoning;
+    // `!reasoning` already covers both `false` and `undefined` (both falsy).
+    if (!reasoning) {
+      return undefined;
+    }
+    return reasoning.effort;
+  }
+
+  /**
+   * Update the reasoning-effort tier at runtime (e.g. `/effort high`). The
+   * request pipeline reads `reasoning.effort` per request, so mutating the live
+   * config in place takes effect on the next turn without an auth refresh.
+   * Provider adapters clamp the tier to what the active model supports. Pass
+   * undefined to clear the override and fall back to the model/provider default.
+   *
+   * No-op when thinking is explicitly disabled (`reasoning: false`) so effort
+   * cannot silently re-enable it.
+   */
+  setReasoningEffort(effort: ReasoningEffort | undefined): void {
+    const applyEffort = (
+      cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
+    ): void => {
+      if (!cfg || cfg.reasoning === false) {
+        return;
+      }
+      const next: { effort?: ReasoningEffort; budget_tokens?: number } = {
+        ...(cfg.reasoning ?? {}),
+      };
+      if (effort) {
+        next.effort = effort;
+      } else {
+        delete next.effort;
+      }
+      // Clearing the last key (e.g. setReasoningEffort(undefined) with no
+      // sibling budget_tokens) collapses `reasoning` back to undefined rather
+      // than leaving an empty `{}` — an empty object is truthy, so downstream
+      // `if (cfg.reasoning)` checks would treat reasoning as active and the
+      // pipeline would emit `reasoning: {}` as wire noise.
+      cfg.reasoning = Object.keys(next).length > 0 ? next : undefined;
+    };
+    // The main session and a runtime (sub-agent) content generator may hold
+    // distinct config objects; update whichever the request path reads.
+    applyEffort(this.contentGeneratorConfig);
+    const runtimeCfg = getRuntimeContentGenerator()?.contentGeneratorConfig;
+    if (runtimeCfg && runtimeCfg !== this.contentGeneratorConfig) {
+      applyEffort(runtimeCfg);
+    }
+    // Keep the rebuildable source in sync so a later refreshAuth keeps the tier.
+    applyEffort(this.modelsConfig?.getGenerationConfig());
+  }
+
+  /**
    * Whether `model` is the same entry as the current primary model — matched on
    * the provider identity (auth type, and baseUrl when both carry one), not just
    * the bare id. The vision bridge must never route at the primary (it's the
@@ -3040,21 +3143,28 @@ export class Config {
    * the bridge at an unreachable, or non-image-capable, model.
    */
   private resolveVisionModelSelection():
-    | VisionBridgeModelSelection
-    | undefined {
+    VisionBridgeModelSelection | undefined {
     if (!this.visionModel) return undefined;
+    const visionModelForLog = formatVisionModelSettingForLog(this.visionModel);
+    const parsedSetting = parseVisionModelSetting(this.visionModel);
+    if (!parsedSetting) {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' could not be parsed; falling back to auto-select`,
+      );
+      return undefined;
+    }
     let selector;
     try {
-      selector = resolveModelId(this.visionModel);
+      selector = resolveModelId(parsedSetting.selector);
     } catch {
       this.debugLogger.warn(
-        `vision model pin '${this.visionModel}' could not be parsed; falling back to auto-select`,
+        `vision model pin '${visionModelForLog}' could not be parsed; falling back to auto-select`,
       );
       return undefined;
     }
     if (!selector) {
       this.debugLogger.warn(
-        `vision model pin '${this.visionModel}' resolved to no selector; falling back to auto-select`,
+        `vision model pin '${visionModelForLog}' resolved to no selector; falling back to auto-select`,
       );
       return undefined;
     }
@@ -3064,24 +3174,34 @@ export class Config {
     // the primary entry itself (the text-only model the bridge works around) —
     // via the provider-aware identity check so a cross-provider namesake stays
     // eligible.
-    const match = this.getAllConfiguredModels().find(
+    const matches = this.getAllConfiguredModels().filter(
       (m) =>
         m.id === selector.modelId &&
         (!selector.authType || m.authType === selector.authType) &&
+        (!parsedSetting.baseUrl || m.baseUrl === parsedSetting.baseUrl) &&
         !m.fastOnly &&
         !m.voiceOnly &&
         !this.isCurrentPrimaryModel(m),
     );
+    if (!parsedSetting.baseUrl && matches.length > 1) {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' matched multiple configured endpoints; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    const match = matches[0];
     if (!match) {
       this.debugLogger.warn(
-        `vision model pin '${this.visionModel}' did not match a usable configured model ` +
+        `vision model pin '${visionModelForLog}' did not match a usable configured model ` +
           `(removed, mistyped, fast/voice-only, or the primary itself); falling back to auto-select`,
       );
       return undefined;
     }
     return {
-      id: this.visionModel,
-      ...(match.baseUrl && { baseUrl: match.baseUrl }),
+      id: parsedSetting.selector,
+      ...((parsedSetting.baseUrl ?? match.baseUrl) && {
+        baseUrl: parsedSetting.baseUrl ?? match.baseUrl,
+      }),
     };
   }
 
@@ -3136,6 +3256,13 @@ export class Config {
       return;
     }
 
+    // Reasoning effort is a global, model-independent preference (set via
+    // /effort). Capture it before the rebuild and re-apply after, so switching
+    // models never silently drops the user's chosen effort — neither the
+    // hot-update path (which copies a fixed field set, not `reasoning`) nor the
+    // full refresh path (which rebuilds the config from scratch).
+    const priorReasoningEffort = this.getReasoningEffort();
+
     // Keep full history (including thought parts) on model switch.
     // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
     // reasoning_content to be preserved across turns.
@@ -3160,6 +3287,11 @@ export class Config {
       );
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
+      // Deliberately does NOT copy `reasoning`: it is a global, model-independent
+      // preference captured in `priorReasoningEffort` above and re-applied via
+      // setReasoningEffort() below. Do not add `reasoning` here — that would
+      // overwrite the live tier with the new model's default and make the
+      // restore a no-op.
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
@@ -3200,11 +3332,25 @@ export class Config {
         this.contentGeneratorConfigSources['toolResultContentFormat'] =
           sources['toolResultContentFormat'];
       }
+      if (priorReasoningEffort) {
+        this.setReasoningEffort(priorReasoningEffort);
+      }
       return;
     }
 
-    // Full refresh path
+    // Full refresh path. `refreshAuth` re-applies the reasoning effort it
+    // captures, but on a model *switch* that capture is already stale: the
+    // preceding switchModel() ran applyResolvedModelDefaults(), which overwrote
+    // modelsConfig's `reasoning` with the new model's preset (undefined for most
+    // models), BEFORE this callback fires. So refreshAuth reads `undefined` and
+    // cannot restore the tier. Re-apply here from `priorReasoningEffort`, which
+    // we captured off the still-intact live contentGeneratorConfig above. This is
+    // a no-op when the new model disables thinking (`reasoning: false`), since
+    // setReasoningEffort() skips that case and never silently re-enables it.
     await this.refreshAuth(authType);
+    if (priorReasoningEffort) {
+      this.setReasoningEffort(priorReasoningEffort);
+    }
   }
 
   /**
@@ -3741,8 +3887,7 @@ export class Config {
   }
 
   getMcpTransportPool():
-    | import('../tools/mcp-transport-pool.js').McpTransportPool
-    | undefined {
+    import('../tools/mcp-transport-pool.js').McpTransportPool | undefined {
     return this.mcpTransportPool;
   }
 
@@ -3822,6 +3967,10 @@ export class Config {
 
   setExcludedMcpServers(excluded: string[]): void {
     this.excludedMcpServers = excluded;
+  }
+
+  getMcpToolIdleTimeoutMs(): number {
+    return this.mcpToolIdleTimeoutMs;
   }
 
   isMcpServerDisabled(serverName: string): boolean {
@@ -5565,8 +5714,7 @@ export class Config {
    * has been registered (e.g., in SDK mode).
    */
   getModelInvocableCommandsProvider():
-    | (() => ReadonlyArray<{ name: string; description: string }>)
-    | null {
+    (() => ReadonlyArray<{ name: string; description: string }>) | null {
     return this.modelInvocableCommandsProvider;
   }
 
@@ -5700,9 +5848,8 @@ export class Config {
       if (options?.forSubAgent) return;
       const schema = this.jsonSchema;
       await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
-        const { SyntheticOutputTool } = await import(
-          '../tools/syntheticOutput.js'
-        );
+        const { SyntheticOutputTool } =
+          await import('../tools/syntheticOutput.js');
         return new SyntheticOutputTool(schema);
       });
     };
@@ -5737,9 +5884,8 @@ export class Config {
       return new ToolSearchTool(this);
     });
     await registerLazy(ToolNames.READ_MCP_RESOURCE, async () => {
-      const { ReadMcpResourceTool } = await import(
-        '../tools/read-mcp-resource.js'
-      );
+      const { ReadMcpResourceTool } =
+        await import('../tools/read-mcp-resource.js');
       return new ReadMcpResourceTool(this);
     });
     await registerLazy(ToolNames.AGENT, async () => {
@@ -5827,9 +5973,8 @@ export class Config {
       return new TodoWriteTool(this);
     });
     await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
-      const { AskUserQuestionTool } = await import(
-        '../tools/askUserQuestion.js'
-      );
+      const { AskUserQuestionTool } =
+        await import('../tools/askUserQuestion.js');
       return new AskUserQuestionTool(this);
     });
     if (!this.sdkMode) {
@@ -5856,9 +6001,8 @@ export class Config {
     });
     if (this.isArtifactEnabled()) {
       await registerLazy(ToolNames.ARTIFACT, async () => {
-        const { ArtifactTool } = await import(
-          '../tools/artifact/artifact-tool.js'
-        );
+        const { ArtifactTool } =
+          await import('../tools/artifact/artifact-tool.js');
         return new ArtifactTool(this);
       });
     }
@@ -5910,6 +6054,12 @@ export class Config {
         const { TeamDeleteTool } = await import('../tools/team-delete.js');
         return new TeamDeleteTool(this);
       });
+      await registerLazy(ToolNames.TEAM_PLAN_APPROVAL, async () => {
+        const { TeamPlanApprovalTool } = await import(
+          '../tools/team-plan-approval.js'
+        );
+        return new TeamPlanApprovalTool(this);
+      });
       await registerLazy(ToolNames.TASK_CREATE, async () => {
         const { TaskCreateTool } = await import('../tools/task-create.js');
         return new TaskCreateTool(this);
@@ -5941,9 +6091,8 @@ export class Config {
     // built-in also gates these. Direct registry.registerFactory() would
     // bypass coreTools allowlist + whole-tool deny rules.
     if (this.isComputerUseEnabled()) {
-      const { registerComputerUseTools } = await import(
-        '../tools/computer-use/index.js'
-      );
+      const { registerComputerUseTools } =
+        await import('../tools/computer-use/index.js');
       await registerComputerUseTools(registerLazy, this);
     }
 

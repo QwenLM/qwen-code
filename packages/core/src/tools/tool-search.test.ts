@@ -730,6 +730,51 @@ describe('ToolSearchTool', () => {
     expect(result.returnDisplay).toBe('Loaded 1 tool(s), 1 unavailable');
   });
 
+  it('select: lets plan-required teammates inspect exit_plan_mode but not enter_plan_mode', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.EXIT_PLAN_MODE,
+        shouldDefer: true,
+        alwaysLoad: true,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.ENTER_PLAN_MODE,
+        shouldDefer: false,
+      }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const result = await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () =>
+        tool
+          .build({
+            query: `select:${ToolNames.EXIT_PLAN_MODE},${ToolNames.ENTER_PLAN_MODE}`,
+          })
+          .execute(new AbortController().signal),
+    );
+
+    expect(String(result.llmContent)).toContain(
+      `"name":"${ToolNames.EXIT_PLAN_MODE}"`,
+    );
+    expect(String(result.llmContent)).not.toContain(
+      `"name":"${ToolNames.ENTER_PLAN_MODE}"`,
+    );
+    expect(String(result.llmContent)).toContain(
+      `${ToolNames.ENTER_PLAN_MODE} is not available`,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.returnDisplay).toBe('Loaded 1 tool(s), 1 unavailable');
+  });
+
   it('+must-word filters candidates whose name does not contain the required term', async () => {
     // Both tools would match on "send" in description; only one has "slack"
     // in its name. The +slack prefix should narrow the result to that one.

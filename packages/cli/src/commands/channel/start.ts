@@ -1,8 +1,24 @@
 import type { CommandModule } from 'yargs';
+import {
+  appendChannelMemory,
+  clearChannelMemory,
+  nextFireTime,
+  parseCron,
+  readChannelMemory,
+} from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
-import { AcpBridge, SessionRouter } from '@qwen-code/channel-base';
-import type { ChannelBase } from '@qwen-code/channel-base';
+import {
+  AcpBridge,
+  ChannelLoopScheduler,
+  ChannelLoopStore,
+  SessionRouter,
+} from '@qwen-code/channel-base';
+import type {
+  ChannelBase,
+  ChannelBaseOptions,
+  ChannelLoopController,
+} from '@qwen-code/channel-base';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
 import { resolveProxy } from './proxy.js';
 import {
@@ -12,6 +28,7 @@ import {
 } from './pidfile.js';
 import {
   createChannel,
+  channelLoopPath,
   loadChannelsConfig,
   loadChannelsFromExtensions,
   parseConfiguredChannels,
@@ -34,6 +51,33 @@ function isFileExistsError(err: unknown): boolean {
     err !== null &&
     (err as NodeJS.ErrnoException).code === 'EEXIST'
   );
+}
+
+function channelMemoryOptions(): Pick<ChannelBaseOptions, 'channelMemory'> {
+  return {
+    channelMemory: {
+      readChannelMemory,
+      appendChannelMemory,
+      clearChannelMemory,
+    },
+  };
+}
+
+function createLoopController(store: ChannelLoopStore): ChannelLoopController {
+  return {
+    create: (input) => store.create(input),
+    createForTarget: (input, maxEnabledLoops) =>
+      store.createForTarget(input, maxEnabledLoops),
+    listForTarget: (channelName, target) =>
+      store.listForTarget(channelName, target),
+    disable: (id) => store.disable(id),
+    validateCron: (cron) => {
+      parseCron(cron);
+      nextFireTime(cron, new Date());
+    },
+    nextFireTime: (job) =>
+      nextFireTime(job.cron, new Date(job.lastFiredAt ?? job.createdAt)),
+  };
 }
 
 function writeServiceInfoOrExit(channels: string[], cleanup: () => void): void {
@@ -135,10 +179,22 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
     config.sessionScope,
     sessionsPath(),
   );
+  const loopStore = new ChannelLoopStore({ filePath: channelLoopPath() });
+  const loopController = createLoopController(loopStore);
   const channels: Map<string, ChannelBase> = new Map();
 
-  const channel = await createChannel(name, config, bridge, { router, proxy });
+  const channel = await createChannel(name, config, bridge, {
+    router,
+    proxy,
+    ...channelMemoryOptions(),
+    loopController,
+  });
   channels.set(name, channel);
+  const scheduler = new ChannelLoopScheduler({
+    store: loopStore,
+    channels,
+    nextFireTime,
+  });
   registerToolCallDispatch(bridge, router, channels);
   registerSessionCleanup(bridge, router, channels);
 
@@ -151,10 +207,10 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
     bridge.stop();
     process.exit(1);
   }
-
   writeServiceInfoOrExit([name], () =>
     cleanupStartedChannels([channel], bridge, router),
   );
+  scheduler.start();
   writeStdoutLine(`[Channel] "${name}" is running. Press Ctrl+C to stop.`);
 
   const attachDisconnectHandler = (b: AcpBridge): void => {
@@ -172,6 +228,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         writeStderrLine(
           `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
         );
+        scheduler.stop();
         channel.disconnect();
         router.clearAll();
         removeServiceInfo();
@@ -181,6 +238,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
       writeStderrLine(
         `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
       );
+      scheduler.stop();
       await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
 
       try {
@@ -188,11 +246,14 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         await bridge.start();
         router.setBridge(bridge);
         channel.setBridge(bridge);
+        channel.disconnect();
+        await channel.connect();
         registerToolCallDispatch(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
         const result = await router.restoreSessions();
+        scheduler.start();
         writeStdoutLine(
           `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
         );
@@ -200,6 +261,10 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
         writeStderrLine(
           `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
         );
+        channel.disconnect();
+        router.clearAll();
+        removeServiceInfo();
+        process.exit(1);
       }
     });
   };
@@ -208,6 +273,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   const shutdown = () => {
     shuttingDown = true;
     writeStdoutLine('\n[Channel] Shutting down...');
+    scheduler.stop();
     channel.disconnect();
     bridge.stop();
     router.clearAll();
@@ -260,6 +326,8 @@ async function startAll(proxy?: string): Promise<void> {
   await bridge.start();
 
   const router = new SessionRouter(bridge, defaultCwd, 'user', sessionsPath());
+  const loopStore = new ChannelLoopStore({ filePath: channelLoopPath() });
+  const loopController = createLoopController(loopStore);
   // Register per-channel scope overrides so each channel uses its own sessionScope
   for (const { name, config } of parsed) {
     router.setChannelScope(name, config.sessionScope);
@@ -273,7 +341,12 @@ async function startAll(proxy?: string): Promise<void> {
   for (const { name, config } of parsed) {
     channels.set(
       name,
-      await createChannel(name, config, bridge, { router, proxy }),
+      await createChannel(name, config, bridge, {
+        router,
+        proxy,
+        ...channelMemoryOptions(),
+        loopController,
+      }),
     );
   }
   registerToolCallDispatch(bridge, router, channels);
@@ -281,9 +354,11 @@ async function startAll(proxy?: string): Promise<void> {
 
   // Connect all channels
   let connectedCount = 0;
+  const connectedChannels: Map<string, ChannelBase> = new Map();
   for (const [name, channel] of channels) {
     try {
       await channel.connect();
+      connectedChannels.set(name, channel);
       connectedCount++;
       writeStdoutLine(`[Channel] "${name}" connected.`);
     } catch (err) {
@@ -298,11 +373,16 @@ async function startAll(proxy?: string): Promise<void> {
     bridge.stop();
     process.exit(1);
   }
-
+  const scheduler = new ChannelLoopScheduler({
+    store: loopStore,
+    channels: connectedChannels,
+    nextFireTime,
+  });
   writeServiceInfoOrExit(
     parsed.map((p) => p.name),
     () => cleanupStartedChannels(channels.values(), bridge, router),
   );
+  scheduler.start();
   writeStdoutLine(
     `[Channel] Running ${connectedCount} channel(s). Press Ctrl+C to stop.`,
   );
@@ -321,6 +401,7 @@ async function startAll(proxy?: string): Promise<void> {
         writeStderrLine(
           `[Channel] Bridge crashed ${recentCrashes.length} times in ${CRASH_WINDOW_MS / 1000}s. Giving up.`,
         );
+        scheduler.stop();
         for (const channel of channels.values()) {
           try {
             channel.disconnect();
@@ -336,6 +417,7 @@ async function startAll(proxy?: string): Promise<void> {
       writeStderrLine(
         `[Channel] Bridge crashed (${recentCrashes.length}/${MAX_CRASH_RESTARTS} in window). Restarting in ${RESTART_DELAY_MS / 1000}s...`,
       );
+      scheduler.stop();
       await new Promise((r) => setTimeout(r, RESTART_DELAY_MS));
 
       try {
@@ -345,11 +427,30 @@ async function startAll(proxy?: string): Promise<void> {
         for (const channel of channels.values()) {
           channel.setBridge(bridge);
         }
+        for (const [name, channel] of connectedChannels) {
+          try {
+            channel.disconnect();
+            await channel.connect();
+          } catch (err) {
+            writeStderrLine(
+              `[Channel] "${name}" failed to reconnect: ${err instanceof Error ? err.message : String(err)}`,
+            );
+            connectedChannels.delete(name);
+          }
+        }
+        if (connectedChannels.size === 0) {
+          writeStderrLine('[Channel] No channels reconnected. Exiting.');
+          bridge.stop();
+          router.clearAll();
+          removeServiceInfo();
+          process.exit(1);
+        }
         registerToolCallDispatch(bridge, router, channels);
         registerSessionCleanup(bridge, router, channels);
         attachDisconnectHandler(bridge);
 
         const result = await router.restoreSessions();
+        scheduler.start();
         writeStdoutLine(
           `[Channel] Bridge restarted. Sessions restored: ${result.restored}, failed: ${result.failed}`,
         );
@@ -357,6 +458,16 @@ async function startAll(proxy?: string): Promise<void> {
         writeStderrLine(
           `[Channel] Failed to restart bridge: ${err instanceof Error ? err.message : String(err)}`,
         );
+        for (const channel of channels.values()) {
+          try {
+            channel.disconnect();
+          } catch {
+            // best-effort
+          }
+        }
+        router.clearAll();
+        removeServiceInfo();
+        process.exit(1);
       }
     });
   };
@@ -365,6 +476,7 @@ async function startAll(proxy?: string): Promise<void> {
   const shutdown = () => {
     shuttingDown = true;
     writeStdoutLine('\n[Channel] Shutting down...');
+    scheduler.stop();
     for (const [name, channel] of channels) {
       try {
         channel.disconnect();

@@ -6,7 +6,11 @@
 
 import { useCallback } from 'react';
 import { SettingScope } from '../../config/settings.js';
-import type { AuthType, ApprovalMode } from '@qwen-code/qwen-code-core';
+import type {
+  AuthType,
+  ApprovalMode,
+  ReasoningEffort,
+} from '@qwen-code/qwen-code-core';
 import type { ArenaDialogType } from './useArenaCommand.js';
 
 export interface DialogCloseOptions {
@@ -20,6 +24,10 @@ export interface DialogCloseOptions {
     mode: ApprovalMode | undefined,
     scope: SettingScope,
   ) => void;
+
+  // Reasoning effort dialog
+  isEffortDialogOpen: boolean;
+  handleEffortSelect: (effort: ReasoningEffort | undefined) => void;
 
   // Auth dialog
   isAuthDialogOpen: boolean;
@@ -95,6 +103,12 @@ export function useDialogClose(options: DialogCloseOptions) {
     if (options.isApprovalModeDialogOpen) {
       // Mimic ESC behavior: onSelect(undefined, selectedScope) - keeps current mode
       options.handleApprovalModeSelect(undefined, SettingScope.User);
+      return true;
+    }
+
+    if (options.isEffortDialogOpen) {
+      // Mimic ESC behavior: onSelect(undefined) - keeps the current effort.
+      options.handleEffortSelect(undefined);
       return true;
     }
 
