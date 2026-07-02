@@ -1261,7 +1261,7 @@ export const ChatEditor = memo(
     const showCancelButton = isRunning && !core.hasContent;
 
     return (
-      <div className={styles.editorShell}>
+      <div className={styles.editorShell} data-composer>
         <div
           ref={containerRef}
           className={styles.container}

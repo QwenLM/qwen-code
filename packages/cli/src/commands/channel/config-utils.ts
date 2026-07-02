@@ -69,7 +69,7 @@ function parseObjectStringFields<Field extends string>(
     }
     result[field] = fieldValue;
   }
-  return result;
+  return Object.keys(result).length > 0 ? result : undefined;
 }
 
 function parseMemoryScopeConfig(
