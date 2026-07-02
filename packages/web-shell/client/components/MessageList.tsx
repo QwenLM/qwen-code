@@ -568,15 +568,17 @@ function cleanTimelineMarkdown(raw: string | null | undefined): string {
   cleaned = stripBalancedTimelineMarker(cleaned, '~~');
   cleaned = stripBalancedTimelineMarker(cleaned, '**');
   cleaned = stripBalancedTimelineMarker(cleaned, '__');
-  return cleaned
+  cleaned = cleaned
     .replace(/\*([^*\s][^*]*?\S)\*/g, '$1')
     .replace(
       /(^|[^\p{L}\p{N}_])_([^_\s][^_]*?\S)_(?=$|[^\p{L}\p{N}_])/gu,
       '$1$2',
-    )
-    .replace(/\u0000(\d+)\u0000/g, (_match, index: string) => {
-      return inlinePlaceholders[Number(index)] ?? '';
-    });
+    );
+
+  for (const [index, value] of inlinePlaceholders.entries()) {
+    cleaned = cleaned.split(`\u0000${index}\u0000`).join(value);
+  }
+  return cleaned;
 }
 
 function stripBalancedTimelineMarker(raw: string, marker: string): string {
