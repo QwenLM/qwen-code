@@ -1849,6 +1849,25 @@ describe('ShellExecutionService', () => {
       });
     });
 
+    it('should use cmd.exe with chcp 65001 UTF-8 prefix via PTY on Windows', async () => {
+      mockPlatform.mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'cmd.exe',
+        argsPrefix: ['/c'],
+        shell: 'cmd',
+      });
+      await simulateExecution('dir "C:\\Temp\\"', (pty) =>
+        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
+      );
+
+      // cmd.exe commands on Windows are prefixed with chcp 65001 for UTF-8
+      expect(mockPtySpawn).toHaveBeenCalledWith(
+        'cmd.exe',
+        ['/c', 'chcp 65001 >nul && dir "C:\\Temp\\"'],
+        expect.any(Object),
+      );
+    });
+
     it('should normalize PATH-like env keys on Windows for pty execution', async () => {
       mockPlatform.mockReturnValue('win32');
       vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
@@ -3037,7 +3056,7 @@ describe('ShellExecutionService child_process fallback', () => {
   });
 
   describe('Platform-Specific Behavior', () => {
-    it('should use cmd.exe with windowsVerbatimArguments on Windows', async () => {
+    it('should use cmd.exe with chcp 65001 UTF-8 prefix on Windows', async () => {
       mockPlatform.mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
         executable: 'cmd.exe',
@@ -3048,9 +3067,10 @@ describe('ShellExecutionService child_process fallback', () => {
         cp.emit('exit', 0, null),
       );
 
+      // cmd.exe commands on Windows are prefixed with chcp 65001 for UTF-8
       expect(mockCpSpawn).toHaveBeenCalledWith(
         'cmd.exe',
-        ['/d', '/s', '/c', 'dir "foo bar"'],
+        ['/d', '/s', '/c', 'chcp 65001 >nul && dir "foo bar"'],
         expect.objectContaining({
           detached: false,
           windowsHide: true,
