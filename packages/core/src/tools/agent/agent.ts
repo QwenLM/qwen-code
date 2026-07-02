@@ -1768,7 +1768,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // the AgentTool's success count). This deliberately routes the denial
       // through the scheduler's failure path (error-formatted model
       // response, failure-path hooks): a blocked spawn IS a failed tool call.
-      error: { message: terminateReason },
+      // The failure path sends ONLY `error.message` to the model and the
+      // scrollback (`llmContent` is discarded there), so the message must be
+      // the full guidance text — the terse `terminateReason` would strip the
+      // "do the task yourself instead" instruction and invite retry loops.
+      error: { message: llmContent },
       returnDisplay: {
         type: 'task_execution' as const,
         subagentName:

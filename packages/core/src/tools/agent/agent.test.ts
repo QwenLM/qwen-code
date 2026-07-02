@@ -766,8 +766,12 @@ describe('AgentTool', () => {
       expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
       // A blocked spawn must take the scheduler's failure path: `error` keeps
       // tool-usage stats from counting it as a spawned sub-agent (and fires
-      // failure-path hooks), and the display row reports it as failed.
-      expect(result.error?.message).toBe('Nesting depth limit reached (max 1)');
+      // failure-path hooks), and the display row reports it as failed. The
+      // scheduler sends only `error.message` to the model (llmContent is
+      // discarded on the failure path), so the message must carry the full
+      // actionable guidance, not just the terse reason label.
+      expect(result.error?.message).toContain('nesting depth limit reached');
+      expect(result.error?.message).toContain('Complete this task directly');
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('failed');
     });
@@ -828,10 +832,12 @@ describe('AgentTool', () => {
         'Cannot spawn sub-agents from within a fork',
       );
       expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
-      // Same failure-path contract as the depth guard above.
-      expect(result.error?.message).toBe(
-        'Sub-agent spawning is not allowed inside a fork',
+      // Same failure-path contract as the depth guard above: the model-facing
+      // message keeps the actionable instruction.
+      expect(result.error?.message).toContain(
+        'Cannot spawn sub-agents from within a fork',
       );
+      expect(result.error?.message).toContain('execute tasks directly');
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('failed');
     });
