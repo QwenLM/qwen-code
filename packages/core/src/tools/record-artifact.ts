@@ -327,8 +327,10 @@ function hasControlCharacter(
 }
 
 function hasUnsafeDisplayPayload(value: string): boolean {
-  return /<\s*\/?[a-z!]|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);|javascript\s*:|data\s*:\s*(?:text\/(?:html|javascript)|application\/javascript)|on[a-z]+\s*=/i.test(
-    value,
+  return (
+    /<\s*\/?[a-z!]|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);|javascript\s*:|data\s*:\s*(?:text\/(?:html|javascript)|application\/javascript)/i.test(
+      value,
+    ) || /(?:^|[\s"'`<])on[a-z][a-z0-9-]*\s*=/i.test(value)
   );
 }
 

@@ -188,6 +188,18 @@ describe('RecordArtifactTool', () => {
     ).toThrow(/metadata/);
   });
 
+  it('allows benign words ending with on before equals signs', () => {
+    const tool = new RecordArtifactTool();
+
+    expect(() =>
+      tool.build({
+        title: 'conversation=value',
+        description: 'configuration=value',
+        url: 'https://example.com/resource',
+      }),
+    ).not.toThrow();
+  });
+
   it('rejects Unicode control characters before reporting success', () => {
     const tool = new RecordArtifactTool();
 

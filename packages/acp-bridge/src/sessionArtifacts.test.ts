@@ -9,6 +9,7 @@ import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import {
   SessionArtifactStore,
   SessionArtifactValidationError,
@@ -298,7 +299,9 @@ describe('SessionArtifactStore', () => {
       workspaceCwd: workspace,
     });
     await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
-    await fs.writeFile(path.join(workspace, 'reports/dashboard.html'), 'hello');
+    const artifactPath = path.join(workspace, 'reports/dashboard.html');
+    const artifactUrl = pathToFileURL(artifactPath).href;
+    await fs.writeFile(artifactPath, 'hello');
 
     const created = await store.upsertMany(
       [{ title: 'Draft', workspacePath: 'reports/dashboard.html' }],
@@ -310,7 +313,7 @@ describe('SessionArtifactStore', () => {
           title: 'Published dashboard',
           storage: 'published',
           managedId: managedIdForWorkspacePath('reports/dashboard.html'),
-          url: 'file:///tmp/dashboard.html',
+          url: artifactUrl,
           mimeType: 'text/html',
         },
       ],
@@ -325,11 +328,37 @@ describe('SessionArtifactStore', () => {
         storage: 'published',
         title: 'Published dashboard',
         managedId: managedIdForWorkspacePath('reports/dashboard.html'),
-        url: 'file:///tmp/dashboard.html',
+        url: artifactUrl,
       },
     });
     expect(upgraded.changes[0]?.artifact).not.toHaveProperty('workspacePath');
     expect((await store.list()).artifacts).toHaveLength(1);
+  });
+
+  it('rejects trusted published file urls outside the workspace', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-published-file-url',
+      workspaceCwd: workspace,
+    });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      await fs.writeFile(path.join(outside, 'secret.html'), 'secret');
+      await expect(
+        store.upsertMany(
+          [
+            {
+              title: 'Outside file',
+              storage: 'published',
+              managedId: 'outside-file',
+              url: pathToFileURL(path.join(outside, 'secret.html')).href,
+            },
+          ],
+          { strict: true, trustedPublisher: true },
+        ),
+      ).rejects.toMatchObject({ field: 'url' });
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
   });
 
   it('evicts non-retained old artifacts before client-retained artifacts', async () => {
@@ -582,6 +611,21 @@ describe('SessionArtifactStore', () => {
         { strict: true },
       ),
     ).rejects.toMatchObject({ field: 'title' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'conversation=value',
+            description: 'configuration=value',
+            url: 'https://example.com/benign',
+          },
+        ],
+        { strict: true },
+      ),
+    ).resolves.toMatchObject({
+      changes: [{ action: 'created' }],
+    });
 
     await expect(
       store.upsertMany(
@@ -867,6 +911,28 @@ describe('SessionArtifactStore', () => {
       ).rejects.toMatchObject({ field: 'workspacePath' });
     } finally {
       vi.useRealTimers();
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects dangling symlinks that point outside the workspace', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's6-dangling-symlink',
+      workspaceCwd: workspace,
+    });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      await fs.symlink(
+        path.join(outside, 'missing.txt'),
+        path.join(workspace, 'escape.txt'),
+      );
+
+      await expect(
+        store.upsertMany([{ title: 'Escape', workspacePath: 'escape.txt' }], {
+          strict: true,
+        }),
+      ).rejects.toMatchObject({ field: 'workspacePath' });
+    } finally {
       await fs.rm(outside, { recursive: true, force: true });
     }
   });

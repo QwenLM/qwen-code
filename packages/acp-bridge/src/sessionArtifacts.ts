@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { writeStderrLine } from './internal/stderrLine.js';
 
 export type DaemonSessionArtifactKind =
@@ -358,7 +359,7 @@ export class SessionArtifactStore {
       trustedPublisher,
     });
     const url = input.url
-      ? normalizeArtifactUrl(input.url, trustedPublisher)
+      ? normalizeArtifactUrl(input.url, trustedPublisher, this.workspaceCwd)
       : undefined;
 
     validateLocator(storage, {
@@ -1119,8 +1120,10 @@ function hasControlCharacter(
 }
 
 function hasUnsafeDisplayPayload(value: string): boolean {
-  return /<\s*\/?[a-z!]|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);|javascript\s*:|data\s*:\s*(?:text\/(?:html|javascript)|application\/javascript)|on[a-z]+\s*=/i.test(
-    value,
+  return (
+    /<\s*\/?[a-z!]|&(?:#[0-9]+|#x[0-9a-f]+|[a-z][a-z0-9]+);|javascript\s*:|data\s*:\s*(?:text\/(?:html|javascript)|application\/javascript)/i.test(
+      value,
+    ) || /(?:^|[\s"'`<])on[a-z][a-z0-9-]*\s*=/i.test(value)
   );
 }
 
@@ -1143,7 +1146,11 @@ function normalizeWorkspacePath(raw: unknown, workspaceCwd: string): string {
   return relative.split(path.sep).join('/');
 }
 
-function normalizeArtifactUrl(raw: unknown, allowFile: boolean): string {
+function normalizeArtifactUrl(
+  raw: unknown,
+  allowFile: boolean,
+  workspaceCwd: string,
+): string {
   const trimmed = normalizeString(raw, 'url', 2048, true);
   let parsed: URL;
   try {
@@ -1169,7 +1176,25 @@ function normalizeArtifactUrl(raw: unknown, allowFile: boolean): string {
       'url',
     );
   }
+  if (
+    parsed.protocol === 'file:' &&
+    !isFileUrlInsideWorkspace(parsed, workspaceCwd)
+  ) {
+    throw new SessionArtifactValidationError(
+      'file url must stay inside the workspace',
+      'url',
+    );
+  }
   return parsed.href;
+}
+
+function isFileUrlInsideWorkspace(parsed: URL, workspaceCwd: string): boolean {
+  try {
+    const absolute = path.resolve(fileURLToPath(parsed));
+    return !isOutsidePath(path.relative(workspaceCwd, absolute));
+  } catch {
+    return false;
+  }
 }
 
 function normalizeMetadata(
@@ -1289,8 +1314,8 @@ async function getWorkspaceStatus(
   escaped?: boolean;
 }> {
   const absolutePath = path.resolve(workspaceCwd, workspacePath);
+  const realWorkspace = await realWorkspaceCwd;
   try {
-    const realWorkspace = await realWorkspaceCwd;
     const realPath = await fs.realpath(absolutePath);
     const relative = path.relative(realWorkspace, realPath);
     if (isOutsidePath(relative)) {
@@ -1305,7 +1330,31 @@ async function getWorkspaceStatus(
     if (!isNotFoundError(error)) {
       throw error;
     }
+    if (await danglingSymlinkEscapesWorkspace(absolutePath, realWorkspace)) {
+      return { status: 'missing', escaped: true };
+    }
     return { status: 'missing' };
+  }
+}
+
+async function danglingSymlinkEscapesWorkspace(
+  absolutePath: string,
+  realWorkspace: string,
+): Promise<boolean> {
+  try {
+    const stat = await fs.lstat(absolutePath);
+    if (!stat.isSymbolicLink()) {
+      return false;
+    }
+    const target = await fs.readlink(absolutePath);
+    const parent = await fs.realpath(path.dirname(absolutePath));
+    const targetPath = path.resolve(parent, target);
+    return isOutsidePath(path.relative(realWorkspace, targetPath));
+  } catch (error) {
+    if (isNotFoundError(error)) {
+      return false;
+    }
+    throw error;
   }
 }
 
