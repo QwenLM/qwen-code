@@ -71,6 +71,7 @@ import {
 import { getManagedAutoMemoryStatus } from './status.js';
 import {
   appendManagedAutoMemoryToUserMemory,
+  type BuildMemoryPromptOptions,
   type UserAutoMemorySection,
   type TeamAutoMemorySection,
 } from './prompt.js';
@@ -1441,6 +1442,7 @@ export class MemoryManager {
     indexContent?: string | null,
     userSection?: UserAutoMemorySection,
     teamSection?: TeamAutoMemorySection,
+    options?: BuildMemoryPromptOptions,
   ): string {
     return appendManagedAutoMemoryToUserMemory(
       userMemory,
@@ -1448,6 +1450,7 @@ export class MemoryManager {
       indexContent,
       userSection,
       teamSection,
+      options,
     );
   }
 

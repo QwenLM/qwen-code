@@ -127,6 +127,22 @@ export interface ServeOptions {
    */
   enableSessionShell?: boolean;
   /**
+   * Path to a PEM certificate file. When both `tlsCert` and `tlsKey`
+   * are set, the daemon serves over HTTPS (`https.createServer`) instead
+   * of plain HTTP. Both must be provided together. The main motivation is
+   * mobile/cross-device access: browsers only expose secure-context APIs
+   * (`getUserMedia` for voice input, WebRTC) over HTTPS or `localhost`, so
+   * a LAN IP like `192.168.x.x` needs TLS. Scope is TLS termination only —
+   * no auto-generation, no ACME. TLS is orthogonal to the bearer-token
+   * auth layer; both still apply on non-loopback binds.
+   */
+  tlsCert?: string;
+  /**
+   * Path to a PEM private key file. See `tlsCert` — both must be set
+   * together to enable HTTPS.
+   */
+  tlsKey?: string;
+  /**
    * Serve the built Web Shell SPA at the daemon root (default true). Set
    * false (the CLI's `--no-web`) for an API-only daemon. No effect when the
    * Web Shell assets aren't present in the build.
@@ -218,10 +234,9 @@ export interface ServeOptions {
   clientMcpOverWs?: boolean;
   /**
    * Tunnel raw CDP to a real browser tab over the reverse `/acp` WS
-   * (Plan C "CDP tunnel", issue #5626). When enabled, a loopback puppeteer
-   * client (chrome-devtools-mcp) can connect to a new `/cdp` WebSocket and
-   * drive ONE real tab via the extension's `chrome.debugger`, reusing the
-   * ready-made chrome-devtools-mcp toolset. `runQwenServe` enables this for
+   * (Plan C "CDP tunnel", issue #5626). When enabled, a loopback CDP client can
+   * connect to a new `/cdp` WebSocket and drive ONE real tab via the extension's
+   * `chrome.debugger`, reusing browser automation tools. `runQwenServe` enables this for
    * Chrome extension origins or explicit env opt-in; callers may pass `false`.
    */
   cdpTunnelOverWs?: boolean;

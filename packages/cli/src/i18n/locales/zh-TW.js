@@ -195,6 +195,7 @@ export default {
   'toolDisplayName.TaskStop': '停止任務',
   'toolDisplayName.TeamCreate': '建立團隊',
   'toolDisplayName.TeamDelete': '刪除團隊',
+  'toolDisplayName.TeamPlanApproval': '團隊計畫審批',
   'toolDisplayName.SendMessage': '傳送訊息',
   'toolDisplayName.StructuredOutput': '結構化輸出',
   'toolDisplayName.Monitor': '監控',
@@ -1914,6 +1915,8 @@ export default {
     '緊湊模式下隱藏工具輸出和思考過程，界面更簡潔（Ctrl+O 切換）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看詳細工具調用結果',
   'Switch to plan mode or exit plan mode': '切換到計劃模式或退出計劃模式',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    '設定具備推理能力的模型思考的強度（{{tiers}}）；依各供應商進行映射與鉗制。',
   'Set a goal — keep working until the condition is met':
     '設定目標 — 持續工作直到條件滿足',
   'Exited plan mode. Previous approval mode restored.':

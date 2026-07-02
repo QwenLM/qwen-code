@@ -24,7 +24,17 @@ export interface ChannelLoopSchedulerOptions {
   loopTimeoutMs?: number;
 }
 
-export class ChannelLoopSkippedError extends Error {}
+/** Why a loop run was skipped; carried as data so reporting never depends on message wording. */
+export type ChannelLoopSkipReason = 'cancel_command' | 'clear' | 'dropped';
+
+export class ChannelLoopSkippedError extends Error {
+  constructor(
+    message: string,
+    readonly reason: ChannelLoopSkipReason = 'dropped',
+  ) {
+    super(message);
+  }
+}
 
 export class ChannelLoopScheduler {
   private readonly store: Pick<ChannelLoopStore, 'list' | 'update' | 'disable'>;
