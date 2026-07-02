@@ -437,7 +437,14 @@ export class QQChannel extends ChannelBase {
           ),
         ) as Map<string, 'c2c' | 'group'>;
       }
-      if (raw.replyMsgId) this.replyMsgId = new Map(raw.replyMsgId);
+      if (raw.replyMsgId) {
+        // Validate: entries must be strings ≤ 128 chars
+        this.replyMsgId = new Map(
+          (raw.replyMsgId as Array<[string, unknown]>).filter(
+            ([, v]) => typeof v === 'string' && v.length <= 128,
+          ),
+        ) as Map<string, string>;
+      }
       if (raw.msgSeqMap) {
         // Validate: entries must be non-negative numbers
         this.msgSeqMap = new Map(
