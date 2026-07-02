@@ -180,6 +180,13 @@ export type ChannelTaskLifecycleEvent =
       phase: 'agent' | 'delivery';
     });
 
+/** Terminal lifecycle event types — exactly one is expected per task. */
+export function isTerminalTaskLifecycleType(
+  type: ChannelTaskLifecycleEvent['type'],
+): type is 'completed' | 'cancelled' | 'failed' {
+  return type === 'completed' || type === 'cancelled' || type === 'failed';
+}
+
 export interface ChannelMemoryTarget {
   channelName: string;
   chatId: string;

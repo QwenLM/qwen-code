@@ -117,4 +117,8 @@ Existing TypeScript plugins that explicitly type the adapter constructor or fact
 - **Streaming hooks** — override `onResponseChunk()` for progressive display (e.g., editing a message in-place)
 - Access control (allowlist, pairing, open), session routing, slash commands, crash recovery
 
+## Lifecycle status
+
+The mock plugin protocol exposes streamed chunks and final outbound messages only. It does not model typing indicators, reactions, card updates, or any other status surface, so prompt and task lifecycle status are intentionally no-op for this example channel.
+
 Full guide: [Channel Plugin Developer Guide](../../../docs/developers/channel-plugins.md)
