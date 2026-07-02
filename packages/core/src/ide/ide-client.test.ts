@@ -1411,6 +1411,56 @@ describe('IdeClient', () => {
       );
     });
   });
+
+  describe('getAllConnectionConfigs ENOENT guard', () => {
+    it('returns empty array silently when readdir rejects with ENOENT', async () => {
+      const enoent = new Error('ENOENT: no such file or directory');
+      (enoent as NodeJS.ErrnoException).code = 'ENOENT';
+      (
+        vi.mocked(fs.promises.readdir) as Mock<
+          (path: fs.PathLike) => Promise<string[]>
+        >
+      ).mockRejectedValue(enoent);
+      mockDebugLogger.debug.mockClear();
+
+      const ideClient = await IdeClient.getInstance();
+      const result = await (
+        ideClient as unknown as {
+          getAllConnectionConfigs: (dir: string) => Promise<unknown[]>;
+        }
+      ).getAllConnectionConfigs('/some/test/dir');
+
+      expect(result).toEqual([]);
+      expect(mockDebugLogger.debug).not.toHaveBeenCalledWith(
+        'Failed to read IDE connection directory:',
+        expect.any(Error),
+      );
+    });
+
+    it('returns empty array and logs debug when readdir rejects with other error', async () => {
+      const eperm = new Error('EPERM: operation not permitted');
+      (eperm as NodeJS.ErrnoException).code = 'EPERM';
+      (
+        vi.mocked(fs.promises.readdir) as Mock<
+          (path: fs.PathLike) => Promise<string[]>
+        >
+      ).mockRejectedValue(eperm);
+      mockDebugLogger.debug.mockClear();
+
+      const ideClient = await IdeClient.getInstance();
+      const result = await (
+        ideClient as unknown as {
+          getAllConnectionConfigs: (dir: string) => Promise<unknown[]>;
+        }
+      ).getAllConnectionConfigs('/some/test/dir');
+
+      expect(result).toEqual([]);
+      expect(mockDebugLogger.debug).toHaveBeenCalledWith(
+        'Failed to read IDE connection directory:',
+        expect.any(Error),
+      );
+    });
+  });
 });
 
 describe('getIdeServerHost', () => {
