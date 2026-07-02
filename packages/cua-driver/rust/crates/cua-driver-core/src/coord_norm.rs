@@ -68,7 +68,9 @@ fn input_coord_fields(tool: &str) -> &'static [(&'static str, bool, bool)] {
 
 /// In-place convert a coordinate tool's normalized input fields to pixels.
 /// Window-basis fields use the window's screenshot size (`screenshot_w/h`);
-/// screen-basis fields (move_cursor) use the cached screen size.
+/// screen-basis fields (move_cursor) use the cached screen size. Desktop-scope
+/// clicks (no pid/window_id → `screenshot_w == 0`) fall back to screen size
+/// since `get_desktop_state` captures in true screen pixels.
 pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screenshot_h: u32) {
     // from_zoom coords live in the zoom-image space, not window-local; core has
     // no crop basis to convert them, so leave the whole call untouched.
@@ -84,7 +86,13 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
                 None => continue, // no screen size cached yet → leave field as-is
             }
         } else if screenshot_w == 0 {
-            continue; // no window basis available → leave field as-is
+            // No window basis available. For desktop-scope clicks (no pid), fall
+            // back to screen size so get_desktop_state + click(x,y) works in
+            // normalized mode. If screen size isn't cached yet, skip.
+            match screen {
+                Some(s) => s,
+                None => continue,
+            }
         } else {
             (screenshot_w, screenshot_h)
         };
@@ -113,8 +121,7 @@ pub fn extract_screenshot_size(result: &ToolResult) -> Option<(u32, u32)> {
 /// they are screen-global with no window-origin/scale basis available in core
 /// (see design doc §5), so converting them here would introduce error.
 pub fn normalize_result(tool: &str, result: &mut ToolResult) {
-    // First version only rewrites get_window_state's screenshot dims.
-    if tool != "get_window_state" {
+    if tool != "get_window_state" && tool != "get_desktop_state" {
         return;
     }
     let scale = coordinate_scale() as u64;
@@ -305,14 +312,23 @@ pub fn screen_size() -> Option<(u32, u32)> {
     screen_cache().lock().ok().and_then(|c| *c)
 }
 
-/// Ingest the screen size from a `get_screen_size` result into the cache.
+/// Ingest the screen size from a `get_screen_size` or `get_desktop_state`
+/// result into the cache. `get_desktop_state` reports `screen_width/height`
+/// (true display size in points); `get_screen_size` reports `width/height`.
 pub fn ingest_screen_size(tool: &str, result: &ToolResult) {
-    if tool != "get_screen_size" {
+    if tool != "get_screen_size" && tool != "get_desktop_state" {
         return;
     }
     if let Some(sc) = result.structured_content.as_ref() {
-        let w = sc.get("width").and_then(|v| v.as_u64());
-        let h = sc.get("height").and_then(|v| v.as_u64());
+        let (w, h) = if tool == "get_desktop_state" {
+            let w = sc.get("screen_width").and_then(|v| v.as_u64());
+            let h = sc.get("screen_height").and_then(|v| v.as_u64());
+            (w, h)
+        } else {
+            let w = sc.get("width").and_then(|v| v.as_u64());
+            let h = sc.get("height").and_then(|v| v.as_u64());
+            (w, h)
+        };
         if let (Some(w), Some(h)) = (w, h) {
             put_screen_size(w as u32, h as u32);
         }
@@ -580,5 +596,45 @@ mod tests {
             .with_structured(json!({ "screenshot_width": 1024, "screenshot_height": 768 }));
         ingest_window_size("click", &args, &r);
         assert_eq!(get_size(990004, 5), None);
+    }
+
+    // ---- desktop-scope ----
+
+    #[test]
+    fn denormalize_click_falls_back_to_screen_for_desktop_scope() {
+        put_screen_size(2560, 1440);
+        let mut args = json!({ "x": 500.0, "y": 500.0 });
+        // screenshot_w=0 simulates no window cache (desktop-scope, no pid)
+        denormalize_args("click", &mut args, 0, 0);
+        assert_eq!(args["x"], json!(1280.0)); // 500/1000*2560
+        assert_eq!(args["y"], json!(720.0));  // 500/1000*1440
+    }
+
+    #[test]
+    fn normalize_result_rewrites_get_desktop_state() {
+        let mut r = ToolResult::text("ok")
+            .with_structured(json!({
+                "screenshot_width": 2560,
+                "screenshot_height": 1440,
+                "screen_width": 1280,
+                "screen_height": 800,
+            }));
+        normalize_result("get_desktop_state", &mut r);
+        let sc = r.structured_content.as_ref().unwrap();
+        assert_eq!(sc["screenshot_width"], json!(1000));
+        assert_eq!(sc["screenshot_height"], json!(1000));
+    }
+
+    #[test]
+    fn ingest_screen_size_from_get_desktop_state() {
+        let r = ToolResult::text("ok")
+            .with_structured(json!({
+                "screen_width": 3840,
+                "screen_height": 2160,
+                "screenshot_width": 3840,
+                "screenshot_height": 2160,
+            }));
+        ingest_screen_size("get_desktop_state", &r);
+        assert_eq!(screen_size(), Some((3840, 2160)));
     }
 }
