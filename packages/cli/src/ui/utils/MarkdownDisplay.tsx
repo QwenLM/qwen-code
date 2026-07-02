@@ -14,7 +14,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
-import { getCachedStringWidth } from './textUtils.js';
+import { fitPendingSlice } from './pendingRenderedHeight.js';
 // Minimum content lines to keep in a clipped live preview before the
 // "generating more" cue (own constant — not coupled to MaxSizedBox's floor).
 const MIN_PENDING_CONTENT_LINES = 1;
@@ -216,71 +216,30 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   const tableSeparatorRegex =
     /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
 
-  // Rendered-height-aware slice of the pending preview. Walk source lines,
-  // charging each a conservative ESTIMATE of the terminal rows it will occupy:
-  //  - a non-table line wraps to ceil(displayWidth / contentWidth) rows (≥ 1),
-  //    so wide/CJK lines are counted accurately;
-  //  - a markdown table renders ~2 rows per data row + borders + marginY, but
-  //    the `maxHeight` clamp caps any single table at the viewport, so charge
-  //    the min of the two. If a table would overflow the REMAINING budget, cut
-  //    *before* it (shown once earlier content commits) — unless it is the first
-  //    block, in which case keep it and let the clamp bound it, then stop.
-  // The estimate is an upper bound on the true rendered height, so the kept
-  // slice can never exceed the budget → the frame can never overflow → no lock.
-  const TABLE_CHROME_ROWS = 5; // top/header/bottom borders + marginY(2)
-  const tableClampRows =
-    availableTerminalHeight !== undefined
-      ? Math.max(2, availableTerminalHeight - 3)
-      : Number.MAX_SAFE_INTEGER;
-  const wrappedRows = (line: string): number => {
-    if (contentWidth <= 0) return 1;
-    return Math.max(1, Math.ceil(getCachedStringWidth(line) / contentWidth));
-  };
+  // Rendered-height-aware slice of the pending preview (shared with
+  // useGeminiStream's incremental commit — see pendingRenderedHeight.ts — so the
+  // two agree on how tall the content renders). Guarantees the live frame never
+  // exceeds the viewport, so ink cannot fall into its from-top full-redraw path
+  // (the scroll-to-top lock). Note keptLines can be 0 when even the first
+  // line/table alone overflows (e.g. a single very wide/CJK line that wraps past
+  // the budget): render nothing plus the "generating more" cue rather than one
+  // oversized row that would bypass the bound.
   let lines = allLines;
   let pendingClipped = false;
   if (pendingRenderedBudget !== undefined) {
-    let rendered = 0;
-    let sourceKept = allLines.length;
-    for (let i = 0; i < allLines.length; ) {
-      const isTableStart =
-        tableRowRegex.test(allLines[i]!) &&
-        i + 1 < allLines.length &&
-        tableSeparatorRegex.test(allLines[i + 1]!);
-      if (isTableStart) {
-        let j = i + 2;
-        while (j < allLines.length && tableRowRegex.test(allLines[j]!)) j++;
-        // Real rendered height is capped by the maxHeight clamp on the table.
-        const cost = Math.min(
-          2 * (j - (i + 2)) + TABLE_CHROME_ROWS,
-          tableClampRows,
-        );
-        if (rendered + cost > pendingRenderedBudget && i > 0) {
-          // Not the first block → cut before the table so earlier content shows.
-          sourceKept = i;
-          break;
-        }
-        rendered += cost;
-        i = j;
-        if (rendered >= pendingRenderedBudget) {
-          // Budget filled by this table (clamped); don't append trailing blocks.
-          sourceKept = j;
-          break;
-        }
-      } else {
-        rendered += wrappedRows(allLines[i]!);
-        if (rendered > pendingRenderedBudget) {
-          sourceKept = i;
-          break;
-        }
-        i++;
-      }
-    }
-    if (sourceKept < allLines.length) {
+    const tableClampRows =
+      availableTerminalHeight !== undefined
+        ? Math.max(2, availableTerminalHeight - 3)
+        : Number.MAX_SAFE_INTEGER;
+    const { keptLines, clipped } = fitPendingSlice(
+      allLines,
+      contentWidth,
+      pendingRenderedBudget,
+      tableClampRows,
+    );
+    if (clipped) {
       pendingClipped = true;
-      lines = allLines.slice(
-        0,
-        Math.max(MIN_PENDING_CONTENT_LINES, sourceKept),
-      );
+      lines = allLines.slice(0, keptLines);
     }
   }
 

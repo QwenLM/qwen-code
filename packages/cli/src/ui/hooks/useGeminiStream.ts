@@ -86,7 +86,7 @@ import {
   resolveAtCommandQuery,
 } from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
-import { getCachedStringWidth } from '../utils/textUtils.js';
+import { fitPendingSlice } from '../utils/pendingRenderedHeight.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
@@ -368,15 +368,15 @@ const EDIT_TOOL_NAMES = new Set([
 ]);
 const STREAM_UPDATE_THROTTLE_MS = 60;
 const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
-// Fallback viewport budget (rendered rows) when the live terminal content
-// height is not yet known.
-const STREAM_PENDING_ITEM_FALLBACK_ROWS = 16;
 // Rows kept in reserve below the commit budget so the incremental commit fires
 // BEFORE MarkdownDisplay's safety-net clip (which reserves 2). Keeping the
 // pending item's rendered height under the safety budget stops that clip from
 // engaging and flickering "generating more" / hiding a table in step with the
 // commit cycle.
 const STREAM_PENDING_COMMIT_RESERVE_ROWS = 5;
+// Conservative estimate of the rows the composer/footer occupy, used to derive
+// a content-area height from terminalHeight before the live value is known.
+const STREAM_PENDING_COMPOSER_RESERVE_ROWS = 12;
 const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 
 type BufferedStreamEvent =
@@ -399,61 +399,22 @@ function clampLoadingThoughtDescription(description: string): string {
   return description.slice(0, LOADING_THOUGHT_DESCRIPTION_MAX_CHARS);
 }
 
-const TABLE_ROW_RE = /^\s*\|.*\|\s*$/;
-
 /**
- * Estimates how many *rendered* terminal rows a single source line occupies.
- * A markdown table row renders ~2 rows (TableRenderer draws a separator between
- * every data row); any line wider than `width` wraps. This mirrors, coarsely,
- * MarkdownDisplay's own rendered-height accounting so the incremental commit
- * can keep the pending item within the viewport in RENDERED terms — a source
- * line count under-estimates tables and wide/CJK text and would let the pending
- * frame overshoot the safety-net clip.
+ * Character index just after the `keptLines`-th source line of `text`, or -1 if
+ * there are not that many lines. Converts a fitPendingSlice line count into a
+ * commit boundary; callers pass it through `findLastSafeSplitPoint` so the cut
+ * never lands inside a fenced code block.
  */
-function estimateRenderedRows(line: string, width: number): number {
-  const base = TABLE_ROW_RE.test(line) ? 2 : 1;
-  if (width <= 0) return base;
-  return base * Math.max(1, Math.ceil(getCachedStringWidth(line) / width));
-}
-
-/** Sum of {@link estimateRenderedRows} over every source line in `text`. */
-function estimateBufferRenderedRows(text: string, width: number): number {
-  let rows = 0;
-  let lineStart = 0;
-  for (let i = 0; i <= text.length; i++) {
-    if (i === text.length || text[i] === '\n') {
-      rows += estimateRenderedRows(text.slice(lineStart, i), width);
-      lineStart = i + 1;
+function charIndexAfterLine(text: string, keptLines: number): number {
+  if (keptLines <= 0) return -1;
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') {
+      count++;
+      if (count === keptLines) return i + 1;
     }
   }
-  return rows;
-}
-
-/**
- * Returns the character index just after the source line at which the cumulative
- * estimated rendered height of `text` first reaches `maxRows`. Used to pick an
- * incremental-commit boundary by rendered height rather than raw line count.
- * The returned index is a line boundary; callers should still pass it through
- * `findLastSafeSplitPoint` to avoid cutting inside a fenced code block.
- */
-function charIndexForRenderedRows(
-  text: string,
-  width: number,
-  maxRows: number,
-): number {
-  let rendered = 0;
-  let lineStart = 0;
-  for (let i = 0; i <= text.length; i++) {
-    if (i === text.length || text[i] === '\n') {
-      const line = text.slice(lineStart, i);
-      rendered += estimateRenderedRows(line, width);
-      if (rendered >= maxRows) {
-        return i < text.length ? i + 1 : text.length;
-      }
-      lineStart = i + 1;
-    }
-  }
-  return text.length;
+  return -1;
 }
 
 /**
@@ -1312,30 +1273,39 @@ export const useGeminiStream = (
       }
       // Rendered-height-aware incremental commit. Commit whole chunks to
       // <Static> so the pending (live) item's ESTIMATED rendered height stays
-      // within the viewport budget. Measuring rendered rows (tables count double,
-      // wide/CJK lines wrap) — not raw source lines — keeps the pending frame
-      // below MarkdownDisplay's safety-net clip, so that clip never engages and
-      // flickers "generating more" / hides a table in step with each commit.
+      // within the viewport budget. Uses the SAME accounting as
+      // MarkdownDisplay's safety-net slice (fitPendingSlice — tables counted as
+      // blocks, wide/CJK lines wrapped) so the two agree and the clip never
+      // engages / flickers in step with the commit cycle.
       //
       //  - `while`, not `if`: a single throttled update can append many lines, so
       //    keep committing until the remainder fits.
       //  - `findLastSafeSplitPoint`: never cut inside a fenced code block (which
       //    would commit a half-open ``` to scrollback permanently).
+      //  - Conservative fallback when the content-area height is not yet known
+      //    (ref is 0 before the first render populates it): derive from
+      //    terminalHeight so a short terminal does not use an over-large budget.
+      const viewportRows =
+        (availableTerminalHeightRef?.current ?? 0) > 0
+          ? availableTerminalHeightRef!.current
+          : Math.max(4, terminalHeight - STREAM_PENDING_COMPOSER_RESERVE_ROWS);
       const commitRowBudget = Math.max(
         4,
-        (availableTerminalHeightRef?.current ||
-          STREAM_PENDING_ITEM_FALLBACK_ROWS) -
-          STREAM_PENDING_COMMIT_RESERVE_ROWS,
+        viewportRows - STREAM_PENDING_COMMIT_RESERVE_ROWS,
       );
-      while (
-        estimateBufferRenderedRows(newGeminiMessageBuffer, terminalWidth) >
-        commitRowBudget
-      ) {
-        const target = charIndexForRenderedRows(
-          newGeminiMessageBuffer,
+      const tableClampRows = Math.max(2, viewportRows - 3);
+      // eslint-disable-next-line no-constant-condition
+      while (true) {
+        const bufferLines = newGeminiMessageBuffer.split('\n');
+        const { keptLines, clipped } = fitPendingSlice(
+          bufferLines,
           terminalWidth,
           commitRowBudget,
+          tableClampRows,
         );
+        if (!clipped) break;
+        const target = charIndexAfterLine(newGeminiMessageBuffer, keptLines);
+        if (target <= 0) break; // cannot split (e.g. one oversized line)
         const splitPoint = findLastSafeSplitPoint(
           newGeminiMessageBuffer,
           target,
@@ -1370,7 +1340,14 @@ export const useGeminiStream = (
       });
       return newGeminiMessageBuffer;
     },
-    [commitItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [
+      commitItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      terminalWidth,
+      terminalHeight,
+      availableTerminalHeightRef,
+    ],
   );
 
   const mergeThought = useCallback(
