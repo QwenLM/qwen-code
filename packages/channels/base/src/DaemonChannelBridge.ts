@@ -5,6 +5,7 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type {
   AvailableCommand,
+  BridgeSessionInfo,
   ChannelAgentBridge,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
@@ -228,6 +229,18 @@ export class DaemonChannelBridge
 
   getAvailableCommands(sessionId: string): AvailableCommand[] {
     return this.availableCommandsBySession.get(sessionId) ?? [];
+  }
+
+  listSessions(): BridgeSessionInfo[] {
+    const result: BridgeSessionInfo[] = [];
+    for (const session of this.sessions.values()) {
+      result.push({
+        sessionId: session.sessionId,
+        workspaceCwd: session.workspaceCwd,
+        hasActivePrompt: this.activePrompts.has(session.sessionId),
+      });
+    }
+    return result;
   }
 
   async start(): Promise<void> {

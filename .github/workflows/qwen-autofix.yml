@@ -664,13 +664,12 @@ jobs:
             7. **Commit**: a single Conventional Commit on the branch, e.g.
                `fix(core): <summary> (#${{ steps.decision.outputs.go_issue }})`.
             8. **Write outputs**:
-               - /tmp/autofix/pr-title.txt — Conventional Commit style PR title.
-               - /tmp/autofix/pr-body.md — PR description following
-                 .github/pull_request_template.md, with motivation and
-                 changes in prose, a Reviewer Test Plan, and `Fixes #${{ steps.decision.outputs.go_issue }}`.
-                 Do not hard-wrap lines.
                - /tmp/autofix/e2e-report.md — E2E evidence: exact commands,
                  before/after behavior, and test output excerpts.
+               - Use the project skill `prepare-pr`
+                 (.qwen/skills/prepare-pr/SKILL.md) to write
+                 /tmp/autofix/pr-title.txt and /tmp/autofix/pr-body.md for
+                 issue #${{ steps.decision.outputs.go_issue }}.
 
             If at any point you conclude the fix is beyond confident reach,
             STOP: write /tmp/autofix/failure.md with what you learned and
