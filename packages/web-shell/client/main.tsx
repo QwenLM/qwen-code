@@ -1,6 +1,6 @@
 import React from 'react';
 import ReactDOM from 'react-dom/client';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import {
   DaemonWorkspaceProvider,
   DaemonSessionProvider,
@@ -93,6 +93,9 @@ function getSessionIdFromUrl(): string | undefined {
 function replaceStandaloneSessionUrl(sessionId: string | undefined): void {
   const url = new URL(window.location.href);
   url.pathname = sessionId ? `/session/${encodeURIComponent(sessionId)}` : '/';
+  // Strip `theme` so a bookmarked / shared URL with `?theme=light` does not
+  // permanently override the user's stored preference on every page load.
+  url.searchParams.delete('theme');
   if (!import.meta.env.DEV) {
     url.searchParams.delete('token');
     url.searchParams.delete('daemon');
@@ -107,6 +110,18 @@ function StandaloneApp({ daemonToken }: { daemonToken?: string }) {
   );
   const [sessionId] = useState<string | undefined>(() => getSessionIdFromUrl());
   const baseUrl = DAEMON_BASE_URL || window.location.origin;
+  // Keep the <html> theme class and <meta name="theme-color"> in sync with
+  // the React theme so mobile status bars / overscroll backgrounds stay
+  // consistent when the user toggles or when ?theme= lands via URL.
+  useEffect(() => {
+    const root = document.documentElement;
+    root.classList.remove('theme-dark', 'theme-light');
+    root.classList.add(`theme-${theme}`);
+    const meta = document.querySelector('meta[name="theme-color"]');
+    if (meta) {
+      meta.setAttribute('content', theme === 'light' ? '#ffffff' : '#0d0d0d');
+    }
+  }, [theme]);
   const handleThemeChange = useCallback((nextTheme: WebShellTheme) => {
     setTheme(nextTheme);
     storeTheme(nextTheme);
