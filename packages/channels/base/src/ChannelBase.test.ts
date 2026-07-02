@@ -7809,13 +7809,13 @@ describe('ChannelBase', () => {
       expect(promptText).toContain('- namespace: memory:test');
       expect(promptText).toContain('Reply briefly.');
       expect(promptText).toContain(
-        '[Loop "daily summary" created by Alice]\n\npost summary',
+        '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
       );
       const secondPromptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[1]![1] as string;
       expect(secondPromptText).not.toContain('Channel identity:');
       expect(secondPromptText).toContain(
-        '[Loop "daily summary" created by Alice]\n\npost summary again',
+        '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary again',
       );
     });
 

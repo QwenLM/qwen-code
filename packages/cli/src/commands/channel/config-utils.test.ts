@@ -105,8 +105,8 @@ describe('parseChannelConfig', () => {
     expect(result.cwd).toBe(process.cwd());
     expect(result.groupPolicy).toBe('disabled');
     expect(result.groups).toEqual({});
-    expect(result['identity']).toBeUndefined();
-    expect(result['memoryScope']).toBeUndefined();
+    expect(result.identity).toBeUndefined();
+    expect(result.memoryScope).toBeUndefined();
   });
 
   it('resolves env vars in token, clientId, clientSecret', async () => {
