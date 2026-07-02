@@ -1,0 +1,6 @@
+# .atlarixignore — project-specific excludes for Atlarix (gitignore syntax).
+#
+# Atlarix already ignores your .gitignore plus a built-in baseline of common
+# dependency/build/cache directories and OS/editor cruft. Add paths here that
+# ONLY Atlarix should skip — e.g. large fixtures, generated docs, vendored code
+# you still want git to track. One pattern per line.
