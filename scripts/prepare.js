@@ -27,18 +27,19 @@ function run(command, args = []) {
     stdio: 'inherit',
   });
 
+  const label = args.length ? `${command} ${args.join(' ')}` : command;
+
   if (result.error) {
-    console.error(result.error.message);
+    console.error(`prepare: ${label} failed: ${result.error.message}`);
     process.exit(1);
   }
 
   if (result.signal) {
-    console.error(`${command} exited with signal ${result.signal}`);
+    console.error(`prepare: ${label} killed by signal ${result.signal}`);
     process.exit(1);
   }
 
   if (result.status !== 0) {
-    const label = args.length ? `${command} ${args.join(' ')}` : command;
     console.error(`prepare: ${label} exited with status ${result.status}`);
     process.exit(result.status ?? 1);
   }
