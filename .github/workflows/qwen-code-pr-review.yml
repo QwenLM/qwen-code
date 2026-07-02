@@ -115,7 +115,9 @@ jobs:
           fi
           ACK_BODY="<!-- qwen-review-ack -->_Qwen Code review request accepted. Review is queued in [workflow run](${RUN_URL})._"
           EXISTING_ACK_ID="$(
+            # -F would otherwise make gh api default to POST.
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --method GET \
               --paginate \
               -F per_page=100 \
               | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
