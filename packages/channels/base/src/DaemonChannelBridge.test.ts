@@ -220,35 +220,26 @@ describe('DaemonChannelBridge', () => {
     bridge.stop();
   });
 
-  it('resolves the turn barrier on turn_error and emits protocol error', async () => {
+  it('rejects prompt and emits protocol error on turn_error', async () => {
     const events = new EventQueue();
     const session = createFakeSession(events);
-    session.prompt.mockImplementation(async () => {
-      setTimeout(() => {
-        events.push({
-          id: 1,
-          v: 1,
-          type: 'session_update',
-          data: {
-            sessionId: 'session-1',
-            update: {
-              sessionUpdate: 'agent_message_chunk',
-              content: { type: 'text', text: 'partial' },
-            },
-          },
-        });
-        events.push({
-          v: 1,
-          type: 'turn_error',
-          data: {
-            sessionId: 'session-1',
-            message: 'model_overloaded',
-            code: 'overloaded',
-          },
-        });
-      }, 0);
-      return { stopReason: 'end_turn' };
-    });
+    session.prompt.mockImplementation(
+      () =>
+        new Promise((_resolve, reject) => {
+          setTimeout(() => {
+            events.push({
+              v: 1,
+              type: 'turn_error',
+              data: {
+                sessionId: 'session-1',
+                message: 'model_overloaded',
+                code: 'overloaded',
+              },
+            });
+            reject(new Error('model_overloaded'));
+          }, 0);
+        }),
+    );
     const bridge = new DaemonChannelBridge({
       cwd: '/repo',
       sessionFactory: vi.fn().mockResolvedValue(session),
@@ -259,8 +250,8 @@ describe('DaemonChannelBridge', () => {
     await bridge.start();
     await bridge.newSession('/repo');
 
-    await expect(bridge.prompt('session-1', 'summarize')).resolves.toBe(
-      'partial',
+    await expect(bridge.prompt('session-1', 'summarize')).rejects.toThrow(
+      'model_overloaded',
     );
     expect(errors).toHaveBeenCalledWith(
       expect.objectContaining({

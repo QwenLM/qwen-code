@@ -308,7 +308,13 @@ export class DaemonChannelBridge
 
     try {
       const result = await session.prompt({ prompt }, controller.signal);
-      await turnBarrier;
+      // Prefer turn_complete for deterministic chunk collection (SSE path).
+      // Fall back to one event-loop tick for non-SSE prompt paths (blocking
+      // HTTP, non-202 responses) where turn_complete never arrives.
+      await Promise.race([
+        turnBarrier,
+        new Promise<void>((resolve) => setTimeout(resolve, 0)),
+      ]);
       const textResult = chunks.join('');
       this.emit('promptComplete', {
         sessionId,
