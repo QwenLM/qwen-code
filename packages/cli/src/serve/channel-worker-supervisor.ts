@@ -736,6 +736,8 @@ export function createChannelWorkerSupervisor(
         if (message.pid !== undefined && currentPid !== undefined) {
           if (message.pid !== currentPid) return;
         }
+        // Use daemon clock, not worker-supplied message.at — a compromised
+        // adapter could inject arbitrary data via the IPC heartbeat.
         snapshot = {
           ...snapshot,
           lastHeartbeatAt: new Date().toISOString(),
