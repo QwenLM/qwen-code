@@ -12,6 +12,7 @@ import * as path from 'node:path';
 import {
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
+  resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
 import type { Content, FunctionCall, Part } from '@google/genai';
@@ -41,6 +42,7 @@ import { MessageType } from '../../ui/types.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
 const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
+const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
 // Records every LoopTickResolver construction's deps so a test can assert what
 // Session computed (e.g. the home confinement root) without a private-field peek.
 const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
@@ -58,6 +60,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
     }),
     generatePromptSuggestion: vi.fn(),
     logPromptSuggestion: vi.fn(),
+    runVisionBridge: runVisionBridgeSpy,
     // Transparent recording wrapper: records the constructor deps, then behaves
     // exactly like the real resolver (subclass → instanceof + methods preserved).
     LoopTickResolver: class extends actual.LoopTickResolver {
@@ -179,18 +182,25 @@ function createEmptyStream() {
 
 /**
  * Points os.homedir() at `home` for a test by overriding the env vars libuv
- * reads (HOME on POSIX, USERPROFILE on Windows) — the module export itself can't
- * be spied under ESM. Returns a restore function.
+ * reads — the module export itself can't be spied under ESM. Returns a restore
+ * function.
  */
 function setFakeHome(home: string): () => void {
-  const prev = {
-    HOME: process.env['HOME'],
-    USERPROFILE: process.env['USERPROFILE'],
-  };
-  process.env['HOME'] = home;
-  process.env['USERPROFILE'] = home;
+  const keys = [
+    'HOME',
+    'USERPROFILE',
+    'HOMEDRIVE',
+    'HOMEPATH',
+    'HOMESHARE',
+  ] as const;
+  const prev = Object.fromEntries(
+    keys.map((key) => [key, process.env[key]]),
+  ) as Record<(typeof keys)[number], string | undefined>;
+  for (const key of keys) {
+    process.env[key] = home;
+  }
   return () => {
-    for (const key of ['HOME', 'USERPROFILE'] as const) {
+    for (const key of keys) {
       if (prev[key] === undefined) delete process.env[key];
       else process.env[key] = prev[key];
     }
@@ -344,6 +354,7 @@ describe('Session', () => {
   }
 
   beforeEach(() => {
+    runVisionBridgeSpy.mockReset();
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
     switchModelSpy = vi
@@ -2212,6 +2223,281 @@ describe('Session', () => {
       }
     });
 
+    it('routes ACP image prompts through the vision bridge for text-only primary models', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: 'look at this' }, { text: '[transcribed image]' }],
+        transcript: '[transcribed image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      expect(runVisionBridgeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: mockConfig,
+          signal: expect.any(AbortSignal),
+        }),
+      );
+      const sent = firstSentMessage();
+      expect(textParts(sent)).toContain('[transcribed image]');
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+    });
+
+    it('strips image parts when the vision bridge is cancelled before applying', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: false,
+        status: 'skipped',
+        convertedCount: 0,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+        egressOccurred: true,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(
+        textParts(sent).some((t: string) => t.includes('look at this')),
+      ).toBe(true);
+    });
+
+    it('preserves oversized inline images for the vision bridge', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = '8';
+      try {
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'qwen3.7-plus',
+        });
+        runVisionBridgeSpy.mockResolvedValue({
+          applied: true,
+          status: 'ok',
+          parts: [{ text: 'look at this' }, { text: '[large image]' }],
+          transcript: '[large image]',
+          convertedCount: 1,
+          omittedCount: 0,
+          modelId: 'qwen3.7-plus',
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'QUJDREVGR0hJSktMTU5PUFFSU1Q=',
+            },
+          ],
+        });
+
+        const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
+          ?.parts as Part[];
+        expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
+        expect(textParts(firstSentMessage())).toContain('[large image]');
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+    });
+
+    it('falls back to text-only parts when the vision bridge throws', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockRejectedValue(new Error('provider unavailable'));
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(
+        textParts(sent).some((t: string) => t.includes('look at this')),
+      ).toBe(true);
+      expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('provider unavailable'),
+      );
+    });
+
+    it('forwards failed bridge replacement parts to the primary model', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'failed',
+        parts: [{ text: 'look at this' }, { text: '[bridge failed]' }],
+        convertedCount: 0,
+        omittedCount: 1,
+        modelId: 'qwen3.7-plus',
+        egressOccurred: true,
+        error: 'quota exceeded',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      const sent = firstSentMessage();
+      expect(textParts(sent)).toContain('[bridge failed]');
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('error=quota exceeded'),
+      );
+    });
+
+    it('does not run the vision bridge when the primary model supports images', async () => {
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ image: true });
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+      expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+        true,
+      );
+    });
+
+    it('preserves unsupported image @ files for the vision bridge', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: {
+            inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          },
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: 'look at this' }, { text: '[file image]' }],
+        transcript: '[file image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'resource_link',
+              uri: 'file:///tmp/image.png',
+              mimeType: 'image/png',
+              name: 'image.png',
+            },
+          ],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            preserveUnsupportedImageForBridge: true,
+          }),
+        );
+        const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
+          ?.parts as Part[];
+        expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
+        expect(textParts(firstSentMessage())).toContain('[file image]');
+      } finally {
+        readManyFilesSpy.mockRestore();
+      }
+    });
+
     describe('conversation_finished telemetry (#4602 review)', () => {
       it('emits conversation_finished once when a turn completes normally', async () => {
         const finishedSpy = vi
@@ -2345,6 +2631,462 @@ describe('Session', () => {
         expect(
           duplicateFollowUp.message[0].functionResponse?.response?.['error'],
         ).toContain('Duplicate provider tool call id "shell_1"');
+      });
+
+      it('stops an ACP prompt after repeated invalid tool parameters with fresh ids', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const messageBus = {
+          request: vi.fn().mockResolvedValue({
+            success: true,
+            output: {
+              decision: 'block',
+              reason: 'Continue after Stop hook',
+            },
+          }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([{ role: 'model', parts: [{ text: 'response' }] }]);
+        mockChat.getLastModelMessageText = vi.fn().mockReturnValue('response');
+        const build = vi
+          .fn()
+          .mockImplementationOnce(() => {
+            throw new Error('Parameter "questions" must be an array: value 1.');
+          })
+          .mockImplementationOnce(() => {
+            throw new Error('Parameter "questions" must be an array: value 2.');
+          })
+          .mockImplementationOnce(() => {
+            throw new Error('Parameter "questions" must be an array: value 3.');
+          });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'ask_user_question',
+          kind: core.Kind.Other,
+          displayName: 'Ask User Question',
+          description: 'Ask user question',
+          build,
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'ask_1',
+                      name: 'ask_user_question',
+                      args: { questions: '[{"question":"Continue?"}]' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'ask_2',
+                      name: 'ask_user_question',
+                      args: { questions: '[{"question":"Continue?"}]' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'ask_3',
+                      name: 'ask_user_question',
+                      args: { questions: '[{"question":"Continue?"}]' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'ask me before continuing' }],
+        });
+
+        expect(build).toHaveBeenCalledTimes(3);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        const stopHookCalls = messageBus.request.mock.calls.filter(
+          ([request]) =>
+            typeof request === 'object' &&
+            request !== null &&
+            'eventName' in request &&
+            request.eventName === 'Stop',
+        );
+        expect(stopHookCalls).toHaveLength(0);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after repeated tool parameter errors',
+          ),
+        );
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'ask_3',
+                name: 'ask_user_question',
+                response: expect.objectContaining({
+                  error: expect.stringContaining(
+                    'Parameter "questions" must be an array',
+                  ),
+                }),
+              }),
+            }),
+            expect.objectContaining({
+              text: expect.stringContaining(
+                'terminated because the model exceeded tool-call safety limits',
+              ),
+            }),
+          ],
+        });
+      });
+
+      it('does not stop disabled tools as repeated invalid parameter calls', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+          isToolEnabled: vi.fn().mockResolvedValue(false),
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'write_file',
+          kind: core.Kind.Edit,
+          build: vi.fn(),
+        });
+        const functionCalls: FunctionCall[] = [
+          { id: 'write_1', name: 'write_file', args: {} },
+          { id: 'write_2', name: 'write_file', args: {} },
+          { id: 'write_3', name: 'write_file', args: {} },
+        ];
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-disabled-tool',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).not.toBe(true);
+        expect(toolLoopState.invalidToolParamErrors.size).toBe(0);
+        expect(result.parts).toHaveLength(3);
+      });
+
+      it('stops early tool lookup errors after repeated invalid tool calls', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockReturnValue(undefined);
+        const functionCalls: FunctionCall[] = [
+          {
+            id: 'missing_1',
+            name: 'missing_tool',
+            args: { value: 'one' },
+          },
+          {
+            id: 'missing_2',
+            name: 'missing_tool',
+            args: { value: 'two' },
+          },
+          {
+            id: 'missing_3',
+            name: 'missing_tool',
+            args: { value: 'three' },
+          },
+          {
+            id: 'missing_4',
+            name: 'missing_tool',
+            args: { value: 'four' },
+          },
+          {
+            id: 'read_after_loop',
+            name: 'read_file',
+            args: { file_path: 'after-loop.ts' },
+          },
+        ];
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-missing-tool-loop',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'missing_1',
+          'missing_2',
+          'missing_3',
+          'missing_4',
+          'read_after_loop',
+        ]);
+        expect(result.parts[4].functionResponse?.response?.['error']).toEqual(
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
+        );
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after repeated tool parameter errors from missing_tool',
+          ),
+        );
+      });
+
+      it('stops an ACP prompt after exceeding the daemon tool-call cap', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const functionCalls = Array.from({ length: 102 }, (_, index) => ({
+          id: `read_${index}`,
+          name: 'read_file',
+          args: { file_path: `file_${index}.ts` },
+        }));
+        functionCalls[101].id = 'read_0';
+        mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: { functionCalls },
+            },
+          ]),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read many files' }],
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'read_0',
+                name: 'read_file',
+                response: {
+                  error: expect.stringContaining('loop detection'),
+                },
+              }),
+            }),
+            expect.objectContaining({
+              text: expect.stringContaining(
+                'terminated because the model exceeded tool-call safety limits',
+              ),
+            }),
+          ]),
+        });
+        const preservedResponses = vi
+          .mocked(mockChat.addHistory)
+          .mock.calls.flatMap(([content]) => content.parts ?? [])
+          .filter((part) => part.functionResponse)
+          .map((part) => part.functionResponse?.id);
+        expect(preservedResponses).toHaveLength(101);
+        expect(new Set(preservedResponses).size).toBe(101);
+        expect(
+          mockChatRecordingService.recordToolResult.mock.calls.map(
+            ([parts]) => parts[0]?.functionResponse?.id,
+          ),
+        ).toEqual(preservedResponses);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after 101 tool calls in one turn.',
+          ),
+        );
+      });
+
+      it('does not start unstarted concurrent Agent calls after invalid parameter loop detection', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const build = vi.fn().mockImplementation(() => {
+          throw new Error('Invalid subagent_type: bad');
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === core.ToolNames.AGENT
+            ? {
+                name: core.ToolNames.AGENT,
+                kind: core.Kind.Think,
+                displayName: 'Agent',
+                description: 'Agent',
+                build,
+                canUpdateOutput: false,
+                isOutputMarkdown: true,
+              }
+            : undefined,
+        );
+        const functionCalls: FunctionCall[] = Array.from(
+          { length: 5 },
+          (_, index) => ({
+            id: `agent_${index}`,
+            name: core.ToolNames.AGENT,
+            args: { subagent_type: `bad_${index}` },
+          }),
+        );
+        functionCalls.push({
+          id: 'read_after_loop',
+          name: 'read_file',
+          args: { file_path: 'after-loop.ts' },
+        });
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-agent-invalid-loop',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(
+          result.parts
+            .slice(3)
+            .map((part) => part.functionResponse?.response?.['error']),
+        ).toEqual([
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
+        ]);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'agent_0',
+          'agent_1',
+          'agent_2',
+          'agent_3',
+          'agent_4',
+          'read_after_loop',
+        ]);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after repeated tool parameter errors',
+          ),
+        );
+      });
+
+      it('stops concurrent Agent batches after Promise.race observes loop detection', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const build = vi.fn().mockImplementation(() => {
+          throw new Error('Invalid subagent_type: bad');
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          displayName: 'Agent',
+          description: 'Agent',
+          build,
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        const functionCalls: FunctionCall[] = Array.from(
+          { length: 3 },
+          (_, index) => ({
+            id: `agent_${index}`,
+            name: core.ToolNames.AGENT,
+            args: { subagent_type: `bad_${index}` },
+          }),
+        );
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-agent-race-loop',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(build).toHaveBeenCalledTimes(3);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'agent_0',
+          'agent_1',
+          'agent_2',
+        ]);
       });
 
       it('clears duplicate provider id tracking between ACP prompts', async () => {
@@ -5197,7 +5939,7 @@ describe('Session', () => {
         });
       });
 
-      it('keeps the home confinement root non-empty when os.homedir() is empty (no QWEN_HOME)', async () => {
+      it('keeps the home confinement root non-empty when os.homedir() is empty (no QWEN_HOME)', () => {
         // Minimal containers with no HOME make os.homedir() === ''. With QWEN_HOME
         // unset the home confinement root must NOT collapse to '': isWithin('',
         // anyPath) is trivially true, so an empty root lets a home
@@ -5205,66 +5947,33 @@ describe('Session', () => {
         // The guard falls back to the parent of the global qwen dir
         // (Storage.getGlobalQwenDir(), itself empty-home-safe), which is the
         // homeQwenDir Session passes to the resolver.
-        const tmpDir = await fs.mkdtemp(
-          path.join(os.tmpdir(), 'loop-md-nohome-'),
-        );
-        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
-        // HOME='' makes libuv's os.homedir() return '' on every platform — it
-        // null-checks HOME, never its emptiness.
-        const restoreHome = setFakeHome('');
-        const prevQwenHome = process.env['QWEN_HOME'];
-        delete process.env['QWEN_HOME'];
-        loopTickResolverDepsSpy.mockClear();
+        const homeQwenDir = path.join(os.tmpdir(), '.qwen');
 
-        const scheduler = {
-          size: 1,
-          hasPendingWork: true,
-          start: vi.fn(
-            (
-              callback: (job: { prompt: string; cronExpr?: string }) => void,
-            ) => {
-              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
-            },
-          ),
-          stop: vi.fn(),
-          getExitSummary: vi.fn().mockReturnValue(undefined),
-        };
-        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
-        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
-        mockChat.sendMessageStream = vi
-          .fn()
-          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+        const roots = resolveHomeLoopResolverRoots({
+          homeDir: '',
+          homeQwenDir,
+          qwenHome: '',
+        });
 
-        try {
-          await session.prompt({
-            sessionId: 'test-session-id',
-            prompt: [{ type: 'text', text: 'hello' }],
-          });
+        // Without the `|| path.dirname(homeQwenDir)` guard this would be ''
+        // (os.homedir()); the guard makes it the non-empty parent of the
+        // empty-home-safe global qwen dir.
+        expect(roots.homeConfineRoot).not.toBe('');
+        expect(roots.homeConfineRoot).toBe(path.dirname(homeQwenDir));
+        expect(roots.homeQwenDir).toBe(homeQwenDir);
+      });
 
-          await vi.waitFor(
-            () => {
-              expect(loopTickResolverDepsSpy).toHaveBeenCalled();
-            },
-            {
-              timeout: 3000,
-            },
-          );
+      it('confines the home loop resolver within QWEN_HOME when set', () => {
+        const homeQwenDir = path.join(os.tmpdir(), '.qwen-home');
 
-          const deps = loopTickResolverDepsSpy.mock.calls.at(-1)![0] as {
-            homeDir: string;
-            homeQwenDir?: string;
-          };
-          // Without the `|| path.dirname(homeQwenDir)` guard this would be ''
-          // (os.homedir()); the guard makes it the non-empty parent of the
-          // empty-home-safe global qwen dir.
-          expect(deps.homeDir).not.toBe('');
-          expect(deps.homeDir).toBe(path.dirname(deps.homeQwenDir!));
-        } finally {
-          if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
-          else process.env['QWEN_HOME'] = prevQwenHome;
-          restoreHome();
-          await fs.rm(tmpDir, { recursive: true, force: true });
-        }
+        const roots = resolveHomeLoopResolverRoots({
+          homeDir: path.join(os.tmpdir(), 'real-home'),
+          homeQwenDir,
+          qwenHome: homeQwenDir,
+        });
+
+        expect(roots.homeConfineRoot).toBe(homeQwenDir);
+        expect(roots.homeQwenDir).toBe(homeQwenDir);
       });
 
       it('reads the home loop.md from QWEN_HOME, not the real ~/.qwen', async () => {
@@ -7467,6 +8176,7 @@ describe('Session', () => {
       mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
       mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+      mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
       mockConfig.getAutoModeDenialState = vi.fn().mockReturnValue({
         consecutiveBlock: 0,
         consecutiveUnavailable: 0,
@@ -8856,9 +9566,15 @@ describe('Session', () => {
         abortSignal: AbortSignal,
         promptId: string,
         functionCalls: FunctionCall[],
+        toolLoopState?: {
+          totalToolCalls: number;
+          invalidToolParamErrors: Map<string, number>;
+          loopDetected: boolean;
+        },
       ) => Promise<{
         parts: Part[];
         stopAfterPermissionCancel: boolean;
+        loopDetected?: boolean;
         repeatedDuplicateProviderToolCall?: boolean;
       }>;
     };
@@ -9188,6 +9904,83 @@ describe('Session', () => {
         error:
           'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
       });
+      expect(cancelledExecute).not.toHaveBeenCalled();
+      expect(laterExecute).not.toHaveBeenCalled();
+    });
+
+    it('skips later pre-loop tools after non-question permission cancellation', async () => {
+      const cancelledExecute = vi.fn();
+      const laterExecute = vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.SHELL
+          ? mockConfirmingTool(name, cancelledExecute, 'exec')
+          : mockAllowedTool(name, laterExecute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'cancelled' },
+      });
+      const toolLoopState = {
+        totalToolCalls: 0,
+        invalidToolParamErrors: new Map<string, number>(),
+        loopDetected: false,
+      };
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-pre-loop-shell-cancel',
+        [
+          {
+            id: 'shell_call',
+            name: core.ToolNames.SHELL,
+            args: { command: 'echo denied' },
+          },
+          {
+            id: 'read_1',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/tmp/one' },
+          },
+          {
+            id: 'read_2',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/tmp/two' },
+          },
+          {
+            id: 'read_3',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/tmp/three' },
+          },
+        ],
+        toolLoopState,
+      );
+
+      expect(result.stopAfterPermissionCancel).toBe(true);
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'shell_call',
+        'read_1',
+        'read_2',
+        'read_3',
+      ]);
+      expect(
+        result.parts.slice(1).map((part) => part.functionResponse?.response),
+      ).toEqual([
+        {
+          error:
+            'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+        },
+        {
+          error:
+            'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+        },
+        {
+          error:
+            'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+        },
+      ]);
       expect(cancelledExecute).not.toHaveBeenCalled();
       expect(laterExecute).not.toHaveBeenCalled();
     });
@@ -9672,6 +10465,91 @@ describe('Session', () => {
       expect(questionExecute).toHaveBeenCalledOnce();
       expect(siblingExecute).toHaveBeenCalledOnce();
       expect(siblingSignal?.aborted).toBe(true);
+    });
+
+    it('aborts sibling Agent calls in the same batch after loop detection', async () => {
+      let firstSiblingSignal: AbortSignal | undefined;
+      let secondSiblingSignal: AbortSignal | undefined;
+      const firstSiblingExecute = vi
+        .fn()
+        .mockImplementation(async (signal: AbortSignal) => {
+          firstSiblingSignal = signal;
+          await waitForAbortOrTick(signal);
+          return {
+            llmContent: 'first sibling stopped',
+            returnDisplay: 'first sibling stopped',
+          };
+        });
+      const secondSiblingExecute = vi
+        .fn()
+        .mockImplementation(async (signal: AbortSignal) => {
+          secondSiblingSignal = signal;
+          await waitForAbortOrTick(signal);
+          return {
+            llmContent: 'second sibling stopped',
+            returnDisplay: 'second sibling stopped',
+          };
+        });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.AGENT,
+        kind: core.Kind.Think,
+        displayName: 'Agent',
+        description: 'Agent',
+        build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+          if (args['_test_id'] === 'invalid') {
+            throw new Error('Invalid subagent_type: bad');
+          }
+          const isFirstSibling = args['_test_id'] === 'sibling_1';
+          return {
+            params: { subagent_type: 'explore', ...args },
+            eventEmitter: new EventEmitter(),
+            execute: isFirstSibling
+              ? firstSiblingExecute
+              : secondSiblingExecute,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Agent'),
+            toolLocations: vi.fn().mockReturnValue([]),
+          };
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      const toolLoopState = {
+        totalToolCalls: 0,
+        invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
+        loopDetected: false,
+      };
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-agent-loop-abort',
+        [
+          {
+            id: 'agent_invalid',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'invalid', subagent_type: 'bad' },
+          },
+          {
+            id: 'agent_sibling_1',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'sibling_1', subagent_type: 'explore' },
+          },
+          {
+            id: 'agent_sibling_2',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'sibling_2', subagent_type: 'explore' },
+          },
+        ],
+        toolLoopState,
+      );
+
+      expect(result.loopDetected).toBe(true);
+      expect(firstSiblingExecute).toHaveBeenCalledOnce();
+      expect(secondSiblingExecute).toHaveBeenCalledOnce();
+      expect(firstSiblingSignal?.aborted).toBe(true);
+      expect(secondSiblingSignal?.aborted).toBe(true);
     });
 
     it('passes an already-aborted parent signal to Agent batches', async () => {

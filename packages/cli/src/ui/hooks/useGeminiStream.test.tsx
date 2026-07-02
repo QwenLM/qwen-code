@@ -4141,6 +4141,9 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        // so that sendMessageStream is actually invoked.
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -4269,6 +4272,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -4329,6 +4334,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       await act(async () => {
@@ -4467,6 +4474,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -4817,6 +4826,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       // Cancel without advancing the throttle timer; the cancel-time
@@ -4934,6 +4945,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       // Sanity: the throttle has not fired yet.
@@ -5380,6 +5393,166 @@ describe('useGeminiStream', () => {
           expect.any(AbortSignal),
           expect.any(String),
           { type: SendMessageType.UserQuery },
+        );
+      });
+    });
+
+    describe('inline model override', () => {
+      // Make the active provider expose `inline-model` so the consumer-side
+      // provider-identity validation accepts the override.
+      const allowInlineModel = (modelId = 'inline-model') => {
+        mockConfig.getModel = vi.fn(() => 'session-model');
+        mockConfig.getContentGeneratorConfig = vi.fn(
+          () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+        );
+        mockConfig.getAvailableModelsForAuthType = vi.fn(
+          () => [{ id: modelId, authType: AuthType.QWEN_OAUTH }] as never,
+        );
+      };
+
+      it('does not let a skill tool with modelOverride: undefined clobber an active inline override', async () => {
+        allowInlineModel();
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'do the thing',
+          modelOverride: 'inline-model',
+        });
+
+        let capturedOnComplete:
+          | ((completedTools: TrackedToolCall[]) => Promise<void>)
+          | null = null;
+        mockUseReactToolScheduler.mockImplementation((onComplete) => {
+          capturedOnComplete = onComplete;
+          return [
+            [],
+            mockScheduleToolCalls,
+            mockCancelAllToolCalls,
+            mockMarkToolsAsSubmitted,
+          ];
+        });
+
+        const { result } = renderHook(() =>
+          useGeminiStream(
+            new MockedGeminiClientClass(mockConfig),
+            [],
+            mockAddItem,
+            mockConfig,
+            true,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            mockHandleSlashCommand,
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            () => Promise.resolve(),
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+          ),
+        );
+
+        // Turn 1: the inline override is set and used for the first call.
+        await act(async () => {
+          await result.current.submitQuery('/model inline-model do the thing');
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          modelOverride: 'inline-model',
+        });
+
+        mockSendMessageStream.mockClear();
+
+        // A skill tool completes with `modelOverride: undefined` (an
+        // inherit/no-model skill). The undefined-clears write must be skipped
+        // while the inline override is active, so the continuation still runs
+        // on the inline model rather than reverting to the session model.
+        const completedToolCalls: TrackedToolCall[] = [
+          {
+            request: {
+              callId: 'skill-call',
+              name: 'pdf-skill',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-id-skill',
+            },
+            status: 'success',
+            responseSubmittedToGemini: false,
+            response: {
+              callId: 'skill-call',
+              responseParts: [{ text: 'skill loaded' }],
+              errorType: undefined,
+              modelOverride: undefined,
+            },
+            tool: {
+              name: 'pdf-skill',
+              displayName: 'pdf-skill',
+              description: 'd',
+              build: vi.fn(),
+            } as never,
+            invocation: {
+              getDescription: () => 'desc',
+            } as unknown as AnyToolInvocation,
+            startTime: Date.now(),
+            endTime: Date.now(),
+          } as TrackedCompletedToolCall,
+        ];
+
+        await act(async () => {
+          await capturedOnComplete?.(completedToolCalls);
+        });
+
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          type: SendMessageType.ToolResult,
+          modelOverride: 'inline-model',
+        });
+      });
+
+      it('clears the inline override on retry and reverts to the session model', async () => {
+        allowInlineModel();
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'do the thing',
+          modelOverride: 'inline-model',
+        });
+
+        const { result } = renderTestHook();
+
+        // Turn 1: inline override applied.
+        await act(async () => {
+          await result.current.submitQuery('/model inline-model do the thing');
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          modelOverride: 'inline-model',
+        });
+
+        mockSendMessageStream.mockClear();
+        mockAddItem.mockClear();
+
+        // Retry re-sends the same prompt; the one-shot override is dropped and
+        // the turn reverts to the session model, with an info item explaining
+        // the switch.
+        await act(async () => {
+          await result.current.submitQuery(
+            'do the thing',
+            SendMessageType.Retry,
+          );
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(
+          mockSendMessageStream.mock.calls[0][3].modelOverride,
+        ).toBeUndefined();
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'info',
+            text: expect.stringContaining('session model'),
+          }),
+          expect.any(Number),
         );
       });
     });
@@ -6012,7 +6185,7 @@ describe('useGeminiStream', () => {
         expect(mockAddItem).toHaveBeenCalledWith(
           {
             type: 'info',
-            text: '⚠️  Response truncated due to token limits.',
+            text: '⚠  Response truncated due to token limits.',
           },
           expect.any(Number),
         );
@@ -6134,57 +6307,57 @@ describe('useGeminiStream', () => {
       const testCases = [
         {
           reason: 'SAFETY',
-          message: '⚠️  Response stopped due to safety reasons.',
+          message: '⚠  Response stopped due to safety reasons.',
         },
         {
           reason: 'RECITATION',
-          message: '⚠️  Response stopped due to recitation policy.',
+          message: '⚠  Response stopped due to recitation policy.',
         },
         {
           reason: 'LANGUAGE',
-          message: '⚠️  Response stopped due to unsupported language.',
+          message: '⚠  Response stopped due to unsupported language.',
         },
         {
           reason: 'BLOCKLIST',
-          message: '⚠️  Response stopped due to forbidden terms.',
+          message: '⚠  Response stopped due to forbidden terms.',
         },
         {
           reason: 'PROHIBITED_CONTENT',
-          message: '⚠️  Response stopped due to prohibited content.',
+          message: '⚠  Response stopped due to prohibited content.',
         },
         {
           reason: 'SPII',
           message:
-            '⚠️  Response stopped due to sensitive personally identifiable information.',
+            '⚠  Response stopped due to sensitive personally identifiable information.',
         },
-        { reason: 'OTHER', message: '⚠️  Response stopped for other reasons.' },
+        { reason: 'OTHER', message: '⚠  Response stopped for other reasons.' },
         {
           reason: 'MALFORMED_FUNCTION_CALL',
-          message: '⚠️  Response stopped due to malformed function call.',
+          message: '⚠  Response stopped due to malformed function call.',
         },
         {
           reason: 'IMAGE_SAFETY',
-          message: '⚠️  Response stopped due to image safety violations.',
+          message: '⚠  Response stopped due to image safety violations.',
         },
         {
           reason: 'IMAGE_PROHIBITED_CONTENT',
-          message: '⚠️  Response stopped due to image prohibited content.',
+          message: '⚠  Response stopped due to image prohibited content.',
         },
         {
           reason: 'NO_IMAGE',
-          message: '⚠️  Response stopped due to no image.',
+          message: '⚠  Response stopped due to no image.',
         },
         {
           reason: 'IMAGE_RECITATION',
-          message: '⚠️  Response stopped due to image recitation policy.',
+          message: '⚠  Response stopped due to image recitation policy.',
         },
         {
           reason: 'IMAGE_OTHER',
-          message: '⚠️  Response stopped due to other image-related reasons.',
+          message: '⚠  Response stopped due to other image-related reasons.',
         },
         {
           reason: 'UNEXPECTED_TOOL_CALL',
-          message: '⚠️  Response stopped due to unexpected tool call.',
+          message: '⚠  Response stopped due to unexpected tool call.',
         },
       ];
 
@@ -6849,6 +7022,8 @@ describe('useGeminiStream', () => {
           void result.current.submitQuery('think then retry');
           await Promise.resolve();
           await Promise.resolve();
+          // Flush the macrotask yield (setImmediate) added after addItem()
+          await vi.advanceTimersByTimeAsync(0);
         });
 
         // Advance past STREAM_UPDATE_THROTTLE_MS (60ms) so the thought
@@ -6946,6 +7121,8 @@ describe('useGeminiStream', () => {
 
         await act(async () => {
           await Promise.resolve();
+          // Flush the macrotask yield (setImmediate) added after addItem()
+          await vi.advanceTimersByTimeAsync(0);
         });
 
         const findErrorItem = () =>
@@ -7059,6 +7236,12 @@ describe('useGeminiStream', () => {
 
         act(() => {
           void result.current.submitQuery('Trigger retry after countdown');
+        });
+
+        await act(async () => {
+          await Promise.resolve();
+          // Flush the macrotask yield (setImmediate) added after addItem()
+          await vi.advanceTimersByTimeAsync(0);
         });
 
         let errorItem = result.current.pendingHistoryItems.find(
@@ -8371,7 +8554,7 @@ describe('useGeminiStream', () => {
         (async function* () {
           yield {
             type: ServerGeminiEventType.HookSystemMessage,
-            value: '🔄 Ralph iteration 3 | No completion promise set',
+            value: '◐ Ralph iteration 3 | No completion promise set',
           };
         })(),
       );
@@ -8386,7 +8569,7 @@ describe('useGeminiStream', () => {
         expect(mockAddItem).toHaveBeenCalledWith(
           expect.objectContaining({
             type: 'stop_hook_system_message',
-            message: '🔄 Ralph iteration 3 | No completion promise set',
+            message: '◐ Ralph iteration 3 | No completion promise set',
           }),
           expect.any(Number),
         );

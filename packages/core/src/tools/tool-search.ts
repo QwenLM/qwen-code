@@ -30,6 +30,12 @@ import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type { Config } from '../config/config.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import {
+  getLeaderOnlyToolUnavailableMessage,
+  getSubagentPlanToolUnavailableMessage,
+  isLeaderOnlyToolUnavailableInSubagent,
+  isPlanLifecycleToolUnavailableInSubagent,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
 
 const debugLogger = createDebugLogger('TOOL_SEARCH');
 
@@ -265,6 +271,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const registry = this.config.getToolRegistry();
     const loaded: AnyDeclarativeTool[] = [];
     const missing: string[] = [];
+    const blocked: string[] = [];
 
     // Case-insensitive lookup across all known names (instance names + factory
     // names). Preserve the user-supplied casing in the error list so the
@@ -282,6 +289,13 @@ class ToolSearchInvocation extends BaseToolInvocation<
       const canonical = lowerIndex.get(requested.toLowerCase());
       if (!canonical) {
         missing.push(requested);
+        continue;
+      }
+      if (
+        isPlanLifecycleToolUnavailableInSubagent(canonical) ||
+        isLeaderOnlyToolUnavailableInSubagent(canonical)
+      ) {
+        blocked.push(canonical);
         continue;
       }
       // Treat ensureTool throws the same as a null return: log + report
@@ -426,6 +440,17 @@ class ToolSearchInvocation extends BaseToolInvocation<
       const header = llmContent ? '\n\n' : '';
       llmContent += `${header}Not found: ${missing.join(', ')}`;
     }
+    let blockedErrorMessage: string | undefined;
+    if (blocked.length > 0) {
+      const blockedMessages = blocked.map((name) =>
+        isLeaderOnlyToolUnavailableInSubagent(name)
+          ? getLeaderOnlyToolUnavailableMessage(name)
+          : getSubagentPlanToolUnavailableMessage(name),
+      );
+      blockedErrorMessage = blockedMessages.join('\n');
+      const header = llmContent ? '\n\n' : '';
+      llmContent += `${header}Unavailable: ${blockedErrorMessage}`;
+    }
     if (truncated.length > 0) {
       // Surface the dropped names so the model knows it must re-issue
       // another ToolSearch for them — without this, the model would
@@ -438,11 +463,16 @@ class ToolSearchInvocation extends BaseToolInvocation<
     const displayParts: string[] = [];
     if (loaded.length > 0) displayParts.push(`Loaded ${loaded.length} tool(s)`);
     if (missing.length > 0) displayParts.push(`${missing.length} missing`);
+    if (blocked.length > 0) displayParts.push(`${blocked.length} unavailable`);
     if (truncated.length > 0)
       displayParts.push(`${truncated.length} truncated`);
     const returnDisplay = displayParts.join(', ') || 'No tools loaded';
 
-    return { llmContent, returnDisplay };
+    const result: ToolResult = { llmContent, returnDisplay };
+    if (blockedErrorMessage && loaded.length === 0) {
+      result.error = { message: blockedErrorMessage };
+    }
+    return result;
   }
 }
 

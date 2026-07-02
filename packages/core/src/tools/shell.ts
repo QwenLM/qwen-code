@@ -9,7 +9,6 @@ import path from 'node:path';
 import os from 'node:os';
 import crypto from 'node:crypto';
 import * as childProcess from 'node:child_process';
-import * as Diff from 'diff';
 import { ApprovalMode, type Config } from '../config/config.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import { ToolErrorType } from './tool-error.js';
@@ -79,7 +78,7 @@ import {
   detectLineEnding,
   type ReadTextFileResponse,
 } from '../services/fileSystemService.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
 
 const debugLogger = createDebugLogger('SHELL');
 
@@ -1614,13 +1613,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
       edit.newContent,
     );
     return {
-      fileDiff: Diff.createPatch(
+      fileDiff: createPatchSmart(
         edit.fileName,
         edit.originalContent,
         edit.newContent,
         'Current',
         'Proposed',
-        DEFAULT_DIFF_OPTIONS,
       ),
       fileName: edit.fileName,
       originalContent: edit.originalContent,
@@ -4471,9 +4469,9 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
   /**
    * Detect `gh pr create` commands and append AI attribution text to the
-   * PR body. Format: "🤖 Generated with Qwen Code (N-shotted by Qwen-Coder)"
+   * PR body. Format: "Generated with Qwen Code (N-shotted by Qwen-Coder)"
    * when at least one user prompt has been recorded since the last commit;
-   * otherwise just "🤖 Generated with Qwen Code".
+   * otherwise just "Generated with Qwen Code".
    *
    * Skipped on Windows: the appended text relies on bash quote-escape
    * conventions (`\$`, `'\''`) that cmd.exe and PowerShell don't honor,
@@ -4508,8 +4506,8 @@ export class ShellToolInvocation extends BaseToolInvocation<
 
     const attribution =
       shots > 0
-        ? `\n\n🤖 Generated with Qwen Code (${shots}-shotted by ${generator})`
-        : `\n\n🤖 Generated with Qwen Code`;
+        ? `\n\nGenerated with Qwen Code (${shots}-shotted by ${generator})`
+        : `\n\nGenerated with Qwen Code`;
 
     // Match both the long form `--body` and the short alias `-b`
     // (documented in `gh pr create --help`), with either space or

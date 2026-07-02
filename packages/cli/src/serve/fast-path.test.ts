@@ -515,6 +515,24 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('parses --tls-cert and --tls-key on the fast path', () => {
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--tls-cert',
+      '/tmp/cert.pem',
+      '--tls-key',
+      '/tmp/key.pem',
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: {
+        tlsCert: '/tmp/cert.pem',
+        tlsKey: '/tmp/key.pem',
+      },
+    });
+  });
+
   it('parses bundled entrypoint argv before serve', () => {
     const parsed = parseServeFastPathArgs([
       '/repo/dist/cli.js',
@@ -552,6 +570,12 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('falls back to the full parser for daemon-managed channels', () => {
+    expect(parseServeFastPathArgs(['serve', '--channel', 'telegram'])).toEqual({
+      kind: 'fallback',
+    });
+  });
+
   it('handles every yargs serve long option or explicitly falls back', () => {
     const options = (
       buildServeCommandParser() as unknown as {
@@ -578,6 +602,8 @@ describe('serve fast path argument parsing', () => {
       ['workspace', ['--workspace', process.cwd()]],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],
+      ['tls-cert', ['--tls-cert', '/tmp/cert.pem']],
+      ['tls-key', ['--tls-key', '/tmp/key.pem']],
       ['web', ['--no-web']],
       ['open', ['--open']],
       ['http-bridge', ['--no-http-bridge']],
@@ -600,10 +626,11 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['channel', ['--channel', 'telegram']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
-    const expectedFallbackOptions = new Set(['help', 'version']);
+    const expectedFallbackOptions = new Set(['channel', 'help', 'version']);
 
     expect(longOptionNames.sort()).toEqual(
       [...sampleArgvByOption.keys()].sort(),

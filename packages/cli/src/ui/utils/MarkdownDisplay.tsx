@@ -14,6 +14,9 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
+// Minimum content lines to keep in a clipped live preview before the
+// "generating more" cue (own constant — not coupled to MaxSizedBox's floor).
+const MIN_PENDING_CONTENT_LINES = 1;
 
 interface MarkdownDisplayProps {
   text: string;
@@ -178,7 +181,33 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // text into scrollback on every repaint. The committed transcript still
   // renders the full message via MarkdownDisplay with isPending=false.
   const displayText = isPending ? text.trimEnd() : text;
-  const lines = displayText.split(/\r?\n/);
+  const allLines = displayText.split(/\r?\n/);
+  // Bound the live (non-`<Static>`) markdown to the viewport budget. A long
+  // streaming message otherwise renders ALL its lines, pushing the non-`<Static>`
+  // frame past the terminal height — at which point ink clears the terminal and
+  // re-streams the entire transcript on every repaint (the top→bottom "scroll
+  // replay" seen on tab-switch in terminal multiplexers). Slice to a CONTIGUOUS
+  // head of source lines rather than clipping with ink `overflow="hidden"`,
+  // which decimates rows (drops interspersed lines) and can erase a code block's
+  // own truncation indicator. Short messages are untouched; the full message
+  // still renders once it commits to `<Static>`. Only while pending and when a
+  // budget is known (constrainHeight on — both non-VP and VP pending items pass
+  // a budget).
+  //
+  // Reserve 2 rows below the content: 1 for the "generating more" cue, and 1
+  // more so a retained code/math block's OWN inner budget
+  // (availableTerminalHeight - RESERVED_LINES, where RESERVED_LINES is up to 3
+  // for math) is never exceeded within the slice — otherwise that block emits
+  // its own cue and we'd stack two.
+  const pendingLineBudget =
+    isPending && availableTerminalHeight !== undefined
+      ? Math.max(MIN_PENDING_CONTENT_LINES, availableTerminalHeight - 2)
+      : undefined;
+  const pendingClipped =
+    pendingLineBudget !== undefined && allLines.length > pendingLineBudget;
+  const lines = pendingClipped
+    ? allLines.slice(0, pendingLineBudget)
+    : allLines;
   const headerRegex = /^ *(#{1,4}) +(.*)/;
   const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
   const ulItemRegex = /^([ \t]*)([-*+]) +(.*)/;
@@ -559,6 +588,20 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         aligns={tableAligns}
         enableInlineMath={renderVisualBlocks}
       />,
+    );
+  }
+
+  // When the live message was clipped to a head slice (see pendingLineBudget
+  // above), add a cue that more is streaming. Code blocks retained in the head
+  // still render their own "... generating more ..." truncation.
+  if (pendingClipped) {
+    return (
+      <Box flexDirection="column">
+        {contentBlocks}
+        <Text color={theme.text.secondary} wrap="truncate">
+          ... generating more ...
+        </Text>
+      </Box>
     );
   }
 

@@ -405,6 +405,37 @@ describe('AgentTool', () => {
       expect(parameters.properties.name?.description).toContain('active team');
     });
 
+    it('exposes plan_mode_required only when teams are enabled', async () => {
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
+
+      const teamAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const schema = teamAgentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          plan_mode_required?: {
+            description?: string;
+          };
+        };
+      };
+      expect(parameters.properties.plan_mode_required?.description).toContain(
+        'named teammate',
+      );
+
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(false);
+      const ordinaryAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const ordinarySchema = ordinaryAgentTool.schema;
+      const ordinaryParameters = ordinarySchema.parametersJsonSchema as {
+        properties: {
+          plan_mode_required?: unknown;
+        };
+      };
+      expect(ordinaryParameters.properties.plan_mode_required).toBeUndefined();
+    });
+
     it('should generate schema without enum when no subagents available', async () => {
       vi.mocked(mockSubagentManager.listSubagents).mockResolvedValue([]);
 
@@ -521,6 +552,41 @@ describe('AgentTool', () => {
         }),
       ).toMatch(/fork/i);
     });
+
+    it('rejects plan_mode_required without a named teammate', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          plan_mode_required: true,
+        }),
+      ).toMatch(/named teammate/i);
+    });
+
+    it('rejects plan_mode_required when no team is active', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'planner',
+          plan_mode_required: true,
+        }),
+      ).toMatch(/active team/i);
+    });
+
+    it('accepts plan_mode_required for a named teammate in an active team', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'planner',
+          plan_mode_required: true,
+        }),
+      ).toBeNull();
+    });
   });
 
   // Round-7 regression guard: agent isolation must refuse when the
@@ -560,8 +626,9 @@ describe('AgentTool', () => {
         // AgentTool execute() in a unit test would require mocking
         // most of the agent runtime; the isolation check itself is
         // what the test is guarding.)
-        const { GitWorktreeService } =
-          await import('../../services/gitWorktreeService.js');
+        const { GitWorktreeService } = await import(
+          '../../services/gitWorktreeService.js'
+        );
         const svc = new GitWorktreeService(repo);
         const dirty = await svc.hasWorktreeChanges(repo);
         expect(dirty).toBe(true);
@@ -592,8 +659,9 @@ describe('AgentTool', () => {
         execFileSync('git', ['commit', '-q', '-m', 'init', '--no-verify'], {
           cwd: repo,
         });
-        const { GitWorktreeService } =
-          await import('../../services/gitWorktreeService.js');
+        const { GitWorktreeService } = await import(
+          '../../services/gitWorktreeService.js'
+        );
         const svc = new GitWorktreeService(repo);
         expect(await svc.hasWorktreeChanges(repo)).toBe(false);
       } finally {
@@ -619,6 +687,51 @@ describe('AgentTool', () => {
       expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
         'file-search',
       );
+    });
+
+    it('passes plan_mode_required through to TeamManager for named teammates', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Plan implementation',
+        prompt: 'Investigate and propose a plan',
+        subagent_type: 'file-search',
+        name: 'planner',
+        plan_mode_required: true,
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(spawnTeammate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'planner',
+          planModeRequired: true,
+        }),
+      );
+    });
+
+    it('rejects plan_mode_required direct execution from a subagent context', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Plan implementation',
+        prompt: 'Investigate and propose a plan',
+        name: 'planner',
+        plan_mode_required: true,
+      });
+
+      const result = await runWithAgentContext('child-agent', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('from the team leader');
+      expect(spawnTeammate).not.toHaveBeenCalled();
     });
   });
 
@@ -2504,7 +2617,8 @@ describe('AgentTool', () => {
 
     it('should clear pendingConfirmation via onConfirm callback (terminal UI path)', async () => {
       let capturedOnConfirm:
-        ((outcome: ToolConfirmationOutcome) => Promise<void>) | undefined;
+        | ((outcome: ToolConfirmationOutcome) => Promise<void>)
+        | undefined;
       const snapshots: Array<{ hasPendingConfirmation: boolean }> = [];
 
       const invocation = createInvocationWithEventDrivenAgent((emitter) => {
@@ -2756,7 +2870,8 @@ describe('AgentTool', () => {
         monitorRegistry.setAgentNotificationCallback.mock.calls.find(
           ([id, cb]) => id === agentId && typeof cb === 'function',
         )?.[1] as
-          ((displayText: string, modelText: string) => void) | undefined;
+          | ((displayText: string, modelText: string) => void)
+          | undefined;
       expect(callback).toBeDefined();
 
       callback?.('Monitor "logs" event #1: ready', '<task-notification />');
@@ -3083,7 +3198,8 @@ describe('AgentTool', () => {
         monitorRegistry.setAgentNotificationCallback.mock.calls.find(
           ([id, cb]) => id === agentId && typeof cb === 'function',
         )?.[1] as
-          ((displayText: string, modelText: string) => void) | undefined;
+          | ((displayText: string, modelText: string) => void)
+          | undefined;
       expect(callback).toBeDefined();
 
       callback?.('Monitor "logs" event #1: ready', '<task-notification />');
