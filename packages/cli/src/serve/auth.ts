@@ -230,11 +230,11 @@ export function hostAllowlist(
       `host.docker.internal:${port}`,
     ]);
     // RFC 7230 §5.4: clients may omit the port suffix when it matches
-    // the URI scheme's default. http → 80, https → 443. The qwen
-    // serve daemon is plain HTTP, so accept the no-port forms when
-    // we're listening on port 80 (uncommon but valid for an operator
-    // who points at a privileged port for clean URLs).
-    if (port === 80) {
+    // the URI scheme's default. http → 80, https → 443. Accept the
+    // no-port forms when we're listening on either default port
+    // (uncommon but valid for an operator who points at a privileged
+    // port for clean URLs, or who enables TLS on 443).
+    if (port === 80 || port === 443) {
       cachedAllowed.add('localhost');
       cachedAllowed.add('127.0.0.1');
       cachedAllowed.add('[::1]');

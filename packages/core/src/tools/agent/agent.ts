@@ -92,6 +92,7 @@ import { toModelVisibleSubagentResult } from '../../agents/subagent-result.js';
 import { ApprovalMode, Config } from '../../config/config.js';
 import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
+import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
   getAgentJsonlPath,
   getAgentMetaPath,
@@ -192,6 +193,8 @@ export interface AgentParams {
   run_in_background?: boolean;
   /** When set, spawn as a named teammate via TeamManager instead of a one-shot subagent. */
   name?: string;
+  /** Start a named teammate in plan mode and require leader approval. */
+  plan_mode_required?: boolean;
   /**
    * When set to `'worktree'`, spins up a temporary git worktree under
    * `<projectRoot>/.qwen/worktrees/agent-<7hex>` and instructs the agent to
@@ -210,6 +213,14 @@ const TEAM_AGENT_NAME_PROPERTY = {
   description:
     'When provided, spawn as a named teammate via the active team ' +
     'instead of a one-shot subagent. Requires an active team context.',
+};
+
+const TEAM_AGENT_PLAN_REQUIRED_PROPERTY = {
+  type: 'boolean',
+  description:
+    'When true, the named teammate starts in plan mode and must call ' +
+    'exit_plan_mode to request leader approval before executing. Only valid ' +
+    'with a named teammate in an active team.',
 };
 
 /**
@@ -605,7 +616,10 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
             'Set to true to run this agent in the background. You will be notified when it completes.',
         },
         ...(config.isAgentTeamEnabled()
-          ? { name: TEAM_AGENT_NAME_PROPERTY }
+          ? {
+              name: TEAM_AGENT_NAME_PROPERTY,
+              plan_mode_required: TEAM_AGENT_PLAN_REQUIRED_PROPERTY,
+            }
           : {}),
         isolation: {
           type: 'string',
@@ -787,6 +801,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
           enum?: string[];
         };
         name?: typeof TEAM_AGENT_NAME_PROPERTY;
+        plan_mode_required?: typeof TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
       };
     };
     if (schema.properties && schema.properties.subagent_type) {
@@ -805,8 +820,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     if (schema.properties) {
       if (this.config.isAgentTeamEnabled()) {
         schema.properties.name = TEAM_AGENT_NAME_PROPERTY;
+        schema.properties.plan_mode_required =
+          TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
       } else {
         delete schema.properties.name;
+        delete schema.properties.plan_mode_required;
       }
     }
   }
@@ -866,6 +884,24 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         params.subagent_type.toLowerCase() === FORK_SUBAGENT_TYPE
       ) {
         return 'Parameter "isolation" requires an explicit subagent_type (and cannot be "fork").';
+      }
+    }
+
+    if (params.plan_mode_required !== undefined) {
+      if (typeof params.plan_mode_required !== 'boolean') {
+        return 'Parameter "plan_mode_required" must be a boolean when set.';
+      }
+      if (params.plan_mode_required) {
+        if (
+          !params.name ||
+          typeof params.name !== 'string' ||
+          params.name.trim() === ''
+        ) {
+          return 'Parameter "plan_mode_required" requires a named teammate via "name".';
+        }
+        if (!this.config.getTeamManager()) {
+          return 'Parameter "plan_mode_required" requires an active team.';
+        }
       }
     }
 
@@ -1718,6 +1754,31 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    if (this.params.plan_mode_required === true) {
+      if (
+        !this.params.name ||
+        this.params.name.trim() === '' ||
+        isSubagentLikeExecutionContext()
+      ) {
+        const msg =
+          'plan_mode_required can only be used when spawning a named teammate from the team leader.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+      if (!this.config.getTeamManager()) {
+        const msg =
+          'plan_mode_required requires an active team. Use TeamCreate first.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+    }
+
     // ─── Team routing ────────────────────────────────────
     // A name only means "spawn a teammate" while a team is active. Older
     // prompts may still pass it without a team; treat that as a normal
@@ -3231,6 +3292,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         prompt: this.params.prompt,
         agentType: this.params.subagent_type,
         cwd: this.config.getCwd(),
+        planModeRequired: this.params.plan_mode_required === true,
       });
 
       // Return immediately — teammate runs concurrently.
