@@ -200,9 +200,35 @@ describe('package scripts', () => {
     }
   });
 
+  it('reports when a prepare command cannot be spawned', () => {
+    const missingBinDir = path.join(tmpdir(), 'qwen-prepare-missing-bin');
+
+    const result = spawnSync(
+      process.execPath,
+      [path.join(root, 'scripts/prepare.js')],
+      {
+        cwd: root,
+        encoding: 'utf8',
+        env: {
+          ...process.env,
+          PATH: missingBinDir,
+          QWEN_SKIP_PREPARE: '',
+        },
+      },
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain('prepare: husky failed:');
+  });
+
   it('wires release quality checks to fast explicit validation steps', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
     const qualityJob = getWorkflowJob(workflow, 'quality');
+    const buildStep = getWorkflowStep(qualityJob, 'Build Project');
+    const serveFastPathStep = getWorkflowStep(
+      qualityJob,
+      'Check Serve Fast Path Bundle',
+    );
     const workspaceTestStep = getWorkflowStep(
       qualityJob,
       'Run Workspace Tests',
@@ -210,6 +236,9 @@ describe('package scripts', () => {
 
     expect(qualityJob).toContain("name: 'Check Serve Fast Path Bundle'");
     expect(qualityJob).toContain('npm run check:serve-fast-path-bundle');
+    expect(qualityJob.indexOf(serveFastPathStep)).toBeLessThan(
+      qualityJob.indexOf(buildStep),
+    );
     expect(workspaceTestStep).toContain('npm run test:release');
     expect(workspaceTestStep).not.toContain('npm run test:ci');
   });

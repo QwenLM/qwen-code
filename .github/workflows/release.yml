@@ -181,13 +181,13 @@ jobs:
         run: |-
           npm run lint:ci
 
-      - name: 'Build Project'
-        run: |-
-          npm run build
-
       - name: 'Check Serve Fast Path Bundle'
         run: |-
           npm run check:serve-fast-path-bundle
+
+      - name: 'Build Project'
+        run: |-
+          npm run build
 
       - name: 'Typecheck Project'
         run: |-
