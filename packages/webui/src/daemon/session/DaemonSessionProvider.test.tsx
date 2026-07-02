@@ -209,6 +209,7 @@ const sdkMocks = vi.hoisted(() => {
     sessions,
     capabilities,
     workspaceProviders,
+    workspaceSkills,
     MockDaemonClient,
     MockDaemonSessionClient,
     workspaceMcpTools,
@@ -421,6 +422,54 @@ describe('DaemonSessionProvider', () => {
       currentMode: 'yolo',
     });
     expect(connection).not.toHaveProperty('sessionId');
+  });
+
+  it('populates skill slash commands during deferred connect (before first prompt)', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      providers: [],
+    });
+    sdkMocks.workspaceSkills.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      skills: [
+        {
+          kind: 'skill',
+          status: 'ok',
+          name: 'review',
+          description: 'Review a GitHub pull request',
+          level: 'bundled',
+          modelInvocable: true,
+        },
+      ],
+    });
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).not.toHaveBeenCalled();
+    expect(connection?.status).toBe('connected');
+    expect(connection).not.toHaveProperty('sessionId');
+    expect(connection?.skills).toEqual(['review']);
+    expect(connection?.commands).toEqual([
+      expect.objectContaining({
+        name: 'review',
+        description: 'Review a GitHub pull request',
+      }),
+    ]);
   });
 
   it('warns when deferred workspace providers fail', async () => {

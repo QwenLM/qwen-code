@@ -11,6 +11,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonCommandInfo,
@@ -158,6 +159,43 @@ export function mapSupportedCommands(
   return {
     commands: mergeCommands(commands, skillCommands),
     skills: status.availableSkills,
+  };
+}
+
+/**
+ * Maps the session-less `/workspace/skills` status into slash-command entries.
+ *
+ * Session creation is deferred until the first prompt, so before any session
+ * exists the only way to populate skill-backed slash commands (e.g. `/review`)
+ * is this workspace-level status, which the daemon answers from `Config`'s
+ * SkillManager without a live session. The shape mirrors the skills portion of
+ * {@link mapSupportedCommands} so the deferred bootstrap and the post-attach
+ * snapshot stay consistent — except workspace status carries real descriptions
+ * and argument hints, which we surface here.
+ */
+export function mapWorkspaceSkills(
+  status: DaemonWorkspaceSkillsStatus | undefined,
+): {
+  commands: DaemonCommandInfo[];
+  skills: string[];
+} {
+  if (!status) return { commands: [], skills: [] };
+
+  const commands = status.skills.map((skill) => ({
+    name: skill.name,
+    description: skill.description || '',
+    ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+    raw: {
+      name: skill.name,
+      description: skill.description || '',
+      input: skill.argumentHint ? { hint: skill.argumentHint } : null,
+      _meta: { source: 'skill' },
+    } satisfies DaemonAvailableCommand,
+  }));
+
+  return {
+    commands,
+    skills: status.skills.map((skill) => skill.name),
   };
 }
 
