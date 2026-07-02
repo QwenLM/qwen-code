@@ -74,10 +74,18 @@ describe('package scripts', () => {
     expect(packageJson.scripts['test:release']).toBe(
       [
         'cross-env NODE_OPTIONS="--max-old-space-size=3072"',
-        'npm run test:ci --workspaces --if-present --parallel -- --coverage=false',
+        'npm run test:ci --workspaces --if-present --parallel -- --coverage.enabled=false',
         '&& npm run test:scripts',
       ].join(' '),
     );
+
+    const vscodePackageJson = JSON.parse(
+      readFileSync(
+        path.join(root, 'packages/vscode-ide-companion/package.json'),
+        'utf8',
+      ),
+    );
+    expect(vscodePackageJson.scripts['test:ci']).toContain('--coverage');
   });
 
   it('can skip root prepare work for CI installs that build explicitly', () => {
@@ -301,32 +309,35 @@ describe('package scripts', () => {
     },
   );
 
-  it('reports when a prepare command cannot be spawned', () => {
-    const missingBinDir = mkdtempSync(
-      path.join(tmpdir(), 'qwen-prepare-missing-bin-'),
-    );
-
-    try {
-      const result = spawnSync(
-        process.execPath,
-        [path.join(root, 'scripts/prepare.js')],
-        {
-          cwd: root,
-          encoding: 'utf8',
-          env: {
-            ...process.env,
-            PATH: missingBinDir,
-            QWEN_SKIP_PREPARE: '',
-          },
-        },
+  it.skipIf(process.platform === 'win32')(
+    'reports when a prepare command cannot be spawned',
+    () => {
+      const missingBinDir = mkdtempSync(
+        path.join(tmpdir(), 'qwen-prepare-missing-bin-'),
       );
 
-      expect(result.status).toBe(1);
-      expect(result.stderr).toContain('prepare: husky failed:');
-    } finally {
-      rmSync(missingBinDir, { recursive: true, force: true });
-    }
-  });
+      try {
+        const result = spawnSync(
+          process.execPath,
+          [path.join(root, 'scripts/prepare.js')],
+          {
+            cwd: root,
+            encoding: 'utf8',
+            env: {
+              ...process.env,
+              PATH: missingBinDir,
+              QWEN_SKIP_PREPARE: '',
+            },
+          },
+        );
+
+        expect(result.status).toBe(1);
+        expect(result.stderr).toContain('prepare: husky failed:');
+      } finally {
+        rmSync(missingBinDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   it('wires release quality checks to fast explicit validation steps', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
