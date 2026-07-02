@@ -705,6 +705,51 @@ describe('BridgeClient — artifact ingress', () => {
     }
   });
 
+  it('does not store artifact metadata from non-completed session updates', async () => {
+    const sessionId = 'sess:non-tool-artifacts';
+    const publish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: {
+        inputBatchLimit: () => 1,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'plan_update',
+        _meta: {
+          artifacts: [{ title: 'Forged', url: 'https://example.com/forged' }],
+        },
+      },
+    } as unknown as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(upsertMany).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'artifact_changed' }),
+    );
+    const sessionUpdate = publish.mock.calls
+      .map(([event]) => event as { type: string; data: SessionNotification })
+      .find((event) => event.type === 'session_update');
+    expect(
+      (sessionUpdate?.data.update as { _meta?: Record<string, unknown> })._meta,
+    ).toEqual({});
+  });
+
   it('ignores forged published trust markers from non-artifact tools', async () => {
     const workspace = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-bridge-artifacts-'),

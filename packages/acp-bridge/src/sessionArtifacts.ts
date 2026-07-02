@@ -7,7 +7,6 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { writeStderrLine } from './internal/stderrLine.js';
 
 export type DaemonSessionArtifactKind =
@@ -359,12 +358,7 @@ export class SessionArtifactStore {
       trustedPublisher,
     });
     const url = input.url
-      ? await normalizeArtifactUrl(
-          input.url,
-          trustedPublisher,
-          this.workspaceCwd,
-          this.getRealWorkspaceCwd(),
-        )
+      ? normalizeArtifactUrl(input.url, trustedPublisher)
       : undefined;
 
     validateLocator(storage, {
@@ -1157,12 +1151,7 @@ function normalizeWorkspacePath(raw: unknown, workspaceCwd: string): string {
   return relative.split(path.sep).join('/');
 }
 
-async function normalizeArtifactUrl(
-  raw: unknown,
-  allowFile: boolean,
-  workspaceCwd: string,
-  realWorkspaceCwd: Promise<string>,
-): Promise<string> {
+function normalizeArtifactUrl(raw: unknown, allowFile: boolean): string {
   const trimmed = normalizeString(raw, 'url', 2048, true);
   let parsed: URL;
   try {
@@ -1188,67 +1177,7 @@ async function normalizeArtifactUrl(
       'url',
     );
   }
-  if (
-    parsed.protocol === 'file:' &&
-    !(await isFileUrlInsideWorkspace(parsed, workspaceCwd, realWorkspaceCwd))
-  ) {
-    throw new SessionArtifactValidationError(
-      'file url must stay inside the workspace',
-      'url',
-    );
-  }
   return parsed.href;
-}
-
-async function isFileUrlInsideWorkspace(
-  parsed: URL,
-  workspaceCwd: string,
-  realWorkspaceCwd: Promise<string>,
-): Promise<boolean> {
-  try {
-    const absolute = path.resolve(fileURLToPath(parsed));
-    const workspace = path.resolve(workspaceCwd);
-    if (isOutsidePath(path.relative(workspace, absolute))) {
-      return false;
-    }
-    const realWorkspace = await realWorkspaceCwd;
-    try {
-      const realPath = await fs.realpath(absolute);
-      return !isOutsidePath(path.relative(realWorkspace, realPath));
-    } catch (error) {
-      if (!isNotFoundError(error)) {
-        return false;
-      }
-      if (await danglingSymlinkEscapesWorkspace(absolute, realWorkspace)) {
-        return false;
-      }
-      return nearestExistingParentIsInsideWorkspace(absolute, realWorkspace);
-    }
-  } catch {
-    return false;
-  }
-}
-
-async function nearestExistingParentIsInsideWorkspace(
-  absolutePath: string,
-  realWorkspace: string,
-): Promise<boolean> {
-  let parent = path.dirname(absolutePath);
-  while (true) {
-    try {
-      const realParent = await fs.realpath(parent);
-      return !isOutsidePath(path.relative(realWorkspace, realParent));
-    } catch (error) {
-      if (!isNotFoundError(error)) {
-        return false;
-      }
-      const next = path.dirname(parent);
-      if (next === parent) {
-        return false;
-      }
-      parent = next;
-    }
-  }
 }
 
 function normalizeMetadata(

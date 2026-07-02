@@ -17,6 +17,7 @@ import type {
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -5647,6 +5648,42 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(artifact).not.toHaveProperty('hookEventName');
     });
 
+    it('_qwen/session/artifacts/add maps artifact validation errors to invalid params', async () => {
+      bridge.addSessionArtifact = async () => {
+        throw new SessionArtifactValidationError(
+          'url must use http or https',
+          'url',
+        );
+      };
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/artifacts/add',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Bad URL',
+          url: 'file:///tmp/report.html',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          data: { errorKind: 'artifact_validation_failed', field: 'url' },
+        },
+      });
+    });
+
     it('_qwen/session/artifacts/remove forwards artifact id', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -5682,6 +5719,33 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         sessionId: 'sess-1',
         artifactId: 'artifact-1',
       });
+    });
+
+    it('_qwen/session/artifacts/remove rejects missing artifact id', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 60,
+        method: '_qwen/session/artifacts/remove',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          message: '`artifactId` is required',
+        },
+      });
+      expect(bridge.lastRemovedArtifact).toBeUndefined();
     });
 
     it('_qwen/session/artifacts/add holds the archive gate while mutating', async () => {

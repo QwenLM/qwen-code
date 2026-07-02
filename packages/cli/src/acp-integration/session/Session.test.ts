@@ -9823,6 +9823,76 @@ describe('Session', () => {
       );
     });
 
+    it('redacts nested inline data before sending PostToolBatch hooks', async () => {
+      const messageBus = {
+        request: vi.fn().mockResolvedValue({
+          success: true,
+          output: { hookSpecificOutput: { hookEventName: 'PostToolBatch' } },
+        }),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation(
+          (eventName: string) => eventName === 'PostToolBatch',
+        );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: [
+          { text: 'screenshot' },
+          { inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' } },
+        ],
+        returnDisplay: 'screenshot',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('read_file', execute),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-batch-redaction',
+        [
+          {
+            id: 'read_call',
+            name: 'read_file',
+            args: { path: 'screenshot.png' },
+          },
+        ],
+      );
+
+      expect(messageBus.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventName: 'PostToolBatch',
+          input: expect.objectContaining({
+            tool_calls: [
+              expect.objectContaining({
+                tool_response: expect.objectContaining({
+                  response_parts: [
+                    expect.objectContaining({
+                      functionResponse: expect.objectContaining({
+                        parts: [
+                          {
+                            inlineData: {
+                              mimeType: 'image/png',
+                              data: '<binary omitted>',
+                            },
+                          },
+                        ],
+                      }),
+                    }),
+                  ],
+                }),
+              }),
+            ],
+          }),
+        }),
+        expect.anything(),
+        expect.anything(),
+        expect.anything(),
+      );
+    });
+
     it('marks cancelled ask_user_question as a turn stop', async () => {
       const execute = vi.fn().mockResolvedValue({
         llmContent: 'should not execute',

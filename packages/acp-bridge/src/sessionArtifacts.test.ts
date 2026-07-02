@@ -335,7 +335,7 @@ describe('SessionArtifactStore', () => {
     expect((await store.list()).artifacts).toHaveLength(1);
   });
 
-  it('rejects trusted published file urls outside the workspace', async () => {
+  it('accepts trusted published file urls outside the workspace', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's2-published-file-url',
       workspaceCwd: workspace,
@@ -355,39 +355,16 @@ describe('SessionArtifactStore', () => {
           ],
           { strict: true, trustedPublisher: true },
         ),
-      ).rejects.toMatchObject({ field: 'url' });
-    } finally {
-      await fs.rm(outside, { recursive: true, force: true });
-    }
-  });
-
-  it('rejects trusted published file urls that resolve outside through symlinks', async () => {
-    const store = new SessionArtifactStore({
-      sessionId: 's2-published-file-symlink',
-      workspaceCwd: workspace,
-    });
-    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
-    try {
-      await fs.writeFile(path.join(outside, 'secret.html'), 'secret');
-      await fs.symlink(
-        path.join(outside, 'secret.html'),
-        path.join(workspace, 'published-link.html'),
-      );
-
-      await expect(
-        store.upsertMany(
-          [
-            {
-              title: 'Escaping link',
+      ).resolves.toMatchObject({
+        changes: [
+          {
+            artifact: {
               storage: 'published',
-              managedId: 'escaping-link',
-              url: pathToFileURL(path.join(workspace, 'published-link.html'))
-                .href,
+              url: pathToFileURL(path.join(outside, 'secret.html')).href,
             },
-          ],
-          { strict: true, trustedPublisher: true },
-        ),
-      ).rejects.toMatchObject({ field: 'url' });
+          },
+        ],
+      });
     } finally {
       await fs.rm(outside, { recursive: true, force: true });
     }

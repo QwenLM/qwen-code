@@ -309,16 +309,32 @@ function recordDaemonInvalidToolParams(
 }
 
 function summarizePostToolBatchResponsePart(part: Part): Part {
-  if (!part.inlineData) {
-    return part;
+  const summarized = part.inlineData
+    ? {
+        ...part,
+        inlineData: {
+          mimeType: part.inlineData.mimeType,
+          data: '<binary omitted>',
+        },
+      }
+    : part;
+  const nested = (
+    summarized.functionResponse as { parts?: unknown } | undefined
+  )?.parts;
+  if (!Array.isArray(nested)) {
+    return summarized;
   }
 
   return {
-    ...part,
-    inlineData: {
-      mimeType: part.inlineData.mimeType,
-      data: '<binary omitted>',
-    },
+    ...summarized,
+    functionResponse: {
+      ...summarized.functionResponse!,
+      parts: nested.map((nestedPart) =>
+        isRecord(nestedPart)
+          ? summarizePostToolBatchResponsePart(nestedPart as Part)
+          : nestedPart,
+      ),
+    } as Part['functionResponse'],
   };
 }
 

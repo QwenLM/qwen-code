@@ -145,7 +145,17 @@ function extractSessionUpdateArtifacts(
   if (!Array.isArray(rawArtifacts)) {
     return [];
   }
-  const update = params.update as { toolCallId?: unknown };
+  const update = params.update as {
+    sessionUpdate?: unknown;
+    status?: unknown;
+    toolCallId?: unknown;
+  };
+  if (
+    update.sessionUpdate !== 'tool_call_update' ||
+    update.status !== 'completed'
+  ) {
+    return [];
+  }
   const toolCallId =
     typeof update.toolCallId === 'string' ? update.toolCallId : undefined;
   const toolName =
