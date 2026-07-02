@@ -16,6 +16,7 @@ import type { ToolResult } from './tools.js';
 import { partToString } from '../utils/partUtils.js';
 import {
   collectAvailableSkillEntries,
+  invalidateCollectedSkillEntriesCache,
   renderAvailableSkillsBlock,
 } from './skill-utils.js';
 
@@ -78,6 +79,11 @@ describe('SkillTool', () => {
   beforeEach(async () => {
     // Setup fake timers
     vi.useFakeTimers();
+
+    // Invalidate module-level skill-entries cache so each test gets fresh
+    // data from its own mock skillManager/config instead of stale entries
+    // cached by a previous test's renderListing() call.
+    invalidateCollectedSkillEntriesCache();
 
     mockAddSessionAllowRule = vi.fn();
     vi.mocked(recordSkillInvocation).mockClear();

@@ -9,6 +9,9 @@ import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
 import { escapeXml } from '../utils/xml.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL_CACHE');
 
 /**
  * Builds the LLM-facing content string when a skill body is injected.
@@ -61,11 +64,24 @@ export interface CollectedAvailableSkills {
  * returned validation fields and the `entries` list are always consistent, so
  * the Skill tool, the startup snapshot, and activation reminders share identical
  * bytes from one source.
+ *
+ * Memoised at module level: repeated calls during startup and mid-session
+ * (SkillCommandLoader, BundledSkillLoader, buildAvailableSkillsReminder,
+ * drainSkillAndCommandReminders) short-circuit to a cached result instead of
+ * re-invoking `skillManager.listSkills()` and re-filtering. The cache is
+ * invalidated by `invalidateCollectedSkillEntriesCache()`.
  */
 export async function collectAvailableSkillEntries(
   skillManager: SkillManager,
   config: Config,
 ): Promise<CollectedAvailableSkills> {
+  if (cachedEntries !== null && !cacheInvalidated) {
+    debugLogger.debug('cache hit (entries=%d)', cachedEntries.entries.length);
+    return cachedEntries;
+  }
+
+  debugLogger.debug('cache miss, recomputing');
+
   // Include a skill only when (a) it is not hidden from the model
   // (`disable-model-invocation`), (b) it is not user-disabled via
   // `skills.disabled`, and (c) it is unconditional or already activated by a
@@ -129,12 +145,23 @@ export async function collectAvailableSkillEntries(
     })),
   ];
 
-  return {
+  const result: CollectedAvailableSkills = {
     availableSkills,
     pendingConditionalSkillNames,
     modelInvocableCommands,
     entries,
   };
+
+  // Store the result and clear the invalidation flag so subsequent calls use the cache.
+  cachedEntries = result;
+  cacheInvalidated = false;
+  debugLogger.debug(
+    'cache populated (skills=%d, commands=%d, entries=%d)',
+    result.availableSkills.length,
+    result.modelInvocableCommands.length,
+    result.entries.length,
+  );
+  return result;
 }
 
 // File-based skills (with a `level`) first, then commands; each alphabetical by
@@ -190,6 +217,29 @@ ${escapeXml(entry.description)}
 </skill>`;
     })
     .join('\n');
+}
+
+/**
+ * Module-level cache for `collectAvailableSkillEntries`. Prevents redundant
+ * disk scans and filtering work during startup (7+ calls from
+ * `SkillCommandLoader`, `BundledSkillLoader`, `buildAvailableSkillsReminder`,
+ * and `drainSkillAndCommandReminders`) by memoising the full result.
+ *
+ * Invalidation is triggered by `invalidateCollectedSkillEntriesCache()`,
+ * which is hooked into the `SkillManager` change-listener pipeline so the
+ * cache always reflects the current skill set and disabled-skill state.
+ */
+let cachedEntries: CollectedAvailableSkills | null = null;
+let cacheInvalidated = false;
+
+/**
+ * Invalidates the module-level skill-entries cache. Call this whenever the
+ * underlying skill set or disabled-skill state changes so that the next
+ * `collectAvailableSkillEntries()` call recomputes from disk.
+ */
+export function invalidateCollectedSkillEntriesCache(): void {
+  debugLogger.debug('cache invalidated');
+  cacheInvalidated = true;
 }
 
 /**

@@ -343,6 +343,11 @@ function VirtualizedList<T>(
   const prevTotalHeight = useRef(totalHeight);
   const prevScrollTop = useRef(actualScrollTop);
   const prevContainerHeight = useRef(scrollableContainerHeight);
+  // Guard against auto-follow overriding a user-initiated scroll within the
+  // same render batch. Set to true by scrollBy (delta < 0) and scrollTo/
+  // scrollToIndex, cleared after one layout-effect cycle so subsequent
+  // streaming updates don't re-stick to bottom (fixes #5941).
+  const userJustScrolledRef = useRef(false);
 
   useLayoutEffect(() => {
     const contentPreviouslyFit =
@@ -352,7 +357,14 @@ function VirtualizedList<T>(
       prevTotalHeight.current - prevContainerHeight.current - 1;
     const wasAtBottom = contentPreviouslyFit || wasScrolledToBottomPixels;
 
-    if (wasAtBottom && actualScrollTop >= prevScrollTop.current) {
+    // Suppress all auto-follow (wasAtBottom + anchor update) when the user
+    // just manually scrolled up. Placed BEFORE the wasAtBottom check so that
+    // `setIsStickingToBottom(true)` is also skipped — otherwise the guard
+    // only prevents the anchor update but leaves isStickingToBottom set,
+    // which causes a re-stick on the next streaming tick (#5941).
+    if (userJustScrolledRef.current) {
+      userJustScrolledRef.current = false;
+    } else if (wasAtBottom && actualScrollTop >= prevScrollTop.current) {
       if (!isStickingToBottom) {
         setIsStickingToBottom(true);
       }
@@ -366,6 +378,7 @@ function VirtualizedList<T>(
 
     if (
       shouldAutoScroll &&
+      !userJustScrolledRef.current &&
       ((listGrew && (isStickingToBottom || wasAtBottom)) ||
         (isStickingToBottom && containerChanged))
     ) {
@@ -387,13 +400,25 @@ function VirtualizedList<T>(
         actualScrollTop > totalHeight - scrollableContainerHeight) &&
       data.length > 0
     ) {
-      const newScrollTop = Math.max(0, totalHeight - scrollableContainerHeight);
-      const newAnchor = getAnchorForScrollTop(newScrollTop, offsets);
+      // Only clamp aggressively when totalHeight grew (new content).
+      // When it shrinks (e.g. pending→height key transition losing measured
+      // height), preserving the current anchor avoids a jump-to-top artifact
+      // (#5941).
       if (
-        scrollAnchor.index !== newAnchor.index ||
-        scrollAnchor.offset !== newAnchor.offset
+        totalHeight >= prevTotalHeight.current ||
+        scrollAnchor.index >= data.length
       ) {
-        setScrollAnchor(newAnchor);
+        const newScrollTop = Math.max(
+          0,
+          totalHeight - scrollableContainerHeight,
+        );
+        const newAnchor = getAnchorForScrollTop(newScrollTop, offsets);
+        if (
+          scrollAnchor.index !== newAnchor.index ||
+          scrollAnchor.offset !== newAnchor.offset
+        ) {
+          setScrollAnchor(newAnchor);
+        }
       }
     } else if (data.length === 0) {
       if (scrollAnchor.index !== 0 || scrollAnchor.offset !== 0) {
@@ -662,6 +687,7 @@ function VirtualizedList<T>(
       scrollBy: (delta: number) => {
         if (delta < 0) {
           setIsStickingToBottom(false);
+          userJustScrolledRef.current = true;
         }
         const currentScrollTop = getScrollTop();
         const maxScroll = Math.max(0, totalHeight - scrollableContainerHeight);
@@ -699,6 +725,7 @@ function VirtualizedList<T>(
           }
         } else {
           setIsStickingToBottom(false);
+          userJustScrolledRef.current = true;
           const newScrollTop = Math.max(0, offset);
           setPendingScrollTop(newScrollTop);
           setScrollAnchor(getAnchorForScrollTop(newScrollTop, offsets));
@@ -724,6 +751,7 @@ function VirtualizedList<T>(
         viewPosition?: number;
       }) => {
         setIsStickingToBottom(false);
+        userJustScrolledRef.current = true;
         const offset = offsets[index];
         if (offset !== undefined) {
           const maxScroll = Math.max(
@@ -751,6 +779,7 @@ function VirtualizedList<T>(
         viewPosition?: number;
       }) => {
         setIsStickingToBottom(false);
+        userJustScrolledRef.current = true;
         const index = data.indexOf(item);
         if (index !== -1) {
           const offset = offsets[index];

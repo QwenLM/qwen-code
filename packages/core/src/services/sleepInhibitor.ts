@@ -64,6 +64,7 @@ export class SleepInhibitor {
   private activeCount = 0;
   private child: ChildProcess | undefined;
   private spawnFailedForCurrentRun = false;
+  private loggedUnexpectedExit = false;
   private readonly platform: NodeJS.Platform;
   private readonly env: NodeJS.ProcessEnv;
   private readonly spawn: NonNullable<SleepInhibitorConfig['spawn']>;
@@ -210,9 +211,12 @@ export class SleepInhibitor {
           this.child = undefined;
         }
         if (this.activeCount > 0 && !this.spawnFailedForCurrentRun) {
-          this.logger.debug(
-            `Sleep inhibitor exited while active: code=${String(code)} signal=${String(signal)}`,
-          );
+          if (!this.loggedUnexpectedExit) {
+            this.loggedUnexpectedExit = true;
+            this.logger.debug(
+              `Sleep inhibitor exited while active: code=${String(code)} signal=${String(signal)}`,
+            );
+          }
         }
       });
     } catch (error) {
