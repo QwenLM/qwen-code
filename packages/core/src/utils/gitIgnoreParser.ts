@@ -189,7 +189,8 @@ export class GitIgnoreParser implements GitIgnoreFilter {
     for (const dir of dirsToVisit) {
       const relativeDir = path.relative(this.projectRoot, dir);
       if (relativeDir) {
-        const normalizedRelativeDir = relativeDir.replace(/\\/g, '/');
+        // Append trailing '/' so directory-only patterns (e.g. `logs/`) match.
+        const normalizedRelativeDir = relativeDir.replace(/\\/g, '/') + '/';
         if (ig.ignores(normalizedRelativeDir)) {
           // This directory is ignored by an ancestor's .gitignore.
           // According to git behavior, we don't need to process this
