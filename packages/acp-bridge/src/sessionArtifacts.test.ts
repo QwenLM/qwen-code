@@ -5,6 +5,7 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -24,6 +25,13 @@ describe('SessionArtifactStore', () => {
     vi.useRealTimers();
     await fs.rm(workspace, { recursive: true, force: true });
   });
+
+  function managedIdForWorkspacePath(workspacePath: string): string {
+    return createHash('sha1')
+      .update(path.resolve(workspace, workspacePath))
+      .digest('hex')
+      .slice(0, 16);
+  }
 
   it('lists, removes, and idempotently ignores missing artifact deletes', async () => {
     const store = new SessionArtifactStore({
@@ -244,6 +252,86 @@ describe('SessionArtifactStore', () => {
     ]);
   });
 
+  it('updates a republished managed artifact when its published url changes', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-published-refresh',
+      workspaceCwd: workspace,
+    });
+
+    await store.upsertMany(
+      [
+        {
+          title: 'Published A',
+          storage: 'published',
+          managedId: 'managed-a',
+          url: 'https://old.example.com/artifact',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+    const refreshed = await store.upsertMany(
+      [
+        {
+          title: 'Published B',
+          storage: 'published',
+          managedId: 'managed-a',
+          url: 'https://new.example.com/artifact',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    expect(refreshed.changes).toHaveLength(1);
+    expect(refreshed.changes[0]).toMatchObject({
+      action: 'updated',
+      artifact: {
+        title: 'Published B',
+        url: 'https://new.example.com/artifact',
+      },
+    });
+    expect((await store.list()).artifacts).toHaveLength(1);
+  });
+
+  it('upgrades a workspace artifact when the artifact tool publishes the same path', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-workspace-published',
+      workspaceCwd: workspace,
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'reports/dashboard.html'), 'hello');
+
+    const created = await store.upsertMany(
+      [{ title: 'Draft', workspacePath: 'reports/dashboard.html' }],
+      { strict: true },
+    );
+    const upgraded = await store.upsertMany(
+      [
+        {
+          title: 'Published dashboard',
+          storage: 'published',
+          managedId: managedIdForWorkspacePath('reports/dashboard.html'),
+          url: 'file:///tmp/dashboard.html',
+          mimeType: 'text/html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    expect(upgraded.changes).toHaveLength(1);
+    expect(upgraded.changes[0]).toMatchObject({
+      action: 'updated',
+      artifactId: created.changes[0]?.artifactId,
+      artifact: {
+        storage: 'published',
+        title: 'Published dashboard',
+        managedId: managedIdForWorkspacePath('reports/dashboard.html'),
+        url: 'file:///tmp/dashboard.html',
+      },
+    });
+    expect(upgraded.changes[0]?.artifact).not.toHaveProperty('workspacePath');
+    expect((await store.list()).artifacts).toHaveLength(1);
+  });
+
   it('evicts non-retained old artifacts before client-retained artifacts', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's3',
@@ -328,6 +416,31 @@ describe('SessionArtifactStore', () => {
     ).rejects.toMatchObject({ field: 'workspacePath' });
   });
 
+  it('accepts workspace entries whose names start with two dots', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's4-dot-prefix',
+      workspaceCwd: workspace,
+    });
+    await fs.mkdir(path.join(workspace, '..data'), { recursive: true });
+    await fs.writeFile(path.join(workspace, '..data/report.html'), 'hello');
+
+    await expect(
+      store.upsertMany(
+        [{ title: 'Projected volume', workspacePath: '..data/report.html' }],
+        { strict: true },
+      ),
+    ).resolves.toMatchObject({
+      changes: [
+        {
+          artifact: {
+            workspacePath: '..data/report.html',
+            status: 'available',
+          },
+        },
+      ],
+    });
+  });
+
   it('drops invalid artifacts in non-strict batches and keeps valid ones', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's4-non-strict',
@@ -342,7 +455,7 @@ describe('SessionArtifactStore', () => {
         {
           title: 'Forged',
           storage: 'published',
-          url: 'file:///tmp/forged.html',
+          url: 'https://example.com/forged',
         },
         {
           title: 'Valid',
@@ -594,6 +707,19 @@ describe('SessionArtifactStore', () => {
         { strict: true },
       ),
     ).rejects.toMatchObject({ field: 'metadata' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Report',
+            url: 'https://example.com/mime',
+            mimeType: 'text/html<script>',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'mimeType' });
   });
 
   it('accepts line whitespace in descriptions but not titles', async () => {
@@ -659,6 +785,39 @@ describe('SessionArtifactStore', () => {
     ]);
 
     expect(repeated.changes).toEqual([]);
+  });
+
+  it('rejects non-finite metadata numbers', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-finite-metadata',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'NaN metadata',
+            url: 'https://example.com/nan',
+            metadata: { score: Number.NaN },
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'metadata' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Infinite metadata',
+            url: 'https://example.com/infinity',
+            metadata: { score: Number.POSITIVE_INFINITY },
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'metadata' });
   });
 
   it('ignores metadata key order when detecting updates', async () => {

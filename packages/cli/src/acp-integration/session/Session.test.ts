@@ -3173,6 +3173,12 @@ describe('Session', () => {
               llmContent: 'nope',
               returnDisplay: 'failed',
               error: { message: 'tool blew up' },
+              artifacts: [
+                {
+                  title: 'Failure artifact',
+                  workspacePath: 'reports/failure.html',
+                },
+              ],
             }),
           }),
         };
@@ -3215,6 +3221,23 @@ describe('Session', () => {
           .find((ev) => ev.function_name === 'read_file');
         expect(toolEvent?.status).toBe('error');
         expect(toolEvent?.success).toBe(false);
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionId: 'test-session-id',
+            update: expect.objectContaining({
+              sessionUpdate: 'tool_call_update',
+              status: 'failed',
+              _meta: expect.objectContaining({
+                artifacts: [
+                  {
+                    title: 'Failure artifact',
+                    workspacePath: 'reports/failure.html',
+                  },
+                ],
+              }),
+            }),
+          }),
+        );
       });
     });
 

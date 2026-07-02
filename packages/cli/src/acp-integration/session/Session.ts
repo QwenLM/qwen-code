@@ -5113,7 +5113,7 @@ export class Session implements SessionContext {
               resultDisplay: toolResult.returnDisplay,
               error,
               success: succeeded,
-              artifacts: succeeded ? toolResult.artifacts : undefined,
+              artifacts: toolResult.artifacts,
             });
           }
 

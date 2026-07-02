@@ -306,9 +306,20 @@ export function isToolArtifactLike(value: unknown): value is ToolArtifact {
     (artifact['sizeBytes'] === undefined ||
       typeof artifact['sizeBytes'] === 'number') &&
     (artifact['metadata'] === undefined ||
-      (typeof artifact['metadata'] === 'object' &&
-        artifact['metadata'] !== null &&
-        !Array.isArray(artifact['metadata'])))
+      isToolArtifactMetadataLike(artifact['metadata']))
+  );
+}
+
+function isToolArtifactMetadataLike(value: unknown): boolean {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    return false;
+  }
+  return Object.values(value).every(
+    (item) =>
+      item === null ||
+      typeof item === 'string' ||
+      typeof item === 'boolean' ||
+      (typeof item === 'number' && Number.isFinite(item)),
   );
 }
 

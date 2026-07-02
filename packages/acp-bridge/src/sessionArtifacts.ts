@@ -251,9 +251,28 @@ export class SessionArtifactStore {
     ) {
       return undefined;
     }
-    return this.artifacts.get(
+    const byUrl = this.artifacts.get(
       stableArtifactId(this.sessionId, `url:${artifact.url}`),
     );
+    if (
+      byUrl &&
+      (byUrl.storage !== 'published' || byUrl.managedId === artifact.managedId)
+    ) {
+      return byUrl;
+    }
+
+    for (const existing of this.artifacts.values()) {
+      if (
+        existing.storage === 'workspace' &&
+        existing.workspacePath &&
+        artifact.managedId ===
+          managedIdForWorkspacePath(this.workspaceCwd, existing.workspacePath)
+      ) {
+        return existing;
+      }
+    }
+
+    return undefined;
   }
 
   async remove(
@@ -339,7 +358,7 @@ export class SessionArtifactStore {
       trustedPublisher,
     });
     const url = input.url
-      ? normalizeArtifactUrl(input.url, storage === 'published')
+      ? normalizeArtifactUrl(input.url, trustedPublisher)
       : undefined;
 
     validateLocator(storage, {
@@ -618,16 +637,23 @@ function mergeArtifact(
     existing.storage !== 'published' &&
     incoming.storage === 'published' &&
     incoming.trustedPublisher;
+  const publishedRefresh =
+    existing.storage === 'published' &&
+    incoming.storage === 'published' &&
+    incoming.trustedPublisher &&
+    incoming.managedId !== undefined &&
+    incoming.managedId === existing.managedId;
+  const publishedUpdate = publishedUpgrade || publishedRefresh;
   const next: StoredArtifact = {
     ...existing,
-    kind: publishedUpgrade ? incoming.kind : existing.kind,
+    kind: publishedUpdate ? incoming.kind : existing.kind,
     storage: publishedUpgrade ? 'published' : existing.storage,
     status: incoming.status,
-    managedId: publishedUpgrade
+    managedId: publishedUpdate
       ? (incoming.managedId ?? existing.managedId)
       : existing.managedId,
-    url: publishedUpgrade ? (incoming.url ?? existing.url) : existing.url,
-    mimeType: publishedUpgrade
+    url: publishedUpdate ? (incoming.url ?? existing.url) : existing.url,
+    mimeType: publishedUpdate
       ? (incoming.mimeType ?? existing.mimeType)
       : existing.mimeType,
     sizeBytes: mergeSizeBytes(existing, incoming),
@@ -636,13 +662,13 @@ function mergeArtifact(
     retentionSource: existing.retentionSource,
     trustedPublisher: existing.trustedPublisher || incoming.trustedPublisher,
     clientRetained: existing.clientRetained || incoming.clientRetained,
-    lastStatAt: publishedUpgrade
+    lastStatAt: publishedUpdate
       ? undefined
       : (incoming.lastStatAt ?? existing.lastStatAt),
     updatedAt: existing.updatedAt,
   };
 
-  if (publishedUpgrade) {
+  if (publishedUpdate) {
     next.title = incoming.title;
     next.description = incoming.description;
     delete next.workspacePath;
@@ -993,6 +1019,16 @@ function stableArtifactId(sessionId: string, identityKey: string): string {
     .slice(0, 16);
 }
 
+function managedIdForWorkspacePath(
+  workspaceCwd: string,
+  workspacePath: string,
+): string {
+  return createHash('sha1')
+    .update(path.resolve(workspaceCwd, workspacePath))
+    .digest('hex')
+    .slice(0, 16);
+}
+
 function normalizeString(
   value: unknown,
   field: string,
@@ -1043,7 +1079,7 @@ function normalizeString(
     );
   }
   if (
-    (field === 'title' || field === 'description') &&
+    (field === 'title' || field === 'description' || field === 'mimeType') &&
     hasUnsafeDisplayPayload(trimmed)
   ) {
     throw new SessionArtifactValidationError(
@@ -1098,7 +1134,7 @@ function normalizeWorkspacePath(raw: unknown, workspaceCwd: string): string {
   }
   const absolute = path.resolve(workspaceCwd, trimmed);
   const relative = path.relative(workspaceCwd, absolute);
-  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+  if (!relative || isOutsidePath(relative)) {
     throw new SessionArtifactValidationError(
       'workspacePath must stay inside the workspace',
       'workspacePath',
@@ -1183,6 +1219,12 @@ function normalizeMetadata(
         'metadata',
       );
     }
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      throw new SessionArtifactValidationError(
+        'metadata numbers must be finite',
+        'metadata',
+      );
+    }
     if (
       typeof value === 'string' &&
       (hasControlCharacter(value) || hasUnsafeDisplayPayload(value))
@@ -1251,7 +1293,7 @@ async function getWorkspaceStatus(
     const realWorkspace = await realWorkspaceCwd;
     const realPath = await fs.realpath(absolutePath);
     const relative = path.relative(realWorkspace, realPath);
-    if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    if (isOutsidePath(relative)) {
       return { status: 'missing', escaped: true };
     }
     const stat = await fs.stat(realPath);
@@ -1273,4 +1315,12 @@ function isNotFoundError(error: unknown): boolean {
   }
   const code = (error as { code?: unknown }).code;
   return code === 'ENOENT' || code === 'ENOTDIR';
+}
+
+function isOutsidePath(relative: string): boolean {
+  return (
+    relative === '..' ||
+    relative.startsWith(`..${path.sep}`) ||
+    path.isAbsolute(relative)
+  );
 }

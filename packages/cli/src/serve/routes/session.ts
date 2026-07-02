@@ -14,6 +14,7 @@ import {
   type ApprovalMode,
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
+import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
@@ -544,11 +545,26 @@ export function registerSessionRoutes(
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
         try {
+          const body = safeBody(req);
+          const artifact: SessionArtifactInput = {
+            title: body['title'] as SessionArtifactInput['title'],
+            kind: body['kind'] as SessionArtifactInput['kind'],
+            storage: body['storage'] as SessionArtifactInput['storage'],
+            description: body[
+              'description'
+            ] as SessionArtifactInput['description'],
+            workspacePath: body[
+              'workspacePath'
+            ] as SessionArtifactInput['workspacePath'],
+            managedId: body['managedId'] as SessionArtifactInput['managedId'],
+            url: body['url'] as SessionArtifactInput['url'],
+            mimeType: body['mimeType'] as SessionArtifactInput['mimeType'],
+            sizeBytes: body['sizeBytes'] as SessionArtifactInput['sizeBytes'],
+            metadata: body['metadata'] as SessionArtifactInput['metadata'],
+          };
           const result = await bridge.addSessionArtifact(
             sessionId,
-            safeBody(req) as unknown as Parameters<
-              AcpSessionBridge['addSessionArtifact']
-            >[1],
+            artifact,
             clientId !== undefined ? { clientId } : undefined,
           );
           res.status(200).json(result);
