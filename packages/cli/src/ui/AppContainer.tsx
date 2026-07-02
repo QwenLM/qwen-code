@@ -960,11 +960,18 @@ export const AppContainer = (props: AppContainerProps) => {
   // re-reading `mergedHistory` / `allVirtualItems` on whatever state
   // change triggered refreshStatic (Ctrl+O, model change, etc.).
   const useTerminalBuffer = settings.merged.ui?.useTerminalBuffer ?? false;
+  const refreshStaticRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const refreshStatic = useCallback(() => {
-    if (!useTerminalBuffer) {
-      stdout.write(ansiEscapes.clearTerminal);
+    if (refreshStaticRef.current) {
+      clearTimeout(refreshStaticRef.current);
     }
-    remountStaticHistory();
+    refreshStaticRef.current = setTimeout(() => {
+      refreshStaticRef.current = null;
+      if (!useTerminalBuffer) {
+        stdout.write(ansiEscapes.clearTerminal);
+      }
+      remountStaticHistory();
+    }, 0);
   }, [useTerminalBuffer, remountStaticHistory, stdout]);
 
   // Keep the static header in sync with model changes without polling.
