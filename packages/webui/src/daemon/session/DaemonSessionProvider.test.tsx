@@ -2509,10 +2509,11 @@ describe('DaemonSessionProvider', () => {
     });
     sdkMocks.sessions.push(session);
 
-    let connection: DaemonConnectionState | undefined;
+    const states: DaemonConnectionState[] = [];
     let blocks: readonly DaemonTranscriptBlock[] = [];
     function Harness() {
-      connection = useDaemonConnection();
+      const connection = useDaemonConnection();
+      states.push(connection);
       blocks = useDaemonTranscriptBlocks();
       return null;
     }
@@ -2525,7 +2526,8 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([
       { kind: 'assistant', text: 'replayed transcript' },
     ]);
-    expect(connection).toMatchObject({
+    expect(states.every((s) => !s.catchingUp)).toBe(true);
+    expect(states[states.length - 1]).toMatchObject({
       status: 'connected',
       sessionId: 'session-1',
       catchingUp: undefined,
