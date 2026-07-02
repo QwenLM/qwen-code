@@ -75,7 +75,9 @@ jobs:
         run: |-
           set -euo pipefail
           existing_id="$(
+            # -F would otherwise make gh api default to POST.
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --method GET \
               --paginate \
               -F per_page=100 \
               | jq -sr '[.[][] | select(.body | contains("<!-- qwen-pr-precheck:manual-required -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
@@ -100,7 +102,9 @@ jobs:
         run: |-
           set -euo pipefail
           existing_id="$(
+            # -F would otherwise make gh api default to POST.
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --method GET \
               --paginate \
               -F per_page=100 \
               | jq -sr '[.[][] | select(.body | contains("<!-- qwen-pr-precheck:manual-required -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
