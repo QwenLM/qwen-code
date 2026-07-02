@@ -27,7 +27,7 @@ export const TOP_LEVEL_COMMANDS = [
   ['sessions <command>', 'Manage Qwen Code sessions'],
 ] as const;
 
-const MCP_COMMANDS = [
+export const MCP_COMMANDS = [
   ['add <name> <commandOrUrl> [args...]', 'Add a server'],
   ['remove <name>', 'Remove a server'],
   ['list', 'List all configured MCP servers'],
@@ -156,6 +156,13 @@ function firstPositionalArg(argv: readonly string[]): string | undefined {
   return undefined;
 }
 
+function normalizeMcpFastPathArgv(argv: readonly string[]): readonly string[] {
+  if (argv[0] === 'mcp' && argv[1] === '--') {
+    return [argv[0], ...argv.slice(2)];
+  }
+  return argv;
+}
+
 export function resolveBootstrapRoute(
   rawArgv: readonly string[],
 ): BootstrapRoute {
@@ -211,7 +218,7 @@ async function printBootstrapVersion(): Promise<void> {
 }
 
 async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
-  const argv = normalizeServeFastPathArgv(rawArgv);
+  const argv = normalizeMcpFastPathArgv(normalizeServeFastPathArgv(rawArgv));
   const hasSubcommand = argv.length > 1 && !argv[1]!.startsWith('-');
   if (!hasSubcommand) {
     printMcpHelp();
@@ -345,7 +352,7 @@ function getErrnoCode(error: unknown): string | undefined {
   return typeof code === 'string' ? code : undefined;
 }
 
-function isExpectedPtyRaceError(error: unknown): boolean {
+export function isExpectedPtyRaceError(error: unknown): boolean {
   if (!(error instanceof Error)) {
     return false;
   }
@@ -373,7 +380,7 @@ function isExpectedPtyRaceError(error: unknown): boolean {
   );
 }
 
-async function handleCriticalError(error: unknown): Promise<void> {
+export async function handleCriticalError(error: unknown): Promise<void> {
   const [{ FatalError }, { AlreadyReportedError }] = await Promise.all([
     import('@qwen-code/qwen-code-core'),
     import('./utils/errors.js'),

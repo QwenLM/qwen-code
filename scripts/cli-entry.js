@@ -20,12 +20,25 @@
  */
 
 import module from 'node:module';
+import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const cliPath = join(__dirname, '..', 'dist', 'cli.js');
-const packageJsonPath = join(__dirname, '..', 'package.json');
+const cliPathCandidates = [
+  join(__dirname, 'cli.js'),
+  join(__dirname, '..', 'dist', 'cli.js'),
+];
+const packageJsonPathCandidates = [
+  join(__dirname, 'package.json'),
+  join(__dirname, '..', 'package.json'),
+];
+const cliPath =
+  cliPathCandidates.find((candidate) => existsSync(candidate)) ??
+  cliPathCandidates[0];
+const packageJsonPath =
+  packageJsonPathCandidates.find((candidate) => existsSync(candidate)) ??
+  packageJsonPathCandidates[0];
 
 function hasFlag(flag, alias) {
   for (const arg of process.argv.slice(2)) {
@@ -54,10 +67,19 @@ if (
   (process.argv[2] === undefined || process.argv[2].startsWith('-')) &&
   hasFlag('--version', '-v')
 ) {
-  const { readFileSync } = await import('node:fs');
-  const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
-  process.stdout.write(`${pkg.version || 'unknown'}\n`);
-  process.exit(0);
+  const version = process.env['CLI_VERSION'];
+  if (version) {
+    process.stdout.write(`${version}\n`);
+    process.exit(0);
+  }
+  try {
+    const { readFileSync } = await import('node:fs');
+    const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+    process.stdout.write(`${pkg.version || 'unknown'}\n`);
+    process.exit(0);
+  } catch {
+    // Fall through to cli.js, which has its own version fallback.
+  }
 }
 
 if (isInProcessFastPath()) {

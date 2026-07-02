@@ -7,8 +7,14 @@
 import type { Argv } from 'yargs';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { FatalError } from '@qwen-code/qwen-code-core';
+import { AlreadyReportedError } from './utils/errors.js';
 import {
+  MCP_COMMANDS,
   TOP_LEVEL_COMMANDS,
+  handleCriticalError,
+  isExpectedPtyRaceError,
   resolveBootstrapRoute,
   runCliEntry,
 } from './cli.js';
@@ -193,6 +199,15 @@ describe('runCliEntry', () => {
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
   });
 
+  it('executes MCP subcommands after -- through the fast path', async () => {
+    await runCliEntry(['mcp', '--', 'list']);
+
+    expect(mocks.mcpListHandler).toHaveBeenCalledTimes(1);
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
+    expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
   it('uses the full CLI when global flags precede MCP commands', async () => {
     await runCliEntry(['--safe-mode', 'mcp', 'list']);
 
@@ -288,6 +303,28 @@ describe('bootstrap import boundaries', () => {
     expect(source).toContain("hasFlag('--version', '-v')");
   });
 
+  it('prints CLI_VERSION from the npm bin wrapper version shortcut', () => {
+    const output = execFileSync(
+      process.execPath,
+      ['../../scripts/cli-entry.js', '--version'],
+      {
+        encoding: 'utf8',
+        env: { ...process.env, CLI_VERSION: '7.7.7-test' },
+      },
+    );
+
+    expect(output).toBe('7.7.7-test\n');
+  });
+
+  it('copies the npm bin wrapper into the package instead of duplicating it', () => {
+    const source = readFileSync('../../scripts/prepare-package.js', 'utf8');
+
+    expect(source).toContain(
+      "fs.copyFileSync(path.join(rootDir, 'scripts', 'cli-entry.js'), cliEntryPath)",
+    );
+    expect(source).not.toContain('const cliEntryContent = `');
+  });
+
   it('keeps bootstrap top-level help commands aligned with config registrations', () => {
     const configSource = readFileSync('src/config/config.ts', 'utf8');
     const commandNameByIdentifier = new Map([
@@ -313,5 +350,103 @@ describe('bootstrap import boundaries', () => {
       expect(commandName, `missing mapping for ${identifier}`).toBeDefined();
       expect(bootstrapCommands).toContain(commandName);
     }
+  });
+
+  it('keeps bootstrap MCP help commands aligned with MCP registrations', () => {
+    const mcpSource = readFileSync('src/commands/mcp.ts', 'utf8');
+    const commandNameByIdentifier = new Map([
+      ['addCommand', 'add'],
+      ['removeCommand', 'remove'],
+      ['listCommand', 'list'],
+      ['reconnectCommand', 'reconnect'],
+      ['approveCommand', 'approve'],
+      ['rejectCommand', 'reject'],
+    ]);
+    const registeredIdentifiers = [
+      ...mcpSource.matchAll(/\.command\((\w+Command)\)/g),
+    ].map((match) => match[1]!);
+    const bootstrapCommands = new Set(
+      MCP_COMMANDS.map(([command]) => command.split(' ')[0]),
+    );
+
+    expect(registeredIdentifiers).toHaveLength(commandNameByIdentifier.size);
+    for (const identifier of registeredIdentifiers) {
+      const commandName = commandNameByIdentifier.get(identifier);
+      expect(commandName, `missing mapping for ${identifier}`).toBeDefined();
+      expect(bootstrapCommands).toContain(commandName);
+    }
+  });
+});
+
+describe('bootstrap error handling', () => {
+  const savedEnv = {
+    NO_COLOR: process.env['NO_COLOR'],
+  };
+
+  let stderr: string[];
+
+  beforeEach(() => {
+    stderr = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    });
+    vi.spyOn(process, 'exit').mockImplementation(((code) => {
+      throw new Error(`process.exit:${String(code)}`);
+    }) as typeof process.exit);
+  });
+
+  afterEach(() => {
+    if (savedEnv.NO_COLOR === undefined) {
+      delete process.env['NO_COLOR'];
+    } else {
+      process.env['NO_COLOR'] = savedEnv.NO_COLOR;
+    }
+    vi.restoreAllMocks();
+  });
+
+  it('prints FatalError messages and exits with their code', async () => {
+    process.env['NO_COLOR'] = '1';
+
+    await expect(
+      handleCriticalError(new FatalError('fatal boom', 42)),
+    ).rejects.toThrow('process.exit:42');
+
+    const output = stderr.join('');
+    expect(output).toContain('fatal boom');
+    expect(output).not.toContain('\x1b[31m');
+  });
+
+  it('exits AlreadyReportedError without printing another error', async () => {
+    await expect(
+      handleCriticalError(new AlreadyReportedError('already printed', 7)),
+    ).rejects.toThrow('process.exit:7');
+
+    expect(stderr.join('')).toBe('');
+  });
+
+  it('prints unexpected errors with the generic critical header', async () => {
+    await expect(
+      handleCriticalError(new Error('generic boom')),
+    ).rejects.toThrow('process.exit:1');
+
+    const output = stderr.join('');
+    expect(output).toContain('An unexpected critical error occurred:');
+    expect(output).toContain('generic boom');
+  });
+
+  it('recognizes expected PTY race errors', () => {
+    expect(
+      isExpectedPtyRaceError(
+        Object.assign(new Error('read EIO'), { code: 'EIO' }),
+      ),
+    ).toBe(true);
+    expect(isExpectedPtyRaceError(new Error('read EAGAIN'))).toBe(true);
+    expect(
+      isExpectedPtyRaceError(
+        new Error('Cannot resize a pty that has already exited'),
+      ),
+    ).toBe(true);
+    expect(isExpectedPtyRaceError(new Error('other failure'))).toBe(false);
   });
 });

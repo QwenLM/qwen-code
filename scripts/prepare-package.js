@@ -299,70 +299,9 @@ function writeDistPackageJson(
 ) {
   console.log('Creating package.json for distribution...');
 
-  const cliEntryContent = `#!/usr/bin/env node
-import module from 'node:module';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { dirname, join } from 'node:path';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const cliPath = join(__dirname, 'cli.js');
-const packageJsonPath = join(__dirname, 'package.json');
-
-function hasFlag(flag, alias) {
-  for (const arg of process.argv.slice(2)) {
-    if (arg === '--') {
-      return false;
-    }
-    if (arg === flag || arg === alias) {
-      return true;
-    }
-  }
-  return false;
-}
-
-function isInProcessFastPath() {
-  const first = process.argv[2];
-  if (first === 'serve' || first === 'mcp') {
-    return true;
-  }
-  if (first === undefined || first.startsWith('-')) {
-    return hasFlag('--help', '-h') || hasFlag('--version', '-v');
-  }
-  return false;
-}
-
-if (
-  (process.argv[2] === undefined || process.argv[2].startsWith('-')) &&
-  hasFlag('--version', '-v')
-) {
-  const { readFileSync } = await import('node:fs');
-  const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
-  process.stdout.write(\`\${pkg.version || 'unknown'}\\n\`);
-  process.exit(0);
-}
-
-if (isInProcessFastPath()) {
-  module.enableCompileCache?.();
-  process.argv[1] = cliPath;
-  await import(pathToFileURL(cliPath).href);
-} else {
-  const { spawnSync } = await import('node:child_process');
-  const result = spawnSync(
-    process.execPath,
-    ['--expose-gc', cliPath, ...process.argv.slice(2)],
-    { stdio: 'inherit' },
-  );
-
-  if (result.signal) {
-    process.kill(process.pid, result.signal);
-  } else {
-    process.exit(result.status ?? 1);
-  }
-}
-`;
-
   const cliEntryPath = path.join(distDir, 'cli-entry.js');
-  fs.writeFileSync(cliEntryPath, cliEntryContent, { mode: 0o755 });
+  fs.copyFileSync(path.join(rootDir, 'scripts', 'cli-entry.js'), cliEntryPath);
+  fs.chmodSync(cliEntryPath, 0o755);
   console.log('Created dist cli-entry.js wrapper');
 
   const rootPackageJson = JSON.parse(
