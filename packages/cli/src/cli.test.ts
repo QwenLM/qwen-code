@@ -7,7 +7,11 @@
 import type { Argv } from 'yargs';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
-import { resolveBootstrapRoute, runCliEntry } from './cli.js';
+import {
+  TOP_LEVEL_COMMANDS,
+  resolveBootstrapRoute,
+  runCliEntry,
+} from './cli.js';
 
 const mocks = vi.hoisted(() => ({
   main: vi.fn(),
@@ -124,6 +128,7 @@ describe('runCliEntry', () => {
 
     const helpText = stdout.join('');
     expect(helpText).toContain('Usage: qwen [options] [command]');
+    expect(helpText).toContain('Manage Qwen Code hooks');
     expect(helpText).toContain('Manage MCP servers');
     expect(helpText).toContain('Run Qwen Code as a local HTTP daemon');
     expect(mocks.main).not.toHaveBeenCalled();
@@ -149,6 +154,15 @@ describe('runCliEntry', () => {
     const helpText = stdout.join('');
     expect(helpText).toContain('List all configured MCP servers');
     expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
+    expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
+  it('executes MCP subcommands through the fast path', async () => {
+    await runCliEntry(['mcp', 'list']);
+
+    expect(mocks.mcpListHandler).toHaveBeenCalledTimes(1);
     expect(mocks.main).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
@@ -194,9 +208,36 @@ describe('bootstrap import boundaries', () => {
     const source = readFileSync('../../scripts/cli-entry.js', 'utf8');
 
     expect(source).toContain('function isInProcessFastPath()');
-    expect(source).toContain("process.argv[2] === 'serve'");
-    expect(source).toContain("process.argv[2] === 'mcp'");
+    expect(source).toContain("first === 'serve'");
+    expect(source).toContain("first === 'mcp'");
     expect(source).toContain("hasFlag('--help', '-h')");
     expect(source).toContain("hasFlag('--version', '-v')");
+  });
+
+  it('keeps bootstrap top-level help commands aligned with config registrations', () => {
+    const configSource = readFileSync('src/config/config.ts', 'utf8');
+    const commandNameByIdentifier = new Map([
+      ['authCommand', 'auth'],
+      ['channelCommand', 'channel'],
+      ['extensionsCommand', 'extensions'],
+      ['hooksCommand', 'hooks'],
+      ['mcpCommand', 'mcp'],
+      ['reviewCommand', 'review'],
+      ['serveCommand', 'serve'],
+      ['sessionsCommand', 'sessions'],
+    ]);
+    const registeredIdentifiers = [
+      ...configSource.matchAll(/\.command\((\w+Command)\)/g),
+    ].map((match) => match[1]!);
+    const bootstrapCommands = new Set(
+      TOP_LEVEL_COMMANDS.map(([command]) => command.split(' ')[0]),
+    );
+
+    expect(registeredIdentifiers).toHaveLength(commandNameByIdentifier.size);
+    for (const identifier of registeredIdentifiers) {
+      const commandName = commandNameByIdentifier.get(identifier);
+      expect(commandName, `missing mapping for ${identifier}`).toBeDefined();
+      expect(bootstrapCommands).toContain(commandName);
+    }
   });
 });

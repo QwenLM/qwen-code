@@ -321,15 +321,20 @@ function hasFlag(flag, alias) {
 }
 
 function isInProcessFastPath() {
-  return (
-    process.argv[2] === 'serve' ||
-    process.argv[2] === 'mcp' ||
-    hasFlag('--help', '-h') ||
-    hasFlag('--version', '-v')
-  );
+  const first = process.argv[2];
+  if (first === 'serve' || first === 'mcp') {
+    return true;
+  }
+  if (first === undefined || first.startsWith('-')) {
+    return hasFlag('--help', '-h') || hasFlag('--version', '-v');
+  }
+  return false;
 }
 
-if (hasFlag('--version', '-v')) {
+if (
+  (process.argv[2] === undefined || process.argv[2].startsWith('-')) &&
+  hasFlag('--version', '-v')
+) {
   const { readFileSync } = await import('node:fs');
   const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
   process.stdout.write(\`\${pkg.version || 'unknown'}\\n\`);

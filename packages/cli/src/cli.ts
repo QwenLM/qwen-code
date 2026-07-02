@@ -5,14 +5,16 @@
  */
 
 import { pathToFileURL } from 'node:url';
+import type { ArgumentsCamelCase, Argv } from 'yargs';
 import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
 
 type BootstrapRoute = 'serve' | 'mcp' | 'help' | 'version' | 'default';
 
-const TOP_LEVEL_COMMANDS = [
+export const TOP_LEVEL_COMMANDS = [
   ['auth', 'Configure authentication (removed)'],
   ['channel <command>', 'Manage messaging channels (Telegram, Discord, etc.)'],
   ['extensions <command>', 'Manage Qwen Code extensions.'],
+  ['hooks', 'Manage Qwen Code hooks (use /hooks in interactive mode).'],
   ['mcp', 'Manage MCP servers'],
   [
     'review <command>',
@@ -130,26 +132,6 @@ function printMcpHelp(): void {
   writeStdoutLine(lines.join('\n'));
 }
 
-function printMcpSubcommandHelp(command: string): void {
-  const match = MCP_COMMANDS.find(([usage]) => usage.split(' ')[0] === command);
-  if (!match) {
-    printMcpHelp();
-    return;
-  }
-
-  const [usage, description] = match;
-  writeStdoutLine(
-    [
-      `Usage: qwen mcp ${usage}`,
-      '',
-      description,
-      '',
-      'Options:',
-      '  -h, --help  Show help',
-    ].join('\n'),
-  );
-}
-
 async function printBootstrapVersion(): Promise<void> {
   if (process.env['CLI_VERSION']) {
     writeStdoutLine(process.env['CLI_VERSION']);
@@ -167,17 +149,13 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
     printMcpHelp();
     return;
   }
-  if (hasFlag(argv.slice(2), '--help', '-h')) {
-    printMcpSubcommandHelp(argv[1]!);
-    return;
-  }
 
   const [{ default: yargsInstance }, { mcpCommand }] = await Promise.all([
     import('yargs'),
     import('./commands/mcp.js'),
   ]);
 
-  const parser = yargsInstance(argv)
+  const parser = yargsInstance([])
     .scriptName('qwen')
     .command(mcpCommand)
     .version(false)
@@ -185,7 +163,33 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
     .alias('h', 'help')
     .exitProcess(false);
 
-  await parser.parse();
+  if (hasFlag(argv.slice(2), '--help', '-h')) {
+    await parseYargsHelp(parser, argv);
+    return;
+  }
+
+  await parser.parseAsync(argv);
+}
+
+async function parseYargsHelp(
+  parser: Argv,
+  argv: readonly string[],
+): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    parser.parse(
+      argv,
+      (error: Error | undefined, _argv: ArgumentsCamelCase, output: string) => {
+        if (output) {
+          writeStdoutLine(output);
+        }
+        if (error) {
+          reject(error);
+          return;
+        }
+        resolve();
+      },
+    );
+  });
 }
 
 async function initializeProfilers(): Promise<void> {
@@ -201,10 +205,6 @@ export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
   const argv = normalizeServeFastPathArgv(rawArgv);
-  if (hasFlag(argv, '--version', '-v')) {
-    await printBootstrapVersion();
-    return;
-  }
   const route = resolveBootstrapRoute(argv);
 
   if (route === 'version') {

@@ -365,8 +365,8 @@ describe('CLI entry import boundary', () => {
   it('does not statically import the full gemini entry before the serve fast path can run', () => {
     const cliSource = readFileSync('src/cli.ts', 'utf8');
 
-    expect(cliSource).not.toContain("import './src/gemini.js'");
-    expect(cliSource).not.toContain("import { main } from './src/gemini.js'");
+    expect(cliSource).not.toContain("import './gemini.js'");
+    expect(cliSource).not.toContain("import { main } from './gemini.js'");
     expect(cliSource).not.toContain("process.argv[2] === 'serve'");
     expect(cliSource).toContain("await import('./serve/fast-path.js')");
   });
