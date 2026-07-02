@@ -107,7 +107,7 @@ const planMsg = (id: string): PlanMessage => ({
 function mount(
   messages: Message[],
   ref?: RefObject<MessageListHandle | null>,
-  opts: { isResponding?: boolean } = {},
+  opts: { hideSessionTimeline?: boolean; isResponding?: boolean } = {},
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -119,6 +119,7 @@ function mount(
           ref={ref}
           messages={messages}
           pendingApproval={null}
+          hideSessionTimeline={opts.hideSessionTimeline}
           isResponding={opts.isResponding}
           shellOutputMaxLines={50}
         />
@@ -164,6 +165,11 @@ const mockMessageListWidth = (width: number) =>
     y: 0,
     toJSON: () => ({}),
   });
+const simpleTurns = (count: number): Message[] =>
+  Array.from({ length: count }, (_, index) => {
+    const turn = index + 1;
+    return [userMsg(`u${turn}`), asstMsg(`a${turn}`)] as Message[];
+  }).flat();
 
 describe('MessageList — turn collapse (DOM)', () => {
   it('collapses a completed turn: hides the step, keeps prompt + answer, shows the toggle', () => {
@@ -258,6 +264,10 @@ describe('MessageList — turn collapse (DOM)', () => {
       asstMsg('a1'),
       userMsg('u2'),
       asstMsg('a2'),
+      userMsg('u3'),
+      asstMsg('a3'),
+      userMsg('u4'),
+      asstMsg('a4'),
     ]);
     await nextFrame();
 
@@ -269,6 +279,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(entries.map((entry) => entry.getAttribute('data-turn-id'))).toEqual([
       'u1',
       'u2',
+      'u3',
+      'u4',
     ]);
     expect(entries[0]?.getAttribute('data-node-kinds')).toBe(
       'thought,commentary,tool,plan',
@@ -276,10 +288,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     const details = Array.from(
       c.querySelectorAll('[data-testid="session-timeline-detail"]'),
     );
-    expect(details).toHaveLength(2);
-    expect(details[0]?.getAttribute('data-detail')).toContain(
-      'thinking · answer · 1 tool call · plan update',
-    );
+    expect(details).toHaveLength(4);
+    expect(details[0]?.getAttribute('data-detail')).toBe('answer');
     const buttons = Array.from(
       c.querySelectorAll<HTMLButtonElement>(
         '[data-testid="session-timeline-entry"] button',
@@ -288,7 +298,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(buttons[0]?.getAttribute('aria-label')).toBe(
       'Turn 1: q. Current turn',
     );
-    expect(buttons[0]?.getAttribute('title')).toContain('thinking');
+    expect(buttons[0]?.hasAttribute('title')).toBe(false);
     expect(entries[0]?.getAttribute('data-in-current-range')).toBe('true');
     expect(entries[1]?.getAttribute('data-in-current-range')).toBe('true');
     expect(
@@ -299,17 +309,21 @@ describe('MessageList — turn collapse (DOM)', () => {
     rectSpy.mockRestore();
   });
 
+  it('hides the session timeline until there are at least four turns', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const c = mount(simpleTurns(3));
+    await nextFrame();
+
+    expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
+    rectSpy.mockRestore();
+  });
+
   it('clicks a session timeline entry to jump to its turn', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const scrollIntoView = vi
       .spyOn(Element.prototype, 'scrollIntoView')
       .mockImplementation(() => {});
-    const c = mount([
-      userMsg('u1'),
-      asstMsg('a1'),
-      userMsg('u2'),
-      asstMsg('a2'),
-    ]);
+    const c = mount(simpleTurns(4));
     await nextFrame();
 
     const secondEntryButton = c.querySelector<HTMLButtonElement>(
@@ -330,12 +344,19 @@ describe('MessageList — turn collapse (DOM)', () => {
   it('hides the session timeline when the message list is narrow', async () => {
     const rectSpy = mockMessageListWidth(1000);
 
-    const c = mount([
-      userMsg('u1'),
-      asstMsg('a1'),
-      userMsg('u2'),
-      asstMsg('a2'),
-    ]);
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
+    rectSpy.mockRestore();
+  });
+
+  it('hides the session timeline when the caller disables it', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+
+    const c = mount(simpleTurns(4), undefined, {
+      hideSessionTimeline: true,
+    });
     await nextFrame();
 
     expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
@@ -345,12 +366,7 @@ describe('MessageList — turn collapse (DOM)', () => {
   it('hides the session timeline when the message list has no width', async () => {
     const rectSpy = mockMessageListWidth(0);
 
-    const c = mount([
-      userMsg('u1'),
-      asstMsg('a1'),
-      userMsg('u2'),
-      asstMsg('a2'),
-    ]);
+    const c = mount(simpleTurns(4));
     await nextFrame();
 
     expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();

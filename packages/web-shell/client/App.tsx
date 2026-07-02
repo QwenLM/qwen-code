@@ -3756,6 +3756,7 @@ export function App({
                         activeTurnStartedAt={activeTurnStartedAt}
                         workspaceCwd={connection.workspaceCwd || ''}
                         shellOutputMaxLines={shellOutputMaxLines}
+                        hideSessionTimeline={effectiveChatWidthMode === 'wide'}
                         showRetryHint={showRetryHint}
                         onRetryClick={handleRetry}
                         onBranchSession={handleBranchCurrentSession}

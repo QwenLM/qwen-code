@@ -443,21 +443,21 @@ describe('getSessionTimelineEntries', () => {
       {
         id: 'u1',
         label: 'hello',
-        detail: 'thinking · 2 tool calls · plan update',
+        detail: 'response',
         timestamp: undefined,
         nodeKinds: ['thought', 'tool', 'plan'],
       },
       {
         id: 'u2',
         label: 'hello',
-        detail: 'No activity',
+        detail: 'response',
         timestamp: undefined,
         nodeKinds: [],
       },
     ]);
   });
 
-  it('keeps mid-turn assistant updates but ignores the final answer', () => {
+  it('prefers the visible final answer over hidden turn steps', () => {
     expect(
       getSessionTimelineEntries([
         makeUserMessage('u1'),
@@ -469,18 +469,28 @@ describe('getSessionTimelineEntries', () => {
       {
         id: 'u1',
         label: 'hello',
-        detail: 'response · thinking',
+        detail: 'response',
         timestamp: undefined,
         nodeKinds: ['commentary', 'thought'],
       },
     ]);
   });
 
-  it('summarizes thinking without exposing its content', () => {
+  it('uses the final answer detail without exposing thinking content', () => {
     const [entry] = getSessionTimelineEntries([
       makeUserMessage('u1'),
       makeThinkingMessage('think', 'private reasoning details'),
       makeAssistantMessage('final'),
+    ]);
+
+    expect(entry?.detail).toBe('response');
+    expect(entry?.detail).not.toContain('private');
+  });
+
+  it('falls back to a thinking summary when there is no final answer', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      makeThinkingMessage('think', 'private reasoning details'),
     ]);
 
     expect(entry?.detail).toBe('thinking');
@@ -520,7 +530,7 @@ describe('getSessionTimelineEntries', () => {
       {
         id: 'u1',
         label: 'hello',
-        detail: '2 parallel agents',
+        detail: 'response',
         timestamp: undefined,
         nodeKinds: ['agents'],
       },
@@ -562,6 +572,25 @@ describe('getSessionTimelineEntries', () => {
     ]);
     expect(entry?.label.endsWith('…')).toBe(true);
     expect(/[\uD800-\uDFFF]/u.test(entry?.label ?? '')).toBe(false);
+  });
+
+  it('cleans markdown markers from timeline labels and details', () => {
+    const [entry] = getSessionTimelineEntries([
+      {
+        ...makeUserMessage('u1'),
+        content: '介绍下 `agent-reproduce-align`',
+      },
+      {
+        ...makeAssistantMessage('a1'),
+        content:
+          '**agent-reproduce-align** – 对齐测试技能\n\n**用途：** 在 [Qwen Code](https://example.com) 中运行参考代码。',
+      },
+    ]);
+
+    expect(entry?.label).toBe('介绍下 agent-reproduce-align');
+    expect(entry?.detail).toBe(
+      'agent-reproduce-align – 对齐测试技能 用途： 在 Qwen Code 中运行参考代码。',
+    );
   });
 });
 
