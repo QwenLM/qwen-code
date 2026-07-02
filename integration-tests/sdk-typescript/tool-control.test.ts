@@ -19,6 +19,7 @@ import {
   type SDKMessage,
   type SDKUserMessage,
 } from '@qwen-code/sdk';
+import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import {
   SDKTestHelper,
   extractText,
@@ -1030,12 +1031,35 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('test.txt', 'original');
 
         const canUseToolCalls: string[] = [];
+        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
+          if (requestIndex === 0) {
+            return {
+              toolCalls: [
+                fakeToolCall('read_file', {
+                  file_path: helper.getPath('test.txt'),
+                }),
+              ],
+            };
+          }
+
+          return { content: 'Plan: leave the file unchanged.' };
+        });
 
         const q = query({
           prompt: 'Read test.txt and write "modified" to it.',
           options: {
             ...SHARED_TEST_OPTIONS,
             cwd: testDir,
+            model: 'fake-model',
+            env: {
+              NO_PROXY: '127.0.0.1,localhost',
+              no_proxy: '127.0.0.1,localhost',
+              OPENAI_API_KEY: 'fake-key',
+              OPENAI_BASE_URL: fakeServer.baseUrl,
+              OPENAI_MODEL: 'fake-model',
+              QWEN_MODEL: 'fake-model',
+            },
+            authType: 'openai',
             permissionMode: 'plan',
             // allowedTools should be overridden by plan mode
             allowedTools: ['write_file'],
@@ -1057,14 +1081,25 @@ describe('Tool Control Parameters (E2E)', () => {
           const toolCalls = findToolCalls(messages);
           const toolNames = toolCalls.map((tc) => tc.toolUse.name);
 
-          // Should be able to read
-          expect(toolNames).toContain('read_file');
+          assertSuccessfulCompletion(messages);
 
-          // write_file should NOT be called in plan mode
-          // (plan mode blocks all write operations)
-          // The AI should respond with a plan instead
+          // read_file should be allowed in plan mode.
+          expect(toolNames).toContain('read_file');
+          const readFileResults = findToolResults(messages, 'read_file');
+          expect(readFileResults.length).toBeGreaterThan(0);
+          for (const result of readFileResults) {
+            expect(result.isError).toBe(false);
+            expect(result.content).toContain('original');
+          }
+
+          // write_file should NOT be called in plan mode.
+          // The fake model responds with a plan after reading the file.
+          expect(toolNames).not.toContain('write_file');
+          expect(canUseToolCalls.length).toBe(0);
+          expect(await helper.readFile('test.txt')).toBe('original');
         } finally {
           await q.close();
+          await fakeServer.close();
         }
       },
       TEST_TIMEOUT,
