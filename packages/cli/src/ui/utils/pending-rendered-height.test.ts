@@ -10,7 +10,7 @@ import {
   estimateWrappedRows,
   isTableStart,
   fitPendingSlice,
-} from './pendingRenderedHeight.js';
+} from './pending-rendered-height.js';
 
 describe('estimateWrappedRows', () => {
   it('returns 1 for a line that fits within the width', () => {

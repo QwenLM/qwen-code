@@ -86,7 +86,7 @@ import {
   resolveAtCommandQuery,
 } from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
-import { fitPendingSlice } from '../utils/pendingRenderedHeight.js';
+import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';

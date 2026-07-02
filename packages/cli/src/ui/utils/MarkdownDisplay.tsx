@@ -14,7 +14,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
-import { fitPendingSlice } from './pendingRenderedHeight.js';
+import { fitPendingSlice } from './pending-rendered-height.js';
 // Minimum content lines to keep in a clipped live preview before the
 // "generating more" cue (own constant — not coupled to MaxSizedBox's floor).
 const MIN_PENDING_CONTENT_LINES = 1;
@@ -217,7 +217,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
 
   // Rendered-height-aware slice of the pending preview (shared with
-  // useGeminiStream's incremental commit — see pendingRenderedHeight.ts — so the
+  // useGeminiStream's incremental commit — see pending-rendered-height.ts — so the
   // two agree on how tall the content renders). Guarantees the live frame never
   // exceeds the viewport, so ink cannot fall into its from-top full-redraw path
   // (the scroll-to-top lock). Note keptLines can be 0 when even the first
