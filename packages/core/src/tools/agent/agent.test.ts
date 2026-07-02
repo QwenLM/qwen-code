@@ -18,7 +18,11 @@ import { type Config, ApprovalMode } from '../../config/config.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
-import { FORK_AGENT, FORK_DEFAULT_MAX_TURNS } from './fork-subagent.js';
+import {
+  FORK_AGENT,
+  FORK_DEFAULT_MAX_TURNS,
+  runInForkContext,
+} from './fork-subagent.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import {
   AgentHeadless,
@@ -181,6 +185,7 @@ describe('AgentTool', () => {
       getSandbox: vi.fn().mockReturnValue(undefined),
       getScreenReader: vi.fn().mockReturnValue(false),
       getMaxSessionTurns: vi.fn().mockReturnValue(-1),
+      getMaxSubagentDepth: vi.fn().mockReturnValue(5),
       getMaxToolCalls: vi.fn().mockReturnValue(-1),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
@@ -732,6 +737,103 @@ describe('AgentTool', () => {
 
       expect(result.llmContent).toContain('from the team leader');
       expect(spawnTeammate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('nesting depth guard', () => {
+    it('rejects a spawn that would exceed maxSubagentDepth', async () => {
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(1);
+      const invocation = agentTool.build({
+        description: 'Spawn deeper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      // One agent frame → invoker is a level-1 sub-agent; its child would be
+      // level 2, which exceeds max=1 → rejected before any subagent load.
+      const result = await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('nesting depth limit reached');
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+    });
+
+    it('allows a spawn from the top-level session at maxSubagentDepth=1', async () => {
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(1);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      const invocation = agentTool.build({
+        description: 'Spawn helper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      // No agent frame → invoker level 0 → child level 1 ≤ 1 → allowed; the
+      // guard lets execution proceed to subagent resolution.
+      await invocation.execute(new AbortController().signal);
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
+    });
+
+    it('does not route a nested sub-agent to a teammate even with a name + active team', async () => {
+      // Regression: nested sub-agents now carry the AgentTool. A sub-agent
+      // passing `name` must NOT reach executeTeammate (which would bypass the
+      // depth guard and the v1 "teammates do not nest" rule). With max depth 1
+      // and one agent frame, the spawn falls through team routing to the depth
+      // guard and is rejected — proving executeTeammate was not taken.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(1);
+      vi.mocked(config.getTeamManager).mockReturnValue({} as never);
+      const invocation = agentTool.build({
+        description: 'Spawn teammate from within a sub-agent',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        name: 'helper',
+      });
+      const result = await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('nesting depth limit reached');
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+    });
+
+    it('blocks a fork child from spawning any sub-agent', async () => {
+      // Forks must never spawn sub-agents. The runtime guard blocks ALL agent
+      // calls from within a fork (not just fork-in-fork), catching the
+      // wildcard/fallback tool path that could otherwise re-add `agent`.
+      const invocation = agentTool.build({
+        description: 'Spawn from within a fork',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      const result = await runInForkContext(() =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain(
+        'Cannot spawn sub-agents from within a fork',
+      );
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+    });
+
+    it('allows nesting while depth remains under the cap', async () => {
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      const invocation = agentTool.build({
+        description: 'Spawn deeper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      // Two frames → invoker is level 2; child would be level 3 ≤ 5 → allowed.
+      await runWithAgentContext('sub-1', () =>
+        runWithAgentContext('sub-2', () =>
+          invocation.execute(new AbortController().signal),
+        ),
+      );
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
     });
   });
 
@@ -3295,6 +3397,7 @@ describe('AgentTool', () => {
             model: 'parent-model',
             maxSessionTurns: -1,
             maxToolCalls: -1,
+            maxSubagentDepth: 5,
           }),
         }),
       );

@@ -8,6 +8,7 @@ import { describe, it, expect, vi } from 'vitest';
 import type { FunctionDeclaration } from '@google/genai';
 import { AgentCore } from './agent-core.js';
 import {
+  getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
   runWithAgentContext,
@@ -15,6 +16,7 @@ import {
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import { ToolNames } from '../../tools/tool-names.js';
 import {
   getAgentName,
   getTeammateContext,
@@ -33,7 +35,6 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../../core/contentGenerator.js';
-import { ToolNames } from '../../tools/tool-names.js';
 
 describe('AgentCore.runInAgentFrames', () => {
   // The deferred-approval `respond` callback that AgentCore hands to the
@@ -221,6 +222,49 @@ describe('AgentCore.runInAgentFrames', () => {
     expect(observedAgentId).toBe('agent-123');
   });
 
+  it('restores the nesting depth for deferred-approval continuations', async () => {
+    // Regression (codex review): the respond closure captured only the agent
+    // id, so runWithAgentContext recomputed depth 0 from the UI's frame-less
+    // chain — a deferred-approved `agent` tool call from a leaf-depth
+    // sub-agent would then bypass maxSubagentDepth. The closure must carry
+    // the depth captured at emit time.
+    const core = makeCore('approval-agent');
+
+    let respondClosure: (() => Promise<void>) | undefined;
+    let observedDepth: number | null = null;
+    const onConfirm = async () => {
+      observedDepth = getCurrentAgentDepth();
+    };
+
+    // Emit from a nested frame (depth 2), mirroring a sub-agent of a
+    // sub-agent whose tool call parks for approval.
+    await runWithAgentContext('lvl1', () =>
+      runWithAgentContext('lvl2', () =>
+        runWithAgentContext('lvl3', async () => {
+          const inheritedAgentId = getCurrentAgentId();
+          const inheritedAgentDepth = getCurrentAgentDepth();
+          expect(inheritedAgentDepth).toBe(2);
+          respondClosure = () =>
+            core.runInAgentFrames(
+              onConfirm,
+              undefined,
+              inheritedAgentId ?? undefined,
+              undefined,
+              inheritedAgentDepth,
+            );
+        }),
+      ),
+    );
+
+    // The frames are gone; respond fires from a fresh chain like the UI.
+    expect(getCurrentAgentId()).toBeNull();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await respondClosure!();
+
+    expect(observedDepth).toBe(2);
+  });
+
   it('restores the teammate identity for deferred-approval continuations', async () => {
     // Regression: a teammate's `send_message`/`task_update` that requires
     // confirmation resumes from the UI's async chain, outside the
@@ -305,6 +349,7 @@ describe('AgentCore.prepareTools', () => {
   function buildAgentForTools(
     toolConfig: ToolConfig | undefined,
     fnDeclarations: FunctionDeclaration[],
+    maxSubagentDepth = 5,
   ): {
     core: AgentCore;
     debugSpy: ReturnType<typeof vi.fn>;
@@ -323,6 +368,7 @@ describe('AgentCore.prepareTools', () => {
         getFunctionDeclarations: getFunctionDeclarationsSpy,
         getFunctionDeclarationsFiltered: getFunctionDeclarationsFilteredSpy,
       }),
+      getMaxSubagentDepth: vi.fn().mockReturnValue(maxSubagentDepth),
     } as unknown as Config;
 
     const core = new AgentCore(
@@ -607,4 +653,91 @@ describe('AgentCore.prepareTools', () => {
       expect(response?.error).not.toContain('not found');
     },
   );
+
+  // ─── Nested sub-agents ──────────────────────────────────────────
+  // The AgentTool is depth-gated: available to a sub-agent only while
+  // maxSubagentDepth still permits another level. prepareTools() reads the
+  // sub-agent's own 0-based depth from getCurrentAgentDepth(); a child sits
+  // at level (depth + 2), which must not exceed the cap.
+  const nestingDecls = (): FunctionDeclaration[] => [
+    { name: 'read_file', description: 'read' } as FunctionDeclaration,
+    {
+      name: ToolNames.AGENT,
+      description: 'spawn subagent',
+    } as FunctionDeclaration,
+  ];
+
+  it('nesting: includes AgentTool for a shallow subagent when depth permits', async () => {
+    const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 5);
+    // One frame → getCurrentAgentDepth() === 0 (a top-level sub-agent).
+    const tools = await runWithAgentContext('lvl1', () => core.prepareTools());
+    expect(tools.map((t) => t.name)).toContain(ToolNames.AGENT);
+  });
+
+  it('nesting: excludes AgentTool at the leaf depth', async () => {
+    const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 2);
+    // Two nested frames → depth === 1 → level 2 → the leaf when max === 2.
+    const tools = await runWithAgentContext('lvl1', () =>
+      runWithAgentContext('lvl2', () => core.prepareTools()),
+    );
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain(ToolNames.AGENT);
+    expect(names).toContain('read_file');
+  });
+
+  it('nesting: maxSubagentDepth=1 reproduces the old no-nesting behavior', async () => {
+    const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 1);
+    const tools = await runWithAgentContext('lvl1', () => core.prepareTools());
+    expect(tools.map((t) => t.name)).not.toContain(ToolNames.AGENT);
+  });
+
+  it('nesting: frameless prepareTools fails closed — AgentTool excluded', async () => {
+    // prepareTools() only ever serves agents, never the top-level session.
+    // A missing agent frame means the launch path forgot runWithAgentContext
+    // (codex review: AgentInteractive.start() before it established its
+    // frame); such an agent must not be depth-gated as the top-level session.
+    const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 5);
+    const tools = await core.prepareTools();
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain(ToolNames.AGENT);
+    expect(names).toContain('read_file');
+  });
+
+  it('nesting: teammates never receive the AgentTool regardless of depth', async () => {
+    const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 5);
+    const identity: TeammateIdentity = {
+      agentId: 'scribe@demo',
+      agentName: 'scribe',
+      teamName: 'demo',
+      isTeamLead: false,
+    };
+    const tools = await runWithTeammateIdentity(identity, () =>
+      runWithAgentContext('lvl1', () => core.prepareTools()),
+    );
+    expect(tools.map((t) => t.name)).not.toContain(ToolNames.AGENT);
+  });
+
+  it('nesting: explicit tools list includes AgentTool only when nesting is allowed', async () => {
+    const allowed = buildAgentForTools(
+      { tools: ['read_file', ToolNames.AGENT] },
+      nestingDecls(),
+      5,
+    );
+    const allowedTools = await runWithAgentContext('lvl1', () =>
+      allowed.core.prepareTools(),
+    );
+    expect(allowedTools.map((t) => t.name)).toContain(ToolNames.AGENT);
+
+    const denied = buildAgentForTools(
+      { tools: ['read_file', ToolNames.AGENT] },
+      nestingDecls(),
+      1,
+    );
+    const deniedTools = await runWithAgentContext('lvl1', () =>
+      denied.core.prepareTools(),
+    );
+    const deniedNames = deniedTools.map((t) => t.name);
+    expect(deniedNames).not.toContain(ToolNames.AGENT);
+    expect(deniedNames).toContain('read_file');
+  });
 });

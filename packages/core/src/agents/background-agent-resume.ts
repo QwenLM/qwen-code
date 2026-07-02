@@ -1028,7 +1028,11 @@ export class BackgroundAgentResumeService {
         }
       };
 
-      const framedRunBody = () => runWithAgentContext(meta.agentId, runBody);
+      // Restore the persisted launch depth so a resumed nested agent keeps
+      // its original nesting level (and spawn eligibility) instead of
+      // recomputing to depth 0 from this top-level resume frame.
+      const framedRunBody = () =>
+        runWithAgentContext(meta.agentId, runBody, meta.depth);
       void (target.isFork ? runInForkContext(framedRunBody) : framedRunBody());
       return entry;
     } catch (error) {

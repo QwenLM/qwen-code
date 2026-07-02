@@ -1996,6 +1996,8 @@ export async function loadCliConfig(
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
+    // Undefined flows through to Config's default (5) and clamp logic.
+    maxSubagentDepth: settings.model?.maxSubagentDepth,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,

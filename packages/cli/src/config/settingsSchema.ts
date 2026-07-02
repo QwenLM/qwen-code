@@ -1360,6 +1360,16 @@ const SETTINGS_SCHEMA = {
           'Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.',
         showInDialog: false,
       },
+      maxSubagentDepth: {
+        type: 'number',
+        label: 'Max Sub-agent Nesting Depth',
+        category: 'Model',
+        requiresRestart: false,
+        default: 5,
+        description:
+          'Maximum number of nested sub-agent levels. 1 disables nesting (sub-agents cannot spawn sub-agents); the default 5 allows a sub-agent to spawn sub-agents up to five levels deep. Values below 1 are clamped to 1. Teammates, forks, and the workflow tool are excluded from nesting.',
+        showInDialog: false,
+      },
       chatCompression: {
         type: 'object',
         label: 'Chat Compression',

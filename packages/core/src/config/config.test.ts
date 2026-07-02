@@ -500,6 +500,45 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('getMaxSubagentDepth', () => {
+    it('defaults to 5 when unset', () => {
+      expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);
+    });
+
+    it('respects an explicit value', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 3,
+        }).getMaxSubagentDepth(),
+      ).toBe(3);
+    });
+
+    it('clamps values below 1 up to 1 (never disables sub-agents)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 0,
+        }).getMaxSubagentDepth(),
+      ).toBe(1);
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: -4,
+        }).getMaxSubagentDepth(),
+      ).toBe(1);
+    });
+
+    it('floors fractional values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 3.9,
+        }).getMaxSubagentDepth(),
+      ).toBe(3);
+    });
+  });
+
   describe('getTeamMemoryEnabled', () => {
     const prevEnv = process.env['QWEN_CODE_MEMORY_TEAM'];
     afterEach(() => {

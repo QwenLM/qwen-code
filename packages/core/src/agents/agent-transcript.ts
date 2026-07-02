@@ -121,6 +121,8 @@ export interface AgentMeta {
   agentColor?: string;
   /** Number of explicit resume attempts performed so far. */
   resumeCount?: number;
+  /** Nesting depth at launch time; restored on background/foreground resume. */
+  depth?: number;
   /** Last terminal error, if any. */
   lastError?: string;
 }
@@ -135,6 +137,12 @@ export interface AgentPersistedCliFlags {
   model?: string;
   maxSessionTurns?: number;
   maxToolCalls?: number;
+  /**
+   * Launch-time nesting cap. Interprets the persisted `depth` — without it a
+   * nested agent launched under a lower cap would resume after restart under
+   * the new session's (or default) cap and regain spawn capacity.
+   */
+  maxSubagentDepth?: number;
 }
 
 /**

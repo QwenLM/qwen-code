@@ -46,12 +46,16 @@ const storage = new AsyncLocalStorage<AgentContext>();
 export function runWithAgentContext<T>(
   agentId: string,
   fn: () => Promise<T>,
+  depthOverride?: number,
 ): Promise<T> {
   const current = storage.getStore() ?? {};
   // Auto-increment depth: top-level = 0, nested = parent+1. No caller has
   // to know about it; telemetry reads it back via getCurrentAgentDepth
-  // (#3731 Phase 3 subagent spans).
-  const depth = (current.depth ?? -1) + 1;
+  // (#3731 Phase 3 subagent spans). depthOverride restores the original
+  // launch depth on background/foreground resume — otherwise the frame
+  // recomputes from a top-level (depth 0) parent and a resumed nested agent
+  // would regain spawn capacity it should not have.
+  const depth = depthOverride ?? (current.depth ?? -1) + 1;
   return storage.run({ ...current, agentId, depth }, fn);
 }
 
@@ -88,4 +92,42 @@ export function getRuntimeContentGenerator():
   | RuntimeContentGeneratorView
   | undefined {
   return storage.getStore()?.runtimeView;
+}
+
+/**
+ * True when there is no active agent frame — i.e. we are in the top-level
+ * user session, not inside a sub-agent. The canonical "top-level only"
+ * predicate for gating capabilities (teammate spawning, forking) that must
+ * not be reachable from a nested sub-agent.
+ */
+export function isTopLevelSession(): boolean {
+  return getCurrentAgentId() === null;
+}
+
+/**
+ * The 0-based depth a child spawned by the current invoker would have:
+ * 0 when spawning from the top-level session (no agent frame), parent
+ * depth + 1 inside a sub-agent frame. Single source of the launch-depth
+ * formula — used for subagent telemetry spans, persisted in AgentMeta so
+ * background/foreground resume can restore the original nesting level (via
+ * the runWithAgentContext depthOverride), and underlying
+ * {@link canSpawnNestedAgent}.
+ */
+export function childLaunchDepth(): number {
+  return getCurrentAgentId() !== null ? getCurrentAgentDepth() + 1 : 0;
+}
+
+/**
+ * Whether the current invoker may spawn a nested sub-agent given the
+ * configured maximum nesting depth (1-based levels; a top-level sub-agent is
+ * level 1). Single source of truth for the depth relationship, shared by
+ * AgentCore.prepareTools() (schema gating) and AgentTool.execute() (runtime
+ * guard) so the two cannot drift apart.
+ *
+ * The would-be child sits at level `childLaunchDepth() + 1` (levels are
+ * 1-based, depths 0-based), which must not exceed `maxDepth`. See
+ * knowledge/qwen-code/design/nested-subagents.md.
+ */
+export function canSpawnNestedAgent(maxDepth: number): boolean {
+  return childLaunchDepth() + 1 <= maxDepth;
 }
