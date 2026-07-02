@@ -278,6 +278,18 @@ describe('FeishuChannel', () => {
       }
     });
 
+    it('keeps bare emphasized text matching a status label', () => {
+      const card = {
+        body: {
+          elements: [{ tag: 'markdown', content: 'Content\n*已完成*' }],
+        },
+      };
+
+      const result = extractCardText(card);
+
+      expect(result).toBe('Content\n*已完成*');
+    });
+
     it('strips truncation notice with terminal lifecycle label', () => {
       // Real last-resort shape: the truncation notice block is baked into the
       // card text and buildCardContent appends the label as its own block.

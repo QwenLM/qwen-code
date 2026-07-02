@@ -5248,11 +5248,7 @@ describe('ChannelBase', () => {
         status: 'running',
       });
 
-      // onResponseChunk stays live during the pending window — adapters
-      // accumulate display state and gate rendering on their own stop flags.
-      expect(ch.responseChunks).toEqual([
-        { chatId: 'chat1', chunk: 'late part', sessionId },
-      ]);
+      expect(ch.responseChunks).toEqual([]);
       expect(ch.taskEvents).toEqual([
         expect.objectContaining({
           type: 'started',

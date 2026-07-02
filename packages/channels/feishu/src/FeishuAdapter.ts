@@ -89,10 +89,10 @@ const CARD_UPDATE_INTERVAL_MS = 1500;
  *  stopLabelFor, and the truncation notice. */
 const FEISHU_STATUS_LABELS =
   '(?:(?:生成中|运行中)(?:\\.\\.\\.)?|已完成|已取消|已失败，请重试|已停止生成|停止失败，请重试|内容过长，已截断)';
-/** A rendered status block: optional `---` divider line + `*label*` line,
+/** A rendered status block: `---` divider line + `*label*` line,
  *  at line granularity anywhere in the joined card text. */
 const FEISHU_STATUS_BLOCK_RE = new RegExp(
-  `(?:^|\\n)(?:---\\n)?\\*${FEISHU_STATUS_LABELS}\\*(?=\\n|$)`,
+  `(?:^|\\n)---\\n\\*${FEISHU_STATUS_LABELS}\\*(?=\\n|$)`,
   'g',
 );
 
