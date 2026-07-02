@@ -277,6 +277,10 @@ export class QQChannel extends ChannelBase {
                     if (this.cronBuffer.get(sessionId) !== entry) {
                       this.cronBuffer.set(sessionId, entry!);
                     }
+                    // Schedule a retry flush since no new chunk may arrive
+                    setTimeout(() => {
+                      this._cronTextHandler?.(sessionId, '');
+                    }, 2000)?.unref();
                   });
                 return; // deletion is handled in .then
               }
@@ -603,6 +607,7 @@ export class QQChannel extends ChannelBase {
       }
       this.cronBuffer.clear();
     }
+    this.cronRetryCount.clear();
     this.flushQQState();
     this.backupGlobalSessions();
     if (this.ws) {
@@ -684,7 +689,11 @@ export class QQChannel extends ChannelBase {
               // Fire-and-forget: flush orphaned buffer. If this send fails
               // the data is lost, which is preferred over leaving it orphaned
               // and never sent.
-              this.sendMessage(s.chatId, s.buffer);
+              this.sendMessage(s.chatId, s.buffer).catch((err) => {
+                process.stderr.write(
+                  `[QQ:${this.name}] Orphaned buffer flush failed: ${err}\n`,
+                );
+              });
               s.buffer = '';
             }
             if (
@@ -707,6 +716,21 @@ export class QQChannel extends ChannelBase {
               this.streamState.delete(sessionId);
             } else {
               s.buffer = toFlush + s.buffer;
+              // Re-arm idle timer so restored buffer doesn't sit orphaned
+              s.timer = setTimeout(() => {
+                if (!s.buffer) return;
+                const buf = s.buffer;
+                s.buffer = '';
+                this.sendMessage(s.chatId, buf).catch((e) => {
+                  process.stderr.write(
+                    `[QQ:${this.name}] idleFlush retry re-arm failed: ${e}\n`,
+                  );
+                  if (this.streamState.get(sessionId) === s) {
+                    s.buffer = buf + (s.buffer || '');
+                  }
+                });
+              }, 2000);
+              s.timer.unref?.();
             }
           } else {
             process.stderr.write(
@@ -1853,11 +1877,8 @@ export class QQChannel extends ChannelBase {
       ? text.replace('[atMention=false]', '[atMention=true]')
       : text;
 
-    // Only block non-@-bot messages — passive replies to @-mentions
-    // must still be delivered. Outbound sendMessage already has a more
-    // precise guard (!msgId + groupActiveMsgEnabled === false).
-    // GROUP_AT_MESSAGE_CREATE always has finalIsAtBot=true, so the
-    // passive-reply path is always taken when active messages are disabled.
+    // GROUP_AT_MESSAGE_CREATE always has finalIsAtBot=true, so @-bot
+    // messages are always delivered. Log when active messages are disabled.
     if (this.groupActiveMsgEnabled.get(chatId) === false) {
       process.stderr.write(
         `[QQ:${this.name}] handleGroup: active messages disabled but @-bot allowed through (passive)\n`,
