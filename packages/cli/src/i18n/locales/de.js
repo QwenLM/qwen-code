@@ -229,6 +229,42 @@ export default {
   'Delete {{name}}': '{{name}} löschen',
   'Unknown Step': 'Unbekannter Schritt',
   'Esc to close': 'Esc zum Schließen',
+  Transcript: 'Transkript',
+  'to close': 'zum Schließen',
+  'to scroll': 'zum Scrollen',
+  'Failed to render transcript.': 'Transkript konnte nicht gerendert werden.',
+  'Read {{count}} file': '{{count}} Datei gelesen',
+  'Read {{count}} files': '{{count}} Dateien gelesen',
+  'Reading {{count}} file': 'Lese {{count}} Datei',
+  'Reading {{count}} files': 'Lese {{count}} Dateien',
+  'Edited {{count}} file': '{{count}} Datei bearbeitet',
+  'Edited {{count}} files': '{{count}} Dateien bearbeitet',
+  'Editing {{count}} file': 'Bearbeite {{count}} Datei',
+  'Editing {{count}} files': 'Bearbeite {{count}} Dateien',
+  'Wrote {{count}} file': '{{count}} Datei geschrieben',
+  'Wrote {{count}} files': '{{count}} Dateien geschrieben',
+  'Writing {{count}} file': 'Schreibe {{count}} Datei',
+  'Writing {{count}} files': 'Schreibe {{count}} Dateien',
+  'Searched {{count}} pattern': '{{count}} Muster durchsucht',
+  'Searched {{count}} patterns': '{{count}} Muster durchsucht',
+  'Searching {{count}} pattern': 'Durchsuche {{count}} Muster',
+  'Searching {{count}} patterns': 'Durchsuche {{count}} Muster',
+  'Listed {{count}} directory': '{{count}} Verzeichnis aufgelistet',
+  'Listed {{count}} directories': '{{count}} Verzeichnisse aufgelistet',
+  'Listing {{count}} directory': 'Liste {{count}} Verzeichnis auf',
+  'Listing {{count}} directories': 'Liste {{count}} Verzeichnisse auf',
+  'Ran {{count}} command': '{{count}} Befehl ausgeführt',
+  'Ran {{count}} commands': '{{count}} Befehle ausgeführt',
+  'Running {{count}} command': 'Führe {{count}} Befehl aus',
+  'Running {{count}} commands': 'Führe {{count}} Befehle aus',
+  'Ran {{count}} agent': '{{count}} Agent ausgeführt',
+  'Ran {{count}} agents': '{{count}} Agenten ausgeführt',
+  'Running {{count}} agent': 'Führe {{count}} Agent aus',
+  'Running {{count}} agents': 'Führe {{count}} Agenten aus',
+  'Used {{count}} tool': '{{count}} Werkzeug verwendet',
+  'Used {{count}} tools': '{{count}} Werkzeuge verwendet',
+  'Using {{count}} tool': 'Verwende {{count}} Werkzeug',
+  'Using {{count}} tools': 'Verwende {{count}} Werkzeuge',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter zum Auswählen, ↑↓ zum Navigieren, Esc zum Schließen',
   'Esc to go back': 'Esc zum Zurückgehen',
@@ -1708,8 +1744,6 @@ export default {
     'Sie können den Berechtigungsmodus schnell mit Tab oder /approval-mode wechseln.',
   'Try /insight to generate personalized insights from your chat history.':
     'Probieren Sie /insight, um personalisierte Erkenntnisse aus Ihrem Chatverlauf zu erstellen.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Ctrl+O drücken, um den Kompaktmodus umzuschalten — Tool-Ausgabe und Denkprozess ausblenden.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Fügen Sie eine QWEN.md-Datei hinzu, um Qwen Code dauerhaften Projektkontext zu geben.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1869,11 +1903,7 @@ export default {
     'Raw-Modus nicht verfügbar. Bitte in einem interaktiven Terminal ausführen.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ Pfeiltasten zum Navigieren, Enter zum Auswählen, Ctrl+C zum Beenden)\n',
-  'to toggle compact mode': 'Kompaktmodus umschalten',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Tool-Ausgabe und Denkprozess ausblenden für eine übersichtlichere Ansicht (mit Ctrl+O umschalten).',
-  'Press Ctrl+O to show full tool output':
-    'Ctrl+O für vollständige Tool-Ausgabe drücken',
+  'to view transcript': 'zum Anzeigen des Transkripts',
   'Switch to plan mode or exit plan mode':
     'In den Plan-Modus wechseln oder den Plan-Modus verlassen',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':

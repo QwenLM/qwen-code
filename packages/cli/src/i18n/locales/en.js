@@ -265,7 +265,7 @@ export default {
   'to search history': 'to search history',
   'to paste images': 'to paste images',
   'for external editor': 'for external editor',
-  'to toggle compact mode': 'to toggle compact mode',
+  'to view transcript': 'to view transcript',
   'Jump through words in the input': 'Jump through words in the input',
   'Close dialogs, cancel requests, or quit application':
     'Close dialogs, cancel requests, or quit application',
@@ -485,6 +485,42 @@ export default {
   'Delete {{name}}': 'Delete {{name}}',
   'Unknown Step': 'Unknown Step',
   'Esc to close': 'Esc to close',
+  Transcript: 'Transcript',
+  'to close': 'to close',
+  'to scroll': 'to scroll',
+  'Failed to render transcript.': 'Failed to render transcript.',
+  'Read {{count}} file': 'Read {{count}} file',
+  'Read {{count}} files': 'Read {{count}} files',
+  'Reading {{count}} file': 'Reading {{count}} file',
+  'Reading {{count}} files': 'Reading {{count}} files',
+  'Edited {{count}} file': 'Edited {{count}} file',
+  'Edited {{count}} files': 'Edited {{count}} files',
+  'Editing {{count}} file': 'Editing {{count}} file',
+  'Editing {{count}} files': 'Editing {{count}} files',
+  'Wrote {{count}} file': 'Wrote {{count}} file',
+  'Wrote {{count}} files': 'Wrote {{count}} files',
+  'Writing {{count}} file': 'Writing {{count}} file',
+  'Writing {{count}} files': 'Writing {{count}} files',
+  'Searched {{count}} pattern': 'Searched {{count}} pattern',
+  'Searched {{count}} patterns': 'Searched {{count}} patterns',
+  'Searching {{count}} pattern': 'Searching {{count}} pattern',
+  'Searching {{count}} patterns': 'Searching {{count}} patterns',
+  'Listed {{count}} directory': 'Listed {{count}} directory',
+  'Listed {{count}} directories': 'Listed {{count}} directories',
+  'Listing {{count}} directory': 'Listing {{count}} directory',
+  'Listing {{count}} directories': 'Listing {{count}} directories',
+  'Ran {{count}} command': 'Ran {{count}} command',
+  'Ran {{count}} commands': 'Ran {{count}} commands',
+  'Running {{count}} command': 'Running {{count}} command',
+  'Running {{count}} commands': 'Running {{count}} commands',
+  'Ran {{count}} agent': 'Ran {{count}} agent',
+  'Ran {{count}} agents': 'Ran {{count}} agents',
+  'Running {{count}} agent': 'Running {{count}} agent',
+  'Running {{count}} agents': 'Running {{count}} agents',
+  'Used {{count}} tool': 'Used {{count}} tool',
+  'Used {{count}} tools': 'Used {{count}} tools',
+  'Using {{count}} tool': 'Using {{count}} tool',
+  'Using {{count}} tools': 'Using {{count}} tools',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter to select, ↑↓ to navigate, Esc to close',
   'Esc to go back': 'Esc to go back',
@@ -1857,8 +1893,6 @@ export default {
     'You can switch permission mode quickly with Tab or /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Try /insight to generate personalized insights from your chat history.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Add a QWEN.md file to give Qwen Code persistent project context.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -2370,10 +2404,6 @@ export default {
     'Raw mode not available. Please run in an interactive terminal.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Press Ctrl+O to show full tool output',
   'Switch to plan mode or exit plan mode':
     'Switch to plan mode or exit plan mode',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':

@@ -291,6 +291,32 @@ export const clearStringWidthCache = (): void => {
 
 const regex = ansiRegex();
 
+// Bare C0 control bytes (plus DEL / C1) that `escapeAnsiCtrlCodes` (ansi-regex)
+// leaves untouched because they carry no ESC prefix — BEL \x07, BS \x08,
+// VT \x0b, FF \x0c, CR \x0d, SO \x0e, SI \x0f, etc. TAB (\x09) and LF (\x0a)
+// are intentionally preserved: they legitimately structure multi-line output.
+// eslint-disable-next-line no-control-regex
+const BARE_C0_CONTROL_CHARS_REGEX = /[\x00-\x08\x0b-\x1f\x7f-\x9f]/g;
+
+// Unicode bidirectional override / isolate characters (the "Trojan Source"
+// attack class, CVE-2021-42572) that can visually reorder rendered text.
+const BIDI_OVERRIDE_CHARS_REGEX =
+  /[\u200e\u200f\u202a-\u202e\u2066-\u2069]/g;
+
+/**
+ * Full sanitization for raw, untrusted text about to be rendered into a
+ * terminal `<Text>` (e.g. tool output in the Ctrl+O transcript, or a caught
+ * error message). Three passes: (1) neutralize ESC-prefixed ANSI sequences
+ * (alt-screen exit, OSC 52 clipboard, …); (2) strip bare C0/C1 control bytes
+ * ansi-regex misses, keeping only TAB/LF; (3) strip bidi override/isolate chars
+ * (Trojan Source). Single source of truth so every render site stays aligned.
+ */
+export function sanitizeTerminalText(value: string): string {
+  return escapeAnsiCtrlCodes(value)
+    .replace(BARE_C0_CONTROL_CHARS_REGEX, '')
+    .replace(BIDI_OVERRIDE_CHARS_REGEX, '');
+}
+
 /* Recursively traverses a JSON-like structure (objects, arrays, primitives)
  * and escapes all ANSI control characters found in any string values.
  *

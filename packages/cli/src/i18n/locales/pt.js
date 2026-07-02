@@ -52,7 +52,7 @@ export default {
   'to search history': 'para pesquisar no histórico',
   'to paste images': 'para colar imagens',
   'for external editor': 'para editor externo',
-  'to toggle compact mode': 'alternar modo compacto',
+  'to view transcript': 'para ver a transcrição',
   'Jump through words in the input': 'Pular palavras na entrada',
   'Close dialogs, cancel requests, or quit application':
     'Fechar diálogos, cancelar solicitações ou sair do aplicativo',
@@ -244,6 +244,42 @@ export default {
   'Delete {{name}}': 'Excluir {{name}}',
   'Unknown Step': 'Etapa Desconhecida',
   'Esc to close': 'Esc para fechar',
+  Transcript: 'Transcrição',
+  'to close': 'para fechar',
+  'to scroll': 'para rolar',
+  'Failed to render transcript.': 'Falha ao renderizar a transcrição.',
+  'Read {{count}} file': 'Leu {{count}} arquivo',
+  'Read {{count}} files': 'Leu {{count}} arquivos',
+  'Reading {{count}} file': 'Lendo {{count}} arquivo',
+  'Reading {{count}} files': 'Lendo {{count}} arquivos',
+  'Edited {{count}} file': 'Editou {{count}} arquivo',
+  'Edited {{count}} files': 'Editou {{count}} arquivos',
+  'Editing {{count}} file': 'Editando {{count}} arquivo',
+  'Editing {{count}} files': 'Editando {{count}} arquivos',
+  'Wrote {{count}} file': 'Escreveu {{count}} arquivo',
+  'Wrote {{count}} files': 'Escreveu {{count}} arquivos',
+  'Writing {{count}} file': 'Escrevendo {{count}} arquivo',
+  'Writing {{count}} files': 'Escrevendo {{count}} arquivos',
+  'Searched {{count}} pattern': 'Pesquisou {{count}} padrão',
+  'Searched {{count}} patterns': 'Pesquisou {{count}} padrões',
+  'Searching {{count}} pattern': 'Pesquisando {{count}} padrão',
+  'Searching {{count}} patterns': 'Pesquisando {{count}} padrões',
+  'Listed {{count}} directory': 'Listou {{count}} diretório',
+  'Listed {{count}} directories': 'Listou {{count}} diretórios',
+  'Listing {{count}} directory': 'Listando {{count}} diretório',
+  'Listing {{count}} directories': 'Listando {{count}} diretórios',
+  'Ran {{count}} command': 'Executou {{count}} comando',
+  'Ran {{count}} commands': 'Executou {{count}} comandos',
+  'Running {{count}} command': 'Executando {{count}} comando',
+  'Running {{count}} commands': 'Executando {{count}} comandos',
+  'Ran {{count}} agent': 'Executou {{count}} agente',
+  'Ran {{count}} agents': 'Executou {{count}} agentes',
+  'Running {{count}} agent': 'Executando {{count}} agente',
+  'Running {{count}} agents': 'Executando {{count}} agentes',
+  'Used {{count}} tool': 'Usou {{count}} ferramenta',
+  'Used {{count}} tools': 'Usou {{count}} ferramentas',
+  'Using {{count}} tool': 'Usando {{count}} ferramenta',
+  'Using {{count}} tools': 'Usando {{count}} ferramentas',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter para selecionar, ↑↓ para navegar, Esc para fechar',
   'Esc to go back': 'Esc para voltar',
@@ -1412,8 +1448,6 @@ export default {
     'Você pode alternar o modo de permissão rapidamente com Shift+Tab ou /approval-mode.',
   'Try /insight to generate personalized insights from your chat history.':
     'Experimente /insight para gerar insights personalizados do seu histórico de conversas.',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Pressione Ctrl+O para alternar o modo compacto — ocultar saída de ferramentas e raciocínio.',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'Adicione um arquivo QWEN.md para dar ao Qwen Code um contexto persistente do projeto.',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1865,10 +1899,6 @@ export default {
     'Modo raw não disponível. Execute em um terminal interativo.',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(Use ↑ ↓ para navegar, Enter para selecionar, Ctrl+C para sair)\n',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'Ocultar saída da ferramenta e raciocínio para uma visualização mais limpa (alternar com Ctrl+O).',
-  'Press Ctrl+O to show full tool output':
-    'Pressione Ctrl+O para exibir a saída completa da ferramenta',
   'Switch to plan mode or exit plan mode':
     'Alternar para o modo de planejamento ou sair do modo de planejamento',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':

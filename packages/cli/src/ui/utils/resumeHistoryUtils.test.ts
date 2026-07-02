@@ -495,6 +495,175 @@ describe('resumeHistoryUtils', () => {
     expect(items).toEqual([{ id: 51, type: 'user', text: '/filecmd' }]);
     expect(items[0]).not.toHaveProperty('sentToModel');
   });
+
+  describe('detailedDisplay (§4.9 Ctrl+O full detail on resume)', () => {
+    type ToolGroupItem = Extract<HistoryItem, { type: 'tool_group' }>;
+    const firstTool = (items: HistoryItem[]) =>
+      (items.find((i) => i.type === 'tool_group') as ToolGroupItem | undefined)
+        ?.tools[0];
+
+    // detailedDisplay is only derived for collapsible (read/search/list) tools,
+    // so use a read tool here (displayName 'Read File' → 'read' category) — an
+    // edit/write tool would correctly yield `undefined` under the gate.
+    const readTool = {
+      name: 'read_file',
+      displayName: 'Read File',
+      description: 'Read a file',
+      build: vi.fn().mockReturnValue({ getDescription: () => 'read' }),
+    } as unknown as AnyDeclarativeTool;
+
+    const buildWithToolResult = (toolResult: Record<string, unknown>) => {
+      const conversation = {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: { id: 'call-1', name: 'read_file', args: {} },
+                } as unknown as Part,
+              ],
+            },
+          },
+          { type: 'tool_result', ...toolResult },
+        ],
+      } as unknown as ConversationRecord;
+      return buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({ read_file: readTool }),
+        10,
+      );
+    };
+
+    it('derives detailedDisplay from toolCallResult.responseParts', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'Read 1 file',
+          status: 'success',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'replace',
+                response: { output: 'FULL FILE CONTENTS' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.resultDisplay).toBe('Read 1 file');
+      expect(tool?.detailedDisplay).toBe('FULL FILE CONTENTS');
+    });
+
+    it('falls back to message.parts when responseParts is absent (older records)', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'Found 2 matches',
+          status: 'success',
+        },
+        message: {
+          parts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'replace',
+                response: { output: 'match line 1\nmatch line 2' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.detailedDisplay).toBe('match line 1\nmatch line 2');
+    });
+
+    it('leaves detailedDisplay undefined when neither source carries output', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'ok',
+          status: 'success',
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.detailedDisplay).toBeUndefined();
+    });
+
+    it('does NOT populate detailedDisplay for errored tools (matches live path)', () => {
+      const items = buildWithToolResult({
+        toolCallResult: {
+          callId: 'call-1',
+          resultDisplay: 'Tool failed',
+          status: 'error',
+          responseParts: [
+            {
+              functionResponse: {
+                id: 'call-1',
+                name: 'replace',
+                response: { output: 'raw error output that must not surface' },
+              },
+            },
+          ],
+        },
+      });
+      const tool = firstTool(items);
+      expect(tool?.status).toBe(ToolCallStatus.Error);
+      expect(tool?.detailedDisplay).toBeUndefined();
+    });
+
+    it('does NOT populate detailedDisplay for non-collapsible tools (matches live gate)', () => {
+      // An edit/write/command/agent tool is never read via `usingDetailedDisplay`,
+      // so the resume path must skip the extraction just like the live path.
+      const editTool = {
+        name: 'replace',
+        displayName: 'Edit',
+        description: 'Edit a file',
+        build: vi.fn().mockReturnValue({ getDescription: () => 'edit' }),
+      } as unknown as AnyDeclarativeTool;
+      const conversation = {
+        messages: [
+          {
+            type: 'assistant',
+            message: {
+              parts: [
+                {
+                  functionCall: { id: 'call-1', name: 'replace', args: {} },
+                } as unknown as Part,
+              ],
+            },
+          },
+          {
+            type: 'tool_result',
+            toolCallResult: {
+              callId: 'call-1',
+              resultDisplay: 'Edited 1 file',
+              status: 'success',
+              responseParts: [
+                {
+                  functionResponse: {
+                    id: 'call-1',
+                    name: 'replace',
+                    response: { output: 'large edit output not needed in Ctrl+O' },
+                  },
+                },
+              ],
+            },
+          },
+        ],
+      } as unknown as ConversationRecord;
+      const items = buildResumedHistoryItems(
+        { conversation } as ResumedSessionData,
+        makeConfig({ replace: editTool }),
+        10,
+      );
+      const tool = firstTool(items);
+      expect(tool?.status).toBe(ToolCallStatus.Success);
+      expect(tool?.detailedDisplay).toBeUndefined();
+    });
+  });
 });
 
 describe('applyCollapsePolicyAndSummary', () => {

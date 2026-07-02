@@ -30,13 +30,30 @@ export const AlternateScreen: FC<AlternateScreenProps> = ({
   const { rows } = useTerminalSize();
 
   useEffect(() => {
-    if (disabled) return;
-    writeRaw(ENTER_ALT_SCREEN + CLEAR_SCREEN + HIDE_CURSOR);
-    const onExit = () => writeRaw(SHOW_CURSOR + EXIT_ALT_SCREEN);
+    // Skip when the root Ink renderer already owns the alt screen (VP mode),
+    // or when stdout is not a TTY (piped/redirected/CI): writing alt-screen
+    // escapes to a non-terminal would just emit garbage bytes. Mirrors the
+    // repo convention of guarding terminal-control writes on `isTTY`
+    // (see startInteractiveUI.tsx / notificationService.ts). On non-TTY the
+    // transcript degrades to in-buffer rendering (no full-screen takeover).
+    if (disabled || !process.stdout.isTTY) return;
+    // Guard the raw writes: stdout can throw synchronously (EPIPE when the
+    // terminal closes mid-render, EAGAIN under backpressure). An uncaught throw
+    // from this effect / its cleanup would crash the app or leave the terminal
+    // in a corrupt state; swallow it — a failed escape write is best-effort.
+    const safeWrite = (data: string) => {
+      try {
+        writeRaw(data);
+      } catch {
+        // best-effort terminal control; ignore transient I/O errors
+      }
+    };
+    safeWrite(ENTER_ALT_SCREEN + CLEAR_SCREEN + HIDE_CURSOR);
+    const onExit = () => safeWrite(SHOW_CURSOR + EXIT_ALT_SCREEN);
     process.on('exit', onExit);
     return () => {
       process.removeListener('exit', onExit);
-      writeRaw(SHOW_CURSOR + EXIT_ALT_SCREEN);
+      safeWrite(SHOW_CURSOR + EXIT_ALT_SCREEN);
     };
   }, [writeRaw, disabled]);
 

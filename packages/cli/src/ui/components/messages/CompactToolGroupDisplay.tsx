@@ -10,6 +10,7 @@ import type { IndividualToolCallDisplay } from '../../types.js';
 import { ToolCallStatus } from '../../types.js';
 import type { AnsiOutputDisplay } from '@qwen-code/qwen-code-core';
 import { ToolDisplayNames } from '@qwen-code/qwen-code-core';
+import { t } from '../../../i18n/index.js';
 import { SHELL_COMMAND_NAME } from '../../constants.js';
 import { ToolStatusIndicator } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
@@ -95,61 +96,65 @@ const TOOL_NAME_TO_CATEGORY: Record<string, ToolCategory> = {
   TodoWrite: 'other',
 };
 
+type SummaryForms = { one: string; many: string };
 type CategoryTemplate = {
-  pastVerb: string;
-  activeVerb: string;
-  singular: string;
-  plural: string;
+  // i18n keys (also the English source strings). `{{count}}` is interpolated
+  // via t() so every locale supplies a natural phrase — keep these as literals
+  // here so they stay greppable and aligned with the locale files.
+  past: SummaryForms;
+  active: SummaryForms;
 };
 
 const CATEGORY_TEMPLATES: Record<ToolCategory, CategoryTemplate> = {
   read: {
-    pastVerb: 'Read',
-    activeVerb: 'Reading',
-    singular: 'file',
-    plural: 'files',
+    past: { one: 'Read {{count}} file', many: 'Read {{count}} files' },
+    active: { one: 'Reading {{count}} file', many: 'Reading {{count}} files' },
   },
   edit: {
-    pastVerb: 'Edited',
-    activeVerb: 'Editing',
-    singular: 'file',
-    plural: 'files',
+    past: { one: 'Edited {{count}} file', many: 'Edited {{count}} files' },
+    active: { one: 'Editing {{count}} file', many: 'Editing {{count}} files' },
   },
   write: {
-    pastVerb: 'Wrote',
-    activeVerb: 'Writing',
-    singular: 'file',
-    plural: 'files',
+    past: { one: 'Wrote {{count}} file', many: 'Wrote {{count}} files' },
+    active: { one: 'Writing {{count}} file', many: 'Writing {{count}} files' },
   },
   search: {
-    pastVerb: 'Searched',
-    activeVerb: 'Searching',
-    singular: 'pattern',
-    plural: 'patterns',
+    past: {
+      one: 'Searched {{count}} pattern',
+      many: 'Searched {{count}} patterns',
+    },
+    active: {
+      one: 'Searching {{count}} pattern',
+      many: 'Searching {{count}} patterns',
+    },
   },
   list: {
-    pastVerb: 'Listed',
-    activeVerb: 'Listing',
-    singular: 'directory',
-    plural: 'directories',
+    past: {
+      one: 'Listed {{count}} directory',
+      many: 'Listed {{count}} directories',
+    },
+    active: {
+      one: 'Listing {{count}} directory',
+      many: 'Listing {{count}} directories',
+    },
   },
   command: {
-    pastVerb: 'Ran',
-    activeVerb: 'Running',
-    singular: 'command',
-    plural: 'commands',
+    past: { one: 'Ran {{count}} command', many: 'Ran {{count}} commands' },
+    active: {
+      one: 'Running {{count}} command',
+      many: 'Running {{count}} commands',
+    },
   },
   agent: {
-    pastVerb: 'Ran',
-    activeVerb: 'Running',
-    singular: 'agent',
-    plural: 'agents',
+    past: { one: 'Ran {{count}} agent', many: 'Ran {{count}} agents' },
+    active: {
+      one: 'Running {{count}} agent',
+      many: 'Running {{count}} agents',
+    },
   },
   other: {
-    pastVerb: 'Used',
-    activeVerb: 'Using',
-    singular: 'tool',
-    plural: 'tools',
+    past: { one: 'Used {{count}} tool', many: 'Used {{count}} tools' },
+    active: { one: 'Using {{count}} tool', many: 'Using {{count}} tools' },
   },
 };
 
@@ -217,16 +222,18 @@ export function buildToolSummary(
     const count = counts.get(cat);
     if (!count) continue;
 
-    const template = CATEGORY_TEMPLATES[cat];
-    const verb = isActive ? template.activeVerb : template.pastVerb;
-    const lower = parts.length > 0;
-    const v = lower ? verb.toLowerCase() : verb;
-
-    if (count === 1) {
-      parts.push(`${v} 1 ${template.singular}`);
-    } else {
-      parts.push(`${v} ${count} ${template.plural}`);
+    const forms = isActive
+      ? CATEGORY_TEMPLATES[cat].active
+      : CATEGORY_TEMPLATES[cat].past;
+    const key = count === 1 ? forms.one : forms.many;
+    let part = t(key, { count: String(count) });
+    // Lowercase the leading character for every part after the first ("Read 3
+    // files, edited 2 files"). Operating on the first char only keeps already-
+    // lowercase nouns intact and is a no-op for caseless scripts (e.g. CJK).
+    if (parts.length > 0) {
+      part = part.charAt(0).toLowerCase() + part.slice(1);
     }
+    parts.push(part);
   }
 
   return parts.join(', ');

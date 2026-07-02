@@ -205,6 +205,43 @@ export default {
   'Delete {{name}}': '{{name}} を削除',
   'Unknown Step': '不明なステップ',
   'Esc to close': 'Esc で閉じる',
+  Transcript: 'トランスクリプト',
+  'to close': '閉じる',
+  'to scroll': 'スクロール',
+  'Failed to render transcript.': 'トランスクリプトの描画に失敗しました。',
+  'Read {{count}} file': '{{count}} 件のファイルを読み込みました',
+  'Read {{count}} files': '{{count}} 件のファイルを読み込みました',
+  'Reading {{count}} file': '{{count}} 件のファイルを読み込み中',
+  'Reading {{count}} files': '{{count}} 件のファイルを読み込み中',
+  'Edited {{count}} file': '{{count}} 件のファイルを編集しました',
+  'Edited {{count}} files': '{{count}} 件のファイルを編集しました',
+  'Editing {{count}} file': '{{count}} 件のファイルを編集中',
+  'Editing {{count}} files': '{{count}} 件のファイルを編集中',
+  'Wrote {{count}} file': '{{count}} 件のファイルを書き込みました',
+  'Wrote {{count}} files': '{{count}} 件のファイルを書き込みました',
+  'Writing {{count}} file': '{{count}} 件のファイルを書き込み中',
+  'Writing {{count}} files': '{{count}} 件のファイルを書き込み中',
+  'Searched {{count}} pattern': '{{count}} 件のパターンを検索しました',
+  'Searched {{count}} patterns': '{{count}} 件のパターンを検索しました',
+  'Searching {{count}} pattern': '{{count}} 件のパターンを検索中',
+  'Searching {{count}} patterns': '{{count}} 件のパターンを検索中',
+  'Listed {{count}} directory': '{{count}} 件のディレクトリを一覧表示しました',
+  'Listed {{count}} directories':
+    '{{count}} 件のディレクトリを一覧表示しました',
+  'Listing {{count}} directory': '{{count}} 件のディレクトリを一覧表示中',
+  'Listing {{count}} directories': '{{count}} 件のディレクトリを一覧表示中',
+  'Ran {{count}} command': '{{count}} 件のコマンドを実行しました',
+  'Ran {{count}} commands': '{{count}} 件のコマンドを実行しました',
+  'Running {{count}} command': '{{count}} 件のコマンドを実行中',
+  'Running {{count}} commands': '{{count}} 件のコマンドを実行中',
+  'Ran {{count}} agent': '{{count}} 件のエージェントを実行しました',
+  'Ran {{count}} agents': '{{count}} 件のエージェントを実行しました',
+  'Running {{count}} agent': '{{count}} 件のエージェントを実行中',
+  'Running {{count}} agents': '{{count}} 件のエージェントを実行中',
+  'Used {{count}} tool': '{{count}} 件のツールを使用しました',
+  'Used {{count}} tools': '{{count}} 件のツールを使用しました',
+  'Using {{count}} tool': '{{count}} 件のツールを使用中',
+  'Using {{count}} tools': '{{count}} 件のツールを使用中',
   'Enter to select, ↑↓ to navigate, Esc to close':
     'Enter で選択、↑↓ で移動、Esc で閉じる',
   'Esc to go back': 'Esc で戻る',
@@ -1139,8 +1176,6 @@ export default {
     'Tab または /approval-mode で権限モードをすばやく切り替えられます。',
   'Try /insight to generate personalized insights from your chat history.':
     '/insight でチャット履歴からパーソナライズされたインサイトを生成できます。',
-  'Press Ctrl+O to toggle compact mode — hide tool output and thinking for a cleaner view.':
-    'Ctrl+O でコンパクトモードを切り替え — ツール出力と思考を非表示にしてすっきり表示。',
   'Add a QWEN.md file to give Qwen Code persistent project context.':
     'QWEN.md ファイルを追加すると、Qwen Code に永続的なプロジェクトコンテキストを与えられます。',
   'Use /btw to ask a quick side question without disrupting the conversation.':
@@ -1406,10 +1441,7 @@ export default {
     'Rawモードが利用できません。インタラクティブターミナルで実行してください。',
   '(Use ↑ ↓ arrows to navigate, Enter to select, Ctrl+C to exit)\n':
     '(↑ ↓ 矢印キーで移動、Enter で選択、Ctrl+C で終了)\n',
-  'to toggle compact mode': 'コンパクトモードの切り替え',
-  'Hide tool output and thinking for a cleaner view (toggle with Ctrl+O).':
-    'コンパクトモードでツール出力と思考を非表示にします（Ctrl+O で切り替え）。',
-  'Press Ctrl+O to show full tool output': 'Ctrl+O で完全なツール出力を表示',
+  'to view transcript': 'トランスクリプトを表示',
   'Switch to plan mode or exit plan mode':
     'プランモードに切り替えるか、プランモードを終了する',
   'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':

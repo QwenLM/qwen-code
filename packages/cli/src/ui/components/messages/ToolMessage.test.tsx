@@ -12,13 +12,15 @@ import { StreamingState, ToolCallStatus } from '../../types.js';
 import { Text } from 'ink';
 import { StreamingContext } from '../../contexts/StreamingContext.js';
 import { SettingsContext } from '../../contexts/SettingsContext.js';
-import { CompactModeProvider } from '../../contexts/CompactModeContext.js';
 import type {
   AnsiOutput,
   AnsiOutputDisplay,
   Config,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../../config/settings.js';
+
+// Global compact mode was removed (#5666); type-based tool rendering no longer
+// consumes a compact-mode context.
 
 vi.mock('../TerminalOutput.js', () => ({
   TerminalOutput: function MockTerminalOutput({
@@ -118,21 +120,18 @@ const mockSettings: LoadedSettings = {
   },
 } as LoadedSettings;
 
-// Helper to render with context (compactMode=false by default to show tool output)
+// Helper to render with context.
 const renderWithContext = (
   ui: React.ReactElement,
   streamingState: StreamingState,
-  compactMode = false,
 ) => {
   const contextValue: StreamingState = streamingState;
   return render(
-    <CompactModeProvider value={{ compactMode, compactInline: false }}>
-      <SettingsContext.Provider value={mockSettings}>
-        <StreamingContext.Provider value={contextValue}>
-          {ui}
-        </StreamingContext.Provider>
-      </SettingsContext.Provider>
-    </CompactModeProvider>,
+    <SettingsContext.Provider value={mockSettings}>
+      <StreamingContext.Provider value={contextValue}>
+        {ui}
+      </StreamingContext.Provider>
+    </SettingsContext.Provider>,
   );
 };
 
@@ -234,29 +233,26 @@ describe('<ToolMessage />', () => {
     expect(output).not.toContain('MockMarkdown:Test result'); // result hidden
   });
 
-  it('shows result for Error status in compact mode', () => {
+  it('shows result for Error status', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} status={ToolCallStatus.Error} />,
       StreamingState.Idle,
-      true,
     );
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
 
-  it('shows result for Executing status in compact mode', () => {
+  it('shows result for Executing status', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} status={ToolCallStatus.Executing} />,
       StreamingState.Idle,
-      true,
     );
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
 
-  it('shows result for Pending status in compact mode', () => {
+  it('shows result for Pending status', () => {
     const { lastFrame } = renderWithContext(
       <ToolMessage {...baseProps} status={ToolCallStatus.Pending} />,
       StreamingState.Idle,
-      true,
     );
     expect(lastFrame()).toContain('MockMarkdown:Test result');
   });
@@ -267,6 +263,178 @@ describe('<ToolMessage />', () => {
       StreamingState.Idle,
     );
     expect(lastFrame()).toContain('MockMarkdown:Test result');
+  });
+
+  describe('fullDetail (§4.9 transcript) data-source switch', () => {
+    it('swaps summary for detailedDisplay on a collapsible tool in fullDetail mode', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="config.yaml"
+          resultDisplay="Read 1 file"
+          detailedDisplay="full file contents here"
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame();
+      // detailedDisplay is raw tool output → rendered as PLAIN TEXT, not Markdown
+      expect(output).toContain('full file contents here');
+      expect(output).not.toContain('MockMarkdown:full file contents here');
+      expect(output).not.toContain('Read 1 file');
+    });
+
+    it('renders detailedDisplay as plain text, not Markdown', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="config.yaml"
+          resultDisplay="Read 1 file"
+          detailedDisplay="# heading from file\n- list item"
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame();
+      // The raw file content must NOT be Markdown-formatted (no MockMarkdown wrap).
+      expect(output).not.toContain('MockMarkdown:');
+      expect(output).toContain('heading from file');
+    });
+
+    it('escapes ANSI/control sequences in detailedDisplay (no raw injection)', () => {
+      // A malicious file read by a collapsible tool could embed terminal
+      // control sequences; the transcript must render them inert, not execute
+      // them. \x1b[?1049l would drop the alt-screen; OSC 52 writes the
+      // clipboard. After escaping, the raw ESC byte must not survive.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="evil.txt"
+          resultDisplay="Read 1 file"
+          detailedDisplay={
+            'before\x1b[?1049lafter\x1b]52;c;ZXZpbA==\x07mid\x08\x0c\x0eend'
+          }
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      // The visible text survives; the raw ESC (\x1b) control byte does not.
+      expect(output).toContain('before');
+      expect(output).toContain('after');
+      expect(output).toContain('mid');
+      expect(output).toContain('end');
+      expect(output).not.toContain('\x1b[?1049l');
+      expect(output).not.toContain('\x1b]52;');
+      // Bare C0 bytes without an ESC prefix (BEL, BS, FF, SO) are stripped too.
+      expect(output).not.toContain('\x07');
+      expect(output).not.toContain('\x08');
+      expect(output).not.toContain('\x0c');
+      expect(output).not.toContain('\x0e');
+    });
+
+    it('strips Unicode bidi override chars in detailedDisplay (Trojan Source)', () => {
+      // U+202E (RLO) and friends can visually reorder text (CVE-2021-42572);
+      // they must be stripped from raw tool output before rendering.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="evil.txt"
+          resultDisplay="Read 1 file"
+          detailedDisplay={'safe\u202estart\u202cmid\u2066end\u2069'}
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('safe');
+      expect(output).toContain('end');
+      expect(output).not.toMatch(/[\u200e\u200f\u202a-\u202e\u2066-\u2069]/);
+    });
+
+    it('preserves TAB and LF in detailedDisplay (structural whitespace)', () => {
+      // The C0 strip regex intentionally skips \x09 (TAB) and \x0a (LF) so
+      // multi-line / column-aligned file output still renders. Lock that in:
+      // stripping them would collapse the segments together.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="table.txt"
+          resultDisplay="Read 1 file"
+          detailedDisplay={'colA\tcolB\nrow2A\trow2B'}
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      // All four cells survive, and are NOT collapsed into one run (which is
+      // what stripping TAB/LF would produce).
+      expect(output).toContain('colA');
+      expect(output).toContain('colB');
+      expect(output).toContain('row2A');
+      expect(output).toContain('row2B');
+      expect(output).not.toContain('colAcolB');
+      expect(output).not.toContain('colBrow2A');
+    });
+
+    it('keeps the summary when forced but NOT in fullDetail mode (main-view force)', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="config.yaml"
+          resultDisplay="Read 1 file"
+          detailedDisplay="full file contents here"
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame();
+      expect(output).toContain('MockMarkdown:Read 1 file');
+      expect(output).not.toContain('full file contents here');
+    });
+
+    it('keeps the summary for a non-collapsible tool even in fullDetail mode', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="test-tool"
+          resultDisplay="Test result"
+          detailedDisplay="should not appear"
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame();
+      expect(output).toContain('MockMarkdown:Test result');
+      expect(output).not.toContain('should not appear');
+    });
+
+    it('falls back to the summary when fullDetail is set but no detailedDisplay exists', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...baseProps}
+          name="ReadFile"
+          description="config.yaml"
+          resultDisplay="Read 1 file"
+          fullDetail
+          forceShowResult
+        />,
+        StreamingState.Idle,
+      );
+      expect(lastFrame()).toContain('MockMarkdown:Read 1 file');
+    });
   });
 
   describe('ToolStatusIndicator rendering', () => {
@@ -751,19 +919,17 @@ describe('<ToolMessage />', () => {
       merged: { ui: { shellOutputMaxLines: 0 } },
     } as unknown as LoadedSettings;
     const { lastFrame } = render(
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
-        <SettingsContext.Provider value={settingsWithDisabledCap}>
-          <StreamingContext.Provider value={StreamingState.Idle}>
-            <ToolMessage
-              {...baseProps}
-              name="Shell"
-              status={ToolCallStatus.Executing}
-              resultDisplay={ansiOutputDisplay}
-              availableTerminalHeight={100}
-            />
-          </StreamingContext.Provider>
-        </SettingsContext.Provider>
-      </CompactModeProvider>,
+      <SettingsContext.Provider value={settingsWithDisabledCap}>
+        <StreamingContext.Provider value={StreamingState.Idle}>
+          <ToolMessage
+            {...baseProps}
+            name="Shell"
+            status={ToolCallStatus.Executing}
+            resultDisplay={ansiOutputDisplay}
+            availableTerminalHeight={100}
+          />
+        </StreamingContext.Provider>
+      </SettingsContext.Provider>,
     );
     const output = lastFrame()!;
     expect(output).toContain('height=94');
@@ -791,19 +957,17 @@ describe('<ToolMessage />', () => {
       merged: { ui: { shellOutputMaxLines: 12 } },
     } as unknown as LoadedSettings;
     const { lastFrame } = render(
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
-        <SettingsContext.Provider value={settingsWithCustomCap}>
-          <StreamingContext.Provider value={StreamingState.Idle}>
-            <ToolMessage
-              {...baseProps}
-              name="Shell"
-              status={ToolCallStatus.Executing}
-              resultDisplay={ansiOutputDisplay}
-              availableTerminalHeight={100}
-            />
-          </StreamingContext.Provider>
-        </SettingsContext.Provider>
-      </CompactModeProvider>,
+      <SettingsContext.Provider value={settingsWithCustomCap}>
+        <StreamingContext.Provider value={StreamingState.Idle}>
+          <ToolMessage
+            {...baseProps}
+            name="Shell"
+            status={ToolCallStatus.Executing}
+            resultDisplay={ansiOutputDisplay}
+            availableTerminalHeight={100}
+          />
+        </StreamingContext.Provider>
+      </SettingsContext.Provider>,
     );
     const output = lastFrame()!;
     expect(output).toContain('height=12');
@@ -940,19 +1104,17 @@ describe('<ToolMessage />', () => {
       merged: { ui: { shellOutputMaxLines: badValue } },
     } as unknown as LoadedSettings;
     const { lastFrame } = render(
-      <CompactModeProvider value={{ compactMode: false, compactInline: false }}>
-        <SettingsContext.Provider value={settingsWithBadCap}>
-          <StreamingContext.Provider value={StreamingState.Idle}>
-            <ToolMessage
-              {...baseProps}
-              name="Shell"
-              status={ToolCallStatus.Executing}
-              resultDisplay={ansiOutputDisplay}
-              availableTerminalHeight={100}
-            />
-          </StreamingContext.Provider>
-        </SettingsContext.Provider>
-      </CompactModeProvider>,
+      <SettingsContext.Provider value={settingsWithBadCap}>
+        <StreamingContext.Provider value={StreamingState.Idle}>
+          <ToolMessage
+            {...baseProps}
+            name="Shell"
+            status={ToolCallStatus.Executing}
+            resultDisplay={ansiOutputDisplay}
+            availableTerminalHeight={100}
+          />
+        </StreamingContext.Provider>
+      </SettingsContext.Provider>,
     );
     const output = lastFrame()!;
     // -1 → 0 → cap disabled (height=94)

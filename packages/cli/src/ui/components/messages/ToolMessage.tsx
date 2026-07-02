@@ -37,6 +37,7 @@ import type { LoadedSettings } from '../../../config/settings.js';
 
 import {
   escapeAnsiCtrlCodes,
+  sanitizeTerminalText,
   getCachedStringWidth,
   toCodePoints,
 } from '../../utils/textUtils.js';
@@ -55,6 +56,7 @@ const DEFAULT_SHELL_OUTPUT_MAX_LINES = 5;
 // Large threshold to ensure we don't cause performance issues for very large
 // outputs that will get truncated further MaxSizedBox anyway.
 const MAXIMUM_RESULT_DISPLAY_CHARACTERS = 1000000;
+
 export type TextEmphasis = 'high' | 'medium' | 'low';
 type DiffResultDisplay = Pick<
   FileDiff,
@@ -530,6 +532,15 @@ export interface ToolMessageProps extends IndividualToolCallDisplay {
   config?: Config;
   forceShowResult?: boolean;
   /**
+   * Transcript (Ctrl+O) full-detail mode. When true AND this is a collapsible
+   * tool (read/search/list) that carries a `detailedDisplay`, the renderer
+   * switches its DATA SOURCE from the summary `resultDisplay` to the full
+   * `detailedDisplay` (§4.9). Kept separate from `forceShowResult`, which only
+   * controls unfold/height — so main-view force scenarios (user-initiated,
+   * error, confirming) still render the summary, never the full output.
+   */
+  fullDetail?: boolean;
+  /**
    * Whether this subagent owns keyboard input for the inline approval
    * surface — when true the focus-holder banner renders and the
    * underlying ToolConfirmationMessage receives keystrokes; when false
@@ -554,6 +565,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   name,
   description,
   resultDisplay,
+  detailedDisplay,
   status,
   availableTerminalHeight,
   contentWidth,
@@ -564,6 +576,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
   ptyId,
   config,
   forceShowResult,
+  fullDetail,
   isFocused,
   isPending,
   executionStartTime,
@@ -668,7 +681,43 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     renderOutputAsMarkdown = false;
   }
 
-  const effectiveDisplayRenderer = useResultDisplayRenderer(resultDisplay);
+  // §4.9: in transcript full-detail mode, collapsible tools (read/search/list)
+  // swap the summary `resultDisplay` for the complete `detailedDisplay` derived
+  // from the persisted functionResponse. Only a non-empty string detail
+  // qualifies; everything else (and all main-view rendering) keeps the summary.
+  const usingDetailedDisplay =
+    fullDetail &&
+    isCollapsibleTool(name) &&
+    typeof detailedDisplay === 'string' &&
+    detailedDisplay.length > 0;
+  // `detailedDisplay` is RAW, un-sanitized tool output (file contents, grep
+  // hits, directory listings). A malicious repo could embed terminal control
+  // codes that execute when the transcript renders the full content unfiltered.
+  // Run it through the shared `sanitizeTerminalText` pipeline (ANSI escape + C0
+  // strip + bidi strip), memoized since the content can be ~25K chars and this
+  // runs on every render.
+  const sanitizedDetailedDisplay = React.useMemo(
+    () =>
+      usingDetailedDisplay && typeof detailedDisplay === 'string'
+        ? sanitizeTerminalText(detailedDisplay)
+        : detailedDisplay,
+    [detailedDisplay, usingDetailedDisplay],
+  );
+  const effectiveResultDisplay = usingDetailedDisplay
+    ? sanitizedDetailedDisplay
+    : resultDisplay;
+
+  // detailedDisplay is RAW tool output (file content, grep hits, directory
+  // listings). Render it as plain text — Markdown formatting would turn the
+  // file's own `#`/`*`/`-`/`>` characters into headings/bold/lists. The usual
+  // `if (availableHeight)` guard above doesn't catch this because fullDetail
+  // lifts the height cap (availableTerminalHeight is undefined in transcript).
+  if (usingDetailedDisplay) {
+    renderOutputAsMarkdown = false;
+  }
+
+  const effectiveDisplayRenderer =
+    useResultDisplayRenderer(effectiveResultDisplay);
 
   // Collapse text/ANSI output for completed collapsible tools (read/search/list)
   // to reduce scrollback noise. Non-collapsible tools (command/edit/agent/MCP/etc.)

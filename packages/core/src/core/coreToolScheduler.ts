@@ -100,7 +100,10 @@ import {
   recordFallbackApprove,
   shouldFallback,
 } from '../permissions/denialTracking.js';
-import { getResponseTextFromParts } from '../utils/generateContentResponseUtilities.js';
+import {
+  getResponseTextFromParts,
+  TOOL_SUCCEEDED_OUTPUT,
+} from '../utils/generateContentResponseUtilities.js';
 import type { ModifyContext } from '../tools/modifiable-tool.js';
 import {
   isModifiableDeclarativeTool,
@@ -716,7 +719,7 @@ export function convertToFunctionResponse(
     }
 
     const output =
-      textParts.length > 0 ? textParts.join('\n') : 'Tool execution succeeded.';
+      textParts.length > 0 ? textParts.join('\n') : TOOL_SUCCEEDED_OUTPUT;
     return [createFunctionResponsePart(callId, toolName, output, mediaParts)];
   }
 
@@ -759,7 +762,7 @@ export function convertToFunctionResponse(
 
   // Default case for other kinds of parts.
   return [
-    createFunctionResponsePart(callId, toolName, 'Tool execution succeeded.'),
+    createFunctionResponsePart(callId, toolName, TOOL_SUCCEEDED_OUTPUT),
   ];
 }
 
