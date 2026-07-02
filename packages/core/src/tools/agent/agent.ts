@@ -1843,6 +1843,27 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       );
     }
 
+    // ─── Teammate spawn guard ─────────────────────────────────────
+    // Teammates do not nest in v1: prepareTools() strips `agent` from every
+    // teammate schema, and this backstop rejects a hallucinated spawn call
+    // that slips past schema-hiding — symmetric with the fork guard below so
+    // the execute() backstops cover the same exclusions as prepareTools().
+    // (execute() intentionally has no isTopLevelSession() term: the
+    // top-level session is the normal spawn path, while prepareTools() only
+    // ever serves agents and uses that check to fail closed on a missing
+    // frame — that asymmetry is why the two layers share canSpawnNestedAgent
+    // rather than one full predicate.) Teammate spawns via `name` returned
+    // in the team-routing branch above, which requires !isTeammate().
+    if (isTeammate()) {
+      debugLogger.debug(
+        `[AgentTool] Teammate containment guard blocked spawn: type=${this.params.subagent_type ?? DEFAULT_BUILTIN_SUBAGENT_TYPE}`,
+      );
+      return this.buildSpawnBlockedResult(
+        'Error: Teammates cannot spawn sub-agents. Complete this task directly with your own tools, or coordinate through send_message.',
+        'Sub-agent spawning is not allowed from a teammate context',
+      );
+    }
+
     // ─── Fork spawn guard ─────────────────────────────────────────
     // Forks must never spawn sub-agents — the fork contract is
     // context-sharing, not isolation. AgentCore.prepareTools() already strips

@@ -39,6 +39,7 @@ import { partToString } from '../../utils/partUtils.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
 import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../../agents/team/identity.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -802,6 +803,34 @@ describe('AgentTool', () => {
       );
 
       expect(result.llmContent).toContain('nesting depth limit reached');
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+    });
+
+    it('blocks a teammate from spawning any sub-agent', async () => {
+      // Teammates do not nest in v1. The schema layer strips `agent` from
+      // teammate tool lists; this pins the symmetric runtime backstop for a
+      // hallucinated call that slips past schema-hiding. Depth would permit
+      // the spawn here (max 5), so a pass proves the teammate guard fired.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      const invocation = agentTool.build({
+        description: 'Spawn from a teammate',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      const result = await runWithTeammateIdentity(
+        {
+          agentId: 'scribe@demo',
+          agentName: 'scribe',
+          teamName: 'demo',
+          isTeamLead: false,
+        },
+        () =>
+          runWithAgentContext('teammate-1', () =>
+            invocation.execute(new AbortController().signal),
+          ),
+      );
+
+      expect(result.llmContent).toContain('Teammates cannot spawn sub-agents');
       expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
     });
 
