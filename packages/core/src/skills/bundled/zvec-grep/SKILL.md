@@ -2,6 +2,7 @@
 name: zvec-grep
 description: For semantic workspace search, use zvec-grep before native grep_search by running the `zg` CLI, especially when the right keywords, symbols, or files are unknown. Best for open-ended code/docs questions about how behavior works, where logic lives, why something happens, whether a feature exists, APIs, architecture, implementation flows, fuzzy discovery, and finding key evidence. Use grep_search mainly for exact literal, regex, or known-symbol lookup.
 when_to_use: Use before native grep_search for open-ended workspace investigations where the right files or search terms are not obvious: semantic discovery, code or document understanding, behavior tracing, implementation flows, API/config/architecture questions, support/existence questions, and finding key evidence. Skip when the exact file/range is already known or the task is a narrow literal, regex, or known-symbol lookup.
+argument-hint: '[setup|query]'
 allowedTools:
   - Bash(zg *)
 ---
@@ -13,6 +14,9 @@ allowedTools:
 Use zvec-grep for the semantic discovery step after this skill is loaded. Run
 the `zg` executable from PATH as `zg ...`; the skill directory is only
 documentation.
+
+Users can run `/zvec-grep setup` to get setup guidance. In setup mode, explain
+the terminal commands and then stop; do not search.
 
 ## Setup
 
@@ -28,6 +32,9 @@ zg --init --embedding qwen/text-embedding-v4 --include "src/**,packages/**,docs/
 
 Use `--include` and `--exclude` to index useful content and keep obvious noise
 out of the search results.
+
+Indexing can take a while on large workspaces. If the index directory appears in
+git status, tell the user it is local generated data and should be ignored.
 
 A typical search uses one to three related queries:
 
