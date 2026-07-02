@@ -357,7 +357,14 @@ function VirtualizedList<T>(
       prevTotalHeight.current - prevContainerHeight.current - 1;
     const wasAtBottom = contentPreviouslyFit || wasScrolledToBottomPixels;
 
-    if (wasAtBottom && actualScrollTop >= prevScrollTop.current) {
+    // Suppress all auto-follow (wasAtBottom + anchor update) when the user
+    // just manually scrolled up. Placed BEFORE the wasAtBottom check so that
+    // `setIsStickingToBottom(true)` is also skipped — otherwise the guard
+    // only prevents the anchor update but leaves isStickingToBottom set,
+    // which causes a re-stick on the next streaming tick (#5941).
+    if (userJustScrolledRef.current) {
+      userJustScrolledRef.current = false;
+    } else if (wasAtBottom && actualScrollTop >= prevScrollTop.current) {
       if (!isStickingToBottom) {
         setIsStickingToBottom(true);
       }
@@ -368,13 +375,6 @@ function VirtualizedList<T>(
       prevContainerHeight.current !== scrollableContainerHeight;
 
     const shouldAutoScroll = props.targetScrollIndex === undefined;
-
-    // Suppress auto-follow when the user just manually scrolled up — the
-    // previous wasAtBottom check would otherwise re-stick to bottom on the
-    // next streaming tick, overriding the user's scroll intent (#5941).
-    if (userJustScrolledRef.current) {
-      userJustScrolledRef.current = false;
-    }
 
     if (
       shouldAutoScroll &&

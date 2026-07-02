@@ -87,6 +87,7 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { invalidateCollectedSkillEntriesCache } from '../tools/skill-utils.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import {
   type AutoModeDenialState,
@@ -637,7 +638,10 @@ export type McpServerScope = 'project' | 'workspace' | 'system';
  * - `pending_approval`: a gated server awaiting approval (#4615).
  */
 export type McpServerUnavailableReason =
-  'removed' | 'not_allowed' | 'excluded' | 'pending_approval';
+  | 'removed'
+  | 'not_allowed'
+  | 'excluded'
+  | 'pending_approval';
 
 /**
  * Scopes whose servers are checked-in / shareable and therefore untrusted: they
@@ -1336,7 +1340,8 @@ export class Config {
   private skillManager: SkillManager | null = null;
   private permissionManager: PermissionManager | null = null;
   private modelInvocableCommandsProvider:
-    (() => ReadonlyArray<{ name: string; description: string }>) | null = null;
+    | (() => ReadonlyArray<{ name: string; description: string }>)
+    | null = null;
   private modelInvocableCommandsExecutor:
     | ((
         name: string,
@@ -1371,7 +1376,8 @@ export class Config {
   private readonly excludeTools: string[] | undefined;
   private readonly disabledSlashCommands: readonly string[];
   private readonly disabledSkillNamesProvider:
-    (() => ReadonlySet<string>) | null;
+    | (() => ReadonlySet<string>)
+    | null;
   //   `disabledTools` is set at construction
   // time but can be re-synced by the daemon mutation surface
   // (`setWorkspaceToolEnabled` propagates through ACP) so a subsequent
@@ -1399,7 +1405,8 @@ export class Config {
    */
   private readonly recentlyRemovedMcpServers = new Set<string>();
   private readonly topTierMcpServers:
-    Record<string, MCPServerConfig> | undefined;
+    | Record<string, MCPServerConfig>
+    | undefined;
   private readonly runtimeMcpServers = new Map<string, MCPServerConfig>();
   private readonly lspEnabled: boolean;
   private lspClient?: LspClient;
@@ -1510,7 +1517,8 @@ export class Config {
   private shellExecutionConfig: ShellExecutionConfig;
   private arenaManager: ArenaManager | null = null;
   private arenaManagerChangeCallback:
-    ((manager: ArenaManager | null) => void) | null = null;
+    | ((manager: ArenaManager | null) => void)
+    | null = null;
   private readonly arenaAgentClient: ArenaAgentClient | null;
   private teamManager: TeamManager | null = null;
   private teamManagerChangeCallbacks = new Set<
@@ -2031,7 +2039,8 @@ export class Config {
                   (input['permission_mode'] as PermissionMode) ||
                     PermissionMode.Default,
                   (input['permission_suggestions'] as
-                    PermissionSuggestion[] | undefined) || undefined,
+                    | PermissionSuggestion[]
+                    | undefined) || undefined,
                   signal,
                 );
                 break;
@@ -3143,7 +3152,8 @@ export class Config {
    * the bridge at an unreachable, or non-image-capable, model.
    */
   private resolveVisionModelSelection():
-    VisionBridgeModelSelection | undefined {
+    | VisionBridgeModelSelection
+    | undefined {
     if (!this.visionModel) return undefined;
     const visionModelForLog = formatVisionModelSettingForLog(this.visionModel);
     const parsedSetting = parseVisionModelSetting(this.visionModel);
@@ -3887,7 +3897,8 @@ export class Config {
   }
 
   getMcpTransportPool():
-    import('../tools/mcp-transport-pool.js').McpTransportPool | undefined {
+    | import('../tools/mcp-transport-pool.js').McpTransportPool
+    | undefined {
     return this.mcpTransportPool;
   }
 
@@ -5702,11 +5713,15 @@ export class Config {
    * skills, user/project file commands, MCP prompts). Called by the CLI's
    * CommandService after initialisation so that the startup snapshot and
    * per-turn drain can include these in the `<available_skills>` listing.
+   *
+   * Also invalidates the skill-entries cache so late-arriving MCP prompts are
+   * picked up on the next `collectAvailableSkillEntries()` call.
    */
   setModelInvocableCommandsProvider(
     provider: () => ReadonlyArray<{ name: string; description: string }>,
   ): void {
     this.modelInvocableCommandsProvider = provider;
+    invalidateCollectedSkillEntriesCache();
   }
 
   /**
@@ -5714,7 +5729,8 @@ export class Config {
    * has been registered (e.g., in SDK mode).
    */
   getModelInvocableCommandsProvider():
-    (() => ReadonlyArray<{ name: string; description: string }>) | null {
+    | (() => ReadonlyArray<{ name: string; description: string }>)
+    | null {
     return this.modelInvocableCommandsProvider;
   }
 
@@ -5848,8 +5864,9 @@ export class Config {
       if (options?.forSubAgent) return;
       const schema = this.jsonSchema;
       await registerLazy(ToolNames.STRUCTURED_OUTPUT, async () => {
-        const { SyntheticOutputTool } =
-          await import('../tools/syntheticOutput.js');
+        const { SyntheticOutputTool } = await import(
+          '../tools/syntheticOutput.js'
+        );
         return new SyntheticOutputTool(schema);
       });
     };
@@ -5884,8 +5901,9 @@ export class Config {
       return new ToolSearchTool(this);
     });
     await registerLazy(ToolNames.READ_MCP_RESOURCE, async () => {
-      const { ReadMcpResourceTool } =
-        await import('../tools/read-mcp-resource.js');
+      const { ReadMcpResourceTool } = await import(
+        '../tools/read-mcp-resource.js'
+      );
       return new ReadMcpResourceTool(this);
     });
     await registerLazy(ToolNames.AGENT, async () => {
@@ -5973,8 +5991,9 @@ export class Config {
       return new TodoWriteTool(this);
     });
     await registerLazy(ToolNames.ASK_USER_QUESTION, async () => {
-      const { AskUserQuestionTool } =
-        await import('../tools/askUserQuestion.js');
+      const { AskUserQuestionTool } = await import(
+        '../tools/askUserQuestion.js'
+      );
       return new AskUserQuestionTool(this);
     });
     if (!this.sdkMode) {
@@ -6001,8 +6020,9 @@ export class Config {
     });
     if (this.isArtifactEnabled()) {
       await registerLazy(ToolNames.ARTIFACT, async () => {
-        const { ArtifactTool } =
-          await import('../tools/artifact/artifact-tool.js');
+        const { ArtifactTool } = await import(
+          '../tools/artifact/artifact-tool.js'
+        );
         return new ArtifactTool(this);
       });
     }
@@ -6091,8 +6111,9 @@ export class Config {
     // built-in also gates these. Direct registry.registerFactory() would
     // bypass coreTools allowlist + whole-tool deny rules.
     if (this.isComputerUseEnabled()) {
-      const { registerComputerUseTools } =
-        await import('../tools/computer-use/index.js');
+      const { registerComputerUseTools } = await import(
+        '../tools/computer-use/index.js'
+      );
       await registerComputerUseTools(registerLazy, this);
     }
 
