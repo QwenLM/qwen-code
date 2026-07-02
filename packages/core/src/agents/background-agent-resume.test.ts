@@ -1128,6 +1128,87 @@ describe('BackgroundAgentResumeService', () => {
     expect(overriddenConfig.getMaxSubagentDepth()).toBe(100);
   }, 20000);
 
+  it.each([
+    // Out-of-range values clamp with Config semantics.
+    { persisted: 5000, expected: 100 },
+    // JSON.stringify(Infinity) === 'null' — the sidecar can legitimately
+    // carry null for a non-finite in-memory value; it must fall back to
+    // the default, not leak through the getter override.
+    { persisted: null, expected: 5 },
+  ])(
+    'normalizes persisted maxSubagentDepth $persisted to $expected on resume',
+    async ({ persisted, expected }) => {
+      const sessionId = `session-depth-norm-${expected}`;
+      const agentId = `agent-depth-norm-${expected}`;
+      const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+      const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+      writeAgentMeta(metaPath, {
+        agentId,
+        agentType: 'researcher',
+        description: 'Resume with persisted depth cap',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'running',
+        subagentName: 'researcher',
+        persistedCliFlags: { maxSubagentDepth: persisted },
+      });
+      fs.writeFileSync(
+        outputFile,
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Resume' }] },
+        }) + '\n',
+        'utf8',
+      );
+
+      registry.register({
+        agentId,
+        description: 'Resume with persisted depth cap',
+        subagentType: 'researcher',
+        status: 'paused',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        prompt: 'Resume with persisted depth cap',
+        outputFile,
+        metaPath,
+        isBackgrounded: true,
+      });
+
+      const createAgentHeadless = vi.fn().mockResolvedValue({
+        subagent: {
+          execute: vi.fn(async () => undefined),
+          setExternalMessageProvider: vi.fn(),
+          getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+          getExecutionSummary: () => ({
+            totalTokens: 0,
+            outputTokens: 0,
+            totalDurationMs: 0,
+          }),
+          getTerminateMode: () => AgentTerminateMode.GOAL,
+          getFinalText: () => 'done',
+        },
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
+
+      const { service, subagentManager } = createService();
+      subagentManager.createAgentHeadless = createAgentHeadless;
+
+      const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+      expect(resumed).toBeDefined();
+      expect(createAgentHeadless).toHaveBeenCalledTimes(1);
+      const [, overriddenConfig] = createAgentHeadless.mock.calls[0]!;
+      expect(overriddenConfig.getMaxSubagentDepth()).toBe(expected);
+    },
+    20000,
+  );
+
   it('restores the persisted launch depth so a resumed nested agent keeps its level', async () => {
     // Resume happens from a top-level frame (depth would recompute to 0);
     // the persisted meta.depth must be pinned via the runWithAgentContext

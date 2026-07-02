@@ -141,8 +141,12 @@ export interface AgentPersistedCliFlags {
    * Launch-time nesting cap. Interprets the persisted `depth` — without it a
    * nested agent launched under a lower cap would resume after restart under
    * the new session's (or default) cap and regain spawn capacity.
+   *
+   * `null` occurs when a non-finite in-memory value crossed JSON
+   * serialization (JSON.stringify(Infinity) === 'null'); the resume path
+   * normalizes it back to the default.
    */
-  maxSubagentDepth?: number;
+  maxSubagentDepth?: number | null;
 }
 
 /**
