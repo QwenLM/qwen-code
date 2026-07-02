@@ -954,6 +954,68 @@ describe('FeishuChannel', () => {
       const cardText = updateCardSpy.mock.calls[0][1] as string;
       expect(cardText).not.toContain('已失败，请重试');
     });
+
+    it('uses divider status shape when stopped empty-card fallback sends a message', async () => {
+      const bridge = createMockBridge();
+      const config = createConfig();
+      const channel = new FeishuChannel('test', config, bridge);
+      (
+        channel as unknown as {
+          requestActivePromptCancellation: (
+            sessionId: string,
+          ) => Promise<boolean>;
+        }
+      ).requestActivePromptCancellation = vi.fn().mockResolvedValue(true);
+
+      const cardSessions = getPrivateMethod<
+        Map<string, Record<string, unknown>>
+      >(channel, 'cardSessions');
+      cardSessions.set('inbound_1', {
+        messageId: 'card_1',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: '',
+        lastUpdateAt: Date.now(),
+      });
+      getPrivateMethod<Map<string, string>>(channel, 'msgToSenderId').set(
+        'inbound_1',
+        'original_user',
+      );
+      getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
+        'session_1',
+        'inbound_1',
+      );
+
+      (channel as unknown as Record<string, unknown>)['updateCard'] = vi
+        .fn()
+        .mockResolvedValue(false);
+      (channel as unknown as Record<string, unknown>)['deleteCard'] = vi
+        .fn()
+        .mockResolvedValue(undefined);
+      const sendMessage = vi.fn().mockResolvedValue(undefined);
+      (channel as unknown as Record<string, unknown>)['sendMessage'] =
+        sendMessage;
+
+      getPrivateMethod<(data: Record<string, unknown>) => boolean>(
+        channel,
+        'onCardAction',
+      ).call(channel, {
+        action: { value: { action: 'stop' } },
+        context: {
+          open_message_id: 'card_1',
+          open_chat_id: 'oc_chat_id',
+        },
+        operator: { open_id: 'original_user' },
+      });
+
+      await vi.waitFor(() => {
+        expect(sendMessage).toHaveBeenCalledWith(
+          'oc_chat_id',
+          '---\n*已停止生成*',
+        );
+      });
+    });
   });
 
   describe('deleteCard', () => {

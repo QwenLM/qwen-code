@@ -1741,7 +1741,7 @@ export class FeishuChannel extends ChannelBase {
               chatId,
               finalText
                 ? `${finalText}\n\n---\n*${stopLabel}*`
-                : `*${stopLabel}*`,
+                : `---\n*${stopLabel}*`,
             );
           }
         }
