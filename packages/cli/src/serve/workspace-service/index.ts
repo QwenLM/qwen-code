@@ -28,6 +28,7 @@ import {
   createIdleEnvStatus,
   createIdleAcpPreflightCells,
   type ServeWorkspacePreflightStatus,
+  type ServeWorkspaceSkillsStatus,
 } from '@qwen-code/acp-bridge/status';
 
 import {
@@ -161,6 +162,7 @@ export function createDaemonWorkspaceService(
     contextFilename,
     statusProvider,
     workspaceProvidersStatusProvider,
+    workspaceSkillsStatusProvider,
     isChannelLive,
     persistDisabledTools,
     persistSetting,
@@ -170,6 +172,11 @@ export function createDaemonWorkspaceService(
     refreshExtensionsForAllSessions: refreshExtensionsForAllSessionsOnBridge,
     publishWorkspaceEvent,
   } = deps;
+
+  // Last skills status answered by a live ACP child, retained so
+  // skill-backed slash commands (e.g. `/review`) keep autocompleting after
+  // the child channel has been reaped. See `getWorkspaceSkillsStatus`.
+  let lastWorkspaceSkillsStatus: ServeWorkspaceSkillsStatus | undefined;
 
   // -- Facade --
   return {
@@ -182,10 +189,58 @@ export function createDaemonWorkspaceService(
     },
 
     async getWorkspaceSkillsStatus(_ctx: WorkspaceRequestContext) {
-      return queryWorkspaceStatus(
-        SERVE_STATUS_EXT_METHODS.workspaceSkills,
-        () => createIdleWorkspaceSkillsStatus(boundWorkspace),
-      );
+      // Skills are enumerated by the ACP child, which owns the live
+      // SkillManager (including extension-provided skills). `queryWorkspaceStatus`
+      // returns the idle placeholder (`initialized: false`, empty `skills`)
+      // whenever no child channel is live — before the first session, after
+      // the child is reaped on session close (`--channel-idle-timeout-ms`
+      // defaults to an immediate kill), and when a cold-start preheat times
+      // out before the child ever answers. In those windows the Web Shell's
+      // pre-first-prompt slash-command list would otherwise drop every skill,
+      // so `/rev` stops autocompleting `/review`. `initialized` cleanly
+      // separates a real child answer (always `true`) from the placeholder.
+      let status: ServeWorkspaceSkillsStatus;
+      try {
+        status = await queryWorkspaceStatus(
+          SERVE_STATUS_EXT_METHODS.workspaceSkills,
+          () => createIdleWorkspaceSkillsStatus(boundWorkspace),
+        );
+      } catch (err) {
+        // The channel can die mid-RPC (`liveChannelInfo()` was valid at the
+        // check but the child exited before the call completed). Treat that
+        // like "no live child" and fall back to the cache / daemon-local
+        // enumeration below instead of failing the request — matching
+        // getWorkspaceEnvStatus / getWorkspacePreflightStatus.
+        writeStderrLine(
+          `qwen serve: getWorkspaceSkillsStatus query failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        status = createIdleWorkspaceSkillsStatus(boundWorkspace);
+      }
+      if (status.initialized) {
+        lastWorkspaceSkillsStatus = status;
+        return status;
+      }
+      // Live child unavailable. Prefer the last answer it produced (keeps the
+      // full, extension-aware list available across a reap)...
+      if (lastWorkspaceSkillsStatus) {
+        return lastWorkspaceSkillsStatus;
+      }
+      // ...then fall back to daemon-local enumeration, so a child that has not
+      // answered even once (e.g. a preheat that times out under `npm run dev`)
+      // still yields the on-disk skills — `/review` included. The provider
+      // handles its own errors, but it is injected, so guard the call too and
+      // degrade to the idle placeholder rather than failing the request —
+      // matching getWorkspaceEnvStatus / getWorkspacePreflightStatus.
+      if (workspaceSkillsStatusProvider) {
+        try {
+          return await workspaceSkillsStatusProvider(boundWorkspace);
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: getWorkspaceSkillsStatus local provider failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+      return status;
     },
 
     async getWorkspaceProvidersStatus(_ctx: WorkspaceRequestContext) {

@@ -4,6 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('AUTO_MEMORY_PROMPT');
+
 const MAX_MANAGED_AUTO_MEMORY_INDEX_LINES = 200;
 const MAX_MANAGED_AUTO_MEMORY_INDEX_BYTES = 25_000;
 
@@ -25,6 +29,7 @@ export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   '```',
 ];
 
+/** Verbose memory-type guidance. See also: {@link CONDENSED_TYPES_SECTION} for the condensed version used in the empty-index prompt path. */
 export const TYPES_SECTION_INDIVIDUAL: readonly string[] = [
   '## Types of memory',
   '',
@@ -96,6 +101,7 @@ export const TYPES_SECTION_INDIVIDUAL: readonly string[] = [
   '',
 ];
 
+/** Verbose exclusion rules (source of truth). See also: {@link CONDENSED_DO_NOT_SAVE_SECTION} for the condensed version. */
 export const WHAT_NOT_TO_SAVE_SECTION: readonly string[] = [
   '## What NOT to save in memory',
   '',
@@ -112,12 +118,62 @@ export const WHAT_NOT_TO_SAVE_SECTION: readonly string[] = [
 export const MEMORY_DRIFT_CAVEAT =
   '- Memory records can become stale over time. Use memory as context for what was true at a given point in time. Before answering the user or building assumptions based solely on information in memory records, verify that the memory is still correct and up-to-date by reading the current state of the files or resources. If a recalled memory conflicts with current information, trust what you observe now — and update or remove the stale memory rather than acting on it.';
 
+/** Verbose access-timing rules. See also: {@link CONDENSED_WHEN_TO_ACCESS_SECTION} for the condensed version. */
 export const WHEN_TO_ACCESS_SECTION: readonly string[] = [
   '## When to access memories',
   '- When memories seem relevant, or the user references prior-conversation work.',
   '- You MUST access memory when the user explicitly asks you to check, recall, or remember.',
   '- If the user says to *ignore* or *not use* memory: proceed as if MEMORY.md were empty. Do not apply remembered facts, cite, compare against, or mention memory content.',
   MEMORY_DRIFT_CAVEAT,
+];
+
+/**
+ * Condensed version of {@link WHEN_TO_ACCESS_SECTION}.
+ * Includes the same key behavioral directives in a shorter form
+ * suitable for the empty-index prompt path.
+ */
+export const CONDENSED_WHEN_TO_ACCESS_SECTION: readonly string[] = [
+  '## Accessing memories',
+  '',
+  '- Access memory when relevant or when user references prior-conversation work.',
+  '- You MUST access memory when the user explicitly asks you to check, recall, or remember.',
+  '- If the user says to ignore memory, proceed as if empty.',
+  '- Memory records can become stale. If a recalled memory conflicts with current information, trust what you observe now — and update or remove the stale memory rather than acting on it.',
+  '- Before recommending a memory that names a file, function, or flag, verify it still exists in the current code.',
+];
+
+/**
+ * Condensed version of {@link WHAT_NOT_TO_SAVE_SECTION}.
+ * Source of truth for exclusion rules is WHAT_NOT_TO_SAVE_SECTION;
+ * this constant provides the same guidance in shorter form for the
+ * empty-index (condensed) prompt path.
+ */
+export const CONDENSED_DO_NOT_SAVE_SECTION: readonly string[] = [
+  '## Do not save',
+  '',
+  '- Code patterns, conventions, architecture, file paths, or project structure (read the project instead)',
+  '- Git history, recent changes, or who-changed-what',
+  '- Debugging solutions or fix recipes (the fix is in the code; the commit message has context)',
+  '- MCP tool names, schemas, field mappings, guessed tool-call formats, or failed call transcripts (save only confirmed durable workarounds, warnings, owner, or escalation path)',
+  '- Ephemeral task state or current conversation context',
+  '- Content already in QWEN.md or AGENTS.md',
+  '',
+  'These exclusions apply even when the user explicitly asks you to save.',
+  'If the user asks you to save a PR list or activity summary, ask what was *surprising* or *non-obvious* about it — that is the part worth keeping.',
+];
+
+/**
+ * Condensed version of {@link TYPES_SECTION_INDIVIDUAL}.
+ * Enumerates the same four types with scope-to-directory mapping
+ * and key behavioral notes, in shorter form for the empty-index prompt path.
+ */
+export const CONDENSED_TYPES_SECTION: readonly string[] = [
+  '## Memory types',
+  '',
+  "- **user** — the user's role, goals, responsibilities, and knowledge (always user-scoped). Avoid writing memories that could be viewed as a negative judgement.",
+  '- **feedback** — guidance on how to approach work: corrections AND confirmed approaches. Record from both failure and success — if you only save corrections, you drift from validated approaches (default user; project only for project-wide conventions).',
+  '- **project** — ongoing work, goals, initiatives, bugs, or incidents not derivable from code/git (always project-scoped). Always convert relative dates to absolute dates when saving. Include *why* — project memories decay fast, so the why helps assess staleness.',
+  '- **reference** — pointers to where information lives in external systems (default project; user when the resource is personal).',
 ];
 
 export const TRUSTING_RECALL_SECTION: readonly string[] = [
@@ -195,6 +251,15 @@ export interface TeamAutoMemorySection {
 }
 
 /**
+ * Condensed version of the team-scope guidance from {@link buildTeamScopeSection}.
+ * Used in the empty-index (condensed) prompt path for multi-tier setups
+ * that include a team directory.
+ */
+export const CONDENSED_TEAM_GUIDANCE: readonly string[] = [
+  'When a team directory is available, route project-wide conventions and shared references to TEAM instead of PROJECT. You MUST NOT save sensitive data to TEAM memory — never API keys, tokens, or credentials; it is visible to everyone who can read the repository. `user` memories are always private — never save them to TEAM. For TEAM memory, only write the file (Step 1) — its index is auto-generated; do NOT hand-edit the team `MEMORY.md`.',
+];
+
+/**
  * Guidance appended when a shared team directory is available. It refines the
  * per-type `<scope>` routing (which only knows user vs project) so the model
  * knows when a memory belongs in the shared tier — and never to put secrets
@@ -230,11 +295,53 @@ function renderIndexBlock(
   ];
 }
 
+function buildIndexSections(
+  memoryDir: string,
+  indexContent: string | null | undefined,
+  userSection: UserAutoMemorySection | undefined,
+  teamSection: TeamAutoMemorySection | undefined,
+): string[] {
+  const sections: string[] = [];
+  if (userSection !== undefined) {
+    sections.push(
+      ...renderIndexBlock(userSection.memoryDir, userSection.indexContent),
+      '',
+    );
+  }
+  sections.push(...renderIndexBlock(memoryDir, indexContent));
+  if (teamSection !== undefined) {
+    sections.push(
+      '',
+      ...renderIndexBlock(teamSection.memoryDir, teamSection.indexContent),
+    );
+  }
+  return sections;
+}
+
+export interface BuildMemoryPromptOptions {
+  forceFullProtocol?: boolean;
+}
+
+function allIndexesEmpty(
+  indexContent: string | null | undefined,
+  userSection: UserAutoMemorySection | undefined,
+  teamSection: TeamAutoMemorySection | undefined,
+): boolean {
+  const isEmpty = (s: string | null | undefined) =>
+    s === null || s === undefined || s.trim() === '';
+  return (
+    isEmpty(indexContent) &&
+    (userSection === undefined || isEmpty(userSection.indexContent)) &&
+    (teamSection === undefined || isEmpty(teamSection.indexContent))
+  );
+}
+
 export function buildManagedAutoMemoryPrompt(
   memoryDir: string,
   indexContent?: string | null,
   userSection?: UserAutoMemorySection,
   teamSection?: TeamAutoMemorySection,
+  options?: BuildMemoryPromptOptions,
 ): string {
   const tierLines: string[] = [];
   if (userSection !== undefined) {
@@ -251,6 +358,101 @@ export function buildManagedAutoMemoryPrompt(
     );
   }
   const multiTier = tierLines.length > 1;
+
+  if (
+    allIndexesEmpty(indexContent, userSection, teamSection) &&
+    !options?.forceFullProtocol
+  ) {
+    debugLogger.debug(
+      'memory prompt: using condensed path (all indexes empty, forceFullProtocol=false)',
+    );
+    const condensedIntro = multiTier
+      ? [
+          `You have ${NUMBER_WORDS[tierLines.length] ?? String(tierLines.length)} persistent, file-based memory directories. ${DIR_EXISTS_GUIDANCE}`,
+          '',
+          ...tierLines,
+        ]
+      : [
+          `You have a persistent, file-based memory system at \`${memoryDir}\`. ${DIR_EXISTS_GUIDANCE}`,
+        ];
+
+    const condensedTypes = CONDENSED_TYPES_SECTION;
+
+    const condensedMaintenanceBullets = [
+      '',
+      '- Keep the name, description, and type fields in memory files up-to-date with the content.',
+      '- Organize memories semantically by topic, not chronologically.',
+      '- Update or remove memories that turn out to be wrong or outdated.',
+      `- Every \`MEMORY.md\` index is always loaded into your conversation context \u2014 lines after ${MAX_MANAGED_AUTO_MEMORY_INDEX_LINES} will be truncated, so keep each index concise.`,
+    ];
+
+    const condensedSave = multiTier
+      ? [
+          '## How to save memories',
+          '',
+          'Two-step process:',
+          '',
+          `**Step 1** — write the memory to its own file (e.g., \`user/role.md\`, \`feedback/testing.md\`) inside the directory chosen by its type scope, using this frontmatter format:`,
+          '',
+          ...MEMORY_FRONTMATTER_EXAMPLE,
+          '',
+          '**Step 2** — add a pointer to that file in the `MEMORY.md` index that lives in the SAME directory you wrote to (each directory has its own index — never cross-reference). Each entry: one line, under ~150 chars: `- [Title](file.md) — one-line hook`.',
+          '- Never write memory content directly into `MEMORY.md` — it is an index of one-line pointers, not a memory file.',
+          '- Do not write duplicate memories. First check if there is an existing memory in any of your memory directories you can update before writing a new one.',
+          ...condensedMaintenanceBullets,
+          ...(teamSection !== undefined
+            ? ['', ...CONDENSED_TEAM_GUIDANCE]
+            : []),
+        ]
+      : [
+          '## How to save memories',
+          '',
+          'Two-step process:',
+          '',
+          `**Step 1** — write the memory to its own file (e.g., \`user/role.md\`, \`feedback/testing.md\`) using this frontmatter format:`,
+          '',
+          ...MEMORY_FRONTMATTER_EXAMPLE,
+          '',
+          `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\`. Each entry: one line, under ~150 chars: \`- [Title](file.md) — one-line hook\`.`,
+          '- Never write memory content directly into `MEMORY.md` — it is an index of one-line pointers, not a memory file. Do not write duplicate memories.',
+          ...condensedMaintenanceBullets,
+        ];
+
+    const indexSections = buildIndexSections(
+      memoryDir,
+      indexContent,
+      userSection,
+      teamSection,
+    );
+
+    const condensedLines = [
+      '# auto memory',
+      '',
+      ...condensedIntro,
+      '',
+      'Your memory is currently empty. When you learn something worth remembering across conversations, save it using the process below.',
+      'If the user explicitly asks you to remember something, save it immediately as whichever type fits best. If they ask you to forget something, find and remove the relevant entry.',
+      '',
+      ...condensedTypes,
+      '',
+      ...CONDENSED_DO_NOT_SAVE_SECTION,
+      '',
+      ...CONDENSED_WHEN_TO_ACCESS_SECTION,
+      '',
+      ...condensedSave,
+      '',
+      '- Use plans and tasks for in-conversation work; reserve memory for durable cross-conversation knowledge.',
+      '',
+      ...indexSections,
+    ];
+
+    return condensedLines.join('\n');
+  }
+
+  const forceReason = options?.forceFullProtocol
+    ? 'forceFullProtocol=true'
+    : 'at least one index has content';
+  debugLogger.debug(`memory prompt: using full path (${forceReason})`);
 
   const intro = multiTier
     ? [
@@ -300,20 +502,12 @@ export function buildManagedAutoMemoryPrompt(
         '- Do not write duplicate memories. First check if there is an existing memory you can update before writing a new one.',
       ];
 
-  const indexSections: string[] = [];
-  if (userSection !== undefined) {
-    indexSections.push(
-      ...renderIndexBlock(userSection.memoryDir, userSection.indexContent),
-      '',
-    );
-  }
-  indexSections.push(...renderIndexBlock(memoryDir, indexContent));
-  if (teamSection !== undefined) {
-    indexSections.push(
-      '',
-      ...renderIndexBlock(teamSection.memoryDir, teamSection.indexContent),
-    );
-  }
+  const indexSections = buildIndexSections(
+    memoryDir,
+    indexContent,
+    userSection,
+    teamSection,
+  );
 
   const lines = [
     '# auto memory',
@@ -351,12 +545,14 @@ export function appendManagedAutoMemoryToUserMemory(
   indexContent?: string | null,
   userSection?: UserAutoMemorySection,
   teamSection?: TeamAutoMemorySection,
+  options?: BuildMemoryPromptOptions,
 ): string {
   const managedPrompt = buildManagedAutoMemoryPrompt(
     memoryDir,
     indexContent,
     userSection,
     teamSection,
+    options,
   );
   const trimmedUserMemory = userMemory.trim();
 
