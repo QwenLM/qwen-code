@@ -13,29 +13,54 @@
  * global.gc() is available for the memory-pressure monitor's critical-tier
  * cleanup.
  *
- * For `qwen serve`: imports cli.js directly in-process, skipping the
- * spawnSync overhead (~370ms on EDR-instrumented hosts). The daemon host
- * process never calls global.gc() — only its ACP children do, and they
- * independently add --expose-gc via spawnChannel.ts.
+ * For bootstrap fast paths: imports cli.js directly in-process, skipping the
+ * spawnSync overhead. These paths do not need global.gc(); the normal
+ * interactive path still relaunches with --expose-gc for the memory-pressure
+ * monitor.
  */
 
 import module from 'node:module';
-import { spawnSync } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join } from 'node:path';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const cliPath = join(__dirname, '..', 'dist', 'cli.js');
+const packageJsonPath = join(__dirname, '..', 'package.json');
 
-function isServeCommand() {
-  return process.argv[2] === 'serve';
+function hasFlag(flag, alias) {
+  for (const arg of process.argv.slice(2)) {
+    if (arg === '--') {
+      return false;
+    }
+    if (arg === flag || arg === alias) {
+      return true;
+    }
+  }
+  return false;
 }
 
-if (isServeCommand()) {
+function isInProcessFastPath() {
+  return (
+    process.argv[2] === 'serve' ||
+    process.argv[2] === 'mcp' ||
+    hasFlag('--help', '-h') ||
+    hasFlag('--version', '-v')
+  );
+}
+
+if (hasFlag('--version', '-v')) {
+  const { readFileSync } = await import('node:fs');
+  const pkg = JSON.parse(readFileSync(packageJsonPath, 'utf8'));
+  process.stdout.write(`${pkg.version || 'unknown'}\n`);
+  process.exit(0);
+}
+
+if (isInProcessFastPath()) {
   module.enableCompileCache?.();
   process.argv[1] = cliPath;
   await import(pathToFileURL(cliPath).href);
 } else {
+  const { spawnSync } = await import('node:child_process');
   const result = spawnSync(
     process.execPath,
     ['--expose-gc', cliPath, ...process.argv.slice(2)],
