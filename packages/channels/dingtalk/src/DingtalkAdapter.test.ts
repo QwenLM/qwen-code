@@ -1,6 +1,9 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
-import type { ChannelTaskLifecycleEvent } from '@qwen-code/channel-base';
+import type {
+  ChannelTaskLifecycleEvent,
+  SessionTarget,
+} from '@qwen-code/channel-base';
 
 type LifecycleBase = Omit<
   Extract<ChannelTaskLifecycleEvent, { type: 'started' }>,
@@ -869,5 +872,213 @@ describe('DingtalkChannel sender attribution', () => {
         messageId: 'header-m1',
       }),
     );
+  });
+});
+
+describe('DingtalkChannel proactive send', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  const groupTarget: SessionTarget = {
+    channelName: 'test-dingtalk',
+    senderId: '443056',
+    chatId: 'cidk4iA51FpTrRlziR0ilUYeg==',
+    isGroup: true,
+  };
+
+  function proactive(channel: DingtalkChannelInstance) {
+    return channel as unknown as {
+      supportsProactiveTarget(target: SessionTarget): boolean;
+      pushProactive(target: SessionTarget, text: string): Promise<void>;
+    };
+  }
+
+  function stubProactiveFetch(
+    sendHandler: (sendCall: number) => Response = () =>
+      new Response('{}', { status: 200 }),
+    tokenHandler: () => Response = () =>
+      new Response(
+        JSON.stringify({
+          errcode: 0,
+          access_token: 'proactive-token',
+          expires_in: 7200,
+        }),
+        { status: 200 },
+      ),
+  ) {
+    let sendCall = 0;
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(tokenHandler());
+        }
+        return Promise.resolve(sendHandler(sendCall++));
+      });
+    const calls = (prefix: string) =>
+      spy.mock.calls.filter((c) => String(c[0]).startsWith(prefix));
+    return {
+      spy,
+      sendCalls: () =>
+        calls('https://api.dingtalk.com/v1.0/robot/groupMessages/send'),
+      tokenCalls: () => calls('https://oapi.dingtalk.com/gettoken'),
+    };
+  }
+
+  function msgParamOf(call: unknown[]): { title: string; text: string } {
+    const body = JSON.parse(String((call[1] as RequestInit).body));
+    return JSON.parse(body.msgParam);
+  }
+
+  it('opts into proactive send', () => {
+    expect(createChannel().supportsProactiveSend()).toBe(true);
+  });
+
+  it('accepts only group conversation targets', () => {
+    const channel = proactive(createChannel());
+    expect(channel.supportsProactiveTarget(groupTarget)).toBe(true);
+    expect(
+      channel.supportsProactiveTarget({ ...groupTarget, isGroup: false }),
+    ).toBe(false);
+    expect(
+      channel.supportsProactiveTarget({
+        channelName: groupTarget.channelName,
+        senderId: groupTarget.senderId,
+        chatId: groupTarget.chatId,
+      }),
+    ).toBe(false);
+    expect(
+      channel.supportsProactiveTarget({
+        ...groupTarget,
+        chatId: 'https://oapi.dingtalk.com/robot/sendBySession?session=abc',
+      }),
+    ).toBe(false);
+    expect(
+      channel.supportsProactiveTarget({ ...groupTarget, chatId: '' }),
+    ).toBe(false);
+    expect(
+      channel.supportsProactiveTarget({ ...groupTarget, threadId: '7' }),
+    ).toBe(false);
+  });
+
+  it('sends proactive group messages through the robot API', async () => {
+    const channel = proactive(createChannel());
+    const { sendCalls, tokenCalls } = stubProactiveFetch();
+
+    await channel.pushProactive(groupTarget, '# Result\nloop output');
+
+    expect(tokenCalls()).toHaveLength(1);
+    const sends = sendCalls();
+    expect(sends).toHaveLength(1);
+    const init = sends[0]![1] as RequestInit;
+    expect(init.method).toBe('POST');
+    expect(
+      (init.headers as Record<string, string>)['x-acs-dingtalk-access-token'],
+    ).toBe('proactive-token');
+    const body = JSON.parse(String(init.body));
+    expect(body.robotCode).toBe('client-id');
+    expect(body.openConversationId).toBe(groupTarget.chatId);
+    expect(body.msgKey).toBe('sampleMarkdown');
+    expect(msgParamOf(sends[0]!).title).toBe('Result');
+    expect(msgParamOf(sends[0]!).text).toContain('loop output');
+  });
+
+  it('reuses the cached token across sends', async () => {
+    const channel = proactive(createChannel());
+    const { tokenCalls } = stubProactiveFetch();
+
+    await channel.pushProactive(groupTarget, 'first');
+    await channel.pushProactive(groupTarget, 'second');
+
+    expect(tokenCalls()).toHaveLength(1);
+  });
+
+  it('splits long proactive messages into continuation chunks', async () => {
+    const channel = proactive(createChannel());
+    const { sendCalls } = stubProactiveFetch();
+
+    const longLine = 'x'.repeat(100);
+    const longText = Array.from({ length: 50 }, () => longLine).join('\n');
+    await channel.pushProactive(groupTarget, longText);
+
+    const sends = sendCalls();
+    expect(sends).toHaveLength(2);
+    expect(msgParamOf(sends[0]!).title).not.toContain('(cont.)');
+    expect(msgParamOf(sends[1]!).title).toContain('(cont.)');
+  });
+
+  it('stops at the first failed chunk', async () => {
+    const channel = proactive(createChannel());
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const { sendCalls } = stubProactiveFetch(
+      () => new Response('denied', { status: 403 }),
+    );
+
+    const longLine = 'x'.repeat(100);
+    const longText = Array.from({ length: 50 }, () => longLine).join('\n');
+    await expect(channel.pushProactive(groupTarget, longText)).rejects.toThrow(
+      'HTTP 403',
+    );
+
+    expect(sendCalls()).toHaveLength(1);
+  });
+
+  it('surfaces API detail in the error and log on failure', async () => {
+    const channel = proactive(createChannel());
+    const writeSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    stubProactiveFetch(() => new Response('perm denied', { status: 403 }));
+
+    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toThrow(
+      'DingTalk proactive send failed: HTTP 403 perm denied',
+    );
+
+    const logged = writeSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(logged).toContain(
+      'proactive send failed (chunk 1/1): HTTP 403 perm denied',
+    );
+  });
+
+  it('refreshes the token and retries once on 401', async () => {
+    const channel = proactive(createChannel());
+    const { sendCalls, tokenCalls } = stubProactiveFetch((sendCall) =>
+      sendCall === 0
+        ? new Response('expired', { status: 401 })
+        : new Response('{}', { status: 200 }),
+    );
+
+    await channel.pushProactive(groupTarget, 'hello');
+
+    expect(sendCalls()).toHaveLength(2);
+    expect(tokenCalls()).toHaveLength(2);
+  });
+
+  it('throws when the token endpoint rejects', async () => {
+    const channel = proactive(createChannel());
+    vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    stubProactiveFetch(
+      undefined,
+      () =>
+        new Response(
+          JSON.stringify({ errcode: 40089, errmsg: 'invalid credential' }),
+          { status: 200 },
+        ),
+    );
+
+    await expect(channel.pushProactive(groupTarget, 'hello')).rejects.toThrow(
+      'gettoken errcode=40089',
+    );
+  });
+
+  it('skips blank text without calling the API', async () => {
+    const channel = proactive(createChannel());
+    const { spy } = stubProactiveFetch();
+
+    await channel.pushProactive(groupTarget, '   \n ');
+
+    expect(spy).not.toHaveBeenCalled();
   });
 });

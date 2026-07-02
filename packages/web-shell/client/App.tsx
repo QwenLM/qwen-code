@@ -126,6 +126,11 @@ import {
   createAndAttachSessionForPrompt,
   isDaemonApprovalMode,
 } from './utils/sessionPreparation';
+import {
+  getComposerPlaceholderKey,
+  shouldBlockComposerSubmit,
+  shouldDisableComposerInput,
+} from './utils/composerInputState';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
   computeTodoDetails,
@@ -1040,12 +1045,12 @@ export function App({
   const editorRef = useRef<EditorHandle | null>(null);
   const notifiedComposerReadyRef = useRef<EditorHandle | null>(null);
   const footerRef = useRef<HTMLDivElement>(null);
-  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [canScrollMessageListToBottom, setCanScrollMessageListToBottom] =
+    useState(false);
   const previousFooterRectRef = useRef<DOMRect | null>(null);
   const previousEmptyStateRef = useRef(false);
   const resumeChatBottomFollow = useCallback(
     (behavior: ScrollBehavior = 'smooth') => {
-      setShowScrollToBottom(false);
       requestAnimationFrame(() => {
         messageListRef.current?.scrollToBottom(behavior);
         requestAnimationFrame(() => {
@@ -2195,6 +2200,14 @@ export function App({
 
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
+      if (
+        shouldBlockComposerSubmit({
+          connectionStatus: connectionRef.current.status,
+        })
+      ) {
+        pushToast('warning', t('editor.connectionDisconnected'));
+        return false;
+      }
       const promptBlocked = streamingStateRef.current !== 'idle';
       const submitPromptFromEditor = (
         promptText: string,
@@ -3066,9 +3079,12 @@ export function App({
     }
     editorRef.current?.focus();
   }, []);
-  const handleFollowStateChange = useCallback((isFollowing: boolean) => {
-    setShowScrollToBottom(!isFollowing);
-  }, []);
+  const handleCanScrollToBottomChange = useCallback(
+    (canScrollToBottom: boolean) => {
+      setCanScrollMessageListToBottom(canScrollToBottom);
+    },
+    [],
+  );
 
   const handleRetry = useCallback(() => {
     if (
@@ -3227,7 +3243,11 @@ export function App({
     };
   }, [resetEscapeState]);
 
-  const isDisabled = !connected || connection.catchingUp;
+  const isDisabled = shouldDisableComposerInput({
+    catchingUp: Boolean(connection.catchingUp),
+    pendingApproval: pendingApproval !== null,
+    isPreparingPrompt,
+  });
 
   const handleModelSelect = useCallback(
     (modelId: string) => {
@@ -3764,7 +3784,9 @@ export function App({
                         }
                         tailContent={undefined}
                         tailKey={undefined}
-                        onFollowStateChange={handleFollowStateChange}
+                        onCanScrollToBottomChange={
+                          handleCanScrollToBottomChange
+                        }
                         virtualScrollThreshold={virtualScrollThreshold}
                       />
                       {btwMessage?.role === 'btw' && (
@@ -3781,7 +3803,7 @@ export function App({
                 </CompactModeContext.Provider>
 
                 <div ref={footerRef} className={styles.footer}>
-                  {showScrollToBottom && (
+                  {canScrollMessageListToBottom && (
                     <div
                       className={
                         showFloatingTodos
@@ -3857,11 +3879,7 @@ export function App({
                       isRunning={streamingState !== 'idle'}
                       isPreparing={isPreparingPrompt}
                       cancelArmed={cancelArmed}
-                      disabled={
-                        isDisabled ||
-                        pendingApproval !== null ||
-                        isPreparingPrompt
-                      }
+                      disabled={isDisabled}
                       commands={commands}
                       skills={loadedSkills}
                       slashCommandCategoryOrder={slashCommandCategoryOrder}
@@ -3886,13 +3904,13 @@ export function App({
                       onDismissFollowup={onDismissFollowup}
                       composerInput={composerInput}
                       composerInputVersion={composerInputVersion}
-                      placeholderText={
-                        !connected || connection.catchingUp
-                          ? t('common.loading')
-                          : isPreparingPrompt || streamingState !== 'idle'
-                            ? t('editor.processing')
-                            : t('editor.placeholder')
-                      }
+                      placeholderText={t(
+                        getComposerPlaceholderKey({
+                          catchingUp: Boolean(connection.catchingUp),
+                          isPreparingPrompt,
+                          isStreaming: streamingState !== 'idle',
+                        }),
+                      )}
                     />
                   </div>
                   {CustomFooter ? (

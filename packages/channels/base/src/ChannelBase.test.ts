@@ -7740,7 +7740,7 @@ describe('ChannelBase', () => {
       expect(bridge.prompt).toHaveBeenCalledTimes(2);
       expect(bridge.prompt).toHaveBeenLastCalledWith(
         expect.any(String),
-        '[Loop "daily summary" created by Alice]\n\npost summary',
+        '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
         {},
       );
       expect(ch.proactive).toEqual([
@@ -7863,7 +7863,7 @@ describe('ChannelBase', () => {
         [
           'Channel memory for this chat:\nUse staging.',
           'Use repo conventions.',
-          '[Loop "daily summary" created by Alice]\n\npost summary',
+          '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
         ].join('\n\n'),
       );
     });
@@ -7917,14 +7917,14 @@ describe('ChannelBase', () => {
       expect(promptMock.mock.calls[0]![1]).toBe(
         [
           'Use repo conventions.',
-          '[Loop "daily summary" created by Alice]\n\npost summary',
+          '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
         ].join('\n\n'),
       );
       expect(promptMock.mock.calls[1]![1]).toBe(
         [
           'Channel memory for this chat:\nUse staging.',
           'Use repo conventions.',
-          '[Loop "daily summary" created by Alice]\n\npost summary',
+          '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
         ].join('\n\n'),
       );
       stderr.mockRestore();
@@ -8613,7 +8613,7 @@ describe('ChannelBase', () => {
         expect(bridge.newSession).toHaveBeenCalledTimes(1);
         expect(bridge.prompt).toHaveBeenLastCalledWith(
           's-1',
-          '[Loop "daily summary" created by Alice]\n\npost again',
+          '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost again',
           {},
         );
         expect(ch.proactive).toEqual([
