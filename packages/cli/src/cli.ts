@@ -165,14 +165,15 @@ export function resolveBootstrapRoute(
     return 'version';
   }
 
-  const firstPositional = firstPositionalArg(argv);
-  if (firstPositional === 'serve') {
+  const firstArg = argv[0];
+  if (firstArg === 'serve') {
     return 'serve';
   }
-  if (firstPositional === 'mcp') {
+  if (firstArg === 'mcp') {
     return 'mcp';
   }
 
+  const firstPositional = firstPositionalArg(argv);
   if (hasFlag(argv, '--help', '-h') && firstPositional === undefined) {
     return 'help';
   }

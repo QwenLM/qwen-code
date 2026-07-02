@@ -84,6 +84,9 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['--model', 'gpt-4', 'Hello'])).toBe(
       'default',
     );
+    expect(resolveBootstrapRoute(['--safe-mode', 'mcp', 'list'])).toBe(
+      'default',
+    );
   });
 
   it('does not treat flags after -- as bootstrap flags', () => {
@@ -188,6 +191,15 @@ describe('runCliEntry', () => {
     expect(mocks.main).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
+  it('uses the full CLI when global flags precede MCP commands', async () => {
+    await runCliEntry(['--safe-mode', 'mcp', 'list']);
+
+    expect(mocks.main).toHaveBeenCalledTimes(1);
+    expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+    expect(mocks.initStartupProfiler).toHaveBeenCalledTimes(1);
+    expect(mocks.initCpuProfiler).toHaveBeenCalledTimes(1);
   });
 
   it('fails MCP fast-path validation without loading the full CLI', async () => {
