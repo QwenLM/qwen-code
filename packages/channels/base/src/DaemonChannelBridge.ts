@@ -345,10 +345,10 @@ export class DaemonChannelBridge
 
   async cancelSession(sessionId: string): Promise<void> {
     const session = this.ensureSession(sessionId);
-    await session.cancel();
     this.resolveTurnBarrier(sessionId);
     this.abortActivePrompts(sessionId);
     this.activePrompts.delete(sessionId);
+    await session.cancel();
   }
 
   async setSessionModel(

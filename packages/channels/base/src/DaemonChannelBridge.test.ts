@@ -1083,7 +1083,7 @@ describe('DaemonChannelBridge', () => {
 
     await expect(promptPromise).rejects.toThrow('aborted');
     expect(session.cancel).toHaveBeenCalledOnce();
-    expect(order).toEqual(['cancel', 'abort']);
+    expect(order).toEqual(['abort', 'cancel']);
 
     events.close();
     bridge.stop();
