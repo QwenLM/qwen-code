@@ -258,6 +258,14 @@ export default tseslint.config(
       'no-undef': 'off',
     },
   },
+  {
+    files: ['.github/scripts/**/*.{js,mjs,cjs}'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
   // ==================== no-console allowlist ====================
   // The following files/packages are allowed to use console.*
 

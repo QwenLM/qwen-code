@@ -30,6 +30,7 @@ import { doctorCommand } from '../ui/commands/doctorCommand.js';
 import { diffCommand } from '../ui/commands/diffCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
+import { effortCommand } from '../ui/commands/effort-command.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
 import { forkCommand } from '../ui/commands/forkCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
@@ -131,6 +132,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       doctorCommand,
       directoryCommand,
       editorCommand,
+      effortCommand,
       exportCommand,
       extensionsCommand,
       helpCommand,

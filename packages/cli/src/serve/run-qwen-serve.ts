@@ -4,8 +4,10 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { X509Certificate } from 'node:crypto';
 import * as fs from 'node:fs';
 import type { Server } from 'node:http';
+import * as https from 'node:https';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import express, {
@@ -837,12 +839,35 @@ function installSameOriginOriginStrip(
       const port = getPort();
       if (port !== cachedStripPort) {
         cachedStripPort = port;
+        // Both schemes: under `--tls-cert/--tls-key` the loopback web
+        // shell is served over https, so its same-origin requests carry
+        // an `https://` Origin. Loopback hosts are trusted as same-origin
+        // regardless of scheme, so listing both is safe even on plain HTTP
+        // (the https entries simply never match without TLS).
         cachedSelfOrigins = new Set([
           `http://127.0.0.1:${port}`,
           `http://localhost:${port}`,
           `http://[::1]:${port}`,
           `http://host.docker.internal:${port}`,
+          `https://127.0.0.1:${port}`,
+          `https://localhost:${port}`,
+          `https://[::1]:${port}`,
+          `https://host.docker.internal:${port}`,
         ]);
+        // RFC 7230 §5.4: browsers omit the port in the Origin header when
+        // it matches the scheme default (http→80, https→443). Accept the
+        // port-less forms so the origin check doesn't fail on port 443.
+        if (port === 80 || port === 443) {
+          for (const host of [
+            '127.0.0.1',
+            'localhost',
+            '[::1]',
+            'host.docker.internal',
+          ]) {
+            cachedSelfOrigins.add(`http://${host}`);
+            cachedSelfOrigins.add(`https://${host}`);
+          }
+        }
       }
       if (cachedSelfOrigins.has(origin)) {
         delete req.headers.origin;
@@ -1405,6 +1430,72 @@ export async function runQwenServe(
         `combination. Use --port for the port, e.g. ` +
         `"--hostname ${host} --port ${port}".`,
     );
+  }
+
+  // TLS is both-or-nothing: a cert without a key (or vice versa) can't
+  // start an HTTPS listener, so fail loud at boot instead of silently
+  // falling back to plain HTTP — the operator asked for TLS and a silent
+  // downgrade would serve the web shell over an insecure transport they
+  // believe is encrypted.
+  let tlsOptions: { cert: Buffer; key: Buffer } | undefined;
+  if ((opts.tlsCert && !opts.tlsKey) || (!opts.tlsCert && opts.tlsKey)) {
+    throw new Error(
+      `--tls-cert and --tls-key must be provided together (got only ` +
+        `--tls-${opts.tlsCert ? 'cert' : 'key'}).`,
+    );
+  }
+  if (opts.tlsCert && opts.tlsKey) {
+    let cert: Buffer;
+    let key: Buffer;
+    try {
+      cert = fs.readFileSync(opts.tlsCert);
+    } catch (err) {
+      throw new Error(
+        `Failed to read --tls-cert "${opts.tlsCert}": ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    try {
+      key = fs.readFileSync(opts.tlsKey);
+    } catch (err) {
+      throw new Error(
+        `Failed to read --tls-key "${opts.tlsKey}": ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    // Fail loud at boot on an expired (or unparseable) certificate. Node's
+    // https.createServer happily starts with an expired cert, then every TLS
+    // handshake is rejected client-side (NET::ERR_CERT_DATE_INVALID) while
+    // /health stays green — a silent outage that's hard to diagnose. Surface
+    // it here with an actionable message instead.
+    let x509: X509Certificate;
+    try {
+      x509 = new X509Certificate(cert);
+    } catch (err) {
+      throw new Error(
+        `--tls-cert "${opts.tlsCert}" is not a valid certificate: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const now = Date.now();
+    if (new Date(x509.validTo).getTime() < now) {
+      throw new Error(
+        `--tls-cert "${opts.tlsCert}" expired on ${x509.validTo}. ` +
+          `Renew the certificate and restart.`,
+      );
+    }
+    // Symmetric to the expiry guard: a cert whose validity window hasn't
+    // started yet (notBefore > now, e.g. clock skew or a freshly minted
+    // cert) also boots cleanly but fails every handshake client-side with
+    // NET::ERR_CERT_DATE_INVALID. Fail loud here too.
+    if (new Date(x509.validFrom).getTime() > now) {
+      throw new Error(
+        `--tls-cert "${opts.tlsCert}" is not yet valid (validFrom: ` +
+          `${x509.validFrom}). Check the certificate's notBefore date or ` +
+          `the system clock.`,
+      );
+    }
+    tlsOptions = { cert, key };
   }
 
   if (!isLoopbackBind(opts.hostname) && !token) {
@@ -2251,7 +2342,12 @@ export async function runQwenServe(
   reserveChannelServicePidfile();
 
   return await new Promise<RunHandle>((resolve, reject) => {
-    const server = app.listen(opts.port, listenHostname, () => {
+    // When TLS is configured, wrap the Express app in an HTTPS listener
+    // (`https.Server extends http.Server`, so everything downstream —
+    // `server.maxConnections`, `server.address()`, `attachServer(server)`,
+    // graceful close — is unchanged). Otherwise `app.listen()` keeps the
+    // existing plain-HTTP path bit-for-bit.
+    const onListening = () => {
       startup.listenerReadyAt = new Date().toISOString();
       startup.processToListenMs = Math.round(process.uptime() * 1000);
       startup.runQwenServeToListenMs = Math.round(
@@ -2287,7 +2383,8 @@ export async function runQwenServe(
       // else: leave unset (Node's default = unlimited at this layer).
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
-      const url = `http://${formatHostForUrl(opts.hostname)}:${actualPort}`;
+      const scheme = tlsOptions ? 'https' : 'http';
+      const url = `${scheme}://${formatHostForUrl(opts.hostname)}:${actualPort}`;
       try {
         if (opts.channelSelection) {
           const createSupervisor =
@@ -2904,7 +3001,30 @@ export async function runQwenServe(
           },
         );
       }
-    });
+    };
+    let server: Server;
+    if (tlsOptions) {
+      let httpsServer: https.Server;
+      try {
+        httpsServer = https.createServer(tlsOptions, app);
+      } catch (err) {
+        // createSecureContext throws a raw OpenSSL string (e.g.
+        // "error:0B080074:...key values mismatch") when cert/key don't pair.
+        // Wrap it so the operator gets the same actionable framing as the
+        // --tls-cert/--tls-key read errors above.
+        reject(
+          new Error(
+            `--tls-cert "${opts.tlsCert}" and --tls-key "${opts.tlsKey}" ` +
+              `could not be loaded (do they match?): ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+        return;
+      }
+      server = httpsServer.listen(opts.port, listenHostname, onListening);
+    } else {
+      server = app.listen(opts.port, listenHostname, onListening);
+    }
     server.once('error', (err) => {
       removeCurrentServePidfile();
       reject(err);

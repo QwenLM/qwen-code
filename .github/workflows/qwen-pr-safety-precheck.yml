@@ -1,0 +1,113 @@
+name: 'Qwen PR Safety Precheck'
+
+on:
+  workflow_call:
+    outputs:
+      decision:
+        description: 'allow_triage or manual_required'
+        value: '${{ jobs.precheck.outputs.decision }}'
+
+jobs:
+  precheck:
+    runs-on: 'ubuntu-latest'
+    timeout-minutes: 5
+    concurrency:
+      group: 'qwen-pr-precheck-${{ github.event.pull_request.number }}'
+      cancel-in-progress: false
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+      issues: 'write'
+    outputs:
+      decision: '${{ steps.assess.outputs.decision }}'
+    steps:
+      - name: 'Checkout trusted precheck script'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          ref: '${{ github.event.repository.default_branch }}'
+          sparse-checkout: '.github/scripts/pr-safety-precheck.mjs'
+
+      - name: 'Collect PR precheck input'
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -euo pipefail
+          if ! gh pr view "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --json title,body,headRefOid,files \
+            > "$RUNNER_TEMP/pr-precheck.json"; then
+            printf '{"headRefOid":"%s","title":"","body":"","files":null}\n' "$HEAD_SHA" \
+              > "$RUNNER_TEMP/pr-precheck.json"
+          fi
+
+          max_diff_bytes=$((256 * 1024 + 1))
+          set +e
+          gh pr diff "$PR_NUMBER" \
+            --repo "$GITHUB_REPOSITORY" \
+            --patch \
+            | head -c "$max_diff_bytes" > "$RUNNER_TEMP/pr-precheck.diff"
+          pipe_status=("${PIPESTATUS[@]}")
+          diff_status="${pipe_status[0]}"
+          head_status="${pipe_status[1]}"
+          set -e
+          diff_bytes="$(wc -c < "$RUNNER_TEMP/pr-precheck.diff" | tr -d ' ')"
+          if [ "$head_status" -ne 0 ] ||
+             { [ "$diff_status" -ne 0 ] &&
+               { [ "$diff_status" -ne 141 ] || [ "$diff_bytes" -lt "$max_diff_bytes" ]; }; }; then
+            : > "$RUNNER_TEMP/pr-precheck.diff"
+          fi
+
+      - name: 'Assess PR safety'
+        id: 'assess'
+        run: |-
+          node .github/scripts/pr-safety-precheck.mjs \
+            --pr "$RUNNER_TEMP/pr-precheck.json" \
+            --diff "$RUNNER_TEMP/pr-precheck.diff" \
+            --comment "$RUNNER_TEMP/pr-precheck-comment.md"
+
+      - name: 'Upsert manual approval comment'
+        if: "steps.assess.outputs.decision == 'manual_required'"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -euo pipefail
+          existing_id="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --paginate \
+              -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-pr-precheck:manual-required -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
+          )"
+          if [ -n "$existing_id" ]; then
+            gh api \
+              --method PATCH \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_id}" \
+              -f body="$(cat "$RUNNER_TEMP/pr-precheck-comment.md")" \
+              > /dev/null
+          else
+            gh pr comment "$PR_NUMBER" \
+              --repo "$GITHUB_REPOSITORY" \
+              --body-file "$RUNNER_TEMP/pr-precheck-comment.md"
+          fi
+
+      - name: 'Clear manual approval comment'
+        if: "steps.assess.outputs.decision == 'allow_triage'"
+        env:
+          GH_TOKEN: '${{ github.token }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
+        run: |-
+          set -euo pipefail
+          existing_id="$(
+            gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --paginate \
+              -F per_page=100 \
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-pr-precheck:manual-required -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
+          )"
+          if [ -n "$existing_id" ]; then
+            gh api \
+              --method DELETE \
+              "repos/${GITHUB_REPOSITORY}/issues/comments/${existing_id}" \
+              > /dev/null
+          fi
