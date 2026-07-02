@@ -57,6 +57,23 @@ export interface ReadFileToolParams {
    * are not supported.
    */
   pages?: string;
+
+  /**
+   * Whether to respect ignore patterns from .gitignore, .qwenignore, and
+   * configured custom Qwen ignore files (optional)
+   */
+  file_filtering_options?: {
+    /**
+     * Whether to respect .gitignore patterns when reading files.
+     * Only available in git repositories. Defaults to settings value.
+     */
+    respect_git_ignore?: boolean;
+    /**
+     * Whether to respect .qwenignore and custom Qwen ignore file patterns
+     * when reading files. Defaults to settings value.
+     */
+    respect_qwen_ignore?: boolean;
+  };
 }
 
 class ReadFileToolInvocation extends BaseToolInvocation<
@@ -418,6 +435,23 @@ export class ReadFileTool extends BaseDeclarativeTool<
               "Optional: For PDF files, the page range to extract as text (e.g., '1-5', '3', '10-20'). Pages are 1-indexed. Max 20 pages per request. Open-ended ranges like '3-' are not supported. When provided, PDF content is extracted as text regardless of model capabilities.",
             type: 'string',
           },
+          file_filtering_options: {
+            description:
+              'Optional: Whether to respect ignore patterns from .gitignore, .qwenignore, and configured custom Qwen ignore files',
+            type: 'object',
+            properties: {
+              respect_git_ignore: {
+                description:
+                  'Optional: Whether to respect .gitignore patterns when reading files. Only available in git repositories. Defaults to the value from settings.',
+                type: 'boolean',
+              },
+              respect_qwen_ignore: {
+                description:
+                  'Optional: Whether to respect .qwenignore and configured custom Qwen ignore file patterns when reading files. Defaults to the value from settings.',
+                type: 'boolean',
+              },
+            },
+          },
         },
         required: ['file_path'],
         type: 'object',
@@ -480,7 +514,26 @@ export class ReadFileTool extends BaseDeclarativeTool<
     }
 
     const fileService = this.config.getFileService();
-    if (fileService.shouldQwenIgnoreFile(params.file_path)) {
+    const configOpts = this.config.getFileFilteringOptions();
+    const respectGitIgnore =
+      params.file_filtering_options?.respect_git_ignore ??
+      configOpts.respectGitIgnore;
+    const respectQwenIgnore =
+      params.file_filtering_options?.respect_qwen_ignore ??
+      configOpts.respectQwenIgnore;
+
+    if (
+      fileService.shouldIgnoreFile(params.file_path, {
+        respectGitIgnore,
+        respectQwenIgnore,
+      })
+    ) {
+      if (
+        respectGitIgnore &&
+        fileService.shouldGitIgnoreFile(params.file_path)
+      ) {
+        return `File path '${filePath}' is ignored by .gitignore pattern(s).`;
+      }
       return `File path '${filePath}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.file_path)} pattern(s).`;
     }
 
