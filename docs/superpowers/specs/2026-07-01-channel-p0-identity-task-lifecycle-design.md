@@ -94,10 +94,11 @@ same namespace into core memory paths without changing channel config shape.
 
 ### Prompt Boundary Injection
 
-`ChannelBase` already prepends `config.instructions` once per session. When a
-channel opts into channel-specific prompt context via `instructions`, `identity`,
-or `memoryScope`, extend that first-message injection to include a generated
-boundary note before custom instructions:
+`ChannelBase` already prepends `config.instructions` once per session; that
+behavior is unchanged. The generated boundary note below is added to the same
+first-message injection only when a channel configures `identity` or
+`memoryScope` (instructions-only channels keep the existing prompt shape). It
+is appended after custom instructions so the boundary takes recency precedence:
 
 ```text
 Channel identity:
@@ -108,15 +109,17 @@ Channel identity:
 Memory scope:
 - namespace: qwen-tag:ops
 - mode: metadata-only
-- storage isolation: not enforced by this version.
+- data from other channels must not be shared.
 ```
 
 The exact wording should be concise and stable enough for tests, but avoid
 over-promising isolation. If no description exists, omit that line.
 
-This note is injected once per agent session, like existing instructions. When
-the bridge reports a session death, the existing `instructedSessions` cleanup
-continues to allow reinjection for the next session.
+This note is injected once per agent session, like existing instructions
+(a transient channel-memory read failure retries the whole context block on
+the next turn, so consecutive turns may repeat it). When the bridge reports a
+session death, the existing `instructedSessions` cleanup continues to allow
+reinjection for the next session.
 
 For compatibility, channels with no `instructions`, `identity`, or `memoryScope`
 configuration keep the existing raw prompt shape. Runtime identity and memory

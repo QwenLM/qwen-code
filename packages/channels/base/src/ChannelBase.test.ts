@@ -3449,7 +3449,7 @@ describe('ChannelBase', () => {
       expect(secondPrompt).not.toContain('Be concise.');
     });
 
-    it('prepends channel boundary metadata before custom instructions once per session', async () => {
+    it('prepends channel boundary metadata after custom instructions once per session', async () => {
       const ch = createChannel({
         instructions: 'Be concise.',
         identity: {
@@ -3480,8 +3480,10 @@ describe('ChannelBase', () => {
       expect(firstPrompt).toContain(
         '- data from other channels must not be shared.',
       );
-      expect(firstPrompt.indexOf('Channel identity:')).toBeLessThan(
-        firstPrompt.indexOf('Be concise.'),
+      // Boundary block comes last so it takes recency precedence over
+      // operator instructions.
+      expect(firstPrompt.indexOf('Be concise.')).toBeLessThan(
+        firstPrompt.indexOf('Channel identity:'),
       );
 
       const secondPrompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
@@ -4763,8 +4765,75 @@ describe('ChannelBase', () => {
 
       expect(ch.taskEvents).toEqual([
         expect.objectContaining({ type: 'started' }),
-        expect.objectContaining({ type: 'failed', error: 'agent boom' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'agent boom',
+          phase: 'agent',
+        }),
       ]);
+    });
+
+    it('contains a throwing onTaskLifecycle hook and logs it', async () => {
+      class ThrowingChannel extends TestChannel {
+        protected override onTaskLifecycle(
+          event: ChannelTaskLifecycleEvent,
+        ): void {
+          super.onTaskLifecycle(event);
+          throw new Error('hook boom');
+        }
+      }
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      try {
+        const ch = new ThrowingChannel('test-chan', defaultConfig(), bridge);
+        await ch.handleInbound(envelope());
+
+        expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'agent response' }]);
+        expect(ch.taskEvents.map((event) => event.type)).toEqual([
+          'started',
+          'completed',
+        ]);
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'onTaskLifecycle threw for started session s-1: hook boom',
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
+    it('logs turn errors that arrive after cancellation', async () => {
+      let rejectPrompt!: (error: Error) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((_resolve, reject) => {
+          rejectPrompt = reject;
+        }),
+      );
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      try {
+        const prompt = ch.handleInbound(envelope({ messageId: 'm-9' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+        await ch.handleInbound(envelope({ text: '/cancel' }));
+        rejectPrompt(new Error('bridge crashed'));
+
+        await expect(prompt).rejects.toThrow('bridge crashed');
+        expect(
+          ch.taskEvents.filter((event) => event.type === 'failed'),
+        ).toEqual([]);
+        expect(stderr).toHaveBeenCalledWith(
+          expect.stringContaining(
+            '[test-chan] turn m-9 threw after cancellation for session s-1: bridge crashed',
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
     });
 
     it('sanitizes failed lifecycle errors', async () => {
@@ -4957,39 +5026,34 @@ describe('ChannelBase', () => {
       await prompt;
     });
 
-    it('does not emit completed when cancellation starts during response delivery', async () => {
+    it('reports cancel failure once response delivery has started', async () => {
       let releaseDelivery!: () => void;
       const deliveryGate = new Promise<void>((resolve) => {
         releaseDelivery = resolve;
       });
-      let resolveCancel!: () => void;
-      const pendingCancel = new Promise<void>((resolve) => {
-        resolveCancel = resolve;
-      });
       (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue('done');
-      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
-        pendingCancel,
-      );
       const ch = createChannel();
       ch.enableCancelCommand();
       ch.responseCompleteGate = deliveryGate;
 
       const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
       await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
-      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
-      await Promise.resolve();
+      // The turn is now blocked inside delivery — a cancel can no longer
+      // suppress the output, so it must fail honestly instead of emitting a
+      // cancelled event for a response the user will receive.
+      await ch.handleInbound(envelope({ text: '/cancel' }));
+
+      expect(bridge.cancelSession).not.toHaveBeenCalled();
+      expect(ch.sent).toContainEqual({
+        chatId: 'chat1',
+        text: 'Failed to cancel current request.',
+      });
+
       releaseDelivery();
-      await new Promise((resolve) => setTimeout(resolve, 0));
-
-      expect(ch.taskEvents.map((event) => event.type)).not.toContain(
-        'completed',
-      );
-
-      resolveCancel();
-      await Promise.all([prompt, cancel]);
+      await prompt;
       expect(ch.taskEvents.map((event) => event.type)).toEqual([
         'started',
-        'cancelled',
+        'completed',
       ]);
     });
 
@@ -8478,6 +8542,113 @@ describe('ChannelBase', () => {
           runCount: 0,
         }),
       ).rejects.toThrow('api down');
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'api down',
+          phase: 'delivery',
+        }),
+      ]);
+    });
+
+    it('emits failed lifecycle event when a loop prompt rejects', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
+        new Error('loop boom'),
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        }),
+      ).rejects.toThrow('loop boom');
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'loop boom',
+          phase: 'agent',
+          messageId: 'job-1',
+        }),
+      ]);
+    });
+
+    it('emits tool_call lifecycle events during loop prompts', async () => {
+      let resolvePrompt!: (value: string) => void;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        }),
+      );
+      const ch = createChannel();
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      ch.dispatchToolCall({
+        sessionId: 's-1',
+        toolCallId: 'tool-loop',
+        kind: 'read_file',
+        title: 'Read README.md',
+        status: 'running',
+        rawInput: { path: 'README.md' },
+      });
+
+      const lifecycleToolCall = ch.taskEvents.find(
+        (event) => event.type === 'tool_call',
+      );
+      expect(lifecycleToolCall).toEqual(
+        expect.objectContaining({
+          type: 'tool_call',
+          messageId: 'job-1',
+          toolCall: expect.objectContaining({ toolCallId: 'tool-loop' }),
+        }),
+      );
+      expect(lifecycleToolCall!.toolCall).not.toHaveProperty('rawInput');
+
+      resolvePrompt('loop response');
+      await loopRun;
     });
 
     it('completes a loop when cancellation settles after proactive delivery', async () => {
