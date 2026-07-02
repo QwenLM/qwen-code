@@ -291,7 +291,10 @@ function sensitiveEnvValues(env: NodeJS.ProcessEnv): string[] {
     /(^|_)(TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|PASSWORD|PASSWD|PASSPHRASE|BASIC_AUTH|AUTH_TOKEN|AUTHORIZATION|SESSION_SECRET|SESSION_TOKEN|SESSION_KEY|SESSION_COOKIE|DSN|CONNECTION_STRING)($|_)/i;
   return Object.entries(env)
     .filter(([key, value]) => sensitiveKey.test(key) && value !== undefined)
-    .map(([, value]) => value!)
+    .flatMap(([, value]) => {
+      const lines = value!.split('\n').filter((l) => l.length >= 4);
+      return lines.length > 1 ? [value!, ...lines] : [value!];
+    })
     .filter((value) => value.length >= 4);
 }
 
@@ -735,7 +738,7 @@ export function createChannelWorkerSupervisor(
         }
         snapshot = {
           ...snapshot,
-          lastHeartbeatAt: message.at ?? new Date().toISOString(),
+          lastHeartbeatAt: new Date().toISOString(),
         };
         armStaleHeartbeatTimer(startedChild);
       };
