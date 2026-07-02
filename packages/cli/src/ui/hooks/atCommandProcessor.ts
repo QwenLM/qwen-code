@@ -37,6 +37,12 @@ import {
   EXTENSION_CONTEXT_BUDGET,
   getExtensionDisplayName,
 } from '../../utils/extension-mention.js';
+import {
+  buildMcpServerContextText,
+  buildMcpServerRef,
+  matchMcpServerByRef,
+  parseMcpServerRef,
+} from '../../utils/mcp-server-mention.js';
 
 export interface ResolveAtCommandParams {
   query: string;
@@ -214,6 +220,10 @@ export async function resolveAtCommandQuery({
     serverName: string;
     uri: string;
   }> = [];
+  const mcpServerMentions: Array<{
+    originalAtPath: string;
+    serverName: string;
+  }> = [];
 
   // Extension references (`@ext:<name>`) collected during the loop.
   const activeExtensions = config.getActiveExtensions?.() ?? [];
@@ -252,6 +262,34 @@ export async function resolveAtCommandQuery({
       onDebugMessage(
         `Extension "${extRef.name}" not found among active extensions. ` +
           `Available: ${activeExtensions.map((e) => e.name).join(', ') || '(none)'}`,
+      );
+      continue;
+    }
+
+    const mcpServerRef = parseMcpServerRef(pathName);
+    if (mcpServerRef) {
+      const matched = matchMcpServerByRef(
+        mcpServerRef.name,
+        config.getMcpServers() || {},
+      );
+      if (matched) {
+        if (
+          !mcpServerMentions.some((m) => m.serverName === matched.serverName)
+        ) {
+          mcpServerMentions.push({
+            originalAtPath,
+            serverName: matched.serverName,
+          });
+        }
+        atPathToResolvedSpecMap.set(
+          originalAtPath,
+          buildMcpServerRef(matched.serverName),
+        );
+        continue;
+      }
+      onDebugMessage(
+        `MCP server "${mcpServerRef.name}" not found among configured MCP servers. ` +
+          `Available: ${Object.keys(config.getMcpServers() || {}).join(', ') || '(none)'}`,
       );
       continue;
     }
@@ -487,6 +525,7 @@ export async function resolveAtCommandQuery({
   if (
     pathSpecsToRead.length === 0 &&
     mcpResourceRefs.length === 0 &&
+    mcpServerMentions.length === 0 &&
     extensionMentions.length === 0
   ) {
     onDebugMessage('No valid file paths found in @ commands to read.');
@@ -511,11 +550,14 @@ export async function resolveAtCommandQuery({
   // Aggregate cap across all extensions to prevent unbounded context injection.
   let extensionContextBudgetRemaining = EXTENSION_CONTEXT_BUDGET;
 
-  const extensionParts: Part[] = [];
-  const extensionDisplays: IndividualToolCallDisplay[] = [];
-  const extensionLabels: string[] = [];
+  const scopedMentionEntries: Array<{
+    originalAtPath: string;
+    part: Part;
+    label: string;
+    display: IndividualToolCallDisplay;
+  }> = [];
   for (let i = 0; i < extensionMentions.length; i++) {
-    const { extension } = extensionMentions[i];
+    const { originalAtPath, extension } = extensionMentions[i];
     const displayName = getExtensionDisplayName(extension);
     const callId = `client-extension-${userMessageTimestamp}-${i}`;
 
@@ -526,17 +568,51 @@ export async function resolveAtCommandQuery({
     });
     extensionContextBudgetRemaining = context.remainingBudget;
 
-    extensionParts.push({ text: context.text });
-    extensionLabels.push(buildExtensionRef(extension.name));
-    extensionDisplays.push({
-      callId,
-      name: 'Activate Extension',
-      description: `Activated extension ${displayName}`,
-      status: ToolCallStatus.Success,
-      resultDisplay: undefined,
-      confirmationDetails: undefined,
+    scopedMentionEntries.push({
+      originalAtPath,
+      part: { text: context.text },
+      label: buildExtensionRef(extension.name),
+      display: {
+        callId,
+        name: 'Activate Extension',
+        description: `Activated extension ${displayName}`,
+        status: ToolCallStatus.Success,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      },
     });
   }
+
+  for (let i = 0; i < mcpServerMentions.length; i++) {
+    const { originalAtPath, serverName } = mcpServerMentions[i];
+    scopedMentionEntries.push({
+      originalAtPath,
+      part: { text: buildMcpServerContextText(config, serverName) },
+      label: buildMcpServerRef(serverName),
+      display: {
+        callId: `client-mcp-server-${userMessageTimestamp}-${i}`,
+        name: 'Activate MCP Server',
+        description: `Activated MCP server ${serverName}`,
+        status: ToolCallStatus.Success,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      },
+    });
+  }
+
+  const scopedMentionOrder = new Map(
+    atPathCommandParts.map((part, index) => [part.content, index]),
+  );
+  scopedMentionEntries.sort(
+    (a, b) =>
+      (scopedMentionOrder.get(a.originalAtPath) ?? Number.MAX_SAFE_INTEGER) -
+      (scopedMentionOrder.get(b.originalAtPath) ?? Number.MAX_SAFE_INTEGER),
+  );
+  const scopedMentionParts = scopedMentionEntries.map((entry) => entry.part);
+  const scopedMentionLabels = scopedMentionEntries.map((entry) => entry.label);
+  const scopedMentionDisplays = scopedMentionEntries.map(
+    (entry) => entry.display,
+  );
 
   // Read files (if any). A hard read error aborts the turn, as before — but
   // any extension/resource tool-cards already gathered are still surfaced.
@@ -588,7 +664,7 @@ export async function resolveAtCommandQuery({
           ? errorToolCallDisplay.resultDisplay
           : undefined;
       const labelsOnError = [
-        ...extensionLabels,
+        ...scopedMentionLabels,
         ...contentLabelsForDisplay,
         ...resourceLabels,
       ];
@@ -596,7 +672,7 @@ export async function resolveAtCommandQuery({
         processedQuery: null,
         shouldProceed: false,
         toolDisplays: [
-          ...extensionDisplays,
+          ...scopedMentionDisplays,
           ...resourceDisplays,
           errorToolCallDisplay,
         ],
@@ -617,12 +693,12 @@ export async function resolveAtCommandQuery({
   // positional alignment, so grouping is safe.
   const processedQueryParts: PartListUnion = [
     { text: initialQueryText },
-    ...extensionParts,
+    ...scopedMentionParts,
     ...fileParts,
     ...resourceParts,
   ];
   const allLabels = [
-    ...extensionLabels,
+    ...scopedMentionLabels,
     ...contentLabelsForDisplay,
     ...resourceLabels,
   ];
@@ -630,7 +706,11 @@ export async function resolveAtCommandQuery({
   return {
     processedQuery: processedQueryParts,
     shouldProceed: true,
-    toolDisplays: [...extensionDisplays, ...fileDisplays, ...resourceDisplays],
+    toolDisplays: [
+      ...scopedMentionDisplays,
+      ...fileDisplays,
+      ...resourceDisplays,
+    ],
     filesRead: allLabels,
     recording: {
       filesRead: allLabels,

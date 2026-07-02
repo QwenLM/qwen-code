@@ -177,6 +177,11 @@ import {
   matchExtensionByRef,
   parseExtensionRef,
 } from '../../utils/extension-mention.js';
+import {
+  buildMcpServerContextText,
+  matchMcpServerByRef,
+  parseMcpServerRef,
+} from '../../utils/mcp-server-mention.js';
 
 // Import modular session components
 import type {
@@ -680,6 +685,20 @@ function collectExtensionMentionRefs(
     const pathName = match[1];
     if (!pathName) continue;
     const ref = parseExtensionRef(pathName);
+    if (ref) {
+      mentions.set(ref.name.toLowerCase(), ref.name);
+    }
+  }
+}
+
+function collectMcpServerMentionRefs(
+  text: string,
+  mentions: Map<string, string>,
+): void {
+  for (const match of text.matchAll(AT_TOKEN_RE)) {
+    const pathName = match[1];
+    if (!pathName) continue;
+    const ref = parseMcpServerRef(pathName);
     if (ref) {
       mentions.set(ref.name.toLowerCase(), ref.name);
     }
@@ -5373,6 +5392,7 @@ export class Session implements SessionContext {
 
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
+    const mcpServerMentions = new Map<string, string>();
     const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
       this.config,
     );
@@ -5381,6 +5401,7 @@ export class Session implements SessionContext {
       switch (part.type) {
         case 'text':
           collectExtensionMentionRefs(part.text, extensionMentions);
+          collectMcpServerMentionRefs(part.text, mcpServerMentions);
           return { text: part.text };
         case 'image':
           if (preserveUnsupportedImageForBridge) {
@@ -5433,18 +5454,21 @@ export class Session implements SessionContext {
       extensionMentions,
       abortSignal,
     );
+    const mcpServerParts =
+      this.#resolveMcpServerMentionParts(mcpServerMentions);
 
     if (
       atPathCommandParts.length === 0 &&
       embeddedContext.length === 0 &&
-      extensionParts.length === 0
+      extensionParts.length === 0 &&
+      mcpServerParts.length === 0
     ) {
       return this.#applyVisionBridgeIfNeeded(parts, abortSignal);
     }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
       return this.#applyVisionBridgeIfNeeded(
-        [...parts, ...extensionParts],
+        [...parts, ...extensionParts, ...mcpServerParts],
         abortSignal,
       );
     }
@@ -5493,6 +5517,7 @@ export class Session implements SessionContext {
       // Add initial query text first
       processedQueryParts.push({ text: initialQueryText });
       processedQueryParts.push(...extensionParts);
+      processedQueryParts.push(...mcpServerParts);
 
       // Then add content parts (preserving binary files as inlineData)
       for (const part of contentParts) {
@@ -5507,6 +5532,7 @@ export class Session implements SessionContext {
     } else {
       processedQueryParts.push({ text: initialQueryText.trim() });
       processedQueryParts.push(...extensionParts);
+      processedQueryParts.push(...mcpServerParts);
     }
 
     // Process embedded context from resource blocks
@@ -5648,6 +5674,30 @@ export class Session implements SessionContext {
       extensionParts.push({ text: context.text });
     }
     return extensionParts;
+  }
+
+  #resolveMcpServerMentionParts(
+    mcpServerMentions: Map<string, string>,
+  ): Part[] {
+    if (mcpServerMentions.size === 0) return [];
+    const servers = this.config.getMcpServers?.() ?? {};
+    if (Object.keys(servers).length === 0) return [];
+
+    const parts: Part[] = [];
+    for (const name of mcpServerMentions.values()) {
+      const matched = matchMcpServerByRef(name, servers);
+      if (!matched) {
+        this.debug(
+          `MCP server "${name}" not found among configured MCP servers. ` +
+            `Available: ${Object.keys(servers).join(', ') || '(none)'}`,
+        );
+        continue;
+      }
+      parts.push({
+        text: buildMcpServerContextText(this.config, matched.serverName),
+      });
+    }
+    return parts;
   }
 
   debug(msg: string): void {

@@ -67,6 +67,9 @@ describe('handleAtCommand', () => {
       getPromptRegistry: () => ({
         getPromptsByServer: () => [],
       }),
+      getResourceRegistry: () => ({
+        getResourcesByServer: () => [],
+      }),
       getDebugMode: () => false,
       getFileExclusions: () => ({
         getCoreIgnorePatterns: () => COMMON_IGNORE_PATTERNS,
@@ -262,6 +265,36 @@ describe('handleAtCommand', () => {
     expect(mockOnDebugMessage).toHaveBeenCalledWith(
       `Path ${dirPath} resolved to directory.`,
     );
+  });
+
+  it('should inject MCP server context for @mcp mentions', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getMcpServers: () => ({ demo: {} }),
+      getPromptRegistry: () => ({
+        getPromptsByServer: (name: string) => (name === 'demo' ? ['p'] : []),
+      }),
+      getResourceRegistry: () => ({
+        getResourcesByServer: (name: string) =>
+          name === 'demo' ? [{ uri: 'res://1' }] : [],
+      }),
+    } as unknown as Config;
+
+    const result = await handleAtCommand({
+      query: 'Use @mcp:demo now',
+      config: mockConfig,
+      onDebugMessage: mockOnDebugMessage,
+      messageId: 128,
+      signal: abortController.signal,
+    });
+
+    expect(result.shouldProceed).toBe(true);
+    expect(result.processedQuery).toEqual([
+      { text: 'Use @mcp:demo now' },
+      {
+        text: expect.stringContaining('--- MCP Server: demo ---'),
+      },
+    ]);
   });
 
   it('should handle query with text before and after @command', async () => {

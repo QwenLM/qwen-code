@@ -141,14 +141,15 @@ const TOOLTIP_STYLES = `
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section {
   display: block !important;
-  height: 0;
-  margin: 6px 10px 3px;
-  padding: 0 !important;
+  height: auto;
+  margin: 6px 10px 4px;
+  padding: 2px 0 4px !important;
+  line-height: 1.2;
   border-bottom: 1px solid var(--border) !important;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section:first-of-type {
-  display: none !important;
+  margin-top: 0;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete .cm-completionLabel {
@@ -1338,6 +1339,19 @@ export function useComposerCore(
       createAtCompletionSource(
         () => workspaceActionsRef.current?.globWorkspace,
         () => workspaceActionsRef.current?.loadExtensionsStatus,
+        () =>
+          workspaceActionsRef.current?.loadMcpStatus
+            ? async () => {
+                const status =
+                  await workspaceActionsRef.current!.loadMcpStatus();
+                return {
+                  servers: (status?.servers ?? []).map((server) => ({
+                    name: server.name,
+                    description: server.description,
+                  })),
+                };
+              }
+            : undefined,
       ),
     ];
 

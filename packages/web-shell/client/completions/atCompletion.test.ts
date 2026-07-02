@@ -5,6 +5,7 @@ import {
   atCompletionSource,
   type ExtensionCompletionEntry,
   type GlobFn,
+  type McpServerCompletionEntry,
 } from './atCompletion';
 
 const extensions: ExtensionCompletionEntry[] = [
@@ -27,6 +28,17 @@ const extensions: ExtensionCompletionEntry[] = [
   },
 ];
 
+const mcpServers: McpServerCompletionEntry[] = [
+  {
+    name: 'dataworks',
+    description: 'DataWorks MCP',
+  },
+  {
+    name: 'clickhouse',
+    description: 'ClickHouse MCP',
+  },
+];
+
 function context(doc: string): CompletionContext {
   return new CompletionContext(EditorState.create({ doc }), doc.length, true);
 }
@@ -41,19 +53,22 @@ describe('atCompletionSource', () => {
       context('@'),
       () => glob,
       () => async () => ({ extensions }),
+      () => async () => ({ servers: mcpServers }),
     );
 
     expect(result?.from).toBe(0);
     expect(result?.options.map((option) => option.label)).toEqual([
       '@ext:browser',
       '@ext:review-tools',
+      '@mcp:clickhouse',
+      '@mcp:dataworks',
       '@README.md',
       '@src/index.ts',
     ]);
     expect(glob).toHaveBeenCalledWith('**/*', { maxResults: 50 });
   });
 
-  it('filters extensions and files by partial input', async () => {
+  it('filters extensions, MCP servers, and files by partial input', async () => {
     const glob = vi.fn<GlobFn>().mockResolvedValue({
       matches: ['browser-test.ts'],
     });
@@ -62,10 +77,17 @@ describe('atCompletionSource', () => {
       context('@bro'),
       () => glob,
       () => async () => ({ extensions }),
+      () => async () => ({
+        servers: [
+          ...mcpServers,
+          { name: 'browser-mcp', description: 'Browser MCP' },
+        ],
+      }),
     );
 
     expect(result?.options.map((option) => option.label)).toEqual([
       '@ext:browser',
+      '@mcp:browser-mcp',
       '@browser-test.ts',
     ]);
     expect(glob).toHaveBeenCalledWith('bro*', { maxResults: 50 });

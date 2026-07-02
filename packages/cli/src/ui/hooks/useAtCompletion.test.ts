@@ -857,6 +857,35 @@ describe('useAtCompletion', () => {
     });
   });
 
+  describe('MCP server mention completion', () => {
+    it('suggests @mcp:<server> mentions for @mcp: queries', async () => {
+      testRootDir = await createTmpDir({ 'file.txt': '' });
+      const resourceConfig = {
+        ...mockConfig,
+        getMcpServers: () => ({ demo: {}, other: {} }),
+      } as unknown as Config;
+
+      const { result } = renderHook(() =>
+        useTestHarnessForAtCompletion(
+          true,
+          'mcp:de',
+          resourceConfig,
+          testRootDir,
+        ),
+      );
+
+      await waitFor(() => {
+        expect(result.current.suggestions.length).toBeGreaterThan(0);
+      });
+      expect(result.current.suggestions.map((s) => s.value)).toContain(
+        'mcp:demo',
+      );
+      expect(result.current.suggestions.map((s) => s.value)).not.toContain(
+        'demo:',
+      );
+    });
+  });
+
   describe('MCP server discovery', () => {
     it('suggests matching servers (with resources) alongside files for a bare @<partial>', async () => {
       testRootDir = await createTmpDir({ 'my-notes.txt': '' });
@@ -879,14 +908,16 @@ describe('useAtCompletion', () => {
         expect(result.current.suggestions.length).toBeGreaterThan(0);
       });
       const values = result.current.suggestions.map((s) => s.value);
-      // Server entry is prepended (before files) and expands to `@myserver:`.
-      expect(values[0]).toBe('myserver:');
+      expect(values[0]).toBe('mcp:myserver');
+      expect(values).toContain('myserver:');
       expect(values).toContain('my-notes.txt');
+      const mentionSug = result.current.suggestions.find(
+        (s) => s.value === 'mcp:myserver',
+      );
+      expect(mentionSug?.isDirectory).toBe(false);
       const serverSug = result.current.suggestions.find(
         (s) => s.value === 'myserver:',
       );
-      // `isDirectory` => no trailing space => completion re-triggers into the
-      // resource list once `@myserver:` is inserted.
       expect(serverSug?.isDirectory).toBe(true);
     });
 
