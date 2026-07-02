@@ -52,6 +52,7 @@ vi.mock('node:fs', () => ({
   mkdirSync: vi.fn(),
   readFileSync: vi.fn(),
   writeFileSync: vi.fn(),
+  renameSync: vi.fn(),
   existsSync: vi.fn(() => false),
 }));
 
@@ -62,6 +63,7 @@ vi.mock('./api.js', () => ({
   fetchGatewayUrl: mockFetchGatewayUrl,
 }));
 
+import { renameSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 vi.mock('ws', () => ({
   default: MockWebSocket,
 }));
@@ -884,5 +886,208 @@ describe('gateway reconnect timer', () => {
     } finally {
       clearTimeoutSpy.mockRestore();
     }
+  });
+});
+
+describe('restoreQQState validation filters', () => {
+  function makeChannel(): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('filters chatTypeMap to only accept c2c and group values', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        chatTypeMap: [
+          ['a', 'c2c'],
+          ['b', 'group'],
+          ['c', 'unknown'],
+          ['d', null],
+          ['e', ''],
+        ],
+      }),
+    );
+
+    const ch = makeChannel();
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const chatTypeMap = (ch as unknown as { chatTypeMap: Map<string, string> })
+      .chatTypeMap;
+    expect(chatTypeMap.size).toBe(2);
+    expect(chatTypeMap.get('a')).toBe('c2c');
+    expect(chatTypeMap.get('b')).toBe('group');
+    expect(chatTypeMap.has('c')).toBe(false);
+    expect(chatTypeMap.has('d')).toBe(false);
+    expect(chatTypeMap.has('e')).toBe(false);
+  });
+
+  it('filters replyMsgId to only accept strings ≤ 128 chars', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        replyMsgId: [
+          ['a', 'valid-id'],
+          ['b', 'x'.repeat(128)],
+          ['c', 'x'.repeat(129)],
+          ['d', 123],
+          ['e', null],
+          ['f', ''],
+        ],
+      }),
+    );
+
+    const ch = makeChannel();
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const replyMsgId = (ch as unknown as { replyMsgId: Map<string, string> })
+      .replyMsgId;
+    expect(replyMsgId.size).toBe(3);
+    expect(replyMsgId.get('a')).toBe('valid-id');
+    expect(replyMsgId.get('b')).toBe('x'.repeat(128));
+    expect(replyMsgId.get('f')).toBe('');
+    expect(replyMsgId.has('c')).toBe(false);
+    expect(replyMsgId.has('d')).toBe(false);
+    expect(replyMsgId.has('e')).toBe(false);
+  });
+
+  it('filters msgSeqMap to only accept non-negative numbers', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        msgSeqMap: [
+          ['a', 0],
+          ['b', 42],
+          ['c', -1],
+          ['d', 'string'],
+          ['e', null],
+        ],
+      }),
+    );
+
+    const ch = makeChannel();
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
+      .msgSeqMap;
+    expect(msgSeqMap.size).toBe(2);
+    expect(msgSeqMap.get('a')).toBe(0);
+    expect(msgSeqMap.get('b')).toBe(42);
+    expect(msgSeqMap.has('c')).toBe(false);
+    expect(msgSeqMap.has('d')).toBe(false);
+    expect(msgSeqMap.has('e')).toBe(false);
+  });
+
+  it('returns false and does not throw on corrupt JSON', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue('not json{{{');
+
+    const ch = makeChannel();
+    const result = (
+      ch as unknown as { restoreQQState: () => boolean }
+    ).restoreQQState();
+    expect(result).toBe(false);
+  });
+
+  it('returns false when state file does not exist', () => {
+    vi.mocked(existsSync).mockReturnValue(false);
+
+    const ch = makeChannel();
+    const result = (
+      ch as unknown as { restoreQQState: () => boolean }
+    ).restoreQQState();
+    expect(result).toBe(false);
+  });
+});
+
+describe('atomic state persistence', () => {
+  function makeChannel(): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('flushQQState writes to tmp path then renames to final path', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as {
+      flushQQState: () => void;
+      qqStatePath: string;
+    };
+
+    chp.flushQQState();
+
+    // First writes to tmp, then renames
+    const writeCalls = vi.mocked(writeFileSync).mock.calls;
+    const renameCalls = vi.mocked(renameSync).mock.calls;
+
+    expect(writeCalls.length).toBeGreaterThanOrEqual(1);
+    expect(renameCalls.length).toBeGreaterThanOrEqual(1);
+
+    // The write should target the .tmp path
+    const writeTarget = writeCalls[0][0] as string;
+    expect(writeTarget).toContain('.tmp');
+
+    // The rename should go from .tmp to the final path
+    expect(renameCalls[0][0]).toBe(writeTarget);
+    expect(renameCalls[0][1]).toBe(chp.qqStatePath);
+  });
+
+  it('flushQQState writes valid JSON with expected keys', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as { flushQQState: () => void };
+
+    chp.flushQQState();
+
+    const writeCalls = vi.mocked(writeFileSync).mock.calls;
+    expect(writeCalls.length).toBeGreaterThanOrEqual(1);
+
+    const written = JSON.parse(writeCalls[0][1] as string);
+    expect(written).toHaveProperty('chatTypeMap');
+    expect(written).toHaveProperty('replyMsgId');
+    expect(written).toHaveProperty('msgSeqMap');
+  });
+
+  it('flushQQState sets file mode 0o600', () => {
+    const ch = makeChannel();
+    (ch as unknown as { flushQQState: () => void }).flushQQState();
+
+    const writeCalls = vi.mocked(writeFileSync).mock.calls;
+    expect(writeCalls.length).toBeGreaterThanOrEqual(1);
+    expect(writeCalls[0][2]).toEqual({ mode: 0o600 });
   });
 });

@@ -236,3 +236,45 @@ describe('validateGatewayUrl', () => {
     );
   });
 });
+
+describe('fetchGatewayUrl + validateGatewayUrl integration', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('rejects when API returns a non-wss URL (http://)', async () => {
+    mockFetch.mockResolvedValue(
+      mockResponse(true, 200, { url: 'http://gateway.qq.com/ws' }),
+    );
+
+    await expect(fetchGatewayUrl('tok', false)).rejects.toThrow('wss://');
+  });
+
+  it('rejects when API returns a non-wss URL (ws://)', async () => {
+    mockFetch.mockResolvedValue(
+      mockResponse(true, 200, { url: 'ws://gateway.qq.com/ws' }),
+    );
+
+    await expect(fetchGatewayUrl('tok', false)).rejects.toThrow('wss://');
+  });
+
+  it('rejects when API returns an invalid URL', async () => {
+    mockFetch.mockResolvedValue(
+      mockResponse(true, 200, { url: 'not a valid url' }),
+    );
+
+    await expect(fetchGatewayUrl('tok', false)).rejects.toThrow(
+      'not a valid URL',
+    );
+  });
+
+  it('accepts when API returns a valid wss:// URL', async () => {
+    mockFetch.mockResolvedValue(
+      mockResponse(true, 200, { url: 'wss://api.sgroup.qq.com/ws' }),
+    );
+
+    await expect(fetchGatewayUrl('tok', false)).resolves.toBe(
+      'wss://api.sgroup.qq.com/ws',
+    );
+  });
+});
