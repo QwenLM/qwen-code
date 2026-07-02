@@ -191,6 +191,15 @@ describe('qwen resolve workflow', () => {
     expect(authorizeStep).toMatch(
       /if \[ "\$PR_ACTION" = "review_requested" \]; then\s+principal="\$SENDER"/,
     );
+    const reviewRequestedBranch = authorizeStep.slice(
+      authorizeStep.indexOf('if [ "$PR_ACTION" = "review_requested" ]; then'),
+      authorizeStep.indexOf('else'),
+    );
+    expect(reviewRequestedBranch).toContain('principal="$SENDER"');
+    expect(reviewRequestedBranch).not.toContain(
+      'echo "should_review=true" >> "$GITHUB_OUTPUT"',
+    );
+    expect(reviewRequestedBranch).not.toContain('exit 0');
     expect(authorizeStep).toContain('pull_request_target)');
     expect(authorizeStep).toContain(
       'Automatic PR review allowed for PR #${PR_NUMBER} after same-repo/precheck gate.',
