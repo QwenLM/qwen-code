@@ -7,6 +7,13 @@
 import { pathToFileURL } from 'node:url';
 import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
 import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
+import { initStartupProfiler } from './utils/startupProfiler.js';
+import { initCpuProfiler } from './utils/cpuProfiler.js';
+
+// Preserve the old entrypoint's profiling baseline before route-specific
+// dynamic imports or command handling shift startup measurements.
+initStartupProfiler();
+initCpuProfiler();
 
 type BootstrapRoute = 'serve' | 'mcp' | 'help' | 'version' | 'default';
 
@@ -99,6 +106,19 @@ const TOP_LEVEL_HELP_OPTIONS = [
   ],
 ] as const satisfies ReadonlyArray<readonly [string, Options]>;
 
+const VALUE_FLAGS = new Set([
+  '--model',
+  '-m',
+  '--prompt',
+  '-p',
+  '--prompt-interactive',
+  '-i',
+  '--output-format',
+  '-o',
+  '--resume',
+  '-r',
+]);
+
 function writeStdoutLine(line: string): void {
   process.stdout.write(line.endsWith('\n') ? line : `${line}\n`);
 }
@@ -108,9 +128,14 @@ function hasFlag(
   long: string,
   short: string,
 ): boolean {
-  for (const arg of argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
     if (arg === '--') {
       return false;
+    }
+    if (VALUE_FLAGS.has(arg)) {
+      i++;
+      continue;
     }
     if (arg === long || arg === short) {
       return true;
@@ -145,9 +170,14 @@ async function buildTopLevelHelpParser() {
 }
 
 function firstPositionalArg(argv: readonly string[]): string | undefined {
-  for (const arg of argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i]!;
     if (arg === '--') {
       return undefined;
+    }
+    if (VALUE_FLAGS.has(arg)) {
+      i++;
+      continue;
     }
     if (!arg.startsWith('-')) {
       return arg;
@@ -296,29 +326,11 @@ async function parseYargsCommand(
   });
 }
 
-async function initializeProfilers(): Promise<void> {
-  const [{ initStartupProfiler }, { initCpuProfiler }] = await Promise.all([
-    import('./utils/startupProfiler.js'),
-    import('./utils/cpuProfiler.js'),
-  ]);
-  initStartupProfiler();
-  initCpuProfiler();
-}
-
 export async function runCliEntry(
   rawArgv: readonly string[] = process.argv.slice(2),
 ): Promise<void> {
   const argv = normalizeServeFastPathArgv(rawArgv);
   const route = resolveBootstrapRoute(argv);
-  let profilersInitialized = false;
-
-  async function ensureProfilersInitialized(): Promise<void> {
-    if (profilersInitialized) {
-      return;
-    }
-    await initializeProfilers();
-    profilersInitialized = true;
-  }
 
   if (route === 'version') {
     await printBootstrapVersion();
@@ -326,7 +338,6 @@ export async function runCliEntry(
   }
 
   if (route === 'serve') {
-    await ensureProfilersInitialized();
     const { tryRunServeFastPath } = await import('./serve/fast-path.js');
     if (await tryRunServeFastPath(argv)) {
       return;
@@ -339,7 +350,6 @@ export async function runCliEntry(
     return;
   }
 
-  await ensureProfilersInitialized();
   const { main } = await import('./gemini.js');
   await main();
 }
@@ -410,7 +420,10 @@ function writeStderrLine(line: string): void {
   process.stderr.write(line.endsWith('\n') ? line : `${line}\n`);
 }
 
-export async function runCliEntryPoint(): Promise<void> {
+export async function runCliEntryPoint(
+  run: () => Promise<void> = runCliEntry,
+  handleError: (error: unknown) => Promise<void> = handleCriticalError,
+): Promise<void> {
   process.on('uncaughtException', (error) => {
     if (isExpectedPtyRaceError(error)) {
       return;
@@ -424,8 +437,12 @@ export async function runCliEntryPoint(): Promise<void> {
     process.exit(1);
   });
 
-  await runCliEntry().catch((error: unknown) => {
-    void handleCriticalError(error).catch((handlerError: unknown) => {
+  try {
+    await run();
+  } catch (error) {
+    try {
+      await handleError(error);
+    } catch (handlerError) {
       writeStderrLine('An unexpected critical error occurred:');
       writeStderrLine('Original error:');
       if (error instanceof Error) {
@@ -440,8 +457,8 @@ export async function runCliEntryPoint(): Promise<void> {
         writeStderrLine(String(handlerError));
       }
       process.exit(1);
-    });
-  });
+    }
+  }
 }
 
 if (

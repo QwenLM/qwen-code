@@ -17,6 +17,7 @@ import {
   isExpectedPtyRaceError,
   resolveBootstrapRoute,
   runCliEntry,
+  runCliEntryPoint,
 } from './cli.js';
 
 const mocks = vi.hoisted(() => ({
@@ -93,6 +94,12 @@ describe('resolveBootstrapRoute', () => {
     expect(resolveBootstrapRoute(['--safe-mode', 'mcp', 'list'])).toBe(
       'default',
     );
+  });
+
+  it('does not treat values for global flags as positional commands or bootstrap flags', () => {
+    expect(resolveBootstrapRoute(['--model', 'gpt-4', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['-p', 'hello', '--help'])).toBe('help');
+    expect(resolveBootstrapRoute(['--model', '-v'])).toBe('default');
   });
 
   it('does not treat flags after -- as bootstrap flags', () => {
@@ -213,8 +220,6 @@ describe('runCliEntry', () => {
 
     expect(mocks.main).toHaveBeenCalledTimes(1);
     expect(mocks.mcpListHandler).not.toHaveBeenCalled();
-    expect(mocks.initStartupProfiler).toHaveBeenCalledTimes(1);
-    expect(mocks.initCpuProfiler).toHaveBeenCalledTimes(1);
   });
 
   it('fails MCP fast-path validation without loading the full CLI', async () => {
@@ -253,8 +258,6 @@ describe('runCliEntry', () => {
 
     expect(mocks.tryRunServeFastPath).toHaveBeenCalledWith(['serve']);
     expect(mocks.main).not.toHaveBeenCalled();
-    expect(mocks.initStartupProfiler).toHaveBeenCalledTimes(1);
-    expect(mocks.initCpuProfiler).toHaveBeenCalledTimes(1);
   });
 
   it('initializes profilers once when the serve fast path falls back', async () => {
@@ -263,16 +266,12 @@ describe('runCliEntry', () => {
     await runCliEntry(['serve']);
 
     expect(mocks.tryRunServeFastPath).toHaveBeenCalledWith(['serve']);
-    expect(mocks.initStartupProfiler).toHaveBeenCalledTimes(1);
-    expect(mocks.initCpuProfiler).toHaveBeenCalledTimes(1);
     expect(mocks.main).toHaveBeenCalledTimes(1);
   });
 
-  it('initializes profilers and loads gemini on the default path', async () => {
+  it('loads gemini on the default path', async () => {
     await runCliEntry([]);
 
-    expect(mocks.initStartupProfiler).toHaveBeenCalledTimes(1);
-    expect(mocks.initCpuProfiler).toHaveBeenCalledTimes(1);
     expect(mocks.main).toHaveBeenCalledTimes(1);
   });
 });
@@ -285,6 +284,23 @@ describe('bootstrap import boundaries', () => {
     expect(source).not.toContain("from '@qwen-code/qwen-code-core'");
     expect(source).not.toContain("import './gemini.js'");
     expect(source).not.toContain("import { main } from './gemini.js'");
+  });
+
+  it('initializes profilers during bootstrap module evaluation', () => {
+    const source = readFileSync('src/cli.ts', 'utf8');
+
+    expect(source).toContain(
+      "import { initStartupProfiler } from './utils/startupProfiler.js'",
+    );
+    expect(source).toContain(
+      "import { initCpuProfiler } from './utils/cpuProfiler.js'",
+    );
+    expect(source.indexOf('initStartupProfiler();')).toBeLessThan(
+      source.indexOf('export async function runCliEntry('),
+    );
+    expect(source.indexOf('initCpuProfiler();')).toBeLessThan(
+      source.indexOf('export async function runCliEntry('),
+    );
   });
 
   it('uses the bootstrap file as the production bundle entry', () => {
@@ -448,5 +464,56 @@ describe('bootstrap error handling', () => {
       ),
     ).toBe(true);
     expect(isExpectedPtyRaceError(new Error('other failure'))).toBe(false);
+  });
+
+  it('wires uncaughtException PTY race suppression without exiting', async () => {
+    let uncaughtHandler: ((error: Error) => void) | undefined;
+    vi.spyOn(process, 'on').mockImplementation(((
+      event: string | symbol,
+      listener: (...args: unknown[]) => void,
+    ) => {
+      if (event === 'uncaughtException') {
+        uncaughtHandler = listener as (error: Error) => void;
+      }
+      return process;
+    }) as typeof process.on);
+
+    await runCliEntryPoint(vi.fn(async () => {}));
+
+    expect(uncaughtHandler).toBeDefined();
+    uncaughtHandler?.(Object.assign(new Error('read EIO'), { code: 'EIO' }));
+    expect(process.exit).not.toHaveBeenCalled();
+    expect(stderr.join('')).toBe('');
+  });
+
+  it('routes run failures through the critical error handler', async () => {
+    const error = new Error('run failed');
+    const run = vi.fn(async () => {
+      throw error;
+    });
+    const handleError = vi.fn(async () => {});
+
+    await runCliEntryPoint(run, handleError);
+
+    expect(handleError).toHaveBeenCalledWith(error);
+  });
+
+  it('reports when the critical error handler itself fails', async () => {
+    const run = vi.fn(async () => {
+      throw new Error('run failed');
+    });
+    const handleError = vi.fn(async () => {
+      throw new Error('handler failed');
+    });
+
+    await expect(runCliEntryPoint(run, handleError)).rejects.toThrow(
+      'process.exit:1',
+    );
+
+    const output = stderr.join('');
+    expect(output).toContain('Original error:');
+    expect(output).toContain('run failed');
+    expect(output).toContain('Error handler failed:');
+    expect(output).toContain('handler failed');
   });
 });
