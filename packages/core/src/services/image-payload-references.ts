@@ -51,6 +51,7 @@ export function prepareImagePayloadsForRequest(
   contents: Content[],
   options: {
     maxRecentImages: number;
+    preserveImagePartsForContentIndex?: number;
     preserveLastUserImagePartCount?: number;
     store: ImagePayloadStore;
   },
@@ -58,6 +59,9 @@ export function prepareImagePayloadsForRequest(
   const referencedIds = collectReferencedImageIds(contents.at(-1));
   const collected: CollectedImage[] = [];
   const transformed = contents.map((content, index) => {
+    if (index === options.preserveImagePartsForContentIndex) {
+      return content;
+    }
     if (index === contents.length - 1 && content.role === 'user') {
       const preserveCount = options.preserveLastUserImagePartCount ?? 0;
       const preserveFrom = Math.max(

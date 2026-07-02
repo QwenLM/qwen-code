@@ -1500,16 +1500,28 @@ export class GeminiChat {
    * Public history readers still use {@link getHistory}, which returns a
    * defensive deep copy for caller mutation safety.
    */
-  private getRequestHistory(currentUserPartCount = 0): Content[] {
-    const requestHistory = extractCuratedHistory(this.history).map(
-      copyContentContainer,
-    );
+  private getRequestHistory(currentUserContent?: Content): Content[] {
+    const curatedHistory = extractCuratedHistory(this.history);
+    const preserveImagePartsForContentIndex = currentUserContent
+      ? curatedHistory.findIndex((content) => content === currentUserContent)
+      : -1;
+    const requestHistory = curatedHistory.map(copyContentContainer);
+    const preserveLastUserImagePartCount =
+      preserveImagePartsForContentIndex === -1
+        ? (currentUserContent?.parts?.length ?? 0)
+        : 0;
+    const preserveImagePartsForContentIndexOption =
+      preserveImagePartsForContentIndex === -1
+        ? undefined
+        : preserveImagePartsForContentIndex;
     const { maxRecentImages } = resolveCompactionTuning(
       this.config.getChatCompression(),
     );
     return prepareImagePayloadsForRequest(requestHistory, {
       maxRecentImages,
-      preserveLastUserImagePartCount: currentUserPartCount,
+      preserveImagePartsForContentIndex:
+        preserveImagePartsForContentIndexOption,
+      preserveLastUserImagePartCount,
       store: this.imagePayloadStore,
     });
   }
@@ -1798,7 +1810,7 @@ export class GeminiChat {
           parsedEnvMaxTokensForThreshold ??
           0)
         : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')));
-    let currentUserPartCount = 0;
+    let currentUserContent: Content | undefined;
     try {
       // The send-lock above is held but the generator's `finally` (which
       // resolves it) has not run yet. Any setup error before returning the
@@ -1972,6 +1984,7 @@ export class GeminiChat {
 
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
+      currentUserContent = userContent;
       userContentAdded = true;
       // Record that the user content landed (see `userContentPushCount`). The
       // setup-error path below decrements this if it rolls the push back.
@@ -2003,8 +2016,7 @@ export class GeminiChat {
               .join(', '),
         );
       }
-      currentUserPartCount = userContent.parts?.length ?? 0;
-      requestContents = this.getRequestHistory(currentUserPartCount);
+      requestContents = this.getRequestHistory(currentUserContent);
     } catch (error) {
       if (userContentAdded) {
         this.history.pop();
@@ -2308,7 +2320,7 @@ export class GeminiChat {
                     // tryCompress stops resetting it.
                     popPartialIfPushed();
                     requestContents =
-                      self.getRequestHistory(currentUserPartCount);
+                      self.getRequestHistory(currentUserContent);
                     debugLogger.info(
                       `Reactive compression succeeded: ` +
                         `${reactiveInfo.originalTokenCount} -> ` +
@@ -2551,8 +2563,7 @@ export class GeminiChat {
             // model's continuation appends to the previous partial output.
             yield { type: StreamEventType.RETRY, isContinuation: true };
             // Re-send with the updated history (includes partial + recovery)
-            const recoveryContents =
-              self.getRequestHistory(currentUserPartCount);
+            const recoveryContents = self.getRequestHistory(currentUserContent);
             escalatedFinishReason = undefined;
             try {
               const recoveryStream = await self.makeApiCallAndProcessStream(

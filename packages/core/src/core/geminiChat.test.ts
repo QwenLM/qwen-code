@@ -7302,6 +7302,42 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('preserves current user image bytes during output recovery', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 0,
+      });
+      const streams = [
+        makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'escalated' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'done' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        {
+          message: [
+            { text: 'describe this image' },
+            { inlineData: { mimeType: 'image/png', data: 'current-shot' } },
+          ],
+        },
+        'prompt-recovery-image',
+      );
+
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const recoveryRequest = vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mock.calls[2]?.[0];
+      const serialized = JSON.stringify(recoveryRequest?.contents);
+      expect(serialized).toContain('"data":"current-shot"');
+    });
+
     it('should coalesce overlapping recovery continuation text', async () => {
       const streams = [
         makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
