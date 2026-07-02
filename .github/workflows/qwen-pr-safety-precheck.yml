@@ -71,10 +71,15 @@ jobs:
               > "$RUNNER_TEMP/pr-precheck.json"
           fi
 
-          if ! gh pr diff "$PR_NUMBER" \
+          max_diff_bytes=$((2 * 1024 * 1024))
+          set +o pipefail
+          gh pr diff "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --patch \
-            > "$RUNNER_TEMP/pr-precheck.diff"; then
+            | head -c "$max_diff_bytes" > "$RUNNER_TEMP/pr-precheck.diff"
+          diff_status=${PIPESTATUS[0]}
+          set -o pipefail
+          if [ "$diff_status" -ne 0 ] && [ "$diff_status" -ne 141 ]; then
             echo "PR diff unavailable; precheck will fail closed." >&2
             : > "$RUNNER_TEMP/pr-precheck.diff"
           fi

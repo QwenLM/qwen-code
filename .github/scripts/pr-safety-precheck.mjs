@@ -1,15 +1,20 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 
+const SECRET_NAME_PATTERN = String.raw`secrets\.[A-Z0-9_]+|process\.env\.[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|_PAT)|\b(?:GITHUB_TOKEN|GH_TOKEN|OPENAI_API_KEY)\b`;
+const LOGGING_SINK_PATTERN = String.raw`\b(?:console\.\w+|process\.(?:stdout|stderr)\.write)\s*\(`;
+const NETWORK_SINK_PATTERN = String.raw`\b(?:fetch|axios|curl|wget)\b`;
+
+function secretSinkPattern(sinkPattern) {
+  return new RegExp(
+    String.raw`(?:${sinkPattern}[^\n]*(?:${SECRET_NAME_PATTERN})|(?:${SECRET_NAME_PATTERN})[\s\S]{0,500}${sinkPattern})`,
+    'i',
+  );
+}
+
 const SENSITIVE_DIFF_PATTERNS = [
-  [
-    'sensitive_diff:secret_logging',
-    /\b(?:console\.\w+|process\.(?:stdout|stderr)\.write)\s*\([^\n]*(?:secrets\.[A-Z0-9_]+|process\.env\.[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|_PAT)|\b(?:GITHUB_TOKEN|GH_TOKEN|OPENAI_API_KEY)\b)/i,
-  ],
-  [
-    'sensitive_diff:secret_network',
-    /\b(?:fetch|axios|curl|wget)\b[^\n]*(?:secrets\.[A-Z0-9_]+|process\.env\.[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|_PAT)|\b(?:GITHUB_TOKEN|GH_TOKEN|OPENAI_API_KEY)\b)/i,
-  ],
+  ['sensitive_diff:secret_logging', secretSinkPattern(LOGGING_SINK_PATTERN)],
+  ['sensitive_diff:secret_network', secretSinkPattern(NETWORK_SINK_PATTERN)],
 ];
 
 const SECRET_VALUE_PATTERNS = [
@@ -30,8 +35,12 @@ const SECRET_VALUE_PATTERNS = [
     /\baccess_token=[A-Za-z0-9._~+/=-]{20,}\b/i,
   ],
   [
+    'secret_value:url_credentials',
+    /\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^@\s]{20,}@/i,
+  ],
+  [
     'secret_value:assignment',
-    /(?:^|[^A-Za-z0-9])(?:[A-Z0-9_-]*(?:api[_-]?key|token|secret|password|pat))\b[^=\n:]{0,32}(?:=|:)\s*['"][A-Za-z0-9._~+/=-]{20,}['"]/i,
+    /(?:^|[^A-Za-z0-9])(?:[A-Z0-9_-]*(?:api[_-]?key|token|secret|password|pat))\b[^=\n:]{0,32}(?::?=|:)\s*['"`][A-Za-z0-9._~+/=-]{20,}['"`]/i,
   ],
 ];
 
@@ -70,15 +79,15 @@ export function assessPullRequestSafety({ pr, diff, trustedAuthor = false }) {
   const diffText = typeof diff === 'string' ? diff : '';
   let addedText = '';
 
-  if (trustedAuthor) {
+  if (!headSha) addReason(reasons, 'input:missing_head_sha');
+
+  if (trustedAuthor && reasons.length === 0) {
     return {
       decision: 'allow_triage',
       head_sha: headSha,
       reason_codes: [],
     };
   }
-
-  if (!headSha) addReason(reasons, 'input:missing_head_sha');
 
   if (!diffText) {
     addReason(reasons, 'input:diff_unavailable');

