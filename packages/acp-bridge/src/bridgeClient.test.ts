@@ -32,6 +32,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type {
   ReadTextFileRequest,
   ReadTextFileResponse,
@@ -558,6 +559,9 @@ describe('BridgeClient — artifact ingress', () => {
     try {
       const sessionId = 'sess:artifacts';
       const publish = vi.fn().mockReturnValue(true);
+      const artifactUrl = pathToFileURL(
+        path.join(workspace, 'dashboard.html'),
+      ).href;
       const fakeEntry = {
         sessionId,
         events: { publish },
@@ -590,7 +594,7 @@ describe('BridgeClient — artifact ingress', () => {
               {
                 title: 'Dashboard',
                 storage: 'published',
-                url: 'file:///tmp/dashboard.html',
+                url: artifactUrl,
                 managedId: 'managed-1',
               },
             ],
@@ -598,6 +602,10 @@ describe('BridgeClient — artifact ingress', () => {
         },
       } as Parameters<BridgeClient['sessionUpdate']>[0]);
 
+      expect(publish.mock.calls.map(([event]) => event.type)).toEqual([
+        'artifact_changed',
+        'session_update',
+      ]);
       expect(publish).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'session_update' }),
       );

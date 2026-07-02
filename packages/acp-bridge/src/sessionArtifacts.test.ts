@@ -706,6 +706,20 @@ describe('SessionArtifactStore', () => {
       store.upsertMany(
         [
           {
+            title: 'Report',
+            description:
+              'data:image/svg+xml;base64,PHN2ZyBvbmxvYWQ9YWxlcnQoMSk+',
+            url: 'https://example.com/data-svg',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'description' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
             title: '&lt;script&gt;alert(1)&lt;/script&gt;',
             url: 'https://example.com/entity',
           },

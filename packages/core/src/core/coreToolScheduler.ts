@@ -861,6 +861,17 @@ const createCancelledResponse = (
   };
 };
 
+function isToolCallResponseInfo(value: unknown): value is ToolCallResponseInfo {
+  if (typeof value !== 'object' || value === null) {
+    return false;
+  }
+  const candidate = value as Partial<ToolCallResponseInfo>;
+  return (
+    typeof candidate.callId === 'string' &&
+    Array.isArray(candidate.responseParts)
+  );
+}
+
 function serializeToolResponse(
   response: ToolCallResponseInfo,
 ): Record<string, unknown> {
@@ -1338,32 +1349,30 @@ export class CoreToolScheduler {
           const preservedResultDisplay =
             this.compactResultDisplayForInteractiveHistory(resultDisplay);
           const errorMessage = `[Operation Cancelled] Reason: ${auxiliaryData}`;
-          const response =
-            typeof auxiliaryData === 'object' && auxiliaryData !== null
-              ? {
-                  ...(auxiliaryData as ToolCallResponseInfo),
-                  resultDisplay:
-                    (auxiliaryData as ToolCallResponseInfo).resultDisplay ??
-                    preservedResultDisplay,
-                }
-              : {
-                  callId: currentCall.request.callId,
-                  responseParts: [
-                    {
-                      functionResponse: {
-                        id: currentCall.request.callId,
-                        name: currentCall.request.name,
-                        response: {
-                          error: errorMessage,
-                        },
+          const response = isToolCallResponseInfo(auxiliaryData)
+            ? {
+                ...auxiliaryData,
+                resultDisplay:
+                  auxiliaryData.resultDisplay ?? preservedResultDisplay,
+              }
+            : {
+                callId: currentCall.request.callId,
+                responseParts: [
+                  {
+                    functionResponse: {
+                      id: currentCall.request.callId,
+                      name: currentCall.request.name,
+                      response: {
+                        error: errorMessage,
                       },
                     },
-                  ],
-                  resultDisplay: preservedResultDisplay,
-                  error: undefined,
-                  errorType: undefined,
-                  contentLength: errorMessage.length,
-                };
+                  },
+                ],
+                resultDisplay: preservedResultDisplay,
+                error: undefined,
+                errorType: undefined,
+                contentLength: errorMessage.length,
+              };
           return {
             request: currentCall.request,
             tool: toolInstance,

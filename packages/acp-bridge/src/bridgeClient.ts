@@ -613,14 +613,6 @@ export class BridgeClient implements Client {
           entry.sessionId,
         )
       : [];
-    const publishParams = sanitizeSessionUpdateArtifacts(params, updateMeta);
-    events.publish({
-      type: 'session_update',
-      data: publishParams,
-      ...originator,
-      ...(serverTimestamp !== undefined ? { _meta: { serverTimestamp } } : {}),
-    });
-
     if (entry) {
       if (artifacts.length > 0) {
         await this.upsertAndPublishArtifacts(entry, artifacts, {
@@ -628,6 +620,14 @@ export class BridgeClient implements Client {
         });
       }
     }
+
+    const publishParams = sanitizeSessionUpdateArtifacts(params, updateMeta);
+    events.publish({
+      type: 'session_update',
+      data: publishParams,
+      ...originator,
+      ...(serverTimestamp !== undefined ? { _meta: { serverTimestamp } } : {}),
+    });
   }
 
   /**
