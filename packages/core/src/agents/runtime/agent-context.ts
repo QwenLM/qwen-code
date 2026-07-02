@@ -35,7 +35,9 @@ interface AgentContext {
   /**
    * Nesting depth — 0 for a top-level subagent (called from a user's
    * top-level interaction), +1 per nested `runWithAgentContext` frame.
-   * Auto-incremented; callers do not pass it. Read via
+   * Auto-incremented by default; resume paths (background resume,
+   * AgentInteractive, deferred approvals) pass `depthOverride` to restore
+   * the original launch depth instead. Read via
    * {@link getCurrentAgentDepth} for telemetry (#3731 Phase 3).
    */
   readonly depth?: number;

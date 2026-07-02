@@ -16,6 +16,7 @@ import {
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
+import { runInForkContext } from '../../tools/agent/fork-subagent.js';
 import { ToolNames } from '../../tools/tool-names.js';
 import {
   getAgentName,
@@ -698,6 +699,18 @@ describe('AgentCore.prepareTools', () => {
     // frame); such an agent must not be depth-gated as the top-level session.
     const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 5);
     const tools = await core.prepareTools();
+    const names = tools.map((t) => t.name);
+    expect(names).not.toContain(ToolNames.AGENT);
+    expect(names).toContain('read_file');
+  });
+
+  it('nesting: fork execution contexts never receive the AgentTool', async () => {
+    // The fork contract is context-sharing, not isolation — forks must not
+    // spawn. Depth would otherwise permit nesting here (one frame, max 5).
+    const { core } = buildAgentForTools({ tools: ['*'] }, nestingDecls(), 5);
+    const tools = await runInForkContext(() =>
+      runWithAgentContext('lvl1', () => core.prepareTools()),
+    );
     const names = tools.map((t) => t.name);
     expect(names).not.toContain(ToolNames.AGENT);
     expect(names).toContain('read_file');

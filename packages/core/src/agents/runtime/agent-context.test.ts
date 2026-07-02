@@ -6,9 +6,12 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  canSpawnNestedAgent,
+  childLaunchDepth,
   getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
+  isTopLevelSession,
   runWithAgentContext,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
@@ -214,6 +217,54 @@ describe('agent-context (depth) — #3731 Phase 3', () => {
         });
       },
       3,
+    );
+  });
+});
+
+describe('agent-context (nesting predicates)', () => {
+  it('isTopLevelSession: true outside any frame, false inside one', async () => {
+    expect(isTopLevelSession()).toBe(true);
+    await runWithAgentContext('sub', async () => {
+      expect(isTopLevelSession()).toBe(false);
+    });
+    expect(isTopLevelSession()).toBe(true);
+  });
+
+  it('childLaunchDepth: 0 from the top level, parent depth + 1 inside frames', async () => {
+    expect(childLaunchDepth()).toBe(0);
+    await runWithAgentContext('lvl1', async () => {
+      expect(childLaunchDepth()).toBe(1);
+      await runWithAgentContext('lvl2', async () => {
+        expect(childLaunchDepth()).toBe(2);
+      });
+    });
+  });
+
+  it('canSpawnNestedAgent: child level (1-based) must not exceed maxDepth', async () => {
+    // Top level: the child would be a level-1 agent — allowed at max 1.
+    expect(canSpawnNestedAgent(1)).toBe(true);
+    await runWithAgentContext('lvl1', async () => {
+      // Inside a level-1 agent: the child would be level 2.
+      expect(canSpawnNestedAgent(1)).toBe(false);
+      expect(canSpawnNestedAgent(2)).toBe(true);
+      await runWithAgentContext('lvl2', async () => {
+        // Inside a level-2 agent: the child would be level 3.
+        expect(canSpawnNestedAgent(2)).toBe(false);
+        expect(canSpawnNestedAgent(3)).toBe(true);
+      });
+    });
+  });
+
+  it('canSpawnNestedAgent respects a depthOverride-pinned frame', async () => {
+    // A resumed agent pinned at depth 4 must not spawn at max 5 (child would
+    // be level 6) even though the resume itself runs from the top level.
+    await runWithAgentContext(
+      'resumed',
+      async () => {
+        expect(canSpawnNestedAgent(5)).toBe(false);
+        expect(canSpawnNestedAgent(6)).toBe(true);
+      },
+      4,
     );
   });
 });
