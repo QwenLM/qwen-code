@@ -21,8 +21,6 @@
  * parent with a just-completed child, or vice versa. Grouping children under
  * whichever position their parent already earned preserves each surface's
  * sort semantics for roots while keeping trees contiguous.
- *
- * See knowledge/qwen-code/design/nested-subagents-ui.md.
  */
 
 /**

@@ -931,8 +931,7 @@ export interface ConfigParameters {
    * spawn sub-agents. The default `5` lets a sub-agent spawn sub-agents up to
    * five levels deep. Values `< 1` are clamped to `1`. This governs *nesting*
    * only; it never disables sub-agents. Teammates, forks, and the workflow
-   * tool are excluded from nesting in v1. See
-   * knowledge/qwen-code/design/nested-subagents.md.
+   * tool are excluded from nesting in v1.
    */
   maxSubagentDepth?: number;
   /**

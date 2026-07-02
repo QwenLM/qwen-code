@@ -504,8 +504,7 @@ export class AgentCore {
     // AsyncLocalStorage frame (see AgentHeadless.run / AgentInteractive), so
     // canSpawnNestedAgent() reads this agent's own depth. Teammates do not
     // nest in v1, and forks must never spawn sub-agents (the fork contract is
-    // context-sharing, not isolation). See
-    // knowledge/qwen-code/design/nested-subagents.md.
+    // context-sharing, not isolation).
     //
     // !isTopLevelSession() fails closed: prepareTools() only ever serves
     // agents — never the top-level user session — so a missing agent frame

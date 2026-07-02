@@ -1765,7 +1765,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       // `error` marks the call failed in the scheduler, so tool-usage stats
       // record a failure — a blocked spawn must not count as a spawned
       // sub-agent (the scrollback summary derives its sub-agent count from
-      // the AgentTool's success count).
+      // the AgentTool's success count). This deliberately routes the denial
+      // through the scheduler's failure path (error-formatted model
+      // response, failure-path hooks): a blocked spawn IS a failed tool call.
       error: { message: terminateReason },
       returnDisplay: {
         type: 'task_execution' as const,
@@ -1833,8 +1835,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // when it would exceed maxSubagentDepth. AgentCore.prepareTools() also
     // hides the AgentTool from leaf-depth sub-agents (same canSpawnNestedAgent
     // check), so a well-behaved model never reaches here. Teammate spawns
-    // returned above and are not gated by depth. See
-    // knowledge/qwen-code/design/nested-subagents.md.
+    // returned above and are not gated by depth.
     const maxSubagentDepth = this.config.getMaxSubagentDepth();
     if (!canSpawnNestedAgent(maxSubagentDepth)) {
       return this.buildSpawnBlockedResult(
@@ -1852,8 +1853,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // `agent` from fork contexts, but wildcard/fallback tool lists make this
     // runtime backstop necessary. Blocks ALL agent calls from a fork child
     // (not just fork-in-fork). This runs before the fork branch below, so the
-    // recursive-fork case is subsumed here. See
-    // knowledge/qwen-code/design/nested-subagents.md.
+    // recursive-fork case is subsumed here.
     if (isInForkExecution()) {
       return this.buildSpawnBlockedResult(
         'Error: Cannot spawn sub-agents from within a fork. Please execute tasks directly.',
@@ -2016,7 +2016,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // carry the AgentTool via nesting — that requests a fork falls back to
         // the awaitable general-purpose sub-agent (via effectiveSubagentType
         // below) instead of opening a nested fork. Fork nesting is deferred
-        // past v1. See knowledge/qwen-code/design/nested-subagents.md.
+        // past v1.
         isTopLevelSession();
       const effectiveSubagentType = isFork
         ? undefined
@@ -2301,7 +2301,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const agentIdSuffix = this.callId ?? randomUUID().slice(0, 8);
       const hookOpts = {
         agentId: `${subagentConfig.name}-${agentIdSuffix}`,
-        agentType: this.params.subagent_type || subagentConfig.name,
+        // Resolved config name, not the raw requested type: a fork request
+        // that fell back to the awaitable path (nested / non-interactive)
+        // must report the agent that actually runs — hooks, spans, task
+        // rows, and the meta sidecar all read this field.
+        agentType: subagentConfig.name,
         resolvedMode,
         signal,
         updateOutput,

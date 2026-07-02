@@ -853,6 +853,12 @@ describe('AgentTool', () => {
 
       expect(result.llmContent).toContain('nesting depth limit reached');
       expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      // A blocked spawn must take the scheduler's failure path: `error` keeps
+      // tool-usage stats from counting it as a spawned sub-agent (and fires
+      // failure-path hooks), and the display row reports it as failed.
+      expect(result.error?.message).toBe('Nesting depth limit reached (max 1)');
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
     });
 
     it('allows a spawn from the top-level session at maxSubagentDepth=1', async () => {
@@ -911,6 +917,12 @@ describe('AgentTool', () => {
         'Cannot spawn sub-agents from within a fork',
       );
       expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      // Same failure-path contract as the depth guard above.
+      expect(result.error?.message).toBe(
+        'Sub-agent spawning is not allowed inside a fork',
+      );
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
     });
 
     it('allows nesting while depth remains under the cap', async () => {

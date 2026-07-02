@@ -125,8 +125,7 @@ export function childLaunchDepth(): number {
  * guard) so the two cannot drift apart.
  *
  * The would-be child sits at level `childLaunchDepth() + 1` (levels are
- * 1-based, depths 0-based), which must not exceed `maxDepth`. See
- * knowledge/qwen-code/design/nested-subagents.md.
+ * 1-based, depths 0-based), which must not exceed `maxDepth`.
  */
 export function canSpawnNestedAgent(maxDepth: number): boolean {
   return childLaunchDepth() + 1 <= maxDepth;
