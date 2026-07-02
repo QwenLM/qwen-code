@@ -499,6 +499,35 @@ describe('DaemonSessionProvider', () => {
     );
   });
 
+  it('warns when deferred workspace skills fail', async () => {
+    const error = new Error('skills unavailable');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sdkMocks.workspaceSkills.mockRejectedValueOnce(error);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+
+    // Skills failing must not block the deferred connect: providers still
+    // resolve and the connection reports connected, just without skill commands.
+    expect(connection).toMatchObject({
+      status: 'connected',
+      workspaceCwd: '/mock-workspace',
+    });
+    expect(connection).not.toHaveProperty('commands');
+    expect(warn).toHaveBeenCalledWith(
+      '[DaemonSessionProvider] workspaceSkills failed in deferred connect:',
+      error,
+    );
+  });
+
   it('preserves a concurrently created session during deferred connect', async () => {
     const providers = createDeferred<unknown>();
     sdkMocks.workspaceProviders.mockReturnValueOnce(providers.promise);
