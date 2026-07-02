@@ -55,6 +55,7 @@ interface MessageListProps {
    * panels don't yank the reader to the bottom. Defaults to false.
    */
   autoScrollTailIntoView?: boolean;
+  hideSessionTimeline?: boolean;
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   onBranchSession?: () => void;
@@ -531,14 +532,35 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
 function compactTimelineText(
   raw: string | null | undefined,
   maxLength: number,
+  options: { stripMarkdown?: boolean } = {},
 ): string {
-  const compact = raw?.replace(/\s+/g, ' ').trim() ?? '';
+  const source =
+    options.stripMarkdown === true ? cleanTimelineMarkdown(raw) : (raw ?? '');
+  const compact = source.replace(/\s+/g, ' ').trim();
   if (maxLength <= 0) return '';
   if (!compact) return '';
   const chars = Array.from(compact);
   return chars.length > maxLength
     ? `${chars.slice(0, maxLength - 1).join('')}…`
     : compact;
+}
+
+function cleanTimelineMarkdown(raw: string | null | undefined): string {
+  if (!raw) return '';
+  return raw
+    .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/`([^`]+)`/g, '$1')
+    .replace(/~~([^~]+)~~/g, '$1')
+    .replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2')
+    .replace(/\*([^*\s][^*]*?\S)\*/g, '$1')
+    .replace(
+      /(^|[^\p{L}\p{N}_])_([^_\s][^_]*?\S)_(?=$|[^\p{L}\p{N}_])/gu,
+      '$1$2',
+    )
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/^\s{0,3}>\s?/gm, '')
+    .replace(/^\s*[-*+]\s+/gm, '');
 }
 
 function timelineLabelForTurn(message: Message): string {
@@ -565,7 +587,7 @@ function timelineDetailSnippetForMessage(message: Message): string {
       // Thinking content may include private model reasoning; keep details label-only.
       return SESSION_TIMELINE_KIND_LABEL.thought;
     case 'assistant':
-      return compactTimelineText(message.content, 120);
+      return compactTimelineText(message.content, 120, { stripMarkdown: true });
     case 'tool_group': {
       const count = message.tools.length;
       return `${count} tool call${count === 1 ? '' : 's'}`;
@@ -574,7 +596,7 @@ function timelineDetailSnippetForMessage(message: Message): string {
       return 'plan update';
     case 'system':
       return isMidTurnInjectedDebugMessage(message)
-        ? compactTimelineText(message.content, 120)
+        ? compactTimelineText(message.content, 120, { stripMarkdown: true })
         : '';
     case 'user':
     case 'user_shell':
@@ -605,6 +627,20 @@ function timelineDetailForTurn(
   finalAssistantId: string | null,
   nodeKinds: readonly TurnTimelineNodeKind[],
 ): string {
+  if (finalAssistantId !== null) {
+    for (const item of turnItems) {
+      if (item.type !== 'message') continue;
+      const { message } = item;
+      if (message.id !== finalAssistantId || message.role !== 'assistant') {
+        continue;
+      }
+      const finalAnswerDetail = compactTimelineText(message.content, 180, {
+        stripMarkdown: true,
+      });
+      if (finalAnswerDetail) return finalAnswerDetail;
+    }
+  }
+
   const snippets: string[] = [];
   for (let i = 0; i < turnItems.length; i += 1) {
     const item = turnItems[i]!;
@@ -638,20 +674,20 @@ export function getSessionTimelineEntries(
 
   const pushTurn = () => {
     if (!turnStart) return;
-    let finalAssistantId: string | null = null;
-    for (let i = turnItems.length - 1; i >= 0; i -= 1) {
-      const item = turnItems[i];
-      if (
-        item?.role === 'assistant' &&
-        compactTimelineText(item.content, 1).length > 0 &&
-        !item.isStreaming
-      ) {
-        finalAssistantId = item.id;
-        break;
-      }
-    }
-
     const timelineItems = groupParallelAgents(turnItems);
+    const finalAssistantIndex = findFinalAnswerIndex(
+      timelineItems,
+      -1,
+      timelineItems.length - 1,
+    );
+    const finalAssistantItem =
+      finalAssistantIndex >= 0 ? timelineItems[finalAssistantIndex] : null;
+    const finalAssistantId =
+      finalAssistantItem?.type === 'message' &&
+      finalAssistantItem.message.role === 'assistant' &&
+      !finalAssistantItem.message.isStreaming
+        ? finalAssistantItem.message.id
+        : null;
     const nodeKinds: TurnTimelineNodeKind[] = [];
     for (const item of timelineItems) {
       if (
@@ -1243,6 +1279,7 @@ const ESTIMATE_TURN_COLLAPSE = 32;
 const ESTIMATE_TAIL = 240;
 const FOLLOW_BOTTOM_THRESHOLD_PX = 30;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
+const SESSION_TIMELINE_MIN_VISIBLE_ENTRIES = 4;
 
 export function shouldUseVirtualScroll(
   totalCount: number,
@@ -1518,10 +1555,6 @@ const SessionTimeline = memo(function SessionTimeline({
                 ? index === currentRange.currentIndex
                 : entry.id === currentTurnId;
             const nodeKinds = entry.nodeKinds.join(',');
-            const titleParts = [
-              `Turn ${index + 1}: ${entry.label}`,
-              entry.detail,
-            ];
             const ariaLabel = [
               `Turn ${index + 1}: ${entry.label}`,
               isCurrent ? 'Current turn' : null,
@@ -1548,7 +1581,6 @@ const SessionTimeline = memo(function SessionTimeline({
                   )}
                   aria-current={isCurrent ? 'step' : undefined}
                   aria-label={ariaLabel}
-                  title={titleParts.join(' · ')}
                   onClick={() => onSelect(entry.id)}
                 >
                   <span className={styles.sessionTimelineTick} />
@@ -1592,6 +1624,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       virtualScrollThreshold = VIRTUAL_SCROLL_THRESHOLD,
       shellOutputMaxLines,
       autoScrollTailIntoView = false,
+      hideSessionTimeline = false,
       showRetryHint = false,
       onRetryClick,
       onBranchSession,
@@ -1751,8 +1784,15 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
 
     const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
       useState(false);
+    const hasEnoughSessionTimelineEntries =
+      sessionTimelineEntries.length >= SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
 
     useLayoutEffect(() => {
+      if (hideSessionTimeline || !hasEnoughSessionTimelineEntries) {
+        setIsSessionTimelineVisible((prev) => (prev ? false : prev));
+        return;
+      }
+
       const el = containerRef.current;
       if (!el) return;
 
@@ -1769,7 +1809,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       const observer = new ResizeObserver(updateVisibility);
       observer.observe(el);
       return () => observer.disconnect();
-    }, []);
+    }, [hasEnoughSessionTimelineEntries, hideSessionTimeline]);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //

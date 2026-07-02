@@ -74,6 +74,7 @@
   margin-right: 0 !important;
   margin-left: 0 !important;
   transition: none;
+  transform: translateX(-22px);
   pointer-events: none;
 }
 
@@ -130,7 +131,7 @@
 
 .sessionTimelineTick {
   display: block;
-  width: 12px;
+  width: 10px;
   height: 4px;
   border-radius: 1px;
   background: color-mix(in srgb, var(--muted-foreground) 30%, transparent);
@@ -143,7 +144,7 @@
 .sessionTimelineButton:hover .sessionTimelineTick,
 .sessionTimelineButton:focus-visible .sessionTimelineTick {
   background: color-mix(in srgb, var(--foreground) 94%, transparent);
-  transform: scaleX(4.4);
+  transform: scaleX(3.8);
 }
 
 .sessionTimelineItem:has(.sessionTimelineButton:hover)
@@ -158,7 +159,7 @@
     + .sessionTimelineItem .sessionTimelineButton:focus-visible
   )
   .sessionTimelineTick {
-  transform: scaleX(3.4);
+  transform: scaleX(3);
 }
 
 .sessionTimelineItem:has(.sessionTimelineButton:hover)
@@ -179,7 +180,7 @@
       .sessionTimelineButton:focus-visible
   )
   .sessionTimelineTick {
-  transform: scaleX(2.4);
+  transform: scaleX(2.2);
 }
 
 .sessionTimelineItem:has(.sessionTimelineButton:hover)
@@ -206,7 +207,7 @@
       .sessionTimelineButton:focus-visible
   )
   .sessionTimelineTick {
-  transform: scaleX(1.6);
+  transform: scaleX(1.5);
 }
 
 .sessionTimelineButtonInRange .sessionTimelineTick {
@@ -227,7 +228,7 @@
 .sessionTimelineDetails {
   position: absolute;
   top: 50%;
-  left: 72px;
+  left: 56px;
   z-index: 1;
   box-sizing: border-box;
   display: grid;
