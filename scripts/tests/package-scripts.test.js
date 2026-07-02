@@ -201,24 +201,30 @@ describe('package scripts', () => {
   });
 
   it('reports when a prepare command cannot be spawned', () => {
-    const missingBinDir = path.join(tmpdir(), 'qwen-prepare-missing-bin');
-
-    const result = spawnSync(
-      process.execPath,
-      [path.join(root, 'scripts/prepare.js')],
-      {
-        cwd: root,
-        encoding: 'utf8',
-        env: {
-          ...process.env,
-          PATH: missingBinDir,
-          QWEN_SKIP_PREPARE: '',
-        },
-      },
+    const missingBinDir = mkdtempSync(
+      path.join(tmpdir(), 'qwen-prepare-missing-bin-'),
     );
 
-    expect(result.status).toBe(1);
-    expect(result.stderr).toContain('prepare: husky failed:');
+    try {
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/prepare.js')],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: missingBinDir,
+            QWEN_SKIP_PREPARE: '',
+          },
+        },
+      );
+
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain('prepare: husky failed:');
+    } finally {
+      rmSync(missingBinDir, { recursive: true, force: true });
+    }
   });
 
   it('wires release quality checks to fast explicit validation steps', () => {
