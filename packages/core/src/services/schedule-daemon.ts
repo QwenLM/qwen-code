@@ -186,6 +186,11 @@ export class ScheduleDaemon {
     return path.join(homedir(), '.qwen', 'schedule-daemon.cmd');
   }
 
+  /** Exposed for testing — returns the daemon command file path. */
+  static getCmdFilePath(): string {
+    return path.join(homedir(), '.qwen', 'schedule-daemon.cmd');
+  }
+
   private startCommandPolling(): void {
     this.commandPollInterval = setInterval(() => {
       void this.processCommandFile();
