@@ -39,10 +39,17 @@ export function useFilterInput(
   const [inputValue, setInputValue] = useState('');
   const [filterValue, setFilterValue] = useState('');
   const composingRef = useRef(false);
+  const committedRef = useRef('');
   const onFilterChangeRef = useRef(onFilterChange);
   onFilterChangeRef.current = onFilterChange;
 
   const commit = useCallback((value: string) => {
+    // `compositionend` fires even when the composition was cancelled and the
+    // text is back to what it was. A no-op commit must not signal a filter
+    // change — dialogs reset their selection/cursor state on that signal, so
+    // a cancelled composition would wipe e.g. the delete dialog's checkmarks.
+    if (value === committedRef.current) return;
+    committedRef.current = value;
     setFilterValue(value);
     onFilterChangeRef.current?.(value);
   }, []);
@@ -65,7 +72,13 @@ export function useFilterInput(
   const onCompositionEnd = useCallback(
     (event: CompositionEvent<HTMLInputElement>) => {
       composingRef.current = false;
-      commit(event.currentTarget.value);
+      const value = event.currentTarget.value;
+      // Most browsers follow compositionend with an `input` event that syncs
+      // the controlled value, but that's not guaranteed — sync it here too so
+      // the field can never display a stale preedit while the list already
+      // filters by the committed text.
+      setInputValue(value);
+      commit(value);
     },
     [commit],
   );
