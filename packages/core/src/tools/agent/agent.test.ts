@@ -755,6 +755,14 @@ describe('AgentTool', () => {
       );
 
       expect(result.llmContent).toContain('nesting depth limit reached');
+      // The user-facing display mirrors a failed task execution, not a bare
+      // string, so the UI renders it like any other failed sub-agent run.
+      expect(result.returnDisplay).toMatchObject({
+        type: 'task_execution',
+        status: 'failed',
+        subagentName: 'file-search',
+        terminateReason: 'Nesting depth limit reached (max 1)',
+      });
       expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
     });
 
@@ -833,6 +841,26 @@ describe('AgentTool', () => {
 
       expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
         'file-search',
+      );
+    });
+
+    it('falls back to a regular general-purpose sub-agent when a nested sub-agent requests a fork', async () => {
+      // Fork is a top-level-only capability in v1. A nested sub-agent
+      // requesting `subagent_type: "fork"` must get the awaitable
+      // general-purpose sub-agent, not an error and not a nested fork.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      const invocation = agentTool.build({
+        description: 'Fork from a nested sub-agent',
+        prompt: 'Do work',
+        subagent_type: 'fork',
+      });
+      await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
       );
     });
   });

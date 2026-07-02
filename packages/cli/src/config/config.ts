@@ -206,6 +206,7 @@ export interface CliArgs {
   maxSessionTurns: number | undefined;
   maxWallTime: string | undefined;
   maxToolCalls: number | undefined;
+  maxSubagentDepth: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   disabledSlashCommands: string[] | undefined;
@@ -887,6 +888,11 @@ export async function parseArguments(): Promise<CliArgs> {
           description:
             'Maximum cumulative tool calls executed during the run (success or failure; `structured_output` under --json-schema is exempt). Aborts with exit code 55 when exceeded. -1 / unset means no limit; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos.',
         })
+        .option('max-subagent-depth', {
+          type: 'number',
+          description:
+            'Maximum sub-agent nesting depth (1-based levels). 1 keeps sub-agents available but disables nesting; capped at 100. Overrides model.maxSubagentDepth from settings. Defaults to 5.',
+        })
         .option('core-tools', {
           type: 'array',
           string: true,
@@ -1233,6 +1239,32 @@ function resolveMaxToolCalls(argv: CliArgs, settings: Settings): number {
     }
   }
   return -1;
+}
+
+/**
+ * Resolves the sub-agent nesting cap. Order of precedence:
+ * `--max-subagent-depth` flag, then `model.maxSubagentDepth` from settings,
+ * else undefined (Config applies the default of 5).
+ *
+ * Yargs accepts `NaN` from non-numeric flag values, and Config's clamp
+ * would silently fall back to the default — validate up front so a typo
+ * fails loudly. Settings values stay lenient (Config clamps them) so a bad
+ * settings.json cannot break startup.
+ */
+function resolveMaxSubagentDepth(
+  argv: CliArgs,
+  settings: Settings,
+): number | undefined {
+  const value = argv.maxSubagentDepth;
+  if (value !== undefined && value !== null) {
+    if (!Number.isInteger(value) || value < 1 || value > 100) {
+      throw new Error(
+        `--max-subagent-depth must be an integer between 1 and 100; got ${value}.`,
+      );
+    }
+    return value;
+  }
+  return settings.model?.maxSubagentDepth;
 }
 
 export function isDebugMode(argv: CliArgs): boolean {
@@ -1997,7 +2029,7 @@ export async function loadCliConfig(
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
     // Undefined flows through to Config's default (5) and clamp logic.
-    maxSubagentDepth: settings.model?.maxSubagentDepth,
+    maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,

@@ -17,7 +17,11 @@ import type {
 import { ContextState } from './agent-headless.js';
 import type { AgentInteractiveConfig } from './agent-types.js';
 import { AgentStatus } from './agent-types.js';
-import { getCurrentAgentDepth, getCurrentAgentId } from './agent-context.js';
+import {
+  getCurrentAgentDepth,
+  getCurrentAgentId,
+  runWithAgentContext,
+} from './agent-context.js';
 
 function createMockChat() {
   return {
@@ -249,6 +253,39 @@ describe('AgentInteractive', () => {
     expect(prepDepth).toBe(0);
     expect(loopId).toBe('agent-1');
     expect(loopDepth).toBe(0);
+  });
+
+  it('pins the construction-time depth when built inside a sub-agent frame', async () => {
+    // A nested in-process interactive agent captures childLaunchDepth() at
+    // construction. start() runs OUTSIDE the parent's frame here, so a
+    // measured depth of 1 proves the pin — without it the agent would be
+    // framed as depth 0 (top-level spawn) and regain spawn capacity.
+    const { core } = createMockCore();
+    let prepDepth = -1;
+    let loopDepth = -1;
+    (core.prepareTools as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      prepDepth = getCurrentAgentDepth();
+      return [];
+    });
+    (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        loopDepth = getCurrentAgentDepth();
+        return { text: 'Done', terminateMode: null, turnsUsed: 1 };
+      },
+    );
+
+    const agent = await runWithAgentContext(
+      'parent-agent',
+      async () =>
+        new AgentInteractive(createConfig({ initialTask: 'go' }), core),
+    );
+    await agent.start(context);
+    await vi.waitFor(() => {
+      expect(agent.getStatus()).toBe('idle');
+    });
+
+    expect(prepDepth).toBe(1);
+    expect(loopDepth).toBe(1);
   });
 
   it('should process initialTask immediately on start', async () => {

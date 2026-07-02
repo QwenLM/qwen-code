@@ -110,7 +110,11 @@ import {
 /**
  * Tools that must never be available to non-team subagents (including
  * forked agents spawned via the Agent tool).
- * - AgentTool prevents recursive subagent spawning.
+ * - AgentTool is depth-gated rather than unconditionally excluded:
+ *   `isExcluded()` in `prepareTools()` re-admits it while
+ *   `canSpawnNestedAgent()` permits another nesting level, and consults
+ *   this set only for every other tool. The entry here remains the
+ *   fail-closed floor for consumers of the raw set.
  * - Cron tools are session-scoped and should only run from the main session.
  * - TaskStop and SendMessage are parent-side control-plane tools for managing
  *   background subagents; subagents have no agent IDs to manage natively, so
@@ -504,8 +508,7 @@ export class AgentCore {
     // AsyncLocalStorage frame (see AgentHeadless.run / AgentInteractive), so
     // canSpawnNestedAgent() reads this agent's own depth. Teammates do not
     // nest in v1, and forks must never spawn sub-agents (the fork contract is
-    // context-sharing, not isolation). See
-    // knowledge/qwen-code/design/nested-subagents.md.
+    // context-sharing, not isolation).
     //
     // !isTopLevelSession() fails closed: prepareTools() only ever serves
     // agents — never the top-level user session — so a missing agent frame

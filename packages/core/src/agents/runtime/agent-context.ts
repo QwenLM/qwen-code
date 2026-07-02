@@ -35,7 +35,9 @@ interface AgentContext {
   /**
    * Nesting depth — 0 for a top-level subagent (called from a user's
    * top-level interaction), +1 per nested `runWithAgentContext` frame.
-   * Auto-incremented; callers do not pass it. Read via
+   * Auto-incremented by default; resume paths (background resume,
+   * AgentInteractive, deferred approvals) pass `depthOverride` to restore
+   * the original launch depth instead. Read via
    * {@link getCurrentAgentDepth} for telemetry (#3731 Phase 3).
    */
   readonly depth?: number;
@@ -125,8 +127,7 @@ export function childLaunchDepth(): number {
  * guard) so the two cannot drift apart.
  *
  * The would-be child sits at level `childLaunchDepth() + 1` (levels are
- * 1-based, depths 0-based), which must not exceed `maxDepth`. See
- * knowledge/qwen-code/design/nested-subagents.md.
+ * 1-based, depths 0-based), which must not exceed `maxDepth`.
  */
 export function canSpawnNestedAgent(maxDepth: number): boolean {
   return childLaunchDepth() + 1 <= maxDepth;

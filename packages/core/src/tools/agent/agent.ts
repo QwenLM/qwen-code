@@ -1828,10 +1828,12 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // when it would exceed maxSubagentDepth. AgentCore.prepareTools() also
     // hides the AgentTool from leaf-depth sub-agents (same canSpawnNestedAgent
     // check), so a well-behaved model never reaches here. Teammate spawns
-    // returned above and are not gated by depth. See
-    // knowledge/qwen-code/design/nested-subagents.md.
+    // returned above and are not gated by depth.
     const maxSubagentDepth = this.config.getMaxSubagentDepth();
     if (!canSpawnNestedAgent(maxSubagentDepth)) {
+      debugLogger.debug(
+        `[AgentTool] Nesting depth guard blocked spawn: childLevel=${childLaunchDepth() + 1} max=${maxSubagentDepth} type=${this.params.subagent_type ?? DEFAULT_BUILTIN_SUBAGENT_TYPE}`,
+      );
       return this.buildSpawnBlockedResult(
         `Error: sub-agent nesting depth limit reached ` +
           `(max ${maxSubagentDepth} level${maxSubagentDepth === 1 ? '' : 's'}). ` +
@@ -1847,9 +1849,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // `agent` from fork contexts, but wildcard/fallback tool lists make this
     // runtime backstop necessary. Blocks ALL agent calls from a fork child
     // (not just fork-in-fork). This runs before the fork branch below, so the
-    // recursive-fork case is subsumed here. See
-    // knowledge/qwen-code/design/nested-subagents.md.
+    // recursive-fork case is subsumed here.
     if (isInForkExecution()) {
+      debugLogger.debug(
+        `[AgentTool] Fork containment guard blocked spawn: type=${this.params.subagent_type ?? DEFAULT_BUILTIN_SUBAGENT_TYPE}`,
+      );
       return this.buildSpawnBlockedResult(
         'Error: Cannot spawn sub-agents from within a fork. Please execute tasks directly.',
         'Sub-agent spawning is not allowed inside a fork',
@@ -2011,7 +2015,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // carry the AgentTool via nesting — that requests a fork falls back to
         // the awaitable general-purpose sub-agent (via effectiveSubagentType
         // below) instead of opening a nested fork. Fork nesting is deferred
-        // past v1. See knowledge/qwen-code/design/nested-subagents.md.
+        // past v1.
         isTopLevelSession();
       const effectiveSubagentType = isFork
         ? undefined
@@ -2020,6 +2024,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             // fall back to the awaitable general-purpose subagent.
             DEFAULT_BUILTIN_SUBAGENT_TYPE
           : (requestedType ?? DEFAULT_BUILTIN_SUBAGENT_TYPE);
+      if (isForkRequested && !isFork) {
+        debugLogger.debug(
+          `[AgentTool] Fork request downgraded to a regular sub-agent (${
+            isTopLevelSession()
+              ? 'forking unavailable in this session'
+              : 'forks do not nest'
+          }).`,
+        );
+      }
       let subagentConfig: SubagentConfig;
 
       if (isFork) {

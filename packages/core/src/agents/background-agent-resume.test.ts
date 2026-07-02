@@ -19,6 +19,7 @@ import {
 } from './agent-transcript.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentEventEmitter } from './runtime/agent-events.js';
+import { getCurrentAgentDepth } from './runtime/agent-context.js';
 import { AgentHeadless } from './runtime/agent-headless.js';
 import {
   FORK_DEFAULT_MAX_TURNS,
@@ -1120,6 +1121,82 @@ describe('BackgroundAgentResumeService', () => {
     expect(overriddenConfig.getModel()).toBe('agent-model');
     expect(overriddenConfig.getMaxSessionTurns()).toBe(7);
     expect(overriddenConfig.getMaxToolCalls()).toBe(11);
+  }, 20000);
+
+  it('restores the persisted launch depth so a resumed nested agent keeps its level', async () => {
+    // Resume happens from a top-level frame (depth would recompute to 0);
+    // the persisted meta.depth must be pinned via the runWithAgentContext
+    // depthOverride, or a resumed nested agent would regain spawn capacity.
+    const sessionId = 'session-depth';
+    const agentId = 'agent-depth';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume nested agent',
+      parentSessionId: sessionId,
+      parentAgentId: 'agent-parent',
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      depth: 2,
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume nested agent' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume nested agent',
+      subagentType: 'researcher',
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume nested agent',
+      outputFile,
+      metaPath,
+      isBackgrounded: true,
+    });
+
+    let observedDepth = -1;
+    const createAgentHeadless = vi.fn().mockResolvedValue({
+      subagent: {
+        execute: vi.fn(async () => {
+          observedDepth = getCurrentAgentDepth();
+        }),
+        setExternalMessageProvider: vi.fn(),
+        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+        getExecutionSummary: () => ({
+          totalTokens: 0,
+          outputTokens: 0,
+          totalDurationMs: 0,
+        }),
+        getTerminateMode: () => AgentTerminateMode.GOAL,
+        getFinalText: () => 'done',
+      },
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless = createAgentHeadless;
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    await vi.waitFor(() => {
+      expect(observedDepth).toBe(2);
+    });
   }, 20000);
 
   it('coalesces concurrent resume calls into a single running agent', async () => {
