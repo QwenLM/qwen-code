@@ -4906,16 +4906,25 @@ export class Config {
    * Days a recurring cron job lives before auto-expiring; `Infinity`
    * means no expiry. The QWEN_CODE_CRON_MAX_AGE_DAYS environment variable
    * overrides the settings value (convenient for cloud/container
-   * deployments); a value of `0` in either disables expiry; negative or
-   * unparseable values fall back to the 7-day default.
+   * deployments); a value of `0` in either source disables expiry;
+   * negative or unparseable values fall back to the 7-day default with
+   * a warning, so a misconfiguration leaves a breadcrumb instead of
+   * surfacing later as "jobs stopped firing after 7 days".
    */
   getCronRecurringMaxAgeDays(): number {
     const env = process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
-    const raw =
-      env !== undefined && env.trim() !== ''
-        ? Number(env)
-        : this.cronRecurringMaxAgeDays;
+    const fromEnv = env !== undefined && env.trim() !== '';
+    const raw = fromEnv ? Number(env) : this.cronRecurringMaxAgeDays;
     if (raw === undefined || !Number.isFinite(raw) || raw < 0) {
+      if (raw !== undefined) {
+        this.debugLogger.warn(
+          (fromEnv
+            ? `QWEN_CODE_CRON_MAX_AGE_DAYS="${env}" is invalid`
+            : `cronRecurringMaxAgeDays=${this.cronRecurringMaxAgeDays} is invalid`) +
+            `; recurring cron jobs will expire after the ` +
+            `${DEFAULT_RECURRING_MAX_AGE_DAYS}-day default.`,
+        );
+      }
       return DEFAULT_RECURRING_MAX_AGE_DAYS;
     }
     return raw === 0 ? Infinity : raw;

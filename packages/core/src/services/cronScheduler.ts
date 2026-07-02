@@ -253,15 +253,22 @@ export class CronScheduler {
 
   /** `projectRoot` anchors durable storage; without it only session-only
    * jobs work. Production constructs via `Config.getCronScheduler()`,
-   * which always supplies it (and the configured `recurringMaxAgeMs`,
-   * where Infinity disables expiry). Non-positive or NaN input falls
-   * back to the 7-day default rather than expiring everything at birth. */
+   * which always supplies it (and the configured `recurringMaxAgeMs`).
+   * `0` and `Infinity` both mean "never expire" — matching the config
+   * layer, where the `0` setting maps to Infinity — so a direct caller
+   * passing `0` gets disabled expiry, not the default. Negative or NaN
+   * input falls back to the 7-day default rather than expiring
+   * everything at birth. */
   constructor(
     private readonly projectRoot: string | null = null,
     recurringMaxAgeMs: number = DEFAULT_RECURRING_MAX_AGE_MS,
   ) {
     this.recurringMaxAgeMs =
-      recurringMaxAgeMs > 0 ? recurringMaxAgeMs : DEFAULT_RECURRING_MAX_AGE_MS;
+      recurringMaxAgeMs === 0
+        ? Infinity
+        : recurringMaxAgeMs > 0
+          ? recurringMaxAgeMs
+          : DEFAULT_RECURRING_MAX_AGE_MS;
   }
 
   /**
@@ -653,6 +660,16 @@ export class CronScheduler {
         } else if (now - t.createdAt >= this.recurringMaxAgeMs) {
           // Aged out while overdue — fires raw one final time, then is
           // deleted (same contract as an aged fire from the tick loop).
+          // Warn with the creation time: a lowered recurringMaxAgeMs
+          // (settings change or a dropped env override) retroactively
+          // expires long-lived tasks here, and once deleted they cannot
+          // be recovered — this log is the only breadcrumb.
+          debugLogger.warn(
+            `Durable task ${t.id} (created ${new Date(
+              t.createdAt,
+            ).toISOString()}) is past the recurring max age at load; ` +
+              'it will fire one final time and be deleted.',
+          );
           finalTasks.push(t);
         } else {
           // Overdue recurring — fire raw once now and resume the normal

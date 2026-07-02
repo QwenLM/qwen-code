@@ -325,8 +325,21 @@ describe('CronScheduler', () => {
       }
     });
 
+    it('treats a zero max age as never expiring, matching the config layer', () => {
+      // Config maps the `0` setting to Infinity before constructing; the
+      // constructor must agree so a direct caller passing 0 gets disabled
+      // expiry, not a silent 7-day default.
+      const custom = new CronScheduler(null, 0);
+      try {
+        const job = custom.create('*/1 * * * *', 'zero means never', true);
+        expect(job.expiresAt).toBe(Infinity);
+      } finally {
+        custom.destroy();
+      }
+    });
+
     it('falls back to the default max age on invalid input', () => {
-      for (const bad of [0, -5, NaN]) {
+      for (const bad of [-5, NaN]) {
         const custom = new CronScheduler(null, bad);
         try {
           const job = custom.create('*/1 * * * *', 'guarded', true);
@@ -959,6 +972,51 @@ describe('CronScheduler', () => {
         JSON.stringify({ pid: process.pid, sessionId: 'other-session' }),
       );
     }
+
+    it('applies a configured max age to durable tasks restored from disk', async () => {
+      // The reload path is the one that matters for configurability: a
+      // regression that ignores the passed max age here would silently
+      // revert every restored task to 7-day expiry after a restart.
+      const twoDaysMs = 2 * 24 * 60 * 60 * 1000;
+      const custom = new CronScheduler(tmpDir, twoDaysMs);
+      try {
+        // lastFiredAt now: not overdue, so no catch-up/final delivery races.
+        await writeCronTasks(tmpDir, [
+          { ...diskTask('shortlived'), lastFiredAt: Date.now() },
+        ]);
+        await custom.enableDurable('session-1');
+
+        const job = custom.list().find((j) => j.id === 'shortlived');
+        expect(job).toBeDefined();
+        expect(job!.expiresAt - job!.createdAt).toBe(twoDaysMs);
+      } finally {
+        custom.destroy();
+      }
+    });
+
+    it('restores durable tasks without expiry when max age is disabled', async () => {
+      const custom = new CronScheduler(tmpDir, Infinity);
+      try {
+        // Created well past the 7-day default: with expiry disabled the
+        // task must be restored as a live job, not aged out into a final
+        // fire + delete.
+        await writeCronTasks(tmpDir, [
+          {
+            ...diskTask('immortal'),
+            createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+            lastFiredAt: Date.now(),
+          },
+        ]);
+        await custom.enableDurable('session-1');
+
+        const job = custom.list().find((j) => j.id === 'immortal');
+        expect(job).toBeDefined();
+        expect(job!.expiresAt).toBe(Infinity);
+        expect(await readCronTasks(tmpDir)).toHaveLength(1);
+      } finally {
+        custom.destroy();
+      }
+    });
 
     it('owner fires durable tasks loaded from disk and persists lastFiredAt', async () => {
       await writeCronTasks(tmpDir, [diskTask('disktask')]);
