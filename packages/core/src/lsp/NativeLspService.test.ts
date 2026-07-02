@@ -341,6 +341,132 @@ describe('NativeLspService', () => {
     }
   });
 
+  test('reinitialize continues replaying documents after one server send fails', async () => {
+    vi.useFakeTimers();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-replay-'));
+    try {
+      const firstPath = path.join(tempDir, 'first.ts');
+      const secondPath = path.join(tempDir, 'second.py');
+      const firstUri = pathToFileURL(firstPath).toString();
+      const secondUri = pathToFileURL(secondPath).toString();
+      fs.writeFileSync(firstPath, 'const value = 1;\n', 'utf-8');
+      fs.writeFileSync(secondPath, 'value = 1\n', 'utf-8');
+      fs.writeFileSync(
+        path.join(tempDir, '.lsp.json'),
+        JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+          },
+          python: {
+            command: 'pyright-langserver',
+          },
+        }),
+      );
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      const service = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+        { workspaceRoot: tempDir },
+      );
+      const firstConnection = {
+        listen: vi.fn(),
+        send: vi.fn(() => {
+          throw new Error('broken pipe');
+        }),
+        onNotification: vi.fn(),
+        onRequest: vi.fn(),
+        request: vi.fn(),
+        initialize: vi.fn(),
+        shutdown: vi.fn(),
+        end: vi.fn(),
+      };
+      const secondConnection = {
+        listen: vi.fn(),
+        send: vi.fn(),
+        onNotification: vi.fn(),
+        onRequest: vi.fn(),
+        request: vi.fn(),
+        initialize: vi.fn(),
+        shutdown: vi.fn(),
+        end: vi.fn(),
+      };
+      const handles = new Map([
+        [
+          'typescript-language-server',
+          {
+            config: {
+              name: 'typescript-language-server',
+              languages: ['typescript'],
+              command: 'typescript-language-server',
+              args: [],
+              transport: 'stdio',
+            },
+            status: 'READY',
+            connection: firstConnection,
+          },
+        ],
+        [
+          'pyright-langserver',
+          {
+            config: {
+              name: 'pyright-langserver',
+              languages: ['python'],
+              command: 'pyright-langserver',
+              args: [],
+              transport: 'stdio',
+            },
+            status: 'READY',
+            connection: secondConnection,
+          },
+        ],
+      ]);
+      const reconcileServerConfigs = vi.fn(async () => ({
+        added: [],
+        removed: [],
+        restarted: ['typescript-language-server', 'pyright-langserver'],
+        unchanged: [],
+        failed: [],
+      }));
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        reconcileServerConfigs,
+        getHandles: () => handles,
+      };
+      const internals = service as unknown as {
+        openedDocuments: Map<string, Set<string>>;
+      };
+      internals.openedDocuments.set(
+        'typescript-language-server',
+        new Set([firstUri]),
+      );
+      internals.openedDocuments.set('pyright-langserver', new Set([secondUri]));
+
+      const reinitialize = service.reinitialize();
+      await vi.runAllTimersAsync();
+      await expect(reinitialize).resolves.toBeDefined();
+
+      expect(firstConnection.send).toHaveBeenCalledOnce();
+      expect(secondConnection.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: 'textDocument/didOpen',
+          params: {
+            textDocument: expect.objectContaining({
+              uri: secondUri,
+              languageId: 'python',
+              text: 'value = 1\n',
+            }),
+          },
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test('reinitialize stops all servers when trusted workspace is required but unavailable', async () => {
     const tempConfig = new MockConfig();
     vi.spyOn(tempConfig, 'isTrustedFolder').mockReturnValue(false);

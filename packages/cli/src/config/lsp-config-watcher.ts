@@ -118,6 +118,7 @@ export class LspConfigWatcher {
   }
 
   private scheduleRefresh(): void {
+    if (!this.started) return;
     this.pending = true;
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.refreshTimer = setTimeout(() => {

@@ -284,7 +284,14 @@ export class NativeLspService {
       }
       let openedAny = false;
       for (const uri of documents) {
-        openedAny = this.sendDocumentOpen(name, handle, uri) || openedAny;
+        try {
+          openedAny = this.sendDocumentOpen(name, handle, uri) || openedAny;
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to replay document ${uri} for LSP server ${name}:`,
+            error,
+          );
+        }
       }
       if (openedAny) {
         await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);

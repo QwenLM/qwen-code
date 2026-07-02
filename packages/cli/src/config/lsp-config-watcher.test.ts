@@ -218,6 +218,34 @@ describe('LspConfigWatcher', () => {
     expect(chokidarMock.watcher.close).toHaveBeenCalledOnce();
   });
 
+  it('ignores filesystem events after stopWatching begins', async () => {
+    vi.useFakeTimers();
+    const dir = makeTempDir();
+    const configPath = path.join(dir, '.lsp.json');
+    let resolveClose: (() => void) | undefined;
+    chokidarMock.watcher.close.mockImplementationOnce(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveClose = resolve;
+        }),
+    );
+    const watcher = new LspConfigWatcher(dir);
+    const listener = vi.fn();
+    watcher.startWatching(listener);
+    const onAll = chokidarMock.handlers.get('all');
+    expect(onAll).toBeDefined();
+
+    const stopPromise = watcher.stopWatching();
+    onAll?.('change', configPath);
+    await vi.advanceTimersByTimeAsync(LspConfigWatcher.DEBOUNCE_MS);
+
+    expect(listener).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+
+    resolveClose?.();
+    await stopPromise;
+  });
+
   it('waits for an active listener before stopping', async () => {
     vi.useFakeTimers();
     const dir = makeTempDir();
