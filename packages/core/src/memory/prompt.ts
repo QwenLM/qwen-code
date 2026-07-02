@@ -138,7 +138,8 @@ export const CONDENSED_WHEN_TO_ACCESS_SECTION: readonly string[] = [
   '- Access memory when relevant or when user references prior-conversation work.',
   '- You MUST access memory when the user explicitly asks you to check, recall, or remember.',
   '- If the user says to ignore memory, proceed as if empty.',
-  '- Memory records can become stale. If a recalled memory conflicts with current information, trust what you observe now and update or remove the stale memory rather than acting on it.',
+  '- Memory records can become stale. If a recalled memory conflicts with current information, trust what you observe now — and update or remove the stale memory rather than acting on it.',
+  '- Before recommending a memory that names a file, function, or flag, verify it still exists in the current code.',
 ];
 
 /**
@@ -151,13 +152,28 @@ export const CONDENSED_DO_NOT_SAVE_SECTION: readonly string[] = [
   '## Do not save',
   '',
   '- Code patterns, conventions, architecture, file paths, or project structure (read the project instead)',
-  '- Git history, recent changes, or who-changed-what — debugging solutions',
+  '- Git history, recent changes, or who-changed-what',
+  '- Debugging solutions or fix recipes (the fix is in the code; the commit message has context)',
   '- MCP tool names, schemas, guessed tool-call formats, or failed call transcripts (save only confirmed durable workarounds, warnings, owner, or escalation path)',
   '- Ephemeral task state or current conversation context',
   '- Content already in QWEN.md or AGENTS.md',
   '',
   'These exclusions apply even when the user explicitly asks you to save.',
   'If the user asks you to save a PR list or activity summary, ask what was *surprising* or *non-obvious* about it — that is the part worth keeping.',
+];
+
+/**
+ * Condensed version of {@link TYPES_SECTION_INDIVIDUAL}.
+ * Enumerates the same four types with scope-to-directory mapping
+ * and key behavioral notes, in shorter form for the empty-index prompt path.
+ */
+export const CONDENSED_TYPES_SECTION: readonly string[] = [
+  '## Memory types',
+  '',
+  "- **user** — the user's role, goals, responsibilities, and knowledge (always user-scoped). Avoid writing memories that could be viewed as a negative judgement.",
+  '- **feedback** — guidance on how to approach work: corrections AND confirmed approaches. Record from both failure and success — if you only save corrections, you drift from validated approaches (default user; project only for project-wide conventions).',
+  '- **project** — ongoing work, goals, initiatives, bugs, or incidents not derivable from code/git (always project-scoped). Always convert relative dates to absolute dates when saving. Include *why* — project memories decay fast, so the why helps assess staleness.',
+  '- **reference** — pointers to where information lives in external systems (default project; user when the resource is personal).',
 ];
 
 export const TRUSTING_RECALL_SECTION: readonly string[] = [
@@ -246,7 +262,7 @@ export interface TeamAutoMemorySection {
  * that include a team directory.
  */
 export const CONDENSED_TEAM_GUIDANCE: readonly string[] = [
-  'When a team directory is available, route project-wide conventions and shared references to TEAM instead of PROJECT. Never save secrets to TEAM. `user` memories are always private — never save them to TEAM. For TEAM memory, only write the file (Step 1) — its index is auto-generated; do NOT hand-edit the team MEMORY.md.',
+  'When a team directory is available, route project-wide conventions and shared references to TEAM instead of PROJECT. You MUST NOT save sensitive data to TEAM memory — never API keys, tokens, or credentials; it is visible to everyone who can read the repository. `user` memories are always private — never save them to TEAM. For TEAM memory, only write the file (Step 1) — its index is auto-generated; do NOT hand-edit the team `MEMORY.md`.',
 ];
 
 function buildTeamScopeSection(): string[] {
@@ -360,14 +376,7 @@ export function buildManagedAutoMemoryPrompt(
           `You have a persistent, file-based memory system at \`${memoryDir}\`. ${DIR_EXISTS_GUIDANCE}`,
         ];
 
-    const condensedTypes = [
-      '## Memory types',
-      '',
-      "- **user** — the user's role, goals, responsibilities, and knowledge (always user-scoped). Avoid writing memories that could be viewed as a negative judgement.",
-      '- **feedback** — guidance on how to approach work: corrections AND confirmed approaches (default user; project only for project-wide conventions)',
-      '- **project** — ongoing work, goals, initiatives, bugs, or incidents not derivable from code/git (always project-scoped). Always convert relative dates to absolute dates when saving.',
-      '- **reference** — pointers to where information lives in external systems (default project; user when the resource is personal)',
-    ];
+    const condensedTypes = CONDENSED_TYPES_SECTION;
 
     const condensedMaintenanceBullets = [
       '',
@@ -405,7 +414,7 @@ export function buildManagedAutoMemoryPrompt(
           ...MEMORY_FRONTMATTER_EXAMPLE,
           '',
           `**Step 2** — add a pointer to that file in \`${memoryDir}/MEMORY.md\`. Each entry: one line, under ~150 chars: \`- [Title](file.md) — one-line hook\`.`,
-          '- Never write memory content directly into MEMORY.md — it is an index of one-line pointers, not a memory file. Do not write duplicate memories.',
+          '- Never write memory content directly into `MEMORY.md` — it is an index of one-line pointers, not a memory file. Do not write duplicate memories.',
           ...condensedMaintenanceBullets,
         ];
 
@@ -431,6 +440,8 @@ export function buildManagedAutoMemoryPrompt(
       ...CONDENSED_WHEN_TO_ACCESS_SECTION,
       '',
       ...condensedSave,
+      '',
+      '- Use plans and tasks for in-conversation work; reserve memory for durable cross-conversation knowledge.',
       '',
       ...indexSections,
     ];

@@ -10,6 +10,7 @@ import {
   buildManagedAutoMemoryPrompt,
   CONDENSED_DO_NOT_SAVE_SECTION,
   CONDENSED_TEAM_GUIDANCE,
+  CONDENSED_TYPES_SECTION,
   CONDENSED_WHEN_TO_ACCESS_SECTION,
   MAX_MANAGED_AUTO_MEMORY_INDEX_LINES,
 } from './prompt.js';
@@ -234,7 +235,7 @@ describe('managed auto-memory prompt helpers', () => {
       'route project-wide conventions and shared references to TEAM',
     );
     // Team auto-index guidance is present (do NOT hand-edit team MEMORY.md)
-    expect(prompt).toContain('do NOT hand-edit the team MEMORY.md');
+    expect(prompt).toContain('do NOT hand-edit the team `MEMORY.md`');
     // Condensed exclusion list is present
     expect(prompt).toContain('## Do not save');
     // Full team scope section is omitted
@@ -314,7 +315,7 @@ describe('managed auto-memory prompt helpers', () => {
     expect(prompt).toContain(
       'route project-wide conventions and shared references to TEAM',
     );
-    expect(prompt).toContain('do NOT hand-edit the team MEMORY.md');
+    expect(prompt).toContain('do NOT hand-edit the team `MEMORY.md`');
     // Full verbose sections are omitted
     expect(prompt).not.toContain('## Types of memory');
     expect(prompt).not.toContain('## Saving to team memory');
@@ -405,5 +406,63 @@ describe('managed auto-memory prompt helpers', () => {
     const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
     expect(prompt).toContain('lines after 200 will be truncated');
     expect(prompt).toContain('keep each index concise');
+  });
+
+  it('emits condensed prompt when forceFullProtocol is explicitly false', () => {
+    const prompt = buildManagedAutoMemoryPrompt(
+      '/tmp/project/.qwen/memory',
+      null,
+      undefined,
+      undefined,
+      { forceFullProtocol: false },
+    );
+    expect(prompt).toContain('## Memory types'); // condensed
+    expect(prompt).not.toContain('## Types of memory'); // not full
+  });
+
+  it('condensed do-not-save splits git history and debugging solutions into separate bullets', () => {
+    const joined = CONDENSED_DO_NOT_SAVE_SECTION.join('\n');
+    // These should be separate exclusion bullets, not merged
+    expect(joined).toContain(
+      '- Git history, recent changes, or who-changed-what',
+    );
+    expect(joined).toContain('- Debugging solutions or fix recipes');
+  });
+
+  it('exports CONDENSED_TYPES_SECTION with scope guidance for all four types', () => {
+    expect(CONDENSED_TYPES_SECTION).toBeDefined();
+    const joined = CONDENSED_TYPES_SECTION.join('\n');
+    expect(joined).toContain('**user**');
+    expect(joined).toContain('**feedback**');
+    expect(joined).toContain('**project**');
+    expect(joined).toContain('**reference**');
+    // Scope routing guidance
+    expect(joined).toContain('always user-scoped');
+    expect(joined).toContain('always project-scoped');
+    expect(joined).toContain('default user');
+    expect(joined).toContain('default project');
+    // Key behavioral notes
+    expect(joined).toContain('Record from both failure and success');
+    expect(joined).toContain('convert relative dates to absolute dates');
+  });
+
+  it('condensed team guidance includes explicit credential types and user-memory privacy', () => {
+    const joined = CONDENSED_TEAM_GUIDANCE.join('\n');
+    expect(joined).toContain('never API keys, tokens, or credentials');
+    expect(joined).toContain('`user` memories are always private');
+    expect(joined).toContain('never save them to TEAM');
+    expect(joined).toContain('`MEMORY.md`'); // backtick consistency
+  });
+
+  it('condensed prompt includes verify-before-recommending guidance', () => {
+    const joined = CONDENSED_WHEN_TO_ACCESS_SECTION.join('\n');
+    expect(joined).toContain('verify it still exists in the current code');
+  });
+
+  it('condensed prompt includes persistence guidance', () => {
+    const prompt = buildManagedAutoMemoryPrompt('/tmp/project/.qwen/memory');
+    expect(prompt).toContain(
+      'Use plans and tasks for in-conversation work; reserve memory for durable cross-conversation knowledge',
+    );
   });
 });
