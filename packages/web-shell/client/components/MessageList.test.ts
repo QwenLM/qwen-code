@@ -583,13 +583,13 @@ describe('getSessionTimelineEntries', () => {
       {
         ...makeAssistantMessage('a1'),
         content:
-          '**agent-reproduce-align** – 对齐测试技能\n\n**用途：** 在 [Qwen Code](https://example.com) 中运行参考代码，*强调*·*范围*—*引用*「。',
+          '**agent-reproduce-align** – 对齐测试技能\n\n**用途：** 在 [Qwen Code](https://example.com) 中运行参考代码，中文*强调*·*范围*—*引用*「_下划线_，保留 snake_case。',
       },
     ]);
 
     expect(entry?.label).toBe('介绍下 agent-reproduce-align');
     expect(entry?.detail).toBe(
-      'agent-reproduce-align – 对齐测试技能 用途： 在 Qwen Code 中运行参考代码，强调·范围—引用「。',
+      'agent-reproduce-align – 对齐测试技能 用途： 在 Qwen Code 中运行参考代码，中文强调·范围—引用「下划线，保留 snake_case。',
     );
   });
 });

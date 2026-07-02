@@ -550,7 +550,11 @@ function cleanTimelineMarkdown(raw: string | null | undefined): string {
     .replace(/`([^`]+)`/g, '$1')
     .replace(/~~([^~]+)~~/g, '$1')
     .replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2')
-    .replace(/(^|[\s\p{P}])\*([^*\s][^*]*?\S)\*(?=\s|$|\p{P})/gu, '$1$2')
+    .replace(/\*([^*\s][^*]*?\S)\*/g, '$1')
+    .replace(
+      /(^|[^\p{L}\p{N}_])_([^_\s][^_]*?\S)_(?=$|[^\p{L}\p{N}_])/gu,
+      '$1$2',
+    )
     .replace(/^\s{0,3}#{1,6}\s+/gm, '')
     .replace(/^\s{0,3}>\s?/gm, '')
     .replace(/^\s*[-*+]\s+/gm, '');
