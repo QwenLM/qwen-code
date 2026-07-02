@@ -960,7 +960,11 @@ jobs:
 
           # Dedup: update an existing tmux comment if one is already present.
           if ! EXISTING="$(
-            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate -F per_page=100 \
+            # -F would otherwise make gh api default to POST.
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              --method GET \
+              --paginate \
+              -F per_page=100 \
               | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:tmux -->"))] | last | .id // empty'
           )"; then
             echo "::warning::Failed to look up existing tmux comments; will create a new one."
