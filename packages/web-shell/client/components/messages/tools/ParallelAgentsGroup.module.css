@@ -1,11 +1,10 @@
 .wrap {
-  margin: 8px 0;
+  margin: 0;
 }
 
 .summary {
   width: 100%;
   margin: 0;
-  padding: 2px 0;
   border: none;
   border-radius: 0;
   background: transparent;
@@ -69,7 +68,6 @@
 }
 
 .summaryTextActive {
-  color: var(--muted-foreground);
   background-image: linear-gradient(
     105deg,
     var(--muted-foreground) 0%,
