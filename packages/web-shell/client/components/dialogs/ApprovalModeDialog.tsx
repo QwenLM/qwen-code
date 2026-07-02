@@ -34,6 +34,20 @@ export function ApprovalModeDialog({
     currentIdx >= 0 ? currentIdx : 0,
   );
 
+  // Follow the current mode until the user first navigates: it can change
+  // while the dialog is open (e.g. another client sharing the session flips
+  // approval mode). Once the user has moved the highlight, don't steal it.
+  const userNavigatedRef = useRef(false);
+  useEffect(() => {
+    if (userNavigatedRef.current || currentIdx < 0) return;
+    setActiveIndex(currentIdx);
+  }, [currentIdx]);
+
+  const moveHighlight = (index: number) => {
+    userNavigatedRef.current = true;
+    setActiveIndex(index);
+  };
+
   const confirm = (index: number) => {
     const mode = approvalModes[index];
     if (mode) onSelect(mode.id);
@@ -42,7 +56,7 @@ export function ApprovalModeDialog({
   const { keyboardMode } = useListboxKeyboard({
     itemCount: approvalModes.length,
     activeIndex,
-    onActiveIndexChange: setActiveIndex,
+    onActiveIndexChange: moveHighlight,
     onConfirm: confirm,
   });
 
@@ -79,7 +93,7 @@ export function ApprovalModeDialog({
               isCurrent ? dp('dialog-current') : ''
             }`}
             onClick={() => confirm(index)}
-            onMouseMove={() => setActiveIndex(index)}
+            onMouseMove={() => moveHighlight(index)}
           >
             <span className={styles.modeIcon}>
               <ModeIcon mode={mode.id} />

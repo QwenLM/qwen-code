@@ -57,6 +57,7 @@ export function ThemeDialog({
       )}
       ref={listRef}
       role="listbox"
+      aria-label={t('theme.title')}
       tabIndex={0}
       aria-activedescendant={
         themes.length > 0 ? `theme-opt-${selectedIdx}` : undefined

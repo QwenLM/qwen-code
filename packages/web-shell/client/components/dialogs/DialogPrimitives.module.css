@@ -182,12 +182,14 @@
    channel, independent of the roving `.selected` background highlight. Both are
    absolutely positioned and vertically centered, so they stay centered whatever
    the row height (single- or multi-line). Shared by every list dialog. */
-.dialog-current {
+.dialog-current,
+.picker-item-confirmed {
   position: relative;
   padding-right: 28px;
 }
 
-.dialog-current::before {
+.dialog-current::before,
+.picker-item-confirmed::before {
   content: '';
   position: absolute;
   left: 0;
@@ -199,7 +201,8 @@
   background: var(--agent-blue-500, #4a9eff);
 }
 
-.dialog-current::after {
+.dialog-current::after,
+.picker-item-confirmed::after {
   content: '✓';
   position: absolute;
   right: 10px;

@@ -57,6 +57,9 @@ export function RewindDialog({
   // the user commits with Enter or a click.
   const [cursorIdx, setCursorIdx] = useState(0);
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
+  // Inline failure text. The app-level onError toast deduplicates repeats, so
+  // a second identical failure would otherwise be invisible in this dialog.
+  const [message, setMessage] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -100,12 +103,18 @@ export function RewindDialog({
   const handleRewind = (promptId: string | null) => {
     if (!promptId || rewindingPromptId) return;
     setRewindingPromptId(promptId);
+    setMessage(null);
     rewind(promptId)
       .then(() => {
         onClose();
       })
       .catch((error: unknown) => {
         onError(error);
+        setMessage(
+          t('rewind.failed', {
+            reason: error instanceof Error ? error.message : String(error),
+          }),
+        );
         setRewindingPromptId(null);
       });
   };
@@ -133,6 +142,19 @@ export function RewindDialog({
     el?.scrollIntoView({ block: 'nearest' });
   }, [cursorIdx]);
 
+  // Snapshots load asynchronously: while loading, nothing in this dialog is
+  // focusable, so DialogShell parks focus on the dialog panel. Once the listbox
+  // mounts, pull focus into it — but only if focus is still parked on the panel
+  // — so screen readers announce the active option via aria-activedescendant
+  // instead of staying silent until the user tabs into the list.
+  useEffect(() => {
+    if (loading || items.length === 0) return;
+    const active = document.activeElement;
+    if (active?.getAttribute('role') === 'dialog') {
+      listRef.current?.focus();
+    }
+  }, [loading, items.length]);
+
   if (loading) {
     return <div className={dp('picker-empty')}>{t('rewind.loading')}</div>;
   }
@@ -147,6 +169,7 @@ export function RewindDialog({
         className={`${styles.list} ${keyboardMode ? styles.keyboardOnly : ''}`}
         ref={listRef}
         role="listbox"
+        aria-label={t('rewind.title')}
         tabIndex={0}
         aria-activedescendant={
           items.length > 0 ? optionId(cursorIdx) : undefined
@@ -187,6 +210,11 @@ export function RewindDialog({
         })}
       </div>
       <div className={styles.footer}>
+        {message && (
+          <span className={styles.footerMessage} role="alert">
+            {message}
+          </span>
+        )}
         <button
           type="button"
           className={dp('dialog-inline-button')}

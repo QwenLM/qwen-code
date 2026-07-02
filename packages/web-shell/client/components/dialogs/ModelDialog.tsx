@@ -111,15 +111,21 @@ export function ModelDialog({
   const [activeIndex, setActiveIndex] = useState(
     currentIdx >= 0 ? currentIdx : 0,
   );
-  // Models may arrive asynchronously; align the highlight with the active model
-  // once the list first populates, before the user starts navigating.
-  const syncedRef = useRef(false);
+  // Follow the current model until the user first navigates: models arrive
+  // asynchronously, and the current model itself can change while the dialog
+  // is open (e.g. another client sharing the session switches models) — the
+  // highlight, detail panel and Enter must track it. Once the user has moved
+  // the highlight themselves, it is theirs and must not be stolen.
+  const userNavigatedRef = useRef(false);
   useEffect(() => {
-    if (!syncedRef.current && availableModels.length > 0) {
-      syncedRef.current = true;
-      setActiveIndex(currentIdx >= 0 ? currentIdx : 0);
-    }
+    if (userNavigatedRef.current || availableModels.length === 0) return;
+    setActiveIndex(currentIdx >= 0 ? currentIdx : 0);
   }, [availableModels.length, currentIdx]);
+
+  const moveHighlight = (index: number) => {
+    userNavigatedRef.current = true;
+    setActiveIndex(index);
+  };
 
   // Keep the highlight in bounds if the model list refreshes/shrinks while open,
   // so aria-activedescendant, the detail panel and Enter all stay in sync.
@@ -139,7 +145,7 @@ export function ModelDialog({
   const { keyboardMode } = useListboxKeyboard({
     itemCount: availableModels.length,
     activeIndex,
-    onActiveIndexChange: setActiveIndex,
+    onActiveIndexChange: moveHighlight,
     onConfirm: confirm,
   });
 
@@ -192,7 +198,7 @@ export function ModelDialog({
                 isCurrent ? dp('dialog-current') : ''
               }`}
               onClick={() => confirm(index)}
-              onMouseMove={() => setActiveIndex(index)}
+              onMouseMove={() => moveHighlight(index)}
             >
               <span className={styles.number}>{index + 1}.</span>
               {authType ? (

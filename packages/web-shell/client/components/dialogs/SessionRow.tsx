@@ -10,6 +10,8 @@ interface SessionRowProps {
   active: boolean;
   /** The user's current session — marks it with the accent bar + ✓. */
   current: boolean;
+  /** Confirmed target for a destructive action (release), distinct from cursor. */
+  confirmed?: boolean;
   /** Non-actionable row (e.g. the current session, or an inactive one). */
   disabled?: boolean;
   /** Tooltip shown when `current` (the pseudo-element ✓ can't carry text). */
@@ -17,8 +19,10 @@ interface SessionRowProps {
   /** Stable id so the listbox can point `aria-activedescendant` at this row. */
   optionId?: string;
   /**
-   * `aria-selected` value. Defaults to `active`; multi-select dialogs pass the
-   * checked state instead.
+   * `aria-selected` value. Per WAI-ARIA this marks the chosen value, not the
+   * roving highlight (which `aria-activedescendant` conveys) — so it defaults
+   * to `current`. Multi-select (delete) passes the checked state and release
+   * passes its confirmed target instead.
    */
   ariaSelected?: boolean;
   /** Leading slot, e.g. a multi-select checkbox. */
@@ -27,9 +31,10 @@ interface SessionRowProps {
   trailing?: ReactNode;
   onClick: () => void;
   /**
-   * Pointer moved over the row (real movement — see useListboxKeyboard). Omit to
-   * opt out of hover selection, e.g. a confirm-button dialog whose action must
-   * track a deliberate click, not the cursor.
+   * Pointer moved over the row (real movement — see useListboxKeyboard). This
+   * updates the roving cursor only; callers that separate cursor from confirmed
+   * target (e.g. release/rewind) still keep the destructive action behind an
+   * explicit Enter/click + button flow.
    */
   onActivate?: () => void;
 }
@@ -44,6 +49,7 @@ export function SessionRow({
   session,
   active,
   current,
+  confirmed,
   disabled,
   currentLabel,
   optionId,
@@ -60,13 +66,15 @@ export function SessionRow({
     <div
       id={optionId}
       role="option"
-      aria-selected={ariaSelected ?? active}
+      aria-selected={ariaSelected ?? current}
+      aria-current={current ? 'true' : undefined}
       aria-disabled={disabled || undefined}
       className={dp(
         'picker-item',
         'picker-session-item',
         active ? 'selected' : undefined,
         current ? 'dialog-current' : undefined,
+        confirmed ? 'picker-item-confirmed' : undefined,
         disabled ? 'disabled' : undefined,
       )}
       title={current ? currentLabel : undefined}

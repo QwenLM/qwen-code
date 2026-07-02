@@ -34,11 +34,14 @@ export function ReleaseSessionDialog({
   } = useSessions({ autoLoad: true });
   const currentSessionId = connection.sessionId;
   const [deleting, setDeleting] = useState(false);
-  const [selectedIdx, setSelectedIdx] = useState(0);
-  const [hasSelectedSession, setHasSelectedSession] = useState(false);
+  // -1 = no highlight; see ResumeDialog for the rationale.
+  const [cursorIdx, setCursorIdx] = useState(-1);
+  const [selectedSessionId, setSelectedSessionId] = useState<string | null>(
+    null,
+  );
   const { filterValue: filterQuery, inputProps } = useFilterInput(() => {
-    setSelectedIdx(0);
-    setHasSelectedSession(false);
+    setCursorIdx(-1);
+    setSelectedSessionId(null);
   });
   const [message, setMessage] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
@@ -58,40 +61,49 @@ export function ReleaseSessionDialog({
       })
     : sessions;
 
-  const selectRow = (index: number) => {
-    setSelectedIdx(index);
-    setHasSelectedSession(true);
+  const confirmRow = (index: number) => {
+    const session = filtered[index];
+    if (!session) return;
+
+    const isCurrent = session.sessionId === currentSessionId;
+    const isReleasable =
+      (session.clientCount ?? 0) > 0 || session.hasActivePrompt === true;
+    if (isCurrent || !isReleasable) return;
+
+    setCursorIdx(index);
+    setSelectedSessionId(session.sessionId);
   };
 
   useEffect(() => {
-    if (selectedIdx >= filtered.length && filtered.length > 0) {
-      setSelectedIdx(filtered.length - 1);
+    if (cursorIdx >= filtered.length && filtered.length > 0) {
+      setCursorIdx(filtered.length - 1);
     }
-  }, [filtered.length, selectedIdx]);
+  }, [filtered.length, cursorIdx]);
 
   useEffect(() => {
-    const el = listRef.current?.children[selectedIdx] as
-      | HTMLElement
-      | undefined;
+    const el = listRef.current?.children[cursorIdx] as HTMLElement | undefined;
     el?.scrollIntoView({ block: 'nearest' });
-  }, [selectedIdx]);
+  }, [cursorIdx]);
 
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
-  // Enter only moves/commits the highlight; the actual (destructive) release
-  // still requires pressing the danger button — mirroring the click behaviour.
+  // Arrows move only the roving cursor. Enter/click confirms the target row,
+  // but the destructive release still stays behind the danger button.
   const { keyboardMode } = useListboxKeyboard({
     itemCount: filtered.length,
-    activeIndex: selectedIdx,
-    onActiveIndexChange: selectRow,
-    onConfirm: selectRow,
+    activeIndex: cursorIdx,
+    onActiveIndexChange: setCursorIdx,
+    onConfirm: confirmRow,
   });
 
   const handleRelease = useCallback(
     (targetSession?: DaemonSessionSummary) => {
-      const session = targetSession ?? filtered[selectedIdx];
+      const session =
+        targetSession ??
+        filtered.find((s) => s.sessionId === selectedSessionId) ??
+        undefined;
       if (!session || deleting) return;
       const releasable =
         (session.clientCount ?? 0) > 0 || session.hasActivePrompt === true;
@@ -123,12 +135,13 @@ export function ReleaseSessionDialog({
       onError,
       onReleased,
       releaseSession,
-      selectedIdx,
+      selectedSessionId,
       t,
     ],
   );
 
-  const selectedSession = filtered[selectedIdx];
+  const selectedSession =
+    filtered.find((s) => s.sessionId === selectedSessionId) ?? undefined;
   const selectedReleasable =
     selectedSession &&
     ((selectedSession.clientCount ?? 0) > 0 ||
@@ -136,7 +149,6 @@ export function ReleaseSessionDialog({
   const canRelease =
     !deleting &&
     !loading &&
-    hasSelectedSession &&
     !!selectedSession &&
     selectedSession.sessionId !== currentSessionId &&
     !!selectedReleasable;
@@ -150,13 +162,14 @@ export function ReleaseSessionDialog({
         <input
           ref={inputRef}
           className={dp('picker-search-input')}
+          aria-label={t('resume.search')}
           role="combobox"
           aria-autocomplete="list"
           aria-expanded="true"
           aria-controls={LIST_ID}
           aria-activedescendant={
-            hasSelectedSession && filtered.length > 0
-              ? optionId(selectedIdx)
+            cursorIdx >= 0 && cursorIdx < filtered.length
+              ? optionId(cursorIdx)
               : undefined
           }
           {...inputProps}
@@ -206,18 +219,27 @@ export function ReleaseSessionDialog({
                 key={s.sessionId}
                 session={s}
                 optionId={optionId(i)}
-                active={hasSelectedSession && i === selectedIdx}
-                current={isCurrent}
+                active={i === cursorIdx}
+                confirmed={s.sessionId === selectedSessionId}
+                ariaSelected={s.sessionId === selectedSessionId}
+                // In release/delete dialogs, "current session" is just a
+                // disabled reason, not the confirmed target. Keep the stronger
+                // accent bar + ✓ for the actual confirmed release target only.
+                current={false}
                 disabled={isDisabled}
-                currentLabel={t('resume.current')}
                 trailing={
-                  !isCurrent && !isReleasable ? (
+                  isCurrent ? (
+                    <span className={dp('picker-item-badge')}>
+                      {t('resume.current')}
+                    </span>
+                  ) : !isReleasable ? (
                     <span className={dp('picker-item-badge')}>
                       {t('release.inactiveBadge')}
                     </span>
                   ) : undefined
                 }
-                onClick={() => selectRow(i)}
+                onClick={() => confirmRow(i)}
+                onActivate={() => setCursorIdx(i)}
               />
             );
           })}

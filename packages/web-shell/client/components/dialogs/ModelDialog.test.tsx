@@ -78,3 +78,81 @@ describe('ModelDialog current marker', () => {
     expect(selected()[0].textContent).toContain('b');
   });
 });
+
+describe('ModelDialog keyboard confirmation', () => {
+  it('confirms the highlighted model on Enter', () => {
+    const onSelect = vi.fn();
+    const models = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+    mount(
+      <ModelDialog onSelect={onSelect} models={models} currentModelId="b" />,
+    );
+
+    // Enter with no navigation confirms the current model's row.
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
+      );
+    });
+    expect(onSelect).toHaveBeenCalledWith('b');
+
+    // After arrowing, Enter confirms the newly highlighted row.
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowDown', cancelable: true }),
+      );
+    });
+    act(() => {
+      window.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', cancelable: true }),
+      );
+    });
+    expect(onSelect).toHaveBeenLastCalledWith('c');
+  });
+});
+
+describe('ModelDialog highlight follows the current model', () => {
+  const models = [{ id: 'a' }, { id: 'b' }, { id: 'c' }];
+  const activeDescendant = () =>
+    container!
+      .querySelector('[role="listbox"]')!
+      .getAttribute('aria-activedescendant');
+
+  it('re-syncs the highlight when the current model changes while open', () => {
+    mount(
+      <ModelDialog onSelect={vi.fn()} models={models} currentModelId="a" />,
+    );
+    expect(activeDescendant()).toBe('model-opt-0');
+
+    // Another client sharing the session switches the model while the dialog
+    // is open: the highlight (and thus detail panel / Enter) must follow.
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ModelDialog onSelect={vi.fn()} models={models} currentModelId="c" />
+        </I18nProvider>,
+      );
+    });
+    expect(activeDescendant()).toBe('model-opt-2');
+  });
+
+  it('stops following once the user has navigated', () => {
+    mount(
+      <ModelDialog onSelect={vi.fn()} models={models} currentModelId="a" />,
+    );
+
+    act(() => {
+      window.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowDown' }));
+    });
+    expect(activeDescendant()).toBe('model-opt-1');
+
+    // The user owns the highlight now — a current-model change must not steal it.
+    act(() => {
+      root!.render(
+        <I18nProvider language="en">
+          <ModelDialog onSelect={vi.fn()} models={models} currentModelId="c" />
+        </I18nProvider>,
+      );
+    });
+    expect(activeDescendant()).toBe('model-opt-1');
+  });
+});

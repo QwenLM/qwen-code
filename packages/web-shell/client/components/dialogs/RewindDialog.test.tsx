@@ -99,4 +99,60 @@ describe('RewindDialog keyboard', () => {
     });
     expect(rewind).toHaveBeenCalledWith('p1');
   });
+
+  it('disables keyboard navigation while a rewind is in flight', async () => {
+    // A rewind that never settles keeps isRewinding true.
+    const rewind = vi.fn().mockReturnValue(new Promise<void>(() => {}));
+    await mount(rewind);
+
+    const activeDescendant = () =>
+      container!
+        .querySelector('[role="listbox"]')!
+        .getAttribute('aria-activedescendant');
+
+    press('ArrowDown');
+    press('Enter');
+    expect(activeDescendant()).toBe('rewind-snapshot-list-opt-1');
+    act(() => {
+      rewindButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(rewind).toHaveBeenCalledWith('p1');
+
+    // While rewinding, arrows must not move the highlight (enabled: false).
+    press('ArrowUp');
+    expect(activeDescendant()).toBe('rewind-snapshot-list-opt-1');
+  });
+
+  it('shows an inline error and re-enables the button when rewind fails', async () => {
+    const rewind = vi.fn().mockRejectedValue(new Error('boom'));
+    await mount(rewind);
+
+    press('ArrowDown');
+    press('Enter');
+    await act(async () => {
+      rewindButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    // The failure is visible in-dialog (toasts may be deduplicated upstream)
+    // and the user can retry.
+    expect(container!.textContent).toContain('boom');
+    expect(rewindButton().disabled).toBe(false);
+  });
+
+  it('pulls focus into the listbox once snapshots arrive, if parked on the panel', async () => {
+    // Simulate DialogShell's fallback: nothing focusable during loading, so
+    // focus sits on the dialog panel.
+    const panel = document.createElement('div');
+    panel.setAttribute('role', 'dialog');
+    panel.tabIndex = -1;
+    document.body.appendChild(panel);
+    panel.focus();
+    expect(document.activeElement).toBe(panel);
+
+    await mount(vi.fn().mockResolvedValue(undefined));
+
+    const listbox = container!.querySelector<HTMLElement>('[role="listbox"]');
+    expect(document.activeElement).toBe(listbox);
+    panel.remove();
+  });
 });

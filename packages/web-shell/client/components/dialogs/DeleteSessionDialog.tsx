@@ -31,12 +31,13 @@ export function DeleteSessionDialog({
   } = useSessions({ autoLoad: true });
   const currentSessionId = connection.sessionId;
   const [deleting, setDeleting] = useState(false);
-  // `selectedIdx` is the keyboard/hover cursor (roving highlight); `selectedIds`
-  // is the multi-select set marked for deletion (shown by the [x] checkbox).
-  const [selectedIdx, setSelectedIdx] = useState(0);
+  // `selectedIdx` is the keyboard/hover cursor (roving highlight, -1 = none —
+  // see ResumeDialog for the rationale); `selectedIds` is the multi-select set
+  // marked for deletion (shown by the [x] checkbox).
+  const [selectedIdx, setSelectedIdx] = useState(-1);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const { filterValue: filterQuery, inputProps } = useFilterInput(() => {
-    setSelectedIdx(0);
+    setSelectedIdx(-1);
     setSelectedIds(new Set());
   });
   const [message, setMessage] = useState<string | null>(null);
@@ -78,14 +79,13 @@ export function DeleteSessionDialog({
   );
 
   useEffect(() => {
-    if (filterQuery && selectedIds.size > 0) {
-      const filteredSet = new Set(filtered.map((s) => s.sessionId));
-      setSelectedIds((prev) => {
-        const pruned = new Set([...prev].filter((id) => filteredSet.has(id)));
-        return pruned.size === prev.size ? prev : pruned;
-      });
-    }
-  }, [filterQuery, filtered, selectedIds.size]);
+    if (selectedIds.size === 0) return;
+    const filteredSet = new Set(filtered.map((s) => s.sessionId));
+    setSelectedIds((prev) => {
+      const pruned = new Set([...prev].filter((id) => filteredSet.has(id)));
+      return pruned.size === prev.size ? prev : pruned;
+    });
+  }, [filtered, selectedIds.size]);
 
   useEffect(() => {
     if (selectedIdx >= filtered.length && filtered.length > 0) {
@@ -221,12 +221,15 @@ export function DeleteSessionDialog({
         <input
           ref={inputRef}
           className={dp('picker-search-input')}
+          aria-label={t('resume.search')}
           role="combobox"
           aria-autocomplete="list"
           aria-expanded="true"
           aria-controls={LIST_ID}
           aria-activedescendant={
-            filtered.length > 0 ? optionId(selectedIdx) : undefined
+            selectedIdx >= 0 && selectedIdx < filtered.length
+              ? optionId(selectedIdx)
+              : undefined
           }
           {...inputProps}
           placeholder=""
@@ -281,9 +284,8 @@ export function DeleteSessionDialog({
                 optionId={optionId(i)}
                 active={i === selectedIdx}
                 ariaSelected={isChecked}
-                current={isCurrent}
+                current={false}
                 disabled={isCurrent}
-                currentLabel={t('resume.current')}
                 leading={
                   <span
                     className={dp(
@@ -293,6 +295,13 @@ export function DeleteSessionDialog({
                   >
                     {isChecked ? '[x] ' : '[ ] '}
                   </span>
+                }
+                trailing={
+                  isCurrent ? (
+                    <span className={dp('picker-item-badge')}>
+                      {t('resume.current')}
+                    </span>
+                  ) : undefined
                 }
                 onClick={() => {
                   setSelectedIdx(i);

@@ -87,6 +87,7 @@ export function ToolsDialog() {
       <div
         id={LIST_ID}
         role="listbox"
+        aria-label={t('tools.title')}
         tabIndex={0}
         aria-activedescendant={
           tools.length > 0 ? optionId(selectedIdx) : undefined
@@ -108,7 +109,10 @@ export function ToolsDialog() {
               key={tool.name}
               id={optionId(i)}
               role="option"
-              aria-selected={i === selectedIdx}
+              // Informational list — rows are expanded, never "chosen", so no
+              // row is ever aria-selected; the roving highlight is conveyed by
+              // aria-activedescendant on the listbox.
+              aria-selected={false}
               aria-expanded={desc ? expanded : undefined}
               className={dp(
                 'picker-item',

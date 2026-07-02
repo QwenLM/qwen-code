@@ -57,7 +57,10 @@ describe('SessionRow', () => {
     expect(row().textContent).toContain('2');
   });
 
-  it('defaults aria-selected to `active`, but an explicit value wins', () => {
+  it('defaults aria-selected to `current` (not the roving highlight), explicit value wins', () => {
+    // The roving highlight must NOT be announced as "selected" — per WAI-ARIA
+    // it is conveyed by aria-activedescendant, while aria-selected marks the
+    // chosen value (here: the current session, also exposed via aria-current).
     mount(
       <SessionRow
         session={session}
@@ -67,17 +70,32 @@ describe('SessionRow', () => {
         onActivate={vi.fn()}
       />,
     );
-    expect(row().getAttribute('aria-selected')).toBe('true');
+    expect(row().getAttribute('aria-selected')).toBe('false');
+    expect(row().getAttribute('aria-current')).toBeNull();
 
     act(() => root?.unmount());
     container?.remove();
-    // Multi-select: aria-selected tracks checked state, not the cursor.
+    mount(
+      <SessionRow
+        session={session}
+        active={false}
+        current={true}
+        onClick={vi.fn()}
+        onActivate={vi.fn()}
+      />,
+    );
+    expect(row().getAttribute('aria-selected')).toBe('true');
+    expect(row().getAttribute('aria-current')).toBe('true');
+
+    act(() => root?.unmount());
+    container?.remove();
+    // Multi-select: an explicit ariaSelected (checked state) wins over current.
     mount(
       <SessionRow
         session={session}
         active={true}
         ariaSelected={false}
-        current={false}
+        current={true}
         onClick={vi.fn()}
         onActivate={vi.fn()}
       />,

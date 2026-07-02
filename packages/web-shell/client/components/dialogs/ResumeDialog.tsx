@@ -19,9 +19,12 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
   const connection = useConnection();
   const { sessions, loading, error } = useSessions({ autoLoad: true });
   const currentSessionId = connection.sessionId;
-  const [selectedIdx, setSelectedIdx] = useState(0);
+  // -1 = no highlight. The dialog opens with nothing highlighted and resets to
+  // none on filter edits, so Enter in the search box cannot confirm a row the
+  // user didn't pick — the highlight only appears once they press ↓/↑ or hover.
+  const [selectedIdx, setSelectedIdx] = useState(-1);
   const { filterValue: filterQuery, inputProps } = useFilterInput(() =>
-    setSelectedIdx(0),
+    setSelectedIdx(-1),
   );
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -35,17 +38,6 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
         );
       })
     : sessions;
-
-  // Sessions load asynchronously; once they arrive, open with the highlight on
-  // the current session (consistent with the model/theme/approval pickers),
-  // before the user navigates or searches.
-  const syncedRef = useRef(false);
-  useEffect(() => {
-    if (syncedRef.current || sessions.length === 0) return;
-    syncedRef.current = true;
-    const idx = sessions.findIndex((s) => s.sessionId === currentSessionId);
-    if (idx > 0) setSelectedIdx(idx);
-  }, [sessions, currentSessionId]);
 
   // Keep selection in bounds
   useEffect(() => {
@@ -89,12 +81,15 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
         <input
           ref={inputRef}
           className={dp('picker-search-input')}
+          aria-label={t('resume.search')}
           role="combobox"
           aria-autocomplete="list"
           aria-expanded="true"
           aria-controls={LIST_ID}
           aria-activedescendant={
-            filtered.length > 0 ? optionId(selectedIdx) : undefined
+            selectedIdx >= 0 && selectedIdx < filtered.length
+              ? optionId(selectedIdx)
+              : undefined
           }
           {...inputProps}
           placeholder=""

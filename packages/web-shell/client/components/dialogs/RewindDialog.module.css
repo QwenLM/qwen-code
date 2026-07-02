@@ -102,8 +102,17 @@
 .footer {
   display: flex;
   justify-content: flex-end;
+  align-items: center;
   gap: 8px;
   padding: 10px 8px 0;
+}
+
+/* Inline failure text: toasts can be deduplicated by the app shell, so the
+   dialog must show the error itself (mirrors delete/release's message hint). */
+.footerMessage {
+  margin-right: auto;
+  color: var(--error-color);
+  font-size: 12px;
 }
 
 .dangerButton {
