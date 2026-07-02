@@ -105,6 +105,8 @@ describe('parseChannelConfig', () => {
     expect(result.cwd).toBe(process.cwd());
     expect(result.groupPolicy).toBe('disabled');
     expect(result.groups).toEqual({});
+    expect(result.identity).toBeUndefined();
+    expect(result.memoryScope).toBeUndefined();
   });
 
   it('resolves env vars in token, clientId, clientSecret', async () => {
@@ -138,6 +140,8 @@ describe('parseChannelConfig', () => {
       cwd: '/custom',
       approvalMode: 'auto',
       instructions: 'Be helpful',
+      identity: { id: 'ops-agent', displayName: 'Ops Agent' },
+      memoryScope: { namespace: 'qwen-tag:ops', mode: 'metadata-only' },
       model: 'qwen-coder',
       groupPolicy: 'open',
       groups: { g1: { mentionKeywords: ['@bot'] } },
@@ -150,9 +154,54 @@ describe('parseChannelConfig', () => {
     expect(result.cwd).toBe('/custom');
     expect(result.approvalMode).toBe('auto');
     expect(result.instructions).toBe('Be helpful');
+    expect(result.identity).toEqual({
+      id: 'ops-agent',
+      displayName: 'Ops Agent',
+    });
+    expect(result.memoryScope).toEqual({
+      namespace: 'qwen-tag:ops',
+      mode: 'metadata-only',
+    });
     expect(result.model).toBe('qwen-coder');
     expect(result.groupPolicy).toBe('open');
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
+  });
+
+  it('rejects a non-object identity', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', identity: 'ops' }),
+    ).rejects.toThrow('Channel "bot" field "identity" must be an object.');
+  });
+
+  it('rejects a non-string identity field', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', identity: { id: 123 } }),
+    ).rejects.toThrow('Channel "bot" field "identity.id" must be a string.');
+  });
+
+  it('rejects a non-object memoryScope', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', memoryScope: ['ops'] }),
+    ).rejects.toThrow('Channel "bot" field "memoryScope" must be an object.');
+  });
+
+  it('rejects an unknown memoryScope.mode', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        memoryScope: { mode: 'full' },
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "memoryScope.mode" must be "metadata-only".',
+    );
+  });
+
+  it('drops empty identity fields instead of failing', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      identity: { id: 'ops-agent', displayName: '', description: null },
+    });
+    expect(result.identity).toEqual({ id: 'ops-agent' });
   });
 
   it('spreads extra fields from raw config', async () => {
