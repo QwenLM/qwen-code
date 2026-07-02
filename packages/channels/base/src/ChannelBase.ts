@@ -584,9 +584,8 @@ export abstract class ChannelBase {
         );
       }
 
-      // Same hold-and-replay contract as handleInbound's onChunk: text_chunk
-      // stays out of the transcript while a cancel is pending; onResponseChunk
-      // stays live (adapters gate visible updates on their own stop state).
+      // Same hold-and-replay contract as handleInbound's onChunk: visible
+      // sinks stay out of the transcript while a cancel is pending.
       const heldChunks: string[] = [];
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
@@ -595,13 +594,13 @@ export abstract class ChannelBase {
             type: 'text_chunk',
             chunk: held,
           });
+          this.onResponseChunk(job.target.chatId, held, sessionId);
         }
       };
       const onChunk = (sid: string, chunk: string) => {
         if (sid !== sessionId || promptState.cancelled) {
           return;
         }
-        this.onResponseChunk(job.target.chatId, chunk, sessionId);
         heldChunks.push(chunk);
         if (!promptState.cancelPending) {
           releaseHeldChunks();
@@ -2586,13 +2585,8 @@ export abstract class ChannelBase {
       promptState.stopStreaming = () => streamer?.stop();
 
       // Chunks arriving while a cancel is PENDING are held here: pushing them
-      // to the BlockStreamer could send a block the cancel can't recall, and
-      // emitting text_chunk would put content in the transcript the user may
-      // never receive. On a failed cancel they're replayed; on success,
-      // discarded. onResponseChunk stays live during the window — adapters
-      // accumulate display state and gate visible updates on their own
-      // stop/cancelling flags, so suppressing it would leave a permanent hole
-      // in adapter-rendered output when the cancel fails.
+      // to any visible sink could send output the cancel can't recall. On a
+      // failed cancel they're replayed; on success, discarded.
       const heldChunks: string[] = [];
       const releaseHeldChunks = () => {
         for (const held of heldChunks.splice(0)) {
@@ -2605,6 +2599,7 @@ export abstract class ChannelBase {
             type: 'text_chunk',
             chunk: held,
           });
+          this.onResponseChunk(envelope.chatId, held, sessionId);
           streamer?.push(held);
         }
       };
@@ -2612,7 +2607,6 @@ export abstract class ChannelBase {
         if (sid !== sessionId || promptState.cancelled) {
           return;
         }
-        this.onResponseChunk(envelope.chatId, chunk, sessionId);
         heldChunks.push(chunk);
         if (!promptState.cancelPending) {
           releaseHeldChunks();

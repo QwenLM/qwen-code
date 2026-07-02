@@ -4961,11 +4961,7 @@ describe('ChannelBase', () => {
       const eventTypes = ch.taskEvents.map((event) => event.type);
       expect(eventTypes).not.toContain('text_chunk');
       expect(eventTypes).not.toContain('completed');
-      // onResponseChunk stays live during the pending window — adapters
-      // accumulate display state and gate rendering on their own stop flags.
-      expect(ch.responseChunks).toEqual([
-        { chatId: 'chat1', chunk: 'late part', sessionId },
-      ]);
+      expect(ch.responseChunks).toEqual([]);
       resolveCancel();
       await Promise.all([prompt, cancel]);
 
@@ -5722,6 +5718,11 @@ describe('ChannelBase', () => {
       expect(ch.sent.map((message) => message.text).join('\n')).toContain(
         'before during after',
       );
+      expect(ch.responseChunks.map((entry) => entry.chunk)).toEqual([
+        'before ',
+        'during ',
+        'after',
+      ]);
     });
 
     it('never sends held block-streaming chunks when the pending cancel succeeds', async () => {
@@ -5769,6 +5770,7 @@ describe('ChannelBase', () => {
       expect(
         ch.taskEvents.filter((event) => event.type === 'text_chunk'),
       ).toEqual([]);
+      expect(ch.responseChunks).toEqual([]);
     });
   });
 
@@ -8033,11 +8035,7 @@ describe('ChannelBase', () => {
       expect(ch.taskEvents).toEqual([
         expect.objectContaining({ type: 'started', messageId: 'job-1' }),
       ]);
-      // onResponseChunk stays live during the pending window — adapters
-      // accumulate display state and gate rendering on their own stop flags.
-      expect(ch.responseChunks).toEqual([
-        { chatId: 'chat1', chunk: 'late loop part', sessionId },
-      ]);
+      expect(ch.responseChunks).toEqual([]);
       resolveCancel();
       await cancel;
       resolvePrompt('loop response');
