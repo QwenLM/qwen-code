@@ -4909,6 +4909,54 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('keeps completion suppressed when cancellation outlives the reconciliation timeout', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+      ch.enableCancelCommand();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-cancel' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+
+      vi.useFakeTimers();
+      try {
+        resolvePrompt('late response');
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
+        await prompt;
+      } finally {
+        vi.useRealTimers();
+      }
+
+      expect(ch.sent).toEqual([]);
+      expect(ch.taskEvents.map((event) => event.type)).toEqual(['started']);
+
+      resolveCancel();
+      await cancel;
+
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Cancelled current request.' },
+      ]);
+      expect(ch.taskEvents.map((event) => event.type)).toEqual([
+        'started',
+        'cancelled',
+      ]);
+    });
+
     it('emits one cancellation lifecycle event for repeated /cancel commands', async () => {
       let resolvePrompt!: (value: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {

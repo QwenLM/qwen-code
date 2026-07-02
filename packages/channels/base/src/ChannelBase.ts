@@ -744,7 +744,7 @@ export abstract class ChannelBase {
       const cancelled = await Promise.race([
         active.cancelRequested,
         new Promise<boolean>((resolve) => {
-          timer = setTimeout(() => resolve(false), CLEAR_CANCEL_TIMEOUT_MS);
+          timer = setTimeout(() => resolve(true), CLEAR_CANCEL_TIMEOUT_MS);
           timer.unref?.();
         }),
       ]);
