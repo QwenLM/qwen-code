@@ -216,6 +216,21 @@ jobs:
           npm run build
           npm run bundle
 
+      - name: 'Check bot credentials'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          if [[ -z "${GITHUB_TOKEN}" ]]; then
+            echo '::error::CI_DEV_BOT_PAT is required to run the issue autofix job.'
+            exit 1
+          fi
+          bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login')"
+          echo "CI_DEV_BOT_PAT authenticates as ${bot_actor}"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+
       - name: 'Find candidate issues'
         id: 'scan'
         env:
@@ -729,7 +744,14 @@ jobs:
             echo '::error::CI_DEV_BOT_PAT is required to publish the PR as qwen-code-dev-bot.'
             exit 1
           fi
+          publish_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login')"
+          echo "CI_DEV_BOT_PAT authenticates as ${publish_actor}"
+          if [[ "${publish_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as ${publish_actor}; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
           BRANCH="autofix/issue-${ISSUE}"
+          git config --local --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
           git push --force-with-lease origin "${BRANCH}"
 
@@ -749,11 +771,16 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           COMMENT_ID: '${{ steps.claim.outputs.comment_id }}'
+          PUBLISH_OUTCOME: '${{ steps.publish.outcome }}'
         run: |-
           if [[ -f "${WORKDIR}/failure.md" ]]; then
             REASON='no further automated attempts will be made on this issue.'
             DETAIL="$(head -c 1500 "${WORKDIR}/failure.md")"
             LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label 'autofix/skip')
+          elif [[ "${PUBLISH_OUTCOME}" == 'failure' ]]; then
+            REASON='the issue will be eligible for a future automated attempt.'
+            DETAIL='The agent produced and verified a fix, but publishing the PR failed. Check the Publish PR step logs for the CI_DEV_BOT_PAT actor and git push error.'
+            LABEL_ARGS=(--remove-label 'autofix/in-progress')
           else
             REASON='the issue will be eligible for a future automated attempt.'
             DETAIL='The run failed before producing a verified fix.'

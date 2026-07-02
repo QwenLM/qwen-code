@@ -16,6 +16,18 @@ const filterUnattendedCandidates =
   workflow.match(
     /filter_unattended_candidates\(\) \{[\s\S]*?\n[ ]{12}\}/,
   )?.[0] ?? '';
+const checkBotCredentialsStep =
+  workflow.match(
+    /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Find candidate issues')/,
+  )?.[0] ?? '';
+const publishPrStep =
+  workflow.match(
+    /- name: 'Publish PR'[\s\S]*?(?=\n[ ]{6}- name: 'Withdraw claim on failure')/,
+  )?.[0] ?? '';
+const withdrawClaimStep =
+  workflow.match(
+    /- name: 'Withdraw claim on failure'[\s\S]*?(?=\n[ ]{2}# ==========)/,
+  )?.[0] ?? '';
 
 describe('qwen-autofix workflow', () => {
   it('does not classify tier-2 issues with incomplete fallback comments', () => {
@@ -136,6 +148,33 @@ describe('qwen-autofix workflow', () => {
     expect(filterUnattendedCandidates).toContain('IN($bots[])');
     expect(filterUnattendedCandidates).not.toContain(
       '.author.login] | map(select',
+    );
+  });
+
+  it('keeps publish credential failures diagnosable', () => {
+    expect(checkBotCredentialsStep.length).toBeGreaterThan(0);
+    expect(publishPrStep.length).toBeGreaterThan(0);
+    expect(withdrawClaimStep.length).toBeGreaterThan(0);
+    expect(checkBotCredentialsStep).toContain(
+      'GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq \'.login\'',
+    );
+    expect(checkBotCredentialsStep).toContain(
+      'CI_DEV_BOT_PAT authenticates as ${bot_actor}',
+    );
+    expect(publishPrStep).toContain(
+      'GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq \'.login\'',
+    );
+    expect(publishPrStep).toContain(
+      'CI_DEV_BOT_PAT authenticates as ${publish_actor}',
+    );
+    expect(publishPrStep).toContain(
+      'git config --local --unset-all http.https://github.com/.extraheader || true',
+    );
+    expect(withdrawClaimStep).toContain(
+      "PUBLISH_OUTCOME: '${{ steps.publish.outcome }}'",
+    );
+    expect(withdrawClaimStep).toContain(
+      'The agent produced and verified a fix, but publishing the PR failed.',
     );
   });
 });
