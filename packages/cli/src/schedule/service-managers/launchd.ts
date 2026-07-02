@@ -15,6 +15,14 @@ import {
 
 const SERVICE_LABEL = 'dev.qwen.schedule-daemon';
 
+function xmlEscape(s: string): string {
+  return s
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 function getPlistPath(): string {
   return path.join(
     os.homedir(),
@@ -37,8 +45,8 @@ function generatePlist(): string {
     <string>${SERVICE_LABEL}</string>
     <key>ProgramArguments</key>
     <array>
-        <string>${process.execPath}</string>
-        <string>${qwenBinary}</string>
+        <string>${xmlEscape(process.execPath)}</string>
+        <string>${xmlEscape(qwenBinary)}</string>
         <string>schedule</string>
         <string>daemon</string>
         <string>start</string>
@@ -48,11 +56,11 @@ function generatePlist(): string {
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>${stdoutLog}</string>
+    <string>${xmlEscape(stdoutLog)}</string>
     <key>StandardErrorPath</key>
-    <string>${stderrLog}</string>
+    <string>${xmlEscape(stderrLog)}</string>
     <key>WorkingDirectory</key>
-    <string>${os.homedir()}</string>
+    <string>${xmlEscape(os.homedir())}</string>
 </dict>
 </plist>
 `;

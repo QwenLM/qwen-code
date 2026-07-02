@@ -132,8 +132,14 @@ export class WebhookServer {
 
     // Read body BEFORE auth so HMAC can sign the actual payload
     let body = '';
+    const MAX_BODY = 1024 * 1024; // 1MB
     for await (const chunk of req) {
       body += chunk.toString();
+      if (body.length > MAX_BODY) {
+        res.writeHead(413, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'Payload too large' }));
+        return;
+      }
     }
 
     // Authenticate if configured

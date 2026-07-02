@@ -194,10 +194,20 @@ export class ScheduleDaemon {
 
   private async processCommandFile(): Promise<void> {
     const cmdFile = this.getCmdFilePath();
-    try {
-      if (!fs.existsSync(cmdFile)) return;
+    const tmpFile = cmdFile + '.processing';
 
-      const content = fs.readFileSync(cmdFile, 'utf-8').trim();
+    // Atomically claim the file by renaming it
+    try {
+      fs.renameSync(cmdFile, tmpFile);
+    } catch {
+      return; // No commands pending
+    }
+
+    try {
+      const content = fs.readFileSync(tmpFile, 'utf-8').trim();
+      // Clean up temp file
+      fs.unlinkSync(tmpFile);
+
       if (!content) return;
 
       // Process each line as a separate command
@@ -225,11 +235,14 @@ export class ScheduleDaemon {
             debugLogger.warn(`Unknown daemon command: ${cmd.action}`);
         }
       }
-
-      // Truncate file after processing
-      fs.writeFileSync(cmdFile, '');
     } catch (err) {
       debugLogger.warn(`Error processing command file: ${err}`);
+      // Clean up temp file on error
+      try {
+        fs.unlinkSync(tmpFile);
+      } catch {
+        // File may not exist
+      }
     }
   }
 
@@ -239,11 +252,15 @@ export class ScheduleDaemon {
 
   loadTask(taskId: string): void {
     if (this.loadedTasks.has(taskId)) return;
-    void readScheduleTask(taskId).then((task) => {
-      if (task && task.definition.schedule.enabled) {
-        this.registerTask(task);
-      }
-    });
+    void readScheduleTask(taskId)
+      .then((task) => {
+        if (task && task.definition.schedule.enabled) {
+          this.registerTask(task);
+        }
+      })
+      .catch((err) => {
+        debugLogger.warn(`Failed to load task ${taskId}: ${err}`);
+      });
   }
 
   unloadTask(taskId: string): void {
@@ -269,11 +286,15 @@ export class ScheduleDaemon {
 
   reloadTask(taskId: string): void {
     this.unloadTask(taskId);
-    void readScheduleTask(taskId).then((task) => {
-      if (task && task.definition.schedule.enabled) {
-        this.registerTask(task);
-      }
-    });
+    void readScheduleTask(taskId)
+      .then((task) => {
+        if (task && task.definition.schedule.enabled) {
+          this.registerTask(task);
+        }
+      })
+      .catch((err) => {
+        debugLogger.warn(`Failed to reload task ${taskId}: ${err}`);
+      });
   }
 
   get isRunning(): boolean {
