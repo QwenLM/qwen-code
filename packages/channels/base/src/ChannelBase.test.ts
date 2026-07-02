@@ -67,6 +67,10 @@ class TestChannel extends ChannelBase {
     this.registerCancelCommand();
   }
 
+  cancelPromptForTest(sessionId: string): Promise<boolean> {
+    return this.requestActivePromptCancellation(sessionId, 'cancel_command');
+  }
+
   protected override onPromptStart(
     chatId: string,
     sessionId: string,
@@ -5176,6 +5180,119 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('does not emit failed after an adapter-initiated cancellation rejects', async () => {
+      let rejectPrompt!: (error: Error) => void;
+      const pendingPrompt = new Promise<string>((_resolve, reject) => {
+        rejectPrompt = reject;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      const ch = createChannel();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-stop' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const cancel = ch.cancelPromptForTest('s-1');
+      expect(cancel).toBeDefined();
+      rejectPrompt(Object.assign(new Error('aborted'), { name: 'AbortError' }));
+      await expect(prompt).rejects.toThrow('aborted');
+      await expect(cancel).resolves.toBe(true);
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({
+          type: 'started',
+          messageId: 'm-stop',
+        }),
+        expect.objectContaining({
+          type: 'cancelled',
+          reason: 'cancel_command',
+          messageId: 'm-stop',
+        }),
+      ]);
+    });
+
+    it('suppresses lifecycle activity while adapter cancellation is pending', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      const ch = createChannel();
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-stop' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+
+      const cancel = ch.cancelPromptForTest(sessionId);
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        sessionId,
+        'late part',
+      );
+      (bridge as unknown as EventEmitter).emit('toolCall', {
+        sessionId,
+        toolCallId: 'tool-pending-adapter-cancel',
+        kind: 'read_file',
+        title: 'Read README.md',
+        status: 'running',
+      });
+
+      expect(ch.responseChunks).toEqual([]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({
+          type: 'started',
+          messageId: 'm-stop',
+        }),
+      ]);
+      resolveCancel();
+      await expect(cancel).resolves.toBe(true);
+      resolvePrompt('late');
+      await prompt;
+      // Held chunk is discarded on a successful cancel — no text_chunk event.
+      expect(
+        ch.taskEvents.filter((event) => event.type === 'text_chunk'),
+      ).toEqual([]);
+    });
+
+    it('clears collect buffers after adapter-initiated cancellation succeeds', async () => {
+      let resolvePrompt!: (value: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      const ch = createChannel({ dispatchMode: 'collect' });
+
+      const prompt = ch.handleInbound(envelope({ messageId: 'm-stop' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+      const sessionId = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+        .calls[0]![0] as string;
+      const maps = ch as unknown as {
+        collectBuffers: Map<string, unknown>;
+      };
+      maps.collectBuffers.set(sessionId, [
+        { text: 'buffered', envelope: envelope({ text: 'buffered' }) },
+      ]);
+
+      await expect(ch.cancelPromptForTest(sessionId)).resolves.toBe(true);
+
+      expect(maps.collectBuffers.has(sessionId)).toBe(false);
+      resolvePrompt('late');
+      await prompt;
+    });
+
     it('does not emit tool call lifecycle events after cancellation', async () => {
       let resolvePrompt!: (value: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {
@@ -5601,6 +5718,53 @@ describe('ChannelBase', () => {
         'before ',
         'during ',
         'after',
+      ]);
+    });
+
+    it('releases held chunks before failed when cancel fails then prompt rejects', async () => {
+      let rejectPrompt!: (err: Error) => void;
+      const pendingPrompt = new Promise<string>((_resolve, reject) => {
+        rejectPrompt = reject;
+      });
+      let rejectCancel!: (err: Error) => void;
+      const pendingCancel = new Promise<void>((_resolve, reject) => {
+        rejectCancel = reject;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'before ');
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'during ');
+      rejectCancel(new Error('session not found'));
+      await cancel;
+      rejectPrompt(new Error('agent down'));
+
+      await expect(prompt).rejects.toThrow('agent down');
+      expect(ch.responseChunks.map((entry) => entry.chunk)).toEqual([
+        'before ',
+        'during ',
+      ]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started' }),
+        expect.objectContaining({ type: 'text_chunk', chunk: 'before ' }),
+        expect.objectContaining({ type: 'text_chunk', chunk: 'during ' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'agent down',
+          phase: 'agent',
+        }),
       ]);
     });
 
@@ -7645,13 +7809,13 @@ describe('ChannelBase', () => {
       expect(promptText).toContain('- namespace: memory:test');
       expect(promptText).toContain('Reply briefly.');
       expect(promptText).toContain(
-        '[Loop "daily summary" created by Alice]\n\npost summary',
+        '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary',
       );
       const secondPromptText = (bridge.prompt as ReturnType<typeof vi.fn>).mock
         .calls[1]![1] as string;
       expect(secondPromptText).not.toContain('Channel identity:');
       expect(secondPromptText).toContain(
-        '[Loop "daily summary" created by Alice]\n\npost summary again',
+        '[Loop "daily summary" created by Alice] Scheduled task running unattended: no one is present to answer questions, and your final response is delivered to this chat automatically — do whatever work the task requires, then put the result in your final response instead of trying to deliver it to this chat yourself.\n\npost summary again',
       );
     });
 
@@ -8728,6 +8892,76 @@ describe('ChannelBase', () => {
 
       expect(ch.taskEvents).toEqual([
         expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'loop boom',
+          phase: 'agent',
+          messageId: 'job-1',
+        }),
+      ]);
+    });
+
+    it('releases held loop chunks before failed when cancel fails then prompt rejects', async () => {
+      let rejectPrompt!: (err: Error) => void;
+      const pendingPrompt = new Promise<string>((_resolve, reject) => {
+        rejectPrompt = reject;
+      });
+      let rejectCancel!: (err: Error) => void;
+      const pendingCancel = new Promise<void>((_resolve, reject) => {
+        rejectCancel = reject;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'before ');
+      const cancel = ch.handleInbound(
+        envelope({ text: '/cancel', senderId: 'alice' }),
+      );
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'during ');
+      rejectCancel(new Error('session not found'));
+      await cancel;
+      rejectPrompt(new Error('loop boom'));
+
+      await expect(loopRun).rejects.toThrow('loop boom');
+      expect(ch.responseChunks.map((entry) => entry.chunk)).toEqual([
+        'before ',
+        'during ',
+      ]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({ type: 'text_chunk', chunk: 'before ' }),
+        expect.objectContaining({ type: 'text_chunk', chunk: 'during ' }),
         expect.objectContaining({
           type: 'failed',
           error: 'loop boom',
