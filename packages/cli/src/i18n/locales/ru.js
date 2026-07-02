@@ -1877,6 +1877,8 @@ export default {
     'Нажмите Ctrl+O для показа полного вывода инструментов',
   'Switch to plan mode or exit plan mode':
     'Переключиться в режим плана или выйти из режима плана',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    'Задаёт интенсивность рассуждений у моделей с поддержкой рассуждений ({{tiers}}); сопоставляется и ограничивается для каждого провайдера.',
   'Exited plan mode. Previous approval mode restored.':
     'Режим плана завершён. Предыдущий режим утверждения восстановлен.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':
