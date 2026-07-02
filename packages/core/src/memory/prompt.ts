@@ -29,7 +29,7 @@ export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   '```',
 ];
 
-/** Verbose memory-type guidance. See also: {@link CONDENSED_TEAM_GUIDANCE} for the condensed version used in team-scope prompts. */
+/** Verbose memory-type guidance. See also: {@link CONDENSED_TYPES_SECTION} for the condensed version used in the empty-index prompt path. */
 export const TYPES_SECTION_INDIVIDUAL: readonly string[] = [
   '## Types of memory',
   '',
@@ -154,7 +154,7 @@ export const CONDENSED_DO_NOT_SAVE_SECTION: readonly string[] = [
   '- Code patterns, conventions, architecture, file paths, or project structure (read the project instead)',
   '- Git history, recent changes, or who-changed-what',
   '- Debugging solutions or fix recipes (the fix is in the code; the commit message has context)',
-  '- MCP tool names, schemas, guessed tool-call formats, or failed call transcripts (save only confirmed durable workarounds, warnings, owner, or escalation path)',
+  '- MCP tool names, schemas, field mappings, guessed tool-call formats, or failed call transcripts (save only confirmed durable workarounds, warnings, owner, or escalation path)',
   '- Ephemeral task state or current conversation context',
   '- Content already in QWEN.md or AGENTS.md',
   '',
@@ -251,12 +251,6 @@ export interface TeamAutoMemorySection {
 }
 
 /**
- * Guidance appended when a shared team directory is available. It refines the
- * per-type `<scope>` routing (which only knows user vs project) so the model
- * knows when a memory belongs in the shared tier — and never to put secrets
- * there.
- */
-/**
  * Condensed version of the team-scope guidance from {@link buildTeamScopeSection}.
  * Used in the empty-index (condensed) prompt path for multi-tier setups
  * that include a team directory.
@@ -265,6 +259,12 @@ export const CONDENSED_TEAM_GUIDANCE: readonly string[] = [
   'When a team directory is available, route project-wide conventions and shared references to TEAM instead of PROJECT. You MUST NOT save sensitive data to TEAM memory — never API keys, tokens, or credentials; it is visible to everyone who can read the repository. `user` memories are always private — never save them to TEAM. For TEAM memory, only write the file (Step 1) — its index is auto-generated; do NOT hand-edit the team `MEMORY.md`.',
 ];
 
+/**
+ * Guidance appended when a shared team directory is available. It refines the
+ * per-type `<scope>` routing (which only knows user vs project) so the model
+ * knows when a memory belongs in the shared tier — and never to put secrets
+ * there.
+ */
 function buildTeamScopeSection(): string[] {
   return [
     '## Saving to team memory',
