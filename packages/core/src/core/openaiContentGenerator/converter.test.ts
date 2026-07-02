@@ -2785,6 +2785,7 @@ describe('OpenAIContentConverter', () => {
       expect(parts?.[0]).toEqual(
         expect.objectContaining({ thought: true, text: 'chain-of-thought' }),
       );
+      expect(isOpenAIReasoningThoughtPart(parts?.[0] as Part)).toBe(true);
       expect(parts?.[1]).toEqual(
         expect.objectContaining({ text: 'final answer' }),
       );
