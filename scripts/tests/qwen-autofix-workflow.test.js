@@ -32,6 +32,14 @@ const withdrawClaimStep =
   workflow.match(
     /- name: 'Withdraw claim on failure'[\s\S]*?(?=\n[ ]{2}# ==========)/,
   )?.[0] ?? '';
+const issueSandboxImageStep =
+  workflow.match(
+    /- name: 'Select issue sandbox image'[\s\S]*?(?=\n {6}- name: 'Claim issue')/,
+  )?.[0] ?? '';
+const reviewSandboxImageStep =
+  workflow.match(
+    /- name: 'Select review sandbox image'[\s\S]*?(?=\n {6}- name: 'Triage and address')/,
+  )?.[0] ?? '';
 
 describe('qwen-autofix workflow', () => {
   it('does not classify tier-2 issues with incomplete fallback comments', () => {
@@ -201,6 +209,33 @@ describe('qwen-autofix workflow', () => {
     );
     expect(withdrawClaimStep).toContain(
       'git push, PR creation, or PR comment error',
+    );
+  });
+
+  it('falls back to the floating sandbox image only when the matching version image is missing', () => {
+    expect(issueSandboxImageStep.length).toBeGreaterThan(0);
+    expect(reviewSandboxImageStep.length).toBeGreaterThan(0);
+    for (const step of [issueSandboxImageStep, reviewSandboxImageStep]) {
+      expect(step).toContain('npm view @qwen-code/qwen-code@latest version');
+      expect(step).toContain(
+        'version_image="ghcr.io/qwenlm/qwen-code:${qwen_version}"',
+      );
+      expect(step).toContain('fallback_image="ghcr.io/qwenlm/qwen-code:latest"');
+      expect(step).toContain('docker manifest inspect "${version_image}"');
+      expect(step).toContain('docker manifest inspect "${fallback_image}"');
+      expect(step).toContain('QWEN_SANDBOX_IMAGE=${sandbox_image}');
+      expect(step).toContain(
+        'echo "qwen_version=${qwen_version}" >> "${GITHUB_OUTPUT}"',
+      );
+      expect(step).toContain(
+        '::warning::Sandbox image ${version_image} is not available; falling back to ${fallback_image}.',
+      );
+    }
+    expect(workflow).toContain(
+      "version: '${{ steps.issue_sandbox_image.outputs.qwen_version }}'",
+    );
+    expect(workflow).toContain(
+      "version: '${{ steps.review_sandbox_image.outputs.qwen_version }}'",
     );
   });
 });

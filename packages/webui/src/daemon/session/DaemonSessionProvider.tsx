@@ -46,6 +46,7 @@ import {
   mapProviderStatus,
   mapSessionContextModels,
   mapSupportedCommands,
+  mapWorkspaceSkills,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import {
@@ -421,20 +422,41 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               !reconnectSessionId &&
               !shouldCreateFreshSession
             ) {
-              const providerResult = await Promise.allSettled([
+              // Fetch skills alongside providers so skill-backed slash
+              // commands (e.g. /review) can autocomplete before the first
+              // prompt. Both are session-less workspace queries; the
+              // session-scoped supported-commands snapshot (which also carries
+              // custom/MCP/workflow commands) still lands once the first prompt
+              // creates a session.
+              const [providerResult, skillsResult] = await Promise.allSettled([
                 client.workspaceProviders(),
+                client.workspaceSkills(),
               ]);
-              if (providerResult[0].status === 'rejected') {
+              if (providerResult.status === 'rejected') {
                 console.warn(
                   '[DaemonSessionProvider] workspaceProviders failed in deferred connect:',
-                  providerResult[0].reason,
+                  providerResult.reason,
+                );
+              }
+              if (skillsResult.status === 'rejected') {
+                console.warn(
+                  '[DaemonSessionProvider] workspaceSkills failed in deferred connect:',
+                  skillsResult.reason,
                 );
               }
               const providers =
-                providerResult[0].status === 'fulfilled'
-                  ? providerResult[0].value
+                providerResult.status === 'fulfilled'
+                  ? providerResult.value
                   : undefined;
               const providerModelStatus = mapProviderStatus(providers);
+              const {
+                commands: deferredSkillCommands,
+                skills: deferredSkills,
+              } = mapWorkspaceSkills(
+                skillsResult.status === 'fulfilled'
+                  ? skillsResult.value
+                  : undefined,
+              );
               setConnection((current) => ({
                 ...current,
                 status: 'connected',
@@ -445,6 +467,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 contextWindow: providerModelStatus.contextWindow,
                 providers,
                 capabilities: caps,
+                ...(deferredSkillCommands.length > 0
+                  ? { commands: deferredSkillCommands }
+                  : {}),
+                ...(deferredSkills.length > 0
+                  ? { skills: deferredSkills }
+                  : {}),
               }));
               return;
             }
