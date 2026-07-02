@@ -109,6 +109,7 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected handleInbound(_env: unknown): Promise<void> {
         return Promise.resolve();
       }
+      protected onTaskLifecycle(_event: unknown): void {}
     },
     SessionRouter: class {
       restoreSessions(): Promise<void> {
