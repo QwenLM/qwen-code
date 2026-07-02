@@ -220,6 +220,7 @@ const TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED = 'non_interactive_denied';
 const TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED = 'background_agent_denied';
 
 const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
+
 const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
 const TOOL_SPAN_STATUS_PERMISSION_DENIED = 'Permission denied for tool';
 const TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED =
@@ -233,6 +234,29 @@ const TOOL_SPAN_STATUS_BACKGROUND_AGENT_DENIED =
 const TOOL_SPAN_STATUS_TOOL_ERROR = 'Tool execution failed';
 const TOOL_SPAN_STATUS_TOOL_EXCEPTION = 'Tool execution failed with exception';
 const TOOL_SPAN_STATUS_TOOL_CANCELLED = 'Tool execution cancelled by user';
+
+// Timeout-specific observability constants — distinguish timeouts from
+// generic tool errors in OTel traces.
+const TOOL_FAILURE_KIND_TIMEOUT = 'timeout';
+const TOOL_SPAN_STATUS_TOOL_TIMEOUT = 'Tool execution timed out';
+
+/**
+ * Builds the failure ToolResult surfaced when a tool call exceeds the
+ * execution timeout. Reported as a normal tool error so the model can adapt
+ * (narrow scope, retry, etc.) instead of the session hanging.
+ */
+function createToolTimeoutResult(timeoutMs: number): ToolResult {
+  const display =
+    timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)}s` : `${timeoutMs}ms`;
+  const message =
+    `Tool execution timed out after ${display}. ` +
+    `The tool may be stuck or operating on too large a scope.`;
+  return {
+    llmContent: message,
+    returnDisplay: message,
+    error: { message, type: ToolErrorType.EXECUTION_TIMEOUT },
+  };
+}
 
 const TRUNCATION_PARAM_GUIDANCE =
   'Note: Your previous response was truncated due to max_tokens limit, ' +
@@ -3313,8 +3337,41 @@ export class CoreToolScheduler {
       this.config,
       `Qwen Code is executing tool ${canonicalName}`,
     );
+    let removeParentAbortForward: (() => void) | undefined;
     try {
       let promise: Promise<ToolResult>;
+
+      // Per-tool-call execution timeout. Disabled by default (experimental):
+      // set QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS to a positive number of
+      // milliseconds to cap how long a single tool call may run.
+      const toolExecutionTimeoutMs = parsePositiveIntegerEnv(
+        process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'],
+        0,
+      );
+
+      // When a timeout is active, run the tool under a derived AbortSignal so
+      // that on timeout we actually cancel the in-flight work (cooperative
+      // tools stop; the shell kills its subprocess) instead of abandoning it
+      // to run on unobserved. A user abort on the parent signal is forwarded
+      // to the derived signal. The forwarding listener is torn down once the
+      // tool settles (see finally below) so it never accumulates on the
+      // long-lived parent (turn) signal across tool calls.
+      let execSignal = signal;
+      let timeoutController: AbortController | undefined;
+      if (toolExecutionTimeoutMs > 0) {
+        timeoutController = new AbortController();
+        execSignal = timeoutController.signal;
+        if (signal.aborted) {
+          timeoutController.abort(signal.reason);
+        } else {
+          const controller = timeoutController;
+          const forwardAbort = () => controller.abort(signal.reason);
+          signal.addEventListener('abort', forwardAbort, { once: true });
+          removeParentAbortForward = () =>
+            signal.removeEventListener('abort', forwardAbort);
+        }
+      }
+
       if (invocation instanceof ShellToolInvocation) {
         const setPidCallback = (pid: number) => {
           this.toolCalls = this.toolCalls.map((tc) =>
@@ -3348,7 +3405,7 @@ export class CoreToolScheduler {
           );
         };
         promise = invocation.execute(
-          signal,
+          execSignal,
           liveOutputCallback,
           shellExecutionConfig,
           setPidCallback,
@@ -3357,13 +3414,46 @@ export class CoreToolScheduler {
         );
       } else {
         promise = invocation.execute(
-          signal,
+          execSignal,
           liveOutputCallback,
           shellExecutionConfig,
         );
       }
 
-      const toolResult: ToolResult = await promise;
+      let toolResult: ToolResult;
+      if (timeoutController) {
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          toolResult = await new Promise<ToolResult>((resolve, reject) => {
+            timeoutTimer = setTimeout(() => {
+              debugLogger.warn(
+                `Tool ${canonicalName} (${callId}) timed out after ` +
+                  `${toolExecutionTimeoutMs}ms — aborting`,
+              );
+              // Cancel the in-flight tool via the derived signal, then resolve
+              // with a timeout error so the scheduler is unblocked even if the
+              // tool ignores the abort. A later settle from `promise` is a
+              // no-op once this wrapper Promise has already resolved.
+              timeoutController?.abort(
+                new DOMException(
+                  `Tool execution timed out after ${toolExecutionTimeoutMs}ms`,
+                  'TimeoutError',
+                ),
+              );
+              resolve(createToolTimeoutResult(toolExecutionTimeoutMs));
+            }, toolExecutionTimeoutMs);
+            timeoutTimer.unref?.();
+            promise.then(resolve, reject);
+          });
+        } finally {
+          if (timeoutTimer) clearTimeout(timeoutTimer);
+          // Tear down the parent-abort forwarding listener now that the tool
+          // has settled (no-op if a user abort already removed it via `once`).
+          removeParentAbortForward?.();
+        }
+      } else {
+        toolResult = await promise;
+      }
       // A tool that observes signal.aborted and resolves with a normal
       // ToolResult (no .error field) would otherwise close the execution
       // sub-span as success while the parent tool span ends as cancelled.
@@ -3823,11 +3913,19 @@ export class CoreToolScheduler {
           toolResult.error.type,
         );
         this.setStatusInternal(callId, 'error', errorResponse);
-        setToolSpanFailure(
-          span,
-          TOOL_FAILURE_KIND_TOOL_ERROR,
-          TOOL_SPAN_STATUS_TOOL_ERROR,
-        );
+        if (toolResult.error.type === ToolErrorType.EXECUTION_TIMEOUT) {
+          setToolSpanFailure(
+            span,
+            TOOL_FAILURE_KIND_TIMEOUT,
+            TOOL_SPAN_STATUS_TOOL_TIMEOUT,
+          );
+        } else {
+          setToolSpanFailure(
+            span,
+            TOOL_FAILURE_KIND_TOOL_ERROR,
+            TOOL_SPAN_STATUS_TOOL_ERROR,
+          );
+        }
       }
     } catch (executionError: unknown) {
       const errorMessage =
@@ -3939,6 +4037,7 @@ export class CoreToolScheduler {
         );
       }
     } finally {
+      removeParentAbortForward?.();
       sleepInhibitorHandle.release();
     }
   }
