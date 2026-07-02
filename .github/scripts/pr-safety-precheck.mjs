@@ -7,7 +7,7 @@ const NETWORK_SINK_PATTERN = String.raw`\b(?:fetch|axios|curl|wget)\b`;
 
 function secretSinkPattern(sinkPattern) {
   return new RegExp(
-    String.raw`(?:${sinkPattern}[^\n]*(?:${SECRET_NAME_PATTERN})|(?:${SECRET_NAME_PATTERN})[\s\S]{0,500}${sinkPattern})`,
+    String.raw`(?:${sinkPattern}[\s\S]{0,500}(?:${SECRET_NAME_PATTERN})|(?:${SECRET_NAME_PATTERN})[\s\S]{0,500}${sinkPattern})`,
     'i',
   );
 }
