@@ -6,7 +6,6 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
-import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
