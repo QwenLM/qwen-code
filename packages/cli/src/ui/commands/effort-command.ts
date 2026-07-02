@@ -28,13 +28,14 @@ export const effortCommand: SlashCommand = {
       { tiers: TIER_LIST },
     );
   },
+  // The tiers show up as a placeholder via argumentHint rather than as
+  // autocompletion suggestions: bare `/effort` should open the picker dialog
+  // (no tier auto-selected), while `/effort <tier>` still sets one directly. A
+  // completion function would surface the tiers as submenu-like entries and let
+  // Enter auto-pick the first one, which we don't want here.
   argumentHint: '[low|medium|high|xhigh|max]',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
-  completion: async (_context, partialArg) => {
-    const prefix = partialArg.trim().toLowerCase();
-    return REASONING_EFFORT_TIERS.filter((tier) => tier.startsWith(prefix));
-  },
   action: async (
     context: CommandContext,
     actionArgs: string,

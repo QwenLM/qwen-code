@@ -106,15 +106,10 @@ describe('effortCommand', () => {
     expect(res).toMatchObject({ messageType: 'error' });
   });
 
-  it('completes tier prefixes', async () => {
-    expect(await effortCommand.completion!(context, 'hi')).toEqual(['high']);
-    expect(await effortCommand.completion!(context, 'x')).toEqual(['xhigh']);
-    expect(await effortCommand.completion!(context, '')).toEqual([
-      'low',
-      'medium',
-      'high',
-      'xhigh',
-      'max',
-    ]);
+  it('does not offer tier autocompletion (tiers are hinted via argumentHint)', () => {
+    // No completion so bare `/effort` opens the picker instead of auto-picking
+    // the first tier; `/effort <tier>` still parses in the action above.
+    expect(effortCommand.completion).toBeUndefined();
+    expect(effortCommand.argumentHint).toBe('[low|medium|high|xhigh|max]');
   });
 });
