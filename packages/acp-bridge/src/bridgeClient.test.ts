@@ -43,6 +43,7 @@ import type {
 import { RequestError } from '@agentclientprotocol/sdk';
 import {
   ClientMcpRegistrar,
+  ToolNames,
   type ClientMcpFrame,
 } from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
@@ -589,7 +590,7 @@ describe('BridgeClient — artifact ingress', () => {
           status: 'completed',
           content: [],
           _meta: {
-            toolName: 'artifact',
+            toolName: ToolNames.ARTIFACT,
             artifacts: [
               {
                 title: 'Dashboard',
@@ -672,7 +673,7 @@ describe('BridgeClient — artifact ingress', () => {
           status: 'completed',
           content: [],
           _meta: {
-            toolName: 'artifact',
+            toolName: ToolNames.ARTIFACT,
             keep: 'visible',
             artifacts: [
               { title: 'One', url: 'https://example.com/1' },
@@ -690,7 +691,7 @@ describe('BridgeClient — artifact ingress', () => {
         sessionUpdate!.data.update as { _meta?: Record<string, unknown> }
       )._meta;
       expect(publishedMeta).toEqual({
-        toolName: 'artifact',
+        toolName: ToolNames.ARTIFACT,
         keep: 'visible',
       });
       expect(upsertMany).toHaveBeenCalledWith(
