@@ -152,7 +152,7 @@ export async function collectAvailableSkillEntries(
     entries,
   };
 
-  // Populate and reset the invalidation flag so the next call recomputes.
+  // Store the result and clear the invalidation flag so subsequent calls use the cache.
   cachedEntries = result;
   cacheInvalidated = false;
   debugLogger.debug(
