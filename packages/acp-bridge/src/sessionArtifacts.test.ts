@@ -432,6 +432,38 @@ describe('SessionArtifactStore', () => {
     ).toEqual([second.changes[0]?.artifactId, overflow.changes[0]?.artifactId]);
   });
 
+  it('drops newest artifacts created in the same batch when no older eviction candidate exists', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's3-same-batch-overflow',
+      workspaceCwd: workspace,
+      maxArtifacts: 1,
+    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      const overflow = await store.upsertMany([
+        { title: 'First link', url: 'https://example.com/first' },
+        { title: 'Second link', url: 'https://example.com/second' },
+      ]);
+
+      expect(overflow.changes).toHaveLength(1);
+      expect(overflow.changes[0]?.artifact).toMatchObject({
+        title: 'First link',
+      });
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [{ title: 'First link' }],
+      });
+
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('action=dropped');
+      expect(logged).toContain('max artifacts exceeded');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('rejects workspace path traversal', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's4',
@@ -574,6 +606,52 @@ describe('SessionArtifactStore', () => {
     expect(repeatedTool.changes[0]?.artifact?.metadata).not.toHaveProperty(
       'hookKey',
     );
+  });
+
+  it('coalesces duplicate identities within one upsert batch', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-coalesce',
+      workspaceCwd: workspace,
+    });
+
+    const result = await store.upsertMany([
+      {
+        title: 'Tool title',
+        source: 'tool',
+        toolName: 'first_tool',
+        url: 'https://example.com/same',
+        metadata: { owner: 'tool' },
+      },
+      {
+        title: 'Client title',
+        source: 'client',
+        clientId: 'client-1',
+        url: 'https://example.com/same',
+        metadata: { retainedBy: 'client' },
+      },
+      {
+        title: 'Hook title',
+        source: 'hook',
+        hookEventName: 'PostToolUse',
+        url: 'https://example.com/same',
+        metadata: { hookKey: 'ignored' },
+      },
+    ]);
+
+    expect(result.changes).toHaveLength(1);
+    expect(result.changes[0]?.artifact).toMatchObject({
+      title: 'Tool title',
+      source: 'tool',
+      toolName: 'first_tool',
+      clientRetained: true,
+      metadata: { owner: 'tool', retainedBy: 'client' },
+    });
+    expect(result.changes[0]?.artifact).not.toHaveProperty('clientId');
+    expect(result.changes[0]?.artifact).not.toHaveProperty('hookEventName');
+    expect(result.changes[0]?.artifact?.metadata).not.toHaveProperty('hookKey');
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ title: 'Tool title' }],
+    });
   });
 
   it('infers artifact kind from storage and workspace extensions', async () => {
