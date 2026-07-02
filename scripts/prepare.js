@@ -36,6 +36,8 @@ function run(command, args = []) {
   }
 
   if (result.status !== 0) {
+    const label = args.length ? `${command} ${args.join(' ')}` : command;
+    console.error(`prepare: ${label} exited with status ${result.status}`);
     process.exit(result.status ?? 1);
   }
 }

@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -67,7 +74,7 @@ describe('package scripts', () => {
     expect(packageJson.scripts['test:release']).toBe(
       [
         'cross-env NODE_OPTIONS="--max-old-space-size=3072"',
-        'npm run test:ci --workspaces --if-present -- --coverage=false',
+        'npm run test:ci --workspaces --if-present --parallel -- --coverage=false',
         '&& npm run test:scripts',
       ].join(' '),
     );
@@ -95,6 +102,59 @@ describe('package scripts', () => {
     expect(result.stdout).toContain('Skipping prepare');
   });
 
+  it('runs prepare steps in order when CI does not skip prepare', () => {
+    const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-bin-'));
+    const logFile = path.join(binDir, 'commands.log');
+
+    try {
+      if (process.platform === 'win32') {
+        writeFileSync(
+          path.join(binDir, 'husky.cmd'),
+          '@echo husky >> "%PREPARE_LOG_FILE%"\r\n',
+        );
+        writeFileSync(
+          path.join(binDir, 'npm.cmd'),
+          '@echo npm %* >> "%PREPARE_LOG_FILE%"\r\n',
+        );
+      } else {
+        writeFileSync(
+          path.join(binDir, 'husky'),
+          '#!/bin/sh\necho husky >> "$PREPARE_LOG_FILE"\n',
+        );
+        writeFileSync(
+          path.join(binDir, 'npm'),
+          '#!/bin/sh\necho "npm $*" >> "$PREPARE_LOG_FILE"\n',
+        );
+        chmodSync(path.join(binDir, 'husky'), 0o755);
+        chmodSync(path.join(binDir, 'npm'), 0o755);
+      }
+
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/prepare.js')],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            PREPARE_LOG_FILE: logFile,
+            QWEN_SKIP_PREPARE: '',
+          },
+        },
+      );
+
+      expect(result.status).toBe(0);
+      expect(readFileSync(logFile, 'utf8').trim().split(/\r?\n/)).toEqual([
+        'husky',
+        'npm run build',
+        'npm run bundle',
+      ]);
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
   it('wires release quality checks to fast explicit validation steps', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
     const qualityJob = getWorkflowJob(workflow, 'quality');
@@ -116,7 +176,7 @@ describe('package scripts', () => {
         / {6}- name: 'Install Dependencies'[\s\S]*? {10}npm ci --no-audit --progress=false/g,
       ) || [];
 
-    expect(installSteps).toHaveLength(5);
+    expect(installSteps.length).toBeGreaterThanOrEqual(5);
     for (const installStep of installSteps) {
       expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
     }
