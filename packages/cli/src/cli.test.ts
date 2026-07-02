@@ -6,8 +6,16 @@
 
 import type { Argv } from 'yargs';
 import { beforeEach, afterEach, describe, expect, it, vi } from 'vitest';
-import { readFileSync } from 'node:fs';
+import {
+  copyFileSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { FatalError } from '@qwen-code/qwen-code-core';
 import { AlreadyReportedError } from './utils/errors.js';
 import {
@@ -29,6 +37,7 @@ const mocks = vi.hoisted(() => ({
   mcpBuilder: vi.fn(),
   mcpListHandler: vi.fn(),
   mcpAddHandler: vi.fn(),
+  getCliVersion: vi.fn(),
 }));
 
 vi.mock('./gemini.js', () => ({
@@ -45,6 +54,10 @@ vi.mock('./utils/startupProfiler.js', () => ({
 
 vi.mock('./utils/cpuProfiler.js', () => ({
   initCpuProfiler: mocks.initCpuProfiler,
+}));
+
+vi.mock('./utils/version.js', () => ({
+  getCliVersion: mocks.getCliVersion,
 }));
 
 vi.mock('./commands/mcp.js', () => ({
@@ -124,6 +137,7 @@ describe('runCliEntry', () => {
     process.exitCode = undefined;
     vi.clearAllMocks();
     mocks.tryRunServeFastPath.mockResolvedValue(false);
+    mocks.getCliVersion.mockResolvedValue('fallback-version');
     process.env['CLI_VERSION'] = '9.9.9';
     vi.spyOn(process.stdout, 'write').mockImplementation((chunk) => {
       stdout.push(String(chunk));
@@ -153,6 +167,17 @@ describe('runCliEntry', () => {
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
+  it('falls back to getCliVersion when CLI_VERSION is unset', async () => {
+    delete process.env['CLI_VERSION'];
+
+    await runCliEntry(['--version']);
+
+    expect(stdout.join('')).toContain('fallback-version');
+    expect(mocks.getCliVersion).toHaveBeenCalledTimes(1);
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
   });
 
   it('prints top-level help without loading the full CLI graph', async () => {
@@ -332,6 +357,54 @@ describe('bootstrap import boundaries', () => {
     expect(output).toBe('7.7.7-test\n');
   });
 
+  it('reads package.json from the npm bin wrapper version shortcut', () => {
+    const expectedVersion = JSON.parse(
+      readFileSync('../../package.json', 'utf8'),
+    ).version;
+    const env = { ...process.env };
+    delete env['CLI_VERSION'];
+
+    const output = execFileSync(
+      process.execPath,
+      ['../../scripts/cli-entry.js', '--version'],
+      {
+        encoding: 'utf8',
+        env,
+      },
+    );
+
+    expect(output).toBe(`${expectedVersion}\n`);
+  });
+
+  it('falls through to cli.js when wrapper package.json parsing fails', () => {
+    const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-cli-entry-'));
+    try {
+      copyFileSync(
+        '../../scripts/cli-entry.js',
+        path.join(tempDir, 'cli-entry.mjs'),
+      );
+      writeFileSync(
+        path.join(tempDir, 'cli.js'),
+        "process.stdout.write('fallback-cli\\n');\n",
+      );
+      const env = { ...process.env };
+      delete env['CLI_VERSION'];
+
+      const output = execFileSync(
+        process.execPath,
+        [path.join(tempDir, 'cli-entry.mjs'), '--version'],
+        {
+          encoding: 'utf8',
+          env,
+        },
+      );
+
+      expect(output).toBe('fallback-cli\n');
+    } finally {
+      rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   it('copies the npm bin wrapper into the package instead of duplicating it', () => {
     const source = readFileSync('../../scripts/prepare-package.js', 'utf8');
 
@@ -431,6 +504,16 @@ describe('bootstrap error handling', () => {
     const output = stderr.join('');
     expect(output).toContain('fatal boom');
     expect(output).not.toContain('\x1b[31m');
+  });
+
+  it('prints FatalError messages in red when color is enabled', async () => {
+    delete process.env['NO_COLOR'];
+
+    await expect(
+      handleCriticalError(new FatalError('fatal color', 42)),
+    ).rejects.toThrow('process.exit:42');
+
+    expect(stderr.join('')).toContain('\x1b[31mfatal color\x1b[0m');
   });
 
   it('exits AlreadyReportedError without printing another error', async () => {
