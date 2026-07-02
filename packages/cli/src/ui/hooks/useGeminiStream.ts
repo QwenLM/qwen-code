@@ -1294,7 +1294,6 @@ export const useGeminiStream = (
         viewportRows - STREAM_PENDING_COMMIT_RESERVE_ROWS,
       );
       const tableClampRows = Math.max(2, viewportRows - 3);
-      // eslint-disable-next-line no-constant-condition
       while (true) {
         const bufferLines = newGeminiMessageBuffer.split('\n');
         const { keptLines, clipped } = fitPendingSlice(
