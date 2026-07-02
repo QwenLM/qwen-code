@@ -2501,6 +2501,37 @@ describe('DaemonSessionProvider', () => {
     expect(last?.catchingUp).toBeFalsy();
   });
 
+  it('does not re-arm catchingUp after injecting replay for a resumed session', async () => {
+    const session = createMockSession({
+      lastEventId: 5,
+      replaySnapshot: createTextReplaySnapshot('replayed transcript'),
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(session);
+
+    let connection: DaemonConnectionState | undefined;
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      connection = useDaemonConnection();
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'replayed transcript' },
+    ]);
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-1',
+      catchingUp: undefined,
+    });
+  });
+
   it('never sets catchingUp on a fresh subscription (no Last-Event-ID)', async () => {
     // A first-time attach has no resume cursor → the daemon emits no
     // replay_complete → arming catchingUp would stick forever. The Provider
