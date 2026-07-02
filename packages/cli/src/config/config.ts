@@ -1888,7 +1888,7 @@ export async function loadCliConfig(
       ? {}
       : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
   const pendingMcpServers =
-    bareMode || safeMode
+    bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
 
@@ -2019,7 +2019,7 @@ export async function loadCliConfig(
         }
       : undefined,
     // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
-    // through chrome-devtools-mcp (far lighter than the OS-level computer-use
+    // through the CDP tunnel (far lighter than the OS-level computer-use
     // driver), so disable computer-use to keep the agent off that heavy path.
     computerUseEnabled: (() => {
       const tunnelOn = process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] === '1';
@@ -2029,7 +2029,7 @@ export async function loadCliConfig(
         writeStderrLine(
           'qwen serve: ignoring tools.computerUse.enabled=true — the CDP ' +
             'tunnel (QWEN_SERVE_CDP_TUNNEL_OVER_WS) routes browser automation ' +
-            'through chrome-devtools-mcp, so computer-use stays disabled.',
+            'through the CDP tunnel, so computer-use stays disabled.',
         );
       }
       return tunnelOn ? false : (settings.tools?.computerUse?.enabled ?? true);

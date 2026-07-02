@@ -38,6 +38,7 @@ const mockChannelConnect = vi.hoisted(() => vi.fn());
 const mockChannelDisconnect = vi.hoisted(() => vi.fn());
 const mockChannelSetBridge = vi.hoisted(() => vi.fn());
 const mockChannelOnToolCall = vi.hoisted(() => vi.fn());
+const mockChannelDispatchToolCall = vi.hoisted(() => vi.fn());
 const mockChannelOnSessionDied = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockBridgeStart = vi.hoisted(() => vi.fn());
@@ -176,6 +177,7 @@ const mockChannel = {
   disconnect: mockChannelDisconnect,
   onSessionDied: mockChannelOnSessionDied,
   onToolCall: mockChannelOnToolCall,
+  dispatchToolCall: mockChannelDispatchToolCall,
   setBridge: mockChannelSetBridge,
 };
 
@@ -584,7 +586,8 @@ describe('startCommand.handler', () => {
     toolCallListener!(event);
 
     expect(mockRouterGetTarget).toHaveBeenCalledWith('s-1');
-    expect(mockChannelOnToolCall).toHaveBeenCalledWith('chat1', event);
+    expect(mockChannelDispatchToolCall).toHaveBeenCalledWith(event);
+    expect(mockChannelOnToolCall).not.toHaveBeenCalled();
   });
 
   it('dispatches session death to the owning channel when the route is known', async () => {
