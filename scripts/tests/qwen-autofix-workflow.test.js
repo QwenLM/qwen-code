@@ -228,9 +228,10 @@ describe('qwen-autofix workflow', () => {
       );
       expect(step).toContain('current_version="$(qwen --version');
       expect(step).toContain(
-        'npm install -g "@qwen-code/qwen-code@${qwen_version}"',
+        'exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"',
       );
-      expect(step).not.toContain('@latest');
+      expect(step).toContain('qwen-bin');
+      expect(step).not.toContain('npm install -g');
     }
     expect(workflow).toContain('run_shell_command(npx vitest)');
     expect(workflow).toContain('"sandbox": false');

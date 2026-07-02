@@ -286,8 +286,16 @@ jobs:
           if [[ "${current_version}" == "${qwen_version}" ]]; then
             echo "Using pre-installed Qwen Code ${current_version}"
           else
-            echo "Installing Qwen Code from npm: @qwen-code/qwen-code@${qwen_version}"
-            npm install -g "@qwen-code/qwen-code@${qwen_version}"
+            echo "Using checked-out Qwen Code bundle ${qwen_version}"
+            qwen_bin="${RUNNER_TEMP}/qwen-bin"
+            mkdir -p "${qwen_bin}"
+            cat > "${qwen_bin}/qwen" <<'EOF'
+          #!/usr/bin/env bash
+          exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"
+          EOF
+            chmod +x "${qwen_bin}/qwen"
+            echo "${qwen_bin}" >> "${GITHUB_PATH}"
+            PATH="${qwen_bin}:${PATH}"
             qwen --version
           fi
 
@@ -1093,8 +1101,16 @@ jobs:
           if [[ "${current_version}" == "${qwen_version}" ]]; then
             echo "Using pre-installed Qwen Code ${current_version}"
           else
-            echo "Installing Qwen Code from npm: @qwen-code/qwen-code@${qwen_version}"
-            npm install -g "@qwen-code/qwen-code@${qwen_version}"
+            echo "Using checked-out Qwen Code bundle ${qwen_version}"
+            qwen_bin="${RUNNER_TEMP}/qwen-bin"
+            mkdir -p "${qwen_bin}"
+            cat > "${qwen_bin}/qwen" <<'EOF'
+          #!/usr/bin/env bash
+          exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"
+          EOF
+            chmod +x "${qwen_bin}/qwen"
+            echo "${qwen_bin}" >> "${GITHUB_PATH}"
+            PATH="${qwen_bin}:${PATH}"
             qwen --version
           fi
 
