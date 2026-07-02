@@ -162,6 +162,7 @@ export function createDaemonWorkspaceService(
     contextFilename,
     statusProvider,
     workspaceProvidersStatusProvider,
+    workspaceSkillsStatusProvider,
     isChannelLive,
     persistDisabledTools,
     persistSetting,
@@ -188,17 +189,16 @@ export function createDaemonWorkspaceService(
     },
 
     async getWorkspaceSkillsStatus(_ctx: WorkspaceRequestContext) {
-      // Skills are enumerated only by the ACP child; the daemon has no local
-      // SkillManager. `queryWorkspaceStatus` therefore returns the idle
-      // placeholder (`initialized: false`, empty `skills`) whenever no child
-      // channel is live — the norm before the first session, and again after
+      // Skills are enumerated by the ACP child, which owns the live
+      // SkillManager (including extension-provided skills). `queryWorkspaceStatus`
+      // returns the idle placeholder (`initialized: false`, empty `skills`)
+      // whenever no child channel is live — before the first session, after
       // the child is reaped on session close (`--channel-idle-timeout-ms`
-      // defaults to an immediate kill). In that window the Web Shell's
+      // defaults to an immediate kill), and when a cold-start preheat times
+      // out before the child ever answers. In those windows the Web Shell's
       // pre-first-prompt slash-command list would otherwise drop every skill,
-      // so `/rev` stops autocompleting `/review`. Serve the last status a live
-      // child produced instead, so skill-backed commands keep autocompleting;
-      // the next live query refreshes it. `initialized` cleanly separates a
-      // real child answer (always `true`) from the idle placeholder (`false`).
+      // so `/rev` stops autocompleting `/review`. `initialized` cleanly
+      // separates a real child answer (always `true`) from the placeholder.
       const status = await queryWorkspaceStatus(
         SERVE_STATUS_EXT_METHODS.workspaceSkills,
         () => createIdleWorkspaceSkillsStatus(boundWorkspace),
@@ -207,7 +207,18 @@ export function createDaemonWorkspaceService(
         lastWorkspaceSkillsStatus = status;
         return status;
       }
-      return lastWorkspaceSkillsStatus ?? status;
+      // Live child unavailable. Prefer the last answer it produced (keeps the
+      // full, extension-aware list available across a reap)...
+      if (lastWorkspaceSkillsStatus) {
+        return lastWorkspaceSkillsStatus;
+      }
+      // ...then fall back to daemon-local enumeration, so a child that has not
+      // answered even once (e.g. a preheat that times out under `npm run dev`)
+      // still yields the on-disk skills — `/review` included.
+      if (workspaceSkillsStatusProvider) {
+        return workspaceSkillsStatusProvider(boundWorkspace);
+      }
+      return status;
     },
 
     async getWorkspaceProvidersStatus(_ctx: WorkspaceRequestContext) {
