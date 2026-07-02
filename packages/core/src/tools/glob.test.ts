@@ -717,6 +717,61 @@ describe('GlobTool', () => {
       expect(globOptions?.ignore?.childrenIgnored).toBeTypeOf('function');
     });
 
+    it('does not prune during traversal when respectGitIgnore is false', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.gitignore'),
+        'node_modules/\n',
+      );
+      await fs.mkdir(path.join(tempRootDir, 'node_modules', 'pkg'), {
+        recursive: true,
+      });
+      await fs.writeFile(
+        path.join(tempRootDir, 'node_modules', 'pkg', 'dep.keep'),
+        'x',
+      );
+      await fs.mkdir(path.join(tempRootDir, 'app'));
+      await fs.writeFile(path.join(tempRootDir, 'app', 'main.keep'), 'x');
+
+      const noGitIgnoreConfig = {
+        ...mockConfig,
+        getFileFilteringOptions: () => ({
+          respectGitIgnore: false,
+          respectQwenIgnore: true,
+        }),
+      } as unknown as Config;
+
+      const invocation = new GlobTool(noGitIgnoreConfig).build({
+        pattern: '**/*.keep',
+      });
+      const result = await invocation.execute(abortSignal);
+
+      // gitignore disabled → the gitignored dir is not pruned; its file appears.
+      expect(result.llmContent).toContain('dep.keep');
+      expect(result.llmContent).toContain('main.keep');
+    });
+
+    it('does not prune entries outside the project root during traversal', async () => {
+      // Root gitignores *.log; an external search dir containing a matching
+      // file must NOT be pruned — ignore rules only apply within the root.
+      await fs.writeFile(path.join(tempRootDir, '.gitignore'), '*.log\n');
+      const externalDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'glob-external-'),
+      );
+      try {
+        await fs.writeFile(path.join(externalDir, 'outside.log'), 'x');
+
+        const invocation = new GlobTool(mockConfig).build({
+          pattern: '*.log',
+          path: externalDir,
+        });
+        const result = await invocation.execute(abortSignal);
+
+        expect(result.llmContent).toContain('outside.log');
+      } finally {
+        await fs.rm(externalDir, { recursive: true, force: true });
+      }
+    });
+
     it('honors gitignore negation re-inclusion during traversal', async () => {
       // `!build/keep.keep` re-includes a file under an otherwise-ignored path.
       // Dropping negations (as a pattern conversion must) would wrongly prune

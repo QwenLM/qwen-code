@@ -155,21 +155,32 @@ class GlobToolInvocation extends BaseToolInvocation<
       fullpath(): string;
       isDirectory(): boolean;
     }): boolean => {
-      const relativePath = path.relative(projectRoot, entry.fullpath());
-      // Never prune paths outside the project root (e.g. an external search
-      // dir); ignore rules are only defined relative to the root.
-      if (!relativePath || !isPathWithinRoot(entry.fullpath(), projectRoot)) {
+      try {
+        const relativePath = path.relative(projectRoot, entry.fullpath());
+        // Never prune paths outside the project root (e.g. an external search
+        // dir); ignore rules are only defined relative to the root.
+        if (!relativePath || !isPathWithinRoot(entry.fullpath(), projectRoot)) {
+          return false;
+        }
+        // Append trailing '/' for directories so the ignore library matches
+        // directory-only patterns like `node_modules/`.
+        const ignorePath = entry.isDirectory()
+          ? relativePath + '/'
+          : relativePath;
+        return this.fileService.shouldIgnoreFile(
+          ignorePath,
+          fileFilteringOptions,
+        );
+      } catch (error) {
+        // Fail open: if an ignore check throws, don't prune. The post-filter
+        // below is the source of truth, so a missed prune only costs a little
+        // extra traversal, whereas a false prune would hide real matches and
+        // be indistinguishable from a legitimately empty result.
+        debugLogger.debug(
+          `traversal ignore check failed for ${entry.fullpath()}: ${getErrorMessage(error)}`,
+        );
         return false;
       }
-      // Append trailing '/' for directories so the ignore library matches
-      // directory-only patterns like `node_modules/`.
-      const ignorePath = entry.isDirectory()
-        ? relativePath + '/'
-        : relativePath;
-      return this.fileService.shouldIgnoreFile(
-        ignorePath,
-        fileFilteringOptions,
-      );
     };
 
     const entries = (await glob(effectivePattern, {
