@@ -243,6 +243,7 @@ jobs:
           COMMENT_USER: '${{ github.event.comment.user.login }}'
           REVIEW_USER: '${{ github.event.review.user.login }}'
           SENDER: '${{ github.event.sender.login }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
           # Select the principal whose permission gates this trigger.
@@ -251,7 +252,7 @@ jobs:
               if [ "$PR_ACTION" = "review_requested" ]; then
                 principal="$SENDER"
               else
-                echo "Automatic PR review allowed after precheck." >> "$GITHUB_STEP_SUMMARY"
+                echo "Automatic PR review allowed for PR #${PR_NUMBER} after same-repo/precheck gate." >> "$GITHUB_STEP_SUMMARY"
                 echo "should_review=true" >> "$GITHUB_OUTPUT"
                 exit 0
               fi

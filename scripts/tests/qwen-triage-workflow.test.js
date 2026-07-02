@@ -36,9 +36,13 @@ function job(name) {
 
 describe('qwen-triage tmux workflow', () => {
   it('does not require fork PR authors to have write permission for automatic triage', () => {
+    const precheckJob = job('precheck-pr');
     const authorizeJob = job('authorize');
     const authorizeStep = step('Check principal write permission');
 
+    expect(precheckJob).toContain("contents: 'read'");
+    expect(precheckJob).toContain("pull-requests: 'read'");
+    expect(precheckJob).toContain("issues: 'write'");
     expect(authorizeJob).toContain(
       "needs.precheck-pr.outputs.decision == 'allow_triage'",
     );
@@ -47,6 +51,9 @@ describe('qwen-triage tmux workflow', () => {
     );
     expect(authorizeStep).toContain(
       'echo "should_run=true" >> "$GITHUB_OUTPUT"',
+    );
+    expect(authorizeStep).toContain(
+      'Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate.',
     );
     expect(authorizeStep).not.toContain(
       'pull_request_target) principal="$PR_AUTHOR"',

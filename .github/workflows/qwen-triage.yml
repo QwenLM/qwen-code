@@ -33,6 +33,10 @@ jobs:
     if: |-
       github.event_name == 'pull_request_target' &&
       github.event.pull_request.head.repo.full_name != github.repository
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+      issues: 'write'
     uses: './.github/workflows/qwen-pr-safety-precheck.yml'
     secrets:
       CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
@@ -86,11 +90,12 @@ jobs:
           COMMENT_USER: '${{ github.event.comment.user.login }}'
           ISSUE_AUTHOR: '${{ github.event.issue.user.login }}'
           COMMENT_BODY: '${{ github.event.comment.body }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
           TMUX_PR: '${{ github.event.inputs.tmux_pr }}'
         run: |-
           set -euo pipefail
           if [ "$EVENT_NAME" = "pull_request_target" ]; then
-            echo "Automatic PR triage allowed after precheck." >> "$GITHUB_STEP_SUMMARY"
+            echo "Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate." >> "$GITHUB_STEP_SUMMARY"
             echo "should_run=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi

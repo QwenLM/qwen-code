@@ -188,7 +188,13 @@ describe('qwen resolve workflow', () => {
     expect(authorizeJob).toContain(
       "needs.precheck-pr.outputs.decision == 'allow_triage'",
     );
+    expect(authorizeStep).toMatch(
+      /if \[ "\$PR_ACTION" = "review_requested" \]; then\s+principal="\$SENDER"/,
+    );
     expect(authorizeStep).toContain('pull_request_target)');
+    expect(authorizeStep).toContain(
+      'Automatic PR review allowed for PR #${PR_NUMBER} after same-repo/precheck gate.',
+    );
     expect(authorizeStep).toContain(
       'echo "should_review=true" >> "$GITHUB_OUTPUT"',
     );
