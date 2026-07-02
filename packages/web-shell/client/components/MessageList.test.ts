@@ -613,6 +613,31 @@ describe('getSessionTimelineEntries', () => {
       'agent-reproduce-align – 对齐测试技能 用途： 在 Qwen Code 中运行参考代码，中文强调·范围—引用「下划线，保留 snake_case。',
     );
   });
+
+  it('cleans preview markdown without rewriting code text', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      {
+        ...makeAssistantMessage('a1'),
+        content:
+          '# Title\n> quoted\n- item\n~~gone~~\n![alt text](url)\n`*literal*`\n```ts\n**code**\n```',
+      },
+    ]);
+
+    expect(entry?.detail).toBe(
+      'Title quoted item gone alt text *literal* **code**',
+    );
+  });
+
+  it('falls back when the final answer cleans to an empty detail', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('a1'), content: '![](url)' },
+    ]);
+
+    expect(entry?.detail).toBe('assistant update');
+    expect(entry?.nodeKinds).toEqual(['commentary']);
+  });
 });
 
 describe('getSessionTimelineRangeForIndexes', () => {

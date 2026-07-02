@@ -547,20 +547,57 @@ function compactTimelineText(
 
 function cleanTimelineMarkdown(raw: string | null | undefined): string {
   if (!raw) return '';
-  return raw
+  const inlinePlaceholders: string[] = [];
+  const stashInline = (value: string) => {
+    const key = `\u0000${inlinePlaceholders.length}\u0000`;
+    inlinePlaceholders.push(value);
+    return key;
+  };
+
+  let cleaned = raw
+    .replace(/```[^\n`]*\n?([\s\S]*?)```/g, (_match, code: string) =>
+      stashInline(code),
+    )
     .replace(/!\[([^\]]*)\]\([^)]+\)/g, '$1')
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/~~([^~]+)~~/g, '$1')
-    .replace(/(\*\*|__)(?=\S)([\s\S]*?\S)\1/g, '$2')
+    .replace(/`([^`\n]+)`/g, (_match, code: string) => stashInline(code))
+    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
+    .replace(/^\s{0,3}>\s?/gm, '')
+    .replace(/^\s*[-*+]\s+/gm, '');
+
+  cleaned = stripBalancedTimelineMarker(cleaned, '~~');
+  cleaned = stripBalancedTimelineMarker(cleaned, '**');
+  cleaned = stripBalancedTimelineMarker(cleaned, '__');
+  return cleaned
     .replace(/\*([^*\s][^*]*?\S)\*/g, '$1')
     .replace(
       /(^|[^\p{L}\p{N}_])_([^_\s][^_]*?\S)_(?=$|[^\p{L}\p{N}_])/gu,
       '$1$2',
     )
-    .replace(/^\s{0,3}#{1,6}\s+/gm, '')
-    .replace(/^\s{0,3}>\s?/gm, '')
-    .replace(/^\s*[-*+]\s+/gm, '');
+    .replace(/\u0000(\d+)\u0000/g, (_match, index: string) => {
+      return inlinePlaceholders[Number(index)] ?? '';
+    });
+}
+
+function stripBalancedTimelineMarker(raw: string, marker: string): string {
+  let result = '';
+  let index = 0;
+  while (index < raw.length) {
+    const start = raw.indexOf(marker, index);
+    if (start === -1) return result + raw.slice(index);
+
+    const contentStart = start + marker.length;
+    const end = raw.indexOf(marker, contentStart);
+    if (end === -1) return result + raw.slice(index);
+
+    const content = raw.slice(contentStart, end);
+    result +=
+      content.trim().length === 0
+        ? raw.slice(index, end + marker.length)
+        : raw.slice(index, start) + content;
+    index = end + marker.length;
+  }
+  return result;
 }
 
 function timelineLabelForTurn(message: Message): string {
@@ -685,7 +722,10 @@ export function getSessionTimelineEntries(
     const finalAssistantId =
       finalAssistantItem?.type === 'message' &&
       finalAssistantItem.message.role === 'assistant' &&
-      !finalAssistantItem.message.isStreaming
+      !finalAssistantItem.message.isStreaming &&
+      compactTimelineText(finalAssistantItem.message.content, 1, {
+        stripMarkdown: true,
+      }).length > 0
         ? finalAssistantItem.message.id
         : null;
     const nodeKinds: TurnTimelineNodeKind[] = [];
