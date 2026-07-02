@@ -28,6 +28,9 @@ package-lock.json
 .codex
 .worktrees/
 
+# Atlarix workspace files
+.atlarix/
+
 # Qwen Code Configs
 .qwen/*
 !.qwen/commands/
