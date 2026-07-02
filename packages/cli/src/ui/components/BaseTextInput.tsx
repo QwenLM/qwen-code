@@ -204,6 +204,8 @@ export const BaseTextInput = ({
 }: BaseTextInputProps): ReactNode => {
   // ── Keyboard handling ──
 
+  const recentInput = useRef<Array<{c: string; t: number}>>([]);
+
   const handleKey = useCallback(
     (key: Key) => {
       // Let the consumer intercept first
@@ -299,6 +301,38 @@ export const BaseTextInput = ({
       ) {
         buffer.backspace();
         return;
+      }
+
+      // IME composition cleanup: when a CJK character arrives after
+      // rapid ASCII input (IME pinyin), the ASCII chars are composition
+      // intermediates. Delete them from the buffer so only the composed
+      // character remains. This avoids modifying the readline pipeline.
+      const code = key.sequence.codePointAt(0) || 0;
+      if (
+        code > 0x2FF && // CJK / Cyrillic / supplementary ranges
+        key.sequence.length >= 1 &&
+        !key.ctrl && !key.meta && !key.paste
+      ) {
+        recentInput.current.push({ c: key.name || key.sequence, t: Date.now() });
+        if (recentInput.current.length > 50) recentInput.current.shift();
+
+        // Walk back through the buffer, removing trailing ASCII letters
+        // that look like IME pinyin intermediates.
+        let toRemove = 0;
+        for (let i = buffer.text.length - 1; i >= 0; i--) {
+          const ch = buffer.text.charCodeAt(i);
+          if (ch >= 0x61 && ch <= 0x7A) { toRemove++; }
+          else if (ch === 0x20) { /* space within pinyin, continue */ }
+          else { break; }
+        }
+        if (toRemove > 0) {
+          // Position cursor at end and backspace N times
+          buffer.move('end');
+          for (let i = 0; i < toRemove; i++) buffer.backspace();
+        }
+      } else if (!key.ctrl && !key.meta && !key.paste && key.name) {
+        recentInput.current.push({ c: key.name, t: Date.now() });
+        if (recentInput.current.length > 50) recentInput.current.shift();
       }
 
       // Fallthrough — delegate to buffer's built-in input handler
