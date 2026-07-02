@@ -167,6 +167,43 @@ describe('parseChannelConfig', () => {
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
   });
 
+  it('rejects a non-object identity', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', identity: 'ops' }),
+    ).rejects.toThrow('Channel "bot" field "identity" must be an object.');
+  });
+
+  it('rejects a non-string identity field', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', identity: { id: 123 } }),
+    ).rejects.toThrow('Channel "bot" field "identity.id" must be a string.');
+  });
+
+  it('rejects a non-object memoryScope', async () => {
+    await expect(
+      parseChannelConfig('bot', { type: 'bare', memoryScope: ['ops'] }),
+    ).rejects.toThrow('Channel "bot" field "memoryScope" must be an object.');
+  });
+
+  it('rejects an unknown memoryScope.mode', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'bare',
+        memoryScope: { mode: 'full' },
+      }),
+    ).rejects.toThrow(
+      'Channel "bot" field "memoryScope.mode" must be "metadata-only".',
+    );
+  });
+
+  it('drops empty identity fields instead of failing', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      identity: { id: 'ops-agent', displayName: '', description: null },
+    });
+    expect(result.identity).toEqual({ id: 'ops-agent' });
+  });
+
   it('spreads extra fields from raw config', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',

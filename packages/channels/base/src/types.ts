@@ -140,6 +140,10 @@ export interface ChannelTaskLifecycleBase {
   memoryScope: ChannelRuntimeMemoryScope;
 }
 
+/**
+ * Whitelist of tool-call fields exposed to lifecycle consumers. Kept explicit
+ * (not derived from ToolCallEvent) so a new bridge field can't leak through.
+ */
 export interface SanitizedToolCallEvent {
   sessionId: string;
   toolCallId: string;
@@ -148,8 +152,17 @@ export interface SanitizedToolCallEvent {
   status: string;
 }
 
+/** 'dropped' = loop was disabled/deleted mid-run (not user-cancelled). */
+export type ChannelTaskCancellationReason =
+  | 'cancel_command'
+  | 'clear'
+  | 'steer'
+  | 'timeout'
+  | 'dropped';
+
 export type ChannelTaskLifecycleEvent =
   | (ChannelTaskLifecycleBase & { type: 'started' })
+  /** `chunk` is raw model output — content, not metadata; deliberately unsanitized. */
   | (ChannelTaskLifecycleBase & { type: 'text_chunk'; chunk: string })
   | (ChannelTaskLifecycleBase & {
       type: 'tool_call';
@@ -157,10 +170,15 @@ export type ChannelTaskLifecycleEvent =
     })
   | (ChannelTaskLifecycleBase & {
       type: 'cancelled';
-      reason: 'cancel_command' | 'clear' | 'steer' | 'timeout' | 'dropped';
+      reason: ChannelTaskCancellationReason;
     })
   | (ChannelTaskLifecycleBase & { type: 'completed' })
-  | (ChannelTaskLifecycleBase & { type: 'failed'; error: string });
+  | (ChannelTaskLifecycleBase & {
+      type: 'failed';
+      error: string;
+      /** Where the turn failed: agent generation vs delivery to the platform. */
+      phase: 'agent' | 'delivery';
+    });
 
 export interface ChannelMemoryTarget {
   channelName: string;

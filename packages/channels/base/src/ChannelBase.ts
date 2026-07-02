@@ -5,6 +5,8 @@ import type {
   ChannelMemoryTarget,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
+  ChannelTaskCancellationReason,
+  ChannelTaskLifecycleBase,
   ChannelTaskLifecycleEvent,
   DispatchMode,
   Envelope,
@@ -50,6 +52,8 @@ const CURRENT_MESSAGE_MARKER = '[Current message - respond to this]';
 const GROUP_HISTORY_ENTRY_TEXT_LIMIT = 1000;
 const GROUP_HISTORY_ENTRY_METADATA_LIMIT = 256;
 const LOOP_CANCEL_GRACE_MS = 5000;
+/** Sentinel message for the loop-prompt timeout rejection; matched by identity below. */
+const LOOP_TIMED_OUT_MESSAGE = 'loop timed out';
 
 export interface ChannelBaseOptions {
   router?: SessionRouter;
@@ -91,7 +95,8 @@ type ActivePrompt = {
   cancelPending?: boolean;
   cancellationEmitted?: boolean;
   cancelRequested?: Promise<boolean>;
-  loopDeliveryStarted?: boolean;
+  /** Set once response delivery to the platform has begun; past this point a cancel can no longer suppress the turn's output. */
+  deliveryStarted?: boolean;
   done: Promise<void>;
   resolve: () => void;
   stopStreaming?: () => void;
@@ -157,8 +162,9 @@ export abstract class ChannelBase {
   protected gate: SenderGate;
   protected router: SessionRouter;
   protected name: string;
-  private readonly identity: ChannelRuntimeIdentity;
-  private readonly memoryScope: ChannelRuntimeMemoryScope;
+  /** Resolved (defaulted + frozen) identity/scope — adapters should read these, not raw config. */
+  protected readonly identity: ChannelRuntimeIdentity;
+  protected readonly memoryScope: ChannelRuntimeMemoryScope;
   /** Resolved proxy URL, available to subclasses for adapter-specific clients. */
   protected proxy?: string;
   private readonly channelMemory?: ChannelMemoryCallbacks;
@@ -200,6 +206,8 @@ export abstract class ChannelBase {
       return;
     }
     if (active && !active.cancelled && !active.cancelPending) {
+      // `?? ''`: dispatchToolCall is a public entry point — a third-party bridge
+      // omitting a field must not throw out of its emit('toolCall').
       const safeToolCall: SanitizedToolCallEvent = {
         sessionId: event.sessionId,
         toolCallId: event.toolCallId,
@@ -267,6 +275,10 @@ export abstract class ChannelBase {
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void;
 
+  /**
+   * Adapter hook for task lifecycle events. The prompt flow never awaits this
+   * hook; an async override's rejection is caught and logged, nothing more.
+   */
   protected onTaskLifecycle(
     _event: ChannelTaskLifecycleEvent,
   ): void | Promise<void> {}
@@ -290,12 +302,12 @@ export abstract class ChannelBase {
   ): void {
     const channel = sanitizeLogText(this.name, 64);
     const sessionId = sanitizeLogText(event.sessionId, 64);
-    const message = sanitizeLogText(
-      err instanceof Error ? err.message : String(err),
-      256,
-    );
+    const stack =
+      err instanceof Error && err.stack
+        ? ` | ${sanitizeLogText(err.stack, 500)}`
+        : '';
     process.stderr.write(
-      `[${channel}] onTaskLifecycle threw for ${event.type} session ${sessionId}: ${message}\n`,
+      `[${channel}] onTaskLifecycle threw for ${event.type} session ${sessionId}: ${this.lifecycleError(err)}${stack}\n`,
     );
   }
 
@@ -309,7 +321,7 @@ export abstract class ChannelBase {
   private emitTaskCancellation(
     active: ActivePrompt,
     sessionId: string,
-    reason: 'cancel_command' | 'clear' | 'steer' | 'timeout' | 'dropped',
+    reason: ChannelTaskCancellationReason,
   ): void {
     if (active.cancellationEmitted) {
       return;
@@ -341,11 +353,17 @@ export abstract class ChannelBase {
   ): ChannelRuntimeMemoryScope {
     return {
       namespace: config.memoryScope?.namespace || `channel:${name}`,
-      mode: 'metadata-only',
+      mode: config.memoryScope?.mode ?? 'metadata-only',
     };
   }
 
+  /** Built once — identity/memoryScope are frozen at construction. */
+  private boundaryPrompt?: string;
+
   private channelBoundaryPrompt(): string {
+    if (this.boundaryPrompt !== undefined) {
+      return this.boundaryPrompt;
+    }
     const identityLines = [
       'Channel identity:',
       `- id: ${sanitizeQuotedText(this.identity.id, 128)}`,
@@ -362,7 +380,8 @@ export abstract class ChannelBase {
       `- mode: ${this.memoryScope.mode}`,
       '- data from other channels must not be shared.',
     ];
-    return [...identityLines, '', ...memoryLines].join('\n');
+    this.boundaryPrompt = [...identityLines, '', ...memoryLines].join('\n');
+    return this.boundaryPrompt;
   }
 
   private shouldPrependChannelBoundaryPrompt(): boolean {
@@ -373,14 +392,7 @@ export abstract class ChannelBase {
     chatId: string,
     sessionId: string,
     messageId?: string,
-  ): {
-    channelName: string;
-    chatId: string;
-    sessionId: string;
-    messageId?: string;
-    identity: ChannelRuntimeIdentity;
-    memoryScope: ChannelRuntimeMemoryScope;
-  } {
+  ): ChannelTaskLifecycleBase {
     return {
       channelName: this.name,
       chatId,
@@ -510,11 +522,13 @@ export abstract class ChannelBase {
             sessionContextReady = false;
           }
         }
-        if (this.shouldPrependChannelBoundaryPrompt()) {
-          context.push(this.channelBoundaryPrompt());
-        }
         if (this.config.instructions) {
           context.push(this.config.instructions);
+        }
+        // Boundary block goes last: recency bias means later instructions win,
+        // and the isolation boundary must not be overridable by operator text.
+        if (this.shouldPrependChannelBoundaryPrompt()) {
+          context.push(this.channelBoundaryPrompt());
         }
         if (context.length > 0) {
           promptText = `${context.join('\n\n')}\n\n${promptText}`;
@@ -551,7 +565,15 @@ export abstract class ChannelBase {
         ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
         type: 'started',
       });
-      this.onPromptStart(job.target.chatId, sessionId);
+      // Guarded: an adapter indicator failure must not orphan the started
+      // event (no terminal) or leak the activePrompts entry.
+      try {
+        this.onPromptStart(job.target.chatId, sessionId, job.id);
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] onPromptStart threw in loop ${job.id} for session ${sessionId}: ${this.lifecycleError(err)}\n`,
+        );
+      }
 
       const onChunk = (sid: string, chunk: string) => {
         if (
@@ -581,28 +603,49 @@ export abstract class ChannelBase {
         );
         await this.settleCancelRequested(promptState);
         if (promptState.cancelled) {
-          throw new ChannelLoopSkippedError('loop cancelled before delivery');
+          throw new ChannelLoopSkippedError(
+            'loop cancelled before delivery',
+            'cancel_command',
+          );
         }
         if (options.shouldContinue && !(await options.shouldContinue())) {
           throw new ChannelLoopSkippedError('loop dropped before delivery');
         }
         if (promptState.cancelled) {
-          throw new ChannelLoopSkippedError('loop cancelled before delivery');
+          throw new ChannelLoopSkippedError(
+            'loop cancelled before delivery',
+            'cancel_command',
+          );
         }
-        if (response && !promptState.cancelled) {
-          promptState.loopDeliveryStarted = true;
+        if (response) {
+          promptState.deliveryStarted = true;
           await this.pushProactive(job.target, response);
         }
-        await this.settleCancelRequested(promptState);
-        this.emitTaskLifecycle({
-          ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
-          type: 'completed',
-        });
+        // Once delivery started the run counts as completed — a cancel settling
+        // during/after the send must not convert a delivered run into a skip
+        // (a one-shot loop would stay enabled and deliver twice).
+        if (!promptState.deliveryStarted) {
+          await this.settleCancelRequested(promptState);
+          if (promptState.cancelled) {
+            throw new ChannelLoopSkippedError(
+              'loop cancelled before delivery',
+              'cancel_command',
+            );
+          }
+        }
+        // /clear can evict mid-delivery and emit its own terminal event; never
+        // follow a cancelled event with completed for the same prompt.
+        if (!promptState.cancellationEmitted) {
+          this.emitTaskLifecycle({
+            ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
+            type: 'completed',
+          });
+        }
         return response;
       } catch (err) {
         await this.settleCancelRequested(promptState);
         if (err instanceof ChannelLoopSkippedError && !promptState.cancelled) {
-          this.emitTaskCancellation(promptState, sessionId, 'dropped');
+          this.emitTaskCancellation(promptState, sessionId, err.reason);
           promptState.cancelled = true;
         }
         if (
@@ -613,11 +656,12 @@ export abstract class ChannelBase {
             ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
             type: 'failed',
             error: this.lifecycleError(err),
+            phase: promptState.deliveryStarted ? 'delivery' : 'agent',
           });
         } else if (
           promptState.cancelled &&
           !(err instanceof ChannelLoopSkippedError) &&
-          !(err instanceof Error && err.message === 'loop timed out')
+          !(err instanceof Error && err.message === LOOP_TIMED_OUT_MESSAGE)
         ) {
           const channel = sanitizeLogText(this.name, 64);
           const safeJobId = sanitizeLogText(job.id, 64);
@@ -632,7 +676,7 @@ export abstract class ChannelBase {
         const stillCurrent = this.activePrompts.get(sessionId) === promptState;
         if (!promptState.clearEvicted) {
           try {
-            this.onPromptEnd(job.target.chatId, sessionId);
+            this.onPromptEnd(job.target.chatId, sessionId, job.id);
           } catch (err) {
             process.stderr.write(
               `[${this.name}] onPromptEnd threw in loop ${job.id} for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
@@ -695,13 +739,13 @@ export abstract class ChannelBase {
         prompt,
         new Promise<never>((_, reject) => {
           timer = setTimeout(() => {
-            reject(new Error('loop timed out'));
+            reject(new Error(LOOP_TIMED_OUT_MESSAGE));
           }, timeoutMs);
           timer.unref?.();
         }),
       ]);
     } catch (err) {
-      if (err instanceof Error && err.message === 'loop timed out') {
+      if (err instanceof Error && err.message === LOOP_TIMED_OUT_MESSAGE) {
         promptState.cancelled = true;
         await this.cancelTimedOutLoopPrompt(promptBridge, sessionId, jobId);
         this.emitTaskCancellation(promptState, sessionId, 'timeout');
@@ -915,7 +959,7 @@ export abstract class ChannelBase {
         );
         return true;
       }
-      if (active.loopDeliveryStarted) {
+      if (active.deliveryStarted) {
         await this.sendMessage(
           envelope.chatId,
           'Failed to cancel current request.',
@@ -929,7 +973,7 @@ export abstract class ChannelBase {
           () => true,
           (err) => {
             process.stderr.write(
-              `[${this.name}] cancelSession failed for session=${activeSessionId}: ${err instanceof Error ? err.message : err}\n`,
+              `[${sanitizeLogText(this.name, 64)}] cancelSession failed for session=${sanitizeLogText(activeSessionId, 64)}: ${this.lifecycleError(err)}\n`,
             );
             active.cancelRequested = undefined;
             return false;
@@ -938,16 +982,20 @@ export abstract class ChannelBase {
       active.cancelRequested = cancelRequested;
       active.cancelPending = true;
 
-      const cancelSucceeded = await cancelRequested;
-      active.cancelPending = false;
-      if (this.activePrompts.get(activeSessionId) !== active) {
-        await this.sendMessage(
-          envelope.chatId,
-          'Failed to cancel current request.',
-        );
-        return true;
+      let cancelSucceeded: boolean;
+      try {
+        cancelSucceeded = await cancelRequested;
+      } finally {
+        active.cancelPending = false;
       }
-      if (!cancelSucceeded) {
+      // Re-check after the await: the turn may have ended (or its delivery
+      // begun) while the cancel RPC was in flight — claiming success then
+      // would emit a spurious cancelled event for a delivered response.
+      if (
+        this.activePrompts.get(activeSessionId) !== active ||
+        active.deliveryStarted ||
+        !cancelSucceeded
+      ) {
         await this.sendMessage(
           envelope.chatId,
           'Failed to cancel current request.',
@@ -1143,8 +1191,14 @@ export abstract class ChannelBase {
         envelope.chatId,
         [
           `Channel: ${this.name}`,
-          `Identity: ${sanitizeQuotedText(this.identity.displayName, 128)}`,
-          `Memory: ${sanitizeQuotedText(this.memoryScope.namespace, 128)}`,
+          // Identity/memory lines only for channels that opted in — keep
+          // unconfigured channels' output unchanged.
+          ...(this.shouldPrependChannelBoundaryPrompt()
+            ? [
+                `Identity: ${sanitizeQuotedText(this.identity.displayName, 128)}`,
+                `Memory: ${sanitizeQuotedText(this.memoryScope.namespace, 128)}`,
+              ]
+            : []),
           // Only the basename — don't leak the absolute cwd to group members.
           `Workspace: ${basename(this.config.cwd)}`,
           `Session: ${active ? 'active' : 'none'}${scopeNote}`,
@@ -1353,8 +1407,12 @@ export abstract class ChannelBase {
         `Session: ${hasSession ? 'active' : 'none'}`,
         `Access: ${policy}`,
         `Channel: ${this.name}`,
-        `Identity: ${sanitizeQuotedText(this.identity.id, 128)}`,
-        `Memory: ${this.memoryScope.mode}`,
+        ...(this.shouldPrependChannelBoundaryPrompt()
+          ? [
+              `Identity: ${sanitizeQuotedText(this.identity.id, 128)}`,
+              `Memory: ${this.memoryScope.mode}`,
+            ]
+          : []),
       ];
       await this.sendMessage(envelope.chatId, lines.join('\n'));
       return true;
@@ -2361,6 +2419,9 @@ export abstract class ChannelBase {
                 `[${this.name}] cancelSession failed for session=${sessionId} (steer): ${err instanceof Error ? err.message : err}\n`,
               );
             });
+            // Emitted before the bridge cancel settles: steer supersedes the
+            // turn at the channel level (cancelled is already set above), so
+            // the event reflects that intent, not the bridge RPC outcome.
             this.emitTaskCancellation(active, sessionId, 'steer');
           }
           // Diagnostic watchdog: if the predecessor turn is STILL the active prompt
@@ -2457,11 +2518,13 @@ export abstract class ChannelBase {
             `Channel memory for this chat:\n${sanitizePromptText(memoryText)}`,
           );
         }
-        if (this.shouldPrependChannelBoundaryPrompt()) {
-          sessionContext.push(this.channelBoundaryPrompt());
-        }
         if (this.config.instructions) {
           sessionContext.push(this.config.instructions);
+        }
+        // Boundary block goes last: recency bias means later instructions win,
+        // and the isolation boundary must not be overridable by operator text.
+        if (this.shouldPrependChannelBoundaryPrompt()) {
+          sessionContext.push(this.channelBoundaryPrompt());
         }
       }
       if (this.dropQueuedTurnIfStale(sessionId, generation, envelope)) {
@@ -2498,7 +2561,15 @@ export abstract class ChannelBase {
         type: 'started',
       });
 
-      this.onPromptStart(envelope.chatId, sessionId, envelope.messageId);
+      // Guarded: an adapter indicator failure must not orphan the started
+      // event (no terminal) or leak the activePrompts entry.
+      try {
+        this.onPromptStart(envelope.chatId, sessionId, envelope.messageId);
+      } catch (err) {
+        process.stderr.write(
+          `[${this.name}] onPromptStart threw for session ${sessionId}: ${this.lifecycleError(err)}\n`,
+        );
+      }
 
       const streamer = useBlockStreaming
         ? new BlockStreamer({
@@ -2540,14 +2611,19 @@ export abstract class ChannelBase {
 
         // If cancelled, skip sending the response
         if (!promptState.cancelled && response) {
+          promptState.deliveryStarted = true;
           if (streamer) {
             await streamer.flush();
           } else {
             await this.onResponseComplete(envelope.chatId, response, sessionId);
           }
         }
-        await this.settleCancelRequested(promptState);
-        if (!promptState.cancelled) {
+        // Once delivery started the turn's outcome is fixed — don't let a
+        // cancel settling during the send rewrite completed into cancelled.
+        if (!promptState.deliveryStarted) {
+          await this.settleCancelRequested(promptState);
+        }
+        if (!promptState.cancelled && !promptState.cancellationEmitted) {
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -2568,12 +2644,14 @@ export abstract class ChannelBase {
             ),
             type: 'failed',
             error: this.lifecycleError(err),
+            phase: promptState.deliveryStarted ? 'delivery' : 'agent',
           });
         } else {
           const channel = sanitizeLogText(this.name, 64);
           const safeSessionId = sanitizeLogText(sessionId, 64);
+          const safeMessageId = sanitizeLogText(envelope.messageId ?? '', 64);
           process.stderr.write(
-            `[${channel}] turn threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
+            `[${channel}] turn ${safeMessageId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
         }
         throw err;

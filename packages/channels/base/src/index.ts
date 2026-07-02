@@ -61,6 +61,7 @@ export type {
   ChannelPlugin,
   ChannelRuntimeIdentity,
   ChannelRuntimeMemoryScope,
+  ChannelTaskCancellationReason,
   ChannelTaskLifecycleBase,
   ChannelTaskLifecycleEvent,
   ChannelType,
@@ -68,8 +69,8 @@ export type {
   Envelope,
   GroupConfig,
   GroupPolicy,
-  SenderPolicy,
   SanitizedToolCallEvent,
+  SenderPolicy,
   SessionScope,
   SessionTarget,
 } from './types.js';
