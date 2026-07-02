@@ -12,7 +12,7 @@ import {
 } from './skill-utils.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { SkillManager } from '../skills/skill-manager.js';
-import type { Config } from '../config.js';
+import type { Config } from '../config/config.js';
 
 function mockPermissionManager(): {
   pm: PermissionManager;
