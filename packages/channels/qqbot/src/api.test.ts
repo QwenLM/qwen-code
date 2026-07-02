@@ -203,4 +203,14 @@ describe('fetchGatewayUrl', () => {
       'wss://api.sgroup.qq.com/',
     );
   });
+
+  it('warns but does not throw for wss URL with unexpected hostname', () => {
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    const result = validateGatewayUrl('wss://unknown-host.example.com/ws');
+    expect(result).toBe('wss://unknown-host.example.com/ws');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Unexpected gateway hostname'),
+    );
+    stderrSpy.mockRestore();
+  });
 });

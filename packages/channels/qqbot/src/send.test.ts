@@ -350,12 +350,12 @@ describe('sendMessage', () => {
     expect(mockFetchAccessToken).toHaveBeenCalled();
   });
 
-  it('catches and re-throws sendQQMessage errors so callers can handle them', async () => {
+  it('logs error and resolves gracefully when sendQQMessage throws', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
     mockSendQQMessage.mockRejectedValue(new Error('network down'));
 
-    // sendMessage now re-throws so callers (cron, idle-flush, toolCall) can handle it
-    await expect(ch.sendMessage('test-chat-id', 'hello')).rejects.toThrow('network down');
+    // sendMessage no longer re-throws; it logs to stderr and resolves gracefully
+    await expect(ch.sendMessage('test-chat-id', 'hello')).resolves.toBeUndefined();
 
     // No crash, and the catch prevents further attempts
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
@@ -538,6 +538,19 @@ describe('sendMessage', () => {
     await ch.sendMessage('test-chat-id', '**bold**');
 
     // Markdown attempt + plain-text fallback. No crash.
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('skips plain-text fallback when markdown and active retry both fail (msgId present)', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const chp = ch as unknown as Record<string, unknown>;
+    (
+      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+    ).set('test-chat-id', { msgId: 'msg-001', timestamp: Date.now() });
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(false, 400, 'markdown rejected'))
+      .mockResolvedValueOnce(mockResponse(false, 500, 'server error'));
+    await ch.sendMessage('test-chat-id', '**bold**');
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
   });
 });

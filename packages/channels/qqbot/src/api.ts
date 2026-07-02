@@ -55,7 +55,7 @@ export async function fetchAccessToken(
 }
 
 /**
- * Validates gateway URL protocol — rejects non-wss: URLs.
+ * Validates gateway URL protocol and warns on unexpected hostname — rejects non-wss: URLs.
  * Used internally by fetchGatewayUrl and available for direct URL validation.
  */
 export function validateGatewayUrl(url: string): string {
@@ -67,7 +67,7 @@ export function validateGatewayUrl(url: string): string {
   }
   // Validate hostname to avoid connecting to unexpected endpoints
   const ALLOWED_GW_HOSTS = ['api.sgroup.qq.com', 'sandbox.api.sgroup.qq.com'];
-  if (!ALLOWED_GW_HOSTS.some(h => parsed.hostname === h || parsed.hostname.endsWith('.' + h))) {
+  if (!ALLOWED_GW_HOSTS.some(h => parsed.hostname === h)) {
     process.stderr.write(`[QQ] Unexpected gateway hostname: ${parsed.hostname}\n`);
   }
   return url;

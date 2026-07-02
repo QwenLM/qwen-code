@@ -484,7 +484,6 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] Send error: ${sanitizeLogText(String(e), 200)}\n`,
       );
-      throw e;
     }
   }
 
@@ -506,7 +505,7 @@ export class QQChannel extends ChannelBase {
         await this.fetchToken();
       } catch (_e) {
         process.stderr.write(
-          `[QQ:${this.name}] resolveRoute: token refresh failed (${_e instanceof Error ? _e.message : String(_e)}), dropping message to ${chatId}\n`,
+          `[QQ:${this.name}] resolveRoute: token refresh failed (${sanitizeLogText(_e instanceof Error ? _e.message : String(_e), 120)}), dropping message to ${sanitizeLogText(chatId, 64)}\n`,
         );
         return null;
       }
