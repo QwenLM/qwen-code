@@ -8,7 +8,10 @@ import {
   telegramFormat,
   splitHtmlForTelegram,
 } from 'telegram-markdown-formatter';
-import { ChannelBase } from '@qwen-code/channel-base';
+import {
+  ChannelBase,
+  isTerminalTaskLifecycleType,
+} from '@qwen-code/channel-base';
 import type {
   ChannelAgentBridge,
   ChannelBaseOptions,
@@ -316,11 +319,7 @@ export class TelegramChannel extends ChannelBase {
       this.startTyping(event.chatId, event.sessionId);
       return;
     }
-    if (
-      event.type === 'completed' ||
-      event.type === 'cancelled' ||
-      event.type === 'failed'
-    ) {
+    if (isTerminalTaskLifecycleType(event.type)) {
       this.stopTyping(event.chatId, event.sessionId);
     }
   }

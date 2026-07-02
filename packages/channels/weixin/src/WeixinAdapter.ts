@@ -7,7 +7,10 @@ import { mkdirSync, writeFileSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { ChannelBase } from '@qwen-code/channel-base';
+import {
+  ChannelBase,
+  isTerminalTaskLifecycleType,
+} from '@qwen-code/channel-base';
 import type {
   ChannelConfig,
   ChannelBaseOptions,
@@ -143,11 +146,7 @@ export class WeixinChannel extends ChannelBase {
       this.startTyping(event.chatId);
       return;
     }
-    if (
-      event.type === 'completed' ||
-      event.type === 'cancelled' ||
-      event.type === 'failed'
-    ) {
+    if (isTerminalTaskLifecycleType(event.type)) {
       this.stopTyping(event.chatId);
     }
   }
@@ -299,7 +298,13 @@ export class WeixinChannel extends ChannelBase {
   private startTyping(chatId: string): void {
     if (this.activeTypingChats.has(chatId)) return;
     this.activeTypingChats.add(chatId);
+    const controller = this.abortController;
     void this.setTyping(chatId, true).then((started) => {
+      // Disconnect (or reconnect) raced the request — don't fire a
+      // post-disconnect setTyping(false).
+      if (controller !== this.abortController || controller?.signal.aborted) {
+        return;
+      }
       if (!started) {
         this.activeTypingChats.delete(chatId);
         return;

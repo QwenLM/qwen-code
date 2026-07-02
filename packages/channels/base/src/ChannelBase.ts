@@ -276,8 +276,10 @@ export abstract class ChannelBase {
   abstract disconnect(): void;
 
   /**
-   * Adapter hook for task lifecycle events. The prompt flow never awaits this
-   * hook; an async override's rejection is caught and logged, nothing more.
+   * Adapter hook for task lifecycle events — the canonical way to track task
+   * state (onPromptStart/onPromptEnd are retained for back-compat). The prompt
+   * flow never awaits this hook; an async override's rejection is caught and
+   * logged, nothing more.
    */
   protected onTaskLifecycle(
     _event: ChannelTaskLifecycleEvent,
@@ -794,32 +796,27 @@ export abstract class ChannelBase {
   ): Promise<boolean> {
     const active = this.activePrompts.get(sessionId);
     if (!active) {
-      return Promise.resolve()
-        .then(() => this.bridge.cancelSession(sessionId))
-        .then(
-          () => true,
-          (err) => {
-            process.stderr.write(
-              `[${this.name}] cancelSession failed for session=${sessionId}: ${err instanceof Error ? err.message : err}\n`,
-            );
-            return false;
-          },
-        );
+      return this.bridge.cancelSession(sessionId).then(
+        () => true,
+        (err) => {
+          this.logCancelSessionFailure(sessionId, err);
+          return false;
+        },
+      );
+    }
+    if (active.deliveryStarted) {
+      return Promise.resolve(false);
     }
     const cancelRequested =
       active.cancelRequested ??
-      Promise.resolve()
-        .then(() => this.bridge.cancelSession(sessionId))
-        .then(
-          () => true,
-          (err) => {
-            process.stderr.write(
-              `[${this.name}] cancelSession failed for session=${sessionId}: ${err instanceof Error ? err.message : err}\n`,
-            );
-            active.cancelRequested = undefined;
-            return false;
-          },
-        );
+      this.bridge.cancelSession(sessionId).then(
+        () => true,
+        (err) => {
+          this.logCancelSessionFailure(sessionId, err);
+          active.cancelRequested = undefined;
+          return false;
+        },
+      );
     active.cancelRequested = cancelRequested;
     active.cancelPending = true;
     return cancelRequested
@@ -827,14 +824,31 @@ export abstract class ChannelBase {
         active.cancelPending = false;
       })
       .then((cancelSucceeded) => {
-        if (cancelSucceeded) {
-          active.cancelled = true;
-          this.stopActiveStreaming(active, sessionId, reason);
-          this.collectBuffers.delete(sessionId);
-          this.emitTaskCancellation(active, sessionId, reason);
+        // Re-check after the await: while the cancel RPC was in flight the
+        // turn may have started delivery, or ended on its own (uncancelled) —
+        // claiming success then would emit a spurious cancelled event for a
+        // response the user received. A turn that ended already-cancelled
+        // (the abort landed) still counts as a successful cancel.
+        const turnEnded = this.activePrompts.get(sessionId) !== active;
+        if (
+          !cancelSucceeded ||
+          active.deliveryStarted ||
+          (turnEnded && !active.cancelled)
+        ) {
+          return false;
         }
-        return cancelSucceeded;
+        active.cancelled = true;
+        this.stopActiveStreaming(active, sessionId, reason);
+        this.collectBuffers.delete(sessionId);
+        this.emitTaskCancellation(active, sessionId, reason);
+        return true;
       });
+  }
+
+  private logCancelSessionFailure(sessionId: string, err: unknown): void {
+    process.stderr.write(
+      `[${sanitizeLogText(this.name, 64)}] cancelSession failed for session=${sanitizeLogText(sessionId, 64)}: ${this.lifecycleError(err)}\n`,
+    );
   }
 
   private async settleCancelRequested(active: ActivePrompt): Promise<void> {
@@ -959,55 +973,18 @@ export abstract class ChannelBase {
         );
         return true;
       }
-      if (active.deliveryStarted) {
-        await this.sendMessage(
-          envelope.chatId,
-          'Failed to cancel current request.',
-        );
-        return true;
-      }
-
-      const cancelRequested =
-        active.cancelRequested ??
-        this.bridge.cancelSession(activeSessionId).then(
-          () => true,
-          (err) => {
-            process.stderr.write(
-              `[${sanitizeLogText(this.name, 64)}] cancelSession failed for session=${sanitizeLogText(activeSessionId, 64)}: ${this.lifecycleError(err)}\n`,
-            );
-            active.cancelRequested = undefined;
-            return false;
-          },
-        );
-      active.cancelRequested = cancelRequested;
-      active.cancelPending = true;
-
-      let cancelSucceeded: boolean;
-      try {
-        cancelSucceeded = await cancelRequested;
-      } finally {
-        active.cancelPending = false;
-      }
-      // Re-check after the await: the turn may have ended (or its delivery
-      // begun) while the cancel RPC was in flight — claiming success then
-      // would emit a spurious cancelled event for a delivered response.
-      if (
-        this.activePrompts.get(activeSessionId) !== active ||
-        active.deliveryStarted ||
-        !cancelSucceeded
-      ) {
-        await this.sendMessage(
-          envelope.chatId,
-          'Failed to cancel current request.',
-        );
-        return true;
-      }
-
-      active.cancelled = true;
-      this.stopActiveStreaming(active, activeSessionId, 'cancel');
-      this.collectBuffers.delete(activeSessionId);
-      this.emitTaskCancellation(active, activeSessionId, 'cancel_command');
-      await this.sendMessage(envelope.chatId, 'Cancelled current request.');
+      // Single cancel state machine: adapter stop buttons and /cancel share
+      // requestActivePromptCancellation so the two paths cannot drift.
+      const cancelSucceeded = await this.requestActivePromptCancellation(
+        activeSessionId,
+        'cancel_command',
+      );
+      await this.sendMessage(
+        envelope.chatId,
+        cancelSucceeded
+          ? 'Cancelled current request.'
+          : 'Failed to cancel current request.',
+      );
       return true;
     });
   }

@@ -53,6 +53,7 @@ vi.mock('@qwen-code/channel-base', async () => {
       protected config: Record<string, unknown>;
       protected name: string;
       handleInbound = vi.fn().mockResolvedValue(undefined);
+      onSessionDied(_sessionId: string): void {}
 
       constructor(
         name: string,
@@ -65,6 +66,7 @@ vi.mock('@qwen-code/channel-base', async () => {
     },
     sanitizeLogText: real.sanitizeLogText,
     sanitizeSenderName: real.sanitizeSenderName,
+    isTerminalTaskLifecycleType: real.isTerminalTaskLifecycleType,
   };
 });
 
@@ -113,9 +115,20 @@ function getPromptHook(
 function getLifecycleHook(
   channel: DingtalkChannelInstance,
 ): (event: ChannelTaskLifecycleEvent) => void {
-  const fn = (channel as unknown as Record<string, unknown>)
-    .onTaskLifecycle as (event: ChannelTaskLifecycleEvent) => void;
+  const fn = (channel as unknown as Record<string, unknown>)[
+    'onTaskLifecycle'
+  ] as (event: ChannelTaskLifecycleEvent) => void;
   return fn.bind(channel);
+}
+
+/** Reactions only fire for message ids seen inbound — mimic message arrival. */
+function seedSeenMessage(
+  channel: DingtalkChannelInstance,
+  messageId: string,
+): void {
+  (
+    channel as unknown as { seenMessages: Map<string, number> }
+  ).seenMessages.set(messageId, Date.now());
 }
 
 function deferredPromise<T>() {
@@ -155,10 +168,11 @@ describe('DingtalkChannel prompt reactions', () => {
       memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
     } satisfies LifecycleBase;
 
+    seedSeenMessage(channel, 'message-1');
     const lifecycle = getLifecycleHook(channel);
     lifecycle({ ...event, type: 'started' });
     lifecycle({ ...event, type: 'started' });
-    lifecycle({ ...event, type: 'failed', error: 'boom' });
+    lifecycle({ ...event, type: 'failed', error: 'boom', phase: 'agent' });
     lifecycle({ ...event, type: 'completed' });
 
     expect(attachReaction).toHaveBeenCalledOnce();
@@ -197,6 +211,7 @@ describe('DingtalkChannel prompt reactions', () => {
       memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
     } satisfies LifecycleBase;
 
+    seedSeenMessage(channel, 'message-2');
     const lifecycle = getLifecycleHook(channel);
     lifecycle({ ...event, type: 'started' });
     lifecycle({ ...event, type: 'cancelled', reason: 'cancel_command' });
@@ -242,6 +257,7 @@ describe('DingtalkChannel prompt reactions', () => {
       channel as unknown as { activeReactionKeys: Set<string> }
     ).activeReactionKeys;
 
+    seedSeenMessage(channel, 'message-1');
     getLifecycleHook(channel)({
       type: 'started',
       channelName: 'dingtalk',
@@ -281,6 +297,7 @@ describe('DingtalkChannel prompt reactions', () => {
       channel as unknown as { attachReaction: typeof attachReaction }
     ).attachReaction = attachReaction;
 
+    seedSeenMessage(channel, 'message-1');
     getPromptHook(channel, 'onPromptStart')(
       'cid-123',
       'session-1',
@@ -304,6 +321,160 @@ describe('DingtalkChannel prompt reactions', () => {
     );
 
     expect(recallReaction).not.toHaveBeenCalled();
+  });
+
+  it('skips reactions when the started event has no messageId', () => {
+    const channel = createChannel();
+    const attachReaction = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as { attachReaction: typeof attachReaction }
+    ).attachReaction = attachReaction;
+
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'cid-123',
+      sessionId: 'session-1',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    });
+
+    expect(attachReaction).not.toHaveBeenCalled();
+  });
+
+  it('skips reactions for loop job ids that never arrived as messages', () => {
+    const channel = createChannel();
+    const attachReaction = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as { attachReaction: typeof attachReaction }
+    ).attachReaction = attachReaction;
+
+    getPromptHook(channel, 'onPromptStart')('cid-123', 'session-1', 'job-1');
+
+    expect(attachReaction).not.toHaveBeenCalled();
+  });
+
+  it('clears the reaction key when attach fails so a retry can attach again', async () => {
+    const channel = createChannel();
+    const attachReaction = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('api down'))
+      .mockResolvedValueOnce(undefined);
+    (
+      channel as unknown as { attachReaction: typeof attachReaction }
+    ).attachReaction = attachReaction;
+    const activeReactionKeys = (
+      channel as unknown as { activeReactionKeys: Set<string> }
+    ).activeReactionKeys;
+    seedSeenMessage(channel, 'message-1');
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    try {
+      getPromptHook(channel, 'onPromptStart')(
+        'cid-123',
+        'session-1',
+        'message-1',
+      );
+      await vi.waitFor(() => expect(activeReactionKeys.size).toBe(0));
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('reaction attach failed: api down'),
+      );
+
+      getPromptHook(channel, 'onPromptStart')(
+        'cid-123',
+        'session-1',
+        'message-1',
+      );
+      expect(attachReaction).toHaveBeenCalledTimes(2);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it.each(['completed', 'cancelled', 'failed'] as const)(
+    'recalls the reaction on an isolated %s event',
+    (terminal) => {
+      const channel = createChannel();
+      const attachReaction = vi.fn().mockResolvedValue(undefined);
+      const recallReaction = vi.fn().mockResolvedValue(undefined);
+      (
+        channel as unknown as {
+          attachReaction: typeof attachReaction;
+          recallReaction: typeof recallReaction;
+        }
+      ).attachReaction = attachReaction;
+      (
+        channel as unknown as {
+          attachReaction: typeof attachReaction;
+          recallReaction: typeof recallReaction;
+        }
+      ).recallReaction = recallReaction;
+
+      const base = {
+        channelName: 'dingtalk',
+        chatId: 'cid-123',
+        sessionId: 'session-1',
+        messageId: 'message-1',
+        identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+        memoryScope: {
+          namespace: 'channel:dingtalk',
+          mode: 'metadata-only',
+        },
+      } satisfies LifecycleBase;
+
+      seedSeenMessage(channel, 'message-1');
+      const lifecycle = getLifecycleHook(channel);
+      lifecycle({ ...base, type: 'started' });
+      if (terminal === 'cancelled') {
+        lifecycle({ ...base, type: terminal, reason: 'cancel_command' });
+      } else if (terminal === 'failed') {
+        lifecycle({ ...base, type: terminal, error: 'boom', phase: 'agent' });
+      } else {
+        lifecycle({ ...base, type: terminal });
+      }
+
+      expect(recallReaction).toHaveBeenCalledOnce();
+      expect(recallReaction).toHaveBeenCalledWith('message-1', 'cid-123');
+    },
+  );
+
+  it('recalls reactions when the session dies without terminal events', () => {
+    const channel = createChannel();
+    const attachReaction = vi.fn().mockResolvedValue(undefined);
+    const recallReaction = vi.fn().mockResolvedValue(undefined);
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).attachReaction = attachReaction;
+    (
+      channel as unknown as {
+        attachReaction: typeof attachReaction;
+        recallReaction: typeof recallReaction;
+      }
+    ).recallReaction = recallReaction;
+    const activeReactionKeys = (
+      channel as unknown as { activeReactionKeys: Set<string> }
+    ).activeReactionKeys;
+
+    seedSeenMessage(channel, 'message-1');
+    getLifecycleHook(channel)({
+      type: 'started',
+      channelName: 'dingtalk',
+      chatId: 'cid-123',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:dingtalk', displayName: 'dingtalk' },
+      memoryScope: { namespace: 'channel:dingtalk', mode: 'metadata-only' },
+    });
+    expect(activeReactionKeys.size).toBe(1);
+
+    channel.onSessionDied('session-1');
+
+    expect(recallReaction).toHaveBeenCalledWith('message-1', 'cid-123');
+    expect(activeReactionKeys.size).toBe(0);
   });
 });
 

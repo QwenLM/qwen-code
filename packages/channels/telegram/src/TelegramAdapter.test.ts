@@ -179,7 +179,12 @@ describe('TelegramChannel', () => {
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
 
     channel.emitLifecycle({ ...baseEvent, type: 'completed' });
-    channel.emitLifecycle({ ...baseEvent, type: 'failed', error: 'boom' });
+    channel.emitLifecycle({
+      ...baseEvent,
+      type: 'failed',
+      error: 'boom',
+      phase: 'agent',
+    });
 
     vi.advanceTimersByTime(4000);
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);

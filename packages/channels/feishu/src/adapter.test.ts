@@ -588,7 +588,8 @@ describe('FeishuChannel', () => {
       await vi.waitFor(() => {
         expect(updateCard).toHaveBeenCalledTimes(1);
       });
-      expect(updateCard.mock.calls[0]![1]).toContain('已停止生成');
+      // Terminal labels travel via the statusLabel param, not the card text.
+      expect(updateCard.mock.calls[0]![4]).toBe('已停止生成');
       expect(updateCard.mock.calls[0]![1]).not.toContain('已取消');
     });
 
@@ -830,8 +831,8 @@ describe('FeishuChannel', () => {
       await new Promise((r) => setTimeout(r, 50));
 
       expect(updateCardSpy).toHaveBeenCalled();
+      expect(updateCardSpy.mock.calls[0][4]).toBe('停止失败，请重试');
       const cardText = updateCardSpy.mock.calls[0][1] as string;
-      expect(cardText).toContain('停止失败，请重试');
       expect(cardText).not.toContain('已失败，请重试');
     });
   });
@@ -1259,6 +1260,54 @@ describe('FeishuChannel', () => {
       stderr.mockRestore();
     });
 
+    it('resolves the card via sessionToInboundMsg when the event has no messageId', async () => {
+      const channel = createChannel();
+      const cardSessions = getPrivateMethod<Map<string, unknown>>(
+        channel,
+        'cardSessions',
+      );
+      cardSessions.set('inbound_1', {
+        messageId: 'om_valid_message_id',
+        created: true,
+        creating: false,
+        stopped: false,
+        accumulatedText: 'answer',
+        lastUpdateAt: Date.now(),
+      });
+      getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg').set(
+        'session_1',
+        'inbound_1',
+      );
+
+      const updateCard = vi.fn().mockResolvedValue(true);
+      (channel as unknown as { updateCard: typeof updateCard }).updateCard =
+        updateCard;
+
+      getPrivateMethod<(event: ChannelTaskLifecycleEvent) => void>(
+        channel,
+        'onTaskLifecycle',
+      ).call(channel, {
+        type: 'cancelled',
+        reason: 'cancel_command',
+        channelName: 'feishu',
+        chatId: 'oc_chat_id',
+        sessionId: 'session_1',
+        identity: { id: 'channel:feishu', displayName: 'feishu' },
+        memoryScope: { namespace: 'channel:feishu', mode: 'metadata-only' },
+      });
+
+      await getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => Promise<void>
+      >(channel, 'onPromptEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'inbound_1',
+      );
+
+      expect(updateCard.mock.calls[0]![4]).toBe('已取消');
+    });
+
     it('treats prompt-end during stop cancellation as cancelled', async () => {
       const channel = createChannel();
       const cardSessions = getPrivateMethod<Map<string, unknown>>(
@@ -1362,9 +1411,8 @@ describe('FeishuChannel', () => {
         expect(updateCard).toHaveBeenCalledTimes(1);
       });
 
-      const rendered = updateCard.mock.calls[0]![1];
-      expect(rendered).toContain('已失败，请重试');
-      expect(rendered).not.toContain('已停止生成');
+      expect(updateCard.mock.calls[0]![4]).toBe('已失败，请重试');
+      expect(updateCard.mock.calls[0]![1]).not.toContain('已停止生成');
     });
 
     it('finalizes creating cards as cancelled instead of stopped after prompt end', async () => {
@@ -1438,9 +1486,8 @@ describe('FeishuChannel', () => {
         expect(updateCard).toHaveBeenCalledTimes(1);
       });
 
-      const rendered = updateCard.mock.calls[0]![1];
-      expect(rendered).toContain('已取消');
-      expect(rendered).not.toContain('已停止生成');
+      expect(updateCard.mock.calls[0]![4]).toBe('已取消');
+      expect(updateCard.mock.calls[0]![1]).not.toContain('已停止生成');
     });
 
     it('finalizes creating cards as completed after empty successful responses', async () => {
@@ -1513,9 +1560,8 @@ describe('FeishuChannel', () => {
         expect(updateCard).toHaveBeenCalledTimes(1);
       });
 
-      const rendered = updateCard.mock.calls[0]![1];
-      expect(rendered).toContain('已完成');
-      expect(rendered).not.toContain('已停止生成');
+      expect(updateCard.mock.calls[0]![4]).toBe('已完成');
+      expect(updateCard.mock.calls[0]![1]).not.toContain('已停止生成');
     });
   });
 

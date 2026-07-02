@@ -7,6 +7,7 @@ import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import {
   ChannelBase,
+  isTerminalTaskLifecycleType,
   sanitizeLogText,
   sanitizeSenderName,
 } from '@qwen-code/channel-base';
@@ -97,6 +98,11 @@ export class DingtalkChannel extends ChannelBase {
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
   private activeReactionKeys = new Set<string>();
+  /** sessionId → reaction keys, so a dead session's reactions can be recalled. */
+  private sessionReactionKeys = new Map<
+    string,
+    Map<string, { messageId: string; chatId: string }>
+  >();
 
   constructor(
     name: string,
@@ -376,6 +382,7 @@ export class DingtalkChannel extends ChannelBase {
       clearInterval(this.dedupTimer);
     }
     this.activeReactionKeys.clear();
+    this.sessionReactionKeys.clear();
     this.client.disconnect();
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }
@@ -393,57 +400,108 @@ export class DingtalkChannel extends ChannelBase {
     return `${conversationId}:${messageId}`;
   }
 
-  private startReaction(chatId: string, messageId?: string): void {
+  private logReactionFailure(action: string, err: unknown): void {
+    process.stderr.write(
+      `[DingTalk:${this.name}] ${action} failed: ${err instanceof Error ? err.message : err}\n`,
+    );
+  }
+
+  private startReaction(
+    chatId: string,
+    messageId?: string,
+    sessionId?: string,
+  ): void {
     if (!messageId || !this.isConversationId(chatId)) return;
+    // Loop lifecycle events carry the internal job id as messageId; the
+    // emotion API only accepts ids of real inbound messages, so skip anything
+    // we never saw arrive (reactions attach at turn start, well within the
+    // dedup TTL).
+    if (!this.seenMessages.has(messageId)) return;
     const key = this.reactionKey(messageId, chatId);
     if (this.activeReactionKeys.has(key)) return;
     this.activeReactionKeys.add(key);
+    if (sessionId) {
+      let keys = this.sessionReactionKeys.get(sessionId);
+      if (!keys) {
+        keys = new Map();
+        this.sessionReactionKeys.set(sessionId, keys);
+      }
+      keys.set(key, { messageId, chatId });
+    }
     this.attachReaction(messageId, chatId)
       .then(() => {
         if (!this.activeReactionKeys.has(key)) {
-          void this.recallReaction(messageId, chatId).catch(() => {});
+          void this.recallReaction(messageId, chatId).catch((err) => {
+            this.logReactionFailure('late reaction recall', err);
+          });
         }
       })
-      .catch(() => {
+      .catch((err) => {
         this.activeReactionKeys.delete(key);
+        this.logReactionFailure('reaction attach', err);
       });
   }
 
-  private stopReaction(chatId: string, messageId?: string): void {
+  private stopReaction(
+    chatId: string,
+    messageId?: string,
+    sessionId?: string,
+  ): void {
     if (!messageId || !this.isConversationId(chatId)) return;
     const key = this.reactionKey(messageId, chatId);
+    if (sessionId) {
+      const keys = this.sessionReactionKeys.get(sessionId);
+      if (keys) {
+        keys.delete(key);
+        if (keys.size === 0) this.sessionReactionKeys.delete(sessionId);
+      }
+    }
     if (!this.activeReactionKeys.delete(key)) return;
-    this.recallReaction(messageId, chatId).catch(() => {});
+    this.recallReaction(messageId, chatId).catch((err) => {
+      this.logReactionFailure('reaction recall', err);
+    });
+  }
+
+  /** Recall reactions left behind when a session dies without terminal lifecycle events. */
+  override onSessionDied(sessionId: string): void {
+    const keys = this.sessionReactionKeys.get(sessionId);
+    if (keys) {
+      this.sessionReactionKeys.delete(sessionId);
+      for (const [key, { messageId, chatId }] of keys) {
+        if (this.activeReactionKeys.delete(key)) {
+          void this.recallReaction(messageId, chatId).catch((err) => {
+            this.logReactionFailure('session-death reaction recall', err);
+          });
+        }
+      }
+    }
+    super.onSessionDied(sessionId);
   }
 
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     if (event.type === 'started') {
-      this.startReaction(event.chatId, event.messageId);
+      this.startReaction(event.chatId, event.messageId, event.sessionId);
       return;
     }
-    if (
-      event.type === 'completed' ||
-      event.type === 'cancelled' ||
-      event.type === 'failed'
-    ) {
-      this.stopReaction(event.chatId, event.messageId);
+    if (isTerminalTaskLifecycleType(event.type)) {
+      this.stopReaction(event.chatId, event.messageId, event.sessionId);
     }
   }
 
   protected override onPromptStart(
     chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageId?: string,
   ): void {
-    this.startReaction(chatId, messageId);
+    this.startReaction(chatId, messageId, sessionId);
   }
 
   protected override onPromptEnd(
     chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageId?: string,
   ): void {
-    this.stopReaction(chatId, messageId);
+    this.stopReaction(chatId, messageId, sessionId);
   }
 
   /**

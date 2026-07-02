@@ -5,7 +5,10 @@ import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { basename, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import * as lark from '@larksuiteoapi/node-sdk';
-import { ChannelBase } from '@qwen-code/channel-base';
+import {
+  ChannelBase,
+  isTerminalTaskLifecycleType,
+} from '@qwen-code/channel-base';
 import { buildCardContent, extractTitle, splitChunks } from './markdown.js';
 import { downloadMedia } from './media.js';
 import type {
@@ -71,6 +74,8 @@ interface CardSessionState {
   /** Set synchronously in onCardAction so .then() callbacks can detect stop intent
    *  before cancelSession resolves. Cleared on cancelSession failure. */
   cancelling?: boolean;
+  /** Stop clicked before any terminal event — render 已停止生成 on every wind-down path. */
+  userStopped?: boolean;
   terminalStatus?: FeishuTerminalStatus;
 }
 
@@ -948,14 +953,12 @@ export class FeishuChannel extends ChannelBase {
             if (result.success) {
               const prefix =
                 cs.atPrefix || this.msgToSenderName.get(inboundMsgId) || '';
-              const stopText = prefix
-                ? `${prefix}\n\n*${this.stopLabelFor(cs.terminalStatus)}*`
-                : `*${this.stopLabelFor(cs.terminalStatus)}*`;
               this.updateCard(
                 result.messageId,
-                stopText,
+                prefix,
                 true,
                 inboundMsgId,
+                this.stopLabelFor(cs.terminalStatus, cs.userStopped ?? false),
               ).catch(() => {});
             }
             cs.creating = false;
@@ -1097,11 +1100,7 @@ export class FeishuChannel extends ChannelBase {
   }
 
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
-    if (
-      event.type !== 'completed' &&
-      event.type !== 'cancelled' &&
-      event.type !== 'failed'
-    ) {
+    if (!isTerminalTaskLifecycleType(event.type)) {
       return;
     }
 
@@ -1366,14 +1365,15 @@ export class FeishuChannel extends ChannelBase {
                   cardState.atPrefix ||
                   this.msgToSenderName.get(messageId) ||
                   '';
-                const stopText = prefix
-                  ? `${prefix}\n\n*${this.stopLabelFor(cardState.terminalStatus)}*`
-                  : `*${this.stopLabelFor(cardState.terminalStatus)}*`;
                 this.updateCard(
                   result.messageId,
-                  stopText,
+                  prefix,
                   true,
                   messageId,
+                  this.stopLabelFor(
+                    cardState.terminalStatus,
+                    cardState.userStopped ?? false,
+                  ),
                 ).catch(() => {});
               }
               cardState.creating = false;
@@ -1424,7 +1424,12 @@ export class FeishuChannel extends ChannelBase {
           const atPrefix = this.msgToSenderName.get(inboundMsgId) || '';
           const terminalStatus =
             cs.terminalStatus ?? (cs.cancelling ? 'cancelled' : 'failed');
-          const terminalLabel = this.statusLabelFor(terminalStatus);
+          // userStopped: a Stop click may lose the race against this wind-down
+          // path — still render 已停止生成 rather than 已取消/已失败.
+          const terminalLabel = this.stopLabelFor(
+            terminalStatus,
+            cs.userStopped ?? false,
+          );
           const text = cs.accumulatedText
             ? atPrefix
               ? `${atPrefix}\n\n${cs.accumulatedText}`
@@ -1640,6 +1645,7 @@ export class FeishuChannel extends ChannelBase {
 
       const handleStop = async () => {
         const wasUserStop = !cardState.terminalStatus;
+        cardState.userStopped = wasUserStop;
         const cancelSucceeded = sessionId
           ? await this.requestActivePromptCancellation(
               sessionId,
@@ -1664,25 +1670,31 @@ export class FeishuChannel extends ChannelBase {
           const prefix =
             cardState.atPrefix || this.msgToSenderName.get(inboundId) || '';
           const stopLabel = cancelSucceeded
-            ? `*${this.stopLabelFor(cardState.terminalStatus, wasUserStop)}*`
-            : '*停止失败，请重试*';
+            ? this.stopLabelFor(cardState.terminalStatus, wasUserStop)
+            : '停止失败，请重试';
           const contentPart = cardState.accumulatedText.trim()
-            ? cardState.accumulatedText + '\n\n---\n' + stopLabel
-            : stopLabel;
+            ? cardState.accumulatedText
+            : '';
           const finalText = prefix
-            ? `${prefix}\n\n${contentPart}`
+            ? contentPart
+              ? `${prefix}\n\n${contentPart}`
+              : prefix
             : contentPart;
           const updated = await this.updateCard(
             cardState.messageId,
             finalText,
             cancelSucceeded,
             inboundId,
+            stopLabel,
           );
           // If updateCard failed and cancel succeeded, try to delete the orphaned
           // card and fall back to sendMessage to avoid leaving a stuck "生成中..." card.
           if (!updated && cancelSucceeded && chatId) {
             await this.deleteCard(cardState.messageId);
-            await this.sendMessage(chatId, finalText);
+            await this.sendMessage(
+              chatId,
+              finalText ? `${finalText}\n\n*${stopLabel}*` : `*${stopLabel}*`,
+            );
           }
         }
         // Do NOT cleanupCard here — let onResponseComplete / onPromptEnd handle it.
