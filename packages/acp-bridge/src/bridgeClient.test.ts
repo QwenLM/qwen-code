@@ -35,6 +35,7 @@ import * as path from 'node:path';
 import type {
   ReadTextFileRequest,
   ReadTextFileResponse,
+  SessionNotification,
   WriteTextFileRequest,
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
@@ -629,6 +630,73 @@ describe('BridgeClient — artifact ingress', () => {
     }
   });
 
+  it('strips raw tool artifacts from session updates before publishing', async () => {
+    const sessionId = 'sess:sanitized-artifacts';
+    const publish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: {
+        inputBatchLimit: () => 1,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-sanitize',
+          status: 'completed',
+          content: [],
+          _meta: {
+            toolName: 'artifact',
+            keep: 'visible',
+            artifacts: [
+              { title: 'One', url: 'https://example.com/1' },
+              { title: 'Two', url: 'https://example.com/2' },
+            ],
+          },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+      const sessionUpdate = publish.mock.calls
+        .map(([event]) => event as { type: string; data: SessionNotification })
+        .find((event) => event.type === 'session_update');
+      expect(sessionUpdate).toBeDefined();
+      const publishedMeta = (
+        sessionUpdate!.data.update as { _meta?: Record<string, unknown> }
+      )._meta;
+      expect(publishedMeta).toEqual({
+        toolName: 'artifact',
+        keep: 'visible',
+      });
+      expect(upsertMany).toHaveBeenCalledWith(
+        [expect.objectContaining({ title: 'One' })],
+        { trustedPublisher: true },
+      );
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('artifact batch limit exceeded');
+      expect(logged).toContain('dropped=1');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('ignores forged published trust markers from non-artifact tools', async () => {
     const workspace = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-bridge-artifacts-'),
@@ -823,6 +891,12 @@ describe('BridgeClient — artifact ingress', () => {
       0,
       Infinity,
     );
+    const lateArtifact = {};
+    Object.defineProperty(lateArtifact, 'title', {
+      get: () => {
+        throw new Error('artifact past cap should not be mapped');
+      },
+    });
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockReturnValue(true as never);
@@ -832,7 +906,7 @@ describe('BridgeClient — artifact ingress', () => {
         artifacts: [
           { title: 'One', url: 'https://example.com/1' },
           { title: 'Two', url: 'https://example.com/2' },
-          { title: 'Three', url: 'https://example.com/3' },
+          lateArtifact,
         ],
       });
 
@@ -851,8 +925,8 @@ describe('BridgeClient — artifact ingress', () => {
     }
   });
 
-  it('logs and drops artifact events for idle sessions', async () => {
-    const sessionId = 'sess:idle-artifacts';
+  it('stores hook artifact events for child-initiated turns', async () => {
+    const sessionId = 'sess:child-artifacts';
     const publish = vi.fn().mockReturnValue(true);
     const workspace = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-bridge-artifacts-'),
@@ -875,9 +949,6 @@ describe('BridgeClient — artifact ingress', () => {
       0,
       Infinity,
     );
-    const stderr = vi
-      .spyOn(process.stderr, 'write')
-      .mockReturnValue(true as never);
     try {
       await expect(
         client.extNotification('qwen/notify/session/artifact-event', {
@@ -889,19 +960,23 @@ describe('BridgeClient — artifact ingress', () => {
           artifacts: [{ title: 'Idle', url: 'https://example.com/idle' }],
         }),
       ).resolves.toBeUndefined();
-      expect(publish).not.toHaveBeenCalled();
       await expect(fakeEntry.artifacts.list()).resolves.toMatchObject({
-        artifacts: [],
+        artifacts: [
+          expect.objectContaining({
+            title: 'Idle',
+            source: 'hook',
+            hookEventName: 'PostToolUse',
+            toolName: 'read_file',
+            toolCallId: 'call-idle',
+          }),
+        ],
       });
-      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
-      expect(logged).toContain('reason=session_idle');
-      expect(logged).toContain('source="hook"');
-      expect(logged).toContain('hookEventName="PostToolUse"');
-      expect(logged).toContain('toolName="read_file"');
-      expect(logged).toContain('toolCallId="call-idle"');
-      expect(logged).toContain('artifactCount=1');
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'artifact_changed',
+        }),
+      );
     } finally {
-      stderr.mockRestore();
       await fsp.rm(workspace, { recursive: true, force: true });
     }
   });

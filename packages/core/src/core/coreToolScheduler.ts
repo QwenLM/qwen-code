@@ -3392,6 +3392,7 @@ export class CoreToolScheduler {
       if (aborted) {
         // PostToolUseFailure Hook
         let cancelMessage = 'User cancelled tool execution.';
+        let failureHookArtifacts: ToolArtifact[] | undefined;
         if (hooksEnabled && messageBus) {
           const failureHookResult = await this.withHookSpan(
             {
@@ -3418,13 +3419,24 @@ export class CoreToolScheduler {
           if (failureHookResult.additionalContext) {
             cancelMessage += `\n\n${failureHookResult.additionalContext}`;
           }
+          failureHookArtifacts = failureHookResult.artifacts;
         }
         this.safelyAddToolResultAttributes(
           span,
           toolName,
           `CANCELLED: ${cancelMessage}`,
         );
-        this.setStatusInternal(callId, 'cancelled', cancelMessage);
+        this.setStatusInternal(
+          callId,
+          'cancelled',
+          failureHookArtifacts && failureHookArtifacts.length > 0
+            ? createCancelledResponse(
+                scheduledCall.request,
+                cancelMessage,
+                failureHookArtifacts,
+              )
+            : cancelMessage,
+        );
         setToolSpanCancelled(span);
         return; // Both code paths should return here
       }

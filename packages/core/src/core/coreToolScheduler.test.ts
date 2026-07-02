@@ -7332,6 +7332,51 @@ describe('CoreToolScheduler telemetry spans', () => {
     }
   });
 
+  it('preserves PostToolUseFailure artifacts when an aborted tool resolves', async () => {
+    const abortController = new AbortController();
+    const messageBus = {
+      request: vi.fn(async (req: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${req.eventName}-hook`,
+        success: true,
+        output:
+          req.eventName === 'PostToolUseFailure'
+            ? {
+                hookSpecificOutput: {
+                  artifacts: [
+                    {
+                      title: 'Resolved cancel report',
+                      workspacePath: 'reports/resolved-cancel.html',
+                    },
+                  ],
+                },
+              }
+            : { decision: 'allow' },
+      })),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return { llmContent: 'done', returnDisplay: 'done' };
+      }),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('cancelled');
+    if (completedCall.status === 'cancelled') {
+      expect(completedCall.response.artifacts).toEqual([
+        {
+          title: 'Resolved cancel report',
+          workspacePath: 'reports/resolved-cancel.html',
+        },
+      ]);
+    }
+  });
+
   it('preserves live output when hook artifacts are attached to user-abort cancellations', async () => {
     const abortController = new AbortController();
     const messageBus = {

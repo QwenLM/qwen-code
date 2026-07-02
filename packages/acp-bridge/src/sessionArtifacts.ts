@@ -351,11 +351,7 @@ export class SessionArtifactStore {
 
     const metadata = normalizeMetadata(input.metadata);
     const workspaceStatus = workspacePath
-      ? await getWorkspaceStatus(
-          this.workspaceCwd,
-          workspacePath,
-          this.getRealWorkspaceCwd(),
-        )
+      ? await this.getInitialWorkspaceStatus(workspacePath)
       : undefined;
     if (workspaceStatus?.escaped) {
       throw new SessionArtifactValidationError(
@@ -425,6 +421,25 @@ export class SessionArtifactStore {
           }),
         ),
     );
+  }
+
+  private async getInitialWorkspaceStatus(workspacePath: string): Promise<{
+    status: DaemonSessionArtifactStatus;
+    sizeBytes?: number;
+    escaped?: boolean;
+  }> {
+    try {
+      return await getWorkspaceStatus(
+        this.workspaceCwd,
+        workspacePath,
+        this.getRealWorkspaceCwd(),
+      );
+    } catch {
+      throw new SessionArtifactValidationError(
+        'workspacePath could not be inspected',
+        'workspacePath',
+      );
+    }
   }
 
   private async refreshWorkspaceStatus(

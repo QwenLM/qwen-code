@@ -784,7 +784,11 @@ describe('SessionArtifactStore', () => {
         store.upsertMany([{ title: 'Denied', workspacePath: 'denied.txt' }], {
           strict: true,
         }),
-      ).rejects.toThrow('permission denied');
+      ).rejects.toMatchObject({
+        code: 'VALIDATION_FAILED',
+        field: 'workspacePath',
+        message: 'workspacePath could not be inspected',
+      });
 
       await expect(
         store.upsertMany([{ title: 'Denied', workspacePath: 'denied.txt' }], {

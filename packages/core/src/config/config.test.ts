@@ -1863,7 +1863,7 @@ describe('Server Config (config.ts)', () => {
         expect(config.isArtifactEnabled()).toBe(false);
       });
 
-      it('stays disabled outside interactive mode even when force-enabled', () => {
+      it('lets QWEN_CODE_ENABLE_ARTIFACT force-enable daemon CLI use', () => {
         process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
 
         const config = new Config({
@@ -1872,7 +1872,7 @@ describe('Server Config (config.ts)', () => {
           sdkMode: false,
         });
 
-        expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isArtifactEnabled()).toBe(true);
       });
 
       it('lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use', () => {

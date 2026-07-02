@@ -98,19 +98,28 @@ function artifactPayloadFields(
   };
 }
 
-function truncateArtifactInputs(
-  artifacts: SessionArtifactInput[],
+function extractCappedArtifactInputs(
+  rawArtifacts: unknown[],
   limit: number,
   sessionId: string,
   source: 'tool' | 'hook',
+  toInput: (artifact: Record<string, unknown>) => SessionArtifactInput,
 ): SessionArtifactInput[] {
-  if (artifacts.length <= limit) {
-    return artifacts;
+  const artifacts: SessionArtifactInput[] = [];
+  for (let index = 0; index < rawArtifacts.length; index++) {
+    const artifact = rawArtifacts[index];
+    if (!isRecord(artifact)) {
+      continue;
+    }
+    if (artifacts.length >= limit) {
+      writeStderrLine(
+        `[artifacts] session=${sessionId} action=dropped reason="artifact batch limit exceeded" source=${source} dropped=${rawArtifacts.length - index}`,
+      );
+      break;
+    }
+    artifacts.push(toInput(artifact));
   }
-  writeStderrLine(
-    `[artifacts] session=${sessionId} action=dropped reason="artifact batch limit exceeded" source=${source} dropped=${artifacts.length - limit}`,
-  );
-  return artifacts.slice(0, limit);
+  return artifacts;
 }
 
 function artifactIngestionErrorReason(error: unknown): unknown {
@@ -127,6 +136,8 @@ function artifactIngestionErrorReason(error: unknown): unknown {
 function extractSessionUpdateArtifacts(
   params: SessionNotification,
   updateMeta: Record<string, unknown> | undefined,
+  limit: number,
+  sessionId: string,
 ): SessionArtifactInput[] {
   const rawArtifacts = updateMeta?.['artifacts'];
   if (!Array.isArray(rawArtifacts)) {
@@ -139,13 +150,38 @@ function extractSessionUpdateArtifacts(
     typeof updateMeta?.['toolName'] === 'string'
       ? updateMeta['toolName']
       : undefined;
-  return rawArtifacts.filter(isRecord).map((artifact) => ({
-    ...artifactPayloadFields(artifact),
-    source: 'tool' as const,
-    toolCallId,
-    toolName,
-    trustedPublisher: false,
-  }));
+  return extractCappedArtifactInputs(
+    rawArtifacts,
+    limit,
+    sessionId,
+    'tool',
+    (artifact) => ({
+      ...artifactPayloadFields(artifact),
+      source: 'tool' as const,
+      toolCallId,
+      toolName,
+      trustedPublisher: false,
+    }),
+  );
+}
+
+function sanitizeSessionUpdateArtifacts(
+  params: SessionNotification,
+  updateMeta: Record<string, unknown> | undefined,
+): SessionNotification {
+  if (!Array.isArray(updateMeta?.['artifacts'])) {
+    return params;
+  }
+  const sanitizedMeta = { ...updateMeta };
+  delete sanitizedMeta['artifacts'];
+  const update = {
+    ...(params.update as Record<string, unknown>),
+    _meta: sanitizedMeta,
+  } as SessionNotification['update'];
+  return {
+    ...params,
+    update,
+  };
 }
 
 function isTrustedArtifactToolUpdate(
@@ -569,28 +605,27 @@ export class BridgeClient implements Client {
       typeof originalTs === 'number' && Number.isFinite(originalTs)
         ? originalTs
         : undefined;
+    const artifacts = entry?.artifacts
+      ? extractSessionUpdateArtifacts(
+          params,
+          updateMeta,
+          entry.artifacts.inputBatchLimit(),
+          entry.sessionId,
+        )
+      : [];
+    const publishParams = sanitizeSessionUpdateArtifacts(params, updateMeta);
     events.publish({
       type: 'session_update',
-      data: params,
+      data: publishParams,
       ...originator,
       ...(serverTimestamp !== undefined ? { _meta: { serverTimestamp } } : {}),
     });
 
     if (entry) {
-      const artifacts = extractSessionUpdateArtifacts(params, updateMeta);
       if (artifacts.length > 0) {
-        await this.upsertAndPublishArtifacts(
-          entry,
-          truncateArtifactInputs(
-            artifacts,
-            entry.artifacts.inputBatchLimit(),
-            entry.sessionId,
-            'tool',
-          ),
-          {
-            trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
-          },
-        );
+        await this.upsertAndPublishArtifacts(entry, artifacts, {
+          trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
+        });
       }
     }
   }
@@ -904,8 +939,6 @@ export class BridgeClient implements Client {
       );
       return;
     }
-    const source =
-      typeof params['source'] === 'string' ? params['source'] : undefined;
     const hookEventName =
       typeof params['hookEventName'] === 'string'
         ? params['hookEventName']
@@ -916,40 +949,21 @@ export class BridgeClient implements Client {
       typeof params['toolCallId'] === 'string'
         ? params['toolCallId']
         : undefined;
-    // Hook artifact events are tied to the active prompt lifecycle. Late events
-    // from an already-finished prompt are dropped instead of mutating an idle
-    // session behind the client's current snapshot.
-    if (entry.promptActive !== true) {
-      writeStderrLine(
-        `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_idle source=${JSON.stringify(
-          source ?? '<missing>',
-        )} hookEventName=${JSON.stringify(
-          hookEventName ?? '<missing>',
-        )} toolName=${JSON.stringify(
-          toolName ?? '<missing>',
-        )} toolCallId=${JSON.stringify(
-          toolCallId ?? '<missing>',
-        )} artifactCount=${rawArtifacts.length}`,
-      );
-      return;
-    }
-    const artifacts = rawArtifacts.filter(isRecord).map((artifact) => ({
-      ...artifactPayloadFields(artifact),
-      source: 'hook' as const,
-      hookEventName,
-      toolName,
-      toolCallId,
-      trustedPublisher: false,
-    }));
-    await this.upsertAndPublishArtifacts(
-      entry,
-      truncateArtifactInputs(
-        artifacts,
-        entry.artifacts.inputBatchLimit(),
-        entry.sessionId,
-        'hook',
-      ),
+    const artifacts = extractCappedArtifactInputs(
+      rawArtifacts,
+      entry.artifacts.inputBatchLimit(),
+      entry.sessionId,
+      'hook',
+      (artifact) => ({
+        ...artifactPayloadFields(artifact),
+        source: 'hook' as const,
+        hookEventName,
+        toolName,
+        toolCallId,
+        trustedPublisher: false,
+      }),
     );
+    await this.upsertAndPublishArtifacts(entry, artifacts);
   }
 
   private async upsertAndPublishArtifacts(
