@@ -601,6 +601,22 @@ describe('Server Config (config.ts)', () => {
         }).getCronRecurringMaxAgeDays(),
       ).toBe(7);
     });
+
+    it('warns on the console once per instance for an invalid value', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = 'not-a-number';
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const config = new Config(baseParams);
+        expect(config.getCronRecurringMaxAgeDays()).toBe(7);
+        expect(config.getCronRecurringMaxAgeDays()).toBe(7);
+        const cronWarnings = warnSpy.mock.calls.filter((call) =>
+          String(call[0]).includes('QWEN_CODE_CRON_MAX_AGE_DAYS'),
+        );
+        expect(cronWarnings).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
   });
 
   describe('getTeamMemorySyncEnabled', () => {

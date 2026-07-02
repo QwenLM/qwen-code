@@ -1498,6 +1498,8 @@ export class Config {
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = true;
   private readonly cronRecurringMaxAgeDays: number | undefined;
+  /** Once-latch for the invalid cron max-age console warning. */
+  private cronMaxAgeWarned = false;
   private readonly agentTeamEnabled: boolean = false;
   private readonly artifactEnabled: boolean = false;
   private readonly artifactAutoOpen: boolean = true;
@@ -4908,16 +4910,19 @@ export class Config {
    * overrides the settings value (convenient for cloud/container
    * deployments); a value of `0` in either source disables expiry;
    * negative or unparseable values fall back to the 7-day default with
-   * a warning, so a misconfiguration leaves a breadcrumb instead of
-   * surfacing later as "jobs stopped firing after 7 days".
+   * a one-time console warning — debug file logging is usually off in
+   * the daemon deployments this knob targets, and the misconfiguration
+   * would otherwise surface only as "jobs stopped firing after 7 days".
    */
   getCronRecurringMaxAgeDays(): number {
     const env = process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
     const fromEnv = env !== undefined && env.trim() !== '';
     const raw = fromEnv ? Number(env) : this.cronRecurringMaxAgeDays;
     if (raw === undefined || !Number.isFinite(raw) || raw < 0) {
-      if (raw !== undefined) {
-        this.debugLogger.warn(
+      if (raw !== undefined && !this.cronMaxAgeWarned) {
+        this.cronMaxAgeWarned = true;
+        // eslint-disable-next-line no-console -- operator-facing misconfiguration breadcrumb; debug file logging is usually off in daemon deployments
+        console.warn(
           (fromEnv
             ? `QWEN_CODE_CRON_MAX_AGE_DAYS="${env}" is invalid`
             : `cronRecurringMaxAgeDays=${this.cronRecurringMaxAgeDays} is invalid`) +

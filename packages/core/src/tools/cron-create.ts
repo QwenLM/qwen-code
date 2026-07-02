@@ -126,6 +126,9 @@ export class CronCreateTool extends BaseDeclarativeTool<
   static readonly Name = ToolNames.CRON_CREATE;
 
   constructor(private config: Config) {
+    // Resolved once: each call re-reads/re-parses the env var and an
+    // invalid value would warn on every call site below.
+    const maxAgeDays = config.getCronRecurringMaxAgeDays();
     super(
       CronCreateTool.Name,
       ToolDisplayNames.CRON_CREATE,
@@ -152,7 +155,7 @@ export class CronCreateTool extends BaseDeclarativeTool<
         'Most "remind me in 5 minutes" requests should stay session-only.\n\n' +
         '## Runtime behavior\n\n' +
         'Jobs only fire while the REPL is idle (not mid-query). The scheduler adds a small deterministic jitter on top of whatever you pick: recurring tasks fire up to 10% of their period late (max 15 min); one-shot tasks landing on :00 or :30 fire up to 90 s early. Picking an off-minute is still the bigger lever.\n\n' +
-        `${recurringExpiryBlurb(config.getCronRecurringMaxAgeDays())}\n\n` +
+        `${recurringExpiryBlurb(maxAgeDays)}\n\n` +
         'Returns a job ID you can pass to CronDelete.',
       Kind.Other,
       {
@@ -171,8 +174,8 @@ export class CronCreateTool extends BaseDeclarativeTool<
             type: 'boolean',
             description:
               `true (default) = fire on every cron match until deleted${
-                Number.isFinite(config.getCronRecurringMaxAgeDays())
-                  ? ` or auto-expired after ${formatDays(config.getCronRecurringMaxAgeDays())}`
+                Number.isFinite(maxAgeDays)
+                  ? ` or auto-expired after ${formatDays(maxAgeDays)}`
                   : ''
               }. ` +
               'false = fire once at the next match, then auto-delete. Use false for "remind me at X" one-shot requests with pinned minute/hour/dom/month.',

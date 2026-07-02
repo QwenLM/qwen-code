@@ -663,9 +663,13 @@ export class CronScheduler {
           // Warn with the creation time: a lowered recurringMaxAgeMs
           // (settings change or a dropped env override) retroactively
           // expires long-lived tasks here, and once deleted they cannot
-          // be recovered — this log is the only breadcrumb.
-          debugLogger.warn(
-            `Durable task ${t.id} (created ${new Date(
+          // be recovered — this log is the only breadcrumb. console
+          // rather than debugLogger: debug file logging is usually off
+          // in the daemon deployments where this matters, and the
+          // deletion is irreversible.
+          // eslint-disable-next-line no-console -- operator-facing breadcrumb for an unrecoverable deletion
+          console.warn(
+            `Durable cron task ${t.id} (created ${new Date(
               t.createdAt,
             ).toISOString()}) is past the recurring max age at load; ` +
               'it will fire one final time and be deleted.',
