@@ -382,6 +382,9 @@ const EN: Messages = {
   'editor.placeholder': 'Type a message or @ file path',
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
+  'editor.connectionDisconnected':
+    'Connection interrupted. Please try again after it reconnects.',
+  'editor.reconnecting': 'Reconnecting. Messages cannot be sent yet.',
   'editor.processing': 'Processing. New messages will be queued.',
   'editor.searchHint': 'ctrl+r next · tab accept · enter send · esc cancel',
   'editor.searchLabel': 'reverse-i-search:',
@@ -1595,6 +1598,8 @@ const ZH: Messages = {
   'editor.placeholder': '输入消息或 @ 文件路径',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
+  'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
+  'editor.reconnecting': '正在重新连接，暂时无法发送消息。',
   'editor.processing': '处理中。新消息会进入队列。',
   'editor.searchHint': 'ctrl+r 下一条 · tab 采纳 · enter 发送 · esc 取消',
   'editor.searchLabel': '历史搜索：',
