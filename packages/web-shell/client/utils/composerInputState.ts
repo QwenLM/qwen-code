@@ -19,24 +19,15 @@ export function shouldDisableComposerInput({
 
 export function getComposerPlaceholderKey({
   catchingUp,
-  connectionStatus,
   isPreparingPrompt,
   isStreaming,
 }: {
   catchingUp: boolean;
-  connectionStatus: ComposerConnectionStatus;
   isPreparingPrompt: boolean;
   isStreaming: boolean;
-}):
-  | 'common.loading'
-  | 'editor.processing'
-  | 'editor.reconnecting'
-  | 'editor.placeholder' {
+}): 'common.loading' | 'editor.processing' | 'editor.placeholder' {
   if (catchingUp) return 'common.loading';
   if (isPreparingPrompt || isStreaming) return 'editor.processing';
-  if (connectionStatus === 'disconnected' || connectionStatus === 'error') {
-    return 'editor.reconnecting';
-  }
   return 'editor.placeholder';
 }
 

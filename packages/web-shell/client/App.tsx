@@ -3902,7 +3902,6 @@ export function App({
                       placeholderText={t(
                         getComposerPlaceholderKey({
                           catchingUp: Boolean(connection.catchingUp),
-                          connectionStatus: connection.status,
                           isPreparingPrompt,
                           isStreaming: streamingState !== 'idle',
                         }),

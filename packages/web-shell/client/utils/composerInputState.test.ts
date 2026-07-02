@@ -17,15 +17,13 @@ describe('composer input state', () => {
     expect(
       getComposerPlaceholderKey({
         catchingUp: false,
-        connectionStatus: 'disconnected',
         isPreparingPrompt: false,
         isStreaming: false,
       }),
-    ).toBe('editor.reconnecting');
+    ).toBe('editor.placeholder');
     expect(
       getComposerPlaceholderKey({
         catchingUp: false,
-        connectionStatus: 'connected',
         isPreparingPrompt: false,
         isStreaming: false,
       }),
@@ -43,7 +41,6 @@ describe('composer input state', () => {
     expect(
       getComposerPlaceholderKey({
         catchingUp: true,
-        connectionStatus: 'connected',
         isPreparingPrompt: false,
         isStreaming: false,
       }),
@@ -59,7 +56,6 @@ describe('composer input state', () => {
     expect(
       getComposerPlaceholderKey({
         catchingUp: false,
-        connectionStatus: 'connected',
         isPreparingPrompt: true,
         isStreaming: false,
       }),
@@ -70,7 +66,6 @@ describe('composer input state', () => {
     expect(
       getComposerPlaceholderKey({
         catchingUp: false,
-        connectionStatus: 'connected',
         isPreparingPrompt: false,
         isStreaming: true,
       }),
