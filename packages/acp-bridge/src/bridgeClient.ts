@@ -46,6 +46,8 @@ import type {
   SessionArtifactStore,
 } from './sessionArtifacts.js';
 
+// Keep in sync with core `ToolNames.ARTIFACT`; acp-bridge avoids a runtime
+// import from core for this hot demux path.
 const PUBLISH_ARTIFACT_TOOL_NAME = 'artifact';
 
 /**
@@ -160,7 +162,6 @@ function extractSessionUpdateArtifacts(
       source: 'tool' as const,
       toolCallId,
       toolName,
-      trustedPublisher: false,
     }),
   );
 }
@@ -960,7 +961,6 @@ export class BridgeClient implements Client {
         hookEventName,
         toolName,
         toolCallId,
-        trustedPublisher: false,
       }),
     );
     await this.upsertAndPublishArtifacts(entry, artifacts);
