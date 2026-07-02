@@ -90,6 +90,17 @@ describe('SettingsSchema', () => {
       ).toBe('boolean');
     });
 
+    it('should leave follow-up suggestions default contextual', () => {
+      const followupSuggestions =
+        getSettingsSchema().ui?.properties?.enableFollowupSuggestions;
+
+      expect(followupSuggestions?.type).toBe('boolean');
+      expect(followupSuggestions?.default).toBeUndefined();
+      expect(followupSuggestions?.description).toContain(
+        'Defaults off for local OpenAI-compatible backends unless explicitly enabled.',
+      );
+    });
+
     it('should have fileFiltering nested properties', () => {
       expect(
         getSettingsSchema().context.properties.fileFiltering.properties

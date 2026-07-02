@@ -1009,6 +1009,32 @@ describe('SettingsUtils', () => {
         expect(result).toBe('false'); // shows default value
       });
 
+      it('should show unset when the schema default is undefined', () => {
+        vi.mocked(getSettingsSchema).mockReturnValue({
+          ui: {
+            properties: {
+              enableFollowupSuggestions: {
+                type: 'boolean',
+                label: 'Enable Follow-up Suggestions',
+                category: 'UI',
+                requiresRestart: false,
+                default: undefined as boolean | undefined,
+                showInDialog: true,
+              },
+            },
+          },
+        } as unknown as SettingsSchemaType);
+
+        const result = getDisplayValue(
+          'ui.enableFollowupSuggestions',
+          makeMockSettings({}),
+          makeMockSettings({}),
+          new Set<string>(),
+        );
+
+        expect(result).toBe('Unset');
+      });
+
       it('should show value with * when changed from default', () => {
         const settings = makeMockSettings({ ui: { requiresRestart: true } }); // true is different from default (false)
         const mergedSettings = makeMockSettings({

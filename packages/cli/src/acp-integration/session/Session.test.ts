@@ -441,6 +441,12 @@ describe('Session', () => {
       getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
+      getModelsConfig: vi.fn().mockReturnValue({
+        getCurrentAuthType: vi.fn().mockImplementation(() => currentAuthType),
+        getGenerationConfig: vi.fn().mockReturnValue({
+          baseUrl: 'https://api.openai.com/v1',
+        }),
+      }),
       getChatRecordingService: vi
         .fn()
         .mockReturnValue(mockChatRecordingService),
@@ -11696,6 +11702,152 @@ describe('Session', () => {
           ([method]) => method === 'qwen/notify/session/prompt-suggestion',
         ),
       ).toBeUndefined();
+    });
+
+    it('does not emit by default for loopback OpenAI-compatible providers', async () => {
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {};
+      (
+        mockConfig.getModelsConfig as unknown as ReturnType<typeof vi.fn>
+      ).mockReturnValue({
+        getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+        getGenerationConfig: vi.fn().mockReturnValue({
+          baseUrl: 'http://127.0.0.1:11434/v1',
+        }),
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(generateMock).not.toHaveBeenCalled();
+      expect(
+        (
+          mockClient.extNotification as ReturnType<typeof vi.fn>
+        ).mock.calls.find(
+          ([method]) => method === 'qwen/notify/session/prompt-suggestion',
+        ),
+      ).toBeUndefined();
+    });
+
+    it('does not let follow-up gate failures break the primary response', async () => {
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {};
+      (
+        mockConfig.getModelsConfig as unknown as ReturnType<typeof vi.fn>
+      ).mockImplementation(() => {
+        throw new Error('model config unavailable');
+      });
+
+      await expect(
+        session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        }),
+      ).resolves.toMatchObject({ stopReason: 'end_turn' });
+
+      expect(generateMock).not.toHaveBeenCalled();
+      expect(
+        (
+          mockClient.extNotification as ReturnType<typeof vi.fn>
+        ).mock.calls.find(
+          ([method]) => method === 'qwen/notify/session/prompt-suggestion',
+        ),
+      ).toBeUndefined();
+    });
+
+    it('does not emit by default when the fast model is a loopback OpenAI-compatible provider', async () => {
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {};
+      (
+        mockConfig.getContentGeneratorConfig as unknown as ReturnType<
+          typeof vi.fn
+        >
+      ).mockReturnValue({
+        authType: AuthType.QWEN_OAUTH,
+        baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        model: currentModel,
+      });
+      (
+        mockConfig as unknown as {
+          getFastModel: ReturnType<typeof vi.fn>;
+          getAllConfiguredModels: ReturnType<typeof vi.fn>;
+        }
+      ).getFastModel = vi
+        .fn()
+        .mockReturnValue(`${AuthType.USE_OPENAI}:local-fast`);
+      (
+        mockConfig as unknown as {
+          getFastModel: ReturnType<typeof vi.fn>;
+          getAllConfiguredModels: ReturnType<typeof vi.fn>;
+        }
+      ).getAllConfiguredModels = vi.fn().mockReturnValue([
+        {
+          authType: AuthType.USE_OPENAI,
+          id: 'local-fast',
+          label: 'local-fast',
+        },
+      ]);
+      (
+        mockConfig.getModelsConfig as unknown as ReturnType<typeof vi.fn>
+      ).mockReturnValue({
+        getCurrentAuthType: vi.fn().mockReturnValue(AuthType.QWEN_OAUTH),
+        getGenerationConfig: vi.fn().mockReturnValue({
+          authType: AuthType.QWEN_OAUTH,
+          baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1',
+        }),
+        getResolvedModel: vi.fn().mockReturnValue({
+          authType: AuthType.USE_OPENAI,
+          id: 'local-fast',
+          name: 'local-fast',
+          baseUrl: 'http://localhost:11434/v1',
+          generationConfig: {},
+          capabilities: {},
+        }),
+      });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      expect(generateMock).not.toHaveBeenCalled();
+      expect(
+        (
+          mockClient.extNotification as ReturnType<typeof vi.fn>
+        ).mock.calls.find(
+          ([method]) => method === 'qwen/notify/session/prompt-suggestion',
+        ),
+      ).toBeUndefined();
+    });
+
+    it('keeps explicit opt-in for loopback OpenAI-compatible providers', async () => {
+      (mockSettings as unknown as { merged: { ui: unknown } }).merged.ui = {
+        enableFollowupSuggestions: true,
+      };
+      (
+        mockSettings as unknown as {
+          user: { settings: { ui: { enableFollowupSuggestions: boolean } } };
+        }
+      ).user.settings.ui = {
+        enableFollowupSuggestions: true,
+      };
+      (
+        mockConfig.getModelsConfig as unknown as ReturnType<typeof vi.fn>
+      ).mockReturnValue({
+        getCurrentAuthType: vi.fn().mockReturnValue(AuthType.USE_OPENAI),
+        getGenerationConfig: vi.fn().mockReturnValue({
+          baseUrl: 'http://localhost:11434/v1',
+        }),
+      });
+      generateMock.mockResolvedValue({ suggestion: 'Run the tests next?' });
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'hello' }],
+      });
+
+      await vi.waitFor(() => {
+        expect(generateMock).toHaveBeenCalled();
+      });
     });
 
     it('emits when the setting is unset (on by default)', async () => {
