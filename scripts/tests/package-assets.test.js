@@ -49,6 +49,53 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
+  it('copies bundled skill scripts and references into the runtime dist', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/SKILL.md',
+      '---\nname: dataviz\ndescription: Chart guidance\n---\nBody\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.js',
+      'console.log("ok");\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/references/palette.md',
+      '# Palette\n',
+    );
+    stubConsole();
+
+    copyBundleAssets({ root: rootDir });
+
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'validate_palette.js',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'references',
+          'palette.md',
+        ),
+      ),
+    ).toBe(true);
+  });
+
   it('includes extension examples in the prepared dist package', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
