@@ -272,6 +272,11 @@ export class QQChannel extends ChannelBase {
                       return;
                     }
                     entry!.buffer = toFlush + (entry!.buffer || '');
+                    // If .then() already removed the entry from cronBuffer,
+                    // re-insert so the restored buffer is not orphaned.
+                    if (this.cronBuffer.get(sessionId) !== entry) {
+                      this.cronBuffer.set(sessionId, entry!);
+                    }
                   });
                 return; // deletion is handled in .then
               }
@@ -281,8 +286,7 @@ export class QQChannel extends ChannelBase {
           entry.timer.unref();
         });
       };
-      this.bridge.on?.('textChunk', this._cronTextHandler);
-      this.cronTextHandlerAttached = true;
+      this.attachCronHandler();
     }
   }
 
@@ -294,24 +298,10 @@ export class QQChannel extends ChannelBase {
    */
   override setBridge(bridge: ChannelAgentBridge): void {
     // Detach from old bridge before swap
-    if (
-      this.qqConfig['cron-msg-experimental'] &&
-      this._cronTextHandler &&
-      this.cronTextHandlerAttached
-    ) {
-      this.bridge.off?.('textChunk', this._cronTextHandler);
-      this.cronTextHandlerAttached = false;
-    }
+    this.detachCronHandler();
     super.setBridge(bridge);
     // Re-attach to new bridge
-    if (
-      this.qqConfig['cron-msg-experimental'] &&
-      this._cronTextHandler &&
-      !this.cronTextHandlerAttached
-    ) {
-      bridge.on?.('textChunk', this._cronTextHandler);
-      this.cronTextHandlerAttached = true;
-    }
+    this.attachCronHandler();
   }
 
   // ── ChannelBase interface ──────────────────────────────────────
@@ -623,14 +613,7 @@ export class QQChannel extends ChannelBase {
       this.connectReject(new Error('Channel disconnected'));
       this.connectReject = null;
     }
-    if (
-      this.qqConfig['cron-msg-experimental'] &&
-      this._cronTextHandler &&
-      this.cronTextHandlerAttached
-    ) {
-      this.bridge.off?.('textChunk', this._cronTextHandler);
-      this.cronTextHandlerAttached = false;
-    }
+    this.detachCronHandler();
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
     this.msgSeqMap.clear();
@@ -716,53 +699,15 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] idleFlush send failed: ${err}\n`,
           );
-          // Clean up pending stream delete marker so onResponseComplete
-          // can retry via the buffer, but only if the streamState entry
-          // hasn't been replaced (replaced entry means a newer flush is
-          // already in progress, so we must not interfere).
+          const wasPending = this.pendingStreamDelete.has(sessionId);
           this.pendingStreamDelete.delete(sessionId);
           if (this.streamState.get(sessionId) === flushedEntry) {
-            s.buffer = toFlush + s.buffer;
-            // Re-arm the idle timer so the restored buffer gets flushed
-            // again, preventing orphaned data when onResponseComplete
-            // was deferred via pendingStreamDelete.
-            s.timer = setTimeout(() => {
-              const ss = s;
-              ss.timer = null;
-              const toRetry = ss.buffer;
-              if (!toRetry) return;
-              ss.buffer = '';
-              this.flushingSessions.add(sessionId);
-              this.sendMessage(ss.chatId, toRetry)
-                .then(() => {
-                  if (this.pendingStreamDelete.has(sessionId)) {
-                    this.pendingStreamDelete.delete(sessionId);
-                    if (ss.buffer) {
-                      this.sendMessage(ss.chatId, ss.buffer);
-                      ss.buffer = '';
-                    }
-                    if (
-                      this.streamState.get(sessionId) === ss &&
-                      !ss.buffer
-                    ) {
-                      this.streamState.delete(sessionId);
-                    }
-                  }
-                })
-                .catch((retryErr) => {
-                  process.stderr.write(
-                    `[QQ:${this.name}] idleFlush retry failed: ${retryErr}\n`,
-                  );
-                  this.pendingStreamDelete.delete(sessionId);
-                  if (this.streamState.get(sessionId) === ss) {
-                    ss.buffer = toRetry + (ss.buffer || '');
-                  }
-                })
-                .finally(() => {
-                  this.flushingSessions.delete(sessionId);
-                });
-            }, 2000);
-            s.timer.unref?.();
+            if (wasPending) {
+              // onResponseComplete already deferred — nobody will retry.
+              this.streamState.delete(sessionId);
+            } else {
+              s.buffer = toFlush + s.buffer;
+            }
           } else {
             process.stderr.write(
               `[QQ:${this.name}] idleFlush: streamState replaced during failed send, ${toFlush.length} chars lost for ${sessionId}\n`,
@@ -925,6 +870,36 @@ export class QQChannel extends ChannelBase {
     this.saveTimer.unref();
   }
 
+  /**
+   * Attach the permanent textChunk handler for cron/non-prompt messages
+   * to the current bridge. No-op if already attached or if cron is disabled.
+   */
+  private attachCronHandler(): void {
+    if (
+      this.qqConfig['cron-msg-experimental'] &&
+      this._cronTextHandler &&
+      !this.cronTextHandlerAttached
+    ) {
+      this.bridge.on?.('textChunk', this._cronTextHandler);
+      this.cronTextHandlerAttached = true;
+    }
+  }
+
+  /**
+   * Detach the permanent textChunk handler from the current bridge.
+   * No-op if not attached or if cron is disabled.
+   */
+  private detachCronHandler(): void {
+    if (
+      this.qqConfig['cron-msg-experimental'] &&
+      this._cronTextHandler &&
+      this.cronTextHandlerAttached
+    ) {
+      this.bridge.off?.('textChunk', this._cronTextHandler);
+      this.cronTextHandlerAttached = false;
+    }
+  }
+
   /** Flush pending state writes immediately (called on disconnect). */
   private flushQQState(): void {
     if (this.saveTimer) {
@@ -1050,6 +1025,19 @@ export class QQChannel extends ChannelBase {
         `[QQ:${this.name}] restoreGlobalSessions failed: ${e instanceof Error ? e.message : String(e)}\n`,
       );
     }
+  }
+
+  /**
+   * Set replyMsgId for a chat, cleaning up the previous entry's msgSeqMap
+   * to prevent orphaned entries accumulating over time.
+   */
+  private setReplyMsgId(chatId: string, msgId: string): void {
+    const oldEntry = this.replyMsgId.get(chatId);
+    if (oldEntry) {
+      this.msgSeqMap.delete(oldEntry.msgId);
+    }
+    this.replyMsgId.set(chatId, { msgId, timestamp: Date.now() });
+    this.saveQQState();
   }
 
   /**
@@ -1406,14 +1394,7 @@ export class QQChannel extends ChannelBase {
                 this.connectReject = null;
                 this._ready = true;
                 this.coldStart = false;
-                if (
-                  this.qqConfig['cron-msg-experimental'] &&
-                  this._cronTextHandler &&
-                  !this.cronTextHandlerAttached
-                ) {
-                  this.bridge.on?.('textChunk', this._cronTextHandler);
-                  this.cronTextHandlerAttached = true;
-                }
+                this.attachCronHandler();
                 onReady();
               })
               .catch((err: unknown) => {
@@ -1423,14 +1404,7 @@ export class QQChannel extends ChannelBase {
                 this.connectReject = null;
                 this._ready = true;
                 this.coldStart = false;
-                if (
-                  this.qqConfig['cron-msg-experimental'] &&
-                  this._cronTextHandler &&
-                  !this.cronTextHandlerAttached
-                ) {
-                  this.bridge.on?.('textChunk', this._cronTextHandler);
-                  this.cronTextHandlerAttached = true;
-                }
+                this.attachCronHandler();
                 onReady();
               });
           } else {
@@ -1439,10 +1413,7 @@ export class QQChannel extends ChannelBase {
             );
             this.connectReject = null;
             this._ready = true;
-            if (this._cronTextHandler && !this.cronTextHandlerAttached) {
-              this.bridge.on?.('textChunk', this._cronTextHandler);
-              this.cronTextHandlerAttached = true;
-            }
+            this.attachCronHandler();
             onReady();
           }
         } else if (t === 'C2C_MESSAGE_CREATE') {
@@ -1475,10 +1446,7 @@ export class QQChannel extends ChannelBase {
           this.connectReject = null;
           this._ready = true;
           this.startHeartbeat();
-          if (this._cronTextHandler && !this.cronTextHandlerAttached) {
-            this.bridge.on?.('textChunk', this._cronTextHandler);
-            this.cronTextHandlerAttached = true;
-          }
+          this.attachCronHandler();
           onReady();
         }
         break;
@@ -1736,8 +1704,7 @@ export class QQChannel extends ChannelBase {
       return;
     }
     this.chatTypeMap.set(chatId, 'c2c');
-    this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
-    this.saveQQState();
+    this.setReplyMsgId(chatId, event.id);
     const senderName = event.author.username || event.author.id || 'QQ User';
     const safeName = sanitizeSenderName(senderName);
     const cleanText = event.content.trim();
@@ -1826,12 +1793,6 @@ export class QQChannel extends ChannelBase {
       );
     }
 
-    // Only track replyMsgId for at-bot messages
-    if (isAtBot) {
-      this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
-      this.saveQQState();
-    }
-
     const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
     const openIdSuffix = groupBotOpenId ? ` [botOpenId:${groupBotOpenId}]` : '';
     const suffixFromBotOpenId = groupBotOpenId
@@ -1886,14 +1847,8 @@ export class QQChannel extends ChannelBase {
     }
     const finalIsAtBot = true;
 
-    // When isAtBot was false but finalIsAtBot was forced true, ensure
-    // replyMsgId is set (prepareGroupMessage skips it when isAtBot is false).
-    // Also fix the text template: replace [atMention=false] with [atMention=true]
+    // Fix the text template: replace [atMention=false] with [atMention=true]
     // since the event type guarantees the message was @-bot.
-    if (finalIsAtBot && !isAtBot) {
-      this.replyMsgId.set(chatId, { msgId: event.id, timestamp: Date.now() });
-      this.saveQQState();
-    }
     const correctedText = !isAtBot
       ? text.replace('[atMention=false]', '[atMention=true]')
       : text;
@@ -1911,6 +1866,7 @@ export class QQChannel extends ChannelBase {
 
     // Dedup check
     if (this.isDuplicate(event.id)) return;
+    this.setReplyMsgId(chatId, event.id);
 
     this.handleInbound({
       channelName: this.name,
@@ -2048,21 +2004,30 @@ export class QQChannel extends ChannelBase {
     }
 
     // Deduplicate before prepareGroupMessage to avoid side effects
-    // (replyMsgId.set, saveQQState) on duplicate events from reconnect replay.
+    // on duplicate events from reconnect replay.
     if (this.isDuplicate(event.id)) return;
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
     const { isSlash, cleanText, text, senderName, isAtBot } = result;
 
+    // Only track replyMsgId for @-bot messages
+    if (isAtBot) {
+      this.setReplyMsgId(chatId, event.id);
+    }
+
     if (policy === 'keyword') {
       if (!this._keywordTriggerCache) {
+        // NOTE: This cache is never invalidated. If keywordTriggers could
+        // change at runtime (e.g. via MCP config update), the old cache
+        // would be stale. Currently the config is read-once at init, so
+        // this is acceptable.
         this._keywordTriggerCache = (this.qqConfig.keywordTriggers ?? [])
           .filter((kw) => kw.length > 0)
-          .map((kw) => kw.toLowerCase());
+          .map((kw) => kw.toLowerCase().normalize('NFC'));
       }
       if (this._keywordTriggerCache.length === 0) return;
-      const lower = cleanText.toLowerCase();
+      const lower = cleanText.toLowerCase().normalize('NFC');
       const matched = this._keywordTriggerCache.some((kw) => lower.includes(kw));
       if (!matched) return;
     }
