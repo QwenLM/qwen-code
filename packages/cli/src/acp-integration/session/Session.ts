@@ -30,6 +30,7 @@ import type {
   GoalTerminalEvent,
   ToolCallRequestInfo,
   ToolCallResponseInfo,
+  PostToolBatchToolCall,
   LoopTickResult,
   ToolArtifact,
   VisionBridgeResult,
@@ -65,6 +66,7 @@ import {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  firePostToolBatchHook,
   buildContextUsage,
   injectPermissionRulesIfMissing,
   NotificationType,
@@ -221,6 +223,7 @@ type RunToolResult = {
   stopAfterPermissionCancel: boolean;
   repeatedDuplicateProviderToolCall?: boolean;
   loopDetected?: boolean;
+  postToolBatchCall?: PostToolBatchToolCall;
 };
 
 type DaemonToolLoopState = {
@@ -303,6 +306,37 @@ function recordDaemonInvalidToolParams(
     `Stopping ACP turn after repeated tool parameter errors from ${toolName}: ${error.message}`,
     loopState,
   );
+}
+
+function summarizePostToolBatchResponsePart(part: Part): Part {
+  if (!part.inlineData) {
+    return part;
+  }
+
+  return {
+    ...part,
+    inlineData: {
+      mimeType: part.inlineData.mimeType,
+      data: '<binary omitted>',
+    },
+  };
+}
+
+function serializePostToolBatchResponse(
+  response: Pick<
+    ToolCallResponseInfo,
+    'responseParts' | 'resultDisplay' | 'error' | 'errorType' | 'contentLength'
+  >,
+): Record<string, unknown> {
+  return {
+    response_parts: response.responseParts.map(
+      summarizePostToolBatchResponsePart,
+    ),
+    result_display: response.resultDisplay,
+    error: response.error?.message,
+    error_type: response.errorType,
+    content_length: response.contentLength,
+  };
 }
 
 // The drain is served from an in-memory queue, so a conforming client answers
@@ -3969,6 +4003,12 @@ export class Session implements SessionContext {
         parts.push(await recordSkippedToolCall(remainingCall, message));
       }
     };
+    const postToolBatchCalls: PostToolBatchToolCall[] = [];
+    const recordPostToolBatchCall = (toolRun: RunToolResult): void => {
+      if (toolRun.postToolBatchCall) {
+        postToolBatchCalls.push(toolRun.postToolBatchCall);
+      }
+    };
 
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by
@@ -4142,6 +4182,7 @@ export class Session implements SessionContext {
         let shouldStopForLoop = false;
         for (const r of results) {
           parts.push(...r.parts);
+          recordPostToolBatchCall(r);
           shouldStop ||= r.stopAfterPermissionCancel;
           shouldStopForLoop ||= r.loopDetected === true;
         }
@@ -4151,6 +4192,10 @@ export class Session implements SessionContext {
             batch.calls[batch.calls.length - 1],
             LOOP_DETECTED_SKIP_MESSAGE,
           );
+          await this.emitPostToolBatchArtifacts(
+            postToolBatchCalls,
+            abortSignal,
+          );
           return {
             parts,
             stopAfterPermissionCancel: false,
@@ -4159,6 +4204,10 @@ export class Session implements SessionContext {
         }
         if (shouldStop) {
           await appendSkippedAfter(parts, batch.calls[batch.calls.length - 1]);
+          await this.emitPostToolBatchArtifacts(
+            postToolBatchCalls,
+            abortSignal,
+          );
           return {
             parts,
             stopAfterPermissionCancel: true,
@@ -4176,8 +4225,13 @@ export class Session implements SessionContext {
             recordSkippedToolCall,
           );
           parts.push(...r.parts);
+          recordPostToolBatchCall(r);
           if (r.loopDetected) {
             await appendSkippedAfter(parts, fc, LOOP_DETECTED_SKIP_MESSAGE);
+            await this.emitPostToolBatchArtifacts(
+              postToolBatchCalls,
+              abortSignal,
+            );
             return {
               parts,
               stopAfterPermissionCancel: false,
@@ -4186,6 +4240,10 @@ export class Session implements SessionContext {
           }
           if (r.stopAfterPermissionCancel) {
             await appendSkippedAfter(parts, fc);
+            await this.emitPostToolBatchArtifacts(
+              postToolBatchCalls,
+              abortSignal,
+            );
             return {
               parts,
               stopAfterPermissionCancel: true,
@@ -4195,6 +4253,7 @@ export class Session implements SessionContext {
         }
       }
     }
+    await this.emitPostToolBatchArtifacts(postToolBatchCalls, abortSignal);
     return {
       parts,
       stopAfterPermissionCancel: false,
@@ -4283,6 +4342,25 @@ export class Session implements SessionContext {
       removeAgentToolAbortPropagation?.();
       removeAgentToolAbortPropagation = undefined;
     };
+    const createPostToolBatchCall = (
+      status: PostToolBatchToolCall['status'],
+      responseParts: Part[],
+      resultDisplay: ToolCallResponseInfo['resultDisplay'],
+      error: Error | undefined,
+      errorType: ToolCallResponseInfo['errorType'],
+    ): PostToolBatchToolCall => ({
+      tool_name: fc.name ?? 'unknown_tool',
+      tool_input: args,
+      tool_use_id: callId,
+      tool_call_id: callId,
+      status,
+      tool_response: serializePostToolBatchResponse({
+        responseParts,
+        resultDisplay,
+        error,
+        errorType,
+      }),
+    });
 
     const errorResponse = (error: Error) => {
       const durationMs = Date.now() - startTime;
@@ -4329,6 +4407,7 @@ export class Session implements SessionContext {
       }
 
       const errorParts = errorResponse(error);
+      const status = activeToolAbortSignal.aborted ? 'cancelled' : 'error';
       this.config.getChatRecordingService()?.recordToolResult(errorParts, {
         callId,
         status: 'error',
@@ -4351,6 +4430,13 @@ export class Session implements SessionContext {
         parts: errorParts,
         stopAfterPermissionCancel: opts?.stopAfterPermissionCancel ?? false,
         loopDetected,
+        postToolBatchCall: createPostToolBatchCall(
+          status,
+          errorParts,
+          undefined,
+          error,
+          undefined,
+        ),
       };
     };
 
@@ -5002,6 +5088,11 @@ export class Session implements SessionContext {
               ? 'error'
               : 'success';
           const succeeded = status === 'success';
+          const responseError = toolResult.error
+            ? new Error(toolResult.error.message)
+            : aborted
+              ? new Error('Tool execution was cancelled')
+              : undefined;
 
           // Fire PostToolUse hook on successful execution (aligned with core path)
           if (
@@ -5099,19 +5190,13 @@ export class Session implements SessionContext {
             // Still log and return function response for LLM
           } else {
             // Normal tool handling: emit result using ToolCallEmitter
-            const error = toolResult.error
-              ? new Error(toolResult.error.message)
-              : aborted
-                ? new Error('Tool execution was cancelled')
-                : undefined;
-
             await this.toolCallEmitter.emitResult({
               callId,
               toolName,
               args,
               message: responseParts,
               resultDisplay: toolResult.returnDisplay,
-              error,
+              error: responseError,
               success: succeeded,
               artifacts: toolResult.artifacts,
             });
@@ -5157,6 +5242,13 @@ export class Session implements SessionContext {
           return {
             parts: responseParts,
             stopAfterPermissionCancel: nestedPermissionCancelled,
+            postToolBatchCall: createPostToolBatchCall(
+              status,
+              responseParts,
+              toolResult.returnDisplay,
+              responseError,
+              toolResult.error?.type,
+            ),
           };
         } catch (e) {
           // Ensure cleanup on error
@@ -5231,10 +5323,18 @@ export class Session implements SessionContext {
               error,
             );
 
+          const responseParts = errorResponse(error);
           return {
-            parts: errorResponse(error),
+            parts: responseParts,
             stopAfterPermissionCancel: nestedPermissionCancelled,
             loopDetected,
+            postToolBatchCall: createPostToolBatchCall(
+              activeToolAbortSignal.aborted ? 'cancelled' : 'error',
+              responseParts,
+              undefined,
+              error,
+              undefined,
+            ),
           };
         }
       }); // end runInToolSpanContext
@@ -5673,6 +5773,46 @@ export class Session implements SessionContext {
   debug(msg: string): void {
     if (this.config.getDebugMode()) {
       debugLogger.warn(msg);
+    }
+  }
+
+  private async emitPostToolBatchArtifacts(
+    toolCalls: PostToolBatchToolCall[],
+    abortSignal: AbortSignal,
+  ): Promise<void> {
+    if (toolCalls.length === 0) {
+      return;
+    }
+
+    try {
+      const shouldFire =
+        !this.config.getDisableAllHooks?.() &&
+        (this.config.hasHooksForEvent?.('PostToolBatch') ?? false);
+      if (!shouldFire) {
+        return;
+      }
+
+      const messageBus = this.config.getMessageBus?.();
+      if (!messageBus) {
+        return;
+      }
+
+      const hookResult = await firePostToolBatchHook(
+        messageBus,
+        toolCalls,
+        String(this.config.getApprovalMode()),
+        abortSignal,
+      );
+      await this.emitHookArtifactsNotification({
+        hookEventName: 'PostToolBatch',
+        artifacts: hookResult.artifacts,
+      });
+    } catch (error) {
+      debugLogger.warn(
+        `PostToolBatch hook artifact notification failed: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 

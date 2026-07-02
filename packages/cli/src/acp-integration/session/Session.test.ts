@@ -9740,11 +9740,24 @@ describe('Session', () => {
       };
     }
 
-    it('does not fire PostToolBatch hooks from the ACP session path', async () => {
+    it('forwards PostToolBatch artifacts from the ACP session path', async () => {
       const messageBus = {
         request: vi.fn().mockImplementation(async (request) => ({
           success: true,
-          output: { decision: 'allow', eventName: request.eventName },
+          output:
+            request.eventName === 'PostToolBatch'
+              ? {
+                  hookSpecificOutput: {
+                    hookEventName: 'PostToolBatch',
+                    artifacts: [
+                      {
+                        title: 'Batch report',
+                        workspacePath: 'reports/batch.html',
+                      },
+                    ],
+                  },
+                }
+              : { decision: 'allow', eventName: request.eventName },
         })),
       };
       mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
@@ -9775,15 +9788,38 @@ describe('Session', () => {
         ],
       );
 
-      expect(messageBus.request).not.toHaveBeenCalledWith(
-        expect.objectContaining({ eventName: 'PostToolBatch' }),
+      expect(messageBus.request).toHaveBeenCalledWith(
+        expect.objectContaining({
+          eventName: 'PostToolBatch',
+          input: expect.objectContaining({
+            tool_calls: [
+              expect.objectContaining({
+                tool_name: 'read_file',
+                tool_input: { path: 'README.md' },
+                tool_use_id: 'read_call',
+                tool_call_id: 'read_call',
+                status: 'success',
+              }),
+            ],
+          }),
+        }),
         expect.anything(),
         expect.anything(),
         expect.anything(),
       );
-      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+      expect(mockClient.extNotification).toHaveBeenCalledWith(
         'qwen/notify/session/artifact-event',
-        expect.objectContaining({ hookEventName: 'PostToolBatch' }),
+        expect.objectContaining({
+          sessionId: 'test-session-id',
+          source: 'hook',
+          hookEventName: 'PostToolBatch',
+          artifacts: [
+            {
+              title: 'Batch report',
+              workspacePath: 'reports/batch.html',
+            },
+          ],
+        }),
       );
     });
 
