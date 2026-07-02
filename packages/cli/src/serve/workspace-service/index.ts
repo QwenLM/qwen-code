@@ -199,10 +199,23 @@ export function createDaemonWorkspaceService(
       // pre-first-prompt slash-command list would otherwise drop every skill,
       // so `/rev` stops autocompleting `/review`. `initialized` cleanly
       // separates a real child answer (always `true`) from the placeholder.
-      const status = await queryWorkspaceStatus(
-        SERVE_STATUS_EXT_METHODS.workspaceSkills,
-        () => createIdleWorkspaceSkillsStatus(boundWorkspace),
-      );
+      let status: ServeWorkspaceSkillsStatus;
+      try {
+        status = await queryWorkspaceStatus(
+          SERVE_STATUS_EXT_METHODS.workspaceSkills,
+          () => createIdleWorkspaceSkillsStatus(boundWorkspace),
+        );
+      } catch (err) {
+        // The channel can die mid-RPC (`liveChannelInfo()` was valid at the
+        // check but the child exited before the call completed). Treat that
+        // like "no live child" and fall back to the cache / daemon-local
+        // enumeration below instead of failing the request — matching
+        // getWorkspaceEnvStatus / getWorkspacePreflightStatus.
+        writeStderrLine(
+          `qwen serve: getWorkspaceSkillsStatus query failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+        status = createIdleWorkspaceSkillsStatus(boundWorkspace);
+      }
       if (status.initialized) {
         lastWorkspaceSkillsStatus = status;
         return status;
