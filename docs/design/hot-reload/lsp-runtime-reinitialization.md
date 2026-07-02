@@ -204,6 +204,9 @@ Resource cleanup:
 - Crash restarts must also serialize through the reconcile queue, or clear the
   hash when they permanently fail. They must not start a replacement process in
   parallel with a config-change reconcile.
+- Crash restart reset must isolate `connection.end()` and `process.kill()`
+  errors. Reset runs when the old connection/process may already be broken, and
+  cleanup failures must not prevent the queued restart from continuing.
 - `NativeLspService.stop()` must clear `openedDocuments` and `lastConnections`
   after `serverManager.stopAll()` so a stopped service does not retain old
   document sets or connection objects.
@@ -231,7 +234,9 @@ Flow:
 7. For successfully restarted servers, replay `textDocument/didOpen` for
    documents that were open before the restart. This gives the replacement
    server the same document context without waiting for the next hover,
-   completion, or diagnostic request to lazily reopen each file.
+   completion, or diagnostic request to lazily reopen each file. After replaying
+   one or more documents for a server, wait for the same document-open delay
+   used by lazy `ensureDocumentOpen()` before reporting reload completion.
 
 Initial discovery should use the same admission filter before calling
 `setServerConfigs()`. This keeps startup and hot reload status consistent for
@@ -252,7 +257,10 @@ strictness:
 - `loadUserConfigsStrict()` is used by hot reload. If the existing `.lsp.json`
   is syntactically valid but contains an invalid top-level shape or invalid
   server entry, it returns an error and `reinitialize()` does not reconcile.
-  This preserves the currently running LSP state for invalid edits.
+  This preserves the currently running LSP state for invalid edits. If the file
+  is missing or is deleted during the strict load, treat that `ENOENT` as a
+  valid empty user config, because deleting `.lsp.json` is the explicit way to
+  remove all workspace user LSP servers.
 
 `NativeLspService.reinitialize()` returns a service-level result:
 
@@ -315,12 +323,12 @@ still use their declared `trustRequired` value. This prevents an untrusted
 workspace from lowering its own trust boundary.
 
 Environment variables from `.lsp.json` are also workspace-controlled. Runtime
-spawn may merge allowed env overrides, but security-sensitive variables such as
-`PATH`, `NODE_OPTIONS`, `LD_PRELOAD`, `LD_LIBRARY_PATH`,
-`DYLD_INSERT_LIBRARIES`, and `DYLD_LIBRARY_PATH` must not be overridden by LSP
-config. Command existence probing must use the process environment instead of
-the config-provided env, so a malicious `PATH` cannot redirect bare command
-names during the probe.
+spawn may merge allowed env overrides, but code-injection variables such as
+`NODE_OPTIONS`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, and
+`DYLD_LIBRARY_PATH` must not be overridden by LSP config. `PATH` is allowed for
+the actual server process to preserve common toolchain setups, but command
+existence probing must use the process environment instead of the config-provided
+env, so a malicious `PATH` cannot redirect bare command names during the probe.
 
 Allow-list boundary:
 
@@ -487,8 +495,10 @@ environment-dependent, so they are not required.
   same config retries;
 - crash restarts serialize with reconcile and clear cached hashes on permanent
   failure;
+- crash restart reset ignores connection/process cleanup errors and continues
+  the queued restart;
 - command existence probing does not use config-provided env, and
-  security-sensitive env overrides are filtered before spawn;
+  code-injection env overrides are filtered before spawn;
 - reconcile return value contains added/removed/restarted/unchanged/failed, not
   admission skipped.
 
@@ -504,6 +514,9 @@ real language servers.
 - strict hot reload rejects invalid server entries without reconciling, while
   cold startup keeps loading valid entries from the same file;
 - deleting `.lsp.json` treats workspace config as empty and triggers reconcile;
+- strict loading treats `ENOENT` as an empty user config, including the
+  deletion race where the file disappears between watcher notification and
+  reload;
 - untrusted workspace stops all servers and does not reconcile/start;
 - initial discovery applies the same per-server `trustRequired` admission filter
   as hot reload;
@@ -512,7 +525,8 @@ real language servers.
 - service-level return value aggregates admission skipped reasons;
 - restarted/removed servers only clear their own document tracking.
 - restarted servers replay `textDocument/didOpen` for previously opened
-  documents after the replacement server is ready.
+  documents after the replacement server is ready, then wait for the
+  document-open processing delay.
 - `stop()` clears document tracking caches after stopping all servers.
 
 `packages/core/src/config/config.test.ts`

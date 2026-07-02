@@ -41,7 +41,6 @@ const SECURITY_SENSITIVE_ENV_KEYS = new Set([
   'LD_LIBRARY_PATH',
   'LD_PRELOAD',
   'NODE_OPTIONS',
-  'PATH',
 ]);
 
 export interface LspServerManagerOptions {
@@ -625,10 +624,18 @@ export class LspServerManager {
     // Crash restart reuses the same logical handle, so clear runtime resources
     // while preserving config and restartAttempts.
     if (handle.connection) {
-      handle.connection.end();
+      try {
+        handle.connection.end();
+      } catch (error) {
+        debugLogger.warn('Error closing LSP connection during reset:', error);
+      }
     }
     if (handle.process && handle.process.exitCode === null) {
-      handle.process.kill();
+      try {
+        handle.process.kill();
+      } catch (error) {
+        debugLogger.warn('Error killing LSP process during reset:', error);
+      }
     }
     handle.connection = undefined;
     handle.process = undefined;

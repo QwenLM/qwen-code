@@ -575,11 +575,11 @@ describe('gemini.tsx main function', () => {
           path: '/workspace/.lsp.json',
           changeType: 'modified',
         }),
-      ).rejects.toThrow('Failed to reload LSP server settings for: clangd');
+      ).rejects.toThrow('LSP reload partially completed');
 
       expect(appEvents.emit).toHaveBeenCalledWith(
         AppEvent.LogError,
-        'Failed to reload LSP server settings for: clangd. Existing LSP state is partially unchanged. Run with --debug for details.',
+        'LSP reload partially completed: changed=<none>, failed=clangd. Run with --debug for details.',
       );
       expect(appEvents.emit).toHaveBeenCalledWith(AppEvent.LspStatusChanged);
     });

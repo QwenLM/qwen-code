@@ -1109,9 +1109,16 @@ export function registerLspHotReload(
         );
         if (failedServers.length > 0) {
           appEvents.emit(AppEvent.LspStatusChanged);
-          const message = `Failed to reload LSP server settings for: ${formatRuntimeReloadNames(
+          const changedServers = [
+            ...result.reconcile.added,
+            ...result.reconcile.removed,
+            ...result.reconcile.restarted,
+          ];
+          const message = `LSP reload partially completed: changed=${formatRuntimeReloadNames(
+            changedServers,
+          )}, failed=${formatRuntimeReloadNames(
             failedServers,
-          )}. Existing LSP state is partially unchanged. Run with --debug for details.`;
+          )}. Run with --debug for details.`;
           appEvents.emit(AppEvent.LogError, message);
           errorReported = true;
           throw new Error(message);

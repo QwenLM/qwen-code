@@ -196,6 +196,28 @@ describe('LspConfigWatcher', () => {
     await watcher.stopWatching();
   });
 
+  it('allows retrying startWatching after watcher initialization fails', async () => {
+    const dir = makeTempDir();
+    const watcher = new LspConfigWatcher(dir);
+    const listener = vi.fn();
+
+    chokidarMock.watch.mockImplementationOnce(() => {
+      throw new Error('watch failed');
+    });
+
+    watcher.startWatching(listener);
+    watcher.startWatching(listener);
+
+    expect(chokidarMock.watch).toHaveBeenCalledTimes(2);
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      `Failed to start LSP config watcher for ${dir}:`,
+      expect.any(Error),
+    );
+
+    await watcher.stopWatching();
+    expect(chokidarMock.watcher.close).toHaveBeenCalledOnce();
+  });
+
   it('waits for an active listener before stopping', async () => {
     vi.useFakeTimers();
     const dir = makeTempDir();
@@ -248,6 +270,35 @@ describe('LspConfigWatcher', () => {
     await vi.advanceTimersByTimeAsync(LspConfigWatcher.LISTENER_TIMEOUT_MS);
     await expect(notifyPromise).resolves.toBe(false);
 
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      'LSP config change listener error:',
+      expect.any(Error),
+    );
+  });
+
+  it('swallows listener rejection that arrives after timeout', async () => {
+    vi.useFakeTimers();
+    const dir = makeTempDir();
+    const watcher = new LspConfigWatcher(dir) as unknown as TestableWatcher;
+    let rejectListener: ((error: Error) => void) | undefined;
+    watcher.listener = vi.fn(
+      () =>
+        new Promise<void>((_resolve, reject) => {
+          rejectListener = reject;
+        }),
+    );
+
+    const notifyPromise = watcher.notifyListener({
+      path: path.join(dir, '.lsp.json'),
+      changeType: 'modified',
+    });
+    await vi.advanceTimersByTimeAsync(LspConfigWatcher.LISTENER_TIMEOUT_MS);
+    await expect(notifyPromise).resolves.toBe(false);
+
+    rejectListener?.(new Error('late listener failure'));
+    await Promise.resolve();
+
+    expect(debugLoggerMock.warn).toHaveBeenCalledTimes(1);
     expect(debugLoggerMock.warn).toHaveBeenCalledWith(
       'LSP config change listener error:',
       expect.any(Error),

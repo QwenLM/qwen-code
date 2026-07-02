@@ -190,6 +190,17 @@ describe('LspConfigLoader config-driven behavior', () => {
     expect(result).toEqual({ ok: true, configs: [] });
   });
 
+  it('strict user config loading treats deleted config as empty', async () => {
+    mock({
+      [workspaceRoot]: {},
+    });
+
+    const loader = new LspConfigLoader(workspaceRoot);
+    const result = await loader.loadUserConfigsStrict();
+
+    expect(result).toEqual({ ok: true, configs: [] });
+  });
+
   it('non-strict user config loading skips invalid entries without rejecting all configs', async () => {
     mock({
       [workspaceRoot]: {

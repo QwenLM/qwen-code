@@ -282,8 +282,12 @@ export class NativeLspService {
       if (!handle || !documents) {
         continue;
       }
+      let openedAny = false;
       for (const uri of documents) {
-        await this.sendDocumentOpen(name, handle, uri);
+        openedAny = this.sendDocumentOpen(name, handle, uri) || openedAny;
+      }
+      if (openedAny) {
+        await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
       }
     }
   }
@@ -431,15 +435,6 @@ export class NativeLspService {
     const lastConnection = this.lastConnections.get(serverName);
     if (lastConnection && lastConnection !== handle.connection) {
       this.openedDocuments.delete(serverName);
-    }
-    this.lastConnections.set(serverName, handle.connection);
-
-    if (!uri.startsWith('file://')) {
-      return false;
-    }
-    const openedForServer = this.openedDocuments.get(serverName);
-    if (openedForServer?.has(uri)) {
-      return false;
     }
 
     if (!this.sendDocumentOpen(serverName, handle, uri)) {

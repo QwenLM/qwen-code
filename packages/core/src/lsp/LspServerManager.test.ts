@@ -699,9 +699,89 @@ describe('LspServerManager', () => {
       SAFE_VALUE: '1',
     });
 
-    expect(env['PATH']).toBe(process.env['PATH']);
+    expect(env['PATH']).toBe('/tmp/fake-bin');
     expect(env['NODE_OPTIONS']).toBe(process.env['NODE_OPTIONS']);
     expect(env['SAFE_VALUE']).toBe('1');
+  });
+
+  it('ignores reset errors while queueing a crash restart', async () => {
+    const manager = createTrustedManager();
+    let exitHandler: ((code: number | null) => void) | undefined;
+    const process = createMockProcess({
+      kill: vi.fn(() => {
+        throw new Error('kill failed');
+      }),
+    });
+    process.once = vi.fn(
+      (event: string, handler: (code: number | null) => void) => {
+        if (event === 'exit') {
+          exitHandler = handler;
+        }
+        return process;
+      },
+    );
+    const connection = createMockConnection({
+      end: vi.fn(() => {
+        throw new Error('end failed');
+      }),
+    });
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        createLspConnection: (
+          config: LspServerConfig,
+        ) => Promise<LspConnectionResult>;
+      },
+      'createLspConnection',
+    )
+      .mockResolvedValueOnce({
+        connection,
+        process: process as unknown as ChildProcess,
+      } as unknown as LspConnectionResult)
+      .mockResolvedValueOnce({
+        connection: createMockConnection(),
+        process: createMockProcess() as unknown as ChildProcess,
+      } as unknown as LspConnectionResult);
+    vi.spyOn(
+      manager as unknown as {
+        initializeLspServer: () => Promise<void>;
+      },
+      'initializeLspServer',
+    ).mockResolvedValue(undefined);
+
+    manager.setServerConfigs([{ ...serverConfig, restartOnCrash: true }]);
+    await manager.startAll();
+    exitHandler?.(1);
+    await manager.reconcileServerConfigs([
+      { ...serverConfig, restartOnCrash: true },
+    ]);
+
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      'Error closing LSP connection during reset:',
+      expect.any(Error),
+    );
+    expect(debugLoggerMock.warn).toHaveBeenCalledWith(
+      'Error killing LSP process during reset:',
+      expect.any(Error),
+    );
+    expect(manager.getHandles().get('clangd')?.status).toBe('READY');
   });
 
   it('kills owned process after graceful shutdown for socket transports', async () => {

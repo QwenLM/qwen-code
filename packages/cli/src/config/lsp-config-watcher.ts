@@ -66,11 +66,9 @@ export class LspConfigWatcher {
 
   startWatching(listener: LspConfigChangeListener): void {
     if (this.started) return;
-    this.started = true;
-    this.listener = listener;
     debugLogger.info(`Starting LSP config watcher for ${this.configPath}`);
     try {
-      this.watcher = watchFs(this.workspaceRoot, {
+      const watcher = watchFs(this.workspaceRoot, {
         ignoreInitial: true,
         depth: 0,
       })
@@ -84,7 +82,13 @@ export class LspConfigWatcher {
             error,
           );
         });
+      this.watcher = watcher;
+      this.listener = listener;
+      this.started = true;
     } catch (error) {
+      this.watcher = undefined;
+      this.listener = undefined;
+      this.started = false;
       debugLogger.warn(
         `Failed to start LSP config watcher for ${this.workspaceRoot}:`,
         error,
@@ -254,17 +258,18 @@ export class LspConfigWatcher {
         (timerId as { unref: () => void }).unref();
       }
     });
+    const listenerPromise = Promise.resolve().then(() =>
+      this.listener?.(event),
+    );
     try {
-      await Promise.race([
-        Promise.resolve().then(() => this.listener?.(event)),
-        timeoutPromise,
-      ]);
+      await Promise.race([listenerPromise, timeoutPromise]);
       return true;
     } catch (error) {
       debugLogger.warn('LSP config change listener error:', error);
       return false;
     } finally {
       if (timerId !== undefined) clearTimeout(timerId);
+      void listenerPromise.catch(() => undefined);
     }
   }
 }

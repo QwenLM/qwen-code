@@ -254,6 +254,7 @@ describe('NativeLspService', () => {
   });
 
   test('reinitialize replays open documents after restarting servers', async () => {
+    vi.useFakeTimers();
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-replay-'));
     try {
       const filePath = path.join(tempDir, 'main.ts');
@@ -317,7 +318,9 @@ describe('NativeLspService', () => {
         new Set([uri]),
       );
 
-      await service.reinitialize();
+      const reinitialize = service.reinitialize();
+      await vi.runAllTimersAsync();
+      await reinitialize;
 
       expect(connection.send).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -331,7 +334,9 @@ describe('NativeLspService', () => {
           },
         }),
       );
+      expect(vi.getTimerCount()).toBe(0);
     } finally {
+      vi.useRealTimers();
       fs.rmSync(tempDir, { recursive: true, force: true });
     }
   });
@@ -359,7 +364,7 @@ describe('NativeLspService', () => {
     expect(result.reconcile.removed).toEqual(['tsserver']);
   });
 
-  test('reinitialize skips trust-required servers in untrusted workspaces', async () => {
+  test('reinitialize skips all user-configured servers in untrusted workspaces', async () => {
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-untrusted-'));
     try {
       fs.writeFileSync(

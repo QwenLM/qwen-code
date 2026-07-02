@@ -53,15 +53,14 @@ export class LspConfigLoader {
 
   async loadUserConfigsStrict(): Promise<LspUserConfigLoadResult> {
     const lspConfigPath = path.join(this.workspaceRoot, '.lsp.json');
-    if (!fs.existsSync(lspConfigPath)) {
-      return { ok: true, configs: [] };
-    }
-
     try {
       const configContent = fs.readFileSync(lspConfigPath, 'utf-8');
       const data = JSON.parse(configContent);
       return this.parseUserConfigSourceStrict(data, lspConfigPath);
     } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return { ok: true, configs: [] };
+      }
       return {
         ok: false,
         error: error instanceof Error ? error : new Error(String(error)),
