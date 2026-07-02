@@ -1,0 +1,21 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.mobile-next/mobile-mcp",
+  "description": "MCP server for iOS and Android Mobile Development, Automation and Testing",
+  "repository": {
+    "url": "https://github.com/mobile-next/mobile-mcp",
+    "source": "github"
+  },
+  "version": "{{VERSION}}",
+  "packages": [
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@mobilenext/mobile-mcp",
+      "version": "{{VERSION}}",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

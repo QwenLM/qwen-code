@@ -1,0 +1,6 @@
+{
+  "include": ["lib/**/*.js"],
+  "exclude": ["node_modules/**", "lib/**/*.js.map"],
+  "reporter": ["html", "text"],
+  "temp-directory": "./coverage/tmp"
+}
