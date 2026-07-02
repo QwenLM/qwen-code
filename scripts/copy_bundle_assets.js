@@ -193,5 +193,5 @@ function copyRecursiveSync(src, dest) {
 }
 
 function isTestFile(fileName) {
-  return fileName.includes('.test.') || fileName.includes('.spec.');
+  return /\.(?:test|spec)\.[cm]?[jt]sx?$/.test(fileName);
 }

@@ -32,7 +32,7 @@ Do not assume `$QWEN_SKILL_ROOT` is set for normal shell commands.
 Run:
 
 ```bash
-node <skill-base-directory>/scripts/validate_palette.js '#2563eb,#d97706,#4d7c0f' --mode light
+node <skill-base-directory>/scripts/validate_palette.js '#1d4ed8,#b45309,#166534' --mode light
 ```
 
 Treat `FAIL` as a required palette change. Treat `WARN` as acceptable only when

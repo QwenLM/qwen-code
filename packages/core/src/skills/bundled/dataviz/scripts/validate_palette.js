@@ -68,9 +68,8 @@ export function validatePalette(input, options = {}) {
       );
       return null;
     }
-    const lab = rgbToLab(rgb);
     const oklch = rgbToOklch(rgb);
-    return { value: normalizeHex(value), rgb, lab, oklch };
+    return { value: normalizeHex(value), rgb, oklch };
   });
 
   if (failures.length > 0) {
@@ -102,10 +101,19 @@ export function validatePalette(input, options = {}) {
   }
 
   for (const [kind, matrix] of Object.entries(CVD_MATRICES)) {
-    const simulated = colors.map((color) => ({
-      value: color.value,
-      lab: rgbToLab(applyMatrix(color.rgb, matrix)),
-    }));
+    const simulated = colors.map((color) => {
+      const rgb = applyMatrix(color.rgb, matrix);
+      return { value: color.value, rgb, lab: rgbToLab(rgb) };
+    });
+
+    for (const color of simulated) {
+      const contrast = contrastRatio(color.rgb, config.surface);
+      if (contrast < config.minContrast) {
+        warnings.push(
+          `${color.value} contrast ${format(contrast)} is below ${config.minContrast}:1 against the ${mode} chart surface under colorblind ${kind} simulation.`,
+        );
+      }
+    }
 
     for (let i = 0; i < simulated.length; i++) {
       for (let j = i + 1; j < simulated.length; j++) {
@@ -230,17 +238,23 @@ function labDistance(left, right) {
 }
 
 function format(value) {
-  return Number(value.toFixed(2)).toString();
+  return Number(value.toFixed(3)).toString();
 }
 
 function parseArgs(argv) {
-  const args = [...argv];
-  const palette = args.shift();
   let mode = 'light';
-  for (let i = 0; i < args.length; i++) {
-    if (args[i] === '--mode') {
-      mode = args[i + 1] ?? mode;
-      i++;
+  let palette;
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--mode') {
+      if (!argv[i + 1] || argv[i + 1].startsWith('--')) {
+        process.stderr.write(
+          'Error: --mode requires a value (light or dark)\n',
+        );
+        process.exit(2);
+      }
+      mode = argv[++i];
+    } else if (!palette) {
+      palette = argv[i];
     }
   }
   return { palette, mode };
@@ -263,7 +277,7 @@ if (
   const { palette, mode } = parseArgs(process.argv.slice(2));
   if (!palette) {
     process.stderr.write(
-      "Usage: node validate_palette.js '#2563eb,#d97706,#4d7c0f' --mode light\n",
+      "Usage: node validate_palette.js '#1d4ed8,#b45309,#166534' --mode light\n",
     );
     process.exit(2);
   }

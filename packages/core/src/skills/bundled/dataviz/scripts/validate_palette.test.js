@@ -4,12 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 import { validatePalette } from './validate_palette.js';
 
+const scriptPath = fileURLToPath(import.meta.url).replace(/\.test\.js$/, '.js');
+
 describe('validate_palette', () => {
   it('passes a varied categorical palette on a light chart surface', () => {
-    const result = validatePalette(['#2563eb', '#d97706', '#4d7c0f'], {
+    const result = validatePalette(['#1d4ed8', '#b45309', '#166534'], {
       mode: 'light',
     });
 
@@ -66,5 +70,31 @@ describe('validate_palette', () => {
 
     expect(result.status).toBe('WARN');
     expect(result.warnings.join('\n')).toMatch(/colorblind/i);
+  });
+
+  it('warns when simulated colors lose chart-surface contrast', () => {
+    const result = validatePalette(['#d97706'], { mode: 'light' });
+
+    expect(result.status).toBe('WARN');
+    expect(result.warnings.join('\n')).toMatch(/contrast/i);
+  });
+
+  it('accepts --mode before the palette in CLI usage', () => {
+    const output = execFileSync(process.execPath, [
+      scriptPath,
+      '--mode',
+      'dark',
+      '#60a5fa,#fbbf24',
+    ]).toString();
+
+    expect(output).toMatch(/^PASS$/m);
+  });
+
+  it('rejects --mode without a value in CLI usage', () => {
+    expect(() =>
+      execFileSync(process.execPath, [scriptPath, '#2563eb', '--mode'], {
+        stdio: 'pipe',
+      }),
+    ).toThrow();
   });
 });

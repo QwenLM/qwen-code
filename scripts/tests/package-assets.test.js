@@ -68,6 +68,11 @@ describe('package asset scripts', () => {
     );
     writeFile(
       rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/font-test-regular.woff2',
+      'font\n',
+    );
+    writeFile(
+      rootDir,
       'packages/core/src/skills/bundled/dataviz/references/palette.md',
       '# Palette\n',
     );
@@ -99,6 +104,18 @@ describe('package asset scripts', () => {
         ),
       ),
     ).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'font-test-regular.woff2',
+        ),
+      ),
+    ).toBe(true);
     expect(
       existsSync(
         path.join(
