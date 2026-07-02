@@ -290,7 +290,7 @@ function validateString(
     return `"${field}" contains control characters`;
   }
   if (
-    (field === 'title' || field === 'description') &&
+    (field === 'title' || field === 'description' || field === 'mimeType') &&
     hasUnsafeDisplayPayload(trimmed)
   ) {
     return `"${field}" contains unsafe markup`;

@@ -333,6 +333,32 @@ describe('SessionArtifactStore', () => {
     });
     expect(upgraded.changes[0]?.artifact).not.toHaveProperty('workspacePath');
     expect((await store.list()).artifacts).toHaveLength(1);
+
+    const republished = await store.upsertMany(
+      [
+        {
+          title: 'Republished dashboard',
+          storage: 'published',
+          managedId: managedIdForWorkspacePath('reports/dashboard.html'),
+          url: artifactUrl,
+          mimeType: 'text/html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    expect(republished.changes).toHaveLength(1);
+    expect(republished.changes[0]).toMatchObject({
+      action: 'updated',
+      artifactId: created.changes[0]?.artifactId,
+      artifact: {
+        storage: 'published',
+        title: 'Republished dashboard',
+        managedId: managedIdForWorkspacePath('reports/dashboard.html'),
+        url: artifactUrl,
+      },
+    });
+    expect((await store.list()).artifacts).toHaveLength(1);
   });
 
   it('accepts trusted published file urls outside the workspace', async () => {
@@ -1212,8 +1238,7 @@ describe('SessionArtifactStore', () => {
       ).rejects.toMatchObject({
         code: 'VALIDATION_FAILED',
         field: 'workspacePath',
-        message:
-          'workspacePath could not be inspected: Error: permission denied',
+        message: 'workspacePath could not be inspected',
       });
 
       await expect(

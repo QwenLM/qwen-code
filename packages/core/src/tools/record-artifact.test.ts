@@ -200,6 +200,14 @@ describe('RecordArtifactTool', () => {
 
     expect(() =>
       tool.build({
+        title: 'HTML mime',
+        mimeType: 'text/html<script>',
+        url: 'https://example.com/resource',
+      }),
+    ).toThrow(/unsafe markup/);
+
+    expect(() =>
+      tool.build({
         title: 'Metadata key',
         url: 'https://example.com/resource',
         metadata: { '<script>': 'unsafe key' },

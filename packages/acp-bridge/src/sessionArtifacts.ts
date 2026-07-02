@@ -264,10 +264,15 @@ export class SessionArtifactStore {
 
     for (const existing of this.artifacts.values()) {
       if (
-        existing.storage === 'workspace' &&
-        existing.workspacePath &&
-        artifact.managedId ===
-          managedIdForWorkspacePath(this.workspaceCwd, existing.workspacePath)
+        (existing.storage === 'workspace' &&
+          existing.workspacePath &&
+          artifact.managedId ===
+            managedIdForWorkspacePath(
+              this.workspaceCwd,
+              existing.workspacePath,
+            )) ||
+        (existing.storage === 'published' &&
+          existing.managedId === artifact.managedId)
       ) {
         return existing;
       }
@@ -456,9 +461,9 @@ export class SessionArtifactStore {
         workspacePath,
         this.getRealWorkspaceCwd(),
       );
-    } catch (error) {
+    } catch {
       throw new SessionArtifactValidationError(
-        `workspacePath could not be inspected: ${errorSummary(error)}`,
+        'workspacePath could not be inspected',
         'workspacePath',
       );
     }
@@ -1141,12 +1146,6 @@ function hasUnsafeDisplayPayload(value: string): boolean {
       value,
     ) || /(?:^|[\s"'`<])on[a-z][a-z0-9-]*\s*=/i.test(value)
   );
-}
-
-function errorSummary(error: unknown): string {
-  return error instanceof Error
-    ? `${error.name}: ${error.message}`
-    : String(error);
 }
 
 function normalizeWorkspacePath(raw: unknown, workspaceCwd: string): string {
