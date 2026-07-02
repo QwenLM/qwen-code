@@ -540,6 +540,43 @@ describe('AgentCore.prepareTools', () => {
     ]);
   });
 
+  it('keeps exit_plan_mode for plan-required teammates only', async () => {
+    const fnDecls: FunctionDeclaration[] = [
+      {
+        name: ToolNames.SEND_MESSAGE,
+        description: 'send message',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.ENTER_PLAN_MODE,
+        description: 'enter plan mode',
+      } as FunctionDeclaration,
+      {
+        name: ToolNames.EXIT_PLAN_MODE,
+        description: 'exit plan mode',
+      } as FunctionDeclaration,
+    ];
+    const { core } = buildAgentForTools({ tools: ['*'] }, fnDecls);
+
+    let tools: FunctionDeclaration[] = [];
+    await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      async () => {
+        tools = await core.prepareTools();
+      },
+    );
+
+    expect(tools.map((t) => t.name)).toEqual([
+      ToolNames.SEND_MESSAGE,
+      ToolNames.EXIT_PLAN_MODE,
+    ]);
+  });
+
   it.each([ToolNames.ENTER_PLAN_MODE, ToolNames.EXIT_PLAN_MODE])(
     'returns a dedicated message when filtered %s is called directly',
     async (toolName) => {
