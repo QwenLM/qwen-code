@@ -30,13 +30,12 @@
  * outside the child) — those still surface once a session exists.
  */
 
-import { SkillManager } from '@qwen-code/qwen-code-core';
-import type { Config, SkillConfig } from '@qwen-code/qwen-code-core';
-import type {
-  ServeWorkspaceSkillStatus,
-  ServeWorkspaceSkillsStatus,
-} from '@qwen-code/acp-bridge/status';
+import { SkillManager, isSafeModeEnv } from '@qwen-code/qwen-code-core';
+import type { Config } from '@qwen-code/qwen-code-core';
+import type { ServeWorkspaceSkillsStatus } from '@qwen-code/acp-bridge/status';
 import { STATUS_SCHEMA_VERSION } from '@qwen-code/acp-bridge/status';
+import { writeStderrLine } from '../utils/stdioHelpers.js';
+import { mapSkillConfigToStatus } from './workspace-skills-mapping.js';
 
 export type WorkspaceSkillsStatusProvider = (
   workspaceCwd: string,
@@ -57,33 +56,51 @@ type SkillManagerConfigShim = Pick<
 >;
 
 export function createWorkspaceSkillsStatusProvider(): WorkspaceSkillsStatusProvider {
-  return (workspaceCwd) => buildWorkspaceSkillsStatus(workspaceCwd);
+  // Reuse one SkillManager per workspace so repeat queries hit its in-memory
+  // skills cache instead of re-scanning (and re-parsing frontmatter / compiling
+  // globs for) every level on each call. This is a best-effort pre-child
+  // fallback, so the slight staleness — a skill added on disk mid-run is not
+  // picked up until the daemon restarts — is acceptable: the live child
+  // re-lists authoritatively once a session exists.
+  const managers = new Map<string, SkillManager>();
+  return (workspaceCwd) => buildWorkspaceSkillsStatus(workspaceCwd, managers);
 }
 
 async function buildWorkspaceSkillsStatus(
   workspaceCwd: string,
+  managers: Map<string, SkillManager>,
 ): Promise<ServeWorkspaceSkillsStatus> {
   try {
-    const shim: SkillManagerConfigShim = {
-      // The daemon binds to an operator-chosen workspace and only lists skills
-      // for autocomplete (the child gates execution), so enumerate all levels
-      // rather than restricting to bundled-only safe mode.
-      isSafeMode: () => false,
-      getBareMode: () => false,
-      getProjectRoot: () => workspaceCwd,
-      // Extension skills need active-extension context that only the child
-      // has; omit them here and let the session snapshot surface them.
-      getActiveExtensions: () => [],
-    };
-    const skillManager = new SkillManager(shim as Config);
+    let skillManager = managers.get(workspaceCwd);
+    if (!skillManager) {
+      const shim: SkillManagerConfigShim = {
+        // Honor the safe-mode env the same way `Config` does when no explicit
+        // flag is passed, so an operator running in safe mode gets the same
+        // bundled-only listing the child would produce.
+        isSafeMode: () => isSafeModeEnv(),
+        // Bare mode is the interactive `--bare` CLI flag; the daemon never runs
+        // bare, so it is always off here.
+        getBareMode: () => false,
+        getProjectRoot: () => workspaceCwd,
+        // Extension skills need active-extension context that only the child
+        // has; omit them here and let the session snapshot surface them.
+        getActiveExtensions: () => [],
+      };
+      skillManager = new SkillManager(shim as Config);
+      managers.set(workspaceCwd, skillManager);
+    }
     const skills = await skillManager.listSkills();
     return {
       v: STATUS_SCHEMA_VERSION,
       workspaceCwd,
       initialized: true,
-      skills: skills.map(mapSkill),
+      skills: skills.map(mapSkillConfigToStatus),
     };
   } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    writeStderrLine(
+      `qwen serve: daemon-local skills enumeration failed for ${workspaceCwd}: ${message}`,
+    );
     return {
       v: STATUS_SCHEMA_VERSION,
       workspaceCwd,
@@ -93,24 +110,9 @@ async function buildWorkspaceSkillsStatus(
         {
           kind: 'skills',
           status: 'error',
-          error: error instanceof Error ? error.message : String(error),
+          error: message,
         },
       ],
     };
   }
-}
-
-function mapSkill(skill: SkillConfig): ServeWorkspaceSkillStatus {
-  const modelInvocable = skill.disableModelInvocation !== true;
-  return {
-    kind: 'skill',
-    status: modelInvocable ? 'ok' : 'disabled',
-    name: skill.name,
-    description: skill.description,
-    level: skill.level,
-    modelInvocable,
-    ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
-    ...(skill.model ? { model: skill.model } : {}),
-    ...(skill.extensionName ? { extensionName: skill.extensionName } : {}),
-  };
 }
