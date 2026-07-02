@@ -28,7 +28,6 @@ import {
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
 import {
-  RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG,
   SessionService,
   Storage,
 } from '@qwen-code/qwen-code-core';
@@ -54,7 +53,6 @@ import {
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
 import {
-  buildChromeDevToolsMcpRuntimeConfigFromPackage,
   type AcpHttpHandle,
   mountAcpHttp,
 } from './index.js';
@@ -88,70 +86,6 @@ vi.mock('../../services/setup-github.js', async () => {
     ...actual,
     setupGithub: setupGithubMocks.setupGithub,
   };
-});
-
-describe('buildChromeDevToolsMcpRuntimeConfigFromPackage', () => {
-  const pkgJsonPath = path.join('/tmp/cdp-mcp-adapter', 'package.json');
-
-  it.each([undefined, 0, -1, 1.5] as const)(
-    'rejects invalid localPort=%s',
-    (localPort) => {
-      expect(
-        buildChromeDevToolsMcpRuntimeConfigFromPackage(
-          localPort,
-          pkgJsonPath,
-          'bin/cli.js',
-        ),
-      ).toBeUndefined();
-    },
-  );
-
-  it('rejects missing and escaping bin paths', () => {
-    expect(
-      buildChromeDevToolsMcpRuntimeConfigFromPackage(4170, pkgJsonPath, {}),
-    ).toBeUndefined();
-    expect(
-      buildChromeDevToolsMcpRuntimeConfigFromPackage(
-        4170,
-        pkgJsonPath,
-        '../evil.js',
-      ),
-    ).toBeUndefined();
-  });
-
-  it('builds the stdio config for a package-local bin', () => {
-    expect(
-      buildChromeDevToolsMcpRuntimeConfigFromPackage(4170, pkgJsonPath, {
-        cli: 'bin/cli.js',
-      }),
-    ).toEqual({
-      command: process.execPath,
-      args: [
-        path.join('/tmp/cdp-mcp-adapter', 'bin/cli.js'),
-        '--wsEndpoint',
-        'ws://127.0.0.1:4170/cdp',
-      ],
-      alwaysLoadTools: true,
-      [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
-    });
-  });
-
-  it('uses the listening host for a specific non-wildcard bind', () => {
-    expect(
-      buildChromeDevToolsMcpRuntimeConfigFromPackage(
-        4170,
-        pkgJsonPath,
-        { cli: 'bin/cli.js' },
-        '192.168.1.20',
-      ),
-    ).toMatchObject({
-      args: [
-        path.join('/tmp/cdp-mcp-adapter', 'bin/cli.js'),
-        '--wsEndpoint',
-        'ws://192.168.1.20:4170/cdp',
-      ],
-    });
-  });
 });
 
 /**

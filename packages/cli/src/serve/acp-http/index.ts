@@ -89,40 +89,6 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function buildChromeDevToolsMcpRuntimeConfigFromPackage(
-  localPort: number | undefined,
-  pkgJsonPath: string,
-  pkgBin: string | Record<string, string> | undefined,
-  hostname?: string,
-): Record<string, unknown> | undefined {
-  if (
-    localPort === undefined ||
-    !Number.isInteger(localPort) ||
-    localPort <= 0
-  ) {
-    return undefined;
-  }
-  const binRel =
-    typeof pkgBin === 'string' ? pkgBin : Object.values(pkgBin ?? {})[0];
-  if (!binRel) return undefined;
-  const pkgDir = path.dirname(pkgJsonPath);
-  const binPath = path.resolve(pkgDir, binRel);
-  const binRelToPkg = path.relative(pkgDir, binPath);
-  if (binRelToPkg.startsWith('..') || path.isAbsolute(binRelToPkg)) {
-    return undefined;
-  }
-  return {
-    command: process.execPath,
-    args: [
-      binPath,
-      '--wsEndpoint',
-      `ws://${formatCdpEndpointHost(hostname)}:${localPort}/cdp`,
-    ],
-    alwaysLoadTools: true,
-    [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
-  };
-}
-
 function buildChromeDevToolsMcpRuntimeConfig(
   localPort: number | undefined,
   hostname: string | undefined,
