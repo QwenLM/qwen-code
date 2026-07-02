@@ -620,6 +620,10 @@ export class DaemonSessionClient {
     return await this.client.closeSession(this.sessionId, this.clientId);
   }
 
+  async detach(): Promise<void> {
+    return await this.client.detachSession(this.sessionId, this.clientId);
+  }
+
   async updateMetadata(metadata: {
     displayName?: string;
   }): Promise<SessionMetadataResult> {

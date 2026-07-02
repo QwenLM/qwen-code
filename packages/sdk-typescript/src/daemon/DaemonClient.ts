@@ -2720,6 +2720,28 @@ export class DaemonClient {
     );
   }
 
+  async detachSession(sessionId: string, clientId?: string): Promise<void> {
+    if (!clientId) return;
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/detach`,
+      {
+        method: 'POST',
+        headers: this.headers({}, clientId),
+      },
+      async (res) => {
+        if (res.status === 204 || res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return;
+        }
+        throw await this.failOnError(res, 'POST /session/:id/detach');
+      },
+    );
+  }
+
   async deleteSessionsData(
     sessionIds: string[],
     clientId?: string,

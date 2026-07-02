@@ -186,6 +186,11 @@ export interface AgentInteractiveConfig {
    * agent's chat with prior context.
    */
   chatHistory?: Content[];
+  /**
+   * Optional async context wrapper for every agent processing loop.
+   * Used by team agents to preserve teammate identity across follow-up messages.
+   */
+  runInContext?: <T>(fn: () => T) => T;
 }
 
 /**

@@ -607,6 +607,7 @@ export interface DaemonWorkspaceProvidersStatus {
   initialized: boolean;
   acpChannelLive?: boolean;
   current?: DaemonWorkspaceProviderCurrent;
+  approvalMode?: DaemonApprovalMode;
   providers: DaemonWorkspaceProviderStatus[];
   errors?: DaemonStatusCell[];
 }
