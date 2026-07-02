@@ -2088,6 +2088,92 @@ describe('Server Config (config.ts)', () => {
       expect(GeminiClient).toHaveBeenCalledWith(config);
     });
 
+    it('preserves the user reasoning effort across an auth refresh that wipes it', async () => {
+      // Regression: the provider sync (applyResolvedModelDefaults) overwrites
+      // `reasoning` with the provider preset's undefined value, dropping the
+      // user-global effort on every restart. refreshAuth must re-apply it.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'max' } },
+      });
+      const authType = AuthType.USE_GEMINI;
+
+      // The rebuilt config comes back WITHOUT reasoning (simulating the wipe).
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'qwen3-coder-plus',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await config.refreshAuth(authType);
+
+      expect(config.getReasoningEffort()).toBe('max');
+      expect(config.getContentGeneratorConfig().reasoning).toEqual({
+        effort: 'max',
+      });
+    });
+
+    it('re-applies the reasoning effort on a full-refresh model switch that wiped modelsConfig', async () => {
+      // Regression for the model-switch path: switchModel() runs
+      // applyResolvedModelDefaults() (which overwrites modelsConfig's
+      // `reasoning` with the new model's preset) BEFORE onModelChange ->
+      // handleModelChange fires. So by the time the full-refresh path calls
+      // refreshAuth, refreshAuth's own capture reads undefined and cannot
+      // restore the tier. handleModelChange must re-apply it from the live
+      // contentGeneratorConfig captured before the rebuild.
+      const config = new Config({
+        ...baseParams,
+        generationConfig: { reasoning: { effort: 'high' } },
+      });
+      const authType = AuthType.USE_GEMINI;
+
+      // Initial auth seeds the live config with the effort.
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'gemini-a',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+      await config.refreshAuth(authType);
+      expect(config.getReasoningEffort()).toBe('high');
+
+      // Simulate switchModel()'s pre-callback wipe of modelsConfig's reasoning.
+      const genConfig = (
+        config as unknown as {
+          modelsConfig: { getGenerationConfig(): { reasoning?: unknown } };
+        }
+      ).modelsConfig.getGenerationConfig();
+      delete genConfig.reasoning;
+
+      // The new model resolves with no reasoning preset (the common case).
+      vi.mocked(resolveContentGeneratorConfigWithSources).mockReturnValue({
+        config: {
+          apiKey: 'test-key',
+          model: 'gemini-b',
+          authType,
+        } as ContentGeneratorConfig,
+        sources: {},
+      });
+
+      await (
+        config as unknown as {
+          handleModelChange: (
+            authType: AuthType,
+            requiresRefresh: boolean,
+          ) => Promise<void>;
+        }
+      ).handleModelChange(authType, true);
+
+      // Effort survives the switch (previously silently dropped to undefined).
+      expect(config.getContentGeneratorConfig().model).toBe('gemini-b');
+      expect(config.getReasoningEffort()).toBe('high');
+    });
+
     it('should fire auth_success notification hook when hooks are enabled', async () => {
       const mockMessageBus = { request: vi.fn() };
       const config = new Config({

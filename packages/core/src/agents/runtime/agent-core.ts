@@ -92,7 +92,10 @@ import {
 } from '../team/identity.js';
 import type { TeammateIdentity } from '../team/types.js';
 import {
+  getLeaderOnlyToolUnavailableMessage,
   getSubagentPlanToolUnavailableMessage,
+  isLeaderOnlyToolUnavailableInSubagent,
+  isPlanRequiredTeammateContext,
   isPlanLifecycleToolUnavailableInSubagent,
   SUBAGENT_PLAN_LIFECYCLE_TOOLS,
 } from './subagent-plan-tool-policy.js';
@@ -126,6 +129,7 @@ export const EXCLUDED_TOOLS_FOR_SUBAGENTS: ReadonlySet<string> = new Set([
   ToolNames.SEND_MESSAGE,
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
+  ToolNames.TEAM_PLAN_APPROVAL,
   ToolNames.TASK_CREATE,
   ToolNames.TASK_UPDATE,
   ToolNames.TASK_LIST,
@@ -154,6 +158,7 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   ToolNames.TASK_STOP,
   ToolNames.TEAM_CREATE,
   ToolNames.TEAM_DELETE,
+  ToolNames.TEAM_PLAN_APPROVAL,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
   // Worktree management belongs to the parent session.
   ToolNames.ENTER_WORKTREE,
@@ -165,6 +170,19 @@ const EXCLUDED_TOOLS_FOR_TEAMMATES: ReadonlySet<string> = new Set([
   // workflow re-arms the O(k^n) fan-out the subagent set prevents.
   ToolNames.WORKFLOW,
 ]);
+
+function getExcludedToolsForCurrentContext(): ReadonlySet<string> {
+  if (!isTeammate()) {
+    return EXCLUDED_TOOLS_FOR_SUBAGENTS;
+  }
+  if (!isPlanRequiredTeammateContext()) {
+    return EXCLUDED_TOOLS_FOR_TEAMMATES;
+  }
+
+  const excluded = new Set(EXCLUDED_TOOLS_FOR_TEAMMATES);
+  excluded.delete(ToolNames.EXIT_PLAN_MODE);
+  return excluded;
+}
 
 /**
  * Prefix applied to each external message injected into a background agent's
@@ -474,9 +492,7 @@ export class AgentCore {
     await toolRegistry.warmAll();
     const toolsList: FunctionDeclaration[] = [];
 
-    const excludedFromSubagents = isTeammate()
-      ? EXCLUDED_TOOLS_FOR_TEAMMATES
-      : EXCLUDED_TOOLS_FOR_SUBAGENTS;
+    const excludedFromSubagents = getExcludedToolsForCurrentContext();
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
         (t): t is string => typeof t === 'string',
@@ -1228,7 +1244,9 @@ export class AgentCore {
       if (!allowedToolNames.has(fc.name)) {
         const errorMessage = isPlanLifecycleToolUnavailableInSubagent(toolName)
           ? getSubagentPlanToolUnavailableMessage(toolName)
-          : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
+          : isLeaderOnlyToolUnavailableInSubagent(toolName)
+            ? getLeaderOnlyToolUnavailableMessage(toolName)
+            : `Tool "${toolName}" not found. Tools must use the exact names provided.`;
         const functionResponsePart = {
           functionResponse: {
             id: callId,

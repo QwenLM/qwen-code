@@ -12,6 +12,7 @@ import { ArenaManager } from './ArenaManager.js';
 import { ArenaEventType } from './arena-events.js';
 import { ArenaSessionStatus, ARENA_MAX_AGENTS } from './types.js';
 import { AgentStatus } from '../runtime/agent-types.js';
+import { ApprovalMode } from '../../config/config.js';
 
 const hoistedMockSetupWorktrees = vi.hoisted(() => vi.fn());
 const hoistedMockCleanupSession = vi.hoisted(() => vi.fn());
@@ -348,6 +349,24 @@ describe('ArenaManager', () => {
   });
 
   describe('chat history forwarding', () => {
+    it('passes approvalMode to in-process backend spawn configs', async () => {
+      mockBackend.type = 'in-process';
+      const manager = new ArenaManager(mockConfig as never);
+
+      await manager.start({
+        ...createValidStartOptions(),
+        approvalMode: ApprovalMode.PLAN,
+      });
+
+      expect(mockBackend.spawnAgent).toHaveBeenCalledTimes(2);
+      for (const call of mockBackend.spawnAgent.mock.calls) {
+        const spawnConfig = call[0] as {
+          inProcess?: { approvalMode?: unknown };
+        };
+        expect(spawnConfig.inProcess?.approvalMode).toBe(ApprovalMode.PLAN);
+      }
+    });
+
     it('should pass chatHistory to backend spawnAgent calls', async () => {
       const manager = new ArenaManager(mockConfig as never);
       const chatHistory = [

@@ -57,6 +57,20 @@ concurrency:
   cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}"
 
 jobs:
+  precheck-pr:
+    if: |-
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.head.repo.full_name != github.repository &&
+      (github.event.action != 'review_requested' ||
+       github.event.requested_reviewer.login == 'qwen-code-ci-bot')
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+      issues: 'write'
+    uses: './.github/workflows/qwen-pr-safety-precheck.yml'
+    secrets:
+      CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
+
   ack-review-request:
     # KEEP IN SYNC with review-pr.if (explicit-trigger branches).
     # Authorization is delegated to the `authorize` job (write+ permission);
@@ -83,7 +97,7 @@ jobs:
     concurrency:
       group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
       cancel-in-progress: false
-    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     timeout-minutes: 5
     permissions:
       pull-requests: 'write'
@@ -103,7 +117,9 @@ jobs:
           fi
           ACK_BODY="<!-- qwen-review-ack -->_Qwen Code review request accepted. Review is queued in [workflow run](${RUN_URL})._"
           EXISTING_ACK_ID="$(
+            # -F would otherwise make gh api default to POST.
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --method GET \
               --paginate \
               -F per_page=100 \
               | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
@@ -125,7 +141,7 @@ jobs:
     if: |-
       github.event_name == 'pull_request_target' &&
       github.event.action == 'review_requested'
-    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     permissions: {}
     outputs:
       bot_login: '${{ steps.values.outputs.bot_login }}'
@@ -179,6 +195,7 @@ jobs:
           echo "should_review=true" >> "$GITHUB_OUTPUT"
 
   authorize:
+    needs: ['precheck-pr']
     # Single source of truth for "may this trigger spend Qwen command compute".
     # The principal whose permission decides eligibility is the PR author
     # (automatic PR events), the commenter (comment command events), or
@@ -190,7 +207,10 @@ jobs:
     # unrelated comment — to avoid spawning a job per comment. The downstream
     # `if`s still do the exact command body match; this prefix is just a filter.
     if: |-
-      github.repository == 'QwenLM/qwen-code' &&
+      always() &&
+      (github.event_name != 'pull_request_target' ||
+       github.event.pull_request.head.repo.full_name == github.repository ||
+       needs.precheck-pr.outputs.decision == 'allow_triage') &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.command == 'resolve') ||
@@ -202,8 +222,10 @@ jobs:
         startsWith(github.event.comment.body, '@qwen-code /review')) ||
        (github.event_name == 'pull_request_review' &&
         startsWith(github.event.review.body, '@qwen-code /review')))
-    # Same-repo guard: this job loads CI_BOT_PAT, so fork-triggered runs stay on hosted (ephemeral); only in-repo PR events use the persistent ECS runner.
-    runs-on: "${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
+    # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
+    # use the persistent ECS runner.
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -320,7 +342,7 @@ jobs:
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
         needs.authorize.outputs.should_review == 'true'))
     timeout-minutes: 200
-    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -421,6 +443,23 @@ jobs:
             echo "review_mode=$REVIEW_MODE"
             echo "timeout_minutes=$TIMEOUT_MINUTES"
           } >> "$GITHUB_OUTPUT"
+
+      - name: 'Setup Node.js for hosted review'
+        if: "steps.context.outputs.should_run == 'true' && (github.repository != 'QwenLM/qwen-code' || vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true')"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+
+      - name: 'Install Qwen CLI if missing'
+        if: "steps.context.outputs.should_run == 'true'"
+        run: |-
+          set -euo pipefail
+          if command -v qwen >/dev/null 2>&1; then
+            qwen --version
+            exit 0
+          fi
+          npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'
+          qwen --version
 
       - name: 'Run review'
         id: 'review'

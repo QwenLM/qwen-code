@@ -8,7 +8,11 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import { GitWorktreeService } from '../../services/gitWorktreeService.js';
 import { Storage } from '../../config/storage.js';
-import type { Config } from '../../config/config.js';
+import {
+  APPROVAL_MODES,
+  type ApprovalMode,
+  type Config,
+} from '../../config/config.js';
 import { getCoreSystemPrompt } from '../../core/prompts.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { isNodeError } from '../../utils/errors.js';
@@ -1068,6 +1072,7 @@ export class ArenaManager {
       inProcess: {
         agentName: model.modelId,
         initialTask: this.arenaConfig?.task,
+        approvalMode: toApprovalMode(this.arenaConfig?.approvalMode),
         runtimeConfig: {
           promptConfig: {
             systemPrompt: getCoreSystemPrompt(
@@ -1800,6 +1805,15 @@ export class ArenaManager {
       wasRepoInitialized: false,
     };
   }
+}
+
+function toApprovalMode(mode: string | undefined): ApprovalMode | undefined {
+  if (!mode) {
+    return undefined;
+  }
+  return APPROVAL_MODES.includes(mode as ApprovalMode)
+    ? (mode as ApprovalMode)
+    : undefined;
 }
 
 function truncateForPrompt(text: string, maxChars: number): string {
