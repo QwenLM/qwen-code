@@ -645,7 +645,13 @@ export abstract class ChannelBase {
         }
         return response;
       } catch (err) {
-        await this.settleCancelRequested(promptState);
+        // Once delivery started, a late-settling cancel must not flip
+        // `cancelled` here — it would suppress the failed emit while the
+        // /cancel handler (seeing deliveryStarted) declines to emit its own
+        // terminal, leaving the task with no terminal event at all.
+        if (!promptState.deliveryStarted) {
+          await this.settleCancelRequested(promptState);
+        }
         if (err instanceof ChannelLoopSkippedError && !promptState.cancelled) {
           this.emitTaskCancellation(promptState, sessionId, err.reason);
           promptState.cancelled = true;
@@ -2611,7 +2617,12 @@ export abstract class ChannelBase {
           });
         }
       } catch (err) {
-        await this.settleCancelRequested(promptState);
+        // Mirror the try path: once delivery started, a late-settling cancel
+        // must not suppress the failed emit (the /cancel handler declines to
+        // emit its own terminal once deliveryStarted is set).
+        if (!promptState.deliveryStarted) {
+          await this.settleCancelRequested(promptState);
+        }
         if (!promptState.cancelled) {
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
