@@ -159,6 +159,10 @@ export function createDaemonChannelBridgeFacade(
     facade.shellCommand = bridge.shellCommand.bind(bridge);
   }
 
+  if (bridge.listSessions) {
+    facade.listSessions = bridge.listSessions.bind(bridge);
+  }
+
   return facade;
 }
 

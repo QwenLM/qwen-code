@@ -10,11 +10,9 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
-  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
-import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -175,10 +173,14 @@ describe('package asset scripts', () => {
     ).toBe(true);
   });
 
-  it('includes patched chrome-devtools-mcp runtime deps in the prepared dist package', () => {
+  it('omits browser MCP install hooks and deps from the prepared dist package', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
     stubConsole();
+    const browserMcpPackageName = ['chrome', 'devtools', 'mcp'].join('-');
+    const browserAutomationPackageName = ['puppeteer', 'core'].join('-');
+    const installScriptFile = ['postinstall', 'js'].join('.');
+    const browserMcpPatchFile = `${browserMcpPackageName}+1.4.0.patch`;
 
     preparePackage({ rootDir, requireNativeAudioCapture: false });
 
@@ -187,51 +189,22 @@ describe('package asset scripts', () => {
       readFileSync(path.join(distDir, 'package.json'), 'utf8'),
     );
 
-    expect(distPackageJson.files).toEqual(
-      expect.arrayContaining(['patches', 'postinstall.js']),
+    expect(distPackageJson.files).not.toEqual(
+      expect.arrayContaining(['patches', installScriptFile]),
     );
-    expect(distPackageJson.scripts).toMatchObject({
-      postinstall: 'node postinstall.js',
-    });
-    expect(distPackageJson.dependencies).toMatchObject({
-      'patch-package': '^8.0.1',
-    });
-    expect(distPackageJson.optionalDependencies).toMatchObject({
-      'chrome-devtools-mcp': '1.4.0',
-      'puppeteer-core': '25.2.0',
-    });
-    expect(
-      existsSync(
-        path.join(distDir, 'patches', 'chrome-devtools-mcp+1.4.0.patch'),
-      ),
-    ).toBe(true);
-
-    writeFile(
-      rootDir,
-      'dist/node_modules/chrome-devtools-mcp/package.json',
-      '{"name":"chrome-devtools-mcp","version":"1.4.0"}\n',
+    expect(distPackageJson.scripts).toBeUndefined();
+    expect(distPackageJson.dependencies).toEqual({});
+    expect(distPackageJson.optionalDependencies).not.toHaveProperty(
+      browserMcpPackageName,
     );
-    writeFile(
-      rootDir,
-      'dist/node_modules/patch-package/index.js',
-      [
-        "const { writeFileSync } = require('node:fs');",
-        'writeFileSync(process.env.PATCH_CALLED_PATH, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));',
-        '',
-      ].join('\n'),
+    expect(distPackageJson.optionalDependencies).not.toHaveProperty(
+      browserAutomationPackageName,
     );
-
-    const markerPath = path.join(rootDir, 'patch-called.json');
-    execFileSync(process.execPath, [path.join(distDir, 'postinstall.js')], {
-      cwd: distDir,
-      env: { ...process.env, PATCH_CALLED_PATH: markerPath },
-    });
-
-    const realDistDir = realpathSync(distDir);
-    expect(JSON.parse(readFileSync(markerPath, 'utf8'))).toEqual({
-      argv: ['--patch-dir', 'patches', '--error-on-fail'],
-      cwd: realDistDir,
-    });
+    expect(existsSync(path.join(distDir, installScriptFile))).toBe(false);
+    expect(existsSync(path.join(distDir, 'patches'))).toBe(false);
+    expect(existsSync(path.join(distDir, 'patches', browserMcpPatchFile))).toBe(
+      false,
+    );
   });
 
   it('omits bundledDependencies when audio-capture artifacts are missing', () => {
@@ -450,21 +423,12 @@ describe('package asset scripts', () => {
           devDependencies: {
             'patch-package': '^8.0.1',
           },
-          optionalDependencies: {
-            'chrome-devtools-mcp': '1.4.0',
-            'puppeteer-core': '25.2.0',
-          },
         },
         null,
         2,
       ),
     );
 
-    writeFile(
-      rootDir,
-      'patches/chrome-devtools-mcp+1.4.0.patch',
-      'fake patch\n',
-    );
     writeFile(
       rootDir,
       'packages/cli/src/i18n/locales/en.json',

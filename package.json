@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.19.4",
+  "version": "0.19.5",
   "engines": {
     "node": ">=22.0.0"
   },
@@ -21,7 +21,7 @@
     "url": "git+https://github.com/QwenLM/qwen-code.git"
   },
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.4"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.5"
   },
   "scripts": {
     "start": "node scripts/start.js",
@@ -162,9 +162,7 @@
     "@lydell/node-pty-darwin-x64": "1.2.0-beta.10",
     "@lydell/node-pty-linux-x64": "1.2.0-beta.10",
     "@lydell/node-pty-win32-arm64": "1.2.0-beta.10",
-    "@lydell/node-pty-win32-x64": "1.2.0-beta.10",
-    "chrome-devtools-mcp": "1.4.0",
-    "puppeteer-core": "25.2.0"
+    "@lydell/node-pty-win32-x64": "1.2.0-beta.10"
   },
   "lint-staged": {
     "*.{js,jsx,ts,tsx}": [

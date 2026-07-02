@@ -13,6 +13,18 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  /*
+   * Safe-area padding for mobile devices with notch / home indicator.
+   * With `viewport-fit=cover` in index.html the page extends behind the
+   * status-bar, home-indicator, and landscape notch regions; these env()
+   * insets push the content back into the visible safe area. On desktop
+   * or phones without notches every inset evaluates to 0 so nothing
+   * changes.
+   */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-mono);
@@ -101,6 +113,14 @@
     pointer-events: auto;
     /* Show immediately on open; only the close path needs the delay above. */
     transition-delay: 0s;
+    /* With `viewport-fit=cover`, the fixed drawer extends behind the status
+       bar, home indicator, and landscape notch. Push the sidebar content
+       into the safe area while keeping the backdrop full-screen (it is a
+       sibling, not a child). */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
   }
 
   .mobileBackdrop {

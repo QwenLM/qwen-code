@@ -201,6 +201,57 @@ describe('createStderrForwarder', () => {
     stderrSpy.mockRestore();
   });
 
+  it('redacts credentials from forwarded lines', () => {
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[p] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    forwarder.onData('Authorization: Bearer eyJsecret123\n');
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.line).not.toContain('eyJsecret123');
+    expect(captured[0]!.line).toContain('<redacted>');
+    expect(stderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('<redacted>'),
+    );
+    expect(stderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('eyJsecret123'),
+    );
+    stderrSpy.mockRestore();
+  });
+
+  it('redacts credentials in force-truncated lines', () => {
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[x] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    const bigChunk = 'Bearer secrettoken123 ' + 'A'.repeat(65 * 1024);
+    forwarder.onData(bigChunk);
+    expect(captured.length).toBeGreaterThanOrEqual(1);
+    expect(captured[0]!.line).toContain('<redacted>');
+    expect(captured[0]!.line).not.toContain('secrettoken123');
+    stderrSpy.mockRestore();
+  });
+
+  it('redacts credentials flushed via onEnd (partial line)', () => {
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[p] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    forwarder.onData('Bearer secrettoken123');
+    expect(captured).toHaveLength(0);
+    forwarder.onEnd();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.line).not.toContain('secrettoken123');
+    expect(captured[0]!.line).toContain('<redacted>');
+    stderrSpy.mockRestore();
+  });
+
   it('works without onDiagnosticLine (still writes to stderr)', () => {
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     const forwarder = createStderrForwarder({
