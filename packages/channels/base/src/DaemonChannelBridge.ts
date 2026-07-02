@@ -180,12 +180,6 @@ function summarizeProtocolDetails(details: unknown): unknown {
   return summary;
 }
 
-async function drainDaemonEventLoop(): Promise<void> {
-  // TODO(daemon-roadmap): replace this bounded client-side drain with a daemon
-  // terminal turn event / SSE waterline once the typed event schema defines it.
-  await new Promise<void>((resolve) => setTimeout(resolve, 0));
-}
-
 export class DaemonChannelBridge
   extends EventEmitter
   implements ChannelAgentBridge
@@ -204,6 +198,7 @@ export class DaemonChannelBridge
     string,
     AvailableCommand[]
   >();
+  private readonly turnBarriers = new Map<string, () => void>();
   private connected = false;
   private latestAvailableCommandsSessionId: string | undefined;
   private lastError: unknown;
@@ -299,6 +294,7 @@ export class DaemonChannelBridge
     };
     this.on('textChunk', onChunk);
     this.on('sessionDied', onSessionDied);
+    const turnBarrier = this.createTurnBarrier(sessionId);
 
     const prompt: Array<Record<string, unknown>> = [];
     if (options?.imageBase64 && options.imageMimeType) {
@@ -312,7 +308,13 @@ export class DaemonChannelBridge
 
     try {
       const result = await session.prompt({ prompt }, controller.signal);
-      await drainDaemonEventLoop();
+      // Prefer turn_complete for deterministic chunk collection (SSE path).
+      // Fall back to one event-loop tick for non-SSE prompt paths (blocking
+      // HTTP, non-202 responses) where turn_complete never arrives.
+      await Promise.race([
+        turnBarrier,
+        new Promise<void>((resolve) => setTimeout(resolve, 0)),
+      ]);
       const textResult = chunks.join('');
       this.emit('promptComplete', {
         sessionId,
@@ -321,6 +323,7 @@ export class DaemonChannelBridge
       } satisfies DaemonPromptCompleteEvent);
       return textResult;
     } finally {
+      this.clearTurnBarrier(sessionId);
       this.off('textChunk', onChunk);
       this.off('sessionDied', onSessionDied);
       this.activePrompts.delete(sessionId);
@@ -348,9 +351,10 @@ export class DaemonChannelBridge
 
   async cancelSession(sessionId: string): Promise<void> {
     const session = this.ensureSession(sessionId);
-    await session.cancel();
+    this.resolveTurnBarrier(sessionId);
     this.abortActivePrompts(sessionId);
     this.activePrompts.delete(sessionId);
+    await session.cancel();
   }
 
   async setSessionModel(
@@ -500,6 +504,16 @@ export class DaemonChannelBridge
           session.sessionId,
           this.getStringField(event.data, 'error', 'stream_error'),
         );
+        break;
+      case 'turn_complete':
+        this.resolveTurnBarrier(session.sessionId);
+        break;
+      case 'turn_error':
+        this.emitProtocolError(
+          `Daemon turn error for session ${session.sessionId}`,
+          event.data,
+        );
+        this.resolveTurnBarrier(session.sessionId);
         break;
       default:
         break;
@@ -690,6 +704,7 @@ export class DaemonChannelBridge
     if (!this.sessions.has(sessionId)) {
       return;
     }
+    this.resolveTurnBarrier(sessionId);
     this.eventControllers.get(sessionId)?.abort();
     this.eventControllers.delete(sessionId);
     this.sessions.delete(sessionId);
@@ -733,6 +748,24 @@ export class DaemonChannelBridge
       controller.abort();
     }
     this.activePromptControllers.delete(sessionId);
+  }
+
+  private createTurnBarrier(sessionId: string): Promise<void> {
+    return new Promise<void>((resolve) => {
+      this.turnBarriers.set(sessionId, resolve);
+    });
+  }
+
+  private resolveTurnBarrier(sessionId: string): void {
+    const resolve = this.turnBarriers.get(sessionId);
+    if (resolve) {
+      this.turnBarriers.delete(sessionId);
+      resolve();
+    }
+  }
+
+  private clearTurnBarrier(sessionId: string): void {
+    this.turnBarriers.delete(sessionId);
   }
 
   private emitProtocolError(message: string, details: unknown): void {

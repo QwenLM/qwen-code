@@ -126,6 +126,11 @@ import {
   createAndAttachSessionForPrompt,
   isDaemonApprovalMode,
 } from './utils/sessionPreparation';
+import {
+  getComposerPlaceholderKey,
+  shouldBlockComposerSubmit,
+  shouldDisableComposerInput,
+} from './utils/composerInputState';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
   computeTodoDetails,
@@ -2195,6 +2200,14 @@ export function App({
 
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
+      if (
+        shouldBlockComposerSubmit({
+          connectionStatus: connectionRef.current.status,
+        })
+      ) {
+        pushToast('warning', t('editor.connectionDisconnected'));
+        return false;
+      }
       const promptBlocked = streamingStateRef.current !== 'idle';
       const submitPromptFromEditor = (
         promptText: string,
@@ -3230,7 +3243,11 @@ export function App({
     };
   }, [resetEscapeState]);
 
-  const isDisabled = !connected || connection.catchingUp;
+  const isDisabled = shouldDisableComposerInput({
+    catchingUp: Boolean(connection.catchingUp),
+    pendingApproval: pendingApproval !== null,
+    isPreparingPrompt,
+  });
 
   const handleModelSelect = useCallback(
     (modelId: string) => {
@@ -3863,11 +3880,7 @@ export function App({
                       isRunning={streamingState !== 'idle'}
                       isPreparing={isPreparingPrompt}
                       cancelArmed={cancelArmed}
-                      disabled={
-                        isDisabled ||
-                        pendingApproval !== null ||
-                        isPreparingPrompt
-                      }
+                      disabled={isDisabled}
                       commands={commands}
                       skills={loadedSkills}
                       slashCommandCategoryOrder={slashCommandCategoryOrder}
@@ -3892,13 +3905,13 @@ export function App({
                       onDismissFollowup={onDismissFollowup}
                       composerInput={composerInput}
                       composerInputVersion={composerInputVersion}
-                      placeholderText={
-                        !connected || connection.catchingUp
-                          ? t('common.loading')
-                          : isPreparingPrompt || streamingState !== 'idle'
-                            ? t('editor.processing')
-                            : t('editor.placeholder')
-                      }
+                      placeholderText={t(
+                        getComposerPlaceholderKey({
+                          catchingUp: Boolean(connection.catchingUp),
+                          isPreparingPrompt,
+                          isStreaming: streamingState !== 'idle',
+                        }),
+                      )}
                     />
                   </div>
                   {CustomFooter ? (
