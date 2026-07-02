@@ -498,6 +498,60 @@ describe('FeishuChannel', () => {
     });
   });
 
+  describe('prompt hook inbound IDs', () => {
+    it('ignores loop job ids that were not registered by processMessage', async () => {
+      const channel = createChannel();
+      const createStreamingCard = vi.fn().mockResolvedValue({
+        success: true,
+        messageId: 'om_valid_message_id',
+      });
+      const addReaction = vi.fn().mockResolvedValue(undefined);
+      const removeReaction = vi.fn().mockResolvedValue(undefined);
+
+      (
+        channel as unknown as {
+          createStreamingCard: typeof createStreamingCard;
+          addReaction: typeof addReaction;
+          removeReaction: typeof removeReaction;
+        }
+      ).createStreamingCard = createStreamingCard;
+      (channel as unknown as { addReaction: typeof addReaction }).addReaction =
+        addReaction;
+      (
+        channel as unknown as { removeReaction: typeof removeReaction }
+      ).removeReaction = removeReaction;
+      getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
+        'inbound_1',
+        'question?',
+      );
+
+      getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => void
+      >(channel, 'onPromptStart').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'job-1',
+      );
+      await getPrivateMethod<
+        (chatId: string, sessionId: string, messageId?: string) => Promise<void>
+      >(channel, 'onPromptEnd').call(
+        channel,
+        'oc_chat_id',
+        'session_1',
+        'job-1',
+      );
+
+      expect(
+        getPrivateMethod<Map<string, string>>(channel, 'sessionToInboundMsg')
+          .size,
+      ).toBe(0);
+      expect(addReaction).not.toHaveBeenCalled();
+      expect(removeReaction).not.toHaveBeenCalled();
+      expect(createStreamingCard).not.toHaveBeenCalled();
+    });
+  });
+
   describe('state machine: stop button during card creation', () => {
     let channel: FeishuChannel;
 
@@ -1425,6 +1479,10 @@ describe('FeishuChannel', () => {
       (
         channel as unknown as { removeReaction: typeof removeReaction }
       ).removeReaction = removeReaction;
+      getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
+        'inbound_1',
+        'question?',
+      );
 
       getPrivateMethod<
         (chatId: string, sessionId: string, messageId?: string) => void
@@ -1500,6 +1558,10 @@ describe('FeishuChannel', () => {
       (
         channel as unknown as { removeReaction: typeof removeReaction }
       ).removeReaction = removeReaction;
+      getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
+        'inbound_1',
+        'question?',
+      );
 
       getPrivateMethod<
         (chatId: string, sessionId: string, messageId?: string) => void
@@ -1575,6 +1637,10 @@ describe('FeishuChannel', () => {
       (
         channel as unknown as { removeReaction: typeof removeReaction }
       ).removeReaction = removeReaction;
+      getPrivateMethod<Map<string, string>>(channel, 'msgToQuestion').set(
+        'inbound_1',
+        'question?',
+      );
 
       getPrivateMethod<
         (chatId: string, sessionId: string, messageId?: string) => void

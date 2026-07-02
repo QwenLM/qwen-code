@@ -1042,6 +1042,27 @@ export class FeishuChannel extends ChannelBase {
     }
   }
 
+  private isKnownInboundMessageId(messageId: string): boolean {
+    return (
+      this.msgToQuestion.has(messageId) ||
+      this.msgToSenderName.has(messageId) ||
+      this.msgToSenderId.has(messageId) ||
+      this.cardSessions.has(messageId) ||
+      this.stoppedMessages.has(messageId)
+    );
+  }
+
+  private knownInboundMessageId(
+    sessionId: string,
+    messageId?: string,
+  ): string | undefined {
+    if (messageId && this.isKnownInboundMessageId(messageId)) {
+      return messageId;
+    }
+    const mapped = this.sessionToInboundMsg.get(sessionId);
+    return mapped && this.isKnownInboundMessageId(mapped) ? mapped : undefined;
+  }
+
   private statusLabelFor(terminalStatus?: FeishuTerminalStatus): string {
     switch (terminalStatus) {
       case 'completed':
@@ -1115,8 +1136,10 @@ export class FeishuChannel extends ChannelBase {
       return;
     }
 
-    const inboundMsgId =
-      event.messageId || this.sessionToInboundMsg.get(event.sessionId);
+    const inboundMsgId = this.knownInboundMessageId(
+      event.sessionId,
+      event.messageId,
+    );
     if (!inboundMsgId) return;
 
     const cardState = this.cardSessions.get(inboundMsgId);
@@ -1328,16 +1351,20 @@ export class FeishuChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
-    if (messageId) {
-      this.sessionToInboundMsg.set(sessionId, messageId);
-      this.addReaction(messageId, 'OnIt').catch(() => {});
+    const inboundMsgId =
+      messageId && this.isKnownInboundMessageId(messageId)
+        ? messageId
+        : undefined;
+    if (inboundMsgId) {
+      this.sessionToInboundMsg.set(sessionId, inboundMsgId);
+      this.addReaction(inboundMsgId, 'OnIt').catch(() => {});
 
       // In blockStreaming mode, skip card creation — BlockStreamer handles delivery
       if (this.config.blockStreaming === 'on') return;
 
       // Create streaming card now that gating has passed
-      if (!this.cardSessions.has(messageId)) {
-        const atSender = this.msgToSenderName.get(messageId) || '';
+      if (!this.cardSessions.has(inboundMsgId)) {
+        const atSender = this.msgToSenderName.get(inboundMsgId) || '';
         const placeholderText = atSender
           ? `${atSender}，思考中...`
           : '思考中...';
@@ -1349,14 +1376,19 @@ export class FeishuChannel extends ChannelBase {
           accumulatedText: '',
           lastUpdateAt: Date.now(),
         };
-        this.cardSessions.set(messageId, cardState);
+        this.cardSessions.set(inboundMsgId, cardState);
 
-        this.createStreamingCard(chatId, placeholderText, undefined, messageId)
+        this.createStreamingCard(
+          chatId,
+          placeholderText,
+          undefined,
+          inboundMsgId,
+        )
           .then((result) => {
             // Only check stopped (not cancelling) — cancelling is set before
             // cancelSession resolves, and the card must still be created so
             // handleStop can update it once cancelSession completes.
-            if (cardState.stopped || this.stoppedMessages.has(messageId)) {
+            if (cardState.stopped || this.stoppedMessages.has(inboundMsgId)) {
               // If abandoned by busy-wait timeout, delete the streaming card —
               // the response was already delivered via sendMessage.
               if (cardState.abandoned) {
@@ -1374,13 +1406,13 @@ export class FeishuChannel extends ChannelBase {
                 // Use cardState.atPrefix (captured by onCardAction before cleanupCard)
                 const prefix =
                   cardState.atPrefix ||
-                  this.msgToSenderName.get(messageId) ||
+                  this.msgToSenderName.get(inboundMsgId) ||
                   '';
                 this.updateCard(
                   result.messageId,
                   prefix,
                   true,
-                  messageId,
+                  inboundMsgId,
                   this.stopLabelFor(
                     cardState.terminalStatus,
                     cardState.userStopped ?? false,
@@ -1388,7 +1420,7 @@ export class FeishuChannel extends ChannelBase {
                 ).catch(() => {});
               }
               cardState.creating = false;
-              this.cleanupCard(messageId);
+              this.cleanupCard(inboundMsgId);
               return;
             }
             if (result.success) {
@@ -1405,7 +1437,7 @@ export class FeishuChannel extends ChannelBase {
               `[Feishu:${this.name}] Processing card error: ${err}\n`,
             );
             cardState.creating = false;
-            this.cleanupCard(messageId);
+            this.cleanupCard(inboundMsgId);
           });
       }
     }
@@ -1416,12 +1448,10 @@ export class FeishuChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): Promise<void> {
-    if (messageId) {
-      this.removeReaction(messageId, 'OnIt').catch(() => {});
-    }
     // Finalize card if onResponseComplete didn't run (prompt was cancelled)
-    const inboundMsgId = messageId || this.sessionToInboundMsg.get(sessionId);
+    const inboundMsgId = this.knownInboundMessageId(sessionId, messageId);
     if (inboundMsgId) {
+      this.removeReaction(inboundMsgId, 'OnIt').catch(() => {});
       // Don't delete stoppedMessages here — let onResponseComplete / stale timer handle it.
       // Deleting here causes a race where the stop button's card callback loses the @sender prefix.
       const cs = this.cardSessions.get(inboundMsgId);
