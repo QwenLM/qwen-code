@@ -74,26 +74,6 @@ export function parseThought(rawText: string): ThoughtSummary {
   return { subject, description };
 }
 
-export function getThoughtText(
-  response: GenerateContentResponse,
-): string | null {
-  if (response.candidates && response.candidates.length > 0) {
-    const candidate = response.candidates[0];
-
-    if (
-      candidate.content &&
-      candidate.content.parts &&
-      candidate.content.parts.length > 0
-    ) {
-      return candidate.content.parts
-        .filter((part) => part.thought)
-        .map((part) => part.text ?? '')
-        .join('');
-    }
-  }
-  return null;
-}
-
 export function getThoughtSummary(
   response: GenerateContentResponse,
 ): ThoughtSummary | null {
