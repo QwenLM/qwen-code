@@ -1891,7 +1891,7 @@ export async function loadCliConfig(
       ? {}
       : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
   const pendingMcpServers =
-    bareMode || safeMode
+    bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
 
