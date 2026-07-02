@@ -64,6 +64,7 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionArtifactValidationError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   SessionBusyError,
@@ -185,6 +186,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_prompt',
   'session_cancel',
   'session_events',
+  'session_artifacts',
   'slow_client_warning',
   'typed_event_schema',
   'session_set_model',
@@ -403,6 +405,9 @@ interface FakeBridgeOpts {
   ) => boolean;
   listImpl?: (workspaceCwd: string) => BridgeSessionSummary[];
   summaryImpl?: (sessionId: string) => BridgeSessionSummary;
+  getSessionArtifactsImpl?: AcpSessionBridge['getSessionArtifacts'];
+  addSessionArtifactImpl?: AcpSessionBridge['addSessionArtifact'];
+  removeSessionArtifactImpl?: AcpSessionBridge['removeSessionArtifact'];
   workspaceMcpImpl?: () => Promise<ServeWorkspaceMcpStatus>;
   workspaceMcpToolsImpl?: (
     serverName: string,
@@ -605,6 +610,17 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   listCalls: string[];
   summaryCalls: string[];
+  sessionArtifactsCalls: string[];
+  addSessionArtifactCalls: Array<{
+    sessionId: string;
+    artifact: Parameters<AcpSessionBridge['addSessionArtifact']>[1];
+    context?: BridgeClientRequestContext;
+  }>;
+  removeSessionArtifactCalls: Array<{
+    sessionId: string;
+    artifactId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   workspaceMcpCalls: number;
   workspaceMcpToolsCalls: string[];
   workspaceMcpResourcesCalls: string[];
@@ -747,6 +763,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
   const summaryCalls: string[] = [];
+  const sessionArtifactsCalls: string[] = [];
+  const addSessionArtifactCalls: FakeBridge['addSessionArtifactCalls'] = [];
+  const removeSessionArtifactCalls: FakeBridge['removeSessionArtifactCalls'] =
+    [];
   let workspaceMcpCalls = 0;
   const workspaceMcpToolsCalls: string[] = [];
   const workspaceMcpResourcesCalls: string[] = [];
@@ -823,6 +843,59 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     ((sessionId: string): BridgeSessionSummary => {
       throw new SessionNotFoundError(sessionId);
     });
+  const getSessionArtifactsImpl =
+    opts.getSessionArtifactsImpl ??
+    (async (sessionId: string) => ({
+      v: 1 as const,
+      sessionId,
+      artifacts: [],
+      generatedAt: '2026-01-01T00:00:00.000Z',
+      limits: { maxArtifacts: 200 },
+    }));
+  const addSessionArtifactImpl =
+    opts.addSessionArtifactImpl ??
+    (async (sessionId, artifact, context) => ({
+      v: 1 as const,
+      sessionId,
+      changes: [
+        {
+          action: 'created' as const,
+          artifactId: 'artifact-1',
+          artifact: {
+            id: 'artifact-1',
+            kind: artifact.kind ?? 'link',
+            storage: artifact.workspacePath ? 'workspace' : 'external_url',
+            source: 'client' as const,
+            status: 'available' as const,
+            title: artifact.title,
+            ...(artifact.url ? { url: artifact.url } : {}),
+            ...(artifact.workspacePath
+              ? { workspacePath: artifact.workspacePath }
+              : {}),
+            clientRetained: true,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+            ...(context?.clientId ? { clientId: context.clientId } : {}),
+          },
+        },
+      ],
+    }));
+  const removeSessionArtifactImpl =
+    opts.removeSessionArtifactImpl ??
+    ((sessionId, artifactId) => ({
+      v: 1 as const,
+      sessionId,
+      changes:
+        artifactId === 'missing'
+          ? []
+          : [
+              {
+                action: 'removed' as const,
+                artifactId,
+                reason: 'explicit' as const,
+              },
+            ],
+    }));
   const workspaceMcpImpl =
     opts.workspaceMcpImpl ??
     (async () => ({
@@ -1173,6 +1246,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionPermissionVotes,
     listCalls,
     summaryCalls,
+    sessionArtifactsCalls,
+    addSessionArtifactCalls,
+    removeSessionArtifactCalls,
     workspaceMcpToolsCalls,
     workspaceMcpResourcesCalls,
     extensionEvents,
@@ -1321,6 +1397,26 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     getSessionSummary(sessionId) {
       summaryCalls.push(sessionId);
       return summaryImpl(sessionId);
+    },
+    async getSessionArtifacts(sessionId) {
+      sessionArtifactsCalls.push(sessionId);
+      return getSessionArtifactsImpl(sessionId);
+    },
+    async addSessionArtifact(sessionId, artifact, context) {
+      addSessionArtifactCalls.push({
+        sessionId,
+        artifact,
+        ...(context ? { context } : {}),
+      });
+      return addSessionArtifactImpl(sessionId, artifact, context);
+    },
+    async removeSessionArtifact(sessionId, artifactId, context) {
+      removeSessionArtifactCalls.push({
+        sessionId,
+        artifactId,
+        ...(context ? { context } : {}),
+      });
+      return removeSessionArtifactImpl(sessionId, artifactId, context);
     },
     async getWorkspaceMcpStatus() {
       workspaceMcpCalls += 1;
@@ -6912,6 +7008,172 @@ describe('createServeApp', () => {
     });
   });
 
+  describe('session artifact routes', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
+    it('GET /session/:id/artifacts returns the bridge snapshot', async () => {
+      const bridge = fakeBridge({
+        getSessionArtifactsImpl: async (sessionId) => ({
+          v: 1,
+          sessionId,
+          artifacts: [
+            {
+              id: 'artifact-1',
+              kind: 'link',
+              storage: 'external_url',
+              source: 'tool',
+              status: 'available',
+              title: 'Lineage',
+              url: 'https://example.com/lineage',
+              clientRetained: false,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          ],
+          generatedAt: '2026-01-01T00:00:00.000Z',
+          limits: { maxArtifacts: 200 },
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(request(app).get('/session/session-A/artifacts'));
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        v: 1,
+        sessionId: 'session-A',
+        artifacts: [{ id: 'artifact-1', title: 'Lineage' }],
+      });
+      expect(bridge.sessionArtifactsCalls).toEqual(['session-A']);
+    });
+
+    it('GET /session/:id/artifacts returns 404 for an unknown session', async () => {
+      const bridge = fakeBridge({
+        getSessionArtifactsImpl: async (sessionId) => {
+          throw new SessionNotFoundError(sessionId);
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(request(app).get('/session/ghost/artifacts'));
+
+      expect(res.status).toBe(404);
+      expect(res.body.sessionId).toBe('ghost');
+      expect(bridge.sessionArtifactsCalls).toEqual(['ghost']);
+    });
+
+    it('POST /session/:id/artifacts requires strict mutation auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .post('/session/session-A/artifacts')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ title: 'Lineage', url: 'https://example.com/lineage' });
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.addSessionArtifactCalls).toHaveLength(0);
+    });
+
+    it('POST /session/:id/artifacts forwards body and client context', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(request(app).post('/session/session-A/artifacts'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ title: 'Lineage', url: 'https://example.com/lineage' });
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        v: 1,
+        sessionId: 'session-A',
+        changes: [
+          {
+            action: 'created',
+            artifact: { title: 'Lineage', clientId: 'client-1' },
+          },
+        ],
+      });
+      expect(bridge.addSessionArtifactCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          artifact: {
+            title: 'Lineage',
+            url: 'https://example.com/lineage',
+          },
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('POST /session/:id/artifacts maps artifact validation errors', async () => {
+      const bridge = fakeBridge({
+        addSessionArtifactImpl: async () => {
+          throw new SessionArtifactValidationError(
+            'url scheme is not allowed',
+            'url',
+          );
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).post('/session/session-A/artifacts'),
+      ).send({ title: 'Bad link', url: 'javascript:alert(1)' });
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        v: 1,
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: 'url scheme is not allowed',
+          field: 'url',
+        },
+      });
+    });
+
+    it('DELETE /session/:id/artifacts/:artifactId requires strict mutation auth', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(baseOpts, undefined, { bridge });
+
+      const res = await request(app)
+        .delete('/session/session-A/artifacts/artifact-1')
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(401);
+      expect(res.body.code).toBe('token_required');
+      expect(bridge.removeSessionArtifactCalls).toHaveLength(0);
+    });
+
+    it('DELETE /session/:id/artifacts/:artifactId is idempotent for missing artifacts', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).delete('/session/session-A/artifacts/missing'),
+      ).set('X-Qwen-Client-Id', 'client-1');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        v: 1,
+        sessionId: 'session-A',
+        changes: [],
+      });
+      expect(bridge.removeSessionArtifactCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          artifactId: 'missing',
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+  });
+
   describe('POST /session/:id/model', () => {
     it('200 with the agent response on success', async () => {
       const bridge = fakeBridge({
@@ -10324,6 +10586,31 @@ describe('createServeApp', () => {
       expect(bridge.updateMetadataCalls[0]?.sessionId).toBe('session-A');
       expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
         displayName: 'My Session',
+      });
+    });
+
+    it('requires mutation auth before updating metadata', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
+        bridge,
+      });
+
+      const noAuth = await request(app)
+        .patch('/session/session-A/metadata')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({ displayName: 'blocked' });
+      expect(noAuth.status).toBe(401);
+      expect(bridge.updateMetadataCalls).toHaveLength(0);
+
+      const authed = await request(app)
+        .patch('/session/session-A/metadata')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .set('Authorization', 'Bearer secret')
+        .send({ displayName: 'allowed' });
+      expect(authed.status).toBe(200);
+      expect(bridge.updateMetadataCalls).toHaveLength(1);
+      expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
+        displayName: 'allowed',
       });
     });
 

@@ -235,6 +235,112 @@ export interface SessionMetadataResult {
   displayName?: string;
 }
 
+type OpenStringUnion<T extends string> = T | (string & {});
+
+/** Known artifact kinds mirrored from the daemon/core contract. */
+export type KnownDaemonSessionArtifactKind =
+  | 'file'
+  | 'link'
+  | 'html'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'pdf'
+  | 'notebook'
+  | 'other';
+
+export type DaemonSessionArtifactKind =
+  OpenStringUnion<KnownDaemonSessionArtifactKind>;
+
+export type KnownDaemonSessionArtifactStorage =
+  | 'workspace'
+  | 'external_url'
+  | 'managed'
+  | 'published';
+
+export type DaemonSessionArtifactStorage =
+  OpenStringUnion<KnownDaemonSessionArtifactStorage>;
+
+export type KnownDaemonSessionArtifactSource = 'tool' | 'hook' | 'client';
+
+export type DaemonSessionArtifactSource =
+  OpenStringUnion<KnownDaemonSessionArtifactSource>;
+
+export type KnownDaemonSessionArtifactStatus = 'available' | 'missing';
+
+export type DaemonSessionArtifactStatus =
+  OpenStringUnion<KnownDaemonSessionArtifactStatus>;
+
+export interface DaemonSessionArtifactInput {
+  kind?: KnownDaemonSessionArtifactKind;
+  storage?: Exclude<KnownDaemonSessionArtifactStorage, 'published'>;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
+}
+
+export interface DaemonSessionArtifact {
+  id: string;
+  kind: DaemonSessionArtifactKind;
+  storage: DaemonSessionArtifactStorage;
+  source: DaemonSessionArtifactSource;
+  status: DaemonSessionArtifactStatus;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
+  clientRetained: boolean;
+  createdAt: string;
+  updatedAt: string;
+  toolCallId?: string;
+  toolName?: string;
+  hookEventName?: string;
+  clientId?: string;
+}
+
+export type KnownDaemonSessionArtifactChangeAction =
+  | 'created'
+  | 'updated'
+  | 'removed';
+export type DaemonSessionArtifactChangeAction =
+  OpenStringUnion<KnownDaemonSessionArtifactChangeAction>;
+
+export type KnownDaemonSessionArtifactRemovalReason = 'eviction' | 'explicit';
+export type DaemonSessionArtifactRemovalReason =
+  OpenStringUnion<KnownDaemonSessionArtifactRemovalReason>;
+
+export interface DaemonSessionArtifactChange {
+  action: DaemonSessionArtifactChangeAction;
+  artifactId: string;
+  artifact?: DaemonSessionArtifact;
+  reason?: DaemonSessionArtifactRemovalReason;
+}
+
+export interface DaemonSessionArtifactsEnvelope {
+  v: 1;
+  sessionId: string;
+  artifacts: DaemonSessionArtifact[];
+  generatedAt: string;
+  limits: {
+    maxArtifacts: number;
+  };
+}
+
+export interface DaemonSessionArtifactMutationResult {
+  v: 1;
+  sessionId: string;
+  changes: DaemonSessionArtifactChange[];
+}
+
 export type DaemonStatus =
   | 'ok'
   | 'warning'

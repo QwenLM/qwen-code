@@ -113,6 +113,7 @@ export class GroupHistoryStore {
       state.delete(key);
       loaded.limits.delete(key);
       this.append({ type: 'clear', key, recordedAt: Date.now() });
+      this.compact(state, loaded.limits);
     }
 
     return entries;

@@ -40,6 +40,15 @@ import type {
 } from './permission.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { writeStderrLine } from './internal/stderrLine.js';
+import type {
+  SessionArtifactChange,
+  SessionArtifactInput,
+  SessionArtifactStore,
+} from './sessionArtifacts.js';
+
+// Keep in sync with core `ToolNames.ARTIFACT`; acp-bridge avoids a runtime
+// import from core for this hot demux path.
+const PUBLISH_ARTIFACT_TOOL_NAME = 'artifact';
 
 /**
  * Duck-type check for `FsError` from `cli/src/serve/fs/errors.ts`.
@@ -67,6 +76,139 @@ function isFsErrorShape(err: unknown): err is FsErrorShape {
     err instanceof Error &&
     err.name === 'FsError' &&
     typeof (err as { kind?: unknown }).kind === 'string'
+  );
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function artifactPayloadFields(
+  artifact: Record<string, unknown>,
+): SessionArtifactInput {
+  return {
+    title: artifact['title'] as string,
+    kind: artifact['kind'] as SessionArtifactInput['kind'],
+    storage: artifact['storage'] as SessionArtifactInput['storage'],
+    description: artifact['description'] as string | undefined,
+    workspacePath: artifact['workspacePath'] as string | undefined,
+    managedId: artifact['managedId'] as string | undefined,
+    url: artifact['url'] as string | undefined,
+    mimeType: artifact['mimeType'] as string | undefined,
+    sizeBytes: artifact['sizeBytes'] as number | undefined,
+    metadata: artifact['metadata'] as SessionArtifactInput['metadata'],
+  };
+}
+
+function extractCappedArtifactInputs(
+  rawArtifacts: unknown[],
+  limit: number,
+  sessionId: string,
+  source: 'tool' | 'hook',
+  toInput: (artifact: Record<string, unknown>) => SessionArtifactInput,
+): SessionArtifactInput[] {
+  const artifacts: SessionArtifactInput[] = [];
+  for (let index = 0; index < rawArtifacts.length; index++) {
+    const artifact = rawArtifacts[index];
+    if (!isRecord(artifact)) {
+      continue;
+    }
+    if (artifacts.length >= limit) {
+      writeStderrLine(
+        `[artifacts] session=${sessionId} action=dropped reason="artifact batch limit exceeded" source=${source} dropped=${rawArtifacts.length - index}`,
+      );
+      break;
+    }
+    artifacts.push(toInput(artifact));
+  }
+  return artifacts;
+}
+
+function artifactIngestionErrorReason(error: unknown): unknown {
+  if (!(error instanceof Error)) {
+    return String(error);
+  }
+  return {
+    name: error.name,
+    message: error.message,
+    stack: error.stack?.split('\n').slice(0, 4).join('\n'),
+  };
+}
+
+function extractSessionUpdateArtifacts(
+  params: SessionNotification,
+  updateMeta: Record<string, unknown> | undefined,
+  limit: number,
+  sessionId: string,
+): SessionArtifactInput[] {
+  const rawArtifacts = updateMeta?.['artifacts'];
+  if (!Array.isArray(rawArtifacts)) {
+    return [];
+  }
+  const update = params.update as {
+    sessionUpdate?: unknown;
+    status?: unknown;
+    toolCallId?: unknown;
+  };
+  if (
+    update.sessionUpdate !== 'tool_call_update' ||
+    update.status !== 'completed'
+  ) {
+    return [];
+  }
+  const toolCallId =
+    typeof update.toolCallId === 'string' ? update.toolCallId : undefined;
+  const toolName =
+    typeof updateMeta?.['toolName'] === 'string'
+      ? updateMeta['toolName']
+      : undefined;
+  return extractCappedArtifactInputs(
+    rawArtifacts,
+    limit,
+    sessionId,
+    'tool',
+    (artifact) => ({
+      ...artifactPayloadFields(artifact),
+      source: 'tool' as const,
+      toolCallId,
+      toolName,
+    }),
+  );
+}
+
+function sanitizeSessionUpdateArtifacts(
+  params: SessionNotification,
+  updateMeta: Record<string, unknown> | undefined,
+): SessionNotification {
+  if (!Array.isArray(updateMeta?.['artifacts'])) {
+    return params;
+  }
+  const sanitizedMeta = { ...updateMeta };
+  delete sanitizedMeta['artifacts'];
+  const update = {
+    ...(params.update as Record<string, unknown>),
+    _meta: sanitizedMeta,
+  } as SessionNotification['update'];
+  return {
+    ...params,
+    update,
+  };
+}
+
+function isTrustedArtifactToolUpdate(
+  params: SessionNotification,
+  updateMeta: Record<string, unknown> | undefined,
+): boolean {
+  const update = params.update as {
+    sessionUpdate?: unknown;
+    status?: unknown;
+  };
+  // ToolCallEmitter stamps _meta.toolName from the actual tool invocation. The
+  // artifact payload itself is never allowed to self-declare publisher trust.
+  return (
+    update.sessionUpdate === 'tool_call_update' &&
+    update.status === 'completed' &&
+    updateMeta?.['toolName'] === PUBLISH_ARTIFACT_TOOL_NAME
   );
 }
 
@@ -207,6 +349,7 @@ function sliceLineRange(
 export interface BridgeClientSessionEntry {
   sessionId: string;
   events: EventBus;
+  artifacts: SessionArtifactStore;
   pendingPermissionIds: Set<string>;
   /**
    * Mid-turn user messages queued by the browser, drained here when the ACP
@@ -215,6 +358,8 @@ export interface BridgeClientSessionEntry {
    * `extMethod` can splice it. See `SessionEntry.midTurnMessageQueue`.
    */
   midTurnMessageQueue: MidTurnQueueEntry[];
+  /** True while a prompt is executing for this session. */
+  promptActive?: boolean;
   activePromptOriginatorClientId?: string;
   /**
    * True while the bridge drives a model roundtrip; the
@@ -471,9 +616,26 @@ export class BridgeClient implements Client {
       typeof originalTs === 'number' && Number.isFinite(originalTs)
         ? originalTs
         : undefined;
+    const artifacts = entry?.artifacts
+      ? extractSessionUpdateArtifacts(
+          params,
+          updateMeta,
+          entry.artifacts.inputBatchLimit(),
+          entry.sessionId,
+        )
+      : [];
+    if (entry) {
+      if (artifacts.length > 0) {
+        await this.upsertAndPublishArtifacts(entry, artifacts, {
+          trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
+        });
+      }
+    }
+
+    const publishParams = sanitizeSessionUpdateArtifacts(params, updateMeta);
     events.publish({
       type: 'session_update',
-      data: params,
+      data: publishParams,
       ...originator,
       ...(serverTimestamp !== undefined ? { _meta: { serverTimestamp } } : {}),
     });
@@ -658,11 +820,12 @@ export class BridgeClient implements Client {
   }
 
   /**
-   * Handle child->bridge ACP `extNotification` calls. Six methods are
-   * recognized — `qwen/notify/session/model-update`,
+   * Handle child->bridge ACP `extNotification` calls. Recognized methods are
+   * `qwen/notify/session/model-update`,
    * `qwen/notify/session/mode-update`,
    * `qwen/notify/session/title-update` (auto/in-process session titles),
    * `qwen/notify/session/prompt-suggestion` (followup assist),
+   * `qwen/notify/session/artifact-event` (hook artifacts),
    * `qwen/notify/session/terminal-sequence`, and
    * `qwen/notify/session/mcp-budget-event` — each translated into a
    * session-scoped SSE frame. Unknown methods are dropped silently
@@ -741,6 +904,10 @@ export class BridgeClient implements Client {
       this.publishExtNotification(sessionId, 'terminal_sequence', rest);
       return;
     }
+    if (method === 'qwen/notify/session/artifact-event') {
+      await this.handleArtifactEvent(params);
+      return;
+    }
     if (method !== 'qwen/notify/session/mcp-budget-event') return;
     const sessionId = params['sessionId'];
     if (typeof sessionId !== 'string') return;
@@ -763,6 +930,82 @@ export class BridgeClient implements Client {
     void _sid;
     void _kind;
     this.publishExtNotification(sessionId, type, rest);
+  }
+
+  private async handleArtifactEvent(
+    params: Record<string, unknown>,
+  ): Promise<void> {
+    const sessionId = params['sessionId'];
+    const rawArtifacts = params['artifacts'];
+    if (typeof sessionId !== 'string' || !Array.isArray(rawArtifacts)) {
+      writeStderrLine(
+        `[demux] session=${typeof sessionId === 'string' ? sessionId : '<missing>'} type=artifact_event action=dropped reason=malformed`,
+      );
+      return;
+    }
+    const entry = this.resolveEntry(sessionId);
+    if (!entry) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_not_found`,
+      );
+      return;
+    }
+    const hookEventName =
+      typeof params['hookEventName'] === 'string'
+        ? params['hookEventName']
+        : undefined;
+    const toolName =
+      typeof params['toolName'] === 'string' ? params['toolName'] : undefined;
+    const toolCallId =
+      typeof params['toolCallId'] === 'string'
+        ? params['toolCallId']
+        : undefined;
+    const artifacts = extractCappedArtifactInputs(
+      rawArtifacts,
+      entry.artifacts.inputBatchLimit(),
+      entry.sessionId,
+      'hook',
+      (artifact) => ({
+        ...artifactPayloadFields(artifact),
+        source: 'hook' as const,
+        hookEventName,
+        toolName,
+        toolCallId,
+      }),
+    );
+    await this.upsertAndPublishArtifacts(entry, artifacts);
+  }
+
+  private async upsertAndPublishArtifacts(
+    entry: BridgeClientSessionEntry,
+    artifacts: SessionArtifactInput[],
+    options?: Parameters<SessionArtifactStore['upsertMany']>[1],
+  ): Promise<void> {
+    try {
+      const result = await entry.artifacts.upsertMany(artifacts, options);
+      this.publishArtifactChanges(entry, result.changes);
+    } catch (error) {
+      writeStderrLine(
+        `[artifacts] session=${entry.sessionId} action=dropped reason=${JSON.stringify(
+          artifactIngestionErrorReason(error),
+        )}`,
+      );
+    }
+  }
+
+  private publishArtifactChanges(
+    entry: BridgeClientSessionEntry,
+    changes: SessionArtifactChange[],
+  ): void {
+    for (const change of changes) {
+      entry.events.publish({
+        type: 'artifact_changed',
+        data: { sessionId: entry.sessionId, change },
+        ...(entry.activePromptOriginatorClientId
+          ? { originatorClientId: entry.activePromptOriginatorClientId }
+          : {}),
+      });
+    }
   }
 
   private publishExtNotification(

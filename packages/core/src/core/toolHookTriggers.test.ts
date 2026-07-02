@@ -401,6 +401,46 @@ describe('toolHookTriggers', () => {
       });
     });
 
+    it('returns PostToolUse artifacts', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {
+          hookSpecificOutput: {
+            artifacts: [
+              {
+                title: 'Tool report',
+                workspacePath: 'reports/tool.html',
+              },
+              {
+                title: 'Malformed report',
+                workspacePath: 123,
+              },
+            ],
+          },
+        },
+      });
+
+      const result = await firePostToolUseHook(
+        mockMessageBus,
+        'test-tool',
+        {},
+        {},
+        'test-id',
+        'auto',
+      );
+
+      expect(result).toEqual({
+        shouldStop: false,
+        artifacts: [
+          {
+            title: 'Tool report',
+            workspacePath: 'reports/tool.html',
+          },
+        ],
+      });
+    });
+
     it('should handle hook execution errors gracefully', async () => {
       const mockMessageBus = createMockMessageBus();
       (mockMessageBus.request as ReturnType<typeof vi.fn>).mockRejectedValue(
@@ -499,6 +539,40 @@ describe('toolHookTriggers', () => {
         shouldStop: true,
         stopReason: 'stop after batch',
         additionalContext: undefined,
+      });
+    });
+
+    it('returns PostToolBatch artifacts', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {
+          hookSpecificOutput: {
+            artifacts: [
+              {
+                title: 'Batch report',
+                workspacePath: 'batch.html',
+              },
+              {
+                title: 'Bad report',
+                workspacePath: 123,
+              },
+            ],
+          },
+        },
+      });
+
+      const result = await firePostToolBatchHook(mockMessageBus, []);
+
+      expect(result).toEqual({
+        shouldStop: false,
+        additionalContext: undefined,
+        artifacts: [
+          {
+            title: 'Batch report',
+            workspacePath: 'batch.html',
+          },
+        ],
       });
     });
 
@@ -653,6 +727,44 @@ describe('toolHookTriggers', () => {
 
       expect(result).toEqual({
         additionalContext: 'Additional context about the failure',
+      });
+    });
+
+    it('returns PostToolUseFailure artifacts', async () => {
+      const mockMessageBus = createMockMessageBus();
+      (mockMessageBus.request as ReturnType<typeof vi.fn>).mockResolvedValue({
+        success: true,
+        output: {
+          hookSpecificOutput: {
+            artifacts: [
+              {
+                title: 'Failure report',
+                workspacePath: 'reports/failure.html',
+              },
+              {
+                title: 'Malformed failure report',
+                metadata: [],
+              },
+            ],
+          },
+        },
+      });
+
+      const result = await firePostToolUseFailureHook(
+        mockMessageBus,
+        'test-id',
+        'test-tool',
+        {},
+        'error message',
+      );
+
+      expect(result).toEqual({
+        artifacts: [
+          {
+            title: 'Failure report',
+            workspacePath: 'reports/failure.html',
+          },
+        ],
       });
     });
 

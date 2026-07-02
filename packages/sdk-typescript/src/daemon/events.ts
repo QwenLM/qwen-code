@@ -8,6 +8,7 @@ import type {
   DaemonEvent,
   DaemonErrorKind,
   DaemonMcpTransport,
+  DaemonSessionArtifactChange,
   PermissionOutcome,
 } from './types.js';
 // Single source of truth: the daemon publisher owns the wire literal in
@@ -41,6 +42,7 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_died',
   'session_closed',
   'session_metadata_updated',
+  'artifact_changed',
   MID_TURN_MESSAGE_INJECTED_EVENT,
   PENDING_PROMPT_ADDED_EVENT,
   PENDING_PROMPT_STARTED_EVENT,
@@ -277,6 +279,12 @@ export interface DaemonSessionClosedData {
 export interface DaemonSessionMetadataUpdatedData {
   sessionId: string;
   displayName?: string;
+  [key: string]: unknown;
+}
+
+export interface DaemonArtifactChangedData {
+  sessionId: string;
+  change: DaemonSessionArtifactChange;
   [key: string]: unknown;
 }
 
@@ -869,6 +877,10 @@ export type DaemonSessionMetadataUpdatedEvent = DaemonEventEnvelope<
   'session_metadata_updated',
   DaemonSessionMetadataUpdatedData
 >;
+export type DaemonArtifactChangedEvent = DaemonEventEnvelope<
+  'artifact_changed',
+  DaemonArtifactChangedData
+>;
 export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
   typeof MID_TURN_MESSAGE_INJECTED_EVENT,
   DaemonMidTurnMessageInjectedData
@@ -1048,6 +1060,7 @@ export type DaemonSessionEvent =
   | DaemonSessionDiedEvent
   | DaemonSessionClosedEvent
   | DaemonSessionMetadataUpdatedEvent
+  | DaemonArtifactChangedEvent
   | DaemonMidTurnMessageInjectedEvent
   | DaemonPendingPromptEvent
   | DaemonSessionBranchedEvent;
@@ -1497,6 +1510,10 @@ export function asKnownDaemonEvent(
     case 'session_metadata_updated':
       return isSessionMetadataUpdatedData(event.data)
         ? (event as DaemonSessionMetadataUpdatedEvent)
+        : undefined;
+    case 'artifact_changed':
+      return isArtifactChangedData(event.data)
+        ? (event as DaemonArtifactChangedEvent)
         : undefined;
     case MID_TURN_MESSAGE_INJECTED_EVENT:
       return isMidTurnMessageInjectedData(event.data)
@@ -2017,6 +2034,7 @@ export function reduceDaemonSessionEvent(
     case 'mcp_server_removed':
     case 'settings_reloaded':
     case 'extensions_changed':
+    case 'artifact_changed':
     case MID_TURN_MESSAGE_INJECTED_EVENT:
     case PENDING_PROMPT_ADDED_EVENT:
     case PENDING_PROMPT_STARTED_EVENT:
@@ -2449,6 +2467,22 @@ function isSessionMetadataUpdatedData(
     isRecord(value) &&
     isNonEmptyString(value['sessionId']) &&
     isOptionalStringOrNull(value['displayName'])
+  );
+}
+
+function isArtifactChangedData(
+  value: unknown,
+): value is DaemonArtifactChangedData {
+  if (!isRecord(value) || !isNonEmptyString(value['sessionId'])) {
+    return false;
+  }
+  const change = value['change'];
+  if (!isRecord(change) || !isNonEmptyString(change['artifactId'])) {
+    return false;
+  }
+  return (
+    isNonEmptyString(change['action']) &&
+    (change['reason'] === undefined || isNonEmptyString(change['reason']))
   );
 }
 
