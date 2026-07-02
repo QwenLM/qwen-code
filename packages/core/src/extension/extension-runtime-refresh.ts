@@ -24,8 +24,14 @@ export async function refreshExtensionRuntime(
 
   await config.getToolRegistry().restartMcpServers();
 
-  // Use allSettled so a rejection from one refresh leg does not prevent the
-  // other leg from applying or stop the memory refresh below.
+  // Refresh skills + subagents in parallel. Both `refreshCache` calls now
+  // resolve only after their async change-listener chain settles — for skills,
+  // that includes `SkillTool.refreshSkills()` rebuilding the model-facing tool
+  // description and updating `geminiClient`'s tool list. Use allSettled (rather
+  // than Promise.all) so a rejection from one leg does not cascade — the other
+  // leg's result is still applied, refreshHierarchicalMemory below still runs,
+  // and callers (`enableExtension`, etc.) don't unwind because of an unrelated
+  // transient failure.
   const skillManager = config.getSkillManager();
   const settled = await Promise.allSettled([
     skillManager?.refreshCache(),
@@ -42,8 +48,11 @@ export async function refreshExtensionRuntime(
   }
 
   // Await hierarchical memory refresh so callers only continue after the
-  // extension refresh has settled, but do not unwind an already-applied
-  // extension mutation if memory refresh fails.
+  // extension refresh has settled. Wrap in try/catch so a transient failure
+  // doesn't propagate up to `enableExtension` / `installExtension` callers,
+  // which have already mutated their `isActive`/`installed` flags by the time
+  // this function is invoked — a failed memory refresh leaves stale memory
+  // but should not back out the surrounding extension transition.
   try {
     await config.refreshHierarchicalMemory();
   } catch (err) {

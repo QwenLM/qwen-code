@@ -77,4 +77,27 @@ describe('refreshExtensionRuntime', () => {
     expect(refreshSkills).toHaveBeenCalledOnce();
     expect(refreshSubagents).toHaveBeenCalledOnce();
   });
+
+  it('rejects when restartMcpServers fails', async () => {
+    const restartMcpServers = vi
+      .fn()
+      .mockRejectedValue(new Error('mcp failed'));
+    const refreshSkills = vi.fn();
+    const refreshSubagents = vi.fn();
+    const refreshHierarchicalMemory = vi.fn();
+
+    const config = {
+      getToolRegistry: () => ({ restartMcpServers }),
+      getSkillManager: () => ({ refreshCache: refreshSkills }),
+      getSubagentManager: () => ({ refreshCache: refreshSubagents }),
+      refreshHierarchicalMemory,
+    } as unknown as ExtensionRuntimeRefreshConfig;
+
+    await expect(refreshExtensionRuntime(config)).rejects.toThrow('mcp failed');
+
+    expect(restartMcpServers).toHaveBeenCalledOnce();
+    expect(refreshSkills).not.toHaveBeenCalled();
+    expect(refreshSubagents).not.toHaveBeenCalled();
+    expect(refreshHierarchicalMemory).not.toHaveBeenCalled();
+  });
 });
