@@ -1427,6 +1427,7 @@ export class Config {
   private mcpReconcilePromise: Promise<void> | undefined;
   private sessionSubagents: SubagentConfig[];
   private userMemory: string;
+  private runtimeContextEntries: Map<string, string> = new Map();
   private sdkMode: boolean;
   private geminiMdFileCount: number;
   private conditionalRulesRegistry: ConditionalRulesRegistry | undefined;
@@ -4385,6 +4386,66 @@ export class Config {
 
   setUserMemory(newUserMemory: string): void {
     this.userMemory = newUserMemory;
+  }
+
+  private static readonly RUNTIME_CONTEXT_KEY_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+  private static readonly RUNTIME_CONTEXT_MAX_VALUE_BYTES = 32 * 1024;
+  private static readonly RUNTIME_CONTEXT_MAX_ENTRIES = 16;
+
+  private getOwnRuntimeContextEntries(): Map<string, string> {
+    if (
+      !Object.prototype.hasOwnProperty.call(this, 'runtimeContextEntries')
+    ) {
+      (
+        this as unknown as { runtimeContextEntries: Map<string, string> }
+      ).runtimeContextEntries = new Map();
+    }
+    return this.runtimeContextEntries;
+  }
+
+  getRuntimeContext(): ReadonlyMap<string, string> {
+    return this.getOwnRuntimeContextEntries();
+  }
+
+  setRuntimeContextEntry(key: string, value: string): boolean {
+    if (!Config.RUNTIME_CONTEXT_KEY_RE.test(key)) {
+      return false;
+    }
+    const entries = this.getOwnRuntimeContextEntries();
+    if (!value) {
+      entries.delete(key);
+      return true;
+    }
+    if (
+      Buffer.byteLength(value, 'utf8') > Config.RUNTIME_CONTEXT_MAX_VALUE_BYTES
+    ) {
+      return false;
+    }
+    if (!entries.has(key) && entries.size >= Config.RUNTIME_CONTEXT_MAX_ENTRIES) {
+      return false;
+    }
+    entries.set(key, value);
+    return true;
+  }
+
+  removeRuntimeContextEntry(key: string): void {
+    this.getOwnRuntimeContextEntries().delete(key);
+  }
+
+  setRuntimeContext(entries: Record<string, string>): void {
+    const store = this.getOwnRuntimeContextEntries();
+    store.clear();
+    for (const [key, value] of Object.entries(entries)) {
+      if (
+        value &&
+        Config.RUNTIME_CONTEXT_KEY_RE.test(key) &&
+        Buffer.byteLength(value, 'utf8') <=
+          Config.RUNTIME_CONTEXT_MAX_VALUE_BYTES &&
+        store.size < Config.RUNTIME_CONTEXT_MAX_ENTRIES
+      ) {
+        store.set(key, value);
+      }
+    }
   }
 
   getGeminiMdFileCount(): number {

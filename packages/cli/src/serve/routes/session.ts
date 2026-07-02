@@ -1393,4 +1393,48 @@ export function registerSessionRoutes(
       },
     ),
   );
+
+  app.post(
+    '/session/:id/runtime-context',
+    mutate(),
+    withMutableSession(
+      'POST /session/:id/runtime-context',
+      async (req, res, sessionId) => {
+        const body = safeBody(req);
+        const entries = body['entries'];
+
+        if (
+          typeof entries !== 'object' ||
+          entries === null ||
+          Array.isArray(entries)
+        ) {
+          res.status(400).json({
+            error:
+              '`entries` is required and must be a non-null object mapping string keys to string values',
+            code: 'invalid_entries',
+          });
+          return;
+        }
+
+        const serialized = JSON.stringify(entries);
+        if (Buffer.byteLength(serialized, 'utf8') > 32 * 1024) {
+          res.status(413).json({
+            error: 'runtime context payload exceeds 32 KiB limit',
+            code: 'payload_too_large',
+          });
+          return;
+        }
+
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+
+        const response = await bridge.setSessionRuntimeContext(
+          sessionId,
+          entries as Record<string, string>,
+          clientId !== undefined ? { clientId } : undefined,
+        );
+        res.status(200).json(response);
+      },
+    ),
+  );
 }

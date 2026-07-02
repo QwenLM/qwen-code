@@ -298,6 +298,7 @@ describe('qwen serve — capabilities envelope', () => {
       'permission_mediation',
       'non_blocking_prompt',
       'session_language',
+      'session_runtime_context',
       'session_rewind',
       'workspace_hooks',
       'session_hooks',
