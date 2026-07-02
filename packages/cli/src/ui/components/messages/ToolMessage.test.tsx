@@ -429,6 +429,7 @@ describe('<ToolMessage />', () => {
         status: 'running' | 'completed' | 'failed' | 'cancelled';
         pendingConfirmation?: object;
         terminateReason?: string;
+        executionSummary?: object;
       };
       isFocused?: boolean;
       isPending?: boolean;
@@ -499,6 +500,87 @@ describe('<ToolMessage />', () => {
       // No approval prompt — completed subagents don't sit on the
       // focus lock.
       expect(output).not.toContain('MockApprovalPrompt');
+    });
+
+    it('counts successful agent-tool calls as sub-agents in the summary tail', () => {
+      // Direct children = successful AgentTool calls from the per-tool
+      // usage stats. The failed call (a guard-blocked spawn) must not
+      // count.
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'delegator',
+              taskDescription: 'Fan out work',
+              taskPrompt: 'Fan out',
+              status: 'completed',
+              executionSummary: {
+                totalToolCalls: 6,
+                totalDurationMs: 22_000,
+                outputTokens: 3100,
+                toolUsage: [
+                  {
+                    name: 'agent',
+                    count: 3,
+                    success: 2,
+                    failure: 1,
+                    totalDurationMs: 0,
+                    averageDurationMs: 0,
+                  },
+                  {
+                    name: 'read_file',
+                    count: 3,
+                    success: 3,
+                    failure: 0,
+                    totalDurationMs: 0,
+                    averageDurationMs: 0,
+                  },
+                ],
+              },
+            },
+            isPending: false,
+          })}
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('6 tools');
+      expect(output).toContain('2 sub-agents');
+    });
+
+    it('renders no sub-agent segment when the agent spawned none', () => {
+      const { lastFrame } = renderWithContext(
+        <ToolMessage
+          {...buildProps({
+            data: {
+              subagentName: 'loner',
+              taskDescription: 'Did it all alone',
+              taskPrompt: 'Solo',
+              status: 'completed',
+              executionSummary: {
+                totalToolCalls: 2,
+                totalDurationMs: 4_000,
+                outputTokens: 500,
+                toolUsage: [
+                  {
+                    name: 'read_file',
+                    count: 2,
+                    success: 2,
+                    failure: 0,
+                    totalDurationMs: 0,
+                    averageDurationMs: 0,
+                  },
+                ],
+              },
+            },
+            isPending: false,
+          })}
+        />,
+        StreamingState.Idle,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('2 tools');
+      expect(output).not.toContain('sub-agent');
     });
 
     it('live (`isPending`) terminal subagent → renders summary inline (panel snapshot already dropped)', () => {

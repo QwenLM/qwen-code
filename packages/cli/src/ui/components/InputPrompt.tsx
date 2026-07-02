@@ -58,7 +58,11 @@ import {
   useBackgroundTaskViewState,
   useBackgroundTaskViewActions,
 } from '../contexts/BackgroundTaskViewContext.js';
-import { isLiveAgentPanelVisibleEntry } from './background-view/liveAgentPanelVisibility.js';
+import {
+  isLiveAgentPanelVisibleEntry,
+  LIVE_AGENT_PANEL_MAX_ROWS,
+} from './background-view/liveAgentPanelVisibility.js';
+import { panelDisplayOrder } from './background-view/agent-forest.js';
 import { FEEDBACK_DIALOG_KEYS } from '../FeedbackDialog.js';
 import { BaseTextInput } from './BaseTextInput.js';
 import type { RenderLineOptions } from './BaseTextInput.js';
@@ -231,8 +235,17 @@ export const InputPrompt: React.FC<InputPromptProps> = ({
     setPillFocused: setBgPillFocused,
   } = useBackgroundTaskViewActions();
   const hasAgents = agents.size > 0;
+  // panelDisplayOrder + the maxRows tail-window mirror LiveAgentPanel's
+  // rendered rows exactly (oldest-first, nested agents grouped under
+  // their parent, windowed to the last LIVE_AGENT_PANEL_MAX_ROWS) so
+  // `livePanelSelectedIndex - 1` indexes the same agent the user sees
+  // highlighted. Filtering alone (snapshot order, newest-first, unsliced)
+  // opened the wrong agent's detail on Enter.
   const getVisibleBgAgents = useCallback(
-    () => bgEntries.filter((e) => isLiveAgentPanelVisibleEntry(e, Date.now())),
+    () =>
+      panelDisplayOrder(
+        bgEntries.filter((e) => isLiveAgentPanelVisibleEntry(e, Date.now())),
+      ).slice(-LIVE_AGENT_PANEL_MAX_ROWS),
     [bgEntries],
   );
   const hasActiveToolConfirmation = useMemo(
