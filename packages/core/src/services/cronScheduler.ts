@@ -32,7 +32,7 @@ export const DEFAULT_RECURRING_MAX_AGE_DAYS = 7;
 // a forgotten schedule keeps firing). Age is evaluated at fire time — an
 // aged job fires one final time, then is deleted. Overridable per scheduler
 // instance (see the constructor); Infinity disables expiry.
-export const DEFAULT_RECURRING_MAX_AGE_MS =
+const DEFAULT_RECURRING_MAX_AGE_MS =
   DEFAULT_RECURRING_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
 // Recurring: up to 10% of period, capped at 15 minutes.
 const MAX_RECURRING_JITTER_MS = 15 * 60 * 1000;
