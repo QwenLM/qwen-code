@@ -39,14 +39,14 @@ jobs:
 
   authorize:
     needs: ['precheck-pr']
-    # Gate the principal on having write+ permission before any agent runs:
-    #   - pull_request_target / `/triage` comment -> gates triage (read-only),
-    #     keyed on the PR author / the commenter respectively.
+    # Gate manual/high-risk entry points on write+ permission before any agent
+    # runs:
+    #   - automatic pull_request_target triage is allowed after the fork PR
+    #     precheck above (or for same-repo PRs).
+    #   - `/triage` comments are keyed on the commenter.
     #   - `/tmux` comment / `tmux_pr` dispatch -> gates real-user testing, which
     #     EXECUTES the PR author's code, so it is keyed on the PR author (whose
     #     code runs), not the commenter/dispatcher (see principal resolution).
-    # Replaces the old eligibility checks based on same-repo PRs and comment
-    # author_association, so fork PRs by trusted authors are covered.
     # The `issues` and `workflow_dispatch`-with-`number` (triage) triggers need
     # no gate: triage is read-only and dispatch already requires write to
     # invoke. But `tmux_pr` dispatch runs the *PR author's* code, not the
@@ -83,15 +83,18 @@ jobs:
           # content; it only reads event metadata and calls one read API.
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           EVENT_NAME: '${{ github.event_name }}'
-          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
           COMMENT_USER: '${{ github.event.comment.user.login }}'
           ISSUE_AUTHOR: '${{ github.event.issue.user.login }}'
           COMMENT_BODY: '${{ github.event.comment.body }}'
           TMUX_PR: '${{ github.event.inputs.tmux_pr }}'
         run: |-
           set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            echo "Automatic PR triage allowed after precheck." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           case "$EVENT_NAME" in
-            pull_request_target) principal="$PR_AUTHOR" ;;
             issue_comment)
               # /tmux executes the PR AUTHOR's code, so gate on the author's
               # permission (whose code runs), not the commenter's. /triage only
@@ -139,7 +142,7 @@ jobs:
           esac
 
   triage:
-    needs: ['authorize', 'precheck-pr']
+    needs: ['authorize']
     timeout-minutes: 30
     concurrency:
       # GitHub evaluates concurrency before the job `if`, but after `needs`.
@@ -150,8 +153,7 @@ jobs:
           (
             (github.event_name == 'pull_request_target' &&
              (github.event.pull_request.draft == true ||
-              (needs.authorize.outputs.should_run != 'true' &&
-               needs.precheck-pr.outputs.decision != 'allow_triage'))) ||
+              needs.authorize.outputs.should_run != 'true')) ||
             (github.event_name == 'issue_comment' &&
              needs.authorize.outputs.should_run != 'true')
           ) &&
@@ -162,12 +164,10 @@ jobs:
         ${{
           github.event_name == 'issues' ||
           github.event_name == 'workflow_dispatch' ||
-          (github.event_name == 'pull_request_target' &&
-           github.event.pull_request.draft == false &&
-           (needs.authorize.outputs.should_run == 'true' ||
-            needs.precheck-pr.outputs.decision == 'allow_triage')) ||
-          (github.event_name == 'issue_comment' &&
-           startsWith(github.event.comment.body, '@qwen-code /triage') &&
+          (((github.event_name == 'pull_request_target' &&
+             github.event.pull_request.draft == false) ||
+            (github.event_name == 'issue_comment' &&
+             startsWith(github.event.comment.body, '@qwen-code /triage'))) &&
            needs.authorize.outputs.should_run == 'true')
         }}
     # Triage is the read-only analysis agent (same security profile as
@@ -180,26 +180,21 @@ jobs:
     runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
-    # always() so the job still evaluates when the upstream `authorize` or
-    # `precheck-pr` job is skipped (issues / workflow_dispatch paths need no
-    # permission gate; same-repo PRs skip precheck).
-    # For pull_request_target: run if the author has write permission OR the
-    # fork PR passed the safety precheck. Triage is read-only (checks out
-    # trusted base code, reads PR via API), so precheck pass is sufficient.
-    # For /triage comments: still require write permission on the commenter.
+    # always() so the job still evaluates when the upstream `authorize` job is
+    # skipped (issues / workflow_dispatch paths, which need no permission gate).
     if: >-
       always() && (
         github.event_name == 'issues' ||
         (github.event_name == 'workflow_dispatch' &&
          github.event.inputs.number != '' &&
          github.event.inputs.tmux_pr == '') ||
-        (github.event_name == 'pull_request_target' &&
-         github.event.pull_request.draft == false &&
-         (needs.authorize.outputs.should_run == 'true' ||
-          needs.precheck-pr.outputs.decision == 'allow_triage')) ||
-        (github.event_name == 'issue_comment' &&
-         startsWith(github.event.comment.body, '@qwen-code /triage') &&
-         needs.authorize.outputs.should_run == 'true')
+        (
+          ((github.event_name == 'pull_request_target' &&
+            github.event.pull_request.draft == false) ||
+           (github.event_name == 'issue_comment' &&
+            startsWith(github.event.comment.body, '@qwen-code /triage'))) &&
+          needs.authorize.outputs.should_run == 'true'
+        )
       )
     steps:
       - name: 'Acknowledge triage request'
