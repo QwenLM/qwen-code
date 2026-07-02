@@ -24,6 +24,20 @@ function step(name) {
 }
 
 describe('qwen-triage tmux workflow', () => {
+  it('does not require fork PR authors to have write permission for automatic triage', () => {
+    const authorizeStep = step('Check principal write permission');
+
+    expect(authorizeStep).toContain(
+      'if [ "$EVENT_NAME" = "pull_request_target" ]; then',
+    );
+    expect(authorizeStep).toContain(
+      'echo "should_run=true" >> "$GITHUB_OUTPUT"',
+    );
+    expect(authorizeStep).not.toContain(
+      'pull_request_target) principal="$PR_AUTHOR"',
+    );
+  });
+
   it('escapes embedded tmux artifacts without bash pattern replacement ampersands', () => {
     const postStep = step('Post tmux result comment');
 

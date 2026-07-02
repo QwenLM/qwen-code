@@ -177,6 +177,20 @@ describe('qwen resolve workflow', () => {
       ? workflow.slice(resolveJobStart)
       : workflow.slice(resolveJobStart, resolveJobStart + 1 + nextJob);
   const reviewJob = job(workflow, 'review-pr');
+  const authorizeJob = job(workflow, 'authorize');
+
+  it('does not require fork PR authors to have write permission for automatic review', () => {
+    const authorizeStep = step(
+      authorizeJob,
+      'Check principal write permission',
+    );
+
+    expect(authorizeStep).toContain('pull_request_target)');
+    expect(authorizeStep).toContain(
+      'echo "should_review=true" >> "$GITHUB_OUTPUT"',
+    );
+    expect(authorizeStep).not.toContain('principal="$PR_AUTHOR"');
+  });
 
   it('keeps the authorization and scope guards on resolve-pr', () => {
     // /resolve must require write+ permission before any credentialed push.

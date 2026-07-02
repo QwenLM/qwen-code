@@ -37,14 +37,14 @@ jobs:
 
   authorize:
     needs: ['precheck-pr']
-    # Gate the principal on having write+ permission before any agent runs:
-    #   - pull_request_target / `/triage` comment -> gates triage (read-only),
-    #     keyed on the PR author / the commenter respectively.
+    # Gate manual/high-risk entry points on write+ permission before any agent
+    # runs:
+    #   - automatic pull_request_target triage is allowed after the fork PR
+    #     precheck above (or for same-repo PRs).
+    #   - `/triage` comments are keyed on the commenter.
     #   - `/tmux` comment / `tmux_pr` dispatch -> gates real-user testing, which
     #     EXECUTES the PR author's code, so it is keyed on the PR author (whose
     #     code runs), not the commenter/dispatcher (see principal resolution).
-    # Replaces the old eligibility checks based on same-repo PRs and comment
-    # author_association, so fork PRs by trusted authors are covered.
     # The `issues` and `workflow_dispatch`-with-`number` (triage) triggers need
     # no gate: triage is read-only and dispatch already requires write to
     # invoke. But `tmux_pr` dispatch runs the *PR author's* code, not the
@@ -81,15 +81,18 @@ jobs:
           # content; it only reads event metadata and calls one read API.
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           EVENT_NAME: '${{ github.event_name }}'
-          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
           COMMENT_USER: '${{ github.event.comment.user.login }}'
           ISSUE_AUTHOR: '${{ github.event.issue.user.login }}'
           COMMENT_BODY: '${{ github.event.comment.body }}'
           TMUX_PR: '${{ github.event.inputs.tmux_pr }}'
         run: |-
           set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            echo "Automatic PR triage allowed after precheck." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           case "$EVENT_NAME" in
-            pull_request_target) principal="$PR_AUTHOR" ;;
             issue_comment)
               # /tmux executes the PR AUTHOR's code, so gate on the author's
               # permission (whose code runs), not the commenter's. /triage only
