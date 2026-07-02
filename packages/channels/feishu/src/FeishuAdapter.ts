@@ -85,10 +85,28 @@ const DEDUP_TTL_MS = 5 * 60 * 1000;
 /** Minimum interval between card updates (ms) to avoid API rate limiting. */
 const CARD_UPDATE_INTERVAL_MS = 1500;
 
-/** Every status/label line a card can render; must cover statusLabelFor,
- *  stopLabelFor, and the truncation notice. */
-const FEISHU_STATUS_LABELS =
-  '(?:(?:生成中|运行中)(?:\\.\\.\\.)?|已完成|已取消|已失败，请重试|已停止生成|停止失败，请重试|内容过长，已截断)';
+const FEISHU_RUNNING_STATUS_LABEL = '运行中...';
+const FEISHU_STOPPED_STATUS_LABEL = '已停止生成';
+const FEISHU_STOP_FAILED_STATUS_LABEL = '停止失败，请重试';
+const FEISHU_TRUNCATED_STATUS_LABEL = '内容过长，已截断';
+const FEISHU_TERMINAL_STATUS_LABELS: Record<FeishuTerminalStatus, string> = {
+  completed: '已完成',
+  cancelled: '已取消',
+  failed: '已失败，请重试',
+};
+const FEISHU_STATUS_STRINGS = [
+  '生成中...',
+  FEISHU_RUNNING_STATUS_LABEL,
+  FEISHU_TERMINAL_STATUS_LABELS.completed,
+  FEISHU_TERMINAL_STATUS_LABELS.cancelled,
+  FEISHU_TERMINAL_STATUS_LABELS.failed,
+  FEISHU_STOPPED_STATUS_LABEL,
+  FEISHU_STOP_FAILED_STATUS_LABEL,
+  FEISHU_TRUNCATED_STATUS_LABEL,
+] as const;
+const escapeRegExp = (value: string) =>
+  value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+const FEISHU_STATUS_LABELS = `(?:${FEISHU_STATUS_STRINGS.map(escapeRegExp).join('|')})`;
 /** A rendered status block: `---` divider line + `*label*` line,
  *  at line granularity anywhere in the joined card text. */
 const FEISHU_STATUS_BLOCK_RE = new RegExp(
@@ -1064,31 +1082,19 @@ export class FeishuChannel extends ChannelBase {
   }
 
   private statusLabelFor(terminalStatus?: FeishuTerminalStatus): string {
-    switch (terminalStatus) {
-      case 'completed':
-        return '已完成';
-      case 'cancelled':
-        return '已取消';
-      case 'failed':
-        return '已失败，请重试';
-      default:
-        return '运行中...';
-    }
+    return terminalStatus === undefined
+      ? FEISHU_RUNNING_STATUS_LABEL
+      : FEISHU_TERMINAL_STATUS_LABELS[terminalStatus];
   }
 
   private stopLabelFor(
     terminalStatus?: FeishuTerminalStatus,
     userInitiated = false,
   ): string {
-    if (userInitiated) return '已停止生成';
-    switch (terminalStatus) {
-      case 'completed':
-      case 'cancelled':
-      case 'failed':
-        return this.statusLabelFor(terminalStatus);
-      default:
-        return '已停止生成';
+    if (userInitiated || terminalStatus === undefined) {
+      return FEISHU_STOPPED_STATUS_LABEL;
     }
+    return this.statusLabelFor(terminalStatus);
   }
 
   private async finalizeStoppedCardUpdate(
@@ -1715,7 +1721,7 @@ export class FeishuChannel extends ChannelBase {
             cardState.atPrefix || this.msgToSenderName.get(inboundId) || '';
           const stopLabel = cancelSucceeded
             ? this.stopLabelFor(cardState.terminalStatus, wasUserStop)
-            : '停止失败，请重试';
+            : FEISHU_STOP_FAILED_STATUS_LABEL;
           const contentPart = cardState.accumulatedText.trim()
             ? cardState.accumulatedText
             : '';
