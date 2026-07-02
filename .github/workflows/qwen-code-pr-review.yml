@@ -68,6 +68,8 @@ jobs:
       pull-requests: 'read'
       issues: 'write'
     uses: './.github/workflows/qwen-pr-safety-precheck.yml'
+    secrets:
+      CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
 
   ack-review-request:
     # KEEP IN SYNC with review-pr.if (explicit-trigger branches).
