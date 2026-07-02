@@ -29,6 +29,7 @@ export const MEMORY_FRONTMATTER_EXAMPLE: readonly string[] = [
   '```',
 ];
 
+/** Verbose memory-type guidance. See also: {@link CONDENSED_TEAM_GUIDANCE} for the condensed version used in team-scope prompts. */
 export const TYPES_SECTION_INDIVIDUAL: readonly string[] = [
   '## Types of memory',
   '',
@@ -100,6 +101,7 @@ export const TYPES_SECTION_INDIVIDUAL: readonly string[] = [
   '',
 ];
 
+/** Verbose exclusion rules (source of truth). See also: {@link CONDENSED_DO_NOT_SAVE_SECTION} for the condensed version. */
 export const WHAT_NOT_TO_SAVE_SECTION: readonly string[] = [
   '## What NOT to save in memory',
   '',
@@ -116,6 +118,7 @@ export const WHAT_NOT_TO_SAVE_SECTION: readonly string[] = [
 export const MEMORY_DRIFT_CAVEAT =
   '- Memory records can become stale over time. Use memory as context for what was true at a given point in time. Before answering the user or building assumptions based solely on information in memory records, verify that the memory is still correct and up-to-date by reading the current state of the files or resources. If a recalled memory conflicts with current information, trust what you observe now — and update or remove the stale memory rather than acting on it.';
 
+/** Verbose access-timing rules. See also: {@link CONDENSED_WHEN_TO_ACCESS_SECTION} for the condensed version. */
 export const WHEN_TO_ACCESS_SECTION: readonly string[] = [
   '## When to access memories',
   '- When memories seem relevant, or the user references prior-conversation work.',
@@ -389,10 +392,7 @@ export function buildManagedAutoMemoryPrompt(
           '- Do not write duplicate memories. First check if there is an existing memory in any of your memory directories you can update before writing a new one.',
           ...condensedMaintenanceBullets,
           ...(teamSection !== undefined
-            ? [
-                '',
-                ...CONDENSED_TEAM_GUIDANCE,
-              ]
+            ? ['', ...CONDENSED_TEAM_GUIDANCE]
             : []),
         ]
       : [
