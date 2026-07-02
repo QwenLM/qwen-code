@@ -858,6 +858,32 @@ describe('createDaemonWorkspaceService', () => {
       expect(result.skills.map((s) => s.name)).toEqual(['review']);
     });
 
+    it('getWorkspaceSkillsStatus degrades to the idle placeholder when the daemon-local provider throws', async () => {
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_m: string, idle: () => unknown) =>
+          Promise.resolve(idle()),
+        );
+      const workspaceSkillsStatusProvider = vi
+        .fn()
+        .mockRejectedValue(new Error('local enumeration blew up'));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({
+          queryWorkspaceStatus,
+          workspaceSkillsStatusProvider,
+          boundWorkspace: '/ws',
+        }),
+      );
+
+      // A throwing injected provider must not fail the request.
+      const result = await svc.getWorkspaceSkillsStatus(makeCtx());
+
+      expect(workspaceSkillsStatusProvider).toHaveBeenCalledWith('/ws');
+      expect(result.initialized).toBe(false);
+      expect(result.skills).toEqual([]);
+      expect(mockWriteStderrLine).toHaveBeenCalled();
+    });
+
     it('getWorkspaceProvidersStatus uses daemon-local provider when present', async () => {
       const queryWorkspaceStatus = vi
         .fn()

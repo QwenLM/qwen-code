@@ -227,9 +227,18 @@ export function createDaemonWorkspaceService(
       }
       // ...then fall back to daemon-local enumeration, so a child that has not
       // answered even once (e.g. a preheat that times out under `npm run dev`)
-      // still yields the on-disk skills — `/review` included.
+      // still yields the on-disk skills — `/review` included. The provider
+      // handles its own errors, but it is injected, so guard the call too and
+      // degrade to the idle placeholder rather than failing the request —
+      // matching getWorkspaceEnvStatus / getWorkspacePreflightStatus.
       if (workspaceSkillsStatusProvider) {
-        return workspaceSkillsStatusProvider(boundWorkspace);
+        try {
+          return await workspaceSkillsStatusProvider(boundWorkspace);
+        } catch (err) {
+          writeStderrLine(
+            `qwen serve: getWorkspaceSkillsStatus local provider failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
       }
       return status;
     },
