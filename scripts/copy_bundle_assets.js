@@ -173,8 +173,8 @@ function copyRecursiveSync(src, dest) {
 
     const entries = fs.readdirSync(src);
     for (const entry of entries) {
-      // Skip .DS_Store files
-      if (entry === '.DS_Store') {
+      // Skip local noise and tests that should not ship in runtime bundles.
+      if (entry === '.DS_Store' || isTestFile(entry)) {
         continue;
       }
 
@@ -190,4 +190,8 @@ function copyRecursiveSync(src, dest) {
       fs.chmodSync(dest, srcStats.mode);
     }
   }
+}
+
+function isTestFile(fileName) {
+  return fileName.includes('.test.') || fileName.includes('.spec.');
 }

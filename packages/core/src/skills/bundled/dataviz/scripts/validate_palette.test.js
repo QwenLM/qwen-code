@@ -17,6 +17,15 @@ describe('validate_palette', () => {
     expect(result.failures).toEqual([]);
   });
 
+  it('passes a varied categorical palette on a dark chart surface', () => {
+    const result = validatePalette(['#60a5fa', '#fbbf24'], {
+      mode: 'dark',
+    });
+
+    expect(result.status).toBe('PASS');
+    expect(result.failures).toEqual([]);
+  });
+
   it('fails invalid hex colors', () => {
     const result = validatePalette(['#2563eb', 'blue'], { mode: 'light' });
 
@@ -36,6 +45,20 @@ describe('validate_palette', () => {
 
     expect(result.status).toBe('FAIL');
     expect(result.failures.join('\n')).toMatch(/contrast/i);
+  });
+
+  it('fails low-contrast dark marks on a dark chart surface', () => {
+    const result = validatePalette(['#111827', '#1f2937'], { mode: 'dark' });
+
+    expect(result.status).toBe('FAIL');
+    expect(result.failures.join('\n')).toMatch(/contrast/i);
+  });
+
+  it('fails when no colors are provided', () => {
+    const result = validatePalette([], { mode: 'light' });
+
+    expect(result.status).toBe('FAIL');
+    expect(result.failures).toEqual(['No colors provided.']);
   });
 
   it('warns when colorblind simulation makes colors too close', () => {

@@ -5,7 +5,9 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { resolve } from 'node:path';
 import process from 'node:process';
+import { fileURLToPath } from 'node:url';
 
 const MODE_CONFIG = {
   light: {
@@ -26,7 +28,7 @@ const CVD_MATRICES = {
   protanopia: [
     [0.56667, 0.43333, 0],
     [0.55833, 0.44167, 0],
-    [0, 0.24167, 0.75833],
+    [0, 0, 1],
   ],
   deuteranopia: [
     [0.625, 0.375, 0],
@@ -52,6 +54,10 @@ export function validatePalette(input, options = {}) {
       failures: [`Unsupported mode "${mode}". Use "light" or "dark".`],
       warnings,
     };
+  }
+
+  if (input.length === 0) {
+    return { status: 'FAIL', failures: ['No colors provided.'], warnings };
   }
 
   const colors = input.map((value, index) => {
@@ -141,13 +147,10 @@ function normalizeHex(value) {
 }
 
 function applyMatrix(rgb, matrix) {
-  return matrix.map((row) =>
-    clamp255(row[0] * rgb[0] + row[1] * rgb[1] + row[2] * rgb[2]),
-  );
-}
-
-function clamp255(value) {
-  return Math.max(0, Math.min(255, Math.round(value)));
+  const linear = rgb.map(srgbChannelToLinear);
+  return matrix
+    .map((row) => row[0] * linear[0] + row[1] * linear[1] + row[2] * linear[2])
+    .map(linearChannelToSrgb);
 }
 
 function contrastRatio(left, right) {
@@ -159,10 +162,7 @@ function contrastRatio(left, right) {
 }
 
 function relativeLuminance(rgb) {
-  const [r, g, b] = rgb.map((channel) => {
-    const value = channel / 255;
-    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
-  });
+  const [r, g, b] = rgb.map(srgbChannelToLinear);
   return 0.2126 * r + 0.7152 * g + 0.0722 * b;
 }
 
@@ -182,10 +182,7 @@ function rgbToLab(rgb) {
 }
 
 function rgbToXyz(rgb) {
-  const [r, g, b] = rgb.map((channel) => {
-    const value = channel / 255;
-    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
-  });
+  const [r, g, b] = rgb.map(srgbChannelToLinear);
   return [
     r * 0.4124564 + g * 0.3575761 + b * 0.1804375,
     r * 0.2126729 + g * 0.7151522 + b * 0.072175,
@@ -198,10 +195,7 @@ function labPivot(value) {
 }
 
 function rgbToOklch(rgb) {
-  const [r, g, b] = rgb.map((channel) => {
-    const value = channel / 255;
-    return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
-  });
+  const [r, g, b] = rgb.map(srgbChannelToLinear);
 
   const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
   const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
@@ -215,6 +209,18 @@ function rgbToOklch(rgb) {
     l: okL,
     c: Math.sqrt(okA * okA + okB * okB),
   };
+}
+
+function srgbChannelToLinear(channel) {
+  const value = channel / 255;
+  return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4;
+}
+
+function linearChannelToSrgb(channel) {
+  const value = Math.max(0, Math.min(1, channel));
+  const encoded =
+    value <= 0.0031308 ? value * 12.92 : 1.055 * value ** (1 / 2.4) - 0.055;
+  return Math.round(encoded * 255);
 }
 
 function labDistance(left, right) {
@@ -250,11 +256,14 @@ function printResult(result) {
   }
 }
 
-if (process.argv[1] && import.meta.url === `file://${process.argv[1]}`) {
+if (
+  process.argv[1] &&
+  fileURLToPath(import.meta.url) === resolve(process.argv[1])
+) {
   const { palette, mode } = parseArgs(process.argv.slice(2));
   if (!palette) {
     process.stderr.write(
-      'Usage: node validate_palette.js "#2563eb,#d97706,#4d7c0f" --mode light\n',
+      "Usage: node validate_palette.js '#2563eb,#d97706,#4d7c0f' --mode light\n",
     );
     process.exit(2);
   }

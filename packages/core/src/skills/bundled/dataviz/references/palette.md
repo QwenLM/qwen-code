@@ -38,5 +38,5 @@ target, or baseline:
 Run the validator whenever exact mark colors are chosen:
 
 ```bash
-node <skill-base-directory>/scripts/validate_palette.js "#2563eb,#d97706,#4d7c0f" --mode light
+node <skill-base-directory>/scripts/validate_palette.js '#2563eb,#d97706,#4d7c0f' --mode light
 ```

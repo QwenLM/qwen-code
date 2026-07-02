@@ -63,6 +63,11 @@ describe('package asset scripts', () => {
     );
     writeFile(
       rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.test.js',
+      'import { it } from "vitest";\n',
+    );
+    writeFile(
+      rootDir,
       'packages/core/src/skills/bundled/dataviz/references/palette.md',
       '# Palette\n',
     );
@@ -82,6 +87,18 @@ describe('package asset scripts', () => {
         ),
       ),
     ).toBe(true);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'validate_palette.test.js',
+        ),
+      ),
+    ).toBe(false);
     expect(
       existsSync(
         path.join(
