@@ -905,6 +905,40 @@ describe('loadCliConfig', () => {
     vi.restoreAllMocks();
   });
 
+  it('should enable debug file logging when debug mode is enabled', async () => {
+    vi.unstubAllEnvs();
+    delete process.env['QWEN_DEBUG_LOG_FILE'];
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    process.argv = ['node', 'script.js', '--debug'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(process.env['QWEN_DEBUG_LOG_FILE']).toBe('1');
+  });
+
+  it('should preserve explicit debug file logging opt-out', async () => {
+    vi.stubEnv('QWEN_DEBUG_LOG_FILE', '0');
+    process.argv = ['node', 'script.js', '--debug'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(process.env['QWEN_DEBUG_LOG_FILE']).toBe('0');
+  });
+
+  it('should not enable debug file logging outside debug mode', async () => {
+    vi.unstubAllEnvs();
+    delete process.env['QWEN_DEBUG_LOG_FILE'];
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(process.env['QWEN_DEBUG_LOG_FILE']).toBeUndefined();
+  });
+
   it('should reset context file names to QWEN.md and AGENTS.md by default', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();

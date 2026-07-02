@@ -77,7 +77,11 @@ import type {
   ArtifactHostConfig,
   ArtifactOssConfig,
 } from '../tools/artifact/publisher.js';
-import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
+import type {
+  LspClient,
+  LspServiceReinitializeResult,
+  LspStatusSnapshot,
+} from '../lsp/types.js';
 import type { InstructionLoadReason } from '../hooks/types.js';
 import { ApprovalMode } from './approval-mode.js';
 
@@ -4307,7 +4311,7 @@ export class Config {
 
     if (this.lspClient) {
       return {
-        ...this.createLspStatusSnapshot(true),
+        ...this.createLspStatusSnapshot(true, this.lspInitializationError),
         statusUnavailable: true,
       };
     }
@@ -4348,8 +4352,30 @@ export class Config {
     if (this.initialized) {
       throw new Error('Cannot set LSP status after initialization');
     }
+    this.setRuntimeLspInitializationError(error);
+  }
+
+  private setRuntimeLspInitializationError(
+    error: Error | string | undefined,
+  ): void {
     this.lspInitializationError =
       error instanceof Error ? error.message : error;
+  }
+
+  async reinitializeLsp(): Promise<LspServiceReinitializeResult | undefined> {
+    if (!this.isLspEnabled() || !this.lspClient?.reinitialize) {
+      return undefined;
+    }
+    try {
+      const result = await this.lspClient.reinitialize();
+      this.setRuntimeLspInitializationError(undefined);
+      return result;
+    } catch (error) {
+      this.setRuntimeLspInitializationError(
+        error instanceof Error ? error : String(error),
+      );
+      throw error;
+    }
   }
 
   getSessionSubagents(): SubagentConfig[] {

@@ -38,6 +38,9 @@ import { LspServerManager } from './LspServerManager.js';
 import type {
   LspConnectionInterface,
   LspServerHandle,
+  LspServerConfig,
+  LspServiceReinitializeResult,
+  LspSkippedServer,
   LspServerStatus,
   LspStatusSnapshot,
   NativeLspServiceOptions,
@@ -141,7 +144,159 @@ export class NativeLspService {
       extensionConfigs,
       userConfigs,
     );
-    this.serverManager.setServerConfigs(serverConfigs);
+    const { admitted, skipped } = this.filterServerConfigs(
+      serverConfigs,
+      workspaceTrusted,
+    );
+    debugLogger.info(
+      `Discovered ${admitted.length} LSP server config(s): ${formatServerNames(
+        admitted.map((config) => config.name),
+      )}, skipped=${formatServerNames(skipped.map((server) => server.name))}`,
+    );
+    this.serverManager.setServerConfigs(admitted);
+  }
+
+  async reinitialize(): Promise<LspServiceReinitializeResult> {
+    const workspaceTrusted = this.config.isTrustedFolder();
+    debugLogger.info(
+      `Reinitializing LSP servers: workspaceRoot=${this.workspaceRoot}, trusted=${workspaceTrusted}`,
+    );
+    if (this.requireTrustedWorkspace && !workspaceTrusted) {
+      const removed = Array.from(this.serverManager.getHandles().keys());
+      await this.serverManager.stopAll();
+      this.clearDocumentTrackingForServers(removed);
+      const result = {
+        reconcile: {
+          added: [],
+          removed,
+          restarted: [],
+          unchanged: [],
+          failed: [],
+        },
+        skipped: [],
+      };
+      debugLogger.info(
+        `LSP reinitialize result: added=<none>, removed=${formatServerNames(
+          removed,
+        )}, restarted=<none>, unchanged=<none>, failed=<none>, skipped=<none>`,
+      );
+      return result;
+    }
+
+    const userConfigs = await this.configLoader.loadUserConfigsStrict();
+    if (!userConfigs.ok) {
+      throw userConfigs.error;
+    }
+
+    const extensionConfigs = await this.configLoader.loadExtensionConfigs(
+      this.getActiveExtensions(),
+    );
+    const serverConfigs = this.configLoader.mergeConfigs(
+      [],
+      extensionConfigs,
+      userConfigs.configs,
+    );
+    const { admitted, skipped } = this.filterServerConfigs(
+      serverConfigs,
+      workspaceTrusted,
+    );
+    const restartedOpenDocuments = this.snapshotOpenDocuments(
+      admitted.map((config) => config.name),
+    );
+    const reconcile = await this.serverManager.reconcileServerConfigs(admitted);
+    this.clearDocumentTrackingForServers([
+      ...reconcile.removed,
+      ...reconcile.restarted,
+      ...reconcile.failed,
+    ]);
+    await this.replayOpenDocuments(reconcile.restarted, restartedOpenDocuments);
+    debugLogger.info(
+      `LSP reinitialize result: added=${formatServerNames(
+        reconcile.added,
+      )}, removed=${formatServerNames(
+        reconcile.removed,
+      )}, restarted=${formatServerNames(
+        reconcile.restarted,
+      )}, unchanged=${formatServerNames(
+        reconcile.unchanged,
+      )}, failed=${formatServerNames(
+        reconcile.failed,
+      )}, skipped=${formatServerNames(skipped.map((server) => server.name))}`,
+    );
+    return { reconcile, skipped };
+  }
+
+  private filterServerConfigs(
+    configs: LspServerConfig[],
+    workspaceTrusted: boolean,
+  ): { admitted: LspServerConfig[]; skipped: LspSkippedServer[] } {
+    const admitted: LspServerConfig[] = [];
+    const skipped: LspSkippedServer[] = [];
+    for (const config of configs) {
+      if (!workspaceTrusted && config.trustRequired) {
+        debugLogger.warn(
+          `LSP server ${config.name} requires trusted workspace, skipping`,
+        );
+        skipped.push({ name: config.name, reason: 'server_trust_required' });
+        continue;
+      }
+      admitted.push(config);
+    }
+    return { admitted, skipped };
+  }
+
+  private clearDocumentTrackingForServers(serverNames: string[]): void {
+    for (const name of serverNames) {
+      this.openedDocuments.delete(name);
+      this.lastConnections.delete(name);
+    }
+  }
+
+  private snapshotOpenDocuments(
+    serverNames: string[],
+  ): Map<string, Set<string>> {
+    const snapshots = new Map<string, Set<string>>();
+    for (const name of serverNames) {
+      const documents = this.openedDocuments.get(name);
+      if (documents) {
+        snapshots.set(name, new Set(documents));
+      }
+    }
+    return snapshots;
+  }
+
+  private async replayOpenDocuments(
+    serverNames: string[],
+    snapshots: Map<string, Set<string>>,
+  ): Promise<void> {
+    if (
+      serverNames.length === 0 ||
+      !serverNames.some((name) => snapshots.has(name))
+    ) {
+      return;
+    }
+    const readyHandles = new Map(this.getReadyHandles());
+    for (const name of serverNames) {
+      const handle = readyHandles.get(name);
+      const documents = snapshots.get(name);
+      if (!handle || !documents) {
+        continue;
+      }
+      let openedAny = false;
+      for (const uri of documents) {
+        try {
+          openedAny = this.sendDocumentOpen(name, handle, uri) || openedAny;
+        } catch (error) {
+          debugLogger.warn(
+            `Failed to replay document ${uri} for LSP server ${name}:`,
+            error,
+          );
+        }
+      }
+      if (openedAny) {
+        await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
+      }
+    }
   }
 
   private getActiveExtensions(): Extension[] {
@@ -165,6 +320,8 @@ export class NativeLspService {
    */
   async stop(): Promise<void> {
     await this.serverManager.stopAll();
+    this.openedDocuments.clear();
+    this.lastConnections.clear();
   }
 
   /**
@@ -286,15 +443,33 @@ export class NativeLspService {
     if (lastConnection && lastConnection !== handle.connection) {
       this.openedDocuments.delete(serverName);
     }
-    this.lastConnections.set(serverName, handle.connection);
 
+    if (!this.sendDocumentOpen(serverName, handle, uri)) {
+      return false;
+    }
+
+    // Wait for the LSP server to process the newly opened document.
+    // Without this delay, requests sent immediately after didOpen may return
+    // empty results because the server hasn't finished analyzing the file.
+    await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
+
+    return true;
+  }
+
+  private sendDocumentOpen(
+    serverName: string,
+    handle: LspServerHandle & { connection: LspConnectionInterface },
+    uri: string,
+  ): boolean {
     if (!uri.startsWith('file://')) {
       return false;
     }
+
     const openedForServer = this.openedDocuments.get(serverName);
     if (openedForServer?.has(uri)) {
       return false;
     }
+    this.lastConnections.set(serverName, handle.connection);
 
     let filePath: string;
     try {
@@ -333,11 +508,6 @@ export class NativeLspService {
     const nextOpened = openedForServer ?? new Set<string>();
     nextOpened.add(uri);
     this.openedDocuments.set(serverName, nextOpened);
-
-    // Wait for the LSP server to process the newly opened document.
-    // Without this delay, requests sent immediately after didOpen may return
-    // empty results because the server hasn't finished analyzing the file.
-    await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
 
     return true;
   }
@@ -1407,4 +1577,8 @@ export class NativeLspService {
           : '';
     return message.includes('No Project');
   }
+}
+
+function formatServerNames(names: readonly string[]): string {
+  return names.length === 0 ? '<none>' : names.join(',');
 }
