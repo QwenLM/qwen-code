@@ -185,6 +185,53 @@ describe('TelegramChannel', () => {
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
   });
 
+  it('keeps typing active until every session in the chat reaches terminal state', () => {
+    const channel = createChannel();
+    const bot = installFakeBot(channel);
+
+    const baseEvent = {
+      channelName: 'telegram',
+      chatId: 'chat-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:telegram', displayName: 'telegram' },
+      memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
+    } satisfies Omit<LifecycleBase, 'sessionId'>;
+
+    channel.emitLifecycle({
+      ...baseEvent,
+      sessionId: 'session-1',
+      type: 'started',
+    });
+    channel.emitLifecycle({
+      ...baseEvent,
+      sessionId: 'session-2',
+      type: 'started',
+    });
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(2);
+
+    channel.emitLifecycle({
+      ...baseEvent,
+      sessionId: 'session-1',
+      type: 'completed',
+    });
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(3);
+
+    channel.emitLifecycle({
+      ...baseEvent,
+      sessionId: 'session-2',
+      type: 'cancelled',
+      reason: 'cancel_command',
+    });
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(3);
+  });
+
   it('treats typing status API failures as best-effort', () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);

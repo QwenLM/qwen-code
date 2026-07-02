@@ -276,6 +276,7 @@ export class TelegramChannel extends ChannelBase {
 
   /** Per-chat typing interval — repeats every 4s since Telegram expires it after 5s. */
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
+  private activeTypingSessions = new Map<string, Set<string>>();
 
   private sendTyping(chatId: string): void {
     try {
@@ -285,7 +286,10 @@ export class TelegramChannel extends ChannelBase {
     }
   }
 
-  private startTyping(chatId: string): void {
+  private startTyping(chatId: string, sessionId = chatId): void {
+    const sessions = this.activeTypingSessions.get(chatId) ?? new Set();
+    sessions.add(sessionId);
+    this.activeTypingSessions.set(chatId, sessions);
     if (this.typingIntervals.has(chatId)) return;
     this.sendTyping(chatId);
     this.typingIntervals.set(
@@ -294,7 +298,13 @@ export class TelegramChannel extends ChannelBase {
     );
   }
 
-  private stopTyping(chatId: string): void {
+  private stopTyping(chatId: string, sessionId = chatId): void {
+    const sessions = this.activeTypingSessions.get(chatId);
+    if (sessions) {
+      sessions.delete(sessionId);
+      if (sessions.size > 0) return;
+      this.activeTypingSessions.delete(chatId);
+    }
     const interval = this.typingIntervals.get(chatId);
     if (!interval) return;
     clearInterval(interval);
@@ -303,7 +313,7 @@ export class TelegramChannel extends ChannelBase {
 
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     if (event.type === 'started') {
-      this.startTyping(event.chatId);
+      this.startTyping(event.chatId, event.sessionId);
       return;
     }
     if (
@@ -311,16 +321,16 @@ export class TelegramChannel extends ChannelBase {
       event.type === 'cancelled' ||
       event.type === 'failed'
     ) {
-      this.stopTyping(event.chatId);
+      this.stopTyping(event.chatId, event.sessionId);
     }
   }
 
-  protected override onPromptStart(chatId: string): void {
-    this.startTyping(chatId);
+  protected override onPromptStart(chatId: string, sessionId?: string): void {
+    this.startTyping(chatId, sessionId);
   }
 
-  protected override onPromptEnd(chatId: string): void {
-    this.stopTyping(chatId);
+  protected override onPromptEnd(chatId: string, sessionId?: string): void {
+    this.stopTyping(chatId, sessionId);
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -366,6 +376,7 @@ export class TelegramChannel extends ChannelBase {
       clearInterval(interval);
     }
     this.typingIntervals.clear();
+    this.activeTypingSessions.clear();
     this.bot.stop();
   }
 
