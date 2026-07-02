@@ -4961,7 +4961,11 @@ describe('ChannelBase', () => {
       const eventTypes = ch.taskEvents.map((event) => event.type);
       expect(eventTypes).not.toContain('text_chunk');
       expect(eventTypes).not.toContain('completed');
-      expect(ch.responseChunks).toEqual([]);
+      // onResponseChunk stays live during the pending window — adapters
+      // accumulate display state and gate rendering on their own stop flags.
+      expect(ch.responseChunks).toEqual([
+        { chatId: 'chat1', chunk: 'late part', sessionId },
+      ]);
       resolveCancel();
       await Promise.all([prompt, cancel]);
 
@@ -5710,6 +5714,53 @@ describe('ChannelBase', () => {
       expect(ch.sent.map((message) => message.text).join('\n')).toContain(
         'before during after',
       );
+    });
+
+    it('never sends held block-streaming chunks when the pending cancel succeeds', async () => {
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let resolveCancel!: () => void;
+      const pendingCancel = new Promise<void>((resolve) => {
+        resolveCancel = resolve;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+
+      const ch = createChannel({
+        blockStreaming: 'on',
+        blockStreamingChunk: { minChars: 5, maxChars: 10 },
+        blockStreamingCoalesce: { idleMs: 500 },
+      });
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      // Far past every send threshold — pushing this into the BlockStreamer
+      // during the pending window would emit a block the cancel can't recall.
+      (bridge as unknown as EventEmitter).emit(
+        'textChunk',
+        's-1',
+        'paragraph one.\n\nparagraph two.\n\n',
+      );
+      resolveCancel();
+      await cancel;
+      resolvePrompt('paragraph one.\n\nparagraph two.');
+      await prompt;
+
+      expect(ch.sent).toEqual([
+        { chatId: 'chat1', text: 'Cancelled current request.' },
+      ]);
+      expect(
+        ch.taskEvents.filter((event) => event.type === 'text_chunk'),
+      ).toEqual([]);
     });
   });
 
@@ -7974,11 +8025,19 @@ describe('ChannelBase', () => {
       expect(ch.taskEvents).toEqual([
         expect.objectContaining({ type: 'started', messageId: 'job-1' }),
       ]);
-      expect(ch.responseChunks).toEqual([]);
+      // onResponseChunk stays live during the pending window — adapters
+      // accumulate display state and gate rendering on their own stop flags.
+      expect(ch.responseChunks).toEqual([
+        { chatId: 'chat1', chunk: 'late loop part', sessionId },
+      ]);
       resolveCancel();
       await cancel;
       resolvePrompt('loop response');
       await expect(loopRun).rejects.toThrow('loop cancelled before delivery');
+      // Held chunk is discarded on a successful cancel — no text_chunk event.
+      expect(
+        ch.taskEvents.filter((event) => event.type === 'text_chunk'),
+      ).toEqual([]);
     });
 
     it('emits a terminal lifecycle event when a loop is disabled after the agent response', async () => {

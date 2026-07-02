@@ -97,6 +97,9 @@ type ActivePrompt = {
   cancelRequested?: Promise<boolean>;
   /** Set once response delivery to the platform has begun; past this point a cancel can no longer suppress the turn's output. */
   deliveryStarted?: boolean;
+  /** Set for loop prompts, whose messageId is an internal job id — adapter
+   *  hooks must not receive it (their contract is platform message ids). */
+  loopPrompt?: boolean;
   done: Promise<void>;
   resolve: () => void;
   stopStreaming?: () => void;
@@ -561,6 +564,7 @@ export abstract class ChannelBase {
         resolve: doneResolve,
         chatId: job.target.chatId,
         messageId: job.id,
+        loopPrompt: true,
       };
       this.activePrompts.set(sessionId, promptState);
       this.emitTaskLifecycle({
@@ -569,26 +573,38 @@ export abstract class ChannelBase {
       });
       // Guarded: an adapter indicator failure must not orphan the started
       // event (no terminal) or leak the activePrompts entry.
+      // No messageId: the hook contract passes INBOUND platform message ids,
+      // and adapters act on them (cards, reactions) — a loop job id would
+      // collide. Lifecycle events still carry job.id for correlation.
       try {
-        this.onPromptStart(job.target.chatId, sessionId, job.id);
+        this.onPromptStart(job.target.chatId, sessionId);
       } catch (err) {
         process.stderr.write(
           `[${this.name}] onPromptStart threw in loop ${job.id} for session ${sessionId}: ${this.lifecycleError(err)}\n`,
         );
       }
 
-      const onChunk = (sid: string, chunk: string) => {
-        if (
-          sid === sessionId &&
-          !promptState.cancelled &&
-          !promptState.cancelPending
-        ) {
+      // Same hold-and-replay contract as handleInbound's onChunk: text_chunk
+      // stays out of the transcript while a cancel is pending; onResponseChunk
+      // stays live (adapters gate visible updates on their own stop state).
+      const heldChunks: string[] = [];
+      const releaseHeldChunks = () => {
+        for (const held of heldChunks.splice(0)) {
           this.emitTaskLifecycle({
             ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
             type: 'text_chunk',
-            chunk,
+            chunk: held,
           });
-          this.onResponseChunk(job.target.chatId, chunk, sessionId);
+        }
+      };
+      const onChunk = (sid: string, chunk: string) => {
+        if (sid !== sessionId || promptState.cancelled) {
+          return;
+        }
+        this.onResponseChunk(job.target.chatId, chunk, sessionId);
+        heldChunks.push(chunk);
+        if (!promptState.cancelPending) {
+          releaseHeldChunks();
         }
       };
       const promptBridge = this.bridge;
@@ -610,6 +626,7 @@ export abstract class ChannelBase {
             'cancel_command',
           );
         }
+        releaseHeldChunks();
         if (options.shouldContinue && !(await options.shouldContinue())) {
           throw new ChannelLoopSkippedError('loop dropped before delivery');
         }
@@ -684,7 +701,7 @@ export abstract class ChannelBase {
         const stillCurrent = this.activePrompts.get(sessionId) === promptState;
         if (!promptState.clearEvicted) {
           try {
-            this.onPromptEnd(job.target.chatId, sessionId, job.id);
+            this.onPromptEnd(job.target.chatId, sessionId);
           } catch (err) {
             process.stderr.write(
               `[${this.name}] onPromptEnd threw in loop ${job.id} for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
@@ -1064,7 +1081,11 @@ export abstract class ChannelBase {
               // onPromptEnd anyway. Letting the purge proceed makes the turn
               // non-current, so the clearEvicted guard then skips correctly.
               try {
-                this.onPromptEnd(active.chatId, id, active.messageId);
+                this.onPromptEnd(
+                  active.chatId,
+                  id,
+                  active.loopPrompt ? undefined : active.messageId,
+                );
               } catch (err) {
                 process.stderr.write(
                   `[${this.name}] onPromptEnd threw during /clear eviction for session ${id}: ${err instanceof Error ? err.message : err}\n`,
@@ -2564,21 +2585,37 @@ export abstract class ChannelBase {
         : null;
       promptState.stopStreaming = () => streamer?.stop();
 
+      // Chunks arriving while a cancel is PENDING are held here: pushing them
+      // to the BlockStreamer could send a block the cancel can't recall, and
+      // emitting text_chunk would put content in the transcript the user may
+      // never receive. On a failed cancel they're replayed; on success,
+      // discarded. onResponseChunk stays live during the window — adapters
+      // accumulate display state and gate visible updates on their own
+      // stop/cancelling flags, so suppressing it would leave a permanent hole
+      // in adapter-rendered output when the cancel fails.
+      const heldChunks: string[] = [];
+      const releaseHeldChunks = () => {
+        for (const held of heldChunks.splice(0)) {
+          this.emitTaskLifecycle({
+            ...this.lifecycleBase(
+              envelope.chatId,
+              sessionId,
+              envelope.messageId,
+            ),
+            type: 'text_chunk',
+            chunk: held,
+          });
+          streamer?.push(held);
+        }
+      };
       const onChunk = (sid: string, chunk: string) => {
-        if (sid === sessionId && !promptState.cancelled) {
-          if (!promptState.cancelPending) {
-            this.emitTaskLifecycle({
-              ...this.lifecycleBase(
-                envelope.chatId,
-                sessionId,
-                envelope.messageId,
-              ),
-              type: 'text_chunk',
-              chunk,
-            });
-            this.onResponseChunk(envelope.chatId, chunk, sessionId);
-          }
-          streamer?.push(chunk);
+        if (sid !== sessionId || promptState.cancelled) {
+          return;
+        }
+        this.onResponseChunk(envelope.chatId, chunk, sessionId);
+        heldChunks.push(chunk);
+        if (!promptState.cancelPending) {
+          releaseHeldChunks();
         }
       };
       const promptBridge = this.bridge;
@@ -2591,6 +2628,9 @@ export abstract class ChannelBase {
         });
 
         await this.settleCancelRequested(promptState);
+        if (!promptState.cancelled) {
+          releaseHeldChunks();
+        }
 
         // If cancelled, skip sending the response
         if (!promptState.cancelled && response) {
