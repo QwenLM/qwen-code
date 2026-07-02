@@ -268,11 +268,20 @@ describe('package scripts', () => {
     }
 
     const publishJob = getWorkflowJob(workflow, 'publish');
+    const gitConfigStep = getWorkflowStep(publishJob, 'Configure Git User');
+    const commitStep = getWorkflowStep(
+      publishJob,
+      'Commit and Conditionally Push package versions',
+    );
     const buildStep = getWorkflowStep(
       publishJob,
       'Build Bundle and Prepare Package',
     );
 
+    expect(gitConfigStep).toContain('git config core.hooksPath .husky');
+    expect(publishJob.indexOf(gitConfigStep)).toBeLessThan(
+      publishJob.indexOf(commitStep),
+    );
     expect(buildStep).toContain('npm run build\n          npm run bundle');
   });
 });
