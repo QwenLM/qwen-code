@@ -361,6 +361,38 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('rejects trusted published file urls that resolve outside through symlinks', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-published-file-symlink',
+      workspaceCwd: workspace,
+    });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      await fs.writeFile(path.join(outside, 'secret.html'), 'secret');
+      await fs.symlink(
+        path.join(outside, 'secret.html'),
+        path.join(workspace, 'published-link.html'),
+      );
+
+      await expect(
+        store.upsertMany(
+          [
+            {
+              title: 'Escaping link',
+              storage: 'published',
+              managedId: 'escaping-link',
+              url: pathToFileURL(path.join(workspace, 'published-link.html'))
+                .href,
+            },
+          ],
+          { strict: true, trustedPublisher: true },
+        ),
+      ).rejects.toMatchObject({ field: 'url' });
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it('evicts non-retained old artifacts before client-retained artifacts', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's3',
@@ -686,6 +718,13 @@ describe('SessionArtifactStore', () => {
     await expect(
       store.upsertMany(
         [{ title: '<img src=x onerror=alert(1)>', url: 'https://example.com' }],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'title' });
+
+    await expect(
+      store.upsertMany(
+        [{ title: 'onload=alert(1)', url: 'https://example.com/onload' }],
         { strict: true },
       ),
     ).rejects.toMatchObject({ field: 'title' });
@@ -1027,6 +1066,38 @@ describe('SessionArtifactStore', () => {
     } finally {
       await fs.rm(outside, { recursive: true, force: true });
     }
+  });
+
+  it('marks dangling symlinks that point inside the workspace as missing', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's6-dangling-internal-symlink',
+      workspaceCwd: workspace,
+    });
+    await fs.symlink(
+      'missing.txt',
+      path.join(workspace, 'internal-missing.txt'),
+    );
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Missing internal link',
+            workspacePath: 'internal-missing.txt',
+          },
+        ],
+        { strict: true },
+      ),
+    ).resolves.toMatchObject({
+      changes: [
+        {
+          artifact: {
+            status: 'missing',
+            workspacePath: 'internal-missing.txt',
+          },
+        },
+      ],
+    });
   });
 
   it('clears size when a workspace artifact becomes missing', async () => {
