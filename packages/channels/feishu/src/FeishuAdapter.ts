@@ -568,9 +568,10 @@ export class FeishuChannel extends ChannelBase {
     let text = lines.join('\n').trim();
     // Strip lifecycle status labels
     text = text.replace(
-      /\n---\n\*(?:(?:生成中|运行中)(?:\.\.\.)?|已完成|已取消|已失败，请重试|已停止生成)\*$/,
+      /\n---\n(?:\*内容过长，已截断\*\n)?\*(?:(?:生成中|运行中)(?:\.\.\.)?|已完成|已取消|已失败，请重试|已停止生成)\*$/,
       '',
     );
+    text = text.replace(/\n---\n\*内容过长，已截断\*$/, '');
     // Strip greeting prefix like "好的，<at id=xxx></at>\n\n"
     text = text.replace(/^好的，<at[^>]*><\/at>\s*\n*/, '');
     return text.trim() || undefined;
@@ -1211,9 +1212,10 @@ export class FeishuChannel extends ChannelBase {
     if (cardState?.created) {
       const updated = await this.updateCard(
         cardState.messageId,
-        `${displayText}${completedSuffix}`,
+        displayText,
         true,
         inboundMsgId,
+        completedLabel,
       );
       if (
         await this.finalizeStoppedCardUpdate(inboundMsgId, cardState, chatId)
@@ -1223,7 +1225,7 @@ export class FeishuChannel extends ChannelBase {
       if (!updated) {
         // Fallback: try without tables (card table number limit, code-fence aware)
         const noTableText = this.stripTables(
-          `${displayText}${completedSuffix}`,
+          displayText,
           '(表格内容请查看原文)',
         );
         const retried = await this.updateCard(
@@ -1231,6 +1233,7 @@ export class FeishuChannel extends ChannelBase {
           noTableText,
           true,
           inboundMsgId,
+          completedLabel,
         );
         if (
           await this.finalizeStoppedCardUpdate(inboundMsgId, cardState, chatId)
@@ -1243,9 +1246,10 @@ export class FeishuChannel extends ChannelBase {
           if (this.countFences(truncated) % 2 === 1) truncated += '\n```';
           const lastResort = await this.updateCard(
             cardState.messageId,
-            truncated + `\n\n---\n*内容过长，已截断*\n*${completedLabel}*`,
+            truncated + '\n\n---\n*内容过长，已截断*',
             true,
             inboundMsgId,
+            completedLabel,
           );
           if (
             await this.finalizeStoppedCardUpdate(
@@ -1283,9 +1287,10 @@ export class FeishuChannel extends ChannelBase {
     if (result.success) {
       const finalized = await this.updateCard(
         result.messageId,
-        `${displayText}${completedSuffix}`,
+        displayText,
         true,
         inboundMsgId,
+        completedLabel,
       );
       if (
         await this.finalizeStoppedCardUpdate(inboundMsgId, cardState, chatId)
@@ -1421,17 +1426,19 @@ export class FeishuChannel extends ChannelBase {
             cs.terminalStatus ?? (cs.cancelling ? 'cancelled' : 'failed');
           const terminalLabel = this.statusLabelFor(terminalStatus);
           const text = cs.accumulatedText
-            ? (atPrefix
-                ? `${atPrefix}\n\n${cs.accumulatedText}`
-                : cs.accumulatedText) +
-              '\n\n---\n' +
-              `*${terminalLabel}*`
-            : (atPrefix ? `${atPrefix}\n\n` : '') + `*${terminalLabel}*`;
+            ? atPrefix
+              ? `${atPrefix}\n\n${cs.accumulatedText}`
+              : cs.accumulatedText
+            : atPrefix || '';
           // Must await updateCard before cleanupCard — updateCard reads
           // msgToQuestion after an await, which cleanupCard would delete.
-          await this.updateCard(cs.messageId, text, true, inboundMsgId).catch(
-            () => {},
-          );
+          await this.updateCard(
+            cs.messageId,
+            text,
+            true,
+            inboundMsgId,
+            terminalLabel,
+          ).catch(() => {});
           this.cleanupCard(inboundMsgId);
         } else {
           // Card creation failed — fallback to plain message delivery

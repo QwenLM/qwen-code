@@ -91,6 +91,7 @@ type ActivePrompt = {
   cancelPending?: boolean;
   cancellationEmitted?: boolean;
   cancelRequested?: Promise<boolean>;
+  loopDeliveryStarted?: boolean;
   done: Promise<void>;
   resolve: () => void;
   stopStreaming?: () => void;
@@ -202,9 +203,9 @@ export abstract class ChannelBase {
       const safeToolCall: SanitizedToolCallEvent = {
         sessionId: event.sessionId,
         toolCallId: event.toolCallId,
-        kind: sanitizeLogText(event.kind, 20),
-        title: sanitizeLogText(event.title, 80),
-        status: sanitizeLogText(event.status, 20),
+        kind: sanitizeLogText(event.kind ?? '', 20),
+        title: sanitizeLogText(event.title ?? '', 80),
+        status: sanitizeLogText(event.status ?? '', 20),
       };
       this.emitTaskLifecycle({
         ...this.lifecycleBase(chatId, event.sessionId, active.messageId),
@@ -266,22 +267,36 @@ export abstract class ChannelBase {
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void;
 
-  protected onTaskLifecycle(_event: ChannelTaskLifecycleEvent): void {}
+  protected onTaskLifecycle(
+    _event: ChannelTaskLifecycleEvent,
+  ): void | Promise<void> {}
 
   private emitTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     try {
-      this.onTaskLifecycle(event);
+      const result = this.onTaskLifecycle(event);
+      if (result && typeof result.catch === 'function') {
+        result.catch((err: unknown) => {
+          this.logTaskLifecycleError(event, err);
+        });
+      }
     } catch (err) {
-      const channel = sanitizeLogText(this.name, 64);
-      const sessionId = sanitizeLogText(event.sessionId, 64);
-      const message = sanitizeLogText(
-        err instanceof Error ? err.message : String(err),
-        256,
-      );
-      process.stderr.write(
-        `[${channel}] onTaskLifecycle threw for ${event.type} session ${sessionId}: ${message}\n`,
-      );
+      this.logTaskLifecycleError(event, err);
     }
+  }
+
+  private logTaskLifecycleError(
+    event: ChannelTaskLifecycleEvent,
+    err: unknown,
+  ): void {
+    const channel = sanitizeLogText(this.name, 64);
+    const sessionId = sanitizeLogText(event.sessionId, 64);
+    const message = sanitizeLogText(
+      err instanceof Error ? err.message : String(err),
+      256,
+    );
+    process.stderr.write(
+      `[${channel}] onTaskLifecycle threw for ${event.type} session ${sessionId}: ${message}\n`,
+    );
   }
 
   private lifecycleError(err: unknown): string {
@@ -294,7 +309,7 @@ export abstract class ChannelBase {
   private emitTaskCancellation(
     active: ActivePrompt,
     sessionId: string,
-    reason: 'cancel_command' | 'clear' | 'steer' | 'timeout',
+    reason: 'cancel_command' | 'clear' | 'steer' | 'timeout' | 'dropped',
   ): void {
     if (active.cancellationEmitted) {
       return;
@@ -575,12 +590,10 @@ export abstract class ChannelBase {
           throw new ChannelLoopSkippedError('loop cancelled before delivery');
         }
         if (response && !promptState.cancelled) {
+          promptState.loopDeliveryStarted = true;
           await this.pushProactive(job.target, response);
         }
         await this.settleCancelRequested(promptState);
-        if (promptState.cancelled) {
-          throw new ChannelLoopSkippedError('loop cancelled before delivery');
-        }
         this.emitTaskLifecycle({
           ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
           type: 'completed',
@@ -589,11 +602,7 @@ export abstract class ChannelBase {
       } catch (err) {
         await this.settleCancelRequested(promptState);
         if (err instanceof ChannelLoopSkippedError && !promptState.cancelled) {
-          this.emitTaskCancellation(
-            promptState,
-            sessionId,
-            this.loopSkippedCancellationReason(err),
-          );
+          this.emitTaskCancellation(promptState, sessionId, 'dropped');
           promptState.cancelled = true;
         }
         if (
@@ -613,12 +622,8 @@ export abstract class ChannelBase {
           const channel = sanitizeLogText(this.name, 64);
           const safeJobId = sanitizeLogText(job.id, 64);
           const safeSessionId = sanitizeLogText(sessionId, 64);
-          const message = sanitizeLogText(
-            err instanceof Error ? err.message : String(err),
-            256,
-          );
           process.stderr.write(
-            `[${channel}] loop ${safeJobId} threw after cancellation for session ${safeSessionId}: ${message}\n`,
+            `[${channel}] loop ${safeJobId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
         }
         throw err;
@@ -739,18 +744,6 @@ export abstract class ChannelBase {
     }
   }
 
-  private loopSkippedCancellationReason(
-    err: ChannelLoopSkippedError,
-  ): 'cancel_command' | 'clear' | 'timeout' {
-    if (err.message.includes('cancelled')) {
-      return 'cancel_command';
-    }
-    if (err.message.includes('cleared') || err.message.includes('dropped')) {
-      return 'clear';
-    }
-    return 'timeout';
-  }
-
   protected requestActivePromptCancellation(
     sessionId: string,
     reason: 'cancel_command' | 'clear' | 'steer' = 'cancel_command',
@@ -809,7 +802,7 @@ export abstract class ChannelBase {
       const cancelled = await Promise.race([
         active.cancelRequested,
         new Promise<boolean>((resolve) => {
-          timer = setTimeout(() => resolve(true), CLEAR_CANCEL_TIMEOUT_MS);
+          timer = setTimeout(() => resolve(false), CLEAR_CANCEL_TIMEOUT_MS);
           timer.unref?.();
         }),
       ]);
@@ -922,6 +915,13 @@ export abstract class ChannelBase {
         );
         return true;
       }
+      if (active.loopDeliveryStarted) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Failed to cancel current request.',
+        );
+        return true;
+      }
 
       const cancelRequested =
         active.cancelRequested ??
@@ -940,6 +940,13 @@ export abstract class ChannelBase {
 
       const cancelSucceeded = await cancelRequested;
       active.cancelPending = false;
+      if (this.activePrompts.get(activeSessionId) !== active) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Failed to cancel current request.',
+        );
+        return true;
+      }
       if (!cancelSucceeded) {
         await this.sendMessage(
           envelope.chatId,
@@ -2504,21 +2511,19 @@ export abstract class ChannelBase {
       promptState.stopStreaming = () => streamer?.stop();
 
       const onChunk = (sid: string, chunk: string) => {
-        if (
-          sid === sessionId &&
-          !promptState.cancelled &&
-          !promptState.cancelPending
-        ) {
-          this.emitTaskLifecycle({
-            ...this.lifecycleBase(
-              envelope.chatId,
-              sessionId,
-              envelope.messageId,
-            ),
-            type: 'text_chunk',
-            chunk,
-          });
-          this.onResponseChunk(envelope.chatId, chunk, sessionId);
+        if (sid === sessionId && !promptState.cancelled) {
+          if (!promptState.cancelPending) {
+            this.emitTaskLifecycle({
+              ...this.lifecycleBase(
+                envelope.chatId,
+                sessionId,
+                envelope.messageId,
+              ),
+              type: 'text_chunk',
+              chunk,
+            });
+            this.onResponseChunk(envelope.chatId, chunk, sessionId);
+          }
           streamer?.push(chunk);
         }
       };

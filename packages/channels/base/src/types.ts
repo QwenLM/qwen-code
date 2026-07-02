@@ -1,7 +1,4 @@
-import type {
-  ChannelAgentBridge,
-  ToolCallEvent,
-} from './ChannelAgentBridge.js';
+import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
 import type { ChannelBase, ChannelBaseOptions } from './ChannelBase.js';
 
 export type SenderPolicy = 'allowlist' | 'pairing' | 'open';
@@ -134,7 +131,7 @@ export interface SessionTarget {
   isGroup?: boolean;
 }
 
-interface ChannelTaskLifecycleBase {
+export interface ChannelTaskLifecycleBase {
   channelName: string;
   chatId: string;
   sessionId: string;
@@ -143,7 +140,13 @@ interface ChannelTaskLifecycleBase {
   memoryScope: ChannelRuntimeMemoryScope;
 }
 
-export type SanitizedToolCallEvent = Omit<ToolCallEvent, 'rawInput'>;
+export interface SanitizedToolCallEvent {
+  sessionId: string;
+  toolCallId: string;
+  kind: string;
+  title: string;
+  status: string;
+}
 
 export type ChannelTaskLifecycleEvent =
   | (ChannelTaskLifecycleBase & { type: 'started' })
@@ -154,7 +157,7 @@ export type ChannelTaskLifecycleEvent =
     })
   | (ChannelTaskLifecycleBase & {
       type: 'cancelled';
-      reason: 'cancel_command' | 'clear' | 'steer' | 'timeout';
+      reason: 'cancel_command' | 'clear' | 'steer' | 'timeout' | 'dropped';
     })
   | (ChannelTaskLifecycleBase & { type: 'completed' })
   | (ChannelTaskLifecycleBase & { type: 'failed'; error: string });

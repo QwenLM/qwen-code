@@ -278,6 +278,23 @@ describe('FeishuChannel', () => {
       }
     });
 
+    it('strips truncation notice with terminal lifecycle label', () => {
+      const card = {
+        body: {
+          elements: [
+            {
+              tag: 'markdown',
+              content: 'Content\n---\n*内容过长，已截断*\n*已完成*',
+            },
+          ],
+        },
+      };
+
+      const result = extractCardText(card);
+
+      expect(result).toBe('Content');
+    });
+
     it('returns undefined for empty card', () => {
       const result = extractCardText({});
       expect(result).toBeUndefined();
@@ -450,11 +467,14 @@ describe('FeishuChannel', () => {
         lastUpdateAt: Date.now(),
       });
 
-      // Mock bridge
-      const bridge = getPrivateMethod<ChannelAgentBridge>(channel, 'bridge');
-      const cancelSessionSpy = vi
-        .spyOn(bridge, 'cancelSession')
-        .mockResolvedValue(undefined);
+      const cancelPromptSpy = vi.fn().mockResolvedValue(true);
+      (
+        channel as unknown as {
+          requestActivePromptCancellation: (
+            sessionId: string,
+          ) => Promise<boolean>;
+        }
+      ).requestActivePromptCancellation = cancelPromptSpy;
 
       // Mock updateCard to not actually call HTTP
       const updateCardMock = vi.fn().mockResolvedValue(true);
@@ -489,14 +509,17 @@ describe('FeishuChannel', () => {
       const state = cardSessions.get('inbound_1') as
         | Record<string, unknown>
         | undefined;
-      // cancelling is set synchronously (stopped is deferred until cancelSession resolves)
+      // cancelling is set synchronously (stopped is deferred until cancellation resolves)
       expect(state?.['cancelling']).toBe(true);
 
-      // Wait for async handleStop to complete — stopped is set after cancelSession resolves
+      // Wait for async handleStop to complete — stopped is set after cancellation resolves
       await vi.waitFor(() => {
         expect(state?.['stopped']).toBe(true);
       });
-      expect(cancelSessionSpy).toHaveBeenCalledWith('session_abc');
+      expect(cancelPromptSpy).toHaveBeenCalledWith(
+        'session_abc',
+        'cancel_command',
+      );
       expect(state?.['cancelling']).toBe(false);
     });
 
@@ -744,11 +767,15 @@ describe('FeishuChannel', () => {
   describe('onCardAction: cancelSession failure', () => {
     it('shows stop failure status when cancelSession throws', async () => {
       const bridge = createMockBridge();
-      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
-        new Error('session not found'),
-      );
       const config = createConfig();
       const channel = new FeishuChannel('test', config, bridge);
+      (
+        channel as unknown as {
+          requestActivePromptCancellation: (
+            sessionId: string,
+          ) => Promise<boolean>;
+        }
+      ).requestActivePromptCancellation = vi.fn().mockResolvedValue(false);
 
       // Set up botOpenId and card state
       (channel as unknown as Record<string, unknown>)['botOpenId'] = 'bot_123';
@@ -1122,7 +1149,7 @@ describe('FeishuChannel', () => {
         'inbound_1',
       );
 
-      expect(updateCard.mock.calls[0]![1]).toContain('已失败，请重试');
+      expect(updateCard.mock.calls[0]![4]).toBe('已失败，请重试');
     });
 
     it('records cancelled lifecycle state for prompt-end card finalization', async () => {
@@ -1167,7 +1194,7 @@ describe('FeishuChannel', () => {
         'inbound_1',
       );
 
-      expect(updateCard.mock.calls[0]![1]).toContain('已取消');
+      expect(updateCard.mock.calls[0]![4]).toBe('已取消');
     });
 
     it('keeps the first terminal lifecycle state for prompt-end card finalization', async () => {
@@ -1223,8 +1250,7 @@ describe('FeishuChannel', () => {
         'inbound_1',
       );
 
-      expect(updateCard.mock.calls[0]![1]).toContain('已完成');
-      expect(updateCard.mock.calls[0]![1]).not.toContain('已取消');
+      expect(updateCard.mock.calls[0]![4]).toBe('已完成');
       expect(stderr).toHaveBeenCalledWith(
         expect.stringContaining(
           'conflicting terminal event cancelled after completed',
@@ -1262,7 +1288,7 @@ describe('FeishuChannel', () => {
         'inbound_1',
       );
 
-      expect(updateCard.mock.calls[0]![1]).toContain('已取消');
+      expect(updateCard.mock.calls[0]![4]).toBe('已取消');
     });
 
     it('finalizes creating cards as failed instead of stopped after prompt end', async () => {
@@ -1568,7 +1594,7 @@ describe('FeishuChannel', () => {
         'session_1',
       );
 
-      expect(updateCard.mock.calls[0]![1]).toContain('已完成');
+      expect(updateCard.mock.calls[0]![4]).toBe('已完成');
     });
 
     it('keeps stop status when user stops during final card update', async () => {
@@ -1689,7 +1715,8 @@ describe('FeishuChannel', () => {
       );
 
       const rendered = updateCard.mock.calls[0]![1] as string;
-      expect(rendered).toContain('已完成');
+      expect(updateCard.mock.calls[0]![4]).toBe('已完成');
+      expect(rendered).not.toContain('已完成');
       expect(rendered.length).toBeLessThanOrEqual(20_000);
     });
   });

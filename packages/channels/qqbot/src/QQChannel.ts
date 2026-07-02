@@ -24,7 +24,6 @@ import type {
   ChannelConfig,
   ChannelBaseOptions,
   ChannelAgentBridge,
-  ChannelTaskLifecycleEvent,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -357,10 +356,6 @@ export class QQChannel extends ChannelBase {
     _chatId: string,
     _sessionId: string,
     _messageId?: string,
-  ): void {}
-
-  protected override onTaskLifecycle(
-    _event: ChannelTaskLifecycleEvent,
   ): void {}
 
   // ── State Persistence (cross-server context continuation) ──────
