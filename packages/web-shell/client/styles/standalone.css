@@ -53,11 +53,13 @@ html.theme-dark body {
  * shows on tap. `-webkit-text-size-adjust: 100%` stops iOS from silently
  * bumping font size on orientation change.
  *
- * `user-select: none` + `-webkit-touch-callout: none` apply to all
- * descendants of html (i.e. UI chrome — buttons, nav, composer shell) to
- * suppress the long-press "Copy / Look Up" callout and accidental text
- * selection. Message content and the editor re-enable both via
- * `:where([data-user-selectable])` below so users can still copy code and
+ * `user-select: none` + `-webkit-touch-callout: none` suppress the
+ * long-press "Copy / Look Up" callout and accidental text selection on
+ * UI chrome (buttons, nav, composer shell). Scoped to touch devices via
+ * `@media (hover: none) and (pointer: coarse)` so desktop users retain
+ * normal text selection in sidebar, error messages, toasts, etc.
+ * Message content and the editor re-enable both via
+ * `[data-user-selectable]` below so users can still copy code and
  * long-press links inside replies.
  */
 html,
@@ -68,12 +70,14 @@ body {
   text-size-adjust: 100%;
 }
 
-html *,
-html *::before,
-html *::after {
-  -webkit-touch-callout: none;
-  -webkit-user-select: none;
-  user-select: none;
+@media (hover: none) and (pointer: coarse) {
+  html *,
+  html *::before,
+  html *::after {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
 }
 
 /*
@@ -102,14 +106,15 @@ textarea,
  * computed font-size is < 16px when focused. The composer editor sits at
  * 14px in the desktop theme (EditorView.theme at specificity 0,2,0 and
  * `.editorArea .cm-content` in ChatEditor.module.css also at 0,2,0), so
- * bump it to 16px on iPhone only. The composer uses `#root [data-composer]`
- * at specificity (1,2,0) to beat the EditorView.theme. Other text inputs
- * (dialogs, sidebar search) use `#root input[type=...]` at (1,1,0). Both
- * match Safari (iPhone) and Chrome-on-iPhone (CriOS).
+ * bump it to 16px on all touch devices (iPhone, iPad). The composer uses
+ * `#root [data-composer]` at specificity (1,2,0) to beat the EditorView
+ * theme. Other text inputs use `#root input[type=...]` at (1,1,0).
+ * `@supports (-webkit-touch-callout: none)` scopes to WebKit (Safari);
+ * `(hover: none) and (pointer: coarse)` matches touch devices including
+ * iPad — and avoids the deprecated `max-device-width`.
  */
 @supports (-webkit-touch-callout: none) {
-  @media only screen and (max-device-width: 480px),
-    only screen and (-webkit-device-pixel-ratio: 3) and (max-device-width: 900px) {
+  @media (hover: none) and (pointer: coarse) {
     #root [data-composer] .cm-content,
     #root [data-composer] .cm-line,
     #root input[type='text'],
