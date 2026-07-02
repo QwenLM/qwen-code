@@ -4,7 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { delimiter, join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
@@ -40,6 +50,72 @@ const checkoutWithRetrySteps =
   workflow.match(
     /- name: 'Checkout with retry'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
   ) ?? [];
+const assessCandidatesStep =
+  workflow.match(
+    /- name: 'Assess candidates'[\s\S]*?(?=\n[ ]{6}- name: 'Read decision')/,
+  )?.[0] ?? '';
+
+function scriptFromRunStep(step) {
+  const runBlock = step.match(/run: \|-\n([\s\S]*)/)?.[1] ?? '';
+  return runBlock
+    .split('\n')
+    .map((line) => (line.startsWith('          ') ? line.slice(10) : line))
+    .join('\n');
+}
+
+function runCheckoutScriptWithFailingFetch(step) {
+  const root = mkdtempSync(join(tmpdir(), 'qwen-autofix-checkout-'));
+  try {
+    const bin = join(root, 'bin');
+    const workspace = join(root, 'workspace');
+    const log = join(root, 'git.log');
+    mkdirSync(bin);
+    mkdirSync(workspace);
+    const gitBin = join(bin, 'git');
+    writeFileSync(
+      gitBin,
+      `#!/usr/bin/env bash
+printf '%s\\n' "$*" >> "$GIT_LOG"
+case " $* " in
+  *" fetch "*) exit 42 ;;
+  *" checkout "*) echo checkout >> "$GIT_LOG"; exit 0 ;;
+  *" clean "*) echo clean >> "$GIT_LOG"; exit 0 ;;
+  *) exit 0 ;;
+esac
+`,
+    );
+    chmodSync(gitBin, 0o755);
+    const sleepBin = join(bin, 'sleep');
+    writeFileSync(
+      sleepBin,
+      `#!/usr/bin/env bash
+printf 'sleep %s\\n' "$*" >> "$GIT_LOG"
+`,
+    );
+    chmodSync(sleepBin, 0o755);
+
+    const script = join(root, 'checkout.sh');
+    writeFileSync(script, scriptFromRunStep(step));
+    const result = spawnSync('bash', ['-e', '-o', 'pipefail', script], {
+      cwd: workspace,
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        GIT_LOG: log,
+        GITHUB_SHA: 'deadbeef',
+        GITHUB_WORKSPACE: workspace,
+        PATH: `${bin}${delimiter}${process.env.PATH ?? ''}`,
+        REPO: 'QwenLM/qwen-code',
+      },
+    });
+    return {
+      log: readFileSync(log, 'utf8'),
+      result,
+    };
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+}
 
 describe('qwen-autofix workflow', () => {
   it('does not classify tier-2 issues with incomplete fallback comments', () => {
@@ -248,13 +324,31 @@ describe('qwen-autofix workflow', () => {
     expect(checkoutWithRetrySteps).toHaveLength(2);
     for (const step of checkoutWithRetrySteps) {
       expect(step).toContain('for attempt in 1 2 3; do');
+      expect(step).toContain('rm -rf .git &&');
       expect(step).toContain(
         'git -c protocol.version=2 fetch --prune --force origin',
       );
       expect(step).toContain('+refs/heads/*:refs/remotes/origin/*');
-      expect(step).toContain('git checkout --force "${GITHUB_SHA}"');
+      expect(step).toContain('git checkout --force "${GITHUB_SHA}" &&');
       expect(step).toContain('sleep "$((attempt * 10))"');
     }
     expect(workflow).not.toContain('actions/checkout@');
+  });
+
+  it('does not clean the workspace after a failed checkout attempt', () => {
+    expect(checkoutWithRetrySteps).toHaveLength(2);
+    for (const step of checkoutWithRetrySteps) {
+      const { log, result } = runCheckoutScriptWithFailingFetch(step);
+      const logLines = log.trim().split('\n');
+      expect(result.status).toBe(1);
+      expect(log.match(/ fetch /g)).toHaveLength(3);
+      expect(logLines.some((line) => line.startsWith('checkout'))).toBe(false);
+      expect(logLines.some((line) => line.startsWith('clean'))).toBe(false);
+    }
+  });
+
+  it('surfaces assessment failures instead of turning them into green no-ops', () => {
+    expect(assessCandidatesStep.length).toBeGreaterThan(0);
+    expect(assessCandidatesStep).not.toContain('continue-on-error: true');
   });
 });

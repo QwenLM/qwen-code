@@ -197,13 +197,13 @@ jobs:
       - name: 'Checkout with retry'
         run: |-
           checkout_repo() {
-            rm -rf .git
-            git init .
-            git remote add origin "https://github.com/${REPO}.git"
-            git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+            rm -rf .git &&
+            git init . &&
+            git remote add origin "https://github.com/${REPO}.git" &&
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}" &&
             git -c protocol.version=2 fetch --prune --force origin \
-              '+refs/heads/*:refs/remotes/origin/*'
-            git checkout --force "${GITHUB_SHA}"
+              '+refs/heads/*:refs/remotes/origin/*' &&
+            git checkout --force "${GITHUB_SHA}" &&
             git clean -ffdx
           }
 
@@ -464,7 +464,6 @@ jobs:
         id: 'assess'
         if: |-
           ${{ steps.scan.outputs.has_candidates == 'true' }}
-        continue-on-error: true
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
@@ -1034,13 +1033,13 @@ jobs:
       - name: 'Checkout with retry'
         run: |-
           checkout_repo() {
-            rm -rf .git
-            git init .
-            git remote add origin "https://github.com/${REPO}.git"
-            git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+            rm -rf .git &&
+            git init . &&
+            git remote add origin "https://github.com/${REPO}.git" &&
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}" &&
             git -c protocol.version=2 fetch --prune --force origin \
-              '+refs/heads/*:refs/remotes/origin/*'
-            git checkout --force "${GITHUB_SHA}"
+              '+refs/heads/*:refs/remotes/origin/*' &&
+            git checkout --force "${GITHUB_SHA}" &&
             git clean -ffdx
           }
 
