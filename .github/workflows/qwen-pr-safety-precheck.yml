@@ -41,6 +41,7 @@ jobs:
             gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" \
               --jq '.permission' 2>/dev/null || true
           )"
+          echo "Author '${PR_AUTHOR}' permission='${permission:-<empty>}'"
           case "$permission" in
             admin|maintain|write) trusted_author=true ;;
             *) trusted_author=false ;;
@@ -74,6 +75,7 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --patch \
             > "$RUNNER_TEMP/pr-precheck.diff"; then
+            echo "PR diff unavailable; precheck will fail closed." >&2
             : > "$RUNNER_TEMP/pr-precheck.diff"
           fi
 

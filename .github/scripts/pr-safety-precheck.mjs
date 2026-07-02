@@ -4,7 +4,7 @@ import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 const SENSITIVE_DIFF_PATTERNS = [
   [
     'sensitive_diff:secret_logging',
-    /\b(?:console\.(?:log|error|info|warn)|process\.(?:stdout|stderr)\.write)\s*\([^\n]*(?:secrets\.[A-Z0-9_]+|process\.env\.[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|_PAT)|\b(?:GITHUB_TOKEN|GH_TOKEN|OPENAI_API_KEY)\b)/i,
+    /\b(?:console\.\w+|process\.(?:stdout|stderr)\.write)\s*\([^\n]*(?:secrets\.[A-Z0-9_]+|process\.env\.[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|_PAT)|\b(?:GITHUB_TOKEN|GH_TOKEN|OPENAI_API_KEY)\b)/i,
   ],
   [
     'sensitive_diff:secret_network',
@@ -31,7 +31,7 @@ const SECRET_VALUE_PATTERNS = [
   ],
   [
     'secret_value:assignment',
-    /\b(?:api[_-]?key|token|secret|password|pat)\b[^=\n:]{0,32}(?:=|:)\s*['"][A-Za-z0-9._~+/=-]{20,}['"]/i,
+    /(?:^|[^A-Za-z0-9])(?:[A-Z0-9_-]*(?:api[_-]?key|token|secret|password|pat))\b[^=\n:]{0,32}(?:=|:)\s*['"][A-Za-z0-9._~+/=-]{20,}['"]/i,
   ],
 ];
 

