@@ -86,6 +86,7 @@ import {
   applyAutoModeDecision,
   evaluateAutoMode,
   getAutoModePermissionDeniedReason,
+  shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
@@ -110,6 +111,12 @@ import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
 import { IdeClient } from '../ide/ide-client.js';
+import {
+  getPlanRequiredTeammatePreApprovalMessage,
+  isPlanRequiredTeammateAwaitingApproval,
+  isPlanRequiredTeammatePreApprovalAllowedTool,
+  shouldUsePlanOnlyReminderInSubagentContext,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
 import { safeSetStatus } from '../telemetry/tracer.js';
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import {
@@ -2061,8 +2068,13 @@ export class CoreToolScheduler {
             canonicalName,
             toolParams,
           );
-          const { finalPermission, pmForcedAsk, pmCtx, denyMessage } =
-            flowResult;
+          const {
+            defaultPermission,
+            finalPermission,
+            pmForcedAsk,
+            pmCtx,
+            denyMessage,
+          } = flowResult;
 
           // ---- L5: Final decision based on permission + ApprovalMode ----
           const approvalMode = this.config.getApprovalMode();
@@ -2073,7 +2085,8 @@ export class CoreToolScheduler {
 
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+              shouldClassifyAllShellForAutoMode(canonicalName, this.config));
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
@@ -2083,6 +2096,52 @@ export class CoreToolScheduler {
             debugLogger.info(
               `Auto mode: L4 allow overridden by protected-write guard for ${canonicalName}`,
             );
+          }
+
+          if (
+            isPlanRequiredTeammateAwaitingApproval(this.config) &&
+            finalPermission !== 'deny'
+          ) {
+            const isExplicitPreApprovalTool =
+              isPlanRequiredTeammatePreApprovalAllowedTool(
+                canonicalName,
+                toolParams,
+              );
+            const canRunBeforeLeaderApproval =
+              isExplicitPreApprovalTool &&
+              (canonicalName === ToolNames.EXIT_PLAN_MODE ||
+                canonicalName === ToolNames.TASK_UPDATE ||
+                (defaultPermission === 'allow' &&
+                  finalPermission === 'allow' &&
+                  !forceAutoReviewForAllow));
+
+            if (canRunBeforeLeaderApproval) {
+              this.setToolCallOutcome(
+                reqInfo.callId,
+                ToolConfirmationOutcome.ProceedAlways,
+              );
+              this.setStatusInternal(reqInfo.callId, 'scheduled');
+              continue;
+            }
+
+            const message =
+              getPlanRequiredTeammatePreApprovalMessage(canonicalName);
+            this.setStatusInternal(
+              reqInfo.callId,
+              'error',
+              createErrorResponse(
+                reqInfo,
+                new Error(message),
+                ToolErrorType.EXECUTION_DENIED,
+              ),
+            );
+            setToolSpanFailure(
+              toolSpan,
+              TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
+              TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
+            );
+            this.finalizeToolSpan(reqInfo.callId);
+            continue;
           }
 
           if (finalPermission === 'allow' && !forceAutoReviewForAllow) {
@@ -2268,7 +2327,13 @@ export class CoreToolScheduler {
                 responseParts: convertToFunctionResponse(
                   reqInfo.name,
                   reqInfo.callId,
-                  getPlanModeSystemReminder(),
+                  // SDK callers and ordinary subagent-like callers should
+                  // return plans directly. Plan-required teammates have a
+                  // dedicated exit_plan_mode approval path instead.
+                  getPlanModeSystemReminder(
+                    shouldUsePlanOnlyReminderInSubagentContext() ||
+                      this.config.getSdkMode(),
+                  ),
                 ),
                 resultDisplay: 'Plan mode blocked a non-read-only tool call.',
                 error: undefined,
@@ -4211,11 +4276,15 @@ export class CoreToolScheduler {
 
         const forceAutoReviewForAllow =
           this.config.getApprovalMode() === ApprovalMode.AUTO &&
-          shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+          (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+            shouldClassifyAllShellForAutoMode(
+              pendingTool.request.name,
+              this.config,
+            ));
 
         if (finalPermission === 'allow' && forceAutoReviewForAllow) {
           debugLogger.info(
-            `Auto mode: pending L4 allow overridden by protected-write guard for ${pendingTool.request.name}`,
+            `Auto mode: pending L4 allow overridden by protected-write guard or classifyAllShell for ${pendingTool.request.name}`,
           );
           const denialState = this.config.getAutoModeDenialState();
           const fallback = shouldFallback(denialState);

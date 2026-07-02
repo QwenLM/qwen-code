@@ -11,7 +11,7 @@
  * are stripped by each caller.
  */
 export const PROMPT_UNSAFE_INVISIBLES =
-  /[\u0080-\u009f\u200b-\u200d\u2028\u2029\u202a-\u202e\u2060\u2066-\u2069\ufeff]/g;
+  /[\u0080-\u009f\p{Cf}\u2028\u2029]|\p{Variation_Selector}/gu;
 
 /**
  * Truncate to at most `max` Unicode CODE POINTS (not UTF-16 code units). A cap
@@ -73,6 +73,8 @@ export function sanitizePromptText(text: string): string {
     text
       .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
       .replace(/^([ \t]*)\[([^\]\r\n]{1,64})\](:?)/gm, '$1$2$3')
+      // Fold ASCII C0/DEL, including CR/LF/TAB, so attacker-controlled group
+      // text cannot create prompt lines outside the adapter's sender attribution.
       // eslint-disable-next-line no-control-regex
       .replace(/[\u0000-\u001f\u007f]/g, ' ')
   );

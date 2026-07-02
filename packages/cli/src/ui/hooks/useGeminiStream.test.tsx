@@ -4141,6 +4141,9 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        // so that sendMessageStream is actually invoked.
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -4269,6 +4272,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -4329,6 +4334,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       await act(async () => {
@@ -4467,6 +4474,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -4817,6 +4826,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       // Cancel without advancing the throttle timer; the cancel-time
@@ -4934,6 +4945,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       // Sanity: the throttle has not fired yet.
@@ -7009,6 +7022,8 @@ describe('useGeminiStream', () => {
           void result.current.submitQuery('think then retry');
           await Promise.resolve();
           await Promise.resolve();
+          // Flush the macrotask yield (setImmediate) added after addItem()
+          await vi.advanceTimersByTimeAsync(0);
         });
 
         // Advance past STREAM_UPDATE_THROTTLE_MS (60ms) so the thought
@@ -7106,6 +7121,8 @@ describe('useGeminiStream', () => {
 
         await act(async () => {
           await Promise.resolve();
+          // Flush the macrotask yield (setImmediate) added after addItem()
+          await vi.advanceTimersByTimeAsync(0);
         });
 
         const findErrorItem = () =>
@@ -7219,6 +7236,12 @@ describe('useGeminiStream', () => {
 
         act(() => {
           void result.current.submitQuery('Trigger retry after countdown');
+        });
+
+        await act(async () => {
+          await Promise.resolve();
+          // Flush the macrotask yield (setImmediate) added after addItem()
+          await vi.advanceTimersByTimeAsync(0);
         });
 
         let errorItem = result.current.pendingHistoryItems.find(

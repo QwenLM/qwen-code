@@ -680,7 +680,10 @@ describe('useStatusLine', () => {
     });
 
     it('falls back to zero when contextWindowSize is unavailable', () => {
-      mockConfig.getContentGeneratorConfig.mockReturnValueOnce(null as never);
+      // Persistent (not Once): the hook reads getContentGeneratorConfig both at
+      // render scope (reasoning-effort trigger key) and inside the data builder,
+      // so simulate "unavailable" for every call rather than just the first.
+      mockConfig.getContentGeneratorConfig.mockReturnValue(null as never);
       setStatusLineConfig({ type: 'command', command: 'cat' });
       renderHook(() => useStatusLine());
 

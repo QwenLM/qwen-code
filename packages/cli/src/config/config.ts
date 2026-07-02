@@ -1856,9 +1856,11 @@ export async function loadCliConfig(
     // Use provided session ID without session resumption
     // Check if session ID is already in use
     const sessionService = new SessionService(cwd);
-    const exists = await sessionService.sessionExists(argv['sessionId']);
+    const exists = await sessionService.sessionExistsInAnyState(
+      argv['sessionId'],
+    );
     if (exists) {
-      const message = `Error: Session Id ${argv['sessionId']} is already in use.`;
+      const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
       writeStderrLine(message);
       process.exit(1);
     }
@@ -1886,7 +1888,7 @@ export async function loadCliConfig(
       ? {}
       : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
   const pendingMcpServers =
-    bareMode || safeMode
+    bareMode || safeMode || approvalMode === ApprovalMode.YOLO
       ? undefined
       : getPendingGatedMcpServers(mcpServers, cwd);
 
@@ -1949,6 +1951,7 @@ export async function loadCliConfig(
       bareMode || safeMode ? undefined : settings.tools?.callCommand,
     mcpServerCommand:
       bareMode || safeMode ? undefined : settings.mcp?.serverCommand,
+    mcpToolIdleTimeoutMs: settings.mcp?.toolIdleTimeoutMs,
     mcpServers,
     topTierMcpServers,
     pendingMcpServers,
@@ -2018,7 +2021,7 @@ export async function loadCliConfig(
         }
       : undefined,
     // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
-    // through chrome-devtools-mcp (far lighter than the OS-level computer-use
+    // through the CDP tunnel (far lighter than the OS-level computer-use
     // driver), so disable computer-use to keep the agent off that heavy path.
     computerUseEnabled: (() => {
       const tunnelOn = process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] === '1';
@@ -2028,7 +2031,7 @@ export async function loadCliConfig(
         writeStderrLine(
           'qwen serve: ignoring tools.computerUse.enabled=true — the CDP ' +
             'tunnel (QWEN_SERVE_CDP_TUNNEL_OVER_WS) routes browser automation ' +
-            'through chrome-devtools-mcp, so computer-use stays disabled.',
+            'through the CDP tunnel, so computer-use stays disabled.',
         );
       }
       return tunnelOn ? false : (settings.tools?.computerUse?.enabled ?? true);

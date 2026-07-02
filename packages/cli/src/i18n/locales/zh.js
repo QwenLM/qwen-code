@@ -196,6 +196,7 @@ export default {
   'toolDisplayName.TaskStop': '停止任务',
   'toolDisplayName.TeamCreate': '创建团队',
   'toolDisplayName.TeamDelete': '删除团队',
+  'toolDisplayName.TeamPlanApproval': '团队计划审批',
   'toolDisplayName.SendMessage': '发送消息',
   'toolDisplayName.StructuredOutput': '结构化输出',
   'toolDisplayName.Monitor': '监控',
@@ -629,6 +630,35 @@ export default {
   // ============================================================================
   // Commands - General (continued)
   // ============================================================================
+  'Get or set any setting by dot-path key':
+    '通过点号路径键查看或设置任意配置项',
+  'Invalid boolean value: "{{value}}". Use "true" or "false".':
+    '无效的布尔值："{{value}}"。请使用 "true" 或 "false"。',
+  'Cannot toggle a number setting. Provide a value: key=<number>.':
+    '无法切换数字类型的设置。请提供值：key=<number>。',
+  'Invalid number value: "{{value}}".': '无效的数字值："{{value}}"。',
+  'Cannot toggle a string setting. Provide a value: key=<value>.':
+    '无法切换字符串类型的设置。请提供值：key=<value>。',
+  'Cannot toggle an enum setting. Provide one of: {{options}}.':
+    '无法切换枚举类型的设置。请提供以下选项之一：{{options}}。',
+  'Invalid enum value: "{{value}}". Valid values: {{options}}.':
+    '无效的枚举值："{{value}}"。有效值：{{options}}。',
+  'Setting "{{type}}" type cannot be set via /config. Edit settings.json directly.':
+    '"{{type}}" 类型的设置无法通过 /config 修改。请直接编辑 settings.json。',
+  'Unsupported setting type: "{{type}}".': '不支持的设置类型："{{type}}"。',
+  'Available settings:': '可用设置：',
+  'Unknown setting key: "{{key}}". Did you mean "{{suggestion}}"?':
+    '未知的设置键："{{key}}"。您是不是想设置 "{{suggestion}}"？',
+  'Unknown setting key: "{{key}}".': '未知的设置键："{{key}}"。',
+  'Failed to set "{{key}}": {{error}}': '设置 "{{key}}" 失败：{{error}}',
+  'Set {{key}} = {{value}}': '已设置 {{key}} = {{value}}',
+  '(This setting requires a restart to take effect.)':
+    '（此设置需要重启才能生效。）',
+  '(Security-sensitive setting — verify you are not exposing credentials.)':
+    '（安全敏感设置 — 请确认您没有泄露凭据。）',
+  'Setting tools.approvalMode to "yolo" is blocked via /config for security reasons. Edit settings.json directly if you understand the risks.':
+    '出于安全原因，禁止通过 /config 将 tools.approvalMode 设置为 "yolo"。如果您了解相关风险，请直接编辑 settings.json。',
+  '(empty)': '（空）',
   'View and edit Qwen Code settings': '查看和编辑 Qwen Code 设置',
   Settings: '设置',
   'To see changes, Qwen Code must be restarted. Press r to exit and apply changes now.':
@@ -2091,6 +2121,8 @@ export default {
     '紧凑模式下隐藏工具输出和思考过程，界面更简洁（Ctrl+O 切换）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看详细工具调用结果',
   'Switch to plan mode or exit plan mode': '切换到计划模式或退出计划模式',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    '设置具备推理能力的模型思考的强度（{{tiers}}）；按各提供方进行映射与钳制。',
   'Set a goal — keep working until the condition is met':
     '设定目标 — 持续工作直到条件满足',
   'Exited plan mode. Previous approval mode restored.':

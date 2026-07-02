@@ -298,8 +298,7 @@ export default {
     'Le sous-agent "{{name}}" a été enregistré au niveau {{level}}.',
   'Name: ': 'Nom : ',
   'Location: ': 'Emplacement : ',
-  '✗ Error saving subagent:':
-    '✗ Erreur lors de la sauvegarde du sous-agent :',
+  '✗ Error saving subagent:': '✗ Erreur lors de la sauvegarde du sous-agent :',
   'Warnings:': 'Avertissements :',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     'Le nom "{{name}}" existe déjà au niveau {{level}} - le sous-agent existant sera écrasé',
@@ -1914,6 +1913,8 @@ export default {
     'Appuyez sur Ctrl+O pour afficher la sortie complète des outils',
   'Switch to plan mode or exit plan mode':
     'Passer en mode plan ou quitter le mode plan',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    "Définit l'intensité de réflexion des modèles compatibles avec le raisonnement ({{tiers}}) ; mappée et limitée selon le fournisseur.",
   'Exited plan mode. Previous approval mode restored.':
     "Mode plan quitté. Mode d'approbation précédent restauré.",
   'Enabled plan mode. The agent will analyze and plan without executing tools.':

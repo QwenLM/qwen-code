@@ -136,7 +136,7 @@ export class AgentInteractive {
 
     if (this.config.initialTask) {
       this.queue.enqueue(this.config.initialTask);
-      this.executionPromise = this.runLoop();
+      this.executionPromise = this.startRunLoop();
     }
   }
 
@@ -190,7 +190,7 @@ export class AgentInteractive {
         !this.masterAbortController.signal.aborted &&
         !isTerminalStatus(this.status)
       ) {
-        this.executionPromise = this.runLoop();
+        this.executionPromise = this.startRunLoop();
       }
     }
   }
@@ -310,7 +310,7 @@ export class AgentInteractive {
   enqueueMessage(message: string): void {
     this.queue.enqueue(message);
     if (!this.processing) {
-      this.executionPromise = this.runLoop();
+      this.executionPromise = this.startRunLoop();
     }
   }
 
@@ -398,6 +398,13 @@ export class AgentInteractive {
   }
 
   // ─── Private Helpers ───────────────────────────────────────
+
+  private startRunLoop(): Promise<void> {
+    if (this.config.runInContext) {
+      return this.config.runInContext(() => this.runLoop());
+    }
+    return this.runLoop();
+  }
 
   /**
    * Settle status after the run loop empties.

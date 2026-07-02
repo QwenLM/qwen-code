@@ -38,6 +38,7 @@ import {
   listMcpResources,
   MCPServerStatus,
   McpClient,
+  discoverTools,
   populateMcpServerCommand,
   removeMCPServerStatus,
   removeMCPStatusChangeListener,
@@ -53,6 +54,7 @@ const mockDebugLogger = vi.hoisted(() => ({
   warn: vi.fn(),
 }));
 const ORIGINAL_ENV = process.env;
+const TEST_MCP_TOOL_IDLE_TIMEOUT_MS = 300000;
 
 vi.mock('node:fs', () => ({
   existsSync: mockExistsSync,
@@ -75,6 +77,7 @@ vi.mock('../utils/debugLogger.js', () => ({
  */
 function cfgWithResources(): Config {
   return {
+    getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
     getResourceRegistry: () => ({
       registerResource: vi.fn(),
       removeResourcesByServer: vi.fn(),
@@ -991,6 +994,31 @@ describe('mcp-client', () => {
       expect(promptRegistry.registerPrompt).not.toHaveBeenCalled();
     });
 
+    it('marks discovered tools alwaysLoad when the MCP server config requests it', async () => {
+      const mockedClient = {
+        listTools: vi.fn().mockResolvedValue({ tools: [] }),
+      } as unknown as ClientLib.Client;
+      vi.mocked(GenAiLib.mcpToTool).mockReturnValue({
+        tool: () =>
+          Promise.resolve({
+            functionDeclarations: [{ name: 'chrome_tool' }],
+          }),
+      } as unknown as GenAiLib.CallableTool);
+
+      const tools = await discoverTools(
+        'chrome-devtools',
+        {
+          command: 'test-command',
+          alwaysLoadTools: true,
+        },
+        mockedClient,
+        cfgWithResources(),
+      );
+
+      expect(tools).toHaveLength(1);
+      expect(tools[0].alwaysLoad).toBe(true);
+    });
+
     it('discoverAndReturn with { applyConfigFilters: false } ignores config filters and trust for shared pool snapshots', async () => {
       const mockedClient = {
         connect: vi.fn(),
@@ -1251,6 +1279,7 @@ describe('mcp-client', () => {
       const registerResource = vi.fn();
       const removeResourcesByServer = vi.fn();
       const cfg = {
+        getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
         getResourceRegistry: () => ({
           registerResource,
           removeResourcesByServer,
@@ -1304,6 +1333,7 @@ describe('mcp-client', () => {
       const registerResource = vi.fn();
       const removeResourcesByServer = vi.fn();
       const cfg = {
+        getMcpToolIdleTimeoutMs: () => TEST_MCP_TOOL_IDLE_TIMEOUT_MS,
         getResourceRegistry: () => ({
           registerResource,
           removeResourcesByServer,
@@ -1440,6 +1470,33 @@ describe('mcp-client', () => {
       const result = await listMcpPrompts('flaky', mockClient);
       expect(result).toEqual([]);
     });
+
+    it('retries on transient ECONNRESET and succeeds on second attempt', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi
+          .fn()
+          .mockRejectedValueOnce(new Error('read ECONNRESET'))
+          .mockResolvedValueOnce({
+            prompts: [{ name: 'greet', description: 'Greet' }],
+          }),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpPrompts('retry-prompts', mockClient);
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('greet');
+      expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(2);
+    });
+
+    it('exhausts retries on persistent transient errors and returns []', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ prompts: {} }),
+        request: vi.fn().mockRejectedValue(new Error('read ECONNRESET')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpPrompts('always-failing', mockClient);
+      expect(result).toEqual([]);
+      // 1 initial + 2 retries = 3 total calls
+      expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(3);
+    });
   });
 
   describe('listMcpResources', () => {
@@ -1535,6 +1592,33 @@ describe('mcp-client', () => {
       const result = await listMcpResources('weird', mockClient);
       expect(result).toEqual([]);
       expect(mockDebugLogger.error).toHaveBeenCalled();
+    });
+
+    it('retries on transient ECONNRESET and succeeds on second attempt', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi
+          .fn()
+          .mockRejectedValueOnce(new Error('read ECONNRESET'))
+          .mockResolvedValueOnce({
+            resources: [{ uri: 'file:///a.txt', name: 'a' }],
+          }),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('retry-server', mockClient);
+      expect(result).toHaveLength(1);
+      expect(result[0].name).toBe('a');
+      expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(2);
+    });
+
+    it('exhausts retries on persistent transient errors and returns []', async () => {
+      const mockClient = {
+        getServerCapabilities: vi.fn().mockReturnValue({ resources: {} }),
+        request: vi.fn().mockRejectedValue(new Error('read ECONNRESET')),
+      } as unknown as ClientLib.Client;
+      const result = await listMcpResources('always-failing', mockClient);
+      expect(result).toEqual([]);
+      // 1 initial + 2 retries = 3 total calls
+      expect(vi.mocked(mockClient.request)).toHaveBeenCalledTimes(3);
     });
   });
 

@@ -7,6 +7,7 @@ import { DWClient, TOPIC_ROBOT, EventAck } from 'dingtalk-stream-sdk-nodejs';
 import type { DWClientDownStream } from 'dingtalk-stream-sdk-nodejs';
 import {
   ChannelBase,
+  isTerminalTaskLifecycleType,
   sanitizeLogText,
   sanitizeSenderName,
 } from '@qwen-code/channel-base';
@@ -17,6 +18,8 @@ import type {
   ChannelBaseOptions,
   Envelope,
   ChannelAgentBridge,
+  ChannelTaskLifecycleEvent,
+  SessionTarget,
 } from '@qwen-code/channel-base';
 
 /**
@@ -80,6 +83,17 @@ const ACK_REACTION_NAME = '👀';
 const ACK_EMOTION_ID = '2659900';
 const ACK_EMOTION_BG_ID = 'im_bg_1';
 const EMOTION_API = 'https://api.dingtalk.com/v1.0/robot/emotion';
+const GROUP_MSG_API = 'https://api.dingtalk.com/v1.0/robot/groupMessages/send';
+const GROUP_MSG_KEY = 'sampleMarkdown'; // DingTalk's built-in {title, text} markdown template key
+const TOKEN_API = 'https://oapi.dingtalk.com/gettoken';
+const PROACTIVE_FETCH_TIMEOUT_MS = 15_000;
+
+interface DingTalkTokenResponse {
+  errcode?: number;
+  errmsg?: string;
+  access_token?: string;
+  expires_in?: number;
+}
 
 type DingTalkClientInternals = DWClient & {
   debug: boolean;
@@ -95,6 +109,23 @@ export class DingtalkChannel extends ChannelBase {
   private dedupTimer?: ReturnType<typeof setInterval>;
   /** Map conversationId → latest sessionWebhook URL for sending replies. */
   private webhooks: Map<string, string> = new Map();
+  private activeReactionKeys = new Set<string>();
+  /** sessionId → reaction keys, so a dead session's reactions can be recalled. */
+  private sessionReactionKeys = new Map<
+    string,
+    Map<string, { messageId: string; chatId: string }>
+  >();
+  /**
+   * Real inbound message ids (insertion-ordered, size-capped). Unlike the
+   * TTL-swept seenMessages dedup map, entries survive long queue waits, so a
+   * turn that starts minutes after its message arrived still gets a reaction.
+   */
+  private inboundMessageIds = new Set<string>();
+  /**
+   * Token cache for proactive sends. The stream SDK only refreshes its token
+   * on (re)connect, so a long-lived socket serves a stale one after ~2h.
+   */
+  private proactiveToken?: { token: string; expiresAt: number };
 
   constructor(
     name: string,
@@ -308,6 +339,137 @@ export class DingtalkChannel extends ChannelBase {
     }
   }
 
+  override supportsProactiveSend(): boolean {
+    return true;
+  }
+
+  /**
+   * The group-message API needs a real openConversationId — reject DMs
+   * (a different API) and webhook-URL fallback chatIds.
+   */
+  protected override supportsProactiveTarget(target: SessionTarget): boolean {
+    return (
+      target.isGroup === true &&
+      target.threadId === undefined &&
+      this.isConversationId(target.chatId)
+    );
+  }
+
+  /**
+   * Single-shot cold send: a failed chunk aborts the remainder (already-sent
+   * chunks are not recalled) and the error surfaces in the loop's lastError.
+   */
+  protected override async pushProactive(
+    target: SessionTarget,
+    text: string,
+  ): Promise<void> {
+    if (!text.trim()) return;
+
+    const chunks = normalizeDingTalkMarkdown(text);
+    const title = extractTitle(text);
+
+    for (let i = 0; i < chunks.length; i++) {
+      await this.sendProactiveChunk(
+        target.chatId,
+        i === 0 ? title : `${title} (cont.)`,
+        chunks[i]!,
+        `chunk ${i + 1}/${chunks.length}`,
+      );
+    }
+  }
+
+  private async getProactiveToken(): Promise<string> {
+    const cached = this.proactiveToken;
+    if (cached && Date.now() < cached.expiresAt) return cached.token;
+
+    const url = `${TOKEN_API}?appkey=${encodeURIComponent(
+      this.config.clientId!,
+    )}&appsecret=${encodeURIComponent(this.config.clientSecret!)}`;
+    let data: DingTalkTokenResponse;
+    try {
+      const resp = await fetch(url, {
+        signal: AbortSignal.timeout(PROACTIVE_FETCH_TIMEOUT_MS),
+      });
+      data = (await resp.json()) as DingTalkTokenResponse;
+    } catch (err) {
+      process.stderr.write(
+        `[DingTalk:${this.name}] proactive send failed: token fetch error ${err}\n`,
+      );
+      throw new Error(
+        'DingTalk proactive send failed: could not fetch access token',
+      );
+    }
+    if (!data.access_token) {
+      const errmsg = sanitizeLogText(String(data.errmsg ?? ''), 200);
+      process.stderr.write(
+        `[DingTalk:${this.name}] proactive send failed: gettoken errcode=${data.errcode} ${errmsg}\n`,
+      );
+      throw new Error(
+        `DingTalk proactive send failed: gettoken errcode=${data.errcode}${errmsg ? ` ${errmsg}` : ''}`,
+      );
+    }
+    this.proactiveToken = {
+      token: data.access_token,
+      // Refresh a minute early so a fire mid-expiry doesn't race the TTL.
+      expiresAt:
+        Date.now() + Math.max(60, (data.expires_in ?? 7200) - 60) * 1000,
+    };
+    return data.access_token;
+  }
+
+  private async sendProactiveChunk(
+    conversationId: string,
+    title: string,
+    text: string,
+    chunkLabel: string,
+  ): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      const token = await this.getProactiveToken();
+      let resp: Response;
+      try {
+        resp = await fetch(GROUP_MSG_API, {
+          method: 'POST',
+          headers: {
+            'x-acs-dingtalk-access-token': token,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            robotCode: this.config.clientId!,
+            openConversationId: conversationId,
+            msgKey: GROUP_MSG_KEY,
+            msgParam: JSON.stringify({ title, text }),
+          }),
+          signal: AbortSignal.timeout(PROACTIVE_FETCH_TIMEOUT_MS),
+        });
+      } catch (err) {
+        const cause = (err as { cause?: unknown }).cause;
+        process.stderr.write(
+          `[DingTalk:${this.name}] proactive send error (${chunkLabel}): ${err}${cause ? ` (${cause})` : ''}\n`,
+        );
+        throw new Error(
+          `DingTalk proactive send failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      if (resp.status === 401 && attempt === 0) {
+        // Stale or revoked token — refresh once and retry this chunk.
+        this.proactiveToken = undefined;
+        await resp.body?.cancel();
+        continue;
+      }
+      if (!resp.ok) {
+        const detail = sanitizeLogText(await resp.text().catch(() => ''), 300);
+        process.stderr.write(
+          `[DingTalk:${this.name}] proactive send failed (${chunkLabel}): HTTP ${resp.status} ${detail}\n`,
+        );
+        throw new Error(
+          `DingTalk proactive send failed: HTTP ${resp.status}${detail ? ` ${detail}` : ''}`,
+        );
+      }
+      await resp.body?.cancel();
+      return;
+    }
+  }
+
   private getAccessToken(): string | undefined {
     return this.client.getConfig().access_token;
   }
@@ -373,35 +535,135 @@ export class DingtalkChannel extends ChannelBase {
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
     }
+    this.activeReactionKeys.clear();
+    this.sessionReactionKeys.clear();
     this.client.disconnect();
     process.stderr.write(`[DingTalk:${this.name}] Disconnected.\n`);
   }
 
   /**
    * The chatId passed to onPromptStart/onPromptEnd is `conversationId ||
-   * sessionWebhook` (see message handler below). Reactions require a real
-   * conversation ID — skip the webhook-URL fallback case.
+   * sessionWebhook` (see message handler below). Reactions and proactive
+   * sends require a real conversation ID — skip the webhook-URL fallback case.
    */
   private isConversationId(chatId: string): boolean {
     return !!chatId && !/^https?:\/\//i.test(chatId);
   }
 
-  protected override onPromptStart(
+  private reactionKey(messageId: string, conversationId: string): string {
+    return `${conversationId}:${messageId}`;
+  }
+
+  private rememberInboundMessageId(msgId: string): void {
+    this.inboundMessageIds.delete(msgId);
+    this.inboundMessageIds.add(msgId);
+    if (this.inboundMessageIds.size > 1000) {
+      const oldest = this.inboundMessageIds.values().next().value;
+      if (oldest !== undefined) this.inboundMessageIds.delete(oldest);
+    }
+  }
+
+  private logReactionFailure(action: string, err: unknown): void {
+    process.stderr.write(
+      `[DingTalk:${this.name}] ${action} failed: ${err instanceof Error ? err.message : err}\n`,
+    );
+  }
+
+  private startReaction(
     chatId: string,
-    _sessionId: string,
     messageId?: string,
+    sessionId?: string,
   ): void {
     if (!messageId || !this.isConversationId(chatId)) return;
-    this.attachReaction(messageId, chatId).catch(() => {});
+    // Loop lifecycle events carry the internal job id as messageId; the
+    // emotion API only accepts ids of real inbound messages, so skip anything
+    // we never saw arrive.
+    if (!this.inboundMessageIds.has(messageId)) return;
+    const key = this.reactionKey(messageId, chatId);
+    if (this.activeReactionKeys.has(key)) return;
+    this.activeReactionKeys.add(key);
+    if (sessionId) {
+      let keys = this.sessionReactionKeys.get(sessionId);
+      if (!keys) {
+        keys = new Map();
+        this.sessionReactionKeys.set(sessionId, keys);
+      }
+      keys.set(key, { messageId, chatId });
+    }
+    this.attachReaction(messageId, chatId)
+      .then(() => {
+        if (!this.activeReactionKeys.has(key)) {
+          void this.recallReaction(messageId, chatId).catch((err) => {
+            this.logReactionFailure('late reaction recall', err);
+          });
+        }
+      })
+      .catch((err) => {
+        this.activeReactionKeys.delete(key);
+        this.logReactionFailure('reaction attach', err);
+      });
+  }
+
+  private stopReaction(
+    chatId: string,
+    messageId?: string,
+    sessionId?: string,
+  ): void {
+    if (!messageId || !this.isConversationId(chatId)) return;
+    const key = this.reactionKey(messageId, chatId);
+    if (sessionId) {
+      const keys = this.sessionReactionKeys.get(sessionId);
+      if (keys) {
+        keys.delete(key);
+        if (keys.size === 0) this.sessionReactionKeys.delete(sessionId);
+      }
+    }
+    if (!this.activeReactionKeys.delete(key)) return;
+    this.recallReaction(messageId, chatId).catch((err) => {
+      this.logReactionFailure('reaction recall', err);
+    });
+  }
+
+  /** Recall reactions left behind when a session dies without terminal lifecycle events. */
+  override onSessionDied(sessionId: string): void {
+    const keys = this.sessionReactionKeys.get(sessionId);
+    if (keys) {
+      this.sessionReactionKeys.delete(sessionId);
+      for (const [key, { messageId, chatId }] of keys) {
+        if (this.activeReactionKeys.delete(key)) {
+          void this.recallReaction(messageId, chatId).catch((err) => {
+            this.logReactionFailure('session-death reaction recall', err);
+          });
+        }
+      }
+    }
+    super.onSessionDied(sessionId);
+  }
+
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    if (event.type === 'started') {
+      this.startReaction(event.chatId, event.messageId, event.sessionId);
+      return;
+    }
+    if (isTerminalTaskLifecycleType(event.type)) {
+      this.stopReaction(event.chatId, event.messageId, event.sessionId);
+    }
+  }
+
+  protected override onPromptStart(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    this.startReaction(chatId, messageId, sessionId);
   }
 
   protected override onPromptEnd(
     chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId || !this.isConversationId(chatId)) return;
-    this.recallReaction(messageId, chatId).catch(() => {});
+    this.stopReaction(chatId, messageId, sessionId);
   }
 
   /**
@@ -643,6 +905,7 @@ export class DingtalkChannel extends ChannelBase {
       }
       if (msgId) {
         this.seenMessages.set(msgId, Date.now());
+        this.rememberInboundMessageId(msgId);
       }
 
       const isGroup = data.conversationType === '2';
