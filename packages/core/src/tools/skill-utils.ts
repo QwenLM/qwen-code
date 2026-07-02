@@ -9,6 +9,9 @@ import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
 import type { SkillConfig, SkillLevel } from '../skills/types.js';
 import { escapeXml } from '../utils/xml.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('SKILL_CACHE');
 
 /**
  * Builds the LLM-facing content string when a skill body is injected.
@@ -73,8 +76,11 @@ export async function collectAvailableSkillEntries(
   config: Config,
 ): Promise<CollectedAvailableSkills> {
   if (cachedEntries !== null && !cacheInvalidated) {
+    debugLogger.debug('cache hit (entries=%d)', cachedEntries.entries.length);
     return cachedEntries;
   }
+
+  debugLogger.debug('cache miss, recomputing');
 
   // Include a skill only when (a) it is not hidden from the model
   // (`disable-model-invocation`), (b) it is not user-disabled via
@@ -149,6 +155,12 @@ export async function collectAvailableSkillEntries(
   // Populate and reset the invalidation flag so the next call recomputes.
   cachedEntries = result;
   cacheInvalidated = false;
+  debugLogger.debug(
+    'cache populated (skills=%d, commands=%d, entries=%d)',
+    result.availableSkills.length,
+    result.modelInvocableCommands.length,
+    result.entries.length,
+  );
   return result;
 }
 
@@ -226,6 +238,7 @@ let cacheInvalidated = false;
  * `collectAvailableSkillEntries()` call recomputes from disk.
  */
 export function invalidateCollectedSkillEntriesCache(): void {
+  debugLogger.debug('cache invalidated');
   cacheInvalidated = true;
 }
 

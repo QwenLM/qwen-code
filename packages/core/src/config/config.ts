@@ -91,6 +91,7 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
+import { invalidateCollectedSkillEntriesCache } from '../tools/skill-utils.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import {
   type AutoModeDenialState,
@@ -5841,11 +5842,15 @@ export class Config {
    * skills, user/project file commands, MCP prompts). Called by the CLI's
    * CommandService after initialisation so that the startup snapshot and
    * per-turn drain can include these in the `<available_skills>` listing.
+   *
+   * Also invalidates the skill-entries cache so late-arriving MCP prompts are
+   * picked up on the next `collectAvailableSkillEntries()` call.
    */
   setModelInvocableCommandsProvider(
     provider: () => ReadonlyArray<{ name: string; description: string }>,
   ): void {
     this.modelInvocableCommandsProvider = provider;
+    invalidateCollectedSkillEntriesCache();
   }
 
   /**
