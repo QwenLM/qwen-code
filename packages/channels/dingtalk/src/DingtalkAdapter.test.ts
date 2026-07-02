@@ -127,8 +127,8 @@ function seedSeenMessage(
   messageId: string,
 ): void {
   (
-    channel as unknown as { seenMessages: Map<string, number> }
-  ).seenMessages.set(messageId, Date.now());
+    channel as unknown as { inboundMessageIds: Set<string> }
+  ).inboundMessageIds.add(messageId);
 }
 
 function deferredPromise<T>() {

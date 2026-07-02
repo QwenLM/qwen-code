@@ -1659,8 +1659,11 @@ export class FeishuChannel extends ChannelBase {
           cardState.cancelling = false;
           this.stoppedMessages.add(inboundId);
         } else {
-          // Clear cancelling flag so .then() callbacks don't treat this as stopped
+          // Clear cancelling flag so .then() callbacks don't treat this as stopped.
+          // The stop didn't take — later wind-down paths must render the real
+          // terminal status, not 已停止生成.
           cardState.cancelling = false;
+          cardState.userStopped = false;
         }
         // If onResponseComplete is already finalizing the card, don't race with it.
         if (cardState.finalizing) return;
@@ -1691,9 +1694,13 @@ export class FeishuChannel extends ChannelBase {
           // card and fall back to sendMessage to avoid leaving a stuck "生成中..." card.
           if (!updated && cancelSucceeded && chatId) {
             await this.deleteCard(cardState.messageId);
+            // Same `---` + label shape as rendered cards so extractCardText
+            // strips it from quote-reply context.
             await this.sendMessage(
               chatId,
-              finalText ? `${finalText}\n\n*${stopLabel}*` : `*${stopLabel}*`,
+              finalText
+                ? `${finalText}\n\n---\n*${stopLabel}*`
+                : `*${stopLabel}*`,
             );
           }
         }

@@ -103,6 +103,12 @@ export class DingtalkChannel extends ChannelBase {
     string,
     Map<string, { messageId: string; chatId: string }>
   >();
+  /**
+   * Real inbound message ids (insertion-ordered, size-capped). Unlike the
+   * TTL-swept seenMessages dedup map, entries survive long queue waits, so a
+   * turn that starts minutes after its message arrived still gets a reaction.
+   */
+  private inboundMessageIds = new Set<string>();
 
   constructor(
     name: string,
@@ -400,6 +406,15 @@ export class DingtalkChannel extends ChannelBase {
     return `${conversationId}:${messageId}`;
   }
 
+  private rememberInboundMessageId(msgId: string): void {
+    this.inboundMessageIds.delete(msgId);
+    this.inboundMessageIds.add(msgId);
+    if (this.inboundMessageIds.size > 1000) {
+      const oldest = this.inboundMessageIds.values().next().value;
+      if (oldest !== undefined) this.inboundMessageIds.delete(oldest);
+    }
+  }
+
   private logReactionFailure(action: string, err: unknown): void {
     process.stderr.write(
       `[DingTalk:${this.name}] ${action} failed: ${err instanceof Error ? err.message : err}\n`,
@@ -414,9 +429,8 @@ export class DingtalkChannel extends ChannelBase {
     if (!messageId || !this.isConversationId(chatId)) return;
     // Loop lifecycle events carry the internal job id as messageId; the
     // emotion API only accepts ids of real inbound messages, so skip anything
-    // we never saw arrive (reactions attach at turn start, well within the
-    // dedup TTL).
-    if (!this.seenMessages.has(messageId)) return;
+    // we never saw arrive.
+    if (!this.inboundMessageIds.has(messageId)) return;
     const key = this.reactionKey(messageId, chatId);
     if (this.activeReactionKeys.has(key)) return;
     this.activeReactionKeys.add(key);
@@ -743,6 +757,7 @@ export class DingtalkChannel extends ChannelBase {
       }
       if (msgId) {
         this.seenMessages.set(msgId, Date.now());
+        this.rememberInboundMessageId(msgId);
       }
 
       const isGroup = data.conversationType === '2';
