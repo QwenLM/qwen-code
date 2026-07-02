@@ -1934,4 +1934,198 @@ describe('BackgroundTaskRegistry', () => {
       expect(respond).toHaveBeenCalledWith(ToolConfirmationOutcome.Cancel);
     });
   });
+
+  describe('enriched crash notifications (#5239)', () => {
+    it('fail() accepts and stores partialResult', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('crash-1'));
+      registry.fail(
+        'crash-1',
+        'Connection timeout',
+        undefined,
+        'Scanned 5 files',
+      );
+
+      const entry = registry.get('crash-1')!;
+      expect(entry.status).toBe('failed');
+      expect(entry.error).toBe('Connection timeout');
+      expect(entry.result).toBe('Scanned 5 files');
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain('<result>Scanned 5 files</result>');
+      expect(modelText).toContain('<result>Error: Connection timeout</result>');
+    });
+
+    it('fail() without partialResult preserves backward compatibility', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('crash-2'));
+      registry.fail('crash-2', 'Something went wrong');
+
+      const entry = registry.get('crash-2')!;
+      expect(entry.result).toBeUndefined();
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain(
+        '<result>Error: Something went wrong</result>',
+      );
+      expect(modelText.match(/<result>/g)!.length).toBe(1);
+    });
+
+    it('fail() with empty-string partialResult does not set entry.result', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('crash-3'));
+      registry.fail('crash-3', 'err', undefined, '');
+
+      expect(registry.get('crash-3')!.result).toBeUndefined();
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText.match(/<result>/g)!.length).toBe(1);
+    });
+
+    it('emitNotification includes <recent-activities> for completed agents', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('act-1'));
+      registry.appendActivity('act-1', {
+        name: 'Read',
+        description: 'Read src/index.ts',
+        at: 1000,
+      });
+      registry.appendActivity('act-1', {
+        name: 'Shell',
+        description: 'npm run build',
+        at: 2000,
+      });
+      registry.appendActivity('act-1', {
+        name: 'Grep',
+        description: 'Search for closure',
+        at: 3000,
+      });
+
+      registry.complete('act-1', 'done');
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain('<recent-activities>');
+      expect(modelText).toContain('<name>Read</name>');
+      expect(modelText).toContain(
+        '<description>Read src/index.ts</description>',
+      );
+      expect(modelText).toContain('<at>1000</at>');
+      expect(modelText).toContain('<name>Shell</name>');
+      expect(modelText).toContain('<name>Grep</name>');
+      expect(modelText).toContain('</recent-activities>');
+    });
+
+    it('emitNotification includes <recent-activities> for failed agents', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('act-2'));
+      registry.appendActivity('act-2', {
+        name: 'Edit',
+        description: 'Modified config',
+        at: 5000,
+      });
+      registry.appendActivity('act-2', {
+        name: 'Shell',
+        description: 'npm test',
+        at: 6000,
+      });
+
+      registry.fail('act-2', 'boom', undefined, 'partial work');
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).toContain('<recent-activities>');
+      expect(modelText).toContain('<name>Edit</name>');
+      expect(modelText).toContain('<name>Shell</name>');
+      expect(modelText).toContain('<result>partial work</result>');
+      expect(modelText).toContain('<result>Error: boom</result>');
+    });
+
+    it('emitNotification omits <recent-activities> when buffer is empty', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('act-3'));
+      registry.complete('act-3', 'done');
+
+      const [, modelText] = callback.mock.calls[0];
+      expect(modelText).not.toContain('<recent-activities>');
+    });
+
+    it('NotificationMeta includes recentActivities', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('meta-1'));
+      registry.appendActivity('meta-1', {
+        name: 'Read',
+        description: 'Read file',
+        at: 1000,
+      });
+      registry.appendActivity('meta-1', {
+        name: 'Shell',
+        description: 'run test',
+        at: 2000,
+      });
+
+      registry.complete('meta-1', 'done');
+
+      const [, , meta] = callback.mock.calls[0] as [
+        string,
+        string,
+        { recentActivities?: ReadonlyArray<{ name: string }> },
+      ];
+      expect(meta.recentActivities).toBeDefined();
+      expect(meta.recentActivities).toHaveLength(2);
+      expect(meta.recentActivities![0].name).toBe('Read');
+      expect(meta.recentActivities![1].name).toBe('Shell');
+    });
+
+    it('NotificationMeta.recentActivities is undefined when no activities', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('meta-2'));
+      registry.complete('meta-2', 'done');
+
+      const [, , meta] = callback.mock.calls[0] as [
+        string,
+        string,
+        { recentActivities?: ReadonlyArray<{ name: string }> },
+      ];
+      expect(meta.recentActivities).toBeUndefined();
+    });
+
+    it('activity buffer cap (5) is respected in XML output', () => {
+      const callback = vi.fn();
+      registry.setNotificationCallback(callback);
+
+      registry.register(makeRegistration('cap-1'));
+      for (let i = 0; i < 7; i++) {
+        registry.appendActivity('cap-1', {
+          name: `Tool${i}`,
+          description: `desc${i}`,
+          at: i * 1000,
+        });
+      }
+
+      registry.complete('cap-1', 'done');
+
+      const [, modelText] = callback.mock.calls[0];
+      const activityMatches = modelText.match(/<activity>/g);
+      expect(activityMatches).toHaveLength(5);
+      expect(modelText).toContain('<name>Tool2</name>');
+      expect(modelText).toContain('<name>Tool6</name>');
+      expect(modelText).not.toContain('<name>Tool0</name>');
+      expect(modelText).not.toContain('<name>Tool1</name>');
+    });
+  });
 });
