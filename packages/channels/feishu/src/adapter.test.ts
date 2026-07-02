@@ -279,12 +279,14 @@ describe('FeishuChannel', () => {
     });
 
     it('strips truncation notice with terminal lifecycle label', () => {
+      // Real last-resort shape: the truncation notice block is baked into the
+      // card text and buildCardContent appends the label as its own block.
       const card = {
         body: {
           elements: [
             {
               tag: 'markdown',
-              content: 'Content\n---\n*内容过长，已截断*\n*已完成*',
+              content: 'Content\n\n---\n*内容过长，已截断*\n\n---\n*已完成*',
             },
           ],
         },
@@ -293,6 +295,57 @@ describe('FeishuChannel', () => {
       const result = extractCardText(card);
 
       expect(result).toBe('Content');
+    });
+
+    it('strips a terminal label joined before a collapsible panel body', () => {
+      // Finished collapsible card: the label lands in the preview element and
+      // sits mid-string once the elements are joined.
+      const card = {
+        body: {
+          elements: [
+            { tag: 'markdown', content: 'Preview text\n\n---\n*已完成*' },
+            {
+              tag: 'collapsible_panel',
+              elements: [{ tag: 'markdown', content: 'Rest of the answer' }],
+            },
+          ],
+        },
+      };
+
+      const result = extractCardText(card);
+
+      expect(result).not.toContain('已完成');
+      expect(result).toContain('Preview text');
+      expect(result).toContain('Rest of the answer');
+    });
+
+    it('strips the stop-failure label', () => {
+      const card = {
+        body: {
+          elements: [
+            {
+              tag: 'markdown',
+              content: 'Partial answer\n\n---\n*停止失败，请重试*',
+            },
+          ],
+        },
+      };
+
+      const result = extractCardText(card);
+
+      expect(result).toBe('Partial answer');
+    });
+
+    it('returns undefined for a label-only stopped card', () => {
+      const card = {
+        body: {
+          elements: [{ tag: 'markdown', content: '\n\n---\n*已停止生成*' }],
+        },
+      };
+
+      const result = extractCardText(card);
+
+      expect(result).toBeUndefined();
     });
 
     it('returns undefined for empty card', () => {

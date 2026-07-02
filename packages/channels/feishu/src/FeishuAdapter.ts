@@ -85,6 +85,17 @@ const DEDUP_TTL_MS = 5 * 60 * 1000;
 /** Minimum interval between card updates (ms) to avoid API rate limiting. */
 const CARD_UPDATE_INTERVAL_MS = 1500;
 
+/** Every status/label line a card can render; must cover statusLabelFor,
+ *  stopLabelFor, and the truncation notice. */
+const FEISHU_STATUS_LABELS =
+  '(?:(?:生成中|运行中)(?:\\.\\.\\.)?|已完成|已取消|已失败，请重试|已停止生成|停止失败，请重试|内容过长，已截断)';
+/** A rendered status block: optional `---` divider line + `*label*` line,
+ *  at line granularity anywhere in the joined card text. */
+const FEISHU_STATUS_BLOCK_RE = new RegExp(
+  `(?:^|\\n)(?:---\\n)?\\*${FEISHU_STATUS_LABELS}\\*(?=\\n|$)`,
+  'g',
+);
+
 const BASE_URL = 'https://open.feishu.cn/open-apis';
 
 /** Validate Feishu ID format to prevent SSRF path traversal in URL interpolation. */
@@ -571,12 +582,12 @@ export class FeishuChannel extends ChannelBase {
     }
 
     let text = lines.join('\n').trim();
-    // Strip lifecycle status labels
-    text = text.replace(
-      /\n---\n(?:\*内容过长，已截断\*\n)?\*(?:(?:生成中|运行中)(?:\.\.\.)?|已完成|已取消|已失败，请重试|已停止生成)\*$/,
-      '',
-    );
-    text = text.replace(/\n---\n\*内容过长，已截断\*$/, '');
+    // Strip status/label blocks wherever they appear — buildCardContent
+    // renders them as `---` + `*label*` blocks that end up trailing, leading
+    // (label-only stop cards), stacked (truncation notice + terminal label),
+    // or mid-string (collapsible preview joined before the panel body) — a
+    // $-anchored regex cannot cover those layouts.
+    text = text.replace(FEISHU_STATUS_BLOCK_RE, '');
     // Strip greeting prefix like "好的，<at id=xxx></at>\n\n"
     text = text.replace(/^好的，<at[^>]*><\/at>\s*\n*/, '');
     return text.trim() || undefined;

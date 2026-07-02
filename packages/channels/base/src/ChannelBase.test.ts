@@ -5252,7 +5252,11 @@ describe('ChannelBase', () => {
         status: 'running',
       });
 
-      expect(ch.responseChunks).toEqual([]);
+      // onResponseChunk stays live during the pending window — adapters
+      // accumulate display state and gate rendering on their own stop flags.
+      expect(ch.responseChunks).toEqual([
+        { chatId: 'chat1', chunk: 'late part', sessionId },
+      ]);
       expect(ch.taskEvents).toEqual([
         expect.objectContaining({
           type: 'started',
@@ -5263,6 +5267,10 @@ describe('ChannelBase', () => {
       await expect(cancel).resolves.toBe(true);
       resolvePrompt('late');
       await prompt;
+      // Held chunk is discarded on a successful cancel — no text_chunk event.
+      expect(
+        ch.taskEvents.filter((event) => event.type === 'text_chunk'),
+      ).toEqual([]);
     });
 
     it('clears collect buffers after adapter-initiated cancellation succeeds', async () => {
