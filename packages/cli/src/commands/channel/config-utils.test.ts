@@ -105,8 +105,8 @@ describe('parseChannelConfig', () => {
     expect(result.cwd).toBe(process.cwd());
     expect(result.groupPolicy).toBe('disabled');
     expect(result.groups).toEqual({});
-    expect(result.identity).toBeUndefined();
-    expect(result.memoryScope).toBeUndefined();
+    expect(result['identity']).toBeUndefined();
+    expect(result['memoryScope']).toBeUndefined();
   });
 
   it('resolves env vars in token, clientId, clientSecret', async () => {
@@ -165,6 +165,17 @@ describe('parseChannelConfig', () => {
     expect(result.model).toBe('qwen-coder');
     expect(result.groupPolicy).toBe('open');
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
+  });
+
+  it('drops empty identity and memory scope objects', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      identity: { id: '', displayName: null, description: undefined },
+      memoryScope: { namespace: '', mode: undefined },
+    });
+
+    expect(result.identity).toBeUndefined();
+    expect(result.memoryScope).toBeUndefined();
   });
 
   it('rejects a non-object identity', async () => {

@@ -586,7 +586,8 @@ export abstract class ChannelBase {
       // sinks stay out of the transcript while a cancel is pending.
       const heldChunks: string[] = [];
       const releaseHeldChunks = () => {
-        for (const held of heldChunks.splice(0)) {
+        while (heldChunks.length > 0) {
+          const held = heldChunks.shift()!;
           this.emitTaskLifecycle({
             ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
             type: 'text_chunk',
@@ -674,6 +675,7 @@ export abstract class ChannelBase {
           !promptState.cancelled &&
           !(err instanceof ChannelLoopSkippedError)
         ) {
+          releaseHeldChunks();
           this.emitTaskLifecycle({
             ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
             type: 'failed',
@@ -2563,7 +2565,8 @@ export abstract class ChannelBase {
       // failed cancel they're replayed; on success, discarded.
       const heldChunks: string[] = [];
       const releaseHeldChunks = () => {
-        for (const held of heldChunks.splice(0)) {
+        while (heldChunks.length > 0) {
+          const held = heldChunks.shift()!;
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
@@ -2632,6 +2635,7 @@ export abstract class ChannelBase {
           await this.settleCancelRequested(promptState);
         }
         if (!promptState.cancelled) {
+          releaseHeldChunks();
           this.emitTaskLifecycle({
             ...this.lifecycleBase(
               envelope.chatId,
