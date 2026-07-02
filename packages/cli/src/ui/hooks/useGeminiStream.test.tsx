@@ -4377,6 +4377,98 @@ describe('useGeminiStream', () => {
       });
     });
 
+    it('splits oversized streamed content by rendered height so the pending item stays bounded', async () => {
+      vi.useFakeTimers();
+
+      // The incremental commit delegates its boundary to findLastSafeSplitPoint;
+      // honour the length cap here (the default test mock returns the whole
+      // string, which would suppress the split).
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        (s: string, cap?: number) =>
+          cap === undefined ? s.length : Math.min(cap, s.length),
+      );
+
+      // 25 lines — exceeds the pending rendered-row budget, so it must split.
+      const lines = Array.from({ length: 25 }, (_, i) => `line ${i + 1}`);
+      const longContent = lines.join('\n');
+
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+
+      // Yield content in chunks to match how production streaming works
+      const chunkSize = 200;
+      const chunks: string[] = [];
+      for (let i = 0; i < longContent.length; i += chunkSize) {
+        chunks.push(longContent.substring(i, i + chunkSize));
+      }
+
+      const mockStream = (async function* () {
+        for (const chunk of chunks) {
+          yield {
+            type: ServerGeminiEventType.Content,
+            value: chunk,
+          };
+        }
+        await holdStream;
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+
+      const { result } = renderTestHook();
+
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        // so that sendMessageStream is actually invoked.
+        await vi.advanceTimersByTimeAsync(0);
+      });
+
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+
+      // Before throttle, pending should be empty
+      expect(result.current.pendingHistoryItems).toEqual([]);
+
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+
+      // The pending item is bounded to the rendered-row budget (< 20 lines).
+      const pendingItems = result.current.pendingHistoryItems;
+      expect(pendingItems.length).toBeGreaterThan(0);
+      const pendingText = pendingItems[0]?.text ?? '';
+      const pendingLineCount =
+        pendingText.length === 0 ? 0 : pendingText.split('\n').length;
+      expect(pendingLineCount).toBeLessThanOrEqual(20);
+
+      // There should also be committed content (the split-off chunk)
+      // The pending item itself is set via setPendingHistoryItem (not addItem),
+      // so mockAddItem only captures the committed chunk.
+      const contentItems = mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) => item.type === 'gemini' || item.type === 'gemini_content',
+        );
+      expect(contentItems.length).toBeGreaterThanOrEqual(1);
+      // The committed chunk should have more lines than the pending item
+      const committedText = contentItems[0].text;
+      const committedLineCount = committedText.split('\n').length;
+      expect(committedLineCount).toBeGreaterThan(pendingLineCount);
+
+      act(() => {
+        result.current.cancelOngoingRequest();
+      });
+
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
     it('does not render leading blank thought chunks as an empty thought item', async () => {
       vi.useFakeTimers();
 

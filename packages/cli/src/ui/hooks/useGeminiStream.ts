@@ -86,6 +86,7 @@ import {
   resolveAtCommandQuery,
 } from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import { getCachedStringWidth } from '../utils/textUtils.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
@@ -367,6 +368,15 @@ const EDIT_TOOL_NAMES = new Set([
 ]);
 const STREAM_UPDATE_THROTTLE_MS = 60;
 const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
+// Fallback viewport budget (rendered rows) when the live terminal content
+// height is not yet known.
+const STREAM_PENDING_ITEM_FALLBACK_ROWS = 16;
+// Rows kept in reserve below the commit budget so the incremental commit fires
+// BEFORE MarkdownDisplay's safety-net clip (which reserves 2). Keeping the
+// pending item's rendered height under the safety budget stops that clip from
+// engaging and flickering "generating more" / hiding a table in step with the
+// commit cycle.
+const STREAM_PENDING_COMMIT_RESERVE_ROWS = 5;
 const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 
 type BufferedStreamEvent =
@@ -387,6 +397,63 @@ function clampLoadingThoughtDescription(description: string): string {
   }
 
   return description.slice(0, LOADING_THOUGHT_DESCRIPTION_MAX_CHARS);
+}
+
+const TABLE_ROW_RE = /^\s*\|.*\|\s*$/;
+
+/**
+ * Estimates how many *rendered* terminal rows a single source line occupies.
+ * A markdown table row renders ~2 rows (TableRenderer draws a separator between
+ * every data row); any line wider than `width` wraps. This mirrors, coarsely,
+ * MarkdownDisplay's own rendered-height accounting so the incremental commit
+ * can keep the pending item within the viewport in RENDERED terms — a source
+ * line count under-estimates tables and wide/CJK text and would let the pending
+ * frame overshoot the safety-net clip.
+ */
+function estimateRenderedRows(line: string, width: number): number {
+  const base = TABLE_ROW_RE.test(line) ? 2 : 1;
+  if (width <= 0) return base;
+  return base * Math.max(1, Math.ceil(getCachedStringWidth(line) / width));
+}
+
+/** Sum of {@link estimateRenderedRows} over every source line in `text`. */
+function estimateBufferRenderedRows(text: string, width: number): number {
+  let rows = 0;
+  let lineStart = 0;
+  for (let i = 0; i <= text.length; i++) {
+    if (i === text.length || text[i] === '\n') {
+      rows += estimateRenderedRows(text.slice(lineStart, i), width);
+      lineStart = i + 1;
+    }
+  }
+  return rows;
+}
+
+/**
+ * Returns the character index just after the source line at which the cumulative
+ * estimated rendered height of `text` first reaches `maxRows`. Used to pick an
+ * incremental-commit boundary by rendered height rather than raw line count.
+ * The returned index is a line boundary; callers should still pass it through
+ * `findLastSafeSplitPoint` to avoid cutting inside a fenced code block.
+ */
+function charIndexForRenderedRows(
+  text: string,
+  width: number,
+  maxRows: number,
+): number {
+  let rendered = 0;
+  let lineStart = 0;
+  for (let i = 0; i <= text.length; i++) {
+    if (i === text.length || text[i] === '\n') {
+      const line = text.slice(lineStart, i);
+      rendered += estimateRenderedRows(line, width);
+      if (rendered >= maxRows) {
+        return i < text.length ? i + 1 : text.length;
+      }
+      lineStart = i + 1;
+    }
+  }
+  return text.length;
 }
 
 /**
@@ -445,6 +512,11 @@ export const useGeminiStream = (
   terminalHeight: number,
   midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
   logger?: Logger | null,
+  // Live content-area height (terminal minus composer/header). Used to bound the
+  // pending item's rendered height so it commits to <Static> before it can grow
+  // tall enough to trigger the scroll-to-top redraw. A ref (not a value) because
+  // it is computed after this hook is called in AppContainer.
+  availableTerminalHeightRef?: React.RefObject<number>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -1228,6 +1300,51 @@ export const useGeminiStream = (
         // broken up so that there are more "statically" rendered.
         const beforeText = newGeminiMessageBuffer.substring(0, safeSplitPoint);
         const afterText = newGeminiMessageBuffer.substring(safeSplitPoint);
+        commitItem(
+          {
+            type: nextPendingType,
+            text: beforeText,
+          },
+          userMessageTimestamp,
+        );
+        nextPendingType = 'gemini_content';
+        newGeminiMessageBuffer = afterText;
+      }
+      // Rendered-height-aware incremental commit. Commit whole chunks to
+      // <Static> so the pending (live) item's ESTIMATED rendered height stays
+      // within the viewport budget. Measuring rendered rows (tables count double,
+      // wide/CJK lines wrap) — not raw source lines — keeps the pending frame
+      // below MarkdownDisplay's safety-net clip, so that clip never engages and
+      // flickers "generating more" / hides a table in step with each commit.
+      //
+      //  - `while`, not `if`: a single throttled update can append many lines, so
+      //    keep committing until the remainder fits.
+      //  - `findLastSafeSplitPoint`: never cut inside a fenced code block (which
+      //    would commit a half-open ``` to scrollback permanently).
+      const commitRowBudget = Math.max(
+        4,
+        (availableTerminalHeightRef?.current ||
+          STREAM_PENDING_ITEM_FALLBACK_ROWS) -
+          STREAM_PENDING_COMMIT_RESERVE_ROWS,
+      );
+      while (
+        estimateBufferRenderedRows(newGeminiMessageBuffer, terminalWidth) >
+        commitRowBudget
+      ) {
+        const target = charIndexForRenderedRows(
+          newGeminiMessageBuffer,
+          terminalWidth,
+          commitRowBudget,
+        );
+        const splitPoint = findLastSafeSplitPoint(
+          newGeminiMessageBuffer,
+          target,
+        );
+        if (splitPoint <= 0 || splitPoint >= newGeminiMessageBuffer.length) {
+          break;
+        }
+        const beforeText = newGeminiMessageBuffer.substring(0, splitPoint);
+        const afterText = newGeminiMessageBuffer.substring(splitPoint);
         commitItem(
           {
             type: nextPendingType,
