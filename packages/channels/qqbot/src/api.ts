@@ -37,7 +37,7 @@ export async function fetchAccessToken(
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
     throw new Error(
-      `QQ Bot token request failed (HTTP ${resp.status}): ${body}`,
+      `QQ Bot token request failed (HTTP ${resp.status}): ${body.slice(0, 80)}`,
     );
   }
 
@@ -55,8 +55,30 @@ export async function fetchAccessToken(
 }
 
 /**
- * Resolve the WebSocket Gateway URL.
- * Throws on HTTP errors or missing URL in the response.
+ * Validates gateway URL protocol and warns on unexpected hostname — rejects non-wss: URLs.
+ * Used internally by fetchGatewayUrl and available for direct URL validation.
+ */
+export function validateGatewayUrl(url: string): string {
+  const parsed = new URL(url);
+  if (!['wss:'].includes(parsed.protocol)) {
+    throw new Error(
+      `QQ Bot gateway URL has invalid protocol: ${parsed.protocol}`,
+    );
+  }
+  // Validate hostname to avoid connecting to unexpected endpoints
+  const ALLOWED_GW_HOSTS = ['api.sgroup.qq.com', 'sandbox.api.sgroup.qq.com'];
+  if (!ALLOWED_GW_HOSTS.some(h => parsed.hostname === h)) {
+    process.stderr.write(`[QQ] Unexpected gateway hostname: ${parsed.hostname}\n`);
+  }
+  return url;
+}
+
+/**
+ * Resolve the WebSocket Gateway URL from the QQ Bot API.
+ * Fetches the gateway endpoint then validates the returned URL.
+ * Throws on HTTP errors, missing URL in the response, or invalid protocol.
+ *
+ * For URL validation without an HTTP request, call validateGatewayUrl directly.
  */
 export async function fetchGatewayUrl(
   accessToken: string,
@@ -77,7 +99,9 @@ export async function fetchGatewayUrl(
   if (!data['url']) {
     throw new Error('QQ Bot gateway response missing WebSocket URL');
   }
-  return data['url'];
+  // Validate protocol to avoid routing the access token to a
+  // compromised or misconfigured endpoint.
+  return validateGatewayUrl(data['url']);
 }
 
 /** Determine the API base URL from the sandbox flag. */

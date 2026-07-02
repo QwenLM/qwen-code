@@ -47,8 +47,8 @@ export type { SenderCheckResult } from './SenderGate.js';
 export { SessionRouter } from './SessionRouter.js';
 export {
   sanitizeSenderName,
-  sanitizePromptText,
   sanitizeLogText,
+  sanitizePromptText,
 } from './sanitize.js';
 export type {
   Attachment,

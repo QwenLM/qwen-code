@@ -867,9 +867,9 @@ describe('FeishuChannel', () => {
         token: 'tenant-token',
         expiresAt: Date.now() + 3600_000,
       };
-      const fetchSpy = vi.spyOn(global, 'fetch').mockResolvedValue(
-        new Response('{}', { status: 200 }),
-      );
+      const fetchSpy = vi
+        .spyOn(global, 'fetch')
+        .mockResolvedValue(new Response('{}', { status: 200 }));
 
       await channel.pushLoop(
         {
