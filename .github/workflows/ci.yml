@@ -180,6 +180,15 @@ jobs:
             echo "::warning::Expected Node 22.x but found $(node -v); tests will run against the runner's Node."
           fi
 
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
       - name: 'Configure npm for rate limiting'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
@@ -192,6 +201,13 @@ jobs:
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
         run: |-
           npm ci --prefer-offline --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && needs.classify_pr.outputs.skip_ci != 'true' && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Audit critical runtime dependencies'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' }}"
@@ -536,11 +552,27 @@ jobs:
             echo "::warning::Expected Node 22.x but found $(node -v); integration tests will run against the runner's Node."
           fi
 
+      - name: 'Configure persistent npm cache (self-hosted)'
+        if: "${{ runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${HOME}/.cache/qwen-code/npm"
+          mkdir -p "${cache_dir}"
+          echo "NPM_CONFIG_CACHE=${cache_dir}" >> "${GITHUB_ENV}"
+          echo "Using persistent npm cache at ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
+
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
         run: |-
           npm ci --no-audit --progress=false
+
+      - name: 'Report npm cache usage (self-hosted)'
+        if: "${{ always() && runner.environment == 'self-hosted' }}"
+        run: |-
+          cache_dir="${NPM_CONFIG_CACHE:-$(npm config get cache)}"
+          echo "npm cache: ${cache_dir}"
+          du -sh "${cache_dir}" 2>/dev/null || true
 
       - name: 'Run CLI Integration Tests'
         run: |-

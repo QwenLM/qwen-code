@@ -32,8 +32,11 @@ import type { EvidenceBundle } from '../plan-gate/types.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import {
   buildSubagentPlanToolBlockedResult,
+  isPlanRequiredTeammateContext,
   isPlanLifecycleToolUnavailableInSubagent,
 } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { getTeammateContext } from '../agents/team/identity.js';
+import type { TeamPlanApprovalDecision } from '../agents/team/TeamManager.js';
 
 const debugLogger = createDebugLogger('EXIT_PLAN_MODE');
 
@@ -126,6 +129,9 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
    * (issue #5574).
    */
   override async getDefaultPermission(): Promise<PermissionDecision> {
+    if (isPlanRequiredTeammateContext()) {
+      return 'allow';
+    }
     if (isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)) {
       // Avoid showing an approval UI for a subagent-only rejection; execute()
       // still returns before saving the plan or changing approval mode.
@@ -148,6 +154,9 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
   override async getConfirmationDetails(
     abortSignal: AbortSignal,
   ): Promise<ToolCallConfirmationDetails> {
+    if (isPlanRequiredTeammateContext()) {
+      return super.getConfirmationDetails(abortSignal);
+    }
     if (isPlanLifecycleToolUnavailableInSubagent(ToolNames.EXIT_PLAN_MODE)) {
       return super.getConfirmationDetails(abortSignal);
     }
@@ -187,15 +196,17 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
     return details;
   }
 
-  private setApprovalModeSafely(mode: ApprovalMode): void {
+  private setApprovalModeSafely(mode: ApprovalMode): string | undefined {
     try {
       this.config.setApprovalMode(mode);
+      return undefined;
     } catch (error) {
       const errorMessage =
         error instanceof Error ? error.message : String(error);
       debugLogger.error(
         `[ExitPlanModeTool] Failed to set approval mode to "${mode}": ${errorMessage}`,
       );
+      return errorMessage;
     }
   }
 
@@ -223,6 +234,14 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
 
     const { plan, originalRequest, researchSummary, resolutionSummary } =
       this.params;
+    if (isPlanRequiredTeammateContext()) {
+      return this.executePlanRequiredTeammate(
+        plan,
+        originalRequest,
+        researchSummary,
+        signal,
+      );
+    }
     const prePlanMode = this.config.getPrePlanMode();
     const gateState = this.config.getPlanGateState();
 
@@ -404,6 +423,97 @@ class ExitPlanModeToolInvocation extends BaseToolInvocation<
         returnDisplay: `Error presenting plan: ${errorMessage}`,
       };
     }
+  }
+
+  private async executePlanRequiredTeammate(
+    plan: string,
+    originalRequest: string | undefined,
+    researchSummary: string | undefined,
+    signal: AbortSignal,
+  ): Promise<ToolResult> {
+    if (this.config.getApprovalMode() !== ApprovalMode.PLAN) {
+      return {
+        llmContent: 'Not in plan mode — no action taken.',
+        returnDisplay: 'Not in plan mode.',
+      };
+    }
+
+    const teammate = getTeammateContext();
+    const manager = this.config.getTeamManager();
+    if (!teammate || !manager) {
+      const message =
+        'Plan-required teammate approval is unavailable in this context.';
+      return {
+        llmContent: message,
+        returnDisplay: message,
+        error: { message },
+      };
+    }
+
+    let decision: TeamPlanApprovalDecision;
+    try {
+      decision = await manager.requestPlanApproval({
+        teammateName: teammate.agentName,
+        plan,
+        originalRequest,
+        researchSummary,
+        signal,
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        llmContent: `Failed to request leader plan approval: ${message}`,
+        returnDisplay: `Leader plan approval failed: ${message}`,
+        error: { message },
+      };
+    }
+
+    if (decision.action === 'reject') {
+      const feedback = decision.message
+        ? `\n\nLeader feedback:\n${decision.message}`
+        : '';
+      const llmContent =
+        'Leader rejected the plan. Revise the plan based on the feedback and call exit_plan_mode again.' +
+        feedback;
+      return {
+        llmContent,
+        returnDisplay: this.buildRejectedGateDisplay(
+          'Leader rejected the plan.',
+          plan,
+          llmContent,
+        ),
+      };
+    }
+
+    const modeError = this.setApprovalModeSafely(decision.targetMode);
+    if (modeError) {
+      const message = `Leader approved the plan, but failed to switch this teammate to ${decision.targetMode}: ${modeError}`;
+      return {
+        llmContent: `${message}. Stay in plan mode and report this failure to the leader.`,
+        returnDisplay: message,
+        error: { message },
+      };
+    }
+
+    try {
+      this.config.savePlan(plan);
+    } catch (error) {
+      debugLogger.warn(
+        `[ExitPlanModeTool] Failed to save plan to disk: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+
+    const feedback = decision.message
+      ? ` Leader note: ${decision.message}`
+      : '';
+    return {
+      llmContent: `Leader approved.${feedback} You can now start coding. Start with updating your todo list if applicable.`,
+      returnDisplay: {
+        type: 'plan_summary',
+        message: 'Leader approved.',
+        plan,
+      },
+    };
   }
 
   private approveAndRestore(

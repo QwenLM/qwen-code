@@ -6,7 +6,6 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import * as Diff from 'diff';
 import type { Config } from '../config/config.js';
 import { ApprovalMode } from '../config/config.js';
 import { isAnyAutoMemPath, isTeamAutoMemPath } from '../memory/paths.js';
@@ -35,7 +34,7 @@ import {
 import type { LineEnding } from '../services/fileSystemService.js';
 import { makeRelative, shortenPath, unescapePath } from '../utils/paths.js';
 import { getErrorMessage, isNodeError } from '../utils/errors.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ToolNames, ToolDisplayNames } from './tool-names.js';
 import type {
@@ -227,13 +226,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
     );
     const fileName = path.basename(this.params.file_path);
 
-    const fileDiff = Diff.createPatch(
+    const fileDiff = createPatchSmart(
       fileName,
-      originalContent, // Original content (empty if new file or unreadable)
-      this.params.content, // Content after potential correction
+      originalContent,
+      this.params.content,
       'Current',
       'Proposed',
-      DEFAULT_DIFF_OPTIONS,
     );
 
     const confirmationDetails: ToolEditConfirmationDetails = {
@@ -526,13 +524,12 @@ class WriteFileToolInvocation extends BaseToolInvocation<
       // However, if it was unreadable, currentContentForDiff will be empty.
       const currentContentForDiff = originalContent;
 
-      const fileDiff = Diff.createPatch(
+      const fileDiff = createPatchSmart(
         fileName,
         currentContentForDiff,
         content,
         'Original',
         'Written',
-        DEFAULT_DIFF_OPTIONS,
       );
 
       const originallyProposedContent = ai_proposed_content || content;

@@ -29,7 +29,14 @@ permissions:
   pull-requests: 'write'
 
 jobs:
+  precheck-pr:
+    if: |-
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    uses: './.github/workflows/qwen-pr-safety-precheck.yml'
+
   authorize:
+    needs: ['precheck-pr']
     # Gate the principal on having write+ permission before any agent runs:
     #   - pull_request_target / `/triage` comment -> gates triage (read-only),
     #     keyed on the PR author / the commenter respectively.
@@ -43,7 +50,10 @@ jobs:
     # invoke. But `tmux_pr` dispatch runs the *PR author's* code, not the
     # dispatcher's, so it IS gated here on the PR author's permission.
     if: |-
-      github.repository == 'QwenLM/qwen-code' &&
+      always() &&
+      (github.event_name != 'pull_request_target' ||
+       github.event.pull_request.head.repo.full_name == github.repository ||
+       needs.precheck-pr.outputs.decision == 'allow_triage') &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'issue_comment' &&
         (startsWith(github.event.comment.body, '@qwen-code /triage') ||
@@ -51,8 +61,10 @@ jobs:
          startsWith(github.event.comment.body, '@qwen-code /tmux '))) ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.tmux_pr != ''))
-    # Same-repo guard: this job loads CI_BOT_PAT, so fork-triggered runs stay on hosted (ephemeral); only in-repo PR events use the persistent ECS runner.
-    runs-on: "${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
+    # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
+    # use the persistent ECS runner.
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -156,20 +168,17 @@ jobs:
     # Triage is the read-only analysis agent (same security profile as
     # review-pr in qwen-code-pr-review.yml): it checks out the trusted base
     # repo, never executes PR code, and reaches the PR/issue only via the API.
-    # Run it on the self-hosted ECS pool like review-pr — not GitHub-hosted —
+    # In the canonical repo, run it on the self-hosted ECS pool like review-pr
     # so it stops queueing behind the hosted CI/e2e/macOS/Windows concurrency
-    # cap while the ECS pool sits idle. Falls back to ubuntu-latest when ECS is
-    # disabled. The upstream `authorize` job deliberately stays on hosted: it is
-    # secret-bearing and runs before the permission gate, so it must stay
-    # ephemeral.
-    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    # cap while the ECS pool sits idle. Forks fall back to ubuntu-latest unless
+    # they deliberately change this workflow in their own repo.
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
     # skipped (issues / workflow_dispatch paths, which need no permission gate).
     if: >-
-      always() &&
-      github.repository == 'QwenLM/qwen-code' && (
+      always() && (
         github.event_name == 'issues' ||
         (github.event_name == 'workflow_dispatch' &&
          github.event.inputs.number != '' &&
