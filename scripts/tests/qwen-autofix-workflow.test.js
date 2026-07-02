@@ -54,6 +54,18 @@ const assessCandidatesStep =
   workflow.match(
     /- name: 'Assess candidates'[\s\S]*?(?=\n[ ]{6}- name: 'Read decision')/,
   )?.[0] ?? '';
+const developFixStep =
+  workflow.match(
+    /- name: 'Develop fix'[\s\S]*?(?=\n[ ]{6}- name: 'Verification gate')/,
+  )?.[0] ?? '';
+const triageAndAddressStep =
+  workflow.match(
+    /- name: 'Triage and address'[\s\S]*?(?=\n[ ]{6}- name: 'Verification gate')/,
+  )?.[0] ?? '';
+const resetAutofixWorkspaceSteps =
+  workflow.match(
+    /- name: 'Reset autofix workspace'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
 
 function scriptFromRunStep(step) {
   const runBlock = step.match(/run: \|-\n([\s\S]*)/)?.[1] ?? '';
@@ -350,5 +362,49 @@ describe('qwen-autofix workflow', () => {
   it('surfaces assessment failures instead of turning them into green no-ops', () => {
     expect(assessCandidatesStep.length).toBeGreaterThan(0);
     expect(assessCandidatesStep).not.toContain('continue-on-error: true');
+  });
+
+  it('clears persistent autofix workdirs before using self-hosted runners', () => {
+    expect(resetAutofixWorkspaceSteps).toHaveLength(2);
+    for (const step of resetAutofixWorkspaceSteps) {
+      expect(step).toContain('rm -rf "${WORKDIR}"');
+      expect(step).toContain('mkdir -p "${WORKDIR}"');
+    }
+    expect(workflow.indexOf("- name: 'Checkout with retry'")).toBeLessThan(
+      workflow.indexOf("- name: 'Reset autofix workspace'"),
+    );
+    expect(workflow.indexOf("- name: 'Reset autofix workspace'")).toBeLessThan(
+      workflow.indexOf("- name: 'Find candidate issues'"),
+    );
+    expect(
+      workflow.lastIndexOf("- name: 'Reset autofix workspace'"),
+    ).toBeLessThan(workflow.indexOf("- name: 'Prepare branch and feedback'"));
+  });
+
+  it('retries transient qwen headless failures safely', () => {
+    const qwenSteps = [
+      assessCandidatesStep,
+      developFixStep,
+      triageAndAddressStep,
+    ];
+    for (const step of qwenSteps) {
+      expect(step.length).toBeGreaterThan(0);
+      expect(step).toContain('for attempt in 1 2; do');
+      expect(step).toContain('qwen --yolo --prompt "${PROMPT}"');
+      expect(step).toContain(
+        '::warning::Qwen Code failed on attempt ${attempt}; retrying.',
+      );
+      expect(step).toContain(
+        '::error::Qwen Code failed after ${attempt} attempts.',
+      );
+    }
+    expect(assessCandidatesStep).toContain('rm -f "${WORKDIR}/decision.json"');
+    expect(developFixStep).toContain('BRANCH="autofix/issue-${ISSUE}"');
+    expect(developFixStep).toContain('git rev-parse --verify "${BRANCH}"');
+    expect(developFixStep).toContain('qwen_worktree_dirty');
+    expect(triageAndAddressStep).toContain('qwen_review_changed');
+    expect(triageAndAddressStep).toContain(
+      'git diff --quiet "origin/${BRANCH}...${BRANCH}"',
+    );
   });
 });

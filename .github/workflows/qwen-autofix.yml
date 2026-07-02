@@ -219,6 +219,11 @@ jobs:
             sleep "$((attempt * 10))"
           done
 
+      - name: 'Reset autofix workspace'
+        run: |-
+          rm -rf "${WORKDIR}"
+          mkdir -p "${WORKDIR}"
+
       - name: 'Check bot credentials'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
@@ -548,9 +553,21 @@ jobs:
             this bot (wrong platform, needs more info, not a real task) and
             should never be re-scanned. Transient doubts are not permanent.
         run: |-
-          mkdir -p .qwen "${QWEN_HOME}"
-          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
-          qwen --yolo --prompt "${PROMPT}"
+          for attempt in 1 2; do
+            rm -rf "${QWEN_HOME}"
+            mkdir -p .qwen "${QWEN_HOME}"
+            printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+            rm -f "${WORKDIR}/decision.json"
+            if qwen --yolo --prompt "${PROMPT}"; then
+              exit 0
+            fi
+            if [[ "${attempt}" == "2" ]]; then
+              echo "::error::Qwen Code failed after ${attempt} attempts."
+              exit 1
+            fi
+            echo "::warning::Qwen Code failed on attempt ${attempt}; retrying."
+            sleep "$((attempt * 30))"
+          done
 
       - name: 'Read decision'
         id: 'decision'
@@ -721,9 +738,35 @@ jobs:
             exit without committing. An honest abort is better than a wrong
             fix.
         run: |-
-          mkdir -p .qwen "${QWEN_HOME}"
-          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
-          qwen --yolo --prompt "${PROMPT}"
+          BRANCH="autofix/issue-${ISSUE}"
+
+          qwen_worktree_dirty() {
+            [[ -n "$(git status --porcelain --untracked-files=all)" ]]
+          }
+
+          for attempt in 1 2; do
+            rm -rf "${QWEN_HOME}"
+            mkdir -p .qwen "${QWEN_HOME}"
+            printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+            if qwen --yolo --prompt "${PROMPT}"; then
+              exit 0
+            fi
+            if [[ -f "${WORKDIR}/failure.md" ]]; then
+              echo '::error::Qwen Code wrote failure.md; not retrying.'
+              exit 1
+            fi
+            if [[ "${attempt}" == "2" ]]; then
+              echo "::error::Qwen Code failed after ${attempt} attempts."
+              exit 1
+            fi
+            if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1 || qwen_worktree_dirty; then
+              echo '::error::Qwen Code failed after changing the workspace; not retrying automatically.'
+              exit 1
+            fi
+            rm -f "${WORKDIR}/failure.md" "${WORKDIR}/e2e-report.md" "${WORKDIR}/pr-title.txt" "${WORKDIR}/pr-body.md" "${WORKDIR}/fix.diff"
+            echo "::warning::Qwen Code failed on attempt ${attempt}; retrying."
+            sleep "$((attempt * 30))"
+          done
 
       - name: 'Verification gate'
         id: 'verify'
@@ -1055,6 +1098,11 @@ jobs:
             sleep "$((attempt * 10))"
           done
 
+      - name: 'Reset autofix workspace'
+        run: |-
+          rm -rf "${WORKDIR}"
+          mkdir -p "${WORKDIR}"
+
       - name: 'Set up Node.js (hosted)'
         if: |-
           ${{ runner.environment == 'github-hosted' }}
@@ -1292,9 +1340,34 @@ jobs:
               /tmp/autofix-review/failure.md with what you learned and exit
               without committing. An honest abort beats a wrong or churn change.
         run: |-
-          mkdir -p .qwen "${QWEN_HOME}"
-          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
-          qwen --yolo --prompt "${PROMPT}"
+          qwen_review_changed() {
+            [[ -n "$(git status --porcelain --untracked-files=all)" ]] && return 0
+            ! git diff --quiet "origin/${BRANCH}...${BRANCH}"
+          }
+
+          for attempt in 1 2; do
+            rm -rf "${QWEN_HOME}"
+            mkdir -p .qwen "${QWEN_HOME}"
+            printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+            if qwen --yolo --prompt "${PROMPT}"; then
+              exit 0
+            fi
+            if [[ -f "${WORKDIR}/failure.md" ]]; then
+              echo '::error::Qwen Code wrote failure.md; not retrying.'
+              exit 1
+            fi
+            if [[ "${attempt}" == "2" ]]; then
+              echo "::error::Qwen Code failed after ${attempt} attempts."
+              exit 1
+            fi
+            if qwen_review_changed; then
+              echo '::error::Qwen Code failed after changing the workspace; not retrying automatically.'
+              exit 1
+            fi
+            rm -f "${WORKDIR}/failure.md" "${WORKDIR}/address-summary.md" "${WORKDIR}/no-action.md" "${WORKDIR}/pr.diff" "${WORKDIR}/report.md"
+            echo "::warning::Qwen Code failed on attempt ${attempt}; retrying."
+            sleep "$((attempt * 30))"
+          done
 
       - name: 'Verification gate'
         id: 'verify'
