@@ -9823,6 +9823,72 @@ describe('Session', () => {
       );
     });
 
+    it('writes stderr when hook artifact notification delivery fails', async () => {
+      const messageBus = {
+        request: vi.fn().mockImplementation(async (request) => ({
+          success: true,
+          output:
+            request.eventName === 'PostToolBatch'
+              ? {
+                  hookSpecificOutput: {
+                    hookEventName: 'PostToolBatch',
+                    artifacts: [
+                      {
+                        title: 'Batch report',
+                        workspacePath: 'reports/batch.html',
+                      },
+                    ],
+                  },
+                }
+              : { decision: 'allow', eventName: request.eventName },
+        })),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation(
+          (eventName: string) => eventName === 'PostToolBatch',
+        );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'tool output',
+        returnDisplay: 'tool output',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('read_file', execute),
+      );
+      mockClient.extNotification = vi
+        .fn()
+        .mockRejectedValue(new Error('socket closed'));
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockReturnValue(true as never);
+
+      try {
+        await (session as unknown as ToolCallInternals).runToolCalls(
+          new AbortController().signal,
+          'prompt-batch-artifacts-drop',
+          [
+            {
+              id: 'read_call',
+              name: 'read_file',
+              args: { path: 'README.md' },
+            },
+          ],
+        );
+
+        const logged = stderr.mock.calls
+          .map((call) => String(call[0]))
+          .join('');
+        expect(logged).toContain('Hook artifact notification dropped');
+        expect(logged).toContain('PostToolBatch');
+        expect(logged).toContain('socket closed');
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it('redacts nested inline data before sending PostToolBatch hooks', async () => {
       const messageBus = {
         request: vi.fn().mockResolvedValue({

@@ -109,6 +109,25 @@ describe('RecordArtifactTool', () => {
         url: 'https://user:pass@example.com/resource',
       }),
     ).toThrow(/credentials/);
+
+    expect(() =>
+      tool.build({
+        title: 'FTP',
+        url: 'ftp://example.com/resource',
+      }),
+    ).toThrow(/http or https/);
+  });
+
+  it('rejects storage values that do not match the locator', () => {
+    const tool = new RecordArtifactTool();
+
+    expect(() =>
+      tool.build({
+        title: 'Workspace mismatch',
+        storage: 'external_url',
+        workspacePath: 'report.html',
+      }),
+    ).toThrow(/storage.*workspace/);
   });
 
   it('rejects artifact metadata that the daemon store would drop', () => {

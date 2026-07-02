@@ -174,6 +174,7 @@ import {
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildExtensionMentionContext,
   EXTENSION_CONTEXT_BUDGET,
@@ -5824,7 +5825,7 @@ export class Session implements SessionContext {
         artifacts: hookResult.artifacts,
       });
     } catch (error) {
-      debugLogger.warn(
+      writeStderrLine(
         `PostToolBatch hook artifact notification failed: ${
           error instanceof Error ? error.message : String(error)
         }`,
@@ -5853,8 +5854,8 @@ export class Session implements SessionContext {
         artifacts: args.artifacts,
       });
     } catch (error) {
-      debugLogger.warn(
-        `Hook artifact notification dropped for ${args.toolName ?? 'unknown tool'}: ${
+      writeStderrLine(
+        `Hook artifact notification dropped for ${args.toolName ?? args.hookEventName}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );

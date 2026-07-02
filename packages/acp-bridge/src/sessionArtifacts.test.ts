@@ -617,6 +617,52 @@ describe('SessionArtifactStore', () => {
     );
   });
 
+  it('logs and keeps existing metadata when a merge would exceed the limit', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-metadata-overflow',
+      workspaceCwd: workspace,
+    });
+    const largeValue = 'x'.repeat(4070);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      const created = await store.upsertMany(
+        [
+          {
+            title: 'Link',
+            url: 'https://example.com/resource',
+            metadata: { blob: largeValue },
+          },
+        ],
+        { strict: true },
+      );
+      const artifactId = created.changes[0]?.artifactId;
+
+      const repeated = await store.upsertMany(
+        [
+          {
+            title: 'Ignored title',
+            url: 'https://example.com/resource',
+            metadata: { extra: 'y'.repeat(20) },
+          },
+        ],
+        { strict: true },
+      );
+
+      expect(repeated.changes).toEqual([]);
+      expect((await store.list()).artifacts[0]?.metadata).toEqual({
+        blob: largeValue,
+      });
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('metadata_merge_dropped');
+      expect(logged).toContain(artifactId);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('coalesces duplicate identities within one upsert batch', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's5-coalesce',
@@ -1023,6 +1069,20 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('rejects workspace symlinks that resolve to the workspace root', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's6-root-symlink',
+      workspaceCwd: workspace,
+    });
+    await fs.symlink(workspace, path.join(workspace, 'root-link'));
+
+    await expect(
+      store.upsertMany([{ title: 'Root', workspacePath: 'root-link' }], {
+        strict: true,
+      }),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
+  });
+
   it('rejects dangling symlinks that point outside the workspace', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's6-dangling-symlink',
@@ -1124,8 +1184,8 @@ describe('SessionArtifactStore', () => {
       expect(artifact).toMatchObject({
         status: 'missing',
         storage: 'workspace',
-        workspacePath: 'report.txt',
       });
+      expect(artifact).not.toHaveProperty('workspacePath');
       expect(artifact).not.toHaveProperty('sizeBytes');
     } finally {
       vi.useRealTimers();

@@ -36,6 +36,7 @@ const SOURCE_RESERVATIONS: Record<DaemonSessionArtifactSource, number> = {
   hook: 50,
 };
 const WORKSPACE_STATUS_REFRESH_TTL_MS = 5_000;
+const WORKSPACE_STATUS_REFRESH_BATCH_SIZE = 20;
 
 export interface ToolArtifactLike {
   kind?: DaemonSessionArtifactKind;
@@ -429,16 +430,18 @@ export class SessionArtifactStore {
 
   private async refreshWorkspaceStatuses(): Promise<void> {
     const now = Date.now();
-    await Promise.all(
-      Array.from(this.artifacts.values())
-        .filter((artifact) => artifact.workspacePath)
-        .filter((artifact) => shouldRefreshWorkspaceStatus(artifact, now))
-        .map((artifact) =>
-          this.refreshWorkspaceStatus(artifact, {
-            onError: 'missing',
-            now,
-          }),
-        ),
+    const staleWorkspaceArtifacts = Array.from(this.artifacts.values())
+      .filter((artifact) => artifact.workspacePath)
+      .filter((artifact) => shouldRefreshWorkspaceStatus(artifact, now));
+
+    await runInBatches(
+      staleWorkspaceArtifacts,
+      WORKSPACE_STATUS_REFRESH_BATCH_SIZE,
+      (artifact) =>
+        this.refreshWorkspaceStatus(artifact, {
+          onError: 'missing',
+          now,
+        }),
     );
   }
 
@@ -478,6 +481,8 @@ export class SessionArtifactStore {
       artifact.sizeBytes = status.sizeBytes;
       if (status.escaped) {
         artifact.status = 'missing';
+        artifact.sizeBytes = undefined;
+        delete artifact.workspacePath;
       }
       artifact.lastStatAt = options.now ?? Date.now();
     } catch (error) {
@@ -521,21 +526,20 @@ export class SessionArtifactStore {
     const candidates = Array.from(this.artifacts.values()).filter(
       (artifact) => !createdInThisBatch.has(artifact.id),
     );
-    await Promise.all(
-      candidates.map((artifact) =>
+    await runInBatches(
+      candidates,
+      WORKSPACE_STATUS_REFRESH_BATCH_SIZE,
+      (artifact) =>
         this.refreshWorkspaceStatus(artifact, { onError: 'preserve' }),
-      ),
     );
+    const sourceCounts = countByRetentionSource(this.artifacts.values());
 
     while (this.artifacts.size > this.maxArtifacts) {
-      const artifact = selectEvictionCandidate(
-        Array.from(this.artifacts.values()).filter(
-          (candidate) => !createdInThisBatch.has(candidate.id),
-        ),
-        countByRetentionSource(this.artifacts.values()),
-      );
+      const artifact = selectEvictionCandidate(candidates, sourceCounts);
       if (!artifact) break;
       this.artifacts.delete(artifact.id);
+      candidates.splice(candidates.indexOf(artifact), 1);
+      sourceCounts[artifact.retentionSource]--;
       removePriorChange(changes, artifact.id);
       removed.push({
         action: 'removed',
@@ -755,6 +759,9 @@ function mergeMetadata(
     return existing;
   }
   if (!isMetadataWithinLimit(merged)) {
+    writeStderrLine(
+      `[artifacts] action=metadata_merge_dropped artifactId=${incoming.id} reason="metadata limit exceeded"`,
+    );
     return existing;
   }
   return merged;
@@ -796,25 +803,35 @@ function selectEvictionCandidate(
 ): StoredArtifact | undefined {
   return (
     oldest(
-      candidates.filter(
-        (artifact) => artifact.status === 'missing' && !artifact.clientRetained,
-      ),
+      candidates,
+      (artifact) => artifact.status === 'missing' && !artifact.clientRetained,
     ) ??
     oldest(
-      candidates.filter(
-        (artifact) =>
-          !artifact.clientRetained &&
-          sourceCounts[artifact.retentionSource] >
-            SOURCE_RESERVATIONS[artifact.retentionSource],
-      ),
+      candidates,
+      (artifact) =>
+        !artifact.clientRetained &&
+        sourceCounts[artifact.retentionSource] >
+          SOURCE_RESERVATIONS[artifact.retentionSource],
     ) ??
-    oldest(candidates.filter((artifact) => !artifact.clientRetained)) ??
+    oldest(candidates, (artifact) => !artifact.clientRetained) ??
     oldest(candidates)
   );
 }
 
-function oldest(artifacts: StoredArtifact[]): StoredArtifact | undefined {
-  return artifacts.sort(compareOldest)[0];
+function oldest(
+  artifacts: StoredArtifact[],
+  predicate: (artifact: StoredArtifact) => boolean = () => true,
+): StoredArtifact | undefined {
+  let selected: StoredArtifact | undefined;
+  for (const artifact of artifacts) {
+    if (!predicate(artifact)) {
+      continue;
+    }
+    if (!selected || compareOldest(artifact, selected) < 0) {
+      selected = artifact;
+    }
+  }
+  return selected;
 }
 
 function compareOldest(a: StoredArtifact, b: StoredArtifact): number {
@@ -1301,7 +1318,7 @@ async function getWorkspaceStatus(
   try {
     const realPath = await fs.realpath(absolutePath);
     const relative = path.relative(realWorkspace, realPath);
-    if (isOutsidePath(relative)) {
+    if (!relative || isOutsidePath(relative)) {
       return { status: 'missing', escaped: true };
     }
     const stat = await fs.stat(realPath);
@@ -1338,6 +1355,16 @@ async function danglingSymlinkEscapesWorkspace(
       return false;
     }
     throw error;
+  }
+}
+
+async function runInBatches<T>(
+  items: T[],
+  batchSize: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  for (let index = 0; index < items.length; index += batchSize) {
+    await Promise.all(items.slice(index, index + batchSize).map(fn));
   }
 }
 
