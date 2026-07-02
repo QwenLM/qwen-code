@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-const REDACTED = '***REDACTED***';
+const REDACTED = '<redacted>';
 
 const CREDENTIAL_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   // Bearer tokens (Feishu, Weixin, Daemon SDK).
@@ -71,7 +71,7 @@ const CREDENTIAL_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   },
   // URL-embedded credentials (scheme://user:pass@host)
   {
-    pattern: /\b([a-z][a-z0-9+.-]*:\/\/)(?:[^/\s]+@)+/gi,
+    pattern: /\b([a-z][a-z0-9+.-]{0,31}:\/\/)(?:[^/\s]+@)+/gi,
     replacement: `$1${REDACTED}@`,
   },
 ];

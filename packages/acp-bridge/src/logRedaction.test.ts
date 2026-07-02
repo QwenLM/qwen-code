@@ -7,7 +7,7 @@
 import { describe, expect, it } from 'vitest';
 import { redactLogCredentials } from './logRedaction.js';
 
-const R = '***REDACTED***';
+const R = '<redacted>';
 
 describe('redactLogCredentials', () => {
   // ── Bearer tokens ──────────────────────────────────────────────────

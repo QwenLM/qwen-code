@@ -211,9 +211,9 @@ describe('createStderrForwarder', () => {
     forwarder.onData('Authorization: Bearer eyJsecret123\n');
     expect(captured).toHaveLength(1);
     expect(captured[0]!.line).not.toContain('eyJsecret123');
-    expect(captured[0]!.line).toContain('***REDACTED***');
+    expect(captured[0]!.line).toContain('<redacted>');
     expect(stderrSpy).toHaveBeenCalledWith(
-      expect.stringContaining('***REDACTED***'),
+      expect.stringContaining('<redacted>'),
     );
     expect(stderrSpy).not.toHaveBeenCalledWith(
       expect.stringContaining('eyJsecret123'),
@@ -231,7 +231,7 @@ describe('createStderrForwarder', () => {
     const bigChunk = 'Bearer secrettoken123 ' + 'A'.repeat(65 * 1024);
     forwarder.onData(bigChunk);
     expect(captured.length).toBeGreaterThanOrEqual(1);
-    expect(captured[0]!.line).toContain('***REDACTED***');
+    expect(captured[0]!.line).toContain('<redacted>');
     expect(captured[0]!.line).not.toContain('secrettoken123');
     stderrSpy.mockRestore();
   });
