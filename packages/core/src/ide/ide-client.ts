@@ -722,6 +722,14 @@ export class IdeClient {
         .map((file) => file.toString())
         .filter((file) => fileRegex.test(file));
     } catch (e) {
+      // Silently return empty when the directory simply doesn't exist
+      // (common in CLI-only setups without an IDE companion extension).
+      if (
+        e instanceof Error &&
+        (e as NodeJS.ErrnoException).code === 'ENOENT'
+      ) {
+        return [];
+      }
       debugLogger.debug('Failed to read IDE connection directory:', e);
       return [];
     }
