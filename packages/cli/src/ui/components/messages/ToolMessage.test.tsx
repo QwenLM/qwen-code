@@ -505,7 +505,8 @@ describe('<ToolMessage />', () => {
     it('counts successful agent-tool calls as sub-agents in the summary tail', () => {
       // Direct children = successful AgentTool calls from the per-tool
       // usage stats. The failed call (a guard-blocked spawn) must not
-      // count.
+      // count. Stats key on the raw request name, so the legacy 'task'
+      // alias must count alongside the canonical 'agent'.
       const { lastFrame } = renderWithContext(
         <ToolMessage
           {...buildProps({
@@ -515,7 +516,7 @@ describe('<ToolMessage />', () => {
               taskPrompt: 'Fan out',
               status: 'completed',
               executionSummary: {
-                totalToolCalls: 6,
+                totalToolCalls: 7,
                 totalDurationMs: 22_000,
                 outputTokens: 3100,
                 toolUsage: [
@@ -524,6 +525,14 @@ describe('<ToolMessage />', () => {
                     count: 3,
                     success: 2,
                     failure: 1,
+                    totalDurationMs: 0,
+                    averageDurationMs: 0,
+                  },
+                  {
+                    name: 'task',
+                    count: 1,
+                    success: 1,
+                    failure: 0,
                     totalDurationMs: 0,
                     averageDurationMs: 0,
                   },
@@ -544,8 +553,8 @@ describe('<ToolMessage />', () => {
         StreamingState.Idle,
       );
       const output = lastFrame() ?? '';
-      expect(output).toContain('6 tools');
-      expect(output).toContain('2 sub-agents');
+      expect(output).toContain('7 tools');
+      expect(output).toContain('3 sub-agents');
     });
 
     it('renders no sub-agent segment when the agent spawned none', () => {
