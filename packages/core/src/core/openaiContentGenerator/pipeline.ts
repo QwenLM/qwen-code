@@ -77,7 +77,10 @@ function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
   //    - NaN/Infinity/non-integer are invalid.
   const fromConfig = config.streamIdleTimeoutMs;
   if (typeof fromConfig === 'number') {
-    if (Number.isInteger(fromConfig) && fromConfig <= MAX_STREAM_IDLE_TIMEOUT_MS) {
+    if (
+      Number.isInteger(fromConfig) &&
+      fromConfig <= MAX_STREAM_IDLE_TIMEOUT_MS
+    ) {
       return fromConfig;
     }
     // eslint-disable-next-line no-console
@@ -775,7 +778,7 @@ export class ContentGenerationPipeline {
       ? new StreamingToolCallParser()
       : undefined;
     const responseParsingOptions =
-      this.config.provider.getResponseParsingOptions?.();
+      this.config.provider.getResponseParsingOptions?.(effectiveModel);
     const taggedThinkingParser =
       isStreaming && responseParsingOptions?.taggedThinkingTags
         ? new TaggedThinkingParser()

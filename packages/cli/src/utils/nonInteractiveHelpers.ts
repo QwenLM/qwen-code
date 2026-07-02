@@ -15,10 +15,13 @@ import type {
   McpToolProgressData,
 } from '@qwen-code/qwen-code-core';
 import {
+  ApprovalMode,
   OutputFormat,
   ToolErrorType,
   createDebugLogger,
+  getArenaSystemReminder,
   getMCPServerStatus,
+  getPlanModeSystemReminder,
 } from '@qwen-code/qwen-code-core';
 import type { Part, PartListUnion } from '@google/genai';
 import type {
@@ -129,6 +132,39 @@ export function computeUsageFromMetrics(metrics: SessionMetrics): Usage {
   }
 
   return usage;
+}
+
+export function buildInitialSystemReminders(config: Config): Part[] {
+  const reminders: Part[] = [];
+
+  if (config.getApprovalMode() === ApprovalMode.PLAN) {
+    reminders.push({ text: getPlanModeSystemReminder(config.getSdkMode?.()) });
+  }
+
+  const arenaManager = config.getArenaManager?.();
+  if (arenaManager) {
+    try {
+      const sessionDir = arenaManager.getArenaSessionDir();
+      const configPath = `${sessionDir}/config.json`;
+      reminders.push({ text: getArenaSystemReminder(configPath) });
+    } catch {
+      // Arena config not yet initialized; match the regular send path.
+    }
+  }
+
+  return reminders;
+}
+
+export function insertAfterFunctionResponses(
+  parts: Part[],
+  additions: Part[],
+): Part[] {
+  const firstNonFunctionResponse = parts.findIndex(
+    (part) => !part.functionResponse,
+  );
+  const insertAt =
+    firstNonFunctionResponse === -1 ? parts.length : firstNonFunctionResponse;
+  return [...parts.slice(0, insertAt), ...additions, ...parts.slice(insertAt)];
 }
 
 /**

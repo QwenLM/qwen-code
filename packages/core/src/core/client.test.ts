@@ -55,7 +55,11 @@ vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
   isUnattendedMode: vi.fn(() => false),
 }));
-import { getCoreSystemPrompt, getCustomSystemPrompt } from './prompts.js';
+import {
+  getCoreSystemPrompt,
+  getCustomSystemPrompt,
+  getPlanModeSystemReminder,
+} from './prompts.js';
 import { DEFAULT_QWEN_FLASH_MODEL } from '../config/models.js';
 import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { promptIdContext } from '../utils/promptIdContext.js';
@@ -75,6 +79,7 @@ import {
   setActiveGoal,
 } from '../goals/activeGoalStore.js';
 import type { FileHistorySnapshot } from '../services/fileHistoryService.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
 
 // Mock fs module to prevent actual file system operations during tests
 const mockFileSystem = new Map<string, string>();
@@ -481,6 +486,7 @@ describe('Gemini Client (client.ts)', () => {
       getNoBrowser: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(true),
       getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getSdkMode: vi.fn().mockReturnValue(false),
       getIdeModeFeature: vi.fn().mockReturnValue(false),
       getIdeMode: vi.fn().mockReturnValue(true),
       getDebugMode: vi.fn().mockReturnValue(false),
@@ -1927,6 +1933,42 @@ describe('Gemini Client (client.ts)', () => {
       expect(stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
       expect(cacheClear).toHaveBeenCalled();
     });
+
+    it('restores stripped retry entries when session token limit skips send', async () => {
+      const retryEntry: Content = {
+        role: 'user',
+        parts: [{ text: 'retry me' }],
+      };
+      const addHistory = vi.fn();
+      client['chat'] = {
+        addHistory,
+        getHistory: vi.fn().mockReturnValue([]),
+        getHistoryLength: vi.fn().mockReturnValue(1),
+        // Send is skipped, so the push counter never advances → restore.
+        getUserContentPushCount: vi.fn().mockReturnValue(0),
+        stripOrphanedUserEntriesFromHistory: vi
+          .fn()
+          .mockReturnValue([retryEntry]),
+        repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+      } as unknown as GeminiChat;
+      vi.mocked(mockConfig.getSessionTokenLimit).mockReturnValue(100);
+      vi.mocked(uiTelemetryService.getLastPromptTokenCount).mockReturnValue(
+        101,
+      );
+
+      const events = await fromAsync(
+        client.sendMessageStream(
+          [{ text: 'retry me' }],
+          new AbortController().signal,
+          'prompt-retry-limit',
+          { type: SendMessageType.Retry },
+        ),
+      );
+
+      expect(events[0]?.type).toBe(GeminiEventType.SessionTokenLimitExceeded);
+      expect(mockTurnRunFn).not.toHaveBeenCalled();
+      expect(addHistory).toHaveBeenCalledWith(retryEntry);
+    });
   });
 
   /**
@@ -3058,14 +3100,14 @@ describe('Gemini Client (client.ts)', () => {
 
       await client.tryCompressChat('p1', true, signal);
 
-      // 5th arg is the `options` bag for `customInstructions` plumbing;
-      // omitted here means undefined which is the correct contract.
+      // 5th arg is the `options` bag — always includes reservedOutputTokens
+      // now; no customInstructions when omitted by the caller.
       expect(tryCompress).toHaveBeenCalledWith(
         'p1',
         'the-model',
         true,
         signal,
-        undefined,
+        { reservedOutputTokens: expect.any(Number) },
       );
     });
 
@@ -3088,7 +3130,10 @@ describe('Gemini Client (client.ts)', () => {
         'the-model',
         true,
         undefined,
-        { customInstructions: 'focus on auth bug' },
+        {
+          customInstructions: 'focus on auth bug',
+          reservedOutputTokens: expect.any(Number),
+        },
       );
     });
 
@@ -4664,6 +4709,89 @@ hello
         ],
         expect.any(AbortSignal),
       );
+    });
+
+    it('uses the subagent plan reminder when a subagent inherits PLAN mode', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      vi.mocked(mockConfig.getSdkMode).mockReturnValue(false);
+      vi.mocked(getPlanModeSystemReminder).mockReturnValue(
+        '<system-reminder>return plan to caller</system-reminder>',
+      );
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Plan ready' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      await runWithAgentContext('agent-1', async () => {
+        const stream = client.sendMessageStream(
+          [{ text: 'Plan this change' }],
+          new AbortController().signal,
+          'prompt-id-subagent-plan-reminder',
+        );
+        for await (const _ of stream) {
+          // consume stream
+        }
+      });
+
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(true);
+    });
+
+    it('uses the subagent plan reminder when SDK mode is active', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      vi.mocked(mockConfig.getSdkMode).mockReturnValue(true);
+      vi.mocked(getPlanModeSystemReminder).mockReturnValue(
+        '<system-reminder>return plan to caller</system-reminder>',
+      );
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Plan ready' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Plan this change' }],
+        new AbortController().signal,
+        'prompt-id-sdk-plan-reminder',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(true);
+    });
+
+    it('uses the main-session plan reminder outside subagent and SDK mode', async () => {
+      vi.mocked(mockConfig.getApprovalMode).mockReturnValue(ApprovalMode.PLAN);
+      vi.mocked(mockConfig.getSdkMode).mockReturnValue(false);
+      vi.mocked(getPlanModeSystemReminder).mockReturnValue(
+        '<system-reminder>call exit_plan_mode</system-reminder>',
+      );
+      const mockStream = (async function* () {
+        yield { type: 'content', value: 'Plan ready' };
+      })();
+      mockTurnRunFn.mockReturnValue(mockStream);
+      client['chat'] = {
+        addHistory: vi.fn(),
+        getHistory: vi.fn().mockReturnValue([]),
+      } as unknown as GeminiChat;
+
+      const stream = client.sendMessageStream(
+        [{ text: 'Plan this change' }],
+        new AbortController().signal,
+        'prompt-id-main-plan-reminder',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      expect(getPlanModeSystemReminder).toHaveBeenCalledWith(false);
     });
 
     it('should not inject duplicate date on the same day', async () => {
@@ -6502,6 +6630,163 @@ Other open files:
         expect(
           mockChat.stripOrphanedUserEntriesFromHistory,
         ).toHaveBeenCalledOnce();
+      });
+
+      it('restores stripped retry entries when the retry stream throws before its first event', async () => {
+        const orphanedPrompt: Content = {
+          role: 'user',
+          parts: [{ text: 'retry me' }],
+        };
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          // Send throws before the push, so the counter never advances → restore.
+          getUserContentPushCount: vi.fn().mockReturnValue(0),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([orphanedPrompt]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            yield* [] as ServerGeminiStreamEvent[];
+            throw new Error('retry failed before first event');
+          })(),
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry me' }],
+              new AbortController().signal,
+              'prompt-retry-pre-event-failure',
+              { type: SendMessageType.Retry },
+            ),
+          ),
+        ).rejects.toThrow('retry failed before first event');
+
+        expect(mockChat.addHistory).toHaveBeenCalledWith(orphanedPrompt);
+      });
+
+      it('does not re-add stripped retry entries when the chat already pushed them before failing', async () => {
+        // Regression (I1): a Retry that fails AFTER chat.sendMessageStream has
+        // pushed the re-submitted user content but BEFORE any event streamed
+        // must not restore the stripped entries on top of the content the chat
+        // already holds — that would duplicate history. The push-counter guard
+        // suppresses the re-add because the push advanced the counter.
+        const orphanedPrompt: Content = {
+          role: 'user',
+          parts: [{ text: 'retry me' }],
+        };
+        // Mirror GeminiChat's user-content push counter; the mocked turn bumps
+        // it when it simulates the pre-API push.
+        let pushCount = 0;
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn().mockReturnValue([]),
+          getHistoryLength: vi.fn().mockReturnValue(0),
+          getUserContentPushCount: vi.fn(() => pushCount),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([orphanedPrompt]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            // Simulate the real chat pushing the re-submitted user content into
+            // history before the API call, then failing pre-event.
+            pushCount++;
+            yield* [] as ServerGeminiStreamEvent[];
+            throw new Error('retry failed after push, before first event');
+          })(),
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry me' }],
+              new AbortController().signal,
+              'prompt-retry-post-push-failure',
+              { type: SendMessageType.Retry },
+            ),
+          ),
+        ).rejects.toThrow('retry failed after push, before first event');
+
+        // The push counter advanced past the post-strip snapshot, so the
+        // restore must be suppressed — no duplicate addHistory.
+        expect(mockChat.addHistory).not.toHaveBeenCalled();
+      });
+
+      it('does not re-add stripped retry entries when auto-compression shrank history below the pre-send length after the push', async () => {
+        // Regression (IDX 4/8): auto-compression inside chat.sendMessageStream
+        // runs BEFORE the re-submitted user content is pushed, so history can
+        // end up SHORTER than it was right after the strip even though the push
+        // landed. A history-length guard would read "history didn't grow" and
+        // wrongly restore the stripped entries, duplicating the prompt. The
+        // push-counter guard is invariant under compression and must suppress
+        // the restore.
+        const orphanedPrompt: Content = {
+          role: 'user',
+          parts: [{ text: 'retry me' }],
+        };
+        // Live history shrinks below the post-strip baseline via compression.
+        const historyRef: Content[] = [
+          { role: 'user', parts: [{ text: 'old-1' }] },
+          { role: 'model', parts: [{ text: 'old-2' }] },
+          { role: 'user', parts: [{ text: 'old-3' }] },
+        ];
+        let pushCount = 0;
+        const mockChat: Partial<GeminiChat> = {
+          addHistory: vi.fn(),
+          getHistory: vi.fn(() => historyRef),
+          getHistoryLength: vi.fn(() => historyRef.length),
+          getUserContentPushCount: vi.fn(() => pushCount),
+          setHistory: vi.fn(),
+          stripOrphanedUserEntriesFromHistory: vi
+            .fn()
+            .mockReturnValue([orphanedPrompt]),
+          repairOrphanedToolUseTurns: vi.fn().mockReturnValue({ injected: [] }),
+        };
+        client['chat'] = mockChat as GeminiChat;
+
+        mockTurnRunFn.mockReturnValue(
+          (async function* () {
+            // Compression collapses the old turns into one summary, THEN the
+            // user content is pushed (counter bumps): net length (2) < the
+            // post-strip baseline (3).
+            historyRef.length = 0;
+            historyRef.push({ role: 'user', parts: [{ text: 'summary' }] });
+            historyRef.push(orphanedPrompt);
+            pushCount++;
+            yield* [] as ServerGeminiStreamEvent[];
+            throw new Error(
+              'failed after compression+push, before first event',
+            );
+          })(),
+        );
+
+        await expect(
+          fromAsync(
+            client.sendMessageStream(
+              [{ text: 'retry me' }],
+              new AbortController().signal,
+              'prompt-retry-compression-shrink',
+              { type: SendMessageType.Retry },
+            ),
+          ),
+        ).rejects.toThrow('failed after compression+push, before first event');
+
+        // History length (2) is below the post-strip baseline (3) — a length
+        // guard would restore here — but the push counter advanced, so the
+        // counter guard must suppress the re-add.
+        expect(mockChat.addHistory).not.toHaveBeenCalled();
       });
 
       it('should not increment sessionTurnCount for retry', async () => {

@@ -177,6 +177,7 @@ describe('AgentTool', () => {
       getApprovalMode: vi.fn().mockReturnValue('default'),
       getModel: vi.fn().mockReturnValue('parent-model'),
       getBareMode: vi.fn().mockReturnValue(false),
+      isSafeMode: vi.fn().mockReturnValue(false),
       getSandbox: vi.fn().mockReturnValue(undefined),
       getScreenReader: vi.fn().mockReturnValue(false),
       getMaxSessionTurns: vi.fn().mockReturnValue(-1),
@@ -404,6 +405,37 @@ describe('AgentTool', () => {
       expect(parameters.properties.name?.description).toContain('active team');
     });
 
+    it('exposes plan_mode_required only when teams are enabled', async () => {
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
+
+      const teamAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const schema = teamAgentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          plan_mode_required?: {
+            description?: string;
+          };
+        };
+      };
+      expect(parameters.properties.plan_mode_required?.description).toContain(
+        'named teammate',
+      );
+
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(false);
+      const ordinaryAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const ordinarySchema = ordinaryAgentTool.schema;
+      const ordinaryParameters = ordinarySchema.parametersJsonSchema as {
+        properties: {
+          plan_mode_required?: unknown;
+        };
+      };
+      expect(ordinaryParameters.properties.plan_mode_required).toBeUndefined();
+    });
+
     it('should generate schema without enum when no subagents available', async () => {
       vi.mocked(mockSubagentManager.listSubagents).mockResolvedValue([]);
 
@@ -520,6 +552,41 @@ describe('AgentTool', () => {
         }),
       ).toMatch(/fork/i);
     });
+
+    it('rejects plan_mode_required without a named teammate', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          plan_mode_required: true,
+        }),
+      ).toMatch(/named teammate/i);
+    });
+
+    it('rejects plan_mode_required when no team is active', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'planner',
+          plan_mode_required: true,
+        }),
+      ).toMatch(/active team/i);
+    });
+
+    it('accepts plan_mode_required for a named teammate in an active team', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'planner',
+          plan_mode_required: true,
+        }),
+      ).toBeNull();
+    });
   });
 
   // Round-7 regression guard: agent isolation must refuse when the
@@ -620,6 +687,51 @@ describe('AgentTool', () => {
       expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
         'file-search',
       );
+    });
+
+    it('passes plan_mode_required through to TeamManager for named teammates', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Plan implementation',
+        prompt: 'Investigate and propose a plan',
+        subagent_type: 'file-search',
+        name: 'planner',
+        plan_mode_required: true,
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(spawnTeammate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'planner',
+          planModeRequired: true,
+        }),
+      );
+    });
+
+    it('rejects plan_mode_required direct execution from a subagent context', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Plan implementation',
+        prompt: 'Investigate and propose a plan',
+        name: 'planner',
+        plan_mode_required: true,
+      });
+
+      const result = await runWithAgentContext('child-agent', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('from the team leader');
+      expect(spawnTeammate).not.toHaveBeenCalled();
     });
   });
 
@@ -775,6 +887,82 @@ describe('AgentTool', () => {
       expect(display.type).toBe('task_execution');
       expect(display.status).toBe('completed');
       expect(display.subagentName).toBe('file-search');
+    });
+
+    it('strips internal analysis and summary tags from subagent result', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        [
+          '<analysis>',
+          'Scratchpad details should stay out of the parent context.',
+          '</analysis>',
+          '',
+          '<summary>',
+          'Task completed successfully',
+          '',
+          '- Found the target file',
+          '</summary>',
+        ].join('\n'),
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).toBe(
+        'Task completed successfully\n\n- Found the target file',
+      );
+      expect(llmText).not.toContain('<analysis>');
+      expect(llmText).not.toContain('<summary>');
+    });
+
+    it('preserves diagnostic tags from failed subagent result', async () => {
+      const raw = '<analysis>debug</analysis><summary>partial</summary>';
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(raw);
+      vi.mocked(mockAgent.getTerminateMode).mockReturnValue(
+        AgentTerminateMode.ERROR,
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(raw);
+    });
+
+    it('explains successful subagents with no model-visible output', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch only</analysis>',
+      );
+
+      const params: AgentParams = {
+        description: 'Search files',
+        prompt: 'Find all TypeScript files',
+        subagent_type: 'file-search',
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await invocation.execute();
+
+      expect(partToString(result.llmContent)).toBe(
+        '(subagent produced no model-visible output)',
+      );
     });
 
     it('passes custom ignore files into worktree isolation file service', async () => {
@@ -2613,6 +2801,52 @@ describe('AgentTool', () => {
       ).toHaveBeenCalled();
       const display = result.returnDisplay as AgentResultDisplay;
       expect(display.status).toBe('background');
+    });
+
+    it('stores sanitized background results in the registry', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch</analysis><summary>visible</summary>',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.runAllTimersAsync();
+
+      expect(mockRegistry.complete).toHaveBeenCalledWith(
+        expect.any(String),
+        'visible',
+        expect.any(Object),
+      );
+    });
+
+    it('stores a fallback for background results with no model-visible text', async () => {
+      vi.mocked(mockAgent.getFinalText).mockReturnValue(
+        '<analysis>scratch only</analysis>',
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'Start monitor',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+      });
+
+      await invocation.execute();
+      await vi.runAllTimersAsync();
+
+      expect(mockRegistry.complete).toHaveBeenCalledWith(
+        expect.any(String),
+        '(subagent produced no model-visible output)',
+        expect.any(Object),
+      );
     });
 
     it('routes owned monitor notifications into a background agent external input queue', async () => {

@@ -23,6 +23,8 @@ import type {
   DaemonRewindSnapshotInfo,
   DaemonSessionBtwResult,
   DaemonMidTurnMessageResult,
+  DaemonPendingPromptsResult,
+  DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionLspStatus,
@@ -482,6 +484,20 @@ export class DaemonSessionClient {
     });
   }
 
+  async getPendingPrompts(): Promise<DaemonPendingPromptsResult> {
+    return await this.client.getPendingPrompts(this.sessionId, {
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
+  async removePendingPrompt(
+    promptId: string,
+  ): Promise<DaemonRemovePendingPromptResult> {
+    return await this.client.removePendingPrompt(this.sessionId, promptId, {
+      ...(this.clientId ? { clientId: this.clientId } : {}),
+    });
+  }
+
   /**
    * Execute a direct daemon-side shell command for this session. Requires the
    * daemon to opt in to direct session shell and bearer auth; this wrapper
@@ -572,6 +588,10 @@ export class DaemonSessionClient {
 
   async close(): Promise<void> {
     return await this.client.closeSession(this.sessionId, this.clientId);
+  }
+
+  async detach(): Promise<void> {
+    return await this.client.detachSession(this.sessionId, this.clientId);
   }
 
   async updateMetadata(metadata: {

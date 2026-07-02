@@ -18,17 +18,11 @@ import {
   toolContainsCallId,
 } from '../toolFormatting';
 import { SubAgentPanel } from './SubAgentPanel';
-import { ToolApproval } from '../ToolApproval';
 import styles from './ParallelAgentsGroup.module.css';
 
 interface ParallelAgentsGroupProps {
   agents: ACPToolCall[];
   pendingApproval?: PermissionRequest | null;
-  onConfirm?: (
-    id: string,
-    selectedOption: string,
-    answers?: Record<string, string>,
-  ) => void;
 }
 
 function formatDuration(ms: number): string {
@@ -59,9 +53,9 @@ function getAgentStats(agent: ACPToolCall, now: number): string {
     taskExec['tokenCount'] > 0
       ? (taskExec['tokenCount'] as number)
       : stats &&
-          typeof stats['totalTokens'] === 'number' &&
-          stats['totalTokens'] > 0
-        ? (stats['totalTokens'] as number)
+          typeof stats['outputTokens'] === 'number' &&
+          stats['outputTokens'] > 0
+        ? (stats['outputTokens'] as number)
         : 0;
   if (tokens > 0) {
     parts.push(formatTokenCount(tokens));
@@ -94,7 +88,6 @@ function ToolGroupIcon() {
 export function ParallelAgentsGroup({
   agents,
   pendingApproval,
-  onConfirm,
 }: ParallelAgentsGroupProps) {
   const { t } = useI18n();
   const [groupExpanded, setGroupExpanded] = useState(false);
@@ -145,13 +138,15 @@ export function ParallelAgentsGroup({
         aria-expanded={showGroup}
         title={showGroup ? t('tool.collapseHint') : t('tool.expand')}
       >
-        <span className={styles.summaryIcon} aria-hidden="true">
-          {summaryStatus === 'failed' ? (
+        {summaryStatus === 'failed' ? (
+          <span className={styles.summaryStatus}>
             <StatusIcon status={summaryStatus} />
-          ) : (
+          </span>
+        ) : (
+          <span className={styles.summaryIcon} aria-hidden="true">
             <ToolGroupIcon />
-          )}
-        </span>
+          </span>
+        )}
         <span
           className={
             hasRunning
@@ -207,9 +202,6 @@ export function ParallelAgentsGroup({
               );
             })}
           </div>
-          {approvalAgent && pendingApproval && onConfirm && (
-            <ToolApproval request={pendingApproval} onConfirm={onConfirm} />
-          )}
         </div>
       )}
     </div>

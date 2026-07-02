@@ -31,6 +31,7 @@ import {
   appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
 } from '../hooks/stopHookCap.js';
+import { toModelVisibleSubagentResult } from './subagent-result.js';
 import { runWithAgentContext } from './runtime/agent-context.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
@@ -362,6 +363,7 @@ function getCompletionStats(
   const summary = subagent.getExecutionSummary();
   return {
     totalTokens: summary.totalTokens,
+    outputTokens: summary.outputTokens,
     toolUses: liveToolCallCount,
     durationMs: summary.totalDurationMs,
   };
@@ -933,8 +935,15 @@ export class BackgroundAgentResumeService {
           }
 
           const terminateMode = subagent.getTerminateMode();
-          const finalText = appendStopHookBlockingCapWarning(
+          const modelVisibleText = toModelVisibleSubagentResult(
             subagent.getFinalText(),
+            terminateMode,
+          );
+          const finalText = appendStopHookBlockingCapWarning(
+            terminateMode === AgentTerminateMode.GOAL
+              ? modelVisibleText ||
+                  '(subagent produced no model-visible output)'
+              : modelVisibleText,
             stopHookWarning,
           );
           const stats = getCompletionStats(subagent, liveToolCallCount);

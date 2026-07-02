@@ -29,21 +29,37 @@ permissions:
   pull-requests: 'write'
 
 jobs:
+  precheck-pr:
+    if: |-
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+      issues: 'write'
+    uses: './.github/workflows/qwen-pr-safety-precheck.yml'
+    secrets:
+      CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
+
   authorize:
-    # Gate the principal on having write+ permission before any agent runs:
-    #   - pull_request_target / `/triage` comment -> gates triage (read-only),
-    #     keyed on the PR author / the commenter respectively.
+    needs: ['precheck-pr']
+    # Gate manual/high-risk entry points on write+ permission before any agent
+    # runs:
+    #   - automatic pull_request_target triage is allowed after the fork PR
+    #     precheck above (or for same-repo PRs).
+    #   - `/triage` comments are keyed on the commenter.
     #   - `/tmux` comment / `tmux_pr` dispatch -> gates real-user testing, which
     #     EXECUTES the PR author's code, so it is keyed on the PR author (whose
     #     code runs), not the commenter/dispatcher (see principal resolution).
-    # Replaces the old eligibility checks based on same-repo PRs and comment
-    # author_association, so fork PRs by trusted authors are covered.
     # The `issues` and `workflow_dispatch`-with-`number` (triage) triggers need
     # no gate: triage is read-only and dispatch already requires write to
     # invoke. But `tmux_pr` dispatch runs the *PR author's* code, not the
     # dispatcher's, so it IS gated here on the PR author's permission.
     if: |-
-      github.repository == 'QwenLM/qwen-code' &&
+      always() &&
+      (github.event_name != 'pull_request_target' ||
+       github.event.pull_request.head.repo.full_name == github.repository ||
+       needs.precheck-pr.outputs.decision == 'allow_triage') &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'issue_comment' &&
         (startsWith(github.event.comment.body, '@qwen-code /triage') ||
@@ -51,8 +67,10 @@ jobs:
          startsWith(github.event.comment.body, '@qwen-code /tmux '))) ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.tmux_pr != ''))
-    # Same-repo guard: this job loads CI_BOT_PAT, so fork-triggered runs stay on hosted (ephemeral); only in-repo PR events use the persistent ECS runner.
-    runs-on: "${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
+    # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
+    # use the persistent ECS runner.
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -69,15 +87,19 @@ jobs:
           # content; it only reads event metadata and calls one read API.
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           EVENT_NAME: '${{ github.event_name }}'
-          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
           COMMENT_USER: '${{ github.event.comment.user.login }}'
           ISSUE_AUTHOR: '${{ github.event.issue.user.login }}'
           COMMENT_BODY: '${{ github.event.comment.body }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
           TMUX_PR: '${{ github.event.inputs.tmux_pr }}'
         run: |-
           set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request_target" ]; then
+            echo "Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate." >> "$GITHUB_STEP_SUMMARY"
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           case "$EVENT_NAME" in
-            pull_request_target) principal="$PR_AUTHOR" ;;
             issue_comment)
               # /tmux executes the PR AUTHOR's code, so gate on the author's
               # permission (whose code runs), not the commenter's. /triage only
@@ -156,20 +178,17 @@ jobs:
     # Triage is the read-only analysis agent (same security profile as
     # review-pr in qwen-code-pr-review.yml): it checks out the trusted base
     # repo, never executes PR code, and reaches the PR/issue only via the API.
-    # Run it on the self-hosted ECS pool like review-pr — not GitHub-hosted —
+    # In the canonical repo, run it on the self-hosted ECS pool like review-pr
     # so it stops queueing behind the hosted CI/e2e/macOS/Windows concurrency
-    # cap while the ECS pool sits idle. Falls back to ubuntu-latest when ECS is
-    # disabled. The upstream `authorize` job deliberately stays on hosted: it is
-    # secret-bearing and runs before the permission gate, so it must stay
-    # ephemeral.
-    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    # cap while the ECS pool sits idle. Forks fall back to ubuntu-latest unless
+    # they deliberately change this workflow in their own repo.
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     # startsWith (not contains) prevents false triggers from comments that
     # mention the phrase in quoted text or mid-sentence descriptions.
     # always() so the job still evaluates when the upstream `authorize` job is
     # skipped (issues / workflow_dispatch paths, which need no permission gate).
     if: >-
-      always() &&
-      github.repository == 'QwenLM/qwen-code' && (
+      always() && (
         github.event_name == 'issues' ||
         (github.event_name == 'workflow_dispatch' &&
          github.event.inputs.number != '' &&
@@ -195,13 +214,21 @@ jobs:
             -f content='eyes' > /dev/null ||
             echo "Failed to add triage acknowledgement reaction; continuing." >&2
 
-      # Self-hosted ECS runners reuse the workspace between runs, so an
-      # interrupted triage (its agent has enter_worktree/exit_worktree) can
-      # leave a stale `.qwen/tmp/*` worktree that trips the checkout below.
-      # Prune defensively; never fail the job. No-op on a fresh hosted runner.
-      - name: 'Clean stale triage worktrees'
+      # Self-hosted ECS runners reuse $HOME, /tmp and the workspace between runs,
+      # so a prior run can bleed into this one: its agent session/memory (under
+      # QWEN_HOME), leftover draft comments (/tmp/stage-*.md, which survive
+      # `git clean`), or a stale `.qwen/tmp/*` worktree from an interrupted
+      # triage (its agent has enter_worktree/exit_worktree). Reset all three
+      # per run; never fail the job. No-op on a fresh hosted runner.
+      - name: 'Clean stale agent state'
         run: |-
           set -uo pipefail
+          # Fresh per-run agent home (must match QWEN_HOME on the Qwen step
+          # below) + drop any leftover stage drafts.
+          QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"
+          rm -rf "$QWEN_HOME" 2>/dev/null || true
+          mkdir -p "$QWEN_HOME"
+          rm -f /tmp/stage-*.md 2>/dev/null || true
           # `.git` is a directory in a normal checkout but a gitlink file in a
           # worktree; -e covers both, and a missing .git (first run) too.
           if [ ! -e .git ]; then
@@ -210,7 +237,7 @@ jobs:
           fi
           rm -rf .qwen/tmp/* 2>/dev/null || true
           git worktree prune -v || true
-          echo "stale triage worktrees cleaned"
+          echo "stale agent state cleaned"
 
       - name: 'Checkout repo'
         uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
@@ -234,6 +261,10 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           GH_TOKEN: '${{ secrets.QWEN_CODE_BOT_TOKEN || secrets.CI_BOT_PAT }}'
           REPOSITORY: '${{ github.repository }}'
+          # Per-run agent home so this run's session/memory cannot leak into the
+          # next on the reused self-hosted workspace (reset in "Clean stale
+          # agent state"). Must match the QWEN_HOME computed there.
+          QWEN_HOME: '${{ runner.temp }}/qwen-home'
         with:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
@@ -939,7 +970,11 @@ jobs:
 
           # Dedup: update an existing tmux comment if one is already present.
           if ! EXISTING="$(
-            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" --paginate -F per_page=100 \
+            # -F would otherwise make gh api default to POST.
+            gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/comments" \
+              --method GET \
+              --paginate \
+              -F per_page=100 \
               | jq -sr '[.[][] | select(.body | contains("<!-- qwen-triage:tmux -->"))] | last | .id // empty'
           )"; then
             echo "::warning::Failed to look up existing tmux comments; will create a new one."

@@ -180,12 +180,14 @@ export interface OpenDialogActionReturn {
     | 'model'
     | 'fast-model'
     | 'voice-model'
+    | 'vision-model'
     | 'subagent_create'
     | 'subagent_list'
     | 'skills_manage'
     | 'trust'
     | 'permissions'
     | 'approval-mode'
+    | 'effort'
     | 'resume'
     | 'delete'
     | 'branch'
@@ -216,6 +218,13 @@ export interface SubmitPromptActionReturn {
   content: PartListUnion;
   /** Optional callback invoked after the agent turn completes successfully. */
   onComplete?: () => Promise<void>;
+  /**
+   * Optional per-turn model id. When set, this prompt (and any tool-call
+   * continuations it spawns) runs on the given model without changing the
+   * session's selected model or persisting anything; it auto-reverts on the
+   * next user turn.
+   */
+  modelOverride?: string;
 }
 
 /**

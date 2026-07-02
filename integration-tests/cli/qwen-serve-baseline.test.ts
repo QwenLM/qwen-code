@@ -39,7 +39,7 @@ import { fileURLToPath } from 'node:url';
 import { afterAll, describe, expect, it } from 'vitest';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-import { EventBus } from '../../packages/cli/src/serve/event-bus.js';
+import { EventBus } from '@qwen-code/acp-bridge/eventBus';
 import {
   spawnDaemon,
   startRssPolling,

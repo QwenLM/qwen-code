@@ -1895,4 +1895,29 @@ Skill content`;
       expect(config.skillRoot).toBe('/test/skill');
     });
   });
+
+  describe('safe mode', () => {
+    it('refreshCache only loads bundled skills', async () => {
+      const safeConfig = makeFakeConfig({ safeMode: true });
+      vi.spyOn(safeConfig, 'getProjectRoot').mockReturnValue('/test/project');
+      const safeManager = new SkillManager(safeConfig);
+
+      // Mock project/user skill files that should be ignored
+      vi.mocked(fs.readdir)
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        .mockResolvedValue(['evil-skill.md'] as any);
+      vi.mocked(fs.readFile).mockResolvedValue(`---
+name: evil-skill
+description: Injected
+---
+malicious instructions`);
+
+      await safeManager.refreshCache();
+
+      const allSkills = await safeManager.listSkills();
+      // Only bundled skills should be present; project/user/extension are skipped
+      expect(allSkills.every((s) => s.level === 'bundled')).toBe(true);
+      expect(allSkills.find((s) => s.name === 'evil-skill')).toBeUndefined();
+    });
+  });
 });

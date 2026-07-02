@@ -33,6 +33,7 @@ import type { Config } from '../config/config.js';
 import {
   DEFAULT_TOKEN_LIMIT,
   ESCALATED_MAX_TOKENS,
+  parsePositiveIntegerEnvValue,
   tokenLimit,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
@@ -292,6 +293,12 @@ interface TryCompressOptions {
    * on the user's stated concern.
    */
   customInstructions?: string;
+  /**
+   * Output tokens reserved by the model (e.g. max_tokens / escalated limit).
+   * Threaded to the compression service so the cheap-gate computes
+   * thresholds against the real available input budget.
+   */
+  reservedOutputTokens?: number;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -1010,7 +1017,7 @@ export class InvalidStreamError extends Error {
  * `onAllToolCallsComplete` was a single-shot that already fired into an
  * `isResponding` early-return).
  */
-const ORPHAN_TOOL_USE_REPAIR_REASON =
+export const ORPHAN_TOOL_USE_REPAIR_REASON =
   'Tool execution result was not recorded — likely interrupted by network ' +
   'failure, abort, or process exit. Treat as failure and retry if needed.';
 
@@ -1423,6 +1430,17 @@ export class GeminiChat {
     | null = null;
 
   /**
+   * Monotonically counts user-content pushes that survived into history.
+   * Incremented when `sendMessageStream` pushes the user content and decremented
+   * only if that same push is rolled back on a setup-time failure. Auto-
+   * compression mutates history length but never touches this counter, so a
+   * caller (the Retry strip/restore in client.ts) can snapshot it and tell
+   * whether the re-submitted content actually landed — a history-length delta
+   * can't, since compression shrinks history independently of the push.
+   */
+  private userContentPushCount = 0;
+
+  /**
    * Reset both partial-push markers in lockstep. Every history-mutation
    * site uses this — single-field resets are a bug because the fields
    * are always paired by lifecycle.
@@ -1541,6 +1559,7 @@ export class GeminiChat {
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
       customInstructions: options?.customInstructions,
+      reservedOutputTokens: options?.reservedOutputTokens,
       signal,
     });
 
@@ -1735,6 +1754,32 @@ export class GeminiChat {
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
     let userContentAdded = false;
+
+    // Compute the output budget the model can actually use. Declared at
+    // function level so the reactive-compression path inside the generator
+    // closure can also access it.
+    //
+    // The subagent path sets params.config.maxOutputTokens explicitly; the
+    // interactive path leaves it undefined but will escalate to
+    // max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')) on MAX_TOKENS.
+    // Pre-reserving that space prevents the dead zone between the adjusted
+    // auto threshold and an unadjusted hard threshold (issue #5950).
+    const cgConfigForThresholds = this.config.getContentGeneratorConfig();
+    const parsedEnvMaxTokensForThreshold = parsePositiveIntegerEnvValue(
+      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+    );
+    const hasUserMaxTokensOverrideForThreshold =
+      (cgConfigForThresholds?.samplingParams?.max_tokens !== undefined &&
+        cgConfigForThresholds?.samplingParams?.max_tokens !== null) ||
+      parsedEnvMaxTokensForThreshold !== undefined;
+    const effectiveReservedOutput: number =
+      params.config?.maxOutputTokens ??
+      (hasUserMaxTokensOverrideForThreshold
+        ? (cgConfigForThresholds?.samplingParams?.max_tokens ??
+          parsedEnvMaxTokensForThreshold ??
+          0)
+        : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')));
+
     try {
       // The send-lock above is held but the generator's `finally` (which
       // resolves it) has not run yet. Any setup error before returning the
@@ -1763,10 +1808,16 @@ export class GeminiChat {
       // force=true already bypasses that breaker, while hard-rescue itself is
       // bounded by hardRescueFailureCount so persistent pre-send rescue
       // failures fall through to reactive overflow after a few strikes.
-      const contextLimit =
-        this.config.getContentGeneratorConfig()?.contextWindowSize ??
-        DEFAULT_TOKEN_LIMIT;
-      const { hard } = computeThresholds(contextLimit);
+      const rawContextLimit =
+        cgConfigForThresholds?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
+      const contextLimit = Math.max(
+        0,
+        rawContextLimit - effectiveReservedOutput,
+      );
+      const { hard } = computeThresholds(
+        contextLimit,
+        this.config.getAutoCompactThreshold(),
+      );
       const imageTokenEstimate = resolveSlimmingConfig(
         this.config.getChatCompression(),
       ).imageTokenEstimate;
@@ -1830,6 +1881,7 @@ export class GeminiChat {
             // classified correctly while the pending user message preserves
             // any active tool-call / response pairing.
             trigger: shouldForceFromHard ? 'auto' : undefined,
+            reservedOutputTokens: effectiveReservedOutput,
           },
         );
       }
@@ -1902,6 +1954,9 @@ export class GeminiChat {
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
       userContentAdded = true;
+      // Record that the user content landed (see `userContentPushCount`). The
+      // setup-error path below decrements this if it rolls the push back.
+      this.userContentPushCount++;
       // Per-send orphan repair (belt-and-suspenders alongside the
       // startChat load-time pass). Runs AFTER user content lands so a
       // user-supplied tool_result closes the pair before we synthesize
@@ -1933,6 +1988,8 @@ export class GeminiChat {
     } catch (error) {
       if (userContentAdded) {
         this.history.pop();
+        // The push above was rolled back, so undo its count too.
+        this.userContentPushCount--;
       }
       streamDoneResolver!();
       throw error;
@@ -1973,14 +2030,16 @@ export class GeminiChat {
           cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
         const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
 
-        // Max output tokens escalation: when no user/env override is set,
-        // the capped default (8K) is used. If the model hits MAX_TOKENS,
-        // retry once with escalated limit (64K).
+        // Max output tokens escalation: when no user/env override is set and
+        // the model hits MAX_TOKENS, retry once with the escalated limit.
         let maxTokensEscalated = false;
+        const parsedEnvMaxTokens = parsePositiveIntegerEnvValue(
+          process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+        );
         const hasUserMaxTokensOverride =
           (cgConfig?.samplingParams?.max_tokens !== undefined &&
             cgConfig?.samplingParams?.max_tokens !== null) ||
-          !!process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+          parsedEnvMaxTokens !== undefined;
 
         let lastFinishReason: string | undefined;
 
@@ -2215,6 +2274,7 @@ export class GeminiChat {
                     {
                       originalTokenCountOverride: reactiveOriginalTokenCount,
                       trigger: 'auto',
+                      reservedOutputTokens: effectiveReservedOutput,
                     },
                   );
 
@@ -2361,12 +2421,11 @@ export class GeminiChat {
           }
         }
 
-        // Max output tokens escalation: if the retry loop succeeded with
-        // the capped default (8K) but hit MAX_TOKENS, retry once at the
-        // model's full output limit. This ensures models with large output
-        // limits (e.g., 128K for Claude Opus, GPT-5) are fully utilized,
-        // while using ESCALATED_MAX_TOKENS (64K) as a floor for unknown
-        // models.
+        // Max output tokens escalation: if the retry loop succeeded but hit
+        // MAX_TOKENS, retry once at the model's full output limit. This ensures
+        // models with large output limits (e.g., 128K for Claude Opus, GPT-5)
+        // are fully utilized, while using ESCALATED_MAX_TOKENS (64K) as a floor
+        // for unknown models.
         // Placed outside the retry loop so that any errors from the
         // escalated stream propagate directly (not caught by retry logic).
         const requestedMaxOutputTokens = params.config?.maxOutputTokens;
@@ -2388,7 +2447,7 @@ export class GeminiChat {
           maxTokensEscalated = true;
           const startingLimitLabel =
             requestedMaxOutputTokens === undefined
-              ? 'capped default'
+              ? 'default max_tokens'
               : `${requestedMaxOutputTokens} tokens`;
           debugLogger.info(
             `Output truncated at ${startingLimitLabel}. Escalating to ${escalatedLimit} tokens.`,
@@ -2759,7 +2818,8 @@ export class GeminiChat {
       const text =
         message.parts
           ?.filter(
-            (part): part is { text: string } => typeof part.text === 'string',
+            (part): part is { text: string } =>
+              typeof part.text === 'string' && !part.thought,
           )
           .map((part) => part.text)
           .join('') ?? '';
@@ -2775,6 +2835,16 @@ export class GeminiChat {
    */
   getHistoryLength(): number {
     return this.history.length;
+  }
+
+  /**
+   * Monotonic count of user-content pushes that survived into history (see the
+   * field doc). Snapshot it before a send and compare after to tell whether the
+   * send actually pushed the user content — robust to auto-compression, which
+   * changes history length without touching this counter.
+   */
+  getUserContentPushCount(): number {
+    return this.userContentPushCount;
   }
 
   /**
@@ -2869,11 +2939,12 @@ export class GeminiChat {
   }
 
   /**
-   * Pop all orphaned trailing user entries from chat history.
+   * Pop orphaned trailing user entries from chat history.
    * In a valid conversation the last entry is always a model response;
    * any trailing user entries are leftovers from a request that failed.
    */
-  stripOrphanedUserEntriesFromHistory(): void {
+  stripOrphanedUserEntriesFromHistory(): Content[] {
+    const strippedEntries: Content[] = [];
     while (
       this.history.length > 0 &&
       this.history[this.history.length - 1]!.role === 'user'
@@ -2895,7 +2966,7 @@ export class GeminiChat {
       if (lastEntry && isSystemReminderContent(lastEntry)) {
         break;
       }
-      this.history.pop();
+      strippedEntries.unshift(this.history.pop()!);
     }
     // Today this is safe even without the reset — only trailing user
     // entries are popped, which can't shift the index of an earlier
@@ -2909,6 +2980,7 @@ export class GeminiChat {
     // happens to line up with whatever model entry is at that index
     // in the meanwhile.
     this.clearPendingPartialState();
+    return strippedEntries;
   }
 
   /**

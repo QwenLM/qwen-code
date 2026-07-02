@@ -52,8 +52,7 @@ export const AssistantMessage = memo(function AssistantMessage({
             <Markdown
               content={content}
               source="assistant"
-              deferMermaid={isStreaming}
-              enhanceTables={!isStreaming}
+              isStreaming={isStreaming}
             />
           </div>
         </div>
@@ -232,9 +231,10 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                     : styles.thinkingSummaryText
                 }
               >
-                {t(thinkingSummaryKey, {
-                  duration: thinkingDuration,
-                })}
+                {t(
+                  thinkingSummaryKey,
+                  thinkingActive ? { duration: thinkingDuration } : {},
+                )}
               </span>
               <span
                 className={
@@ -257,7 +257,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                   <Markdown
                     content={content}
                     source="thinking"
-                    deferMermaid={isStreaming}
+                    isStreaming={isStreaming}
                   />
                 </div>
               </div>

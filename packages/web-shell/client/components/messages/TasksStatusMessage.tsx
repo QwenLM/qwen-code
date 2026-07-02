@@ -677,15 +677,21 @@ function TaskDetail({
     },
   ];
 
-  if (task.kind === 'agent' && task.stats?.totalTokens) {
+  const agentOutputTokens =
+    task.kind === 'agent'
+      ? (((task.stats as Record<string, unknown> | undefined)?.[
+          'outputTokens'
+        ] as number | undefined) ?? task.stats?.totalTokens)
+      : undefined;
+  if (agentOutputTokens) {
     subtitleParts.push(
       t('tasks.detail.tokens', {
-        count: formatTokenCount(task.stats.totalTokens),
+        count: formatTokenCount(agentOutputTokens),
       }),
     );
     compactFields.push({
       label: t('tasks.detail.tokenCount'),
-      value: formatTokenCount(task.stats.totalTokens),
+      value: formatTokenCount(agentOutputTokens),
     });
   }
 
