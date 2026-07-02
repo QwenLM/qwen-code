@@ -26,7 +26,13 @@ import type {
   ChannelAgentBridge,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { OpCode, Intent } from './types.js';
 import type {
@@ -204,7 +210,7 @@ export class QQChannel extends ChannelBase {
         if (attempt < 2) {
           const msg = e instanceof Error ? e.message : String(e);
           process.stderr.write(
-            `[QQ:${this.name}] Connect attempt ${attempt + 1} failed: ${msg}, retrying...\n`,
+            `[QQ:${this.name}] Connect attempt ${attempt + 1} failed: ${sanitizeLogText(msg, 200)}, retrying...\n`,
           );
           await this.sleep(2000);
         } else {
@@ -253,7 +259,7 @@ export class QQChannel extends ChannelBase {
         if (!resp.ok && useMarkdown) {
           const errBody = await resp.text().catch(() => '');
           process.stderr.write(
-            `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${errBody.slice(0, 100)}), retrying as plain text\n`,
+            `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${sanitizeLogText(errBody, 200)}), retrying as plain text\n`,
           );
           const plainBody: Record<string, unknown> = {
             content: chunk,
@@ -275,14 +281,16 @@ export class QQChannel extends ChannelBase {
           // Drain response body to avoid socket leak
           const errBody = await resp.text().catch(() => '');
           process.stderr.write(
-            `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${body['msg_seq'] ?? '-'}): ${errBody.slice(0, 200)}\n`,
+            `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${body['msg_seq'] ?? '-'}): ${sanitizeLogText(errBody, 200)}\n`,
           );
           break; // stop sending on failure to avoid msg_seq gaps
         }
         // Only persist seq on success
         if (msgId) this.msgSeqMap.set(msgId, nextSeq);
       } catch (e) {
-        process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
+        process.stderr.write(
+          `[QQ:${this.name}] Send error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+        );
         break;
       }
     }
@@ -362,11 +370,13 @@ export class QQChannel extends ChannelBase {
 
   /** Debounced state persistence to avoid blocking event loop. */
   private saveQQState(): void {
+    if (this.disposed) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
       try {
+        const tmpPath = this.qqStatePath + '.tmp';
         writeFileSync(
-          this.qqStatePath,
+          tmpPath,
           JSON.stringify({
             chatTypeMap: Array.from(this.chatTypeMap.entries()),
             replyMsgId: Array.from(this.replyMsgId.entries()),
@@ -374,10 +384,14 @@ export class QQChannel extends ChannelBase {
           }),
           { mode: 0o600 },
         );
-      } catch {
-        /* best-effort */
+        renameSync(tmpPath, this.qqStatePath);
+      } catch (e) {
+        process.stderr.write(
+          `[QQ:${this.name}] saveQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+        );
       }
     }, 500);
+    this.saveTimer.unref();
   }
 
   /** Flush pending state writes immediately (called on disconnect). */
@@ -387,16 +401,21 @@ export class QQChannel extends ChannelBase {
       this.saveTimer = null;
     }
     try {
+      const tmpPath = this.qqStatePath + '.tmp';
       writeFileSync(
-        this.qqStatePath,
+        tmpPath,
         JSON.stringify({
           chatTypeMap: Array.from(this.chatTypeMap.entries()),
           replyMsgId: Array.from(this.replyMsgId.entries()),
           msgSeqMap: Array.from(this.msgSeqMap.entries()),
         }),
+        { mode: 0o600 },
       );
-    } catch {
-      /* best-effort */
+      renameSync(tmpPath, this.qqStatePath);
+    } catch (e) {
+      process.stderr.write(
+        `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      );
     }
   }
 
@@ -410,13 +429,27 @@ export class QQChannel extends ChannelBase {
     try {
       if (!existsSync(this.qqStatePath)) return false;
       const raw = JSON.parse(readFileSync(this.qqStatePath, 'utf-8'));
-      if (raw.chatTypeMap) this.chatTypeMap = new Map(raw.chatTypeMap);
+      if (raw.chatTypeMap) {
+        // Validate: only accept 'c2c' | 'group' values
+        this.chatTypeMap = new Map(
+          (raw.chatTypeMap as Array<[string, unknown]>).filter(
+            ([, v]) => v === 'c2c' || v === 'group',
+          ),
+        ) as Map<string, 'c2c' | 'group'>;
+      }
       if (raw.replyMsgId) this.replyMsgId = new Map(raw.replyMsgId);
-      if (raw.msgSeqMap) this.msgSeqMap = new Map(raw.msgSeqMap);
+      if (raw.msgSeqMap) {
+        // Validate: entries must be non-negative numbers
+        this.msgSeqMap = new Map(
+          (raw.msgSeqMap as Array<[string, unknown]>).filter(
+            ([, v]) => typeof v === 'number' && v >= 0,
+          ),
+        ) as Map<string, number>;
+      }
       return true;
     } catch (e) {
       process.stderr.write(
-        `[QQ:${this.name}] Failed to restore QQ state: ${e instanceof Error ? e.message : String(e)}\n`,
+        `[QQ:${this.name}] Failed to restore QQ state: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
       );
       return false;
     }
@@ -549,7 +582,7 @@ export class QQChannel extends ChannelBase {
         this.fetchToken().catch((e) => {
           if (this.disposed) return;
           process.stderr.write(
-            `[QQ:${this.name}] Token refresh failed: ${e}, retrying in 60s\n`,
+            `[QQ:${this.name}] Token refresh failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, retrying in 60s\n`,
           );
           this.scheduleTokenRefreshRetry();
         });
@@ -564,7 +597,7 @@ export class QQChannel extends ChannelBase {
       this.fetchToken().catch((e) => {
         if (this.disposed) return;
         process.stderr.write(
-          `[QQ:${this.name}] Token refresh failed: ${e}, retrying in 60s\n`,
+          `[QQ:${this.name}] Token refresh failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, retrying in 60s\n`,
         );
         this.scheduleTokenRefreshRetry();
       });
@@ -611,7 +644,7 @@ export class QQChannel extends ChannelBase {
         this.handleGatewayMessage(msg, resolve);
       } catch (e) {
         process.stderr.write(
-          `[QQ:${this.name}] Malformed gateway message: ${e instanceof Error ? e.message : String(e)}\n`,
+          `[QQ:${this.name}] Malformed gateway message: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
         );
       }
     });
@@ -680,7 +713,9 @@ export class QQChannel extends ChannelBase {
     });
 
     this.ws.on('error', (e: Error) => {
-      process.stderr.write(`[QQ:${this.name}] WebSocket error: ${e.message}\n`);
+      process.stderr.write(
+        `[QQ:${this.name}] WebSocket error: ${sanitizeLogText(e.message, 200)}\n`,
+      );
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         reject(e);
       }
@@ -853,7 +888,7 @@ export class QQChannel extends ChannelBase {
         const msg = e instanceof Error ? e.message : String(e);
         const backoff = Math.min(1000 * 2 ** (attempt + 1), 30000);
         process.stderr.write(
-          `[QQ:${this.name}] RC: ${msg} (retry in ${backoff}ms, attempt ${attempt + 1}/${maxGwRetries})\n`,
+          `[QQ:${this.name}] RC: ${sanitizeLogText(msg, 200)} (retry in ${backoff}ms, attempt ${attempt + 1}/${maxGwRetries})\n`,
         );
         if (attempt < maxGwRetries - 1) await this.sleep(backoff);
       }
@@ -944,7 +979,9 @@ export class QQChannel extends ChannelBase {
       isMentioned: true,
       isReplyToBot: false,
     }).catch((e) =>
-      process.stderr.write(`[QQ:${this.name}] C2C handler error: ${e}\n`),
+      process.stderr.write(
+        `[QQ:${this.name}] C2C handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      ),
     );
   }
 
@@ -1013,7 +1050,9 @@ export class QQChannel extends ChannelBase {
       isReplyToBot: true,
       ...(isSlash ? {} : { alreadyPrefixed: true as const }),
     }).catch((e) =>
-      process.stderr.write(`[QQ:${this.name}] Group handler error: ${e}\n`),
+      process.stderr.write(
+        `[QQ:${this.name}] Group handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      ),
     );
   }
 }
