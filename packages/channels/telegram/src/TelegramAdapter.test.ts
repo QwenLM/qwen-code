@@ -237,6 +237,27 @@ describe('TelegramChannel', () => {
     expect(bot.api.sendChatAction).toHaveBeenCalledTimes(3);
   });
 
+  it('clears typing when a session dies without a terminal event', () => {
+    const channel = createChannel({}, { removeSessionId: vi.fn() });
+    const bot = installFakeBot(channel);
+
+    channel.emitLifecycle({
+      channelName: 'telegram',
+      chatId: 'chat-1',
+      sessionId: 'session-1',
+      messageId: 'message-1',
+      identity: { id: 'channel:telegram', displayName: 'telegram' },
+      memoryScope: { namespace: 'channel:telegram', mode: 'metadata-only' },
+      type: 'started',
+    });
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+
+    channel.onSessionDied('session-1');
+
+    vi.advanceTimersByTime(4000);
+    expect(bot.api.sendChatAction).toHaveBeenCalledTimes(1);
+  });
+
   it('treats typing status API failures as best-effort', () => {
     const channel = createChannel();
     const bot = installFakeBot(channel);

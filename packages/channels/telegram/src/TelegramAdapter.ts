@@ -332,6 +332,15 @@ export class TelegramChannel extends ChannelBase {
     this.stopTyping(chatId, sessionId);
   }
 
+  override onSessionDied(sessionId: string): void {
+    for (const [chatId, sessions] of this.activeTypingSessions) {
+      if (sessions.has(sessionId)) {
+        this.stopTyping(chatId, sessionId);
+      }
+    }
+    super.onSessionDied(sessionId);
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
     await this.sendTelegramMessage(chatId, text);
   }
