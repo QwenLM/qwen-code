@@ -2511,10 +2511,14 @@ export class ShellToolInvocation extends BaseToolInvocation<
       // `promoteAbortController.signal.aborted` exclusion, the
       // foreground path would falsely report "Command timed out" for
       // a process that finished naturally.
+      // When the scheduler's execution timeout fires, execSignal is aborted
+      // with a TimeoutError — distinguish this from a user cancellation.
+      const schedulerTimedOut =
+        signal.aborted && getAbortReasonName(signal) === 'TimeoutError';
       const wasTimeout =
         effectiveTimeout &&
         combinedSignal.aborted &&
-        !signal.aborted &&
+        (!signal.aborted || schedulerTimedOut) &&
         !promoteAbortController.signal.aborted;
       const wasPromoteRefused =
         promoteAbortController.signal.aborted && !signal.aborted;
@@ -2668,10 +2672,12 @@ export class ShellToolInvocation extends BaseToolInvocation<
           // cancellation. See the matching block above for why we also
           // exclude `promoteAbortController.signal.aborted` from the
           // timeout discriminator.
+          const schedulerTimedOut =
+            signal.aborted && getAbortReasonName(signal) === 'TimeoutError';
           const wasTimeout =
             effectiveTimeout &&
             combinedSignal.aborted &&
-            !signal.aborted &&
+            (!signal.aborted || schedulerTimedOut) &&
             !promoteAbortController.signal.aborted;
           const wasPromoteRefused =
             promoteAbortController.signal.aborted && !signal.aborted;

@@ -3344,9 +3344,14 @@ export class CoreToolScheduler {
       // Per-tool-call execution timeout. Disabled by default (experimental):
       // set QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS to a positive number of
       // milliseconds to cap how long a single tool call may run.
-      const toolExecutionTimeoutMs = parsePositiveIntegerEnv(
-        process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'],
-        0,
+      // Cap at 2^31-1 to avoid setTimeout integer overflow (Node truncates
+      // larger values to 1ms with TimeoutOverflowWarning).
+      const toolExecutionTimeoutMs = Math.min(
+        parsePositiveIntegerEnv(
+          process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'],
+          0,
+        ),
+        2_147_483_647,
       );
 
       // When a timeout is active, run the tool under a derived AbortSignal so
@@ -3461,13 +3466,17 @@ export class CoreToolScheduler {
       // exec sub-span ends UNSET, matching setToolSpanCancelled on the
       // parent (#4212, #4302 review).
       const aborted = signal.aborted;
+      const isTimeout =
+        !aborted && toolResult.error?.type === ToolErrorType.EXECUTION_TIMEOUT;
       endToolExecutionSpan(execSpan, {
         success: toolResult.error === undefined && !aborted,
         error: aborted
           ? TOOL_SPAN_STATUS_TOOL_CANCELLED
-          : toolResult.error
-            ? TOOL_SPAN_STATUS_TOOL_ERROR
-            : undefined,
+          : isTimeout
+            ? TOOL_SPAN_STATUS_TOOL_TIMEOUT
+            : toolResult.error
+              ? TOOL_SPAN_STATUS_TOOL_ERROR
+              : undefined,
         cancelled: aborted,
       });
       if (aborted) {
