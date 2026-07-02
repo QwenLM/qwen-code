@@ -156,6 +156,7 @@ export class QQChannel extends ChannelBase {
   private pendingStreamDelete: Set<string> = new Set();
   private _reconnectId: number = 0;
   private blockStreaming: boolean = false;
+  private flushedSessions: Set<string> = new Set();
 
   private readonly qqStatePath: string;
   /**
@@ -299,6 +300,9 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${body['msg_seq'] ?? '-'}): ${errBody.slice(0, 200)}\n`,
           );
+          if (propagateError) {
+            throw new Error(`Send HTTP ${resp.status}`);
+          }
           break; // stop sending on failure to avoid msg_seq gaps
         }
         // Only persist seq on success
@@ -368,6 +372,7 @@ export class QQChannel extends ChannelBase {
     this.streamState.clear();
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
+    this.flushedSessions.clear();
     this._reconnectId++;
   }
 
@@ -422,22 +427,23 @@ export class QQChannel extends ChannelBase {
     const buffer = state.buffer;
     state.buffer = '';
     this.flushingSessions.add(sessionId);
-    this.sendMessage(state.chatId, buffer)
+    this.sendMessage(state.chatId, buffer, true)
       .then(() => {
+        this.flushedSessions.add(sessionId);
         if (this.pendingStreamDelete.has(sessionId)) {
           this.pendingStreamDelete.delete(sessionId);
           if (this.streamState.get(sessionId) === state && !state.buffer) {
             this.streamState.delete(sessionId);
           }
         } else {
-          if (this.streamState.get(sessionId) === state) {
+          if (this.streamState.get(sessionId) === state && !state.buffer) {
             this.streamState.delete(sessionId);
           }
         }
       })
       .catch((e: unknown) => {
         process.stderr.write(
-          `[QQ:${this.name}] idleFlush send failed: ${String(e)}\\n`,
+          `[QQ:${this.name}] idleFlush send failed: ${String(e)}\n`,
         );
         if (this.pendingStreamDelete.has(sessionId)) {
           this.pendingStreamDelete.delete(sessionId);
@@ -446,6 +452,11 @@ export class QQChannel extends ChannelBase {
           const current = this.streamState.get(sessionId);
           if (current) {
             current.buffer = buffer + (current.buffer || '');
+            const reconnectId2 = this._reconnectId;
+            current.timer = setTimeout(() => {
+              this.idleFlush(sessionId, reconnectId2);
+            }, 2000);
+            current.timer.unref?.();
           }
         }
       })
@@ -467,6 +478,7 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.add(event.sessionId);
     this.sendMessage(state.chatId, buffer, true)
       .then(() => {
+        this.flushedSessions.add(event.sessionId);
         if (this.pendingStreamDelete.has(event.sessionId)) {
           this.pendingStreamDelete.delete(event.sessionId);
           this.streamState.delete(event.sessionId);
@@ -478,6 +490,11 @@ export class QQChannel extends ChannelBase {
           this.streamState.delete(event.sessionId);
         } else {
           state.buffer = buffer + (state.buffer || '');
+          const reconnectId2 = this._reconnectId;
+          state.timer = setTimeout(() => {
+            this.idleFlush(event.sessionId, reconnectId2);
+          }, 2000);
+          state.timer.unref?.();
         }
         process.stderr.write(
           `[QQ:${this.name}] toolCallFlush send failed: ${String(e)}\n`,
@@ -502,8 +519,10 @@ export class QQChannel extends ChannelBase {
       this.pendingStreamDelete.add(sessionId);
       return;
     }
-    const remaining = state?.buffer ?? fullText;
+    const wasFlushed = this.flushedSessions.has(sessionId);
+    const remaining = state?.buffer ?? (wasFlushed ? '' : fullText);
     this.streamState.delete(sessionId);
+    this.flushedSessions.delete(sessionId);
     if (remaining) {
       await super.onResponseComplete(chatId, remaining, sessionId);
     }
