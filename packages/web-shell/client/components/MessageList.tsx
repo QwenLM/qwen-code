@@ -10,6 +10,7 @@ import {
   useMemo,
   useState,
   type ReactNode,
+  type MouseEvent as ReactMouseEvent,
   type MutableRefObject,
 } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
@@ -57,7 +58,7 @@ interface MessageListProps {
   showRetryHint?: boolean;
   onRetryClick?: () => void;
   onBranchSession?: () => void;
-  onFollowStateChange?: (isFollowing: boolean) => void;
+  onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
 }
 
 function getLastUserMessageId(messages: Message[]): string | null {
@@ -1240,6 +1241,7 @@ const ESTIMATE_HEADER = 120;
 const ESTIMATE_MESSAGE = 80;
 const ESTIMATE_TURN_COLLAPSE = 32;
 const ESTIMATE_TAIL = 240;
+const FOLLOW_BOTTOM_THRESHOLD_PX = 30;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
 
 export function shouldUseVirtualScroll(
@@ -1593,7 +1595,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       showRetryHint = false,
       onRetryClick,
       onBranchSession,
-      onFollowStateChange,
+      onCanScrollToBottomChange,
     },
     ref,
   ) {
@@ -1682,7 +1684,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const scrollCooldown = useRef(false);
     const scrollCooldownCount = useRef(0);
     const sessionTimelineFrame = useRef<number | null>(null);
-    const lastReportedFollow = useRef(true);
+    const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
     const prevLastUserMsgId = useRef<string | null>(null);
     const prevActiveExecutionKey = useRef<string | null>(null);
     const prevCatchingUp: MutableRefObject<boolean | undefined> =
@@ -1692,17 +1694,37 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     const pendingFollowRecheck = useRef(false);
     const pendingFollowRecheckFrame = useRef<number | undefined>(undefined);
     const pendingFollowRecheckTimer = useRef<number | undefined>(undefined);
+    const pendingOverflowFrame = useRef<number | undefined>(undefined);
     catchingUpRef.current = catchingUp;
     const containerRef = useRef<HTMLDivElement>(null);
 
+    const reportCanScrollToBottom = useCallback(() => {
+      const el = containerRef.current;
+      const distanceFromBottom = el
+        ? el.scrollHeight - el.scrollTop - el.clientHeight
+        : 0;
+      const canScrollToBottom = !shouldFollow.current && distanceFromBottom > 1;
+      if (lastReportedCanScrollToBottom.current === canScrollToBottom) return;
+      lastReportedCanScrollToBottom.current = canScrollToBottom;
+      onCanScrollToBottomChange?.(canScrollToBottom);
+    }, [onCanScrollToBottomChange]);
+
+    const scheduleScrollOverflowReport = useCallback(() => {
+      if (pendingOverflowFrame.current !== undefined) {
+        window.cancelAnimationFrame(pendingOverflowFrame.current);
+      }
+      pendingOverflowFrame.current = window.requestAnimationFrame(
+        reportCanScrollToBottom,
+      );
+    }, [reportCanScrollToBottom]);
+
     const setShouldFollow = useCallback(
       (value: boolean) => {
+        if (shouldFollow.current === value) return;
         shouldFollow.current = value;
-        if (lastReportedFollow.current === value) return;
-        lastReportedFollow.current = value;
-        onFollowStateChange?.(value);
+        scheduleScrollOverflowReport();
       },
-      [onFollowStateChange],
+      [scheduleScrollOverflowReport],
     );
     const visibleItems = useMemo(
       () =>
@@ -1763,7 +1785,8 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     //      Even if the model is still streaming, the viewport stays put.
     //
     //   3. Scroll-back-to-bottom resumes — when the user scrolls back
-    //      near the bottom (< 30px from edge), follow mode re-engages
+    //      near the bottom (within FOLLOW_BOTTOM_THRESHOLD_PX), follow mode
+    //      re-engages
     //      and new content resumes sticking.
     //
     //   4. New message resets follow — after the user sends a message,
@@ -1812,8 +1835,9 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       if (!el) return;
       const distanceFromBottom =
         el.scrollHeight - el.scrollTop - el.clientHeight;
-      setShouldFollow(distanceFromBottom < 30);
-    }, [setShouldFollow]);
+      setShouldFollow(distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX);
+      scheduleScrollOverflowReport();
+    }, [scheduleScrollOverflowReport, setShouldFollow]);
 
     const scheduleFollowRecheck = useCallback(() => {
       pendingFollowRecheck.current = true;
@@ -1845,6 +1869,9 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         if (pendingFollowRecheckTimer.current !== undefined) {
           window.clearTimeout(pendingFollowRecheckTimer.current);
         }
+        if (pendingOverflowFrame.current !== undefined) {
+          window.cancelAnimationFrame(pendingOverflowFrame.current);
+        }
       },
       [],
     );
@@ -1855,19 +1882,29 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         // follow so streaming output does not yank the viewport back to the
         // tail while the user is inspecting history.
         const el = containerRef.current;
-        if (el && el.scrollHeight <= el.clientHeight + 1) {
-          // If there is no scrollbar yet, there is no meaningful "not at
-          // bottom" state to report. The toggle may create overflow though, so
-          // re-check after the expanded/collapsed rows have been laid out.
-          scheduleFollowRecheck();
-        } else {
+        // If there is no scrollbar yet, there is no meaningful "not at
+        // bottom" state to report. The toggle may create overflow though, so
+        // re-check after the expanded/collapsed rows have been laid out.
+        if (!el || el.scrollHeight > el.clientHeight + 1) {
           setShouldFollow(false);
         }
+        scheduleFollowRecheck();
         setCollapseOverrides((prev) => {
           const next = new Map(prev);
           next.set(turnId, nextExpanded);
           return next;
         });
+      },
+      [scheduleFollowRecheck, setShouldFollow],
+    );
+
+    const handleDisclosureClickCapture = useCallback(
+      (event: ReactMouseEvent<HTMLDivElement>) => {
+        const target = event.target;
+        if (!(target instanceof HTMLElement)) return;
+        if (!target.closest('[aria-expanded]')) return;
+        setShouldFollow(false);
+        scheduleFollowRecheck();
       },
       [scheduleFollowRecheck, setShouldFollow],
     );
@@ -1905,7 +1942,9 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         } else {
           el.scrollTop = el.scrollHeight;
         }
+        scheduleScrollOverflowReport();
         lastScrollTop.current = Math.max(0, el.scrollHeight - el.clientHeight);
+        reportCanScrollToBottom();
         const releaseCooldown = () => {
           if (scrollCooldownCount.current === gen) {
             scrollCooldown.current = false;
@@ -1917,7 +1956,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
           requestAnimationFrame(releaseCooldown);
         }
       },
-      [getScrollElement],
+      [getScrollElement, reportCanScrollToBottom, scheduleScrollOverflowReport],
     );
 
     const resumeBottomFollow = useCallback(
@@ -2103,6 +2142,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
           if (scrollCooldownCount.current === gen) {
             scrollCooldown.current = false;
             scheduleSessionTimelineRangeUpdate();
+            scheduleScrollOverflowReport();
           }
         }, 150);
         const key = getItemKey(rowIndex);
@@ -2115,6 +2155,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         getItemKey,
         setShouldFollow,
         scheduleSessionTimelineRangeUpdate,
+        scheduleScrollOverflowReport,
       ],
     );
 
@@ -2221,21 +2262,27 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       const curr = el.scrollTop;
       lastScrollTop.current = curr;
       const distanceFromBottom = el.scrollHeight - curr - el.clientHeight;
+      scheduleScrollOverflowReport();
 
       // Rule 2: scrolling up → pause follow
       if (curr < prev - 1) {
         // Container resizes can clamp scrollTop downward while the viewport is
         // still at the tail. Treat that as follow mode, not a manual scroll-up.
-        setShouldFollow(distanceFromBottom < 30);
+        setShouldFollow(distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX);
         return;
       }
       // Rule 3: near bottom → resume follow
       // Run only after non-upward scrolls. Otherwise a tiny wheel-up near the
       // tail would pause follow and immediately re-enable it in the same event.
-      if (distanceFromBottom < 30) {
+      if (distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX) {
         setShouldFollow(true);
       }
-    }, [getScrollElement, scheduleSessionTimelineRangeUpdate, setShouldFollow]);
+    }, [
+      getScrollElement,
+      scheduleScrollOverflowReport,
+      scheduleSessionTimelineRangeUpdate,
+      setShouldFollow,
+    ]);
 
     useEffect(() => {
       const el = getScrollElement();
@@ -2243,6 +2290,33 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       el.addEventListener('scroll', handleScroll, { passive: true });
       return () => el.removeEventListener('scroll', handleScroll);
     }, [getScrollElement, handleScroll]);
+
+    useEffect(() => {
+      const el = getScrollElement();
+      if (!el || typeof ResizeObserver === 'undefined') return;
+      const observer = new ResizeObserver(scheduleScrollOverflowReport);
+      observer.observe(el);
+      for (const child of Array.from(el.children)) {
+        observer.observe(child);
+      }
+      const mutationObserver = new MutationObserver((mutations) => {
+        for (const mutation of mutations) {
+          for (const node of Array.from(mutation.addedNodes)) {
+            if (node instanceof HTMLElement) observer.observe(node);
+          }
+          for (const node of Array.from(mutation.removedNodes)) {
+            if (node instanceof HTMLElement) observer.unobserve(node);
+          }
+        }
+        scheduleScrollOverflowReport();
+      });
+      mutationObserver.observe(el, { childList: true });
+      scheduleScrollOverflowReport();
+      return () => {
+        observer.disconnect();
+        mutationObserver.disconnect();
+      };
+    }, [getScrollElement, scheduleScrollOverflowReport]);
 
     // Clear screen (e.g. /clear) → reset to follow mode, drop stale per-turn
     // collapse overrides, and disarm any deferred scroll so it can't fire
@@ -2487,8 +2561,16 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       }
     }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
 
+    useLayoutEffect(() => {
+      scheduleScrollOverflowReport();
+    }, [messages, scheduleScrollOverflowReport, totalCount, totalVirtualSize]);
+
     return (
-      <div ref={containerRef} className={styles.list}>
+      <div
+        ref={containerRef}
+        className={styles.list}
+        onClickCapture={handleDisclosureClickCapture}
+      >
         <SessionTimeline
           entries={sessionTimelineEntries}
           currentTurnId={currentTimelineTurnId}

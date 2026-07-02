@@ -1040,12 +1040,12 @@ export function App({
   const editorRef = useRef<EditorHandle | null>(null);
   const notifiedComposerReadyRef = useRef<EditorHandle | null>(null);
   const footerRef = useRef<HTMLDivElement>(null);
-  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [canScrollMessageListToBottom, setCanScrollMessageListToBottom] =
+    useState(false);
   const previousFooterRectRef = useRef<DOMRect | null>(null);
   const previousEmptyStateRef = useRef(false);
   const resumeChatBottomFollow = useCallback(
     (behavior: ScrollBehavior = 'smooth') => {
-      setShowScrollToBottom(false);
       requestAnimationFrame(() => {
         messageListRef.current?.scrollToBottom(behavior);
         requestAnimationFrame(() => {
@@ -3066,9 +3066,12 @@ export function App({
     }
     editorRef.current?.focus();
   }, []);
-  const handleFollowStateChange = useCallback((isFollowing: boolean) => {
-    setShowScrollToBottom(!isFollowing);
-  }, []);
+  const handleCanScrollToBottomChange = useCallback(
+    (canScrollToBottom: boolean) => {
+      setCanScrollMessageListToBottom(canScrollToBottom);
+    },
+    [],
+  );
 
   const handleRetry = useCallback(() => {
     if (
@@ -3764,7 +3767,9 @@ export function App({
                         }
                         tailContent={undefined}
                         tailKey={undefined}
-                        onFollowStateChange={handleFollowStateChange}
+                        onCanScrollToBottomChange={
+                          handleCanScrollToBottomChange
+                        }
                         virtualScrollThreshold={virtualScrollThreshold}
                       />
                       {btwMessage?.role === 'btw' && (
@@ -3781,7 +3786,7 @@ export function App({
                 </CompactModeContext.Provider>
 
                 <div ref={footerRef} className={styles.footer}>
-                  {showScrollToBottom && (
+                  {canScrollMessageListToBottom && (
                     <div
                       className={
                         showFloatingTodos

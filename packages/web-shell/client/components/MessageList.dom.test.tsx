@@ -21,10 +21,19 @@ vi.mock('./MessageItem', async () => {
       message: Message;
       showAssistantActions?: boolean;
     }) =>
-      React.createElement('div', {
-        'data-testid': `msg-${message.id}`,
-        'data-assistant-actions': String(Boolean(showAssistantActions)),
-      }),
+      React.createElement(
+        'div',
+        {
+          'data-testid': `msg-${message.id}`,
+          'data-assistant-actions': String(Boolean(showAssistantActions)),
+        },
+        message.role === 'thinking'
+          ? React.createElement('button', {
+              'aria-expanded': 'false',
+              'data-testid': `disclosure-${message.id}`,
+            })
+          : null,
+      ),
   };
 });
 vi.mock('./messages/tools/ParallelAgentsGroup', () => ({
@@ -42,8 +51,11 @@ type MessageListHandle = import('./MessageList').MessageListHandle;
 
 // jsdom provides neither ResizeObserver (MessageList's resize guard) nor a real
 // scrollIntoView (the non-virtual scroll path) — stub both.
+const resizeObserverCallbacks: ResizeObserverCallback[] = [];
 class ResizeObserverStub {
-  constructor(private readonly callback: ResizeObserverCallback) {}
+  constructor(private readonly callback: ResizeObserverCallback) {
+    resizeObserverCallbacks.push(callback);
+  }
   observe() {
     this.callback([], this as unknown as ResizeObserver);
   }
@@ -56,12 +68,19 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
+function triggerResizeObservers() {
+  for (const callback of resizeObserverCallbacks) {
+    callback([], {} as ResizeObserver);
+  }
+}
+
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 afterEach(() => {
   for (const { root, container } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
   }
+  resizeObserverCallbacks.length = 0;
   vi.useRealTimers();
 });
 
@@ -107,7 +126,10 @@ const planMsg = (id: string): PlanMessage => ({
 function mount(
   messages: Message[],
   ref?: RefObject<MessageListHandle | null>,
-  opts: { isResponding?: boolean } = {},
+  opts: {
+    isResponding?: boolean;
+    onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
+  } = {},
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -121,6 +143,7 @@ function mount(
           pendingApproval={null}
           isResponding={opts.isResponding}
           shellOutputMaxLines={50}
+          onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
     );
@@ -143,6 +166,8 @@ const queryToggle = (c: HTMLElement, turnId: string) =>
   c.querySelector(`[data-testid="toggle-${turnId}"]`) as HTMLElement | null;
 const toggle = (c: HTMLElement, turnId: string) =>
   queryToggle(c, turnId) as HTMLElement;
+const disclosure = (c: HTMLElement, id: string) =>
+  c.querySelector(`[data-testid="disclosure-${id}"]`) as HTMLElement;
 const toggleRow = (c: HTMLElement, turnId: string) =>
   toggle(c, turnId).closest('[role="button"]') as HTMLElement;
 const click = (el: Element) =>
@@ -426,5 +451,256 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(assistantActions(c, 'mid')).toBe('false');
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('reports when the user has scrolled away from the bottom', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      value: 600,
+      writable: true,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const onCanScrollToBottomChange = vi.fn();
+
+    const container = mount([asstMsg('a1')], undefined, {
+      onCanScrollToBottomChange,
+    });
+    await nextFrame();
+
+    const list = container.firstElementChild as HTMLElement;
+    list.scrollTop = 600;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    await nextFrame();
+
+    list.scrollTop = 500;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
+
+    list.scrollTop = 600;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('reports no scroll-to-bottom affordance when the list has no scrollbar', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onCanScrollToBottomChange = vi.fn();
+
+    mount([userMsg('u1')], undefined, { onCanScrollToBottomChange });
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('reports no scroll-to-bottom affordance when already at the bottom', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      value: 600,
+      writable: true,
+    });
+    const onCanScrollToBottomChange = vi.fn();
+
+    mount([userMsg('u1')], undefined, { onCanScrollToBottomChange });
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('keeps the scroll-to-bottom affordance hidden when followed content grows', async () => {
+    let scrollHeight = 600;
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+      },
+    });
+    const onCanScrollToBottomChange = vi.fn();
+
+    mount([asstMsg('a1')], undefined, { onCanScrollToBottomChange });
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+
+    scrollHeight = 1200;
+    act(() => triggerResizeObservers());
+    await nextFrame();
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('reports scroll-to-bottom affordance when a clicked disclosure grows during streaming', async () => {
+    let scrollHeight = 600;
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+      },
+    });
+    const onCanScrollToBottomChange = vi.fn();
+    const c = mount([thinkingMsg('t1'), asstMsg('a1')], undefined, {
+      isResponding: true,
+      onCanScrollToBottomChange,
+    });
+    await nextFrame();
+
+    click(disclosure(c, 't1'));
+
+    scrollHeight = 1200;
+    act(() => triggerResizeObservers());
+    await nextFrame();
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it('keeps the scroll-to-bottom affordance hidden when disclosure growth stays near bottom', async () => {
+    let scrollHeight = 600;
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+      },
+    });
+    const onCanScrollToBottomChange = vi.fn();
+    const c = mount([thinkingMsg('t1'), asstMsg('a1')], undefined, {
+      isResponding: true,
+      onCanScrollToBottomChange,
+    });
+    await nextFrame();
+
+    click(disclosure(c, 't1'));
+
+    scrollHeight = 620;
+    act(() => triggerResizeObservers());
+    await nextFrame();
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('clears the scroll-to-bottom affordance immediately after scrolling to bottom', async () => {
+    let scrollTop = 600;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, 600));
+      },
+    });
+    const onCanScrollToBottomChange = vi.fn();
+    const ref = createRef<MessageListHandle>();
+    const c = mount([asstMsg('a1')], ref, { onCanScrollToBottomChange });
+    await nextFrame();
+    await nextFrame();
+
+    const list = c.firstElementChild as HTMLElement;
+    scrollTop = 0;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
+
+    act(() => ref.current?.scrollToBottom('auto'));
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('reports scroll-to-bottom affordance when expanding content creates overflow', async () => {
+    let scrollHeight = 600;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      value: 0,
+      writable: true,
+    });
+    const onCanScrollToBottomChange = vi.fn();
+    const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')], undefined, {
+      onCanScrollToBottomChange,
+    });
+    await nextFrame();
+
+    click(toggle(c, 'u1'));
+    scrollHeight = 1200;
+    await nextFrame();
+    await nextFrame();
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 230)));
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
   });
 });
