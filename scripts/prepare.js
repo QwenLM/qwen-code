@@ -6,6 +6,8 @@
 
 import { spawnSync } from 'node:child_process';
 
+// Release workflow jobs set this when they run explicit build/bundle steps after
+// npm ci. Workflows that rely on prepare-during-install should leave it unset.
 const skipPrepare = ['1', 'true'].includes(
   (process.env.QWEN_SKIP_PREPARE ?? '').toLowerCase(),
 );
