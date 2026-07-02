@@ -2,6 +2,9 @@ name: 'Qwen PR Safety Precheck'
 
 on:
   workflow_call:
+    secrets:
+      CI_BOT_PAT:
+        required: false
     outputs:
       decision:
         description: 'allow_triage or manual_required'
@@ -70,7 +73,7 @@ jobs:
       - name: 'Upsert manual approval comment'
         if: "steps.assess.outputs.decision == 'manual_required'"
         env:
-          GH_TOKEN: '${{ github.token }}'
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
@@ -80,7 +83,7 @@ jobs:
               --method GET \
               --paginate \
               -F per_page=100 \
-              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-pr-precheck:manual-required -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-pr-precheck:manual-required -->")) | select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot" or (.user.type == "Bot"))] | last | .id // empty'
           )"
           if [ -n "$existing_id" ]; then
             gh api \
@@ -99,7 +102,7 @@ jobs:
       - name: 'Clear manual approval comment'
         if: "steps.assess.outputs.decision == 'allow_triage'"
         env:
-          GH_TOKEN: '${{ github.token }}'
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
@@ -109,7 +112,7 @@ jobs:
               --method GET \
               --paginate \
               -F per_page=100 \
-              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-pr-precheck:manual-required -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
+              | jq -sr '[.[][] | select(.body | contains("<!-- qwen-pr-precheck:manual-required -->")) | select(.user.login == "github-actions[bot]" or .user.login == "qwen-code-ci-bot" or (.user.type == "Bot"))] | last | .id // empty'
           )"
           if [ -n "$existing_id" ]; then
             gh api \
