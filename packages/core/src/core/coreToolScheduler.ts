@@ -246,8 +246,10 @@ const TOOL_SPAN_STATUS_TOOL_TIMEOUT = 'Tool execution timed out';
  * (narrow scope, retry, etc.) instead of the session hanging.
  */
 function createToolTimeoutResult(timeoutMs: number): ToolResult {
+  const display =
+    timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)}s` : `${timeoutMs}ms`;
   const message =
-    `Tool execution timed out after ${Math.round(timeoutMs / 1000)}s. ` +
+    `Tool execution timed out after ${display}. ` +
     `The tool may be stuck or operating on too large a scope.`;
   return {
     llmContent: message,
@@ -3335,6 +3337,7 @@ export class CoreToolScheduler {
       this.config,
       `Qwen Code is executing tool ${canonicalName}`,
     );
+    let removeParentAbortForward: (() => void) | undefined;
     try {
       let promise: Promise<ToolResult>;
 
@@ -3355,7 +3358,6 @@ export class CoreToolScheduler {
       // long-lived parent (turn) signal across tool calls.
       let execSignal = signal;
       let timeoutController: AbortController | undefined;
-      let removeParentAbortForward: (() => void) | undefined;
       if (toolExecutionTimeoutMs > 0) {
         timeoutController = new AbortController();
         execSignal = timeoutController.signal;
@@ -4035,6 +4037,7 @@ export class CoreToolScheduler {
         );
       }
     } finally {
+      removeParentAbortForward?.();
       sleepInhibitorHandle.release();
     }
   }

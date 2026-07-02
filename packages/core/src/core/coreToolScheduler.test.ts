@@ -921,9 +921,10 @@ describe('CoreToolScheduler', () => {
           new MockTool({ name: 'read_file', canUpdateOutput: true, execute }),
         ],
       ]);
-      const { scheduler } = createSchedulerForLegacyToolTests({
-        toolsByName,
-      });
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName,
+        });
 
       // Abort the parent shortly after scheduling (well before the 10s timeout)
       setTimeout(() => parentController.abort(), 20);
@@ -943,6 +944,13 @@ describe('CoreToolScheduler', () => {
 
       // The tool should have seen the abort forwarded from the parent signal
       expect(toolSawAbort).toBe(true);
+      // Parent abort takes precedence: the scheduler's `signal.aborted`
+      // check after the catch path overrides the tool rejection with
+      // 'cancelled' status, even though the tool rejected.
+      const completedCall = (
+        onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+      )[0];
+      expect(completedCall.status).toBe('cancelled');
     } finally {
       if (previousTimeout === undefined) {
         delete process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
@@ -7167,6 +7175,46 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(spanRecord.statusCalls).toEqual([]);
     expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('tool_error');
     expect(spanRecord.ended).toBe(true);
+  });
+
+  it('sets timeout failure_kind on span when tool exceeds execution timeout', async () => {
+    const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+    process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '30';
+    try {
+      toolSpanRecords.length = 0;
+      const { scheduler, onAllToolCallsComplete } = buildScheduler({
+        execute: () =>
+          new Promise(() => {
+            /* never settles */
+          }),
+      });
+      await scheduler.schedule(
+        [
+          {
+            callId: 'timeout-span',
+            name: 'mockTool',
+            args: { input: 'x' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-timeout-span',
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      const spanRecord = getLastToolSpan();
+      const completedCalls = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as
+        | ToolCall[]
+        | undefined;
+      expect(completedCalls?.[0].status).toBe('error');
+      expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('timeout');
+      expect(spanRecord.ended).toBe(true);
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+      } else {
+        process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = previousTimeout;
+      }
+    }
   });
 
   it('preserves original tool errors when the failure hook rejects', async () => {
