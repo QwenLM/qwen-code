@@ -1454,6 +1454,11 @@ export default {
     '正在压缩中，请等待上一个请求完成',
   'Failed to compress chat history.': '压缩聊天历史失败',
   'Failed to compress chat history: {{error}}': '压缩聊天历史失败：{{error}}',
+  'Compressing context...': '正在压缩上下文...',
+  'Compression instructions were truncated to {{max}} characters.':
+    '压缩指令已截断至 {{max}} 个字符。',
+  'Context compressed ({{originalTokens}} -> {{newTokens}}).':
+    '上下文已压缩（{{originalTokens}} -> {{newTokens}}）。',
   'Compressing chat history': '正在压缩聊天历史',
   'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.':
     '聊天历史已从 {{originalTokens}} 个 token 压缩到 {{newTokens}} 个 token。',

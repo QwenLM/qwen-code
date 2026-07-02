@@ -96,7 +96,7 @@ export const compressCommand: SlashCommand = {
           }
           yield {
             messageType: 'info' as const,
-            content: 'Compressing context...',
+            content: t('Compressing context...'),
           };
           const compressed = await doCompress();
           if (!compressed) {
@@ -108,7 +108,10 @@ export const compressCommand: SlashCommand = {
           }
           yield {
             messageType: 'info' as const,
-            content: `Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).`,
+            content: t('Context compressed ({{originalTokens}} -> {{newTokens}}).', {
+              originalTokens: compressed.originalTokenCount.toString(),
+              newTokens: compressed.newTokenCount.toString(),
+            }),
           };
         } catch (e) {
           yield {
@@ -178,7 +181,7 @@ export const compressCommand: SlashCommand = {
       return {
         type: 'message',
         messageType: 'info',
-        content: `${truncationNotice ? `${truncationNotice} ` : ''}Context compressed (${compressed.originalTokenCount} -> ${compressed.newTokenCount}).`,
+        content: `${truncationNotice ? `${truncationNotice} ` : ''}${t('Context compressed ({{originalTokens}} -> {{newTokens}}).', { originalTokens: compressed.originalTokenCount.toString(), newTokens: compressed.newTokenCount.toString() })}`,
       };
     } catch (e) {
       // If cancelled via ESC, don't show error — cancelSlashCommand already handled UI

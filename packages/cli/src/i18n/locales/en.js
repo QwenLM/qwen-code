@@ -1520,6 +1520,11 @@ export default {
   'Failed to compress chat history.': 'Failed to compress chat history.',
   'Failed to compress chat history: {{error}}':
     'Failed to compress chat history: {{error}}',
+  'Compressing context...': 'Compressing context...',
+  'Compression instructions were truncated to {{max}} characters.':
+    'Compression instructions were truncated to {{max}} characters.',
+  'Context compressed ({{originalTokens}} -> {{newTokens}}).':
+    'Context compressed ({{originalTokens}} -> {{newTokens}}).',
   'Compressing chat history': 'Compressing chat history',
   'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.':
     'Chat history compressed from {{originalTokens}} to {{newTokens}} tokens.',
