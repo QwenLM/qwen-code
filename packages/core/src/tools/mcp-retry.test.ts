@@ -198,25 +198,32 @@ describe('retryWithBackoff', () => {
     expect(fn).toHaveBeenCalledTimes(1);
   });
 
-  it('uses exponential backoff delay (observed timing)', async () => {
-    const timestamps: number[] = [];
+  it('uses exponential backoff delay', async () => {
+    vi.useFakeTimers();
     const fn = vi.fn(async () => {
-      timestamps.push(Date.now());
       throw new Error('ETIMEDOUT');
     });
 
-    await expect(
-      retryWithBackoff(fn, 'test-backoff', {
+    try {
+      const promise = retryWithBackoff(fn, 'test-backoff', {
         maxRetries: 2,
         baseDelayMs: 50,
-      }),
-    ).rejects.toThrow('ETIMEDOUT');
+      });
+      const errorPromise = promise.catch((error: unknown) => error);
 
-    expect(fn).toHaveBeenCalledTimes(3);
-    const gap1 = timestamps[1]! - timestamps[0]!;
-    const gap2 = timestamps[2]! - timestamps[1]!;
-    expect(gap1).toBeGreaterThanOrEqual(50);
-    expect(gap2).toBeGreaterThanOrEqual(gap1);
+      await vi.waitFor(() => expect(fn).toHaveBeenCalledTimes(1));
+
+      await vi.advanceTimersByTimeAsync(50);
+      await vi.waitFor(() => expect(fn).toHaveBeenCalledTimes(2));
+
+      await vi.advanceTimersByTimeAsync(100);
+      const error = await errorPromise;
+      expect(error).toBeInstanceOf(Error);
+      expect((error as Error).message).toBe('ETIMEDOUT');
+      expect(fn).toHaveBeenCalledTimes(3);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('succeeds after transient 503 then success', async () => {
