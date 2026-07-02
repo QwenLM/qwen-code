@@ -182,13 +182,15 @@ export class ScheduleDaemon {
   // Command-file IPC (CRUD reload signals)
   // -----------------------------------------------------------------------
 
+  private static readonly CMD_FILE = path.join('.qwen', 'schedule-daemon.cmd');
+
   private getCmdFilePath(): string {
-    return path.join(homedir(), '.qwen', 'schedule-daemon.cmd');
+    return path.join(homedir(), ScheduleDaemon.CMD_FILE);
   }
 
   /** Exposed for testing — returns the daemon command file path. */
   static getCmdFilePath(): string {
-    return path.join(homedir(), '.qwen', 'schedule-daemon.cmd');
+    return path.join(homedir(), ScheduleDaemon.CMD_FILE);
   }
 
   private startCommandPolling(): void {
