@@ -17,8 +17,13 @@ vi.stubGlobal(
   },
 );
 
-const { fetchAccessToken, fetchGatewayUrl, getApiBase, sendQQMessage } =
-  await import('./api.js');
+const {
+  fetchAccessToken,
+  fetchGatewayUrl,
+  getApiBase,
+  sendQQMessage,
+  validateGatewayUrl,
+} = await import('./api.js');
 
 function mockResponse(ok: boolean, status: number, body: unknown): Response {
   return {
@@ -187,6 +192,47 @@ describe('fetchGatewayUrl', () => {
 
     await expect(fetchGatewayUrl('tok', false)).rejects.toThrow(
       'QQ Bot gateway response missing WebSocket URL',
+    );
+  });
+});
+
+describe('validateGatewayUrl', () => {
+  it('rejects https URLs', () => {
+    expect(() => validateGatewayUrl('https://gateway.qq.com/ws')).toThrow(
+      'wss://',
+    );
+  });
+
+  it('rejects http URLs', () => {
+    expect(() => validateGatewayUrl('http://gateway.qq.com/ws')).toThrow(
+      'wss://',
+    );
+  });
+
+  it('rejects ws URLs', () => {
+    expect(() => validateGatewayUrl('ws://gateway.qq.com/ws')).toThrow(
+      'wss://',
+    );
+  });
+
+  it('accepts valid wss URL', () => {
+    const url = 'wss://api.sgroup.qq.com/ws';
+    expect(validateGatewayUrl(url)).toBe(url);
+  });
+
+  it('warns on unknown hostname (advisory)', () => {
+    const spy = vi.spyOn(process.stderr, 'write');
+    const url = 'wss://evil.example.com/ws';
+    expect(validateGatewayUrl(url)).toBe(url);
+    expect(spy).toHaveBeenCalledWith(
+      expect.stringContaining('unexpected gateway hostname'),
+    );
+    spy.mockRestore();
+  });
+
+  it('rejects invalid URLs', () => {
+    expect(() => validateGatewayUrl('not a valid url')).toThrow(
+      'not a valid URL',
     );
   });
 });

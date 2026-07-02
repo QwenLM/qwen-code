@@ -37,7 +37,7 @@ export async function fetchAccessToken(
   if (!resp.ok) {
     const body = await resp.text().catch(() => '');
     throw new Error(
-      `QQ Bot token request failed (HTTP ${resp.status}): ${body}`,
+      `QQ Bot token request failed (HTTP ${resp.status}): ${body.slice(0, 80)}`,
     );
   }
 
@@ -52,6 +52,39 @@ export async function fetchAccessToken(
     accessToken: data.access_token,
     expiresIn: data.expires_in ?? 7200,
   };
+}
+
+/**
+ * Validate the WebSocket Gateway URL to prevent SSRF.
+ * - Enforces wss:// protocol (hard boundary — throws on non-wss).
+ * - Logs a stderr warning for unexpected hostnames (advisory only).
+ */
+export function validateGatewayUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'wss:') {
+      throw new Error(
+        `QQ Bot gateway URL must use wss:// protocol, got: ${parsed.protocol}`,
+      );
+    }
+    // Advisory: warn on unexpected gateway hostnames
+    const hostname = parsed.hostname.toLowerCase();
+    if (
+      !hostname.endsWith('.qq.com') &&
+      !hostname.endsWith('.tencent.com') &&
+      !hostname.endsWith('.tencentcs.com')
+    ) {
+      process.stderr.write(
+        `[QQ] Warning: unexpected gateway hostname: ${hostname}\n`,
+      );
+    }
+    return url;
+  } catch (e) {
+    if (e instanceof TypeError) {
+      throw new Error(`QQ Bot gateway URL is not a valid URL: ${url}`);
+    }
+    throw e;
+  }
 }
 
 /**
@@ -77,7 +110,7 @@ export async function fetchGatewayUrl(
   if (!data['url']) {
     throw new Error('QQ Bot gateway response missing WebSocket URL');
   }
-  return data['url'];
+  return validateGatewayUrl(data['url']);
 }
 
 /** Determine the API base URL from the sandbox flag. */
