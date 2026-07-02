@@ -19,6 +19,7 @@ import { FileReadCache } from '../services/fileReadCache.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
 import type { ToolInvocation, ToolResult } from './tools.js';
+import { execSync } from 'node:child_process';
 
 vi.mock('../telemetry/loggers.js', () => ({
   logFileOperation: vi.fn(),
@@ -54,6 +55,10 @@ describe('ReadFileTool', () => {
       }),
       getFileReadCache: () => fileReadCache,
       getFileReadCacheDisabled: () => false,
+      getFileFilteringOptions: () => ({
+        respectGitIgnore: true,
+        respectQwenIgnore: true,
+      }),
     } as unknown as Config;
     tool = new ReadFileTool(mockConfigInstance);
   });
@@ -1092,6 +1097,10 @@ describe('ReadFileTool', () => {
           }),
           getFileReadCache: () => isolatedCache,
           getFileReadCacheDisabled: () => true,
+          getFileFilteringOptions: () => ({
+            respectGitIgnore: true,
+            respectQwenIgnore: true,
+          }),
         } as unknown as Config;
         const disabledTool = new ReadFileTool(disabledConfig);
 
@@ -1173,6 +1182,10 @@ describe('ReadFileTool', () => {
           }),
           getFileReadCache: () => fileReadCache,
           getFileReadCacheDisabled: () => false,
+          getFileFilteringOptions: () => ({
+            respectGitIgnore: false,
+            respectQwenIgnore: true,
+          }),
         } as unknown as Config;
         const customTool = new ReadFileTool(customConfig);
         const ignoredFilePath = path.join(tempRootDir, 'cursor-secret.txt');
@@ -1202,6 +1215,64 @@ describe('ReadFileTool', () => {
           file_path: allowedFilePath,
         };
         const invocation = tool.build(params);
+        expect(typeof invocation).not.toBe('string');
+      });
+    });
+
+    describe('with .gitignore', () => {
+      beforeEach(async () => {
+        // Initialize a git repository so .gitignore is loaded
+        execSync('git init', { cwd: tempRootDir });
+        await fsp.writeFile(
+          path.join(tempRootDir, '.gitignore'),
+          ['secret.env', 'ignored-dir/'].join('\n'),
+        );
+      });
+
+      it('should throw error if path is ignored by .gitignore when respectGitIgnore is true', () => {
+        const ignoredFilePath = path.join(tempRootDir, 'secret.env');
+        const params: ReadFileToolParams = {
+          file_path: ignoredFilePath,
+        };
+        const expectedError = `File path '${ignoredFilePath}' is ignored by .gitignore pattern(s).`;
+        expect(() => tool.build(params)).toThrow(expectedError);
+      });
+
+      it('should allow reading git-ignored files when respectGitIgnore is false', () => {
+        const ignoredFilePath = path.join(tempRootDir, 'secret.env');
+        const params: ReadFileToolParams = {
+          file_path: ignoredFilePath,
+          file_filtering_options: { respect_git_ignore: false },
+        };
+        const invocation = tool.build(params);
+        expect(typeof invocation).not.toBe('string');
+      });
+
+      it('should allow reading non-git-ignored files', () => {
+        const allowedFilePath = path.join(tempRootDir, 'allowed.txt');
+        const params: ReadFileToolParams = {
+          file_path: allowedFilePath,
+        };
+        const invocation = tool.build(params);
+        expect(typeof invocation).not.toBe('string');
+      });
+
+      it('should respect per-call file_filtering_options to override git-ignore', () => {
+        const ignoredFilePath = path.join(tempRootDir, 'secret.env');
+
+        // With respect_git_ignore: true (default from config), should reject
+        expect(() =>
+          tool.build({
+            file_path: ignoredFilePath,
+            file_filtering_options: { respect_git_ignore: true },
+          }),
+        ).toThrow(/\.gitignore/);
+
+        // With respect_git_ignore: false, should allow
+        const invocation = tool.build({
+          file_path: ignoredFilePath,
+          file_filtering_options: { respect_git_ignore: false },
+        });
         expect(typeof invocation).not.toBe('string');
       });
     });
