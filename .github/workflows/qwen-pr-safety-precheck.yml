@@ -89,9 +89,11 @@ jobs:
               -f body="$(cat "$RUNNER_TEMP/pr-precheck-comment.md")" \
               > /dev/null
           else
-            gh pr comment "$PR_NUMBER" \
-              --repo "$GITHUB_REPOSITORY" \
-              --body-file "$RUNNER_TEMP/pr-precheck-comment.md"
+            gh api \
+              --method POST \
+              "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              -f body="$(cat "$RUNNER_TEMP/pr-precheck-comment.md")" \
+              > /dev/null
           fi
 
       - name: 'Clear manual approval comment'
