@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { redactLogCredentials } from './logRedaction.js';
 
 const R = '<redacted>';
@@ -13,9 +13,9 @@ describe('redactLogCredentials', () => {
   // ── Bearer tokens ──────────────────────────────────────────────────
 
   it('redacts Bearer tokens', () => {
-    expect(redactLogCredentials('Authorization: Bearer eyJhbGciOi.xyz.abc')).toBe(
-      `Authorization: ${R}`,
-    );
+    expect(
+      redactLogCredentials('Authorization: Bearer eyJhbGciOi.xyz.abc'),
+    ).toBe(`Authorization: ${R}`);
   });
 
   it('redacts bare Bearer (no "Authorization:" prefix)', () => {
@@ -49,9 +49,9 @@ describe('redactLogCredentials', () => {
   });
 
   it('redacts Authorization with Digest scheme', () => {
-    expect(
-      redactLogCredentials('Authorization: Digest username="user"'),
-    ).toBe(`Authorization: ${R}`);
+    expect(redactLogCredentials('Authorization: Digest username="user"')).toBe(
+      `Authorization: ${R}`,
+    );
   });
 
   // ── DingTalk access token header ──────────────────────────────────
@@ -121,9 +121,7 @@ describe('redactLogCredentials', () => {
   // ── Key=value secret assignments ──────────────────────────────────
 
   it('redacts token= assignments with ≥10 char values', () => {
-    expect(redactLogCredentials('token=abcdef1234567890')).toBe(
-      `token=${R}`,
-    );
+    expect(redactLogCredentials('token=abcdef1234567890')).toBe(`token=${R}`);
   });
 
   it('redacts API_KEY: assignments', () => {
@@ -150,7 +148,9 @@ describe('redactLogCredentials', () => {
 
   it('redacts compound key names like AWS_SECRET_ACCESS_KEY', () => {
     expect(
-      redactLogCredentials('AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCY'),
+      redactLogCredentials(
+        'AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCY',
+      ),
     ).toBe(`AWS_SECRET_ACCESS_KEY=${R}`);
   });
 
@@ -161,9 +161,9 @@ describe('redactLogCredentials', () => {
   });
 
   it('redacts client_secret assignments', () => {
-    expect(
-      redactLogCredentials('client_secret: abcdef1234567890xxxx'),
-    ).toBe(`client_secret: ${R}`);
+    expect(redactLogCredentials('client_secret: abcdef1234567890xxxx')).toBe(
+      `client_secret: ${R}`,
+    );
   });
 
   // ── JSON-quoted secret fields ───────────────────────────────────
@@ -189,9 +189,9 @@ describe('redactLogCredentials', () => {
   // ── URL-embedded credentials ──────────────────────────────────────
 
   it('redacts URL credentials', () => {
-    expect(redactLogCredentials('proxy: https://user:pass@proxy.local:8080')).toBe(
-      `proxy: https://${R}@proxy.local:8080`,
-    );
+    expect(
+      redactLogCredentials('proxy: https://user:pass@proxy.local:8080'),
+    ).toBe(`proxy: https://${R}@proxy.local:8080`);
   });
 
   it('redacts multiple userinfo segments', () => {
@@ -232,5 +232,24 @@ describe('redactLogCredentials', () => {
   it('handles very long lines without error', () => {
     const longLine = 'x'.repeat(100_000);
     expect(() => redactLogCredentials(longLine)).not.toThrow();
+  });
+});
+
+describe('createStderrForwarder redaction integration', () => {
+  it('redacts credentials flushed via onEnd (partial line without newline)', async () => {
+    const { createStderrForwarder } = await import('./spawnChannel.js');
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[p] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    forwarder.onData('Bearer secrettoken123');
+    expect(captured).toHaveLength(0);
+    forwarder.onEnd();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.line).not.toContain('secrettoken123');
+    expect(captured[0]!.line).toContain('<redacted>');
+    stderrSpy.mockRestore();
   });
 });
