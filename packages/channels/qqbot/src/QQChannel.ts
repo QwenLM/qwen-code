@@ -232,7 +232,11 @@ export class QQChannel extends ChannelBase {
     }
   }
 
-  async sendMessage(chatId: string, text: string): Promise<void> {
+  async sendMessage(
+    chatId: string,
+    text: string,
+    propagateError = false,
+  ): Promise<void> {
     // ── Normal text / markdown flow ──────────────────────────
     const route = await this.resolveRoute(chatId);
     if (!route) return;
@@ -301,6 +305,7 @@ export class QQChannel extends ChannelBase {
         if (msgId) this.msgSeqMap.set(msgId, nextSeq);
       } catch (e) {
         process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
+        if (propagateError) throw e;
         break;
       }
     }
@@ -460,7 +465,7 @@ export class QQChannel extends ChannelBase {
     const buffer = state.buffer;
     state.buffer = '';
     this.flushingSessions.add(event.sessionId);
-    this.sendMessage(state.chatId, buffer)
+    this.sendMessage(state.chatId, buffer, true)
       .then(() => {
         if (this.pendingStreamDelete.has(event.sessionId)) {
           this.pendingStreamDelete.delete(event.sessionId);
@@ -468,10 +473,14 @@ export class QQChannel extends ChannelBase {
         }
       })
       .catch((e: unknown) => {
-        state.buffer = buffer + (state.buffer || '');
-        this.pendingStreamDelete.delete(event.sessionId);
+        if (this.pendingStreamDelete.has(event.sessionId)) {
+          this.pendingStreamDelete.delete(event.sessionId);
+          this.streamState.delete(event.sessionId);
+        } else {
+          state.buffer = buffer + (state.buffer || '');
+        }
         process.stderr.write(
-          `[QQ:${this.name}] toolCallFlush send failed: ${String(e)}\\n`,
+          `[QQ:${this.name}] toolCallFlush send failed: ${String(e)}\n`,
         );
       })
       .finally(() => {
