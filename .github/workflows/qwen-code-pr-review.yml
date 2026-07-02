@@ -63,6 +63,10 @@ jobs:
       github.event.pull_request.head.repo.full_name != github.repository &&
       (github.event.action != 'review_requested' ||
        github.event.requested_reviewer.login == 'qwen-code-ci-bot')
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+      issues: 'write'
     uses: './.github/workflows/qwen-pr-safety-precheck.yml'
 
   ack-review-request:
