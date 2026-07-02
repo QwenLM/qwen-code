@@ -10,6 +10,7 @@ import {
   computeAgentTreeInfo,
   computeUserBlockingIds,
   reorderChildrenUnderParents,
+  treeRowPrefix,
 } from './agent-forest.js';
 
 interface TestNode extends AgentForestNode {
@@ -210,5 +211,31 @@ describe('computeUserBlockingIds', () => {
   it('treats a legacy entry without parentAgentId as top-level', () => {
     const entries = [agent('legacy', { isBackgrounded: false })];
     expect(computeUserBlockingIds(entries)).toEqual(new Set(['legacy']));
+  });
+});
+
+describe('treeRowPrefix', () => {
+  it('indents by visible depth with a marker on spawned rows', () => {
+    expect(
+      treeRowPrefix(agent('root'), { visibleDepth: 0, orphaned: false }),
+    ).toBe('');
+    expect(
+      treeRowPrefix(agent('child', { parentAgentId: 'root' }), {
+        visibleDepth: 1,
+        orphaned: false,
+      }),
+    ).toBe('    ↳ ');
+  });
+
+  it('clamps the indent at TREE_INDENT_MAX_LEVELS for deep trees', () => {
+    // Maintainer mutation-testing on #6191 found removing the clamp
+    // survived the suite. A depth-4 row must indent 3 levels (12 spaces),
+    // not 4 (16) — the detail view's level badge carries the exact depth.
+    expect(
+      treeRowPrefix(agent('deep', { parentAgentId: 'p3' }), {
+        visibleDepth: 4,
+        orphaned: false,
+      }),
+    ).toBe('            ↳ ');
   });
 });
