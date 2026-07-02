@@ -1055,6 +1055,46 @@ export class FeishuChannel extends ChannelBase {
     }
   }
 
+  private async finalizeStoppedCardUpdate(
+    inboundMsgId: string,
+    cardState: CardSessionState | undefined,
+    chatId: string,
+  ): Promise<boolean> {
+    if (
+      !cardState ||
+      (!cardState.stopped && !this.stoppedMessages.has(inboundMsgId))
+    ) {
+      return false;
+    }
+
+    if (cardState.created && cardState.messageId) {
+      const prefix =
+        cardState.atPrefix || this.msgToSenderName.get(inboundMsgId) || '';
+      const stopLabel = `*${this.stopLabelFor(
+        cardState.terminalStatus,
+        this.stoppedMessages.has(inboundMsgId),
+      )}*`;
+      const contentPart = cardState.accumulatedText.trim()
+        ? cardState.accumulatedText + '\n\n---\n' + stopLabel
+        : stopLabel;
+      const finalText = prefix ? `${prefix}\n\n${contentPart}` : contentPart;
+      const updated = await this.updateCard(
+        cardState.messageId,
+        finalText,
+        true,
+        inboundMsgId,
+      );
+      if (!updated) {
+        await this.deleteCard(cardState.messageId);
+        await this.sendMessage(chatId, finalText);
+      }
+    }
+
+    this.cleanupCard(inboundMsgId);
+    this.stoppedMessages.delete(inboundMsgId);
+    return true;
+  }
+
   protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     if (
       event.type !== 'completed' &&
@@ -1175,6 +1215,11 @@ export class FeishuChannel extends ChannelBase {
         true,
         inboundMsgId,
       );
+      if (
+        await this.finalizeStoppedCardUpdate(inboundMsgId, cardState, chatId)
+      ) {
+        return;
+      }
       if (!updated) {
         // Fallback: try without tables (card table number limit, code-fence aware)
         const noTableText = this.stripTables(
@@ -1187,6 +1232,11 @@ export class FeishuChannel extends ChannelBase {
           true,
           inboundMsgId,
         );
+        if (
+          await this.finalizeStoppedCardUpdate(inboundMsgId, cardState, chatId)
+        ) {
+          return;
+        }
         if (!retried) {
           // Final fallback: just mark as done with a short message
           let truncated = displayText.slice(0, 2000);
@@ -1197,6 +1247,15 @@ export class FeishuChannel extends ChannelBase {
             true,
             inboundMsgId,
           );
+          if (
+            await this.finalizeStoppedCardUpdate(
+              inboundMsgId,
+              cardState,
+              chatId,
+            )
+          ) {
+            return;
+          }
           if (!lastResort) {
             // All three updateCard attempts failed — delete orphaned card
             // before falling back to sendMessage
@@ -1228,6 +1287,11 @@ export class FeishuChannel extends ChannelBase {
         true,
         inboundMsgId,
       );
+      if (
+        await this.finalizeStoppedCardUpdate(inboundMsgId, cardState, chatId)
+      ) {
+        return;
+      }
       if (finalized) {
         this.cleanupCard(inboundMsgId);
         return;
@@ -1594,7 +1658,7 @@ export class FeishuChannel extends ChannelBase {
             cardState.atPrefix || this.msgToSenderName.get(inboundId) || '';
           const stopLabel = cancelSucceeded
             ? `*${this.stopLabelFor(cardState.terminalStatus, wasUserStop)}*`
-            : `*${this.statusLabelFor('failed')}*`;
+            : '*停止失败，请重试*';
           const contentPart = cardState.accumulatedText.trim()
             ? cardState.accumulatedText + '\n\n---\n' + stopLabel
             : stopLabel;
