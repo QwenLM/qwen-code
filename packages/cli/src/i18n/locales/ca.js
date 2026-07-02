@@ -1920,6 +1920,8 @@ export default {
     'Premeu Ctrl+O per mostrar la sortida completa de les eines',
   'Switch to plan mode or exit plan mode':
     'Canviar al mode de planificació o sortir del mode de planificació',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    'Defineix la intensitat de raonament dels models compatibles ({{tiers}}); mapejada i limitada segons el proveïdor.',
   'Exited plan mode. Previous approval mode restored.':
     "S'ha sortit del mode de planificació. S'ha restaurat el mode d'aprovació anterior.",
   'Enabled plan mode. The agent will analyze and plan without executing tools.':

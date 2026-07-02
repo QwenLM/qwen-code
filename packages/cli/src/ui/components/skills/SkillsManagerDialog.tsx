@@ -33,6 +33,7 @@ import type {
 import type { LoadedSettings } from '../../../config/settings.js';
 import { SettingScope } from '../../../config/settings.js';
 import { t } from '../../../i18n/index.js';
+import { levelLabel } from '../../utils/skill-level-label.js';
 import type { UseHistoryManagerReturn } from '../../hooks/useHistoryManager.js';
 import { useKeypress } from '../../hooks/useKeypress.js';
 import { theme } from '../../semantic-colors.js';
@@ -67,23 +68,6 @@ const LEVEL_ORDER: Record<SkillLevel, number> = {
   extension: 2,
   bundled: 3,
 };
-
-// Level labels are looked up at render-time (not module-load) so that
-// switching `/language` after startup actually flips the visible label.
-function levelLabel(level: SkillLevel): string {
-  switch (level) {
-    case 'project':
-      return t('Project');
-    case 'user':
-      return t('User');
-    case 'extension':
-      return t('Extension');
-    case 'bundled':
-      return t('Bundled');
-    default:
-      return level;
-  }
-}
 
 const NAME_COLUMN = 24;
 

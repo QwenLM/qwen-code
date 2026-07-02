@@ -19,6 +19,7 @@ import {
   type AvailableModel,
   type Config,
   isImageCapable,
+  parseVisionModelSetting,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
@@ -39,6 +40,14 @@ const FAST_MODEL_CONFIGURATION_HINT =
 
 const VISION_MODEL_CONFIGURATION_HINT =
   'Configure an image-capable model in settings.modelProviders and ensure the required environment variables are set. Run /model --vision <model-id> to set it, or leave it unset to auto-pick a same-provider vision model.';
+
+function formatVisionModelSettingForDisplay(setting: string): string {
+  const parsed = parseVisionModelSetting(setting);
+  if (!parsed) return setting.replace(/\0/g, '\\0');
+  return parsed.baseUrl
+    ? `${parsed.selector} (${parsed.baseUrl})`
+    : parsed.selector;
+}
 
 function persistSetting(
   settings: LoadedSettings,
@@ -154,6 +163,45 @@ function formatUnavailableVisionModelMessage(
     modelName,
     availableModels,
     VISION_MODEL_CONFIGURATION_HINT,
+  );
+}
+
+function formatAmbiguousVisionModelMessage(
+  modelName: string,
+  matchingModels: AvailableModel[],
+): string {
+  const endpoints = matchingModels
+    .map((model) => model.baseUrl ?? '(default endpoint)')
+    .join(', ');
+  const qualifiedSelectors = Array.from(
+    new Set(
+      matchingModels
+        .map((model) =>
+          model.authType ? `${model.authType}:${model.id}` : undefined,
+        )
+        .filter((selector): selector is string => selector !== undefined),
+    ),
+  );
+  const scriptedHint =
+    qualifiedSelectors.length > 1
+      ? `\n${t(
+          'For scripts, pass an auth-qualified selector such as {{selector}}.',
+          {
+            selector: qualifiedSelectors[0],
+          },
+        )}`
+      : '';
+  return (
+    t("Vision model '{{modelName}}' matches multiple configured endpoints.", {
+      modelName,
+    }) +
+    '\n' +
+    t('Matching endpoints: {{endpoints}}.', { endpoints }) +
+    '\n' +
+    t(
+      'Run /model --vision without an argument and choose the exact endpoint.',
+    ) +
+    scriptedHint
   );
 }
 
@@ -452,14 +500,17 @@ export const modelCommand: SlashCommand = {
         // current vision model (non-interactive).
         if (context.executionMode !== 'interactive') {
           const visionModel =
-            context.services.settings?.merged?.visionModel?.trim() ||
-            t('not set');
+            context.services.settings?.merged?.visionModel?.trim();
           return {
             type: 'message',
             messageType: 'info',
             content: t(
               'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
-              { visionModel },
+              {
+                visionModel: visionModel
+                  ? formatVisionModelSettingForDisplay(visionModel)
+                  : t('not set'),
+              },
             ),
           };
         }
@@ -496,9 +547,17 @@ export const modelCommand: SlashCommand = {
           ? config.getAvailableModelsForAuthType(selector.authType)
           : config.getAllConfiguredModels()
       ).filter((m) => !m.fastOnly && !m.voiceOnly);
-      const matched = availableModels.find(
+      const matchingModels = availableModels.filter(
         (model) => model.id === selector.modelId,
       );
+      if (matchingModels.length > 1) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatAmbiguousVisionModelMessage(modelName, matchingModels),
+        };
+      }
+      const matched = matchingModels[0];
       if (!matched) {
         return {
           type: 'message',
@@ -528,9 +587,15 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'visionModel', modelName);
+      const qualifiedModelName = `${
+        selector.authType ?? matched.authType
+      }:${selector.modelId}`;
+      const visionModel = matched.baseUrl
+        ? `${qualifiedModelName}\0${matched.baseUrl}`
+        : qualifiedModelName;
+      persistSetting(settings, 'visionModel', visionModel);
       // Sync runtime Config so the vision bridge picks it up without a restart.
-      config.setVisionModel(modelName);
+      config.setVisionModel(visionModel);
       // The pin is honored even if the model isn't image-capable (the user may
       // know better than our metadata), but warn — the bridge sends images to it.
       const visionWarning = isImageCapable(matched)
