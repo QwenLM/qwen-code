@@ -18,11 +18,15 @@ const filterUnattendedCandidates =
   )?.[0] ?? '';
 const checkBotCredentialsStep =
   workflow.match(
-    /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Find candidate issues')/,
+    /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js')/,
   )?.[0] ?? '';
 const publishPrStep =
   workflow.match(
     /- name: 'Publish PR'[\s\S]*?(?=\n[ ]{6}- name: 'Withdraw claim on failure')/,
+  )?.[0] ?? '';
+const pushAndReportStep =
+  workflow.match(
+    /- name: 'Push and report'[\s\S]*?(?=\n[ ]{6}- name: 'Report dry-run \/ failure')/,
   )?.[0] ?? '';
 const withdrawClaimStep =
   workflow.match(
@@ -154,9 +158,16 @@ describe('qwen-autofix workflow', () => {
   it('keeps publish credential failures diagnosable', () => {
     expect(checkBotCredentialsStep.length).toBeGreaterThan(0);
     expect(publishPrStep.length).toBeGreaterThan(0);
+    expect(pushAndReportStep.length).toBeGreaterThan(0);
     expect(withdrawClaimStep.length).toBeGreaterThan(0);
+    expect(workflow.indexOf("- name: 'Check bot credentials'")).toBeLessThan(
+      workflow.indexOf("- name: 'Set up Node.js'"),
+    );
     expect(checkBotCredentialsStep).toContain(
       'GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq \'.login\'',
+    );
+    expect(checkBotCredentialsStep).toContain(
+      'Failed to verify CI_DEV_BOT_PAT identity with gh api user',
     );
     expect(checkBotCredentialsStep).toContain(
       'CI_DEV_BOT_PAT authenticates as ${bot_actor}',
@@ -168,6 +179,18 @@ describe('qwen-autofix workflow', () => {
       'CI_DEV_BOT_PAT authenticates as ${publish_actor}',
     );
     expect(publishPrStep).toContain(
+      'Failed to verify CI_DEV_BOT_PAT identity with gh api user',
+    );
+    expect(publishPrStep).toContain(
+      'git config --local --unset-all http.https://github.com/.extraheader || true',
+    );
+    expect(pushAndReportStep).toContain(
+      'GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq \'.login\'',
+    );
+    expect(pushAndReportStep).toContain(
+      'CI_DEV_BOT_PAT authenticates as ${bot_actor}',
+    );
+    expect(pushAndReportStep).toContain(
       'git config --local --unset-all http.https://github.com/.extraheader || true',
     );
     expect(withdrawClaimStep).toContain(
@@ -175,6 +198,9 @@ describe('qwen-autofix workflow', () => {
     );
     expect(withdrawClaimStep).toContain(
       'The agent produced and verified a fix, but publishing the PR failed.',
+    );
+    expect(withdrawClaimStep).toContain(
+      'git push, PR creation, or PR comment error',
     );
   });
 });
