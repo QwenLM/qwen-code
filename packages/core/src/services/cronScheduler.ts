@@ -26,11 +26,14 @@ import { tryAcquireLock, releaseLock } from './cronTasksLock.js';
 const debugLogger = createDebugLogger('CRON_SCHEDULER');
 
 const MAX_JOBS = 50;
-// Recurring jobs auto-expire this long after creation (claw-code parity:
-// covers "check my PRs every hour this week" while bounding how long a
-// forgotten schedule keeps firing). Age is evaluated at fire time — an
-// aged job fires one final time, then is deleted.
-const RECURRING_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+export const DEFAULT_RECURRING_MAX_AGE_DAYS = 7;
+// Recurring jobs auto-expire this long after creation by default (claw-code
+// parity: covers "check my PRs every hour this week" while bounding how long
+// a forgotten schedule keeps firing). Age is evaluated at fire time — an
+// aged job fires one final time, then is deleted. Overridable per scheduler
+// instance (see the constructor); Infinity disables expiry.
+export const DEFAULT_RECURRING_MAX_AGE_MS =
+  DEFAULT_RECURRING_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
 // Recurring: up to 10% of period, capped at 15 minutes.
 const MAX_RECURRING_JITTER_MS = 15 * 60 * 1000;
 // One-shot: up to 90s early for jobs landing on :00 or :30.
@@ -244,10 +247,22 @@ export class CronScheduler {
   // successor reading the file pre-write would re-run the same work.
   private pendingPersist: Promise<void> = Promise.resolve();
 
+  /** Age after which recurring jobs expire, evaluated at fire time.
+   * Infinity = never expire. Guarded in the constructor. */
+  private readonly recurringMaxAgeMs: number;
+
   /** `projectRoot` anchors durable storage; without it only session-only
    * jobs work. Production constructs via `Config.getCronScheduler()`,
-   * which always supplies it. */
-  constructor(private readonly projectRoot: string | null = null) {}
+   * which always supplies it (and the configured `recurringMaxAgeMs`,
+   * where Infinity disables expiry). Non-positive or NaN input falls
+   * back to the 7-day default rather than expiring everything at birth. */
+  constructor(
+    private readonly projectRoot: string | null = null,
+    recurringMaxAgeMs: number = DEFAULT_RECURRING_MAX_AGE_MS,
+  ) {
+    this.recurringMaxAgeMs =
+      recurringMaxAgeMs > 0 ? recurringMaxAgeMs : DEFAULT_RECURRING_MAX_AGE_MS;
+  }
 
   /**
    * Creates a new session-only cron job. Returns the created job.
@@ -270,7 +285,7 @@ export class CronScheduler {
       prompt,
       recurring,
       createdAt: now,
-      expiresAt: recurring ? now + RECURRING_MAX_AGE_MS : Infinity,
+      expiresAt: recurring ? now + this.recurringMaxAgeMs : Infinity,
       // Prevent the scheduler from firing during the creation minute
       lastFiredAt: now - (now % 60_000),
       jitterMs,
@@ -635,7 +650,7 @@ export class CronScheduler {
           // delivery covers every consumer — interactive, headless, and
           // ACP enqueue whatever `prompt` holds.
           missedOneShots.push(t);
-        } else if (now - t.createdAt >= RECURRING_MAX_AGE_MS) {
+        } else if (now - t.createdAt >= this.recurringMaxAgeMs) {
           // Aged out while overdue — fires raw one final time, then is
           // deleted (same contract as an aged fire from the tick loop).
           finalTasks.push(t);
@@ -691,7 +706,7 @@ export class CronScheduler {
         );
         continue;
       }
-      const job = durableTaskToJob(task, existing);
+      const job = durableTaskToJob(task, this.recurringMaxAgeMs, existing);
       if (existing?.lastFiredAt !== undefined) {
         job.lastFiredAt = Math.max(existing.lastFiredAt, job.lastFiredAt ?? 0);
       }
@@ -720,7 +735,9 @@ export class CronScheduler {
     if (finalTasks.length > 0) {
       this.fireOrBuffer({
         kind: 'final',
-        jobs: finalTasks.map((t) => durableTaskToJob(t)),
+        jobs: finalTasks.map((t) =>
+          durableTaskToJob(t, this.recurringMaxAgeMs),
+        ),
       });
     }
   }
@@ -757,7 +774,7 @@ export class CronScheduler {
         // surfaces and runs them instead of losing the task permanently.
         const skipped: string[] = [];
         const runnable = pending.tasks.filter((t) => {
-          const job = durableTaskToJob(t);
+          const job = durableTaskToJob(t, this.recurringMaxAgeMs);
           // `job.durable &&` mirrors catch-up/final/tick — durableTaskToJob always
           // sets durable, so it's a no-op today, but keeps the four skip sites
           // identical so a future non-durable carrier can't be silently dropped.
@@ -778,7 +795,7 @@ export class CronScheduler {
         for (const id of skipped) this.pendingRemoval.delete(id);
         if (runnable.length > 0) {
           onFire({
-            ...durableTaskToJob(runnable[0]!),
+            ...durableTaskToJob(runnable[0]!, this.recurringMaxAgeMs),
             prompt: buildMissedCronNotification(runnable),
             missed: true,
           });
@@ -1268,7 +1285,11 @@ function hasParseableCron(task: DurableCronTask): boolean {
   }
 }
 
-function durableTaskToJob(task: DurableCronTask, existing?: CronJob): CronJob {
+function durableTaskToJob(
+  task: DurableCronTask,
+  recurringMaxAgeMs: number,
+  existing?: CronJob,
+): CronJob {
   // Jitter is deterministic per (id, cron, recurring) but costly to
   // compute for sparse crons — carry it forward across reloads.
   const jitterMs =
@@ -1283,9 +1304,7 @@ function durableTaskToJob(task: DurableCronTask, existing?: CronJob): CronJob {
     prompt: task.prompt,
     recurring: task.recurring,
     createdAt: task.createdAt,
-    expiresAt: task.recurring
-      ? task.createdAt + RECURRING_MAX_AGE_MS
-      : Infinity,
+    expiresAt: task.recurring ? task.createdAt + recurringMaxAgeMs : Infinity,
     lastFiredAt: task.lastFiredAt ?? undefined,
     jitterMs,
     durable: true,

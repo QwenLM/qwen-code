@@ -291,6 +291,52 @@ describe('CronScheduler', () => {
       expect(fired).toHaveLength(1);
     });
 
+    it('honors a configured recurring max age', () => {
+      const oneDayMs = 24 * 60 * 60 * 1000;
+      const custom = new CronScheduler(null, oneDayMs);
+      try {
+        const job = custom.create('*/1 * * * *', 'short-lived', true);
+        expect(job.expiresAt - job.createdAt).toBe(oneDayMs);
+
+        const fired: CronJob[] = [];
+        custom.start((j) => fired.push(j));
+        custom.tick(new Date(job.expiresAt + 1000));
+        expect(fired).toHaveLength(1);
+        expect(custom.list()).toHaveLength(0);
+      } finally {
+        custom.destroy();
+      }
+    });
+
+    it('never expires recurring jobs when max age is Infinity', () => {
+      const custom = new CronScheduler(null, Infinity);
+      try {
+        const job = custom.create('*/1 * * * *', 'immortal', true);
+        expect(job.expiresAt).toBe(Infinity);
+
+        const fired: CronJob[] = [];
+        custom.start((j) => fired.push(j));
+        // Well past the 7-day default — still recurring, not removed.
+        custom.tick(new Date(job.createdAt + 30 * 24 * 60 * 60 * 1000));
+        expect(fired).toHaveLength(1);
+        expect(custom.list()).toHaveLength(1);
+      } finally {
+        custom.destroy();
+      }
+    });
+
+    it('falls back to the default max age on invalid input', () => {
+      for (const bad of [0, -5, NaN]) {
+        const custom = new CronScheduler(null, bad);
+        try {
+          const job = custom.create('*/1 * * * *', 'guarded', true);
+          expect(job.expiresAt - job.createdAt).toBe(7 * 24 * 60 * 60 * 1000);
+        } finally {
+          custom.destroy();
+        }
+      }
+    });
+
     it('fires in next minute after first fire', () => {
       const fired: CronJob[] = [];
       scheduler.start((job) => fired.push(job));
