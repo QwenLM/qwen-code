@@ -1863,4 +1863,52 @@ export default {
   in: '入力',
   out: '出力',
   'In/Out': '入力/出力',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Qwen Codeのアップデートを確認し、利用可能な場合はインストールします',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Qwen Code のアップデートがあります！{{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Qwen Code の新しいバージョンがあります！{{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} は最新です！',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'アップデートの確認に失敗しました。ネットワークまたはレジストリ設定を確認してください。',
+  'Unable to check for updates: {{reason}}':
+    'アップデートを確認できません: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'アップデート成功！新バージョンは次回起動時に使用されます。',
+  'Update downloaded. It will be applied after you exit this session.':
+    'アップデートをダウンロードしました。現在のセッション終了後に適用されます。',
+  'Update failed: {{error}}': 'アップデート失敗：{{error}}',
+  'Downloading update...': 'アップデートをダウンロードしています...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'アップデートに成功しました！新しいバージョンを使用するには Qwen Code を再起動してください。再起動前にモデルプロバイダーを切り替えると正しく動作しない場合があります。',
+  'Automatic update failed. Please try updating manually.':
+    '自動アップデートに失敗しました。手動で更新してください。',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    '自動更新に失敗しました: {{error}}。手動で更新するにはインストーラーを再実行してください。',
+  'Running from a local git clone. Please update with "git pull".':
+    'ローカル Git クローンから実行中です。"git pull" で更新してください。',
+  'Running via npx, update not applicable.':
+    'npx 経由で実行中のため、更新は適用されません。',
+  'Running via pnpx, update not applicable.':
+    'pnpx 経由で実行中のため、更新は適用されません。',
+  'Running via bunx, update not applicable.':
+    'bunx 経由で実行中のため、更新は適用されません。',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Homebrew 経由でインストールされています。"brew upgrade" で更新してください。',
+  "Locally installed. Please update via your project's package.json.":
+    'ローカルにインストールされています。プロジェクトの package.json 経由で更新してください。',
+  'Update requires sudo. Please run:':
+    '更新には sudo が必要です。次を実行してください:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'スタンドアロンインストールを検出しました。自動更新を試行しています...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'スタンドアロンインストールを検出しました。更新するにはスタンドアロンインストーラーを再実行してください:',
+  'Run the following to update:':
+    '以下のコマンドを実行してアップデートしてください：',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'このスタンドアロンインストールを自動更新できません。以下から再インストールしてください：',
+  'Manual update required. Please reinstall Qwen Code.':
+    '手動更新が必要です。Qwen Codeを再インストールしてください。',
 };

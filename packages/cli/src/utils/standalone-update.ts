@@ -11,10 +11,14 @@ import * as path from 'node:path';
 import { Readable, Transform } from 'node:stream';
 import { spawn, execFile } from 'node:child_process';
 import { pipeline } from 'node:stream/promises';
+import type { Stats } from 'node:fs';
 import { fetch } from 'undici';
 import * as tar from 'tar';
+import type { ReadEntry } from 'tar';
 import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { verifySignature } from './standalone-update-verify.js';
+import { updateEventEmitter } from './updateEventEmitter.js';
+import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('STANDALONE_UPDATE');
 
@@ -35,6 +39,7 @@ const VALID_TARGETS = new Set([
 const SEMVER_RE = /^v?\d+\.\d+\.\d+(-[\w.]+)?$/;
 
 type UndiciResponse = Awaited<ReturnType<typeof fetch>>;
+type TarFilterEntry = Stats | ReadEntry | { type?: string; linkpath?: unknown };
 
 function normalizeVersion(version: string): string {
   if (!SEMVER_RE.test(version)) {
@@ -193,21 +198,107 @@ async function downloadToFile(
   return hash.digest('hex');
 }
 
-function validateExtractedPaths(resolvedDest: string): void {
+function isPathInside(base: string, candidate: string): boolean {
+  const rel = path.relative(base, candidate);
+  return (
+    rel === '' ||
+    (!!rel &&
+      rel !== '..' &&
+      !rel.startsWith(`..${path.sep}`) &&
+      !path.isAbsolute(rel))
+  );
+}
+
+function normalizeTarEntryPath(entryPath: string): string | null {
+  const parts = entryPath
+    .split(/[\\/]+/)
+    .filter((part) => part && part !== '.');
+  if (parts.length === 0 || parts.includes('..')) {
+    return null;
+  }
+  return parts.join('/');
+}
+
+export function isSafeTarLinkTarget(
+  entryPath: string,
+  linkPath: string,
+  resolvedDest: string,
+): boolean {
+  if (path.posix.isAbsolute(linkPath) || path.win32.isAbsolute(linkPath)) {
+    return false;
+  }
+  const normalizedEntryPath = normalizeTarEntryPath(entryPath);
+  if (!normalizedEntryPath) {
+    return false;
+  }
+  const archiveRoot = normalizedEntryPath.split('/')[0];
+  const linkTarget = path.resolve(
+    resolvedDest,
+    path.posix.dirname(normalizedEntryPath),
+    linkPath,
+  );
+  return isPathInside(path.join(resolvedDest, archiveRoot), linkTarget);
+}
+
+export function isSafeTarEntry(
+  entryPath: string,
+  entry: TarFilterEntry,
+  resolvedDest: string,
+): boolean {
+  if (!isSafeTarEntryPath(entryPath)) return false;
+  const entryType = 'type' in entry ? entry.type : undefined;
+  const linkPath = 'linkpath' in entry ? entry.linkpath : undefined;
+
+  // Reject hardlinks outright. tar resolves hardlink linkpath relative to the
+  // extraction root, not the entry directory, so sharing symlink target logic
+  // would allow traversal outside resolvedDest.
+  if (entryType === 'Link') {
+    return false;
+  }
+
+  if (entryType === 'SymbolicLink' && linkPath !== undefined) {
+    return isSafeTarLinkTarget(entryPath, String(linkPath), resolvedDest);
+  }
+
+  return true;
+}
+
+function isAlreadyExistsError(err: unknown): boolean {
+  return (
+    typeof err === 'object' &&
+    err !== null &&
+    'code' in err &&
+    (err as { code?: string }).code === 'EEXIST'
+  );
+}
+
+function validateExtractedPaths(
+  resolvedDest: string,
+  options: { symlinksOnly?: boolean } = {},
+): void {
   const entries = fs.readdirSync(resolvedDest, {
     recursive: true,
     withFileTypes: true,
   });
   for (const entry of entries) {
+    if (options.symlinksOnly && !entry.isSymbolicLink()) {
+      continue;
+    }
     const fullPath = path.join(
       String(entry.parentPath || entry.path),
       entry.name,
     );
-    const resolved = fs.realpathSync(fullPath);
-    if (
-      !resolved.startsWith(resolvedDest + path.sep) &&
-      resolved !== resolvedDest
-    ) {
+    let resolved: string;
+    try {
+      resolved = fs.realpathSync(fullPath);
+    } catch (err) {
+      fs.rmSync(resolvedDest, { recursive: true, force: true });
+      const detail = err instanceof Error ? err.message : String(err);
+      throw new Error(
+        `Invalid archive entry: ${entry.name} could not be resolved (${detail})`,
+      );
+    }
+    if (!isPathInside(resolvedDest, resolved)) {
       fs.rmSync(resolvedDest, { recursive: true, force: true });
       throw new Error(
         `Path traversal detected in archive: ${entry.name} resolves to ${resolved}`,
@@ -221,7 +312,7 @@ export function isSafeTarEntryPath(entryPath: string): boolean {
   if (path.posix.isAbsolute(entryPath) || path.win32.isAbsolute(entryPath)) {
     return false;
   }
-  return !entryPath.split(/[\\/]+/).includes('..');
+  return normalizeTarEntryPath(entryPath) !== null;
 }
 
 async function extractArchive(
@@ -250,38 +341,22 @@ async function extractArchive(
       ps.on('error', reject);
     });
     const resolvedDest = fs.realpathSync(destDir);
+    // Windows Expand-Archive has no pre-extraction filter like tar.extract,
+    // so keep the full post-extraction traversal scan here. The Unix/tar path
+    // can limit its defense-in-depth scan to symlinks because isSafeTarEntry
+    // validates regular entry paths and rejects hardlinks before extraction.
     validateExtractedPaths(resolvedDest);
   } else {
-    const resolvedDest = path.resolve(destDir);
+    const resolvedDest = fs.realpathSync(destDir);
     await tar.extract({
       file: archivePath,
       cwd: destDir,
       preservePaths: false,
-      filter: (p, entry) => {
-        if (!isSafeTarEntryPath(p)) return false;
-        if (
-          'type' in entry &&
-          entry.type === 'SymbolicLink' &&
-          'linkpath' in entry
-        ) {
-          const linkTarget = path.resolve(
-            resolvedDest,
-            path.dirname(p),
-            String(entry.linkpath),
-          );
-          if (
-            !linkTarget.startsWith(resolvedDest + path.sep) &&
-            linkTarget !== resolvedDest
-          ) {
-            return false;
-          }
-        }
-        return true;
-      },
+      filter: (p, entry) => isSafeTarEntry(p, entry, resolvedDest),
     });
     // Post-extraction defense-in-depth: detect chained symlink attacks that
     // bypass the string-level filter (e.g. symlink A → ".", then A/payload → "../../etc")
-    validateExtractedPaths(fs.realpathSync(destDir));
+    validateExtractedPaths(fs.realpathSync(destDir), { symlinksOnly: true });
   }
 }
 
@@ -406,15 +481,23 @@ function cleanupEmptyStandaloneDir(standaloneDir: string): void {
   }
 }
 
-const UNSAFE_SHELL_CHARS = /["`$\\;\n\r]/;
+const UNSAFE_SHELL_CHARS = /[\0\n\r]/;
 const UNSAFE_CMD_CHARS = /[&|<>^%!"`\n\r]/;
 
-function assertSafeForShellEmbed(p: string, context: string): void {
+function assertSafeForSingleQuotedShellPath(p: string, context: string): void {
   if (UNSAFE_SHELL_CHARS.test(p)) {
     throw new Error(
       `${context} contains characters unsafe for shell embedding: ${p}`,
     );
   }
+}
+
+function shellQuoteForSh(p: string): string {
+  return `'${p.replace(/'/g, "'\\''")}'`;
+}
+
+function shellQuoteForFish(p: string): string {
+  return shellQuoteForSh(p);
 }
 
 function isProcessAlive(pid: number): boolean {
@@ -549,21 +632,35 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
         );
       }
       const wrapperPath = path.join(binDir, 'qwen.cmd');
-      if (!fs.existsSync(wrapperPath)) {
+      try {
         const content = `@echo off\r\ncall "${standaloneDir}\\bin\\qwen.cmd" %*\r\n`;
-        fs.writeFileSync(wrapperPath, content);
+        fs.writeFileSync(wrapperPath, content, { flag: 'wx' });
+      } catch (err) {
+        if (!isAlreadyExistsError(err)) {
+          throw err;
+        }
       }
     } else {
-      assertSafeForShellEmbed(standaloneDir, 'standaloneDir');
+      assertSafeForSingleQuotedShellPath(standaloneDir, 'standaloneDir');
       const wrapperPath = path.join(binDir, 'qwen');
-      if (!fs.existsSync(wrapperPath)) {
-        const content = `#!/bin/sh\nexec "${standaloneDir}/bin/qwen" "$@"\n`;
-        fs.writeFileSync(wrapperPath, content, { mode: 0o755 });
+      try {
+        // Match install-qwen-standalone.sh's write_unix_wrapper:
+        // uses /usr/bin/env sh for portability, and single-quoted paths.
+        const quotedQwenBin = shellQuoteForSh(
+          path.join(standaloneDir, 'bin', 'qwen'),
+        );
+        const content = `#!/usr/bin/env sh\nexec ${quotedQwenBin} "$@"\n`;
+        fs.writeFileSync(wrapperPath, content, { mode: 0o755, flag: 'wx' });
+      } catch (err) {
+        if (!isAlreadyExistsError(err)) {
+          throw err;
+        }
       }
       ensurePathInShellRc(binDir);
     }
   } catch (err) {
-    debugLogger.warn('Failed to create bin wrapper:', err);
+    const detail = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to create bin wrapper: ${detail}`);
   }
 }
 
@@ -572,7 +669,7 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
  * Mirrors the logic in install-qwen-standalone.sh maybe_update_shell_path.
  */
 export function ensurePathInShellRc(binDir: string): void {
-  assertSafeForShellEmbed(binDir, 'binDir');
+  assertSafeForSingleQuotedShellPath(binDir, 'binDir');
 
   const shell = process.env['SHELL'] || '';
   let rcFile: string | null = null;
@@ -583,10 +680,13 @@ export function ensurePathInShellRc(binDir: string): void {
   } else if (shell.endsWith('/bash')) {
     const bashrc = path.join(home, '.bashrc');
     const profile = path.join(home, '.bash_profile');
-    // macOS bash reads .bash_profile for login shells; Linux reads .bashrc.
-    // Match install-qwen-standalone.sh's maybe_update_shell_path logic.
-    if (os.platform() === 'darwin') {
-      rcFile = fs.existsSync(profile) ? profile : bashrc;
+    // Match install-qwen-standalone.sh's maybe_update_shell_path logic:
+    // prefer .bashrc when it exists, otherwise fall back to .bash_profile,
+    // and create .bashrc if neither file exists.
+    if (fs.existsSync(bashrc)) {
+      rcFile = bashrc;
+    } else if (fs.existsSync(profile)) {
+      rcFile = profile;
     } else {
       rcFile = bashrc;
     }
@@ -600,15 +700,22 @@ export function ensurePathInShellRc(binDir: string): void {
     const content = fs.existsSync(rcFile)
       ? fs.readFileSync(rcFile, 'utf-8')
       : '';
-    // Use a marker to detect our managed PATH entry precisely,
-    // avoiding false positives from comments or $PATH-appended entries
-    const marker = '# Added by Qwen Code standalone installer';
-    if (content.includes(marker)) return;
+    // Use begin/end block markers matching install-qwen-standalone.sh's
+    // maybe_update_shell_path, so the update codepath is idempotent with the
+    // install script and does not produce duplicate PATH entries.
+    const beginMarker = '# Qwen Code PATH block begin';
+    const endMarker = '# Qwen Code PATH block end';
+    const legacyMarker = '# Added by Qwen Code standalone installer';
+    if (content.includes(beginMarker) && content.includes(endMarker)) return;
+    if (content.includes(legacyMarker)) return;
 
     const exportLine = shell.endsWith('/fish')
-      ? `\n${marker}\nfish_add_path "${binDir}"\n`
-      : `\n${marker}\nexport PATH="${binDir}:$PATH"\n`;
-    fs.appendFileSync(rcFile, exportLine);
+      ? `set -gx PATH ${shellQuoteForFish(binDir)} $PATH`
+      : `export PATH=${shellQuoteForSh(binDir)}:$PATH`;
+
+    const block = `\n${beginMarker}\n${exportLine}\n${endMarker}\n`;
+    fs.mkdirSync(path.dirname(rcFile), { recursive: true });
+    fs.appendFileSync(rcFile, block);
     debugLogger.info(`Added ${binDir} to ${rcFile}`);
   } catch (err) {
     debugLogger.debug('Failed to update shell rc:', err);
@@ -674,7 +781,12 @@ export async function performStandaloneUpdate(
   }
 
   if (isFirstTimeMigration) {
-    fs.mkdirSync(standaloneDir, { recursive: true });
+    try {
+      fs.mkdirSync(standaloneDir, { recursive: true });
+    } catch (err) {
+      releaseLock(lockPath);
+      throw err;
+    }
   }
 
   // Download to a temp dir in os.tmpdir(), then extract to a sibling dir
@@ -695,6 +807,9 @@ export async function performStandaloneUpdate(
   try {
     const archivePath = path.join(tempDir, filename);
     debugLogger.info(`Downloading ${filename} (${versionPath})...`);
+    updateEventEmitter.emit('update-info', {
+      message: t('Downloading update...'),
+    });
     const archiveHash = await downloadToFile(
       versionPath,
       filename,
@@ -716,6 +831,11 @@ export async function performStandaloneUpdate(
 
     debugLogger.info('Running smoke test...');
     await smokeTest(newInstallDir, target);
+
+    // Ensure the PATH wrapper can be created before mutating the active install.
+    // This is critical for npm→standalone migration: a wrapper failure should not
+    // be reported as a generic update failure after the install has been swapped.
+    ensureBinWrapper(standaloneDir, target);
 
     debugLogger.info('Replacing installation...');
     updateResult = atomicReplace(standaloneDir, newInstallDir, lockPath);
@@ -752,9 +872,6 @@ export async function performStandaloneUpdate(
         }
       }
     }
-
-    // Ensure bin wrapper exists (critical for npm→standalone migration)
-    ensureBinWrapper(standaloneDir, target);
 
     debugLogger.info('Standalone update complete.');
     return updateResult;

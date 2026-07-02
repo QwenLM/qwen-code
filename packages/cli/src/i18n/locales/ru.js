@@ -2079,4 +2079,51 @@ export default {
   in: 'вх.',
   out: 'вых.',
   'In/Out': 'Вх/Вых',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Проверить обновления Qwen Code и установить при наличии',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Доступно обновление Qwen Code! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Доступна новая версия Qwen Code! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!': 'Qwen Code {{version}} актуален!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    'Не удалось проверить обновления. Проверьте сеть или настройки registry.',
+  'Unable to check for updates: {{reason}}':
+    'Невозможно проверить обновления: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    'Обновление успешно! Новая версия будет использована при следующем запуске.',
+  'Update downloaded. It will be applied after you exit this session.':
+    'Обновление загружено. Оно будет применено после выхода из этого сеанса.',
+  'Update failed: {{error}}': 'Ошибка обновления: {{error}}',
+  'Downloading update...': 'Загрузка обновления...',
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Обновление успешно! Перезапустите Qwen Code, чтобы использовать новую версию. Переключение поставщиков моделей до перезапуска может работать некорректно.',
+  'Automatic update failed. Please try updating manually.':
+    'Автоматическое обновление не удалось. Попробуйте обновить вручную.',
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Автоматическое обновление не удалось: {{error}}. Повторно запустите установщик, чтобы обновить вручную.',
+  'Running from a local git clone. Please update with "git pull".':
+    'Запущено из локального клона Git. Обновите с помощью "git pull".',
+  'Running via npx, update not applicable.':
+    'Запущено через npx, обновление неприменимо.',
+  'Running via pnpx, update not applicable.':
+    'Запущено через pnpx, обновление неприменимо.',
+  'Running via bunx, update not applicable.':
+    'Запущено через bunx, обновление неприменимо.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Установлено через Homebrew. Обновите с помощью "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    'Установлено локально. Обновите через package.json вашего проекта.',
+  'Update requires sudo. Please run:':
+    'Для обновления требуется sudo. Выполните:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'Обнаружена автономная установка. Выполняется попытка автоматического обновления...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'Обнаружена автономная установка. Повторно запустите автономный установщик для обновления:',
+  'Run the following to update:': 'Выполните следующую команду для обновления:',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'Невозможно автоматически обновить эту автономную установку. Переустановите с:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Требуется ручное обновление. Переустановите Qwen Code.',
 };

@@ -64,6 +64,7 @@ import { authCommand } from '../commands/auth.js';
 import { reviewCommand } from '../commands/review.js';
 import { serveCommand } from '../commands/serve.js';
 import { sessionsCommand } from '../commands/sessions.js';
+import { updateCommand } from '../commands/update.js';
 
 // UUID v4 regex pattern for validation
 const SESSION_ID_REGEX =
@@ -1062,7 +1063,9 @@ export async function parseArguments(): Promise<CliArgs> {
     // Register `qwen serve` (Stage 1 daemon)
     .command(serveCommand)
     // Register sessions subcommands
-    .command(sessionsCommand);
+    .command(sessionsCommand)
+    // Register update command
+    .command(updateCommand);
 
   yargsInstance
     .version(await getCliVersion()) // This will enable the --version flag based on package.json
@@ -1087,7 +1090,8 @@ export async function parseArguments(): Promise<CliArgs> {
       result._[0] === 'hooks' ||
       result._[0] === 'channel' ||
       result._[0] === 'review' ||
-      result._[0] === 'sessions')
+      result._[0] === 'sessions' ||
+      result._[0] === 'update')
   ) {
     // Note: `serve` is intentionally NOT in this list. Its handler blocks
     // forever (after the listener is up); SIGINT/SIGTERM in runQwenServe
@@ -1096,7 +1100,7 @@ export async function parseArguments(): Promise<CliArgs> {
     // execution and exit. Returning here would let the main interactive
     // flow run, which would prompt for stdin input despite the user
     // having already invoked a subcommand.
-    process.exit(0);
+    process.exit(process.exitCode ?? 0);
   }
 
   // Normalize query args: handle both quoted "@path file" and unquoted @path file

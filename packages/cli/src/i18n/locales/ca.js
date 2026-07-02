@@ -2060,4 +2060,52 @@ export default {
     'Ús: /history collapse-on-resume|expand-on-resume|expand-now',
   'History collapsed: {{n}} messages hidden. Use /history expand-now to show.':
     'Història reduïda: {{n}} missatges ocults. Utilitzeu /history expand-now per mostrar.',
+  // Update command
+  'Check for Qwen Code updates and install if available':
+    'Comprova les actualitzacions de Qwen Code i instal·la si estan disponibles',
+  'Qwen Code update available! {{current}} → {{latest}}':
+    'Actualització de Qwen Code disponible! {{current}} → {{latest}}',
+  'A new version of Qwen Code is available! {{current}} → {{latest}}':
+    'Hi ha una versió nova de Qwen Code disponible! {{current}} → {{latest}}',
+  'Qwen Code {{version}} is up to date!':
+    'Qwen Code {{version}} està actualitzat!',
+  'Failed to check for updates. Please check your network or registry configuration.':
+    "No s'han pogut comprovar les actualitzacions. Comproveu la xarxa o la configuració del registre.",
+  'Unable to check for updates: {{reason}}':
+    'No es poden comprovar les actualitzacions: {{reason}}',
+  'Update successful! The new version will be used on your next run.':
+    "Actualització correcta! La nova versió s'utilitzarà en la propera execució.",
+  'Update downloaded. It will be applied after you exit this session.':
+    "Actualització descarregada. S'aplicarà després de sortir d'aquesta sessió.",
+  'Update failed: {{error}}': 'Actualització fallida: {{error}}',
+  'Downloading update...': "S'està baixant l'actualització...",
+  'Update successful! Please restart Qwen Code to use the new version. Switching model providers before restarting may not work correctly.':
+    'Actualització correcta! Reinicieu Qwen Code per utilitzar la nova versió. Canviar de proveïdor de models abans de reiniciar pot no funcionar correctament.',
+  'Automatic update failed. Please try updating manually.':
+    "L'actualització automàtica ha fallat. Proveu d'actualitzar manualment.",
+  'Automatic update failed: {{error}}. Re-run the installer to update manually.':
+    'Ha fallat l’actualització automàtica: {{error}}. Torneu a executar l’instal·lador per actualitzar manualment.',
+  'Running from a local git clone. Please update with "git pull".':
+    'S’està executant des d’un clon Git local. Actualitzeu amb "git pull".',
+  'Running via npx, update not applicable.':
+    'S’està executant via npx, l’actualització no és aplicable.',
+  'Running via pnpx, update not applicable.':
+    'S’està executant via pnpx, l’actualització no és aplicable.',
+  'Running via bunx, update not applicable.':
+    'S’està executant via bunx, l’actualització no és aplicable.',
+  'Installed via Homebrew. Please update with "brew upgrade".':
+    'Instal·lat via Homebrew. Actualitzeu amb "brew upgrade".',
+  "Locally installed. Please update via your project's package.json.":
+    'Instal·lat localment. Actualitzeu mitjançant el package.json del vostre projecte.',
+  'Update requires sudo. Please run:':
+    'L’actualització requereix sudo. Executeu:',
+  'Standalone install detected. Attempting to automatically update now...':
+    'S’ha detectat una instal·lació independent. S’intenta actualitzar automàticament...',
+  'Standalone install detected. Please rerun the standalone installer to update:':
+    'S’ha detectat una instal·lació independent. Torneu a executar l’instal·lador independent per actualitzar:',
+  'Run the following to update:': 'Executeu el següent per actualitzar:',
+  'Unable to auto-update this standalone installation. Please reinstall from:':
+    'No es pot actualitzar automàticament aquesta instal·lació autònoma. Reinstal·leu des de:',
+  'Manual update required. Please reinstall Qwen Code.':
+    'Actualització manual requerida. Reinstal·leu Qwen Code.',
 };
