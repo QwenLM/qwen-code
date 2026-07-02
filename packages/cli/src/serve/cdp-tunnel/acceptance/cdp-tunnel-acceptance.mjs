@@ -265,7 +265,21 @@ async function waitForHealth(timeoutMs = 60_000) {
  * The MOCK EXTENSION: connect /acp, ACP initialize, mcp_register, then service
  * cdp_attach / cdp_command frames by answering page-domain CDP.
  */
-function startMockExtension() {
+async function startMockExtension(timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = new Error('mock extension WebSocket failed');
+  while (Date.now() < deadline) {
+    try {
+      return await connectMockExtensionOnce();
+    } catch (e) {
+      lastError = e instanceof Error ? e : new Error(String(e));
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  throw lastError;
+}
+
+function connectMockExtensionOnce() {
   return new Promise((resolveConn, rejectConn) => {
     const ws = new WebSocket(WS_ACP);
     let resolved = false;
