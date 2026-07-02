@@ -80,6 +80,36 @@ describe('validate_palette', () => {
     expect(result.failures.join('\n')).toMatch(/unsupported mode/i);
   });
 
+  it('normalizes 3-digit hex shorthand in messages', () => {
+    const result = validatePalette(['#777', '#999'], { mode: 'light' });
+
+    expect(result.status).toBe('WARN');
+    expect(result.warnings.join('\n')).toContain('#777777');
+    expect(result.warnings.join('\n')).toContain('#999999');
+  });
+
+  it('deduplicates repeated validation messages', () => {
+    const result = validatePalette(['#777777', '#777777'], { mode: 'light' });
+
+    expect(result.status).toBe('WARN');
+    expect(
+      result.warnings.filter((warning) =>
+        warning.includes('#777777 has low OKLCH chroma'),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it('rejects palettes that are too large for pairwise checks', () => {
+    const result = validatePalette(Array(51).fill('#2563eb'), {
+      mode: 'light',
+    });
+
+    expect(result.status).toBe('FAIL');
+    expect(result.failures).toEqual([
+      'Palette has 51 colors; maximum supported is 50.',
+    ]);
+  });
+
   it('warns when colorblind simulation makes colors too close', () => {
     const result = validatePalette(['#2563eb', '#7c3aed'], { mode: 'light' });
 

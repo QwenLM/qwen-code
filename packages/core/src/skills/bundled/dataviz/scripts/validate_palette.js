@@ -42,6 +42,8 @@ const CVD_MATRICES = {
   ],
 };
 
+const MAX_PALETTE_COLORS = 50;
+
 export function validatePalette(input, options = {}) {
   const mode = options.mode ?? 'light';
   const config = modeConfig(mode);
@@ -60,6 +62,16 @@ export function validatePalette(input, options = {}) {
     return { status: 'FAIL', failures: ['No colors provided.'], warnings };
   }
 
+  if (input.length > MAX_PALETTE_COLORS) {
+    return {
+      status: 'FAIL',
+      failures: [
+        `Palette has ${input.length} colors; maximum supported is ${MAX_PALETTE_COLORS}.`,
+      ],
+      warnings,
+    };
+  }
+
   const colors = input.map((value, index) => {
     const rgb = parseHexColor(value);
     if (!rgb) {
@@ -69,7 +81,7 @@ export function validatePalette(input, options = {}) {
       return null;
     }
     const oklch = rgbToOklch(rgb);
-    return { value: normalizeHex(value), rgb, oklch };
+    return { value: normalizeHex(rgb), rgb, oklch };
   });
 
   if (failures.length > 0) {
@@ -127,11 +139,17 @@ export function validatePalette(input, options = {}) {
     }
   }
 
+  const uniqueFailures = [...new Set(failures)];
+  const uniqueWarnings = [...new Set(warnings)];
   return {
     status:
-      failures.length > 0 ? 'FAIL' : warnings.length > 0 ? 'WARN' : 'PASS',
-    failures,
-    warnings,
+      uniqueFailures.length > 0
+        ? 'FAIL'
+        : uniqueWarnings.length > 0
+          ? 'WARN'
+          : 'PASS',
+    failures: uniqueFailures,
+    warnings: uniqueWarnings,
   };
 }
 
@@ -149,8 +167,7 @@ function parseHexColor(value) {
   );
 }
 
-function normalizeHex(value) {
-  const rgb = parseHexColor(value);
+function normalizeHex(rgb) {
   return `#${rgb.map((channel) => channel.toString(16).padStart(2, '0')).join('')}`;
 }
 
