@@ -7,11 +7,9 @@ export const CI_PROFILES = {
   FULL: 'full',
 };
 
-const GITHUB_CI_ONLY_FILES = new Set([
+export const GITHUB_CI_ONLY_FILES = new Set([
   '.github/scripts/pr-safety-precheck.mjs',
   '.github/scripts/pr-safety-precheck.test.mjs',
-  '.github/scripts/ci/classify-profile.mjs',
-  '.github/scripts/ci/classify-profile.test.mjs',
   '.github/workflows/qwen-pr-safety-precheck.yml',
 ]);
 
@@ -49,7 +47,9 @@ function main() {
   try {
     const files = readFileSync(filePath, 'utf8').split(/\r?\n/);
     console.log(classifyChangedFiles(files));
-  } catch {
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(`::warning::Failed to read changed files: ${message}`);
     console.log(CI_PROFILES.FULL);
   }
 }
