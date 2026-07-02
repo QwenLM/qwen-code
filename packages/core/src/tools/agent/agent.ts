@@ -53,8 +53,10 @@ import {
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import {
-  getCurrentAgentDepth,
+  canSpawnNestedAgent,
+  childLaunchDepth,
   getCurrentAgentId,
+  isTopLevelSession,
   runWithAgentContext,
 } from '../../agents/runtime/agent-context.js';
 import { trace, context as otelContext } from '@opentelemetry/api';
@@ -426,6 +428,9 @@ function applyPersistedCliFlagOverrides(
   if (flags.maxToolCalls !== undefined) {
     ov.getMaxToolCalls = () => flags.maxToolCalls;
   }
+  if (flags.maxSubagentDepth !== undefined) {
+    ov.getMaxSubagentDepth = () => flags.maxSubagentDepth;
+  }
 }
 
 function capturePersistedCliFlags(
@@ -441,6 +446,7 @@ function capturePersistedCliFlags(
     model: config.getModel(),
     maxSessionTurns: config.getMaxSessionTurns(),
     maxToolCalls: config.getMaxToolCalls(),
+    maxSubagentDepth: config.getMaxSubagentDepth(),
   };
 }
 
@@ -1333,7 +1339,8 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       promptConfig = {
         renderedSystemPrompt: generationConfig.systemInstruction as
-          string | Content,
+          | string
+          | Content,
         initialMessages,
       };
       toolConfig = {
@@ -1478,18 +1485,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         ? undefined
         : trace.getSpan(otelContext.active())?.spanContext();
     // Capture parent identity BEFORE we enter the child's runWithAgentContext
-    // frame inside `body`. The parent's depth is `getCurrentAgentDepth()` (0
-    // outside any frame, N inside frame at depth N); the subagent itself
-    // lives one level deeper, hence the +1 — but only when a parent frame
-    // exists. Without a parent the subagent is top-level (depth 0). The
-    // `getCurrentAgentId() !== null` test discriminates "no frame" from
-    // "frame at depth 0", which `getCurrentAgentDepth()` alone cannot.
-    // Review wenshao @ #4410.
+    // frame inside `body` — childLaunchDepth() reads the invoker's frame, not
+    // the child's. Review wenshao @ #4410.
     const parentAgentId = getCurrentAgentId();
     const span = startSubagentSpan({
       ...spec,
       parentAgentId: parentAgentId ?? undefined,
-      depth: parentAgentId !== null ? getCurrentAgentDepth() + 1 : 0,
+      depth: childLaunchDepth(),
       invokingRequestId: this.callId,
       sessionId: this.config.getSessionId(),
       invokerSpanContext,
@@ -1713,6 +1715,29 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     }
   }
 
+  /**
+   * Failure ToolResult for a spawn blocked by an execute()-entry guard
+   * (nesting depth limit, fork containment). Keeps the two guards' result
+   * shape in lockstep.
+   */
+  private buildSpawnBlockedResult(
+    llmContent: string,
+    terminateReason: string,
+  ): ToolResult {
+    return {
+      llmContent,
+      returnDisplay: {
+        type: 'task_execution' as const,
+        subagentName:
+          this.params.subagent_type ?? DEFAULT_BUILTIN_SUBAGENT_TYPE,
+        taskDescription: this.params.description,
+        taskPrompt: this.params.prompt,
+        status: 'failed' as const,
+        terminateReason,
+      },
+    };
+  }
+
   async execute(
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
@@ -1721,7 +1746,13 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     // A name only means "spawn a teammate" while a team is active. Older
     // prompts may still pass it without a team; treat that as a normal
     // one-shot agent instead of failing the whole task.
-    if (this.params.name && !isTeammate()) {
+    //
+    // isTopLevelSession() restricts teammate spawning to the top-level
+    // session. Nested sub-agents now carry the AgentTool, so without this a
+    // sub-agent could pass `name` and reach executeTeammate, bypassing both
+    // the v1 "teammates do not nest" rule and the depth guard below. A nested
+    // sub-agent's `name` falls through to the normal path.
+    if (this.params.name && !isTeammate() && isTopLevelSession()) {
       if (!this.config.getTeamManager()) {
         debugLogger.debug(
           `[AgentTool] Ignoring teammate name "${this.params.name}" because no team is active.`,
@@ -1729,6 +1760,39 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       } else {
         return this.executeTeammate(this.params.name, signal, updateOutput);
       }
+    }
+
+    // ─── Nesting depth guard ──────────────────────────────────────
+    // Authoritative runtime backstop for sub-agent nesting: reject the spawn
+    // when it would exceed maxSubagentDepth. AgentCore.prepareTools() also
+    // hides the AgentTool from leaf-depth sub-agents (same canSpawnNestedAgent
+    // check), so a well-behaved model never reaches here. Teammate spawns
+    // returned above and are not gated by depth. See
+    // knowledge/qwen-code/design/nested-subagents.md.
+    const maxSubagentDepth = this.config.getMaxSubagentDepth();
+    if (!canSpawnNestedAgent(maxSubagentDepth)) {
+      return this.buildSpawnBlockedResult(
+        `Error: sub-agent nesting depth limit reached ` +
+          `(max ${maxSubagentDepth} level${maxSubagentDepth === 1 ? '' : 's'}). ` +
+          `Complete this task directly with your own tools instead of ` +
+          `spawning another sub-agent.`,
+        `Nesting depth limit reached (max ${maxSubagentDepth})`,
+      );
+    }
+
+    // ─── Fork spawn guard ─────────────────────────────────────────
+    // Forks must never spawn sub-agents — the fork contract is
+    // context-sharing, not isolation. AgentCore.prepareTools() already strips
+    // `agent` from fork contexts, but wildcard/fallback tool lists make this
+    // runtime backstop necessary. Blocks ALL agent calls from a fork child
+    // (not just fork-in-fork). This runs before the fork branch below, so the
+    // recursive-fork case is subsumed here. See
+    // knowledge/qwen-code/design/nested-subagents.md.
+    if (isInForkExecution()) {
+      return this.buildSpawnBlockedResult(
+        'Error: Cannot spawn sub-agents from within a fork. Please execute tasks directly.',
+        'Sub-agent spawning is not allowed inside a fork',
+      );
     }
 
     // ── Isolation state hoisted to the outermost scope ────────────
@@ -1879,7 +1943,15 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const requestedType = this.params.subagent_type;
       const isForkRequested =
         requestedType?.toLowerCase() === FORK_SUBAGENT_TYPE;
-      const isFork = isForkRequested && isForkSubagentEnabled(this.config);
+      const isFork =
+        isForkRequested &&
+        isForkSubagentEnabled(this.config) &&
+        // v1: fork is a top-level-only capability. A sub-agent — which may now
+        // carry the AgentTool via nesting — that requests a fork falls back to
+        // the awaitable general-purpose sub-agent (via effectiveSubagentType
+        // below) instead of opening a nested fork. Fork nesting is deferred
+        // past v1. See knowledge/qwen-code/design/nested-subagents.md.
+        isTopLevelSession();
       const effectiveSubagentType = isFork
         ? undefined
         : isForkRequested
@@ -1891,25 +1963,6 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       if (isFork) {
         subagentConfig = FORK_AGENT;
-
-        // Recursive-fork guard. A fork child's reasoning loop runs inside
-        // an AsyncLocalStorage frame set by `runInForkContext`; when its
-        // model calls the `agent` tool, this check fires before any history
-        // or config is touched.
-        if (isInForkExecution()) {
-          return {
-            llmContent:
-              'Error: Cannot create a fork from within an existing fork child. Please execute tasks directly.',
-            returnDisplay: {
-              type: 'task_execution' as const,
-              subagentName: FORK_AGENT.name,
-              taskDescription: this.params.description,
-              taskPrompt: this.params.prompt,
-              status: 'failed' as const,
-              terminateReason: 'Recursive forking is not allowed',
-            },
-          };
-        }
       } else {
         const loadedConfig = await this.subagentManager.loadSubagent(
           effectiveSubagentType!,
@@ -2280,7 +2333,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         // already requires confirmation — this only flips deny → surface.)
         const shouldBubble = Boolean(
           subagentConfig.approvalMode === BUBBLE_APPROVAL_MODE &&
-          this.config.isInteractive(),
+            this.config.isInteractive(),
         );
         // Use Object.create so the resolved approval mode override (e.g.
         // subagent-level `approvalMode: auto-edit`) is preserved.
@@ -2456,6 +2509,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,
+          // Persisted so resume restores the original nesting level; see
+          // childLaunchDepth() for the rationale.
+          depth: childLaunchDepth(),
         });
 
         // Subscribe to the subagent's tool-call event stream so the
@@ -3018,6 +3074,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           subagentName: subagentConfig.name,
           agentColor: subagentConfig.color,
           resumeCount: 0,
+          // Persisted so resume restores the original nesting level; see
+          // childLaunchDepth() for the rationale.
+          depth: childLaunchDepth(),
         });
 
         const stopHookWarning = await runFramed();

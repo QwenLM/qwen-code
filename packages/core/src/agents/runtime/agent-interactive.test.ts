@@ -17,6 +17,7 @@ import type {
 import { ContextState } from './agent-headless.js';
 import type { AgentInteractiveConfig } from './agent-types.js';
 import { AgentStatus } from './agent-types.js';
+import { getCurrentAgentDepth, getCurrentAgentId } from './agent-context.js';
 
 function createMockChat() {
   return {
@@ -207,6 +208,47 @@ describe('AgentInteractive', () => {
     // Shutdown drains queue, loop exits normally → completed.
     await agent.shutdown();
     expect(agent.getStatus()).toBe('completed');
+  });
+
+  it('runs start() and the message loop inside the agent identity frame', async () => {
+    // Regression (codex review): start() called prepareTools() outside any
+    // runWithAgentContext frame, so in-process interactive agents (Arena,
+    // in-process teammates) were depth-gated as the top-level session —
+    // receiving the `agent` tool even at maxSubagentDepth=1 — and their
+    // later `agent` calls were counted as top-level spawns.
+    const { core } = createMockCore();
+    let prepId: string | null = null;
+    let prepDepth = -1;
+    let loopId: string | null = null;
+    let loopDepth = -1;
+    (core.prepareTools as ReturnType<typeof vi.fn>).mockImplementation(() => {
+      prepId = getCurrentAgentId();
+      prepDepth = getCurrentAgentDepth();
+      return [];
+    });
+    (core.runReasoningLoop as ReturnType<typeof vi.fn>).mockImplementation(
+      async () => {
+        loopId = getCurrentAgentId();
+        loopDepth = getCurrentAgentDepth();
+        return { text: 'Done', terminateMode: null, turnsUsed: 1 };
+      },
+    );
+
+    const agent = new AgentInteractive(
+      createConfig({ initialTask: 'go' }),
+      core,
+    );
+    await agent.start(context);
+    await vi.waitFor(() => {
+      expect(agent.getStatus()).toBe('idle');
+    });
+
+    // Spawned from the top-level session → the agent's own frame is depth 0
+    // (a level-1 agent), for schema preparation and reasoning rounds alike.
+    expect(prepId).toBe('agent-1');
+    expect(prepDepth).toBe(0);
+    expect(loopId).toBe('agent-1');
+    expect(loopDepth).toBe(0);
   });
 
   it('should process initialTask immediately on start', async () => {

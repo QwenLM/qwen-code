@@ -200,16 +200,20 @@ describe('agent-context (depth) — #3731 Phase 3', () => {
     });
   });
 
-  it('callers do not pass depth — it is computed from parent frame only', async () => {
-    // Defensive: confirm `runWithAgentContext`'s signature still takes
-    // only (agentId, fn). Phase 3 depth tracking must remain a
-    // caller-invisible internal concern.
-    await runWithAgentContext('outer', async () => {
-      const before = getCurrentAgentDepth();
-      // No way to pass depth in — the helper computes it.
-      await runWithAgentContext('inner', async () => {
-        expect(getCurrentAgentDepth()).toBe(before + 1);
-      });
-    });
+  it('depthOverride pins the depth for background/foreground resume', async () => {
+    // Resume runs from a top-level frame; without the override a resumed
+    // nested agent would recompute to depth 0 and regain spawn capacity.
+    // Passing the persisted launch depth restores the original level, and a
+    // child frame still auto-increments from the restored value.
+    await runWithAgentContext(
+      'resumed',
+      async () => {
+        expect(getCurrentAgentDepth()).toBe(3);
+        await runWithAgentContext('child', async () => {
+          expect(getCurrentAgentDepth()).toBe(4);
+        });
+      },
+      3,
+    );
   });
 });

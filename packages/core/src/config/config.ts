@@ -907,6 +907,16 @@ export interface ConfigParameters {
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
   /**
+   * Maximum number of nested sub-agent levels (1-based). `1` reproduces the
+   * pre-nesting behavior — level-1 sub-agents exist but cannot themselves
+   * spawn sub-agents. The default `5` lets a sub-agent spawn sub-agents up to
+   * five levels deep. Values `< 1` are clamped to `1`. This governs *nesting*
+   * only; it never disables sub-agents. Teammates, forks, and the workflow
+   * tool are excluded from nesting in v1. See
+   * knowledge/qwen-code/design/nested-subagents.md.
+   */
+  maxSubagentDepth?: number;
+  /**
    * Wall-clock budget for an unattended run, in seconds. `-1` (default)
    * means no limit. Enforced by the CLI's non-interactive run loop
    * see `RunBudgetEnforcer` in `packages/cli/src/utils/runBudget.ts`.
@@ -1448,6 +1458,7 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
   private readonly maxToolCalls: number;
   private readonly clearContextOnIdle: ClearContextOnIdleSettings;
@@ -1670,6 +1681,12 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    // Default 5 (nesting on). Explicit values below 1 clamp to 1 so the knob
+    // never disables sub-agents outright — it only bounds nesting.
+    this.maxSubagentDepth =
+      params.maxSubagentDepth == null
+        ? 5
+        : Math.max(1, Math.floor(params.maxSubagentDepth));
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
     const clearContextOnIdle = params.clearContextOnIdle;
@@ -3262,6 +3279,10 @@ export class Config {
 
   getMaxSessionTurns(): number {
     return this.maxSessionTurns;
+  }
+
+  getMaxSubagentDepth(): number {
+    return this.maxSubagentDepth;
   }
 
   getMaxWallTimeSeconds(): number {

@@ -1411,7 +1411,8 @@ export async function loadCliConfig(
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
-  const safeMode = argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
+  const safeMode =
+    argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
 
   // Surface `--insecure` as an env var so it reaches the undici dispatcher
   // layer (which controls TLS verification) without threading a flag through
@@ -1992,6 +1993,8 @@ export async function loadCliConfig(
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
+    // Undefined flows through to Config's default (5) and clamp logic.
+    maxSubagentDepth: settings.model?.maxSubagentDepth,
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? true,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
@@ -2093,9 +2096,7 @@ export async function loadCliConfig(
         ? false
         : (settings.memory?.enableTeamMemorySync ?? false),
     enableAutoSkill:
-      bareMode || safeMode
-        ? false
-        : (settings.memory?.enableAutoSkill ?? true),
+      bareMode || safeMode ? false : (settings.memory?.enableAutoSkill ?? true),
     autoSkillConfirm:
       bareMode || safeMode
         ? false

@@ -22,12 +22,16 @@ import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
 import {
+  canSpawnNestedAgent,
+  getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
+  isTopLevelSession,
   runWithAgentContext,
   runWithRuntimeContentGenerator,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
+import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 import {
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
@@ -469,9 +473,36 @@ export class AgentCore {
     const excludedFromSubagents = isTeammate()
       ? EXCLUDED_TOOLS_FOR_TEAMMATES
       : EXCLUDED_TOOLS_FOR_SUBAGENTS;
-    // When a subagent has an explicit tools list (not wildcard), only the
-    // recursive-spawn guard (AgentTool) is enforced.
-    const recursionGuardOnly = new Set<string>([ToolNames.AGENT]);
+
+    // Nested sub-agents: the AgentTool is normally excluded to prevent
+    // recursive spawning, but when maxSubagentDepth permits another level we
+    // let it back in. prepareTools() runs inside this sub-agent's own
+    // AsyncLocalStorage frame (see AgentHeadless.run / AgentInteractive), so
+    // canSpawnNestedAgent() reads this agent's own depth. Teammates do not
+    // nest in v1, and forks must never spawn sub-agents (the fork contract is
+    // context-sharing, not isolation). See
+    // knowledge/qwen-code/design/nested-subagents.md.
+    //
+    // !isTopLevelSession() fails closed: prepareTools() only ever serves
+    // agents — never the top-level user session — so a missing agent frame
+    // means the launch path forgot runWithAgentContext. Without this check
+    // such an agent would be depth-gated as the top-level session and receive
+    // the AgentTool even at maxSubagentDepth=1 (codex review: frame-less
+    // AgentInteractive.start(), since fixed to establish its frame).
+    const nestingAllowed =
+      !isTopLevelSession() &&
+      !isTeammate() &&
+      !isInForkExecution() &&
+      canSpawnNestedAgent(this.runtimeContext.getMaxSubagentDepth());
+
+    // Effective exclusion test. AgentTool is depth-gated (allowed only when
+    // this sub-agent is shallow enough to spawn another level); every other
+    // control-plane tool follows the static exclusion set unchanged.
+    const isExcluded = (name: string | undefined): boolean => {
+      if (!name) return false;
+      if (name === ToolNames.AGENT) return !nestingAllowed;
+      return excludedFromSubagents.has(name);
+    };
 
     if (this.toolConfig) {
       const asStrings = this.toolConfig.tools.filter(
@@ -493,7 +524,7 @@ export class AgentCore {
         toolsList.push(
           ...toolRegistry
             .getFunctionDeclarations({ includeDeferred: true })
-            .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
+            .filter((t) => !isExcluded(t.name)),
         );
       } else {
         // Explicit tool list: apply the full subagent exclusion set (not just
@@ -502,23 +533,23 @@ export class AgentCore {
         // explicitly-configured subagents that happen to list them.
         toolsList.push(
           ...toolRegistry.getFunctionDeclarationsFiltered(
-            asStrings.filter((name) => !excludedFromSubagents.has(name)),
+            asStrings.filter((name) => !isExcluded(name)),
           ),
         );
       }
-      // Also filter inline FunctionDeclaration[] passed directly in toolConfig.
-      toolsList.push(
-        ...onlyInlineDecls.filter(
-          (d) => !(d.name && recursionGuardOnly.has(d.name)),
-        ),
-      );
+      // Also filter inline FunctionDeclaration[] passed directly in toolConfig
+      // through the same exclusion test as the registry branches, so the
+      // depth-gated AgentTool and every other control-plane tool are handled
+      // uniformly (the inline form must not become a leak path for
+      // workflow/cron/team tools into a subagent).
+      toolsList.push(...onlyInlineDecls.filter((d) => !isExcluded(d.name)));
     } else {
       // Inherit all available tools by default when not specified — see the
       // wildcard branch above for why deferred tools are included.
       toolsList.push(
         ...toolRegistry
           .getFunctionDeclarations({ includeDeferred: true })
-          .filter((t) => !(t.name && excludedFromSubagents.has(t.name))),
+          .filter((t) => !isExcluded(t.name)),
       );
     }
 
@@ -605,7 +636,10 @@ export class AgentCore {
    * `inheritedAgentId` does the same for logical agent ownership. It is
    * needed by deferred approval because the user's approval response runs
    * from the parent UI chain, after the subagent's AsyncLocalStorage frame
-   * has unwound.
+   * has unwound. `inheritedAgentDepth` accompanies it: without the original
+   * nesting depth the restored frame recomputes to depth 0, letting a
+   * deferred-approved `agent` tool call from a leaf-depth sub-agent bypass
+   * maxSubagentDepth.
    *
    * `inheritedTeammateIdentity` restores the in-process teammate identity
    * frame (`teammateIdentityStore`). Deferred approval needs it for the
@@ -624,12 +658,21 @@ export class AgentCore {
     inheritedView?: RuntimeContentGeneratorView,
     inheritedAgentId?: string,
     inheritedTeammateIdentity?: TeammateIdentity,
+    inheritedAgentDepth?: number,
   ): Promise<T> {
     const runInner = () =>
       subagentNameContext.run(this.name, () => {
         const runWithView = () => this.withRuntimeView(fn, inheritedView);
+        // inheritedAgentDepth restores the agent's original nesting depth.
+        // Without it the frame recomputes from the UI's frame-less async
+        // chain to depth 0, and an approved `agent` tool call from a
+        // leaf-depth sub-agent would bypass maxSubagentDepth.
         return inheritedAgentId
-          ? runWithAgentContext(inheritedAgentId, runWithView)
+          ? runWithAgentContext(
+              inheritedAgentId,
+              runWithView,
+              inheritedAgentDepth,
+            )
           : runWithView();
       });
     return inheritedTeammateIdentity
@@ -1408,6 +1451,10 @@ export class AgentCore {
             // restore it. See `runInAgentFrames` for the wiring.
             const inheritedView = getRuntimeContentGenerator();
             const inheritedAgentId = getCurrentAgentId();
+            // Depth pairs with the id: the continuation must re-enter the
+            // frame at this agent's original depth, or the depth guard on a
+            // deferred-approved `agent` tool call would see depth 0.
+            const inheritedAgentDepth = getCurrentAgentDepth();
             // Capture the teammate identity frame too, while the loop
             // frame is still live, so the deferred-approval continuation
             // can restore it. See `runInAgentFrames` for why this matters
@@ -1443,6 +1490,7 @@ export class AgentCore {
                   inheritedView,
                   inheritedAgentId ?? undefined,
                   inheritedTeammateIdentity,
+                  inheritedAgentDepth,
                 );
               },
               timestamp: Date.now(),
