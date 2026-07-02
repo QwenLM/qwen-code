@@ -86,6 +86,7 @@ import {
   resolveAtCommandQuery,
 } from './atCommandProcessor.js';
 import { findLastSafeSplitPoint } from '../utils/markdownUtilities.js';
+import { fitPendingSlice } from '../utils/pending-rendered-height.js';
 import { useStateAndRef } from './useStateAndRef.js';
 import { prefixMidTurnUserMessageParts } from '../../utils/midTurnUserMessage.js';
 import { isInlineModelOverrideAllowed } from '../../utils/acpModelUtils.js';
@@ -367,6 +368,15 @@ const EDIT_TOOL_NAMES = new Set([
 ]);
 const STREAM_UPDATE_THROTTLE_MS = 60;
 const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
+// Rows kept in reserve below the commit budget so the incremental commit fires
+// BEFORE MarkdownDisplay's safety-net clip (which reserves 2). Keeping the
+// pending item's rendered height under the safety budget stops that clip from
+// engaging and flickering "generating more" / hiding a table in step with the
+// commit cycle.
+const STREAM_PENDING_COMMIT_RESERVE_ROWS = 5;
+// Conservative estimate of the rows the composer/footer occupy, used to derive
+// a content-area height from terminalHeight before the live value is known.
+const STREAM_PENDING_COMPOSER_RESERVE_ROWS = 12;
 const LOADING_THOUGHT_DESCRIPTION_MAX_CHARS = 4_096;
 
 type BufferedStreamEvent =
@@ -387,6 +397,24 @@ function clampLoadingThoughtDescription(description: string): string {
   }
 
   return description.slice(0, LOADING_THOUGHT_DESCRIPTION_MAX_CHARS);
+}
+
+/**
+ * Character index just after the `keptLines`-th source line of `text`, or -1 if
+ * there are not that many lines. Converts a fitPendingSlice line count into a
+ * commit boundary; callers pass it through `findLastSafeSplitPoint` so the cut
+ * never lands inside a fenced code block.
+ */
+function charIndexAfterLine(text: string, keptLines: number): number {
+  if (keptLines <= 0) return -1;
+  let count = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === '\n') {
+      count++;
+      if (count === keptLines) return i + 1;
+    }
+  }
+  return -1;
 }
 
 /**
@@ -445,6 +473,11 @@ export const useGeminiStream = (
   terminalHeight: number,
   midTurnDrainRef?: React.RefObject<(() => string[]) | null>,
   logger?: Logger | null,
+  // Live content-area height (terminal minus composer/header). Used to bound the
+  // pending item's rendered height so it commits to <Static> before it can grow
+  // tall enough to trigger the scroll-to-top redraw. A ref (not a value) because
+  // it is computed after this hook is called in AppContainer.
+  availableTerminalHeightRef?: React.RefObject<number>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -1238,6 +1271,59 @@ export const useGeminiStream = (
         nextPendingType = 'gemini_content';
         newGeminiMessageBuffer = afterText;
       }
+      // Rendered-height-aware incremental commit. Commit whole chunks to
+      // <Static> so the pending (live) item's ESTIMATED rendered height stays
+      // within the viewport budget. Uses the SAME accounting as
+      // MarkdownDisplay's safety-net slice (fitPendingSlice — tables counted as
+      // blocks, wide/CJK lines wrapped) so the two agree and the clip never
+      // engages / flickers in step with the commit cycle.
+      //
+      //  - `while`, not `if`: a single throttled update can append many lines, so
+      //    keep committing until the remainder fits.
+      //  - `findLastSafeSplitPoint`: never cut inside a fenced code block (which
+      //    would commit a half-open ``` to scrollback permanently).
+      //  - Conservative fallback when the content-area height is not yet known
+      //    (ref is 0 before the first render populates it): derive from
+      //    terminalHeight so a short terminal does not use an over-large budget.
+      const viewportRows =
+        (availableTerminalHeightRef?.current ?? 0) > 0
+          ? availableTerminalHeightRef!.current
+          : Math.max(4, terminalHeight - STREAM_PENDING_COMPOSER_RESERVE_ROWS);
+      const commitRowBudget = Math.max(
+        4,
+        viewportRows - STREAM_PENDING_COMMIT_RESERVE_ROWS,
+      );
+      const tableClampRows = Math.max(2, viewportRows - 3);
+      while (true) {
+        const bufferLines = newGeminiMessageBuffer.split('\n');
+        const { keptLines, clipped } = fitPendingSlice(
+          bufferLines,
+          terminalWidth,
+          commitRowBudget,
+          tableClampRows,
+        );
+        if (!clipped) break;
+        const target = charIndexAfterLine(newGeminiMessageBuffer, keptLines);
+        if (target <= 0) break; // cannot split (e.g. one oversized line)
+        const splitPoint = findLastSafeSplitPoint(
+          newGeminiMessageBuffer,
+          target,
+        );
+        if (splitPoint <= 0 || splitPoint >= newGeminiMessageBuffer.length) {
+          break;
+        }
+        const beforeText = newGeminiMessageBuffer.substring(0, splitPoint);
+        const afterText = newGeminiMessageBuffer.substring(splitPoint);
+        commitItem(
+          {
+            type: nextPendingType,
+            text: beforeText,
+          },
+          userMessageTimestamp,
+        );
+        nextPendingType = 'gemini_content';
+        newGeminiMessageBuffer = afterText;
+      }
       // Update the existing message with accumulated content.
       setPendingHistoryItem((item) => {
         const base: HistoryItemWithoutId = {
@@ -1253,7 +1339,14 @@ export const useGeminiStream = (
       });
       return newGeminiMessageBuffer;
     },
-    [commitItem, pendingHistoryItemRef, setPendingHistoryItem],
+    [
+      commitItem,
+      pendingHistoryItemRef,
+      setPendingHistoryItem,
+      terminalWidth,
+      terminalHeight,
+      availableTerminalHeightRef,
+    ],
   );
 
   const mergeThought = useCallback(

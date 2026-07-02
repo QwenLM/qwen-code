@@ -14,6 +14,7 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
+import { fitPendingSlice } from './pending-rendered-height.js';
 // Minimum content lines to keep in a clipped live preview before the
 // "generating more" cue (own constant — not coupled to MaxSizedBox's floor).
 const MIN_PENDING_CONTENT_LINES = 1;
@@ -183,31 +184,27 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   const displayText = isPending ? text.trimEnd() : text;
   const allLines = displayText.split(/\r?\n/);
   // Bound the live (non-`<Static>`) markdown to the viewport budget. A long
-  // streaming message otherwise renders ALL its lines, pushing the non-`<Static>`
+  // streaming message otherwise renders ALL its lines, pushing the dynamic
   // frame past the terminal height — at which point ink clears the terminal and
-  // re-streams the entire transcript on every repaint (the top→bottom "scroll
-  // replay" seen on tab-switch in terminal multiplexers). Slice to a CONTIGUOUS
-  // head of source lines rather than clipping with ink `overflow="hidden"`,
-  // which decimates rows (drops interspersed lines) and can erase a code block's
-  // own truncation indicator. Short messages are untouched; the full message
-  // still renders once it commits to `<Static>`. Only while pending and when a
-  // budget is known (constrainHeight on — both non-VP and VP pending items pass
-  // a budget).
+  // re-streams the whole frame from the top on every repaint (the "scroll-to-
+  // top lock"). The rendered-height-aware slice below keeps a CONTIGUOUS head of
+  // source lines whose RENDERED height fits the budget; a contiguous slice
+  // (rather than ink `overflow="hidden"`) avoids decimating interspersed rows
+  // and preserves a code block's own truncation cue. The full message still
+  // renders once it commits to `<Static>`. Only while pending and when a budget
+  // is known (constrainHeight on — both non-VP and VP pending items pass one).
   //
-  // Reserve 2 rows below the content: 1 for the "generating more" cue, and 1
-  // more so a retained code/math block's OWN inner budget
-  // (availableTerminalHeight - RESERVED_LINES, where RESERVED_LINES is up to 3
-  // for math) is never exceeded within the slice — otherwise that block emits
-  // its own cue and we'd stack two.
-  const pendingLineBudget =
+  // Reserve 2 rows: 1 for the "generating more" cue, 1 so a retained code/math
+  // block's OWN inner truncation cue can't stack on top of the outer one.
+  //
+  // This is a SAFETY NET on top of incremental scrollback commit: it guarantees
+  // the live frame never exceeds the viewport regardless of how the streaming
+  // layer chunks content, because rendered height ≠ source-line count (a table
+  // renders ~2 rows per data row; a wide/CJK line wraps to multiple rows).
+  const pendingRenderedBudget =
     isPending && availableTerminalHeight !== undefined
       ? Math.max(MIN_PENDING_CONTENT_LINES, availableTerminalHeight - 2)
       : undefined;
-  const pendingClipped =
-    pendingLineBudget !== undefined && allLines.length > pendingLineBudget;
-  const lines = pendingClipped
-    ? allLines.slice(0, pendingLineBudget)
-    : allLines;
   const headerRegex = /^ *(#{1,4}) +(.*)/;
   const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
   const ulItemRegex = /^([ \t]*)([-*+]) +(.*)/;
@@ -218,6 +215,33 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   const tableRowRegex = /^\s*\|(.+)\|\s*$/;
   const tableSeparatorRegex =
     /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
+
+  // Rendered-height-aware slice of the pending preview (shared with
+  // useGeminiStream's incremental commit — see pending-rendered-height.ts — so the
+  // two agree on how tall the content renders). Guarantees the live frame never
+  // exceeds the viewport, so ink cannot fall into its from-top full-redraw path
+  // (the scroll-to-top lock). Note keptLines can be 0 when even the first
+  // line/table alone overflows (e.g. a single very wide/CJK line that wraps past
+  // the budget): render nothing plus the "generating more" cue rather than one
+  // oversized row that would bypass the bound.
+  let lines = allLines;
+  let pendingClipped = false;
+  if (pendingRenderedBudget !== undefined) {
+    const tableClampRows =
+      availableTerminalHeight !== undefined
+        ? Math.max(2, availableTerminalHeight - 3)
+        : Number.MAX_SAFE_INTEGER;
+    const { keptLines, clipped } = fitPendingSlice(
+      allLines,
+      contentWidth,
+      pendingRenderedBudget,
+      tableClampRows,
+    );
+    if (clipped) {
+      pendingClipped = true;
+      lines = allLines.slice(0, keptLines);
+    }
+  }
 
   /** Parse column alignments from a markdown table separator like `|:---|:---:|---:|` */
   const parseTableAligns = (line: string): ColumnAlign[] =>
@@ -386,7 +410,10 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       }
       tableRows.push(cells);
     } else if (inTable && !tableRowMatch) {
-      // End of table
+      // End of table — a following line closes it, so this table is COMPLETE
+      // and renders in full (the rendered-aware slice guarantees a completed
+      // table that would overflow was cut before it; `maxHeight` clamps the
+      // residual wrapped-cell case).
       if (tableHeaders.length > 0 && tableRows.length > 0) {
         addContentBlock(
           <RenderTable
@@ -396,6 +423,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
             contentWidth={contentWidth}
             aligns={tableAligns}
             enableInlineMath={renderVisualBlocks}
+            isPending={isPending}
+            availableTerminalHeight={availableTerminalHeight}
           />,
         );
       }
@@ -577,7 +606,11 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     );
   }
 
-  // Handle table at end of content
+  // Handle table at end of content — the table still being written. Draw it live
+  // (growing each tick); the `maxHeight` clamp caps it at the viewport and the
+  // slice above keeps preceding content within budget, so it can never overflow
+  // and lock the terminal. Renders in full once the message commits to <Static>
+  // (isPending=false → no clamp).
   if (inTable && tableHeaders.length > 0 && tableRows.length > 0) {
     addContentBlock(
       <RenderTable
@@ -587,6 +620,8 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         contentWidth={contentWidth}
         aligns={tableAligns}
         enableInlineMath={renderVisualBlocks}
+        isPending={isPending}
+        availableTerminalHeight={availableTerminalHeight}
       />,
     );
   }
@@ -901,7 +936,15 @@ interface RenderTableProps {
   contentWidth: number;
   aligns?: ColumnAlign[];
   enableInlineMath?: boolean;
+  isPending?: boolean;
+  availableTerminalHeight?: number;
 }
+
+// Backstop only: the pending slice bounds a completed table's height assuming
+// single-line cells, but a cell that WRAPS renders taller and could still
+// overflow. While streaming, cap the table to the viewport (reserve 3 rows:
+// marginY 2 + the outer cue) so it can never trigger the scroll-to-top lock.
+const TABLE_PENDING_RESERVED_ROWS = 3;
 
 const RenderTableInternal: React.FC<RenderTableProps> = ({
   headers,
@@ -909,15 +952,24 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
   contentWidth,
   aligns,
   enableInlineMath = false,
-}) => (
-  <TableRenderer
-    headers={headers}
-    rows={rows}
-    contentWidth={contentWidth}
-    aligns={aligns}
-    enableInlineMath={enableInlineMath}
-  />
-);
+  isPending = false,
+  availableTerminalHeight,
+}) => {
+  const maxHeight =
+    isPending && availableTerminalHeight !== undefined
+      ? Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS)
+      : undefined;
+  return (
+    <TableRenderer
+      headers={headers}
+      rows={rows}
+      contentWidth={contentWidth}
+      aligns={aligns}
+      enableInlineMath={enableInlineMath}
+      maxHeight={maxHeight}
+    />
+  );
+};
 
 const RenderTable = React.memo(RenderTableInternal);
 
