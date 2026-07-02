@@ -247,8 +247,8 @@ export function sliceTextByVisualHeight(
  * Wrap text into the visual rows it occupies at `width` columns, accounting
  * for both explicit newlines and code-point-width-aware soft wrapping. Unlike
  * `sliceTextByVisualHeight` (which keeps only a head/tail window), this returns
- * every visual row, so callers that scroll an arbitrary offset (e.g. the
- * ThinkingViewer) can slice the rows the user actually sees.
+ * every visual row, so callers that scroll an arbitrary offset can slice the
+ * rows the user actually sees.
  */
 export function wrapToVisualLines(text: string, width: number): string[] {
   if (width <= 0) {

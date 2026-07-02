@@ -1024,6 +1024,16 @@ const SETTINGS_SCHEMA = {
           'Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.',
         showInDialog: true,
       },
+      showScrollbar: {
+        type: 'boolean',
+        label: 'Show Scrollbar (Virtualized History)',
+        category: 'UI',
+        requiresRestart: false,
+        default: true,
+        description:
+          'Show the auto-hiding scrollbar in the in-app scrollable viewport (Virtualized History). The bar appears while scrolling and fades out when idle. Disable to hide it entirely.',
+        showInDialog: true,
+      },
       shellOutputMaxLines: {
         type: 'number',
         label: 'Shell Output Max Lines',
