@@ -574,6 +574,144 @@ describe('sendMessage', () => {
     await ch.sendMessage('test-chat-id', '**bold**');
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
   });
+
+  it('stops at 429 early return — no plain-text fallback after active retry rate-limited', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const chp = ch as unknown as Record<string, unknown>;
+    (
+      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+    ).set('test-chat-id', { msgId: 'msg-429', timestamp: Date.now() });
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(false, 400, 'markdown rejected'))
+      .mockResolvedValueOnce(mockResponse(false, 429, 'rate limited'));
+    await ch.sendMessage('test-chat-id', '**bold**');
+    // markdown attempt + active retry = 2 calls (no plain-text fallback)
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    const secondBody = mockSendQQMessage.mock.calls[1][3] as Record<string, unknown>;
+    expect(secondBody['msg_type']).toBe(0); // active retry
+    // No 3rd call
+  });
+
+  it('rolls back msgSeqMap when sendQQMessage throws and replyMsgId is set', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const chp = ch as unknown as Record<string, unknown>;
+    (
+      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+    ).set('test-chat-id', { msgId: 'msg-rollback', timestamp: Date.now() });
+
+    // Set initial msgSeq
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-rollback', 5);
+
+    mockSendQQMessage.mockRejectedValue(new Error('connection reset'));
+
+    await expect(ch.sendMessage('test-chat-id', 'hello')).rejects.toThrow(
+      'connection reset',
+    );
+
+    // msgSeq should be rolled back (nextSeq = 6 was set, rollback to 5)
+    expect(msgSeqMap.get('msg-rollback')).toBe(5);
+  });
+
+  it('rolls back msgSeqMap when sendQQMessage throws and replyMsgId is set (new session)', async () => {
+    // Same as above but with no initial msgSeq entry
+    const ch = makeChannel({ chatType: 'c2c' });
+    const chp = ch as unknown as Record<string, unknown>;
+    (
+      chp['replyMsgId'] as Map<string, { msgId: string; timestamp: number }>
+    ).set('test-chat-id', { msgId: 'msg-new', timestamp: Date.now() });
+
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    // msg-new not yet in the map — send sets nextSeq = 0 + 1 = 1
+
+    mockSendQQMessage.mockRejectedValue(new Error('network error'));
+
+    await expect(ch.sendMessage('test-chat-id', 'hello')).rejects.toThrow(
+      'network error',
+    );
+
+    // Rollback should set it to 0 (nextSeq - 1 = 1 - 1 = 0)
+    expect(msgSeqMap.get('msg-new')).toBe(0);
+  });
+});
+
+describe('setReplyMsgId', () => {
+  function makeChannel(): QQChannelClass {
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+    );
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+    return ch;
+  }
+
+  it('cleans up old msgSeqMap entry when setting new replyMsgId for same chatId', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+
+    // Set initial state: chat has msgSeq entries for current reply
+    replyMsgId.set('test-chat-id', {
+      msgId: 'old-msg-id',
+      timestamp: Date.now(),
+    });
+    msgSeqMap.set('old-msg-id', 5);
+    msgSeqMap.set('other-msg-id', 10);
+
+    // Now call setReplyMsgId with a new msgId
+    (chp['setReplyMsgId'] as (chatId: string, msgId: string) => void)(
+      'test-chat-id',
+      'new-msg-id',
+    );
+
+    // Old msgSeq entry should be deleted
+    expect(msgSeqMap.has('old-msg-id')).toBe(false);
+    // Other entries should be untouched
+    expect(msgSeqMap.get('other-msg-id')).toBe(10);
+    // New replyMsgId should be set
+    expect(replyMsgId.get('test-chat-id')!.msgId).toBe('new-msg-id');
+  });
+
+  it('does nothing when chatId has no prior replyMsgId', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('existing-seq', 3);
+
+    (chp['setReplyMsgId'] as (chatId: string, msgId: string) => void)(
+      'new-chat',
+      'msg-new',
+    );
+
+    // No old entry to clean up — existing entries untouched
+    expect(msgSeqMap.get('existing-seq')).toBe(3);
+    expect(msgSeqMap.has('msg-new')).toBe(false); // msgSeq set later by send
+    expect(replyMsgId.get('new-chat')!.msgId).toBe('msg-new');
+  });
 });
 
 // Security: verify real sanitizers from channel-base strip dangerous characters.

@@ -506,6 +506,22 @@ describe('handleGroup', () => {
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
   });
+
+  it('bot 消息被 handleGroup 跳过（event.author.bot 守卫）', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as QQChannelRaw;
+    pvt['handleGroup'](
+      makeGroupEvent({
+        content: '<@OPENID_BOT> auto reply',
+        author: {
+          member_openid: 'bot-1',
+          bot: true,
+        },
+      }),
+    );
+    await vi.advanceTimersByTimeAsync(600);
+    expect(mockHandleInbound).not.toHaveBeenCalled();
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -769,6 +785,58 @@ describe('群管理事件', () => {
       pvt['handleGroupDelRobot'](evt);
 
       expect(spy).toHaveBeenCalled();
+      spy.mockRestore();
+    });
+
+    it('清理 cron buffer/timer（cron-msg-experimental 启用）', () => {
+      const ch = makeChannel({ 'cron-msg-experimental': true });
+      const pvt = ch as unknown as QQChannelRaw;
+
+      // Pre-populate router with a getTarget that reports the group
+      const router = (ch as unknown as Record<string, unknown>)[
+        'router'
+      ] as { getTarget: ReturnType<typeof vi.fn> };
+      router.getTarget = vi.fn().mockReturnValue({
+        chatId: 'group-cron',
+      });
+
+      // Set up cron buffer
+      const cronBuffer = (ch as unknown as Record<string, unknown>)[
+        'cronBuffer'
+      ] as Map<
+        string,
+        { buffer: string; timer: ReturnType<typeof setTimeout> | null }
+      >;
+      cronBuffer.set('cron-sid-1', {
+        buffer: 'pending cron text',
+        timer: setTimeout(() => {}, 9999),
+      });
+      cronBuffer.set('cron-sid-2', {
+        buffer: 'other cron text',
+        timer: setTimeout(() => {}, 8888),
+      });
+
+      // Pre-populate cronRetryCount
+      const cronRetryCount = (ch as unknown as Record<string, unknown>)[
+        'cronRetryCount'
+      ] as Map<string, number>;
+      cronRetryCount.set('cron-sid-1', 2);
+
+      const spy = vi.spyOn(globalThis, 'clearTimeout');
+
+      const evt: GroupDelRobotEvent = {
+        group_openid: 'group-cron',
+        op_member_openid: 'admin-1',
+        timestamp: Date.now(),
+      };
+      pvt['handleGroupDelRobot'](evt);
+
+      // cron-sid-1's buffer should be removed (targets group-cron)
+      expect(cronBuffer.has('cron-sid-1')).toBe(false);
+      // cron-sid-2's buffer should also be removed (same group)
+      expect(cronBuffer.has('cron-sid-2')).toBe(false);
+      // clearTimeout called for both timers
+      expect(spy).toHaveBeenCalledTimes(2);
       spy.mockRestore();
     });
   });

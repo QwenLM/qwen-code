@@ -269,6 +269,36 @@ describe('onResponseChunk', () => {
     await Promise.resolve();
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
   });
+
+  it('blockStreaming === "on" 时直接 return 不累计', () => {
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+        blockStreaming: 'on',
+      },
+      {} as unknown as import('@qwen-code/channel-base').AcpBridge,
+    );
+    const chp = ch as unknown as Record<string, unknown>;
+    chp['accessToken'] = 'test-token';
+    chp['tokenExpiresAt'] = Date.now() + 3600_000;
+
+    const streamState = chp['streamState'] as Map<string, unknown>;
+
+    onResponseChunk(ch, 'test-chat', 'should be blocked', 'sess-1');
+
+    expect(streamState.has('sess-1')).toBe(false);
+    expect(streamState.size).toBe(0);
+  });
 });
 
 describe('onToolCall', () => {

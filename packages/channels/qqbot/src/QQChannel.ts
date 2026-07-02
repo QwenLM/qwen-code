@@ -311,6 +311,13 @@ export class QQChannel extends ChannelBase {
   // ── ChannelBase interface ──────────────────────────────────────
 
   async connect(): Promise<void> {
+    // Clear any pending reconnect timer from a previous disconnect/reconnect
+    // chain — connect() is an explicit call and should not race with stale
+    // reconnectWithRetry timeouts.
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     this._reconnectId++;
     this.disposed = false;
     this.isReconnecting = false;
@@ -712,7 +719,15 @@ export class QQChannel extends ChannelBase {
           this.pendingStreamDelete.delete(sessionId);
           if (this.streamState.get(sessionId) === flushedEntry) {
             if (wasPending) {
-              // onResponseComplete already deferred — nobody will retry.
+              process.stderr.write(
+                `[QQ:${this.name}] idleFlush: wasPending send failed, ${toFlush.length} chars dropped for ${sessionId}\n`,
+              );
+              // Fire-and-forget: try to salvage the content
+              this.sendMessage(s.chatId, toFlush).catch((e2) => {
+                process.stderr.write(
+                  `[QQ:${this.name}] idleFlush wasPending fire-and-forget failed: ${e2}\n`,
+                );
+              });
               this.streamState.delete(sessionId);
             } else {
               s.buffer = toFlush + s.buffer;
@@ -721,14 +736,22 @@ export class QQChannel extends ChannelBase {
                 if (!s.buffer) return;
                 const buf = s.buffer;
                 s.buffer = '';
-                this.sendMessage(s.chatId, buf).catch((e) => {
-                  process.stderr.write(
-                    `[QQ:${this.name}] idleFlush retry re-arm failed: ${e}\n`,
-                  );
-                  if (this.streamState.get(sessionId) === s) {
-                    s.buffer = buf + (s.buffer || '');
-                  }
-                });
+                this.flushingSessions.add(sessionId);
+                this.sendMessage(s.chatId, buf)
+                  .catch((e) => {
+                    process.stderr.write(
+                      `[QQ:${this.name}] idleFlush retry re-arm failed: ${e}\n`,
+                    );
+                    if (this.streamState.get(sessionId) === s) {
+                      s.buffer = buf + (s.buffer || '');
+                      process.stderr.write(
+                        `[QQ:${this.name}] idleFlush: giving up after failed re-arm, ${buf.length} chars orphaned for ${sessionId}\n`,
+                      );
+                    }
+                  })
+                  .finally(() => {
+                    this.flushingSessions.delete(sessionId);
+                  });
               }, 2000);
               s.timer.unref?.();
             }
@@ -1856,6 +1879,11 @@ export class QQChannel extends ChannelBase {
     if (event.author.bot) return;
     const chatId = event.group_openid;
     this.chatTypeMap.set(chatId, 'group');
+
+    // Deduplicate before prepareGroupMessage to avoid side effects
+    // on duplicate events from reconnect replay.
+    if (this.isDuplicate(event.id)) return;
+
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
     const { isAtBot, isSlash, text, senderName } = result;
@@ -1885,8 +1913,6 @@ export class QQChannel extends ChannelBase {
       );
     }
 
-    // Dedup check
-    if (this.isDuplicate(event.id)) return;
     this.setReplyMsgId(chatId, event.id);
 
     this.handleInbound({

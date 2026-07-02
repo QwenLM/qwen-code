@@ -242,4 +242,71 @@ describe('cronTextHandler', () => {
       { markdown: { content: 'routed text' }, msg_type: 2 },
     );
   });
+
+  it('retries on send failure (buffer restored) and discards after MAX_CRON_RETRIES', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+
+    // Make send consistently fail
+    mockSendQQMessage.mockRejectedValue(new Error('network error'));
+
+    triggerTextChunk('sess-retry', 'retry text');
+    await flushSetImmediate();
+
+    const cronRetryCount = pvt['cronRetryCount'] as Map<string, number>;
+    const cronBuffer = pvt['cronBuffer'] as Map<
+      string,
+      { buffer: string; timer: unknown }
+    >;
+
+    // First idle timer fires at t=2000 → send fails → retries=1, buffer restored
+    await vi.advanceTimersByTimeAsync(2000);
+    await flushSetImmediate();
+    expect(cronRetryCount.get('sess-retry')).toBe(1);
+    expect(cronBuffer.has('sess-retry')).toBe(true);
+
+    // The retry mechanism chains: setTimeout(2s) → _cronTextHandler → setImmediate
+    // → idleTimer(2s) → failed send. March forward in 2s chunks with flushSetImmediate
+    // until we see retries discarded.
+    for (let i = 0; i < 10; i++) {
+      await vi.advanceTimersByTimeAsync(2000);
+      await flushSetImmediate();
+      // If buffer was discarded, we're done
+      if (!cronBuffer.has('sess-retry')) break;
+    }
+
+    // Eventually the buffer should be discarded
+    expect(cronRetryCount.has('sess-retry')).toBe(false);
+    expect(cronBuffer.has('sess-retry')).toBe(false);
+  });
+
+  it('does not fire when streamState has the session (isolated from prompt path)', async () => {
+    const ch = makeChannel();
+    const pvt = ch as unknown as Record<string, unknown>;
+    pvt['_ready'] = true;
+
+    // Pre-populate streamState with the session
+    const streamState = pvt['streamState'] as Map<
+      string,
+      { chatId: string; buffer: string; timer: unknown }
+    >;
+    streamState.set('sess-prompt', {
+      chatId: 'test-chat',
+      buffer: 'prompt text',
+      timer: null,
+    });
+
+    // Trigger textChunk — cron handler should bail out due to streamState check
+    triggerTextChunk('sess-prompt', 'cron text');
+    await flushSetImmediate();
+
+    const cronBuffer = pvt['cronBuffer'] as Map<string, unknown>;
+    // Cron buffer should NOT have this session
+    expect(cronBuffer.has('sess-prompt')).toBe(false);
+    // streamState should be untouched (still has the prompt text)
+    expect(streamState.get('sess-prompt')!.buffer).toBe('prompt text');
+    // No send should have occurred
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
 });
