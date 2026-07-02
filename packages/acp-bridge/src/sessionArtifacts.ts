@@ -454,9 +454,9 @@ export class SessionArtifactStore {
         workspacePath,
         this.getRealWorkspaceCwd(),
       );
-    } catch {
+    } catch (error) {
       throw new SessionArtifactValidationError(
-        'workspacePath could not be inspected',
+        `workspacePath could not be inspected: ${errorSummary(error)}`,
         'workspacePath',
       );
     }
@@ -1125,6 +1125,12 @@ function hasUnsafeDisplayPayload(value: string): boolean {
       value,
     ) || /(?:^|[\s"'`<])on[a-z][a-z0-9-]*\s*=/i.test(value)
   );
+}
+
+function errorSummary(error: unknown): string {
+  return error instanceof Error
+    ? `${error.name}: ${error.message}`
+    : String(error);
 }
 
 function normalizeWorkspacePath(raw: unknown, workspaceCwd: string): string {

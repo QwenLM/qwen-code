@@ -1026,7 +1026,8 @@ describe('SessionArtifactStore', () => {
       ).rejects.toMatchObject({
         code: 'VALIDATION_FAILED',
         field: 'workspacePath',
-        message: 'workspacePath could not be inspected',
+        message:
+          'workspacePath could not be inspected: Error: permission denied',
       });
 
       await expect(
