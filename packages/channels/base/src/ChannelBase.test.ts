@@ -8553,6 +8553,92 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('emits delivery failure even when a pending cancel settles during wind-down', async () => {
+      let resolveCancelRpc!: () => void;
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        new Promise<void>((resolve) => {
+          resolveCancelRpc = resolve;
+        }),
+      );
+      let releaseShouldContinue!: () => void;
+      const gate = new Promise<void>((resolve) => {
+        releaseShouldContinue = resolve;
+      });
+      // First call is the pre-run guard; the second (post-prompt) parks so
+      // /cancel can land between settle and deliveryStarted.
+      let shouldContinueCalls = 0;
+      const shouldContinue = vi.fn().mockImplementation(async () => {
+        shouldContinueCalls += 1;
+        if (shouldContinueCalls >= 2) {
+          await gate;
+        }
+        return true;
+      });
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+      vi.spyOn(
+        ch as unknown as {
+          pushProactive: (
+            target: { chatId: string },
+            text: string,
+          ) => Promise<void>;
+        },
+        'pushProactive',
+      ).mockRejectedValue(new Error('send failed'));
+
+      const loopRun = ch.runLoopPrompt(
+        {
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat1',
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        },
+        { shouldContinue },
+      );
+      loopRun.catch(() => {});
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      const cancel = ch.handleInbound(
+        envelope({ text: '/cancel', senderId: 'alice' }),
+      );
+      await vi.waitFor(() =>
+        expect(bridge.cancelSession).toHaveBeenCalledOnce(),
+      );
+      releaseShouldContinue();
+
+      await expect(loopRun).rejects.toThrow('send failed');
+      resolveCancelRpc();
+      await cancel;
+
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({
+          type: 'failed',
+          error: 'send failed',
+          phase: 'delivery',
+        }),
+      ]);
+      expect(ch.sent).toContainEqual({
+        chatId: 'chat1',
+        text: 'Failed to cancel current request.',
+      });
+    });
+
     it('emits failed lifecycle event when a loop prompt rejects', async () => {
       (bridge.prompt as ReturnType<typeof vi.fn>).mockRejectedValue(
         new Error('loop boom'),
