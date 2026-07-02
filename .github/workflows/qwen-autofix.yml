@@ -517,6 +517,27 @@ jobs:
                 done
           fi
 
+      - name: 'Select issue sandbox image'
+        id: 'issue_sandbox_image'
+        if: |-
+          ${{ steps.decision.outputs.go_issue != '' }}
+        run: |-
+          qwen_version="$(npm view @qwen-code/qwen-code@latest version)"
+          version_image="ghcr.io/qwenlm/qwen-code:${qwen_version}"
+          fallback_image="ghcr.io/qwenlm/qwen-code:latest"
+          sandbox_image="${version_image}"
+          if docker manifest inspect "${version_image}" > /dev/null 2>&1; then
+            echo "Using sandbox image ${sandbox_image}"
+          elif docker manifest inspect "${fallback_image}" > /dev/null 2>&1; then
+            sandbox_image="${fallback_image}"
+            echo "::warning::Sandbox image ${version_image} is not available; falling back to ${fallback_image}."
+          else
+            echo "::error::Neither sandbox image ${version_image} nor ${fallback_image} is available."
+            exit 1
+          fi
+          echo "QWEN_SANDBOX_IMAGE=${sandbox_image}" >> "${GITHUB_ENV}"
+          echo "qwen_version=${qwen_version}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Claim issue'
         id: 'claim'
         if: |-
@@ -552,6 +573,7 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          version: '${{ steps.issue_sandbox_image.outputs.qwen_version }}'
           settings_json: |-
             {
               "maxSessionTurns": 400,
@@ -1011,6 +1033,25 @@ jobs:
           echo '--- feedback.md ---'
           cat "${WORKDIR}/feedback.md"
 
+      - name: 'Select review sandbox image'
+        id: 'review_sandbox_image'
+        run: |-
+          qwen_version="$(npm view @qwen-code/qwen-code@latest version)"
+          version_image="ghcr.io/qwenlm/qwen-code:${qwen_version}"
+          fallback_image="ghcr.io/qwenlm/qwen-code:latest"
+          sandbox_image="${version_image}"
+          if docker manifest inspect "${version_image}" > /dev/null 2>&1; then
+            echo "Using sandbox image ${sandbox_image}"
+          elif docker manifest inspect "${fallback_image}" > /dev/null 2>&1; then
+            sandbox_image="${fallback_image}"
+            echo "::warning::Sandbox image ${version_image} is not available; falling back to ${fallback_image}."
+          else
+            echo "::error::Neither sandbox image ${version_image} nor ${fallback_image} is available."
+            exit 1
+          fi
+          echo "QWEN_SANDBOX_IMAGE=${sandbox_image}" >> "${GITHUB_ENV}"
+          echo "qwen_version=${qwen_version}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Triage and address'
         id: 'address'
         uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
@@ -1021,6 +1062,7 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          version: '${{ steps.review_sandbox_image.outputs.qwen_version }}'
           settings_json: |-
             {
               "maxSessionTurns": 400,
