@@ -1,4 +1,10 @@
-import { useEffect, useRef, type ReactNode } from 'react';
+import {
+  createContext,
+  useEffect,
+  useRef,
+  useState,
+  type ReactNode,
+} from 'react';
 import { createPortal } from 'react-dom';
 import { useI18n } from '../../i18n';
 import { useTheme, WebShellThemeId } from '../../themeContext';
@@ -37,6 +43,23 @@ function getFocusable(container: HTMLElement | null): HTMLElement[] {
   );
 }
 
+// Mounted shells, bottom → top. Every shell listens on `document`, and
+// `stopPropagation` cannot silence sibling listeners on the same node — so
+// without this, one Escape would close every stacked dialog at once (and the
+// bottom one would win any race, since it registered first). Only the topmost
+// shell handles keys; stacked dialogs peel off one layer per Escape.
+const shellStack: object[] = [];
+
+export const DialogShellIdContext = createContext<object | null>(null);
+
+export function isTopDialogShellId(shellId: object | null): boolean {
+  // Most production callers live inside DialogShell and get a shell id. Tests or
+  // any future standalone consumer may not; in that case, preserve the original
+  // single-dialog behavior and allow the hook to handle keys normally.
+  if (shellId === null) return true;
+  return shellStack[shellStack.length - 1] === shellId;
+}
+
 export function DialogShell({
   title,
   subtitle,
@@ -53,13 +76,29 @@ export function DialogShell({
   // once-bound key listener.
   const onCloseRef = useRef(onClose);
   onCloseRef.current = onClose;
+  // Capture the opener during the dialog's first render, before any child
+  // effects can move focus into an autofocused search field.
+  const [previouslyFocused] = useState<HTMLElement | null>(() =>
+    typeof document !== 'undefined'
+      ? (document.activeElement as HTMLElement | null)
+      : null,
+  );
+  // A completed backdrop click should close, but any drag that crosses the
+  // panel boundary in either direction must not. Record whether the press both
+  // started and ended on the backdrop itself, then let the synthesized click
+  // close only when both are true.
+  const backdropPressStartedRef = useRef(false);
+  const backdropPressEndedRef = useRef(false);
+  // Identity token for this shell instance in the module-level stack.
+  const shellIdRef = useRef<object | null>(null);
+  if (shellIdRef.current === null) shellIdRef.current = {};
 
   // Move focus into the dialog on open, restore it to the opener on close, and
-  // trap Tab within the panel. Escape closes. Attached in the capture phase so
-  // Escape is handled here before the app-level window handler sees it.
+  // trap Tab within the panel. Escape closes.
   useEffect(() => {
     const panel = panelRef.current;
-    const previouslyFocused = document.activeElement as HTMLElement | null;
+    const shellId = shellIdRef.current!;
+    shellStack.push(shellId);
 
     // Autofocus: respect a child that already claimed focus (e.g. a search
     // input's own effect); otherwise focus the first content focusable (skipping
@@ -75,8 +114,17 @@ export function DialogShell({
     }
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      // With stacked dialogs, only the topmost shell may handle Escape/Tab —
+      // a lower shell closing or trapping focus would act "through" the one
+      // covering it.
+      if (shellStack[shellStack.length - 1] !== shellId) return;
+      // A control inside the dialog may consume the key first (e.g. Escape to
+      // cancel an inline edit) — honor that instead of dismissing the dialog.
+      if (event.defaultPrevented) return;
       // Escape mid-IME-composition cancels the composition, not the dialog.
-      if (event.isComposing) return;
+      // keyCode 229 covers WebKit, which fires compositionend before the
+      // committing key's keydown (see useListboxKeyboard for the same guard).
+      if (event.isComposing || event.keyCode === 229) return;
       if (event.key === 'Escape') {
         event.preventDefault();
         event.stopPropagation();
@@ -111,18 +159,56 @@ export function DialogShell({
       }
     };
 
-    document.addEventListener('keydown', handleKeyDown, true);
+    // Bubble phase on `document`, deliberately positioned in the middle of the
+    // propagation chain: controls inside the dialog run first (and can consume
+    // Escape via preventDefault, honored above), while `window`-level listeners
+    // — the app's global shortcuts and useListboxKeyboard — run after, so the
+    // stopPropagation on Escape still shields them. Moving this listener to the
+    // capture phase would steal Escape from the dialog's own controls; moving
+    // it to `window` would lose the race with the app-level handlers.
+    document.addEventListener('keydown', handleKeyDown);
     return () => {
-      document.removeEventListener('keydown', handleKeyDown, true);
-      previouslyFocused?.focus?.();
+      document.removeEventListener('keydown', handleKeyDown);
+      const idx = shellStack.indexOf(shellId);
+      if (idx >= 0) shellStack.splice(idx, 1);
+      if (shellStack.length === 0) {
+        previouslyFocused?.focus?.();
+        return;
+      }
+      // Another modal is still stacked above the page — keep focus inside the
+      // remaining top shell instead of restoring it behind the modal layer.
+      const scopes = Array.from(
+        document.querySelectorAll<HTMLElement>('[data-keyboard-scope]'),
+      );
+      const topPanel =
+        scopes[scopes.length - 1]?.querySelector<HTMLElement>(
+          '[role="dialog"]',
+        );
+      const topFocusables = getFocusable(topPanel);
+      const preferred = topFocusables.find(
+        (el) => !el.hasAttribute('data-dialog-close'),
+      );
+      (preferred ?? topPanel)?.focus();
     };
-  }, []);
+  }, [previouslyFocused]);
+
+  const handleBackdropMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
+    backdropPressStartedRef.current = event.target === event.currentTarget;
+    backdropPressEndedRef.current = false;
+  };
+
+  const handleBackdropMouseUp = (event: React.MouseEvent<HTMLDivElement>) => {
+    backdropPressEndedRef.current = event.target === event.currentTarget;
+  };
 
   const handleBackdropClick = (event: React.MouseEvent<HTMLDivElement>) => {
-    // Only close on a completed click on the backdrop itself. This lets a press
-    // that starts on the backdrop be cancelled before mouse-up, and it avoids
-    // dismissing the dialog from a click inside the panel that bubbles out.
-    if (event.target === event.currentTarget) {
+    const shouldClose =
+      backdropPressStartedRef.current &&
+      backdropPressEndedRef.current &&
+      event.target === event.currentTarget;
+    backdropPressStartedRef.current = false;
+    backdropPressEndedRef.current = false;
+    if (shouldClose) {
       onClose();
     }
   };
@@ -131,32 +217,36 @@ export function DialogShell({
     <div
       className={`${styles.backdrop} ${themeClass}`}
       data-keyboard-scope
+      onMouseDown={handleBackdropMouseDown}
+      onMouseUp={handleBackdropMouseUp}
       onClick={handleBackdropClick}
     >
-      <section
-        ref={panelRef}
-        className={`${styles.panel} ${sizeClass[size]}`}
-        role="dialog"
-        aria-modal="true"
-        aria-label={title}
-        tabIndex={-1}
-      >
-        <header className={styles.header}>
-          <div className={styles.titleWrap}>
-            <div className={styles.title}>{title}</div>
-            {subtitle && <div className={styles.subtitle}>{subtitle}</div>}
-          </div>
-          <button
-            type="button"
-            className={styles.close}
-            onClick={onClose}
-            aria-label={t('common.close')}
-            title={t('common.close')}
-            data-dialog-close
-          />
-        </header>
-        <div className={styles.body}>{children}</div>
-      </section>
+      <DialogShellIdContext.Provider value={shellIdRef.current}>
+        <section
+          ref={panelRef}
+          className={`${styles.panel} ${sizeClass[size]}`}
+          role="dialog"
+          aria-modal="true"
+          aria-label={title}
+          tabIndex={-1}
+        >
+          <header className={styles.header}>
+            <div className={styles.titleWrap}>
+              <div className={styles.title}>{title}</div>
+              {subtitle && <div className={styles.subtitle}>{subtitle}</div>}
+            </div>
+            <button
+              type="button"
+              className={styles.close}
+              onClick={onClose}
+              aria-label={t('common.close')}
+              title={t('common.close')}
+              data-dialog-close
+            />
+          </header>
+          <div className={styles.body}>{children}</div>
+        </section>
+      </DialogShellIdContext.Provider>
     </div>
   );
 
