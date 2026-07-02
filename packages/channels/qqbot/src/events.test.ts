@@ -327,7 +327,6 @@ describe('handleGroup', () => {
   });
 
   it('设置 replyMsgId', () => {
-    const _before = Date.now();
     const ch = makeChannel();
     const pvt = ch as unknown as QQChannelRaw;
     pvt['handleGroup'](
@@ -707,10 +706,7 @@ describe('群管理事件', () => {
       ] as Map<string, boolean>;
 
       chatTypeMap.set('group-del-1', 'group');
-      replyMsgId.set('group-del-1', {
-        msgId: 'msg-xyz',
-        timestamp: Date.now(),
-      });
+      replyMsgId.set('group-del-1', 'msg-xyz');
       groupActiveMsgEnabled.set('group-del-1', true);
 
       const evt: GroupDelRobotEvent = {

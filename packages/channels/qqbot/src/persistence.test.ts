@@ -287,7 +287,6 @@ describe('restoreQQState', () => {
   });
 
   it('filters expired replyMsgId entries (timestamp < 5 min ago)', () => {
-    const _oldTs = Date.now() - 400_000;
     fsStore[statePath] = JSON.stringify({
       replyMsgId: [
         ['u1', 'msg_old'],

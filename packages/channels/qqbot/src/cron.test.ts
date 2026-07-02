@@ -146,6 +146,7 @@ describe('cronTextHandler', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
+    pvt['_inCronFlow'] = true;
 
     triggerTextChunk('sess-1', 'hello ');
     await flushSetImmediate();
@@ -191,6 +192,7 @@ describe('cronTextHandler', () => {
     const ch = makeChannel();
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
+    pvt['_inCronFlow'] = true;
 
     triggerTextChunk('sess-a', 'buffer-a ');
     triggerTextChunk('sess-b', 'buffer-b ');
@@ -210,6 +212,7 @@ describe('cronTextHandler', () => {
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
 
+    pvt['_inCronFlow'] = true;
     const router = (ch as unknown as Record<string, unknown>)['router'] as {
       getTarget: ReturnType<typeof vi.fn>;
     };
@@ -235,6 +238,7 @@ describe('cronTextHandler', () => {
     const pvt = ch as unknown as Record<string, unknown>;
     pvt['_ready'] = true;
 
+    pvt['_inCronFlow'] = true;
     mockSendQQMessage.mockResolvedValue(mockResponse(true));
 
     triggerTextChunk('sess-cleanup', 'cleanup text');

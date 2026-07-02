@@ -175,6 +175,10 @@ export class QQChannel extends ChannelBase {
   private _cronTextHandler: ((sessionId: string, text: string) => void) | null =
     null;
   /** Tracks whether _cronTextHandler is registered on bridge. */
+  /** Gate: only set during cron-scheduled message flows. Prevents
+     phantom cronBuffer entries when textChunk fires during normal
+     bridge.prompt() calls (ChannelBase has its own listener there). */
+  private _inCronFlow: boolean = false;
   private cronTextHandlerAttached: boolean = false;
 
   /** Path to persisted QQ routing state: chatTypeMap, replyMsgId, msgSeqMap. */
@@ -227,7 +231,7 @@ export class QQChannel extends ChannelBase {
       this._cronTextHandler = (sessionId: string, text: string) => {
         setImmediate(() => {
           if (!this._ready) return;
-          // streamState not on this branch — always treat as cron
+          if (!this._inCronFlow) return;
           let entry = this.cronBuffer.get(sessionId);
           if (!entry) {
             entry = { buffer: '', timer: null };
@@ -1318,9 +1322,11 @@ export class QQChannel extends ChannelBase {
     const chatId = event.group_openid;
     this.chatTypeMap.set(chatId, 'group');
 
-    // Deduplicate before prepareGroupMessage to avoid side effects
-    // on duplicate events from reconnect replay.
-    if (this.isDuplicate(event.id)) return;
+    // Deduplicate after prepareGroupMessage so side effects
+    // (extractBotOpenId) always run, even for replayed duplicates.
+    // Only skip handleInbound on duplicates — this prevents silent
+    // drops when GROUP_MESSAGE_CREATE fires before GROUP_AT_MESSAGE_CREATE
+    // for the same message.
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
@@ -1351,6 +1357,9 @@ export class QQChannel extends ChannelBase {
       );
     }
 
+    // Deduplicate before handleInbound — prepareGroupMessage already ran
+    // so side effects (extractBotOpenId) are applied regardless of dedup.
+    if (this.isDuplicate(event.id)) return;
     this.replyMsgId.set(chatId, event.id);
     this.saveQQState();
     this.handleInbound({

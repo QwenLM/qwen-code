@@ -398,10 +398,12 @@ describe('group sender-name sanitization', () => {
     expect((env.text.match(/[[\]]/g) ?? []).length).toBeGreaterThanOrEqual(4);
     // The nick inside the tag (after [atMention=...]) is capped at 64 chars.
     const secondBracket = env.text.indexOf('[', env.text.indexOf(']') + 1);
-    const _inside = env.text.slice(
+    const inside = env.text.slice(
       secondBracket + 1,
       env.text.indexOf(']', secondBracket),
     );
+    // Nick inside the tag is capped at 64 chars.
+    expect(inside.length).toBeLessThanOrEqual(64);
     // Normal (non-slash) group messages stay self-prefixed.
     expect(env.alreadyPrefixed).toBe(true);
     expect(env.text).toContain('hello world');
