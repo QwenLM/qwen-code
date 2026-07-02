@@ -320,7 +320,7 @@ describe('bootstrap import boundaries', () => {
     const source = readFileSync('../../scripts/prepare-package.js', 'utf8');
 
     expect(source).toContain(
-      "fs.copyFileSync(path.join(rootDir, 'scripts', 'cli-entry.js'), cliEntryPath)",
+      "fs.copyFileSync(path.join(__dirname, 'cli-entry.js'), cliEntryPath)",
     );
     expect(source).not.toContain('const cliEntryContent = `');
   });

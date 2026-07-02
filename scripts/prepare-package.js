@@ -300,7 +300,7 @@ function writeDistPackageJson(
   console.log('Creating package.json for distribution...');
 
   const cliEntryPath = path.join(distDir, 'cli-entry.js');
-  fs.copyFileSync(path.join(rootDir, 'scripts', 'cli-entry.js'), cliEntryPath);
+  fs.copyFileSync(path.join(__dirname, 'cli-entry.js'), cliEntryPath);
   fs.chmodSync(cliEntryPath, 0o755);
   console.log('Created dist cli-entry.js wrapper');
 
