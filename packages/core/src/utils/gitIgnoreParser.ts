@@ -104,6 +104,7 @@ export class GitIgnoreParser implements GitIgnoreFilter {
     }
 
     try {
+      const isDir = filePath.endsWith('/');
       const resolved = path.resolve(this.projectRoot, filePath);
       const relativePath = path.relative(this.projectRoot, resolved);
 
@@ -115,7 +116,12 @@ export class GitIgnoreParser implements GitIgnoreFilter {
       }
 
       // Even in windows, Ignore expects forward slashes.
-      const normalizedPath = relativePath.replace(/\\/g, '/');
+      let normalizedPath = relativePath.replace(/\\/g, '/');
+      // Preserve trailing '/' so directory-only patterns (e.g. `node_modules/`)
+      // are matched correctly by the ignore library.
+      if (isDir && !normalizedPath.endsWith('/')) {
+        normalizedPath += '/';
+      }
 
       if (normalizedPath.startsWith('/') || normalizedPath === '') {
         return false;

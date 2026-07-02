@@ -27,6 +27,7 @@ import { ToolErrorType } from './tool-error.js';
 import { getErrorMessage } from '../utils/errors.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { isPathWithinRoot } from '../utils/workspaceContext.js';
 
 const debugLogger = createDebugLogger('GLOB');
 
@@ -150,19 +151,23 @@ class GlobToolInvocation extends BaseToolInvocation<
     // FileDiscoveryService reuses the real .gitignore/.qwenignore semantics
     // (anchoring, negation/re-inclusion, nested ignore files) — a hand-rolled
     // gitignore→glob pattern conversion cannot reproduce these correctly.
-    const isTraversalIgnored = (entry: { fullpath(): string }): boolean => {
+    const isTraversalIgnored = (entry: {
+      fullpath(): string;
+      isDirectory(): boolean;
+    }): boolean => {
       const relativePath = path.relative(projectRoot, entry.fullpath());
       // Never prune paths outside the project root (e.g. an external search
       // dir); ignore rules are only defined relative to the root.
-      if (
-        !relativePath ||
-        relativePath.startsWith('..') ||
-        path.isAbsolute(relativePath)
-      ) {
+      if (!relativePath || !isPathWithinRoot(entry.fullpath(), projectRoot)) {
         return false;
       }
+      // Append trailing '/' for directories so the ignore library matches
+      // directory-only patterns like `node_modules/`.
+      const ignorePath = entry.isDirectory()
+        ? relativePath + '/'
+        : relativePath;
       return this.fileService.shouldIgnoreFile(
-        relativePath,
+        ignorePath,
         fileFilteringOptions,
       );
     };

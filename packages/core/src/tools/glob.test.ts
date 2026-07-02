@@ -694,6 +694,29 @@ describe('GlobTool', () => {
       expect(result.llmContent).not.toContain('dep.keep');
     });
 
+    it('passes ignore callbacks to glob for traversal pruning', async () => {
+      await fs.writeFile(
+        path.join(tempRootDir, '.gitignore'),
+        'node_modules/\n',
+      );
+      await fs.mkdir(path.join(tempRootDir, 'node_modules'));
+
+      vi.mocked(glob.glob).mockClear();
+
+      const invocation = new GlobTool(mockConfig).build({
+        pattern: '**/*.keep',
+      });
+      await invocation.execute(abortSignal);
+
+      const lastCall = vi.mocked(glob.glob).mock.calls.at(-1);
+      const globOptions = lastCall?.[1] as
+        | { ignore?: { ignored?: unknown; childrenIgnored?: unknown } }
+        | undefined;
+      expect(globOptions?.ignore).toBeDefined();
+      expect(globOptions?.ignore?.ignored).toBeTypeOf('function');
+      expect(globOptions?.ignore?.childrenIgnored).toBeTypeOf('function');
+    });
+
     it('honors gitignore negation re-inclusion during traversal', async () => {
       // `!build/keep.keep` re-includes a file under an otherwise-ignored path.
       // Dropping negations (as a pattern conversion must) would wrongly prune
