@@ -44,7 +44,7 @@ const CVD_MATRICES = {
 
 export function validatePalette(input, options = {}) {
   const mode = options.mode ?? 'light';
-  const config = MODE_CONFIG[mode];
+  const config = modeConfig(mode);
   const failures = [];
   const warnings = [];
 
@@ -253,6 +253,14 @@ function parseArgs(argv) {
         process.exit(2);
       }
       mode = argv[++i];
+    } else if (argv[i].startsWith('--mode=')) {
+      mode = argv[i].slice('--mode='.length);
+      if (!mode) {
+        process.stderr.write(
+          'Error: --mode requires a value (light or dark)\n',
+        );
+        process.exit(2);
+      }
     } else if (!palette) {
       palette = argv[i];
     }
@@ -263,11 +271,15 @@ function parseArgs(argv) {
 function printResult(result) {
   process.stdout.write(`${result.status}\n`);
   for (const failure of result.failures) {
-    process.stdout.write(`FAIL: ${failure}\n`);
+    process.stderr.write(`FAIL: ${failure}\n`);
   }
   for (const warning of result.warnings) {
     process.stdout.write(`WARN: ${warning}\n`);
   }
+}
+
+function modeConfig(mode) {
+  return Object.hasOwn(MODE_CONFIG, mode) ? MODE_CONFIG[mode] : undefined;
 }
 
 if (
@@ -278,6 +290,12 @@ if (
   if (!palette) {
     process.stderr.write(
       "Usage: node validate_palette.js '#1d4ed8,#b45309,#166534' --mode light\n",
+    );
+    process.exit(2);
+  }
+  if (!modeConfig(mode)) {
+    process.stderr.write(
+      `Error: Unsupported mode "${mode}". Use "light" or "dark".\n`,
     );
     process.exit(2);
   }

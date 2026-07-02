@@ -52,3 +52,6 @@ node <skill-base-directory>/scripts/validate_palette.js '#1d4ed8,#b45309,#166534
 The validator's 2.5:1 contrast floor is a practical chart-mark heuristic, not a
 WCAG AA guarantee. Use 3:1 or higher when chart marks must satisfy WCAG 2.1
 non-text contrast without relying on labels or secondary encodings.
+
+The validator also enforces OKLCH lightness bands so marks are neither too pale
+nor too dark for the selected surface, even when contrast alone looks adequate.

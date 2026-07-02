@@ -59,11 +59,25 @@ describe('validate_palette', () => {
     expect(result.failures.join('\n')).toMatch(/contrast/i);
   });
 
+  it('fails marks outside the OKLCH lightness band', () => {
+    const result = validatePalette(['#1a1a2e'], { mode: 'light' });
+
+    expect(result.status).toBe('FAIL');
+    expect(result.failures.join('\n')).toMatch(/lightness/i);
+  });
+
   it('fails when no colors are provided', () => {
     const result = validatePalette([], { mode: 'light' });
 
     expect(result.status).toBe('FAIL');
     expect(result.failures).toEqual(['No colors provided.']);
+  });
+
+  it('fails unsupported modes without reading object prototypes', () => {
+    const result = validatePalette(['#2563eb'], { mode: '__proto__' });
+
+    expect(result.status).toBe('FAIL');
+    expect(result.failures.join('\n')).toMatch(/unsupported mode/i);
   });
 
   it('warns when colorblind simulation makes colors too close', () => {
@@ -91,11 +105,49 @@ describe('validate_palette', () => {
     expect(output).toMatch(/^PASS$/m);
   });
 
+  it('accepts --mode=value in CLI usage', () => {
+    const output = execFileSync(process.execPath, [
+      scriptPath,
+      '--mode=dark',
+      '#60a5fa,#fbbf24',
+    ]).toString();
+
+    expect(output).toMatch(/^PASS$/m);
+  });
+
   it('rejects --mode without a value in CLI usage', () => {
     expect(() =>
       execFileSync(process.execPath, [scriptPath, '#2563eb', '--mode'], {
         stdio: 'pipe',
       }),
     ).toThrow();
+  });
+
+  it('treats invalid CLI modes as usage errors', () => {
+    try {
+      execFileSync(process.execPath, [
+        scriptPath,
+        '--mode',
+        'midnight',
+        '#2563eb',
+      ]);
+      throw new Error('expected command to fail');
+    } catch (err) {
+      expect(err.status).toBe(2);
+      expect(err.stderr.toString()).toMatch(/unsupported mode/i);
+    }
+  });
+
+  it('prints validation failure details to stderr', () => {
+    try {
+      execFileSync(process.execPath, [scriptPath, '#eeeeee'], {
+        stdio: 'pipe',
+      });
+      throw new Error('expected command to fail');
+    } catch (err) {
+      expect(err.status).toBe(1);
+      expect(err.stdout.toString()).toMatch(/^FAIL$/m);
+      expect(err.stderr.toString()).toMatch(/FAIL:/);
+    }
   });
 });
