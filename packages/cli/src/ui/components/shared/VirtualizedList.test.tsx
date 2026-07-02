@@ -681,5 +681,94 @@ describe('<VirtualizedList />', () => {
       rerender(<Wrapper />);
       expect(listRef!.getScrollIndex()).toBe(24);
     });
+
+    it('scrollBy(-delta) prevents auto-stick on subsequent data growth (regression for #5941)', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+      let items = makeItems(20);
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={items}
+            renderItem={renderItem}
+            estimatedItemHeight={estimatedItemHeight}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={SCROLL_TO_ITEM_END}
+            containerHeight={5}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+
+      // User scrolls up via scrollBy (negative delta)
+      act(() => {
+        listRef!.scrollBy(-5);
+      });
+      rerender(<Wrapper />);
+
+      const scrollTopAfterScrollUp = listRef!.getScrollState().scrollTop;
+
+      // New data arrives — should NOT re-stick to bottom since user scrolled up
+      items = makeItems(25);
+      rerender(<Wrapper />);
+      rerender(<Wrapper />);
+
+      const scrollTopAfterGrowth = listRef!.getScrollState().scrollTop;
+      // The scroll position should remain where the user scrolled to,
+      // not auto-stick to bottom
+      expect(scrollTopAfterGrowth).toBe(scrollTopAfterScrollUp);
+    });
+
+    it('anchor is preserved when totalHeight shrinks (regression for #5941)', () => {
+      type RefShape = VirtualizedListRef<Item>;
+      let listRef: RefShape | null = null;
+      // Start with items that have a known height (estimatedItemHeight returns 1)
+      let items = makeItems(30);
+
+      function Wrapper() {
+        const ref = useRef<RefShape>(null);
+        if (ref.current) listRef = ref.current;
+        return (
+          <VirtualizedList<Item>
+            ref={ref}
+            data={items}
+            renderItem={renderItem}
+            estimatedItemHeight={() => 10}
+            keyExtractor={keyExtractor}
+            initialScrollIndex={10}
+            containerHeight={20}
+            width={40}
+            showScrollbar={false}
+          />
+        );
+      }
+
+      const { rerender } = render(<Wrapper />);
+      rerender(<Wrapper />);
+      expect(listRef).not.toBeNull();
+
+      // Capture the anchor before shrinking
+      const anchorBefore = listRef!.getScrollIndex();
+
+      // Shrink data — totalHeight decreases because some items are removed.
+      // The anchor index (10) is still within data.length, so it should be
+      // preserved rather than aggressively clamped.
+      items = makeItems(15);
+      rerender(<Wrapper />);
+      rerender(<Wrapper />);
+
+      const anchorAfter = listRef!.getScrollIndex();
+      // Anchor should remain at the same index (10) since it's still valid
+      expect(anchorAfter).toBe(anchorBefore);
+    });
   });
 });

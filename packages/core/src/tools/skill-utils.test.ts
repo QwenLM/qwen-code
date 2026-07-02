@@ -87,12 +87,8 @@ describe('collectAvailableSkillEntries cache', () => {
   }
 
   // Reset module-level cache before each test so tests are isolated.
-  beforeEach(async () => {
+  beforeEach(() => {
     invalidateCollectedSkillEntriesCache();
-    const sm = createMockSkillManager();
-    const cfg = createMockConfig();
-    // Prime the cache so beforeEach leaves a clean known state.
-    await collectAvailableSkillEntries(sm, cfg);
   });
 
   afterEach(() => {
@@ -175,5 +171,69 @@ describe('collectAvailableSkillEntries cache', () => {
     // Second call — cache hit, listSkills should NOT be called again.
     await collectAvailableSkillEntries(sm, cfg);
     expect(sm.listSkills).toHaveBeenCalledTimes(1);
+  });
+
+  it('cache reflects actual skill data and updates after invalidation', async () => {
+    // Set up a mock skill manager that returns non-empty skill data.
+    const skill1 = {
+      name: 'git-skill',
+      description: 'Git operations',
+      level: 'project' as const,
+      filePath: '/tmp/skills/git-skill',
+      body: '# Git Skill',
+      disableModelInvocation: false,
+    };
+    const skill2 = {
+      name: 'docker-skill',
+      description: 'Docker management',
+      level: 'project' as const,
+      filePath: '/tmp/skills/docker-skill',
+      body: '# Docker Skill',
+      disableModelInvocation: false,
+    };
+
+    const sm = createMockSkillManager();
+    const cfg = createMockConfig();
+
+    // Use vi.spyOn to ensure the mock is definitely being called
+    const listSkillsSpy = vi
+      .spyOn(sm, 'listSkills')
+      .mockResolvedValue([skill1, skill2]);
+
+    const result1 = await collectAvailableSkillEntries(sm, cfg);
+
+    // Verify listSkills was actually called
+    expect(listSkillsSpy).toHaveBeenCalledTimes(1);
+
+    // Assert cached content reflects the input skills.
+    expect(result1.availableSkills).toHaveLength(2);
+    expect(result1.availableSkills.map((s) => s.name)).toEqual(
+      expect.arrayContaining(['git-skill', 'docker-skill']),
+    );
+    expect(result1.entries).toHaveLength(2);
+    // Entries are sorted: file-based skills first (by level), then alphabetically by name
+    expect(result1.entries.map((e) => e.name)).toContain('docker-skill');
+    expect(result1.entries.map((e) => e.name)).toContain('git-skill');
+
+    // Invalidate cache and return different skills.
+    invalidateCollectedSkillEntriesCache();
+    const differentSkill = {
+      name: 'k8s-skill',
+      description: 'Kubernetes management',
+      level: 'project' as const,
+      filePath: '/tmp/skills/k8s-skill',
+      body: '# K8s Skill',
+      disableModelInvocation: false,
+    };
+    listSkillsSpy.mockResolvedValueOnce([differentSkill]);
+
+    const result2 = await collectAvailableSkillEntries(sm, cfg);
+
+    // After invalidation, the new result should reflect the changed data.
+    expect(result2).not.toBe(result1);
+    expect(result2.availableSkills).toHaveLength(1);
+    expect(result2.availableSkills[0].name).toBe('k8s-skill');
+    expect(result2.entries).toHaveLength(1);
+    expect(result2.entries[0].name).toBe('k8s-skill');
   });
 });
