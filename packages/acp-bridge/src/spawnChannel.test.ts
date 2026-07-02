@@ -406,23 +406,19 @@ describe('getAcpMemoryArgs', () => {
     const args = getAcpMemoryArgs();
     expect(args).toContain('--expose-gc');
     const heapArg = args.find((a) => a.startsWith('--max-old-space-size='));
-    /* eslint-disable vitest/no-conditional-expect -- heapArg presence depends on system memory */
     if (heapArg) {
       const sizeMB = Number(heapArg.split('=')[1]);
       expect(sizeMB).toBeGreaterThan(0);
       expect(sizeMB).toBeLessThanOrEqual(16_384);
     }
-    /* eslint-enable vitest/no-conditional-expect */
   });
 
   it('respects the 16GB cap', () => {
     const args = getAcpMemoryArgs();
     const heapArg = args.find((a) => a.startsWith('--max-old-space-size='));
-    /* eslint-disable vitest/no-conditional-expect -- heapArg presence depends on system memory */
     if (heapArg) {
       const sizeMB = Number(heapArg.split('=')[1]);
       expect(sizeMB).toBeLessThanOrEqual(16_384);
     }
-    /* eslint-enable vitest/no-conditional-expect */
   });
 });
