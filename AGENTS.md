@@ -32,8 +32,8 @@ PRs are exempt):
 
 1. **Large-scope changes (500+ changed lines in core, additions +
    deletions combined) → hard block.**
-   No evaluation, no exceptions. Large-scale core refactors must be
-   maintainer-initiated. Breadth alone is not size — a low-risk sweep that
+   Skip evaluation entirely — the maintainer exemption above is the sole
+   exception. Large-scale core refactors must be maintainer-initiated. Breadth alone is not size — a low-risk sweep that
    touches 10+ files but changes a line or two each is escalated to a
    maintainer for awareness and otherwise judged under Tier 2's
    100%-confidence bar, not auto-rejected on file count.

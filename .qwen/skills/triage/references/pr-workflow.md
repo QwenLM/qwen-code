@@ -31,7 +31,19 @@ continue to Stage 2, Stage 3, or approval.
 gh api -X PATCH "/repos/$REPO/issues/comments/$COMMENT_ID" -F body=@/tmp/stage-N-updated.md
 ```
 
-Never create duplicates.
+Never create duplicates. For terminal-exit reviews (submitted via
+`gh pr review --request-changes`), the GitHub API does not support editing PR
+reviews. On re-run: check if a `CHANGES_REQUESTED` review from the bot already
+exists — if it does, skip re-submitting (the existing review already gates the
+PR). Only update issue comments, not PR reviews.
+
+```bash
+# Check for existing terminal-exit review before re-submitting
+EXISTING=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+  --jq '[.[] | select(.user.login=="qwen-code-ci-bot" and .state=="CHANGES_REQUESTED")] | length')
+# Only submit if no existing terminal review
+if [ "$EXISTING" -eq 0 ]; then gh pr review ... ; fi
+```
 
 **Signature:** every comment ends with:
 
@@ -59,7 +71,7 @@ Then **stop**. This is a wall, not a guideline.
 
 **Breadth ≠ size.** A uniform, low-risk sweep — renaming a symbol, updating an import path, a lint/format autofix, the same null-guard at many call sites — can touch **10+ files** while changing only a line or two each. Don't auto-reject on file count alone: **flag it for the maintainer's awareness**, and otherwise let it proceed to Stage 1 under Tier 2's 100%-confidence bar, judged on the actual diff rather than the file count. (A deep rewrite concentrated in a few files still trips the 500-line threshold above, so depth isn't ignored.)
 
-**Tier 2 — Small-scope changes to core → evaluate with 100% confidence.** If the PR touches fewer files but still hits core paths, you MAY proceed to Stage 1 — but only if you are **100% confident** the change is correct and safe. If there is any doubt at all — "the direction looks correct" is NOT 100% confidence — escalate to maintainer before proceeding. You must be able to name every downstream consumer affected; if you cannot, escalate.
+**Tier 2 — Changes to core below the 500-line threshold → evaluate with 100% confidence.** If the PR hits core paths but stays under Tier 1 (either few files, or a breadth-sweep flagged above), you MAY proceed to Stage 1 — but only if you are **100% confident** the change is correct and safe. If there is any doubt at all — "the direction looks correct" is NOT 100% confidence — escalate to maintainer before proceeding. You must be able to name every downstream consumer affected; if you cannot, escalate.
 
 **Why two tiers:** A one-line bugfix in `packages/core/src/providers/install.ts` with a clear reproduction is different from a 75-file refactor of the provider system. The gate can handle the former; the latter requires maintainer architectural context. But for any core change, **when in doubt, escalate. Better to wrongly escalate than to wrongly approve.**
 
@@ -88,7 +100,36 @@ gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-g
 Before "is the direction right?", ask **"does this problem actually exist?"**
 
 - **Observed bug** (linked issue, reproduction, before/after) → proceed.
-- **Theoretical hardening** ("could theoretically send X" with no evidence) → **request changes.** Ask for a reproduction. If the author cannot provide one on re-run, escalate to the maintainer (use `$QWEN_MAINTAINER_HANDLE` if set) and stop — do not proceed to Stage 2.
+- **Theoretical hardening** ("could theoretically send X" with no evidence) → **request changes.** Ask for a reproduction:
+
+```bash
+cat > /tmp/stage-1b-reproduction.md <<'EOF'
+<!-- qwen-triage stage=1b -->
+
+This PR addresses a theoretical concern — "could theoretically send X" — but
+no reproduction demonstrates it has actually happened. Could you provide a
+before/after reproduction or link an issue where this was observed?
+
+Without a reproduction, this is a hypothesis that belongs in issues, not PRs.
+If the author cannot provide one on re-run, escalate to the maintainer and stop.
+
+<details>
+<summary>中文说明</summary>
+
+这个 PR 解决的是一个理论性的问题——"理论上可能发生 X"——但没有复现证明它
+实际发生过。能否提供一个 before/after 复现，或者关联一个观测到此现象的 issue？
+
+没有复现的 fix 只是一个假设——应该放在 issues 里，而不是 PR。
+如果作者在 re-run 时仍无法提供复现，请转交 maintainer 处理。
+
+</details>
+
+— _Qwen Code · qwen3.7-max_
+EOF
+gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1b-reproduction.md
+```
+
+If the author cannot provide a reproduction on re-run, escalate to the maintainer (use `$QWEN_MAINTAINER_HANDLE` if set) and stop — do not proceed to Stage 2.
 - **No reproduction = no fix.** A `fix:` PR without reproduction is a hypothesis — belongs in issues, not PRs.
 
 **"direction is correct" ≠ "problem exists."** If the runtime already handles the case correctly, there is no bug — only code hygiene. Code hygiene does not warrant a PR.
