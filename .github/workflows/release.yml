@@ -98,6 +98,7 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --no-audit --progress=false
 
@@ -168,6 +169,7 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --no-audit --progress=false
 
@@ -183,13 +185,17 @@ jobs:
         run: |-
           npm run build
 
+      - name: 'Check Serve Fast Path Bundle'
+        run: |-
+          npm run check:serve-fast-path-bundle
+
       - name: 'Typecheck Project'
         run: |-
           npm run typecheck
 
       - name: 'Run Workspace Tests'
         run: |-
-          npm run test:ci
+          npm run test:release
 
   integration_none:
     name: 'Integration Tests (No Sandbox)'
@@ -221,8 +227,14 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --no-audit --progress=false
+
+      - name: 'Build Bundle'
+        run: |-
+          npm run build
+          npm run bundle
 
       - name: 'Run CLI Integration Tests'
         run: |-
@@ -262,8 +274,14 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --no-audit --progress=false
+
+      - name: 'Build Bundle'
+        run: |-
+          npm run build
+          npm run bundle
 
       - name: 'Set up Docker'
         uses: 'docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5' # ratchet:docker/setup-buildx-action@v4
@@ -349,6 +367,7 @@ jobs:
       - name: 'Install Dependencies'
         env:
           NPM_CONFIG_PREFER_OFFLINE: 'true'
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           npm ci --no-audit --progress=false
 
@@ -403,6 +422,7 @@ jobs:
         env:
           QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD: "${{ github.repository == 'QwenLM/qwen-code' && '1' || '' }}"
         run: |-
+          npm run build
           npm run bundle
           npm run prepare:package
 
