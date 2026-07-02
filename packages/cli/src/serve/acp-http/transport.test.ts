@@ -91,7 +91,7 @@ vi.mock('../../services/setup-github.js', async () => {
 });
 
 describe('buildChromeDevToolsMcpRuntimeConfigFromPackage', () => {
-  const pkgJsonPath = path.join('/tmp/chrome-devtools-mcp', 'package.json');
+  const pkgJsonPath = path.join('/tmp/cdp-mcp-adapter', 'package.json');
 
   it.each([undefined, 0, -1, 1.5] as const)(
     'rejects invalid localPort=%s',
@@ -127,7 +127,7 @@ describe('buildChromeDevToolsMcpRuntimeConfigFromPackage', () => {
     ).toEqual({
       command: process.execPath,
       args: [
-        path.join('/tmp/chrome-devtools-mcp', 'bin/cli.js'),
+        path.join('/tmp/cdp-mcp-adapter', 'bin/cli.js'),
         '--wsEndpoint',
         'ws://127.0.0.1:4170/cdp',
       ],
@@ -146,7 +146,7 @@ describe('buildChromeDevToolsMcpRuntimeConfigFromPackage', () => {
       ),
     ).toMatchObject({
       args: [
-        path.join('/tmp/chrome-devtools-mcp', 'bin/cli.js'),
+        path.join('/tmp/cdp-mcp-adapter', 'bin/cli.js'),
         '--wsEndpoint',
         'ws://192.168.1.20:4170/cdp',
       ],
@@ -6467,6 +6467,11 @@ describe('ACP WebSocket transport security', () => {
   let server: Server;
   let port: number;
   let bridge: FakeBridge;
+  let previousCdpMcpCommand: string | undefined;
+
+  beforeEach(() => {
+    previousCdpMcpCommand = process.env['QWEN_CDP_MCP_COMMAND'];
+  });
 
   function startServer(
     opts: {
@@ -6510,7 +6515,16 @@ describe('ACP WebSocket transport security', () => {
   afterEach(async () => {
     server?.closeAllConnections?.();
     await new Promise<void>((r) => server?.close(() => r()) ?? r());
+    if (previousCdpMcpCommand === undefined) {
+      delete process.env['QWEN_CDP_MCP_COMMAND'];
+    } else {
+      process.env['QWEN_CDP_MCP_COMMAND'] = previousCdpMcpCommand;
+    }
   });
+
+  function enableCdpMcpCommand() {
+    process.env['QWEN_CDP_MCP_COMMAND'] = process.execPath;
+  }
 
   function wsConnect(
     opts: { headers?: Record<string, string> } = {},
@@ -6607,7 +6621,22 @@ describe('ACP WebSocket transport security', () => {
     expect(result.code).toBe(101);
   });
 
+  it('does not register chrome-devtools MCP without an explicit CDP MCP command', async () => {
+    delete process.env['QWEN_CDP_MCP_COMMAND'];
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    expect(bridge.runtimeMcpAdds).toHaveLength(0);
+    expect(bridge.runtimeMcpRemoves).toHaveLength(0);
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
   it('dynamically registers chrome-devtools MCP for an active CDP bridge', async () => {
+    enableCdpMcpCommand();
     await startServer({ cdpTunnelOverWs: true });
     const ws = await wsConnect();
     await initializeCdpBridge(ws);
@@ -6620,7 +6649,6 @@ describe('ACP WebSocket transport security', () => {
     expect(bridge.runtimeMcpAdds[0]?.config).toMatchObject({
       command: process.execPath,
       args: expect.arrayContaining([
-        expect.stringContaining('chrome-devtools-mcp'),
         '--wsEndpoint',
         `ws://127.0.0.1:${port}/cdp`,
       ]),
@@ -6636,6 +6664,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('keeps chrome-devtools MCP registered while a replacement CDP bridge is active', async () => {
+    enableCdpMcpCommand();
     await startServer({ cdpTunnelOverWs: true });
     const first = await wsConnect();
     await initializeCdpBridge(first, 1);
@@ -6659,6 +6688,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('removes chrome-devtools MCP when settings already define it', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddResult = { shadowedSettings: true };
@@ -6678,6 +6708,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('retries chrome-devtools MCP registration after a skipped result', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddResult = {
@@ -6707,6 +6738,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('removes chrome-devtools MCP if the CDP bridge disconnects during registration', async () => {
+    enableCdpMcpCommand();
     await startServer({ cdpTunnelOverWs: true });
     let releaseAdd: (() => void) | undefined;
     bridge.runtimeMcpBeforeAddResolve = () =>
@@ -6729,6 +6761,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('retries chrome-devtools MCP registration after add failure', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddError = new Error('add failed');
@@ -6754,6 +6787,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('retries chrome-devtools MCP registration while the ACP channel is unavailable', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddError = Object.assign(new Error('no channel'), {
@@ -6781,6 +6815,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('stops retrying chrome-devtools MCP registration after ACP channel retry exhaustion', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddError = Object.assign(new Error('no channel'), {
@@ -6805,6 +6840,7 @@ describe('ACP WebSocket transport security', () => {
   }, 10_000);
 
   it('skips chrome-devtools MCP registration when /cdp requires auth', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({
       cdpTunnelOverWs: true,

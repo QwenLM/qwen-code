@@ -169,6 +169,19 @@ describe('buildClassifierSystemPrompt', () => {
     expect(prompt).toContain('Data exfiltration');
   });
 
+  it('keeps out-of-band callback guidance free of specific IOC domains', () => {
+    const prompt = buildClassifierSystemPrompt(makeConfig({}));
+
+    expect(prompt).toContain('out-of-band callback');
+    expect(prompt).toContain('collaborator');
+    expect(prompt).toContain('request-bin services');
+    expect(prompt).toContain('public tunnel endpoints');
+    expect(prompt).not.toContain('oastify.com');
+    expect(prompt).not.toContain('webhook.site');
+    expect(prompt).not.toContain('ngrok.io');
+    expect(prompt).not.toContain('ngrok-free.app');
+  });
+
   it('renders the four classifier sections (allow / soft / hard / environment)', () => {
     const prompt = buildClassifierSystemPrompt(makeConfig({}));
     expect(prompt).toContain('## Default ALLOW');

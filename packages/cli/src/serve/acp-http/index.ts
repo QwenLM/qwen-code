@@ -6,7 +6,6 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
-import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
@@ -65,9 +64,9 @@ const CDP_PATH = '/cdp';
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
 const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
+const CDP_MCP_COMMAND_ENV = 'QWEN_CDP_MCP_COMMAND';
 const RUNTIME_MCP_RETRY_DELAY_MS = 250;
 const RUNTIME_MCP_RETRY_ATTEMPTS = 20;
-const requireFromHere = createRequire(import.meta.url);
 
 function formatCdpEndpointHost(hostname: string | undefined): string {
   const host = hostname?.trim() || '127.0.0.1';
@@ -128,27 +127,26 @@ function buildChromeDevToolsMcpRuntimeConfig(
   localPort: number | undefined,
   hostname: string | undefined,
 ): Record<string, unknown> | undefined {
-  try {
-    const pkgJsonPath = requireFromHere.resolve(
-      'chrome-devtools-mcp/package.json',
-    );
-    const pkg = requireFromHere('chrome-devtools-mcp/package.json') as {
-      bin?: string | Record<string, string>;
-    };
-    return buildChromeDevToolsMcpRuntimeConfigFromPackage(
-      localPort,
-      pkgJsonPath,
-      pkg.bin,
-      hostname,
-    );
-  } catch (err) {
-    writeStderrLine(
-      `qwen serve: chrome-devtools-mcp package not resolvable: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
+  if (
+    localPort === undefined ||
+    !Number.isInteger(localPort) ||
+    localPort <= 0
+  ) {
     return undefined;
   }
+  const command = process.env[CDP_MCP_COMMAND_ENV]?.trim();
+  if (!command) {
+    return undefined;
+  }
+  return {
+    command,
+    args: [
+      '--wsEndpoint',
+      `ws://${formatCdpEndpointHost(hostname)}:${localPort}/cdp`,
+    ],
+    alwaysLoadTools: true,
+    [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
+  };
 }
 
 /**
