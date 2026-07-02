@@ -1457,6 +1457,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           'task_prompt',
           typedStopOutput.getEffectiveReason(),
         );
+        continueContext.set('hook_context', '');
         await subagent.execute(continueContext, signal);
 
         if (signal?.aborted) return undefined;
@@ -1642,6 +1643,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   ): Promise<string | undefined> {
     const { agentId, agentType, resolvedMode, signal, updateOutput } = opts;
     const hookSystem = this.config.getHookSystem();
+
+    // Always set hook_context so ${hook_context} in systemPrompt does not
+    // throw when no hook is configured or the hook returns no additional context.
+    contextState.set('hook_context', '');
 
     try {
       if (hookSystem) {
@@ -2300,6 +2305,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       const contextState = new ContextState();
       contextState.set('task_prompt', taskPrompt);
+      // Always set hook_context so ${hook_context} in systemPrompt does not
+      // throw when no hook is configured or the hook returns no additional context.
+      contextState.set('hook_context', '');
 
       // ── Background (async) execution path ──────────────────────
       if (shouldRunInBackground) {
