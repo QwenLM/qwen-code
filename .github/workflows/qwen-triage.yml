@@ -34,6 +34,7 @@ jobs:
       github.event_name == 'pull_request_target' &&
       github.event.pull_request.head.repo.full_name != github.repository
     uses: './.github/workflows/qwen-pr-safety-precheck.yml'
+    secrets: inherit
 
   authorize:
     needs: ['precheck-pr']

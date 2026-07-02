@@ -68,6 +68,7 @@ jobs:
       pull-requests: 'read'
       issues: 'write'
     uses: './.github/workflows/qwen-pr-safety-precheck.yml'
+    secrets: inherit
 
   ack-review-request:
     # KEEP IN SYNC with review-pr.if (explicit-trigger branches).
