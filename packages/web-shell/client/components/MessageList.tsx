@@ -1836,7 +1836,7 @@ export const MessageList = memo(
       sessionTimelineEntries.length >= SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
 
     useLayoutEffect(() => {
-      if (hideSessionTimeline || !hasEnoughSessionTimelineEntries) {
+      if (hideSessionTimeline) {
         setIsSessionTimelineVisible((prev) => (prev ? false : prev));
         return;
       }
@@ -1857,7 +1857,7 @@ export const MessageList = memo(
       const observer = new ResizeObserver(updateVisibility);
       observer.observe(el);
       return () => observer.disconnect();
-    }, [hasEnoughSessionTimelineEntries, hideSessionTimeline]);
+    }, [hideSessionTimeline]);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //
@@ -2663,7 +2663,7 @@ export const MessageList = memo(
           entries={sessionTimelineEntries}
           currentTurnId={currentTimelineTurnId}
           currentRange={sessionTimelineRange}
-          hidden={!isSessionTimelineVisible}
+          hidden={!isSessionTimelineVisible || !hasEnoughSessionTimelineEntries}
           onSelect={scrollToMessage}
         />
         {useVirtualScroll ? (
