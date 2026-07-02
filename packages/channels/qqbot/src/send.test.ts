@@ -550,7 +550,7 @@ describe('sendMessage', () => {
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat-id/messages',
       'test-token',
-      { content: '**bold**', msg_type: 0, msg_id: 'msg-001', msg_seq: 2 },
+      { content: '**bold**', msg_type: 0, msg_id: 'msg-001', msg_seq: 1 },
     );
   });
 
@@ -1216,12 +1216,15 @@ describe('restoreQQState validation filters', () => {
     const ch = makeChannel();
     (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
 
-    const replyMsgId = (ch as unknown as { replyMsgId: Map<string, string> })
-      .replyMsgId;
+    const replyMsgId = (
+      ch as unknown as {
+        replyMsgId: Map<string, { msgId: string; timestamp: number }>;
+      }
+    ).replyMsgId;
     expect(replyMsgId.size).toBe(3);
-    expect(replyMsgId.get('a')).toBe('valid-id');
-    expect(replyMsgId.get('b')).toBe('x'.repeat(128));
-    expect(replyMsgId.get('f')).toBe('');
+    expect(replyMsgId.get('a')?.msgId).toBe('valid-id');
+    expect(replyMsgId.get('b')?.msgId).toBe('x'.repeat(128));
+    expect(replyMsgId.get('f')?.msgId).toBe('');
     expect(replyMsgId.has('c')).toBe(false);
     expect(replyMsgId.has('d')).toBe(false);
     expect(replyMsgId.has('e')).toBe(false);

@@ -157,7 +157,7 @@ export class QQChannel extends ChannelBase {
         '## QQ Bot Channel',
         '',
         '你是通过 QQ Bot 与用户对话的 AI 助手。',
-        '回复控制在 2000 字符以内（超长会自动分块），支持 Markdown 格式。',
+        '回复控制在 2000 字符以内，支持 Markdown 格式。',
       ].join('\n');
     }
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -212,8 +212,10 @@ export class QQChannel extends ChannelBase {
       entry && Date.now() - entry.timestamp < 300_000 ? entry.msgId : undefined;
     if (entry && !msgId) {
       process.stderr.write(
-        `[QQ:${this.name}] replyMsgId entry expired for ${sanitizeLogText(chatId, 64)}, falling back to active message\n`,
+        `[QQ:${this.name}] replyMsgId entry expired for ${sanitizeLogText(chatId, 64)}, reply context expired, sending without msg_id\n`,
       );
+      this.msgSeqMap.delete(entry.msgId);
+      this.replyMsgId.delete(chatId);
     }
 
     let nextSeq = 0;
@@ -244,6 +246,15 @@ export class QQChannel extends ChannelBase {
           `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${sanitizeLogText(errBody, 200)})\n`,
         );
 
+        // 429 = rate-limited — do not retry, bail immediately
+        if (resp.status === 429) {
+          process.stderr.write(
+            `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on markdown attempt for ${sanitizeLogText(chatId, 64)}\n`,
+          );
+          if (msgId) this.saveQQState();
+          return;
+        }
+
         if (msgId) {
           this.msgSeqMap.set(msgId, nextSeq - 1);
           rollbackApplied = true;
@@ -251,7 +262,7 @@ export class QQChannel extends ChannelBase {
             content: text,
             msg_type: 0,
             msg_id: msgId,
-            msg_seq: nextSeq + 1,
+            msg_seq: nextSeq,
           };
           const activeResp = await sendQQMessage(
             route.base,
@@ -260,7 +271,10 @@ export class QQChannel extends ChannelBase {
             activeBody,
           );
           if (activeResp.ok) {
-            this.msgSeqMap.set(msgId, nextSeq + 1);
+            const current = this.replyMsgId.get(chatId);
+            if (current?.msgId === msgId) {
+              this.msgSeqMap.set(msgId, nextSeq);
+            }
             this.saveQQState();
             return;
           }
@@ -276,8 +290,16 @@ export class QQChannel extends ChannelBase {
           }
         }
 
-        // Active retry failed — skip plain-text fallback for passive replies
-        if (msgId) return;
+        // Passive reply: both markdown and active retry failed
+        if (msgId) {
+          if (resp.status !== 429) {
+            process.stderr.write(
+              `[QQ:${this.name}] MESSAGE DROPPED: both passive and active send failed for ${sanitizeLogText(chatId, 64)}\n`,
+            );
+          }
+          this.saveQQState();
+          return;
+        }
 
         // Plain-text fallback for active messages (no reply context)
         const plainBody: Record<string, unknown> = {
@@ -291,6 +313,7 @@ export class QQChannel extends ChannelBase {
           plainBody,
         );
         if (!fallbackRes.ok) {
+          await fallbackRes.text().catch(() => '');
           process.stderr.write(
             `[QQ:${this.name}] Plain-text fallback failed: ${fallbackRes.status}\n`,
           );
@@ -508,7 +531,9 @@ export class QQChannel extends ChannelBase {
               const entry = v as { msgId?: unknown; timestamp?: unknown };
               return (
                 typeof entry.msgId === 'string' &&
-                typeof entry.timestamp === 'number'
+                entry.msgId.length <= 128 &&
+                typeof entry.timestamp === 'number' &&
+                Number.isFinite(entry.timestamp)
               );
             }),
         ) as Map<string, { msgId: string; timestamp: number }>;
@@ -653,6 +678,7 @@ export class QQChannel extends ChannelBase {
           this.replyMsgId.delete(chatId);
         }
       }
+      this.saveQQState();
     }, 60_000);
     this.replyMsgIdCleanupTimer.unref();
   }
@@ -1099,7 +1125,6 @@ export class QQChannel extends ChannelBase {
     const chatId = event.author.user_openid || event.author.id;
     this.chatTypeMap.set(chatId, 'c2c');
     this.setReplyMsgId(chatId, event.id);
-    this.saveQQState();
     this.handleInbound({
       channelName: this.name,
       senderId: chatId,
@@ -1128,7 +1153,6 @@ export class QQChannel extends ChannelBase {
     const chatId = event.group_openid;
     this.chatTypeMap.set(chatId, 'group');
     this.setReplyMsgId(chatId, event.id);
-    this.saveQQState();
     const senderName = event.author.username || event.author.id || 'QQ User';
     // Strip @mention tags from message content. QQ Bot API docs state the API
     // cleans these, but the format varies across API versions:
