@@ -98,6 +98,20 @@ describe('redactLogCredentials', () => {
     expect(redactLogCredentials('ghp_short')).toBe('ghp_short');
   });
 
+  it('redacts sk- keys with hyphens (sk-proj-, sk-ant-)', () => {
+    const key = 'sk-proj-' + 'a'.repeat(20);
+    expect(redactLogCredentials(key)).toBe(`sk-${R}`);
+  });
+
+  it('redacts github_pat_ fine-grained PATs', () => {
+    const token = 'github_pat_' + 'A'.repeat(40);
+    expect(redactLogCredentials(token)).toBe(R);
+  });
+
+  it('redacts AWS STS temporary credentials (ASIA prefix)', () => {
+    expect(redactLogCredentials('ASIAIOSFODNN7EXAMPLE')).toBe(R);
+  });
+
   // ── AWS access key IDs ────────────────────────────────────────────
 
   it('redacts AWS access key IDs', () => {

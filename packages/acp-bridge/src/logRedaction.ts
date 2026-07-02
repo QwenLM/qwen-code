@@ -18,8 +18,10 @@ const CREDENTIAL_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
     pattern: /(QQBot\s+)[A-Za-z0-9._~+/=-]+/gi,
     replacement: `$1${REDACTED}`,
   },
-  // Authorization header catch-all (Basic, Digest, custom schemes).
-  // Matches "<scheme> <credential>" as a unit so both parts are redacted.
+  // Authorization header catch-all (Basic and single-credential schemes).
+  // Matches "<scheme> <credential>" (up to 2 tokens). Multi-parameter
+  // schemes like Digest are only partially redacted — acceptable since
+  // channel SDKs use Bearer/Basic exclusively.
   // Must come after Bearer/QQBot so those get the more specific replacement.
   {
     pattern: /(Authorization:\s*)\S+(?:\s+\S+)?/gi,
@@ -31,20 +33,22 @@ const CREDENTIAL_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
     replacement: `$1${REDACTED}`,
   },
   // API keys with common prefixes (≥20 chars to avoid false positives on
-  // short test fixtures like "sk-test")
+  // short test fixtures like "sk-test"). Includes hyphens for compound
+  // prefixes like sk-proj-, sk-ant-api03-.
   {
-    pattern: /sk-[a-zA-Z0-9]{20,}/g,
+    pattern: /sk-[a-zA-Z0-9-]{20,}/g,
     replacement: `sk-${REDACTED}`,
   },
   // GitHub / GitLab / Slack tokens.
+  // Includes github_pat_ (fine-grained PATs) and ghu_ (app user tokens).
   // Slack tokens use hyphens as separators: xoxb-NNN-NNN-alphanum.
   {
-    pattern: /(?:ghp_|gho_|ghs_|glpat-|xoxb-|xoxp-)[a-zA-Z0-9-]{20,}/g,
+    pattern: /(?:ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|xoxb-|xoxp-)[a-zA-Z0-9_-]{20,}/g,
     replacement: REDACTED,
   },
-  // AWS access key IDs
+  // AWS access key IDs (permanent AKIA + temporary STS ASIA)
   {
-    pattern: /AKIA[A-Z0-9]{16}/g,
+    pattern: /(?:AKIA|ASIA)[A-Z0-9]{16}/g,
     replacement: REDACTED,
   },
   // Key=value assignments for simple secret names (token=, secret=, etc.)

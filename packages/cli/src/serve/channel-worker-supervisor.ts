@@ -293,7 +293,7 @@ function sensitiveEnvValues(env: NodeJS.ProcessEnv): string[] {
     .filter(([key, value]) => sensitiveKey.test(key) && value !== undefined)
     .flatMap(([, value]) => {
       const lines = value!.split('\n').filter((l) => l.length >= 4);
-      return lines.length > 1 ? [value!, ...lines] : [value!];
+      return lines.length > 0 ? [value!, ...lines] : [value!];
     })
     .filter((value) => value.length >= 4);
 }
