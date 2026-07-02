@@ -603,6 +603,41 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
   });
 
+  it('keeps the scroll-to-bottom affordance hidden when disclosure growth stays near bottom', async () => {
+    let scrollHeight = 600;
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+      },
+    });
+    const onCanScrollToBottomChange = vi.fn();
+    const c = mount([thinkingMsg('t1'), asstMsg('a1')], undefined, {
+      isResponding: true,
+      onCanScrollToBottomChange,
+    });
+    await nextFrame();
+
+    click(disclosure(c, 't1'));
+
+    scrollHeight = 620;
+    act(() => triggerResizeObservers());
+    await nextFrame();
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
   it('clears the scroll-to-bottom affordance immediately after scrolling to bottom', async () => {
     let scrollTop = 600;
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {

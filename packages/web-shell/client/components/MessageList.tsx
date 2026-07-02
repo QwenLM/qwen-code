@@ -1241,6 +1241,7 @@ const ESTIMATE_HEADER = 120;
 const ESTIMATE_MESSAGE = 80;
 const ESTIMATE_TURN_COLLAPSE = 32;
 const ESTIMATE_TAIL = 240;
+const FOLLOW_BOTTOM_THRESHOLD_PX = 30;
 export const VIRTUAL_SCROLL_THRESHOLD = 200;
 
 export function shouldUseVirtualScroll(
@@ -1784,7 +1785,8 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
     //      Even if the model is still streaming, the viewport stays put.
     //
     //   3. Scroll-back-to-bottom resumes — when the user scrolls back
-    //      near the bottom (< 30px from edge), follow mode re-engages
+    //      near the bottom (within FOLLOW_BOTTOM_THRESHOLD_PX), follow mode
+    //      re-engages
     //      and new content resumes sticking.
     //
     //   4. New message resets follow — after the user sends a message,
@@ -1833,7 +1835,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       if (!el) return;
       const distanceFromBottom =
         el.scrollHeight - el.scrollTop - el.clientHeight;
-      setShouldFollow(distanceFromBottom <= 1);
+      setShouldFollow(distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX);
       scheduleScrollOverflowReport();
     }, [scheduleScrollOverflowReport, setShouldFollow]);
 
@@ -2266,13 +2268,13 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       if (curr < prev - 1) {
         // Container resizes can clamp scrollTop downward while the viewport is
         // still at the tail. Treat that as follow mode, not a manual scroll-up.
-        setShouldFollow(distanceFromBottom < 30);
+        setShouldFollow(distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX);
         return;
       }
       // Rule 3: near bottom → resume follow
       // Run only after non-upward scrolls. Otherwise a tiny wheel-up near the
       // tail would pause follow and immediately re-enable it in the same event.
-      if (distanceFromBottom < 30) {
+      if (distanceFromBottom < FOLLOW_BOTTOM_THRESHOLD_PX) {
         setShouldFollow(true);
       }
     }, [
