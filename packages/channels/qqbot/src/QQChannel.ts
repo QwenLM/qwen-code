@@ -26,13 +26,22 @@ import type {
   ChannelAgentBridge,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import {
+  readFileSync,
+  writeFileSync,
+  existsSync,
+  mkdirSync,
+  renameSync,
+} from 'node:fs';
 import { join } from 'node:path';
 import { OpCode, Intent } from './types.js';
 import type {
   QQChannelConfig,
   QQMessageEvent,
   QQGroupMessageEvent,
+  GroupAddRobotEvent,
+  GroupDelRobotEvent,
+  GroupMsgToggleEvent,
 } from './types.js';
 import {
   getCredsFilePath,
@@ -140,12 +149,39 @@ export class QQChannel extends ChannelBase {
   /** msg_seq counter per user messageId, for multi-block streaming. */
   private msgSeqMap: Map<string, number> = new Map();
 
+  // ── Group / cron fields ────────────────────────────────────────
+
+  /** Per-group bot OPENID map for multi-group support. */
+  private botOpenIdByGroup: Map<string, string> = new Map();
+  /** Guard: set to true after first READY + session restore completes. */
+  private _ready: boolean = false;
+  /** Whether this process has never received READY (cold start). */
+  private coldStart: boolean = true;
+  /** Track per-group active message permission. */
+  private groupActiveMsgEnabled: Map<string, boolean> = new Map();
+  /** Lazy cache for filtered, lowercased keyword triggers. */
+  private _keywordTriggerCache: string[] | null = null;
+
+  /** Accumulation buffer for cron/non-prompt textChunk events. */
+  private cronBuffer: Map<
+    string,
+    { buffer: string; timer: ReturnType<typeof setTimeout> | null }
+  > = new Map();
+  /** Retry count per session for cron buffer flush. */
+  private cronRetryCount: Map<string, number> = new Map();
+  private static readonly MAX_CRON_RETRIES = 3;
+
+  /** Named handler for permanent textChunk listener (cron/non-prompt). */
+  private _cronTextHandler: ((sessionId: string, text: string) => void) | null =
+    null;
+  /** Tracks whether _cronTextHandler is registered on bridge. */
+  private cronTextHandlerAttached: boolean = false;
+
   /** Path to persisted QQ routing state: chatTypeMap, replyMsgId, msgSeqMap. */
   private readonly qqStatePath: string;
   /**
-   * Path to the SessionRouter persistence file we back up before shutdown.
-   * start.ts passes a shared router; standalone QQChannel instances use a
-   * per-channel router file.
+   * Path to the global sessions.json managed by start.ts.
+   * start.ts deletes it on shutdown, so we back it up.
    */
   private readonly globalSessionsPath: string;
   /** Backup of sessions.json so conversations survive daemon restarts. */
@@ -162,7 +198,6 @@ export class QQChannel extends ChannelBase {
     mkdirSync(stateDir, { recursive: true });
     const sessionsPath = join(stateDir, `${safeName}-sessions.json`);
 
-    const hasExternalRouter = Boolean(options?.router);
     const router =
       options?.router ??
       new SessionRouter(bridge, config.cwd, config.sessionScope, sessionsPath);
@@ -170,17 +205,93 @@ export class QQChannel extends ChannelBase {
     super(name, config, bridge, {
       ...options,
       router,
-      registerBridgeEvents: options?.registerBridgeEvents ?? !hasExternalRouter,
+      registerBridgeEvents: options?.registerBridgeEvents ?? !options?.router,
     });
     this.qqConfig = config as unknown as QQChannelConfig;
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
-    this.globalSessionsPath = hasExternalRouter
+    // In standalone mode (no external router), use the per-channel
+    // sessions path so the channel owns its own session file.
+    this.globalSessionsPath = options?.router
       ? join(stateDir, 'sessions.json')
       : sessionsPath;
     this.sessionsBackupPath = join(
       stateDir,
       `${safeName}-sessions-backup.json`,
     );
+
+    // Permanent textChunk listener for cron/non-prompt messages.
+    // ChannelBase's prompt-path textChunk listener is only alive during
+    // bridge.prompt(). Cron messages bypass prompt() so their textChunk
+    // events arrive without a listener. This permanent listener catches them.
+    if (this.qqConfig['cron-msg-experimental']) {
+      this._cronTextHandler = (sessionId: string, text: string) => {
+        setImmediate(() => {
+          if (!this._ready) return;
+          // streamState not on this branch — always treat as cron
+          let entry = this.cronBuffer.get(sessionId);
+          if (!entry) {
+            entry = { buffer: '', timer: null };
+            this.cronBuffer.set(sessionId, entry);
+          }
+          if (entry.timer) {
+            clearTimeout(entry.timer);
+            entry.timer = null;
+          }
+          entry.buffer += text;
+          entry.timer = setTimeout(() => {
+            const toFlush = entry!.buffer;
+            entry!.buffer = '';
+            entry!.timer = null;
+            if (toFlush) {
+              const target = this.router.getTarget(sessionId);
+              if (target) {
+                this.sendMessage(target.chatId, toFlush)
+                  .then(() => {
+                    this.cronRetryCount.delete(sessionId);
+                    if (!entry!.buffer) this.cronBuffer.delete(sessionId);
+                  })
+                  .catch((err) => {
+                    process.stderr.write(
+                      `[QQ:${this.name}] Cron flush send error: ${err}\n`,
+                    );
+                    const retries =
+                      (this.cronRetryCount.get(sessionId) ?? 0) + 1;
+                    this.cronRetryCount.set(sessionId, retries);
+                    if (retries >= QQChannel.MAX_CRON_RETRIES) {
+                      process.stderr.write(
+                        `[QQ:${this.name}] Cron flush exhausted retries (${QQChannel.MAX_CRON_RETRIES}) for ${sessionId}, discarding\n`,
+                      );
+                      this.cronRetryCount.delete(sessionId);
+                      this.cronBuffer.delete(sessionId);
+                      return;
+                    }
+                    entry!.buffer = toFlush + (entry!.buffer || '');
+                    if (this.cronBuffer.get(sessionId) !== entry) {
+                      this.cronBuffer.set(sessionId, entry!);
+                    }
+                    setTimeout(() => {
+                      this._cronTextHandler?.(sessionId, '');
+                    }, 2000);
+                  });
+                return;
+              }
+            }
+            this.cronBuffer.delete(sessionId);
+          }, 2000);
+        });
+      };
+      this.attachCronHandler();
+    }
+  }
+
+  /**
+   * Override setBridge to re-attach the permanent `_cronTextHandler`
+   * after bridge crash-recovery.
+   */
+  override setBridge(bridge: ChannelAgentBridge): void {
+    this.detachCronHandler();
+    super.setBridge(bridge);
+    this.attachCronHandler();
   }
 
   // ── ChannelBase interface ──────────────────────────────────────
@@ -192,7 +303,44 @@ export class QQChannel extends ChannelBase {
         '## QQ Bot Channel',
         '',
         '你是通过 QQ Bot 与用户对话的 AI 助手。',
-        '回复控制在 2000 字符以内（超长会自动分块），支持 Markdown 格式。',
+        '支持 Markdown 格式，回复自然流畅即可。',
+        '消息前缀 [atMention=true] 表示该消息 @了你，[atMention=false] 表示未 @你。',
+        '不想回复时只输出 <noreply> 即可，消息不会发出。',
+        '',
+        '以下规则仅适用于群聊消息。C2C 私聊中请始终正常回复。',
+        '## 群聊唤醒与静默规则',
+        '',
+        '### 当 [atMention=false] — 未 @你',
+        '由你自主判断当前聊天氛围是否适合插嘴：',
+        '- 闲聊/调侃/玩梗 → 可以接茬，风趣即可',
+        '- 严肃讨论/事务协商 → 保持沉默',
+        '- 不确定 → 沉默',
+        '',
+        '### 当 [atMention=true] — @了你',
+        '先去掉 @标签和你的名字，剩下的内容是对你的提问或指令吗？',
+        '',
+        '以下场景即使 @了你也必须沉默：',
+        '1. 纯提及/陈述 — "QwenCode 好像变聪明了"',
+        '2. 转述/引用 — "刚才 QwenCode 给的方案可以"',
+        '3. 间接呼叫 — "@李四 你让 QwenCode 查下"',
+        '4. 调侃/试探 — "这事 QwenCode 肯定不知道"',
+        '',
+        '### 回复准则',
+        '- 被唤醒后直接做事，禁止"我在"等占位回复',
+        '- 一条消息 @多人时，只有明确指派给你才接',
+        '- 不确认时先沉默',
+        '- 完成对话后立刻回归静默',
+        '',
+        '## @提及格式',
+        '',
+        '消息内容中的 <@OPENID> 标签代表群成员的 QQ 标识。',
+        '当其他群成员 @你（机器人）时，消息内容中会出现 <@你的BotOPENID> 标签，这代表该消息是 @给你的。机器人自己的 OPENID 将在连接建立后告知。',
+        '你可以在回复中使用 <@OPENID> 格式来 @提及特定的群成员。',
+        '例如：回复 "<@ABC123DEF456> 你好" 会在群里 @该成员。',
+        '',
+        '## 关于机器人消息',
+        '',
+        '消息前缀 [bot] 表示该消息来自另一个机器人。是否回复由你自主判断。',
       ].join('\n');
     }
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -215,20 +363,34 @@ export class QQChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
+    if (text.trim() === '<noreply>') {
+      process.stderr.write(
+        `[QQ:${this.name}] <noreply> skipped for ${chatId}\n`,
+      );
+      return;
+    }
     // ── Normal text / markdown flow ──────────────────────────
     const route = await this.resolveRoute(chatId);
     if (!route) return;
 
     const msgId = this.replyMsgId.get(chatId);
     const useMarkdown = hasMarkdownSyntax(text);
+    // Respect QQ Bot active-message toggle: when a group admin disables
+    // active messages, drop outbound sends silently to avoid platform-policy
+    // violations. Only applies to active sends (no msgId — passive replies
+    // to @-bot messages must still be delivered.
+    if (!msgId && this.groupActiveMsgEnabled.get(chatId) === false) {
+      process.stderr.write(
+        `[QQ:${this.name}] sendMessage blocked: active messages disabled for ${chatId}\n`,
+      );
+      return;
+    }
 
     for (const chunk of splitText(text)) {
       try {
         const body: Record<string, unknown> = useMarkdown
           ? { msg_type: 2, markdown: { content: chunk } }
           : { content: chunk, msg_type: 0 };
-        // Multi-block streaming: set msg_id + incrementing msg_seq
-        // seq incremented before send so we can track the next value
         const nextSeq = msgId ? (this.msgSeqMap.get(msgId) ?? 0) + 1 : 0;
         if (msgId) {
           body['msg_id'] = msgId;
@@ -242,14 +404,6 @@ export class QQChannel extends ChannelBase {
           body,
         );
 
-        // Markdown is a fully available, zero-permission message type on the QQ
-        // Bot Open Platform — bot.q.qq.com API docs list msg_type=2 alongside
-        // text/ark/embed with no application gate. (q.qq.com/wiki/FAQ/robot
-        // mentions a markdown permission application, but that FAQ targets a
-        // different platform — likely older 群机器人 or mini-program bots —
-        // not the Open Platform API we use here.) We retry as plaintext as
-        // defense-in-depth against edge cases where a bot's markdown capability
-        // might be restricted server-side.
         if (!resp.ok && useMarkdown) {
           const errBody = await resp.text().catch(() => '');
           process.stderr.write(
@@ -272,21 +426,18 @@ export class QQChannel extends ChannelBase {
         }
 
         if (!resp.ok) {
-          // Drain response body to avoid socket leak
           const errBody = await resp.text().catch(() => '');
           process.stderr.write(
             `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${body['msg_seq'] ?? '-'}): ${errBody.slice(0, 200)}\n`,
           );
-          break; // stop sending on failure to avoid msg_seq gaps
+          break;
         }
-        // Only persist seq on success
         if (msgId) this.msgSeqMap.set(msgId, nextSeq);
       } catch (e) {
         process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
         break;
       }
     }
-    // Persist msgSeqMap once after all chunks are sent
     if (msgId) this.saveQQState();
   }
 
@@ -307,8 +458,10 @@ export class QQChannel extends ChannelBase {
     }
     if (!this.accessToken || !isValidChatId(chatId)) return null;
     const base = getApiBase(Boolean(this.qqConfig.sandbox));
+    const routeType =
+      this.chatTypeMap.get(chatId) || this.qqConfig.chatTypes?.[chatId];
     const path =
-      this.chatTypeMap.get(chatId) === 'group'
+      routeType === 'group'
         ? `/v2/groups/${chatId}/messages`
         : `/v2/users/${chatId}/messages`;
     return { base, path };
@@ -316,6 +469,7 @@ export class QQChannel extends ChannelBase {
 
   disconnect(): void {
     this.disposed = true;
+    this._ready = false;
     this.stopHeartbeat();
     this.stopTokenRefresh();
     if (this.seenCleanupTimer) {
@@ -326,6 +480,15 @@ export class QQChannel extends ChannelBase {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+
+    // Clean up cron buffers
+    if (this.qqConfig['cron-msg-experimental']) {
+      for (const [, entry] of this.cronBuffer) {
+        if (entry.timer) clearTimeout(entry.timer);
+      }
+      this.cronBuffer.clear();
+    }
+    this.cronRetryCount.clear();
     this.flushQQState();
     this.backupGlobalSessions();
     if (this.ws) {
@@ -336,9 +499,13 @@ export class QQChannel extends ChannelBase {
       this.connectReject(new Error('Channel disconnected'));
       this.connectReject = null;
     }
+    this.detachCronHandler();
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
     this.msgSeqMap.clear();
+    this.botOpenIdByGroup.clear();
+    this.seenMessages.clear();
+    this.coldStart = true;
   }
 
   /**
@@ -360,26 +527,62 @@ export class QQChannel extends ChannelBase {
 
   // ── State Persistence (cross-server context continuation) ──────
 
-  /** Debounced state persistence to avoid blocking event loop. */
+  private serializeQQState(): string {
+    return JSON.stringify({
+      chatTypeMap: Array.from(this.chatTypeMap.entries()),
+      replyMsgId: Array.from(this.replyMsgId.entries()),
+      msgSeqMap: Array.from(this.msgSeqMap.entries()),
+      groupActiveMsgEnabled: Array.from(this.groupActiveMsgEnabled.entries()),
+      botOpenIdByGroup: Array.from(this.botOpenIdByGroup.entries()),
+    });
+  }
+
+  /** Debounced state persistence with atomic write. */
   private saveQQState(): void {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
       try {
-        writeFileSync(
-          this.qqStatePath,
-          JSON.stringify({
-            chatTypeMap: Array.from(this.chatTypeMap.entries()),
-            replyMsgId: Array.from(this.replyMsgId.entries()),
-            msgSeqMap: Array.from(this.msgSeqMap.entries()),
-          }),
-          { mode: 0o600 },
-        );
+        const tmpPath = this.qqStatePath + '.tmp';
+        writeFileSync(tmpPath, this.serializeQQState(), { mode: 0o600 });
+        renameSync(tmpPath, this.qqStatePath);
       } catch {
         /* best-effort */
       }
     }, 500);
   }
 
+  /**
+   * Attach the permanent textChunk handler for cron/non-prompt messages
+   * to the current bridge. No-op if already attached or if cron is disabled.
+   */
+  private attachCronHandler(): void {
+    if (
+      this.qqConfig['cron-msg-experimental'] &&
+      this._cronTextHandler &&
+      !this.cronTextHandlerAttached
+    ) {
+      this.bridge.on?.('textChunk', this._cronTextHandler);
+      this.cronTextHandlerAttached = true;
+    }
+  }
+
+  /**
+   * Detach the permanent textChunk handler from the current bridge.
+   * No-op if not attached or if cron is disabled.
+   */
+  private detachCronHandler(): void {
+    if (
+      this.qqConfig['cron-msg-experimental'] &&
+      this._cronTextHandler &&
+      this.cronTextHandlerAttached
+    ) {
+      this.bridge.off?.('textChunk', this._cronTextHandler);
+      this.cronTextHandlerAttached = false;
+    }
+  }
+
+  /** Flush pending state writes immediately (called on disconnect). */
+  /** Flush pending state writes immediately (called on disconnect). */
   /** Flush pending state writes immediately (called on disconnect). */
   private flushQQState(): void {
     if (this.saveTimer) {
@@ -387,14 +590,9 @@ export class QQChannel extends ChannelBase {
       this.saveTimer = null;
     }
     try {
-      writeFileSync(
-        this.qqStatePath,
-        JSON.stringify({
-          chatTypeMap: Array.from(this.chatTypeMap.entries()),
-          replyMsgId: Array.from(this.replyMsgId.entries()),
-          msgSeqMap: Array.from(this.msgSeqMap.entries()),
-        }),
-      );
+      const tmpPath = this.qqStatePath + '.tmp';
+      writeFileSync(tmpPath, this.serializeQQState(), { mode: 0o600 });
+      renameSync(tmpPath, this.qqStatePath);
     } catch {
       /* best-effort */
     }
@@ -402,17 +600,49 @@ export class QQChannel extends ChannelBase {
 
   /**
    * Restore QQ routing state from disk.
-   * Trusts persisted JSON — if the file is corrupt, new Map() may create
-   * entries with undefined values, causing get()===undefined to fall through
-   * to default routing (C2C). This is acceptable for a rare edge case.
+   * Trusts persisted JSON — if the file is corrupt, entries with undefined
+   * values may appear, which is acceptable for a rare edge case.
    */
   private restoreQQState(): boolean {
     try {
       if (!existsSync(this.qqStatePath)) return false;
       const raw = JSON.parse(readFileSync(this.qqStatePath, 'utf-8'));
-      if (raw.chatTypeMap) this.chatTypeMap = new Map(raw.chatTypeMap);
-      if (raw.replyMsgId) this.replyMsgId = new Map(raw.replyMsgId);
-      if (raw.msgSeqMap) this.msgSeqMap = new Map(raw.msgSeqMap);
+      if (raw.chatTypeMap) {
+        this.chatTypeMap = new Map(
+          (raw.chatTypeMap as Array<[string, unknown]>).filter(
+            ([, v]) => v === 'c2c' || v === 'group',
+          ),
+        ) as Map<string, 'c2c' | 'group'>;
+      }
+      if (raw.replyMsgId) {
+        this.replyMsgId = new Map(
+          (raw.replyMsgId as Array<[string, unknown]>).map(([k, v]) => [
+            k,
+            typeof v === 'string' ? v : (v as { msgId: string }).msgId,
+          ]),
+        );
+      }
+      if (raw.msgSeqMap) {
+        this.msgSeqMap = new Map(
+          (raw.msgSeqMap as Array<[string, unknown]>).filter(
+            ([, v]) => typeof v === 'number' && v >= 0,
+          ),
+        ) as Map<string, number>;
+      }
+      if (raw.groupActiveMsgEnabled) {
+        this.groupActiveMsgEnabled = new Map(
+          (raw.groupActiveMsgEnabled as Array<[string, unknown]>).filter(
+            ([, v]) => typeof v === 'boolean',
+          ),
+        ) as Map<string, boolean>;
+      }
+      if (raw.botOpenIdByGroup) {
+        this.botOpenIdByGroup = new Map(
+          (raw.botOpenIdByGroup as Array<[string, unknown]>).filter(
+            ([, v]) => typeof v === 'string' && /^[A-F0-9]{32}$/i.test(v),
+          ),
+        ) as Map<string, string>;
+      }
       return true;
     } catch (e) {
       process.stderr.write(
@@ -484,7 +714,6 @@ export class QQChannel extends ChannelBase {
           | undefined;
         if (!entry?.sessionId) continue;
         const correctId: string = entry.sessionId;
-        // sid is undefined here — use entry.target directly instead of tt.get(undefined)
         const target = entry.target;
         tm.set(key, correctId);
         tt.delete(undefined as unknown as string);
@@ -505,7 +734,6 @@ export class QQChannel extends ChannelBase {
     const safeName = this.name.replace(/[^A-Za-z0-9_-]/g, '_');
     const credsFile = getCredsFilePath(safeName);
 
-    // Try load persisted credentials first, then fall back to config
     let appID = this.qqConfig.appID;
     let appSecret = this.qqConfig.appSecret;
 
@@ -519,7 +747,6 @@ export class QQChannel extends ChannelBase {
       }
     }
 
-    // If still no credentials, launch QR code login
     if (!appID || !appSecret) {
       process.stderr.write(
         `[QQ:${this.name}] No credentials, scan QR code with QQ...\n`,
@@ -542,7 +769,6 @@ export class QQChannel extends ChannelBase {
     if (this.disposed) return;
     this.stopTokenRefresh();
     const ttl = Math.max(0, this.tokenExpiresAt - Date.now());
-    // Refresh at 80% of TTL, minimum 60s before expiry
     const delay = Math.max(Math.min(ttl * 0.8, ttl - 60_000), 60_000);
     if (delay > 0) {
       this.tokenRefreshTimer = setTimeout(() => {
@@ -599,7 +825,7 @@ export class QQChannel extends ChannelBase {
     reject: (err: Error) => void,
   ): void {
     this.ws = new WebSocket(url);
-    const dialed = this.ws; // capture for stale-close guard
+    const dialed = this.ws;
 
     this.ws.on('open', () => {
       process.stderr.write(`[QQ:${this.name}] WebSocket connected\n`);
@@ -617,9 +843,6 @@ export class QQChannel extends ChannelBase {
     });
 
     this.ws.on('close', (code: number) => {
-      // Stale-close guard: if a new dialGateway() call has since
-      // replaced this.ws, this close event belongs to a dead socket
-      // and must not nuke the live connection.
       if (this.ws !== dialed) return;
       process.stderr.write(
         `[QQ:${this.name}] WebSocket closed (code=${code})\n`,
@@ -633,11 +856,12 @@ export class QQChannel extends ChannelBase {
 
       this.serverRequestedReconnect = false;
 
+      // Non-1000 close codes (e.g. 4009) imply the server-side session is
+      // gone; skip the RESUME attempt and go straight to IDENTIFY.
+      if (code !== 1000 && code !== 4000) {
+        this.tryResume = false;
+      }
       if (shouldReconnect && this.connectReject) {
-        // Pre-READY close: reject so the caller's retry loop retries.
-        // connectReject is null after READY; when it's still set,
-        // we're waiting for the first READY and must not internal-reconnect
-        // (which would create a competing WebSocket and leak the Promise).
         this.connectReject(
           new Error(`WebSocket closed before READY (code=${code})`),
         );
@@ -659,7 +883,6 @@ export class QQChannel extends ChannelBase {
         process.stderr.write(
           `[QQ:${this.name}] FATAL: reconnect exhausted after ${this.maxReconnectAttempts} attempts. Bot is offline until daemon restart.\n`,
         );
-        // Reject pending connect promise if we're not reconnecting
         if (this.connectReject) {
           this.connectReject(
             new Error(
@@ -669,7 +892,6 @@ export class QQChannel extends ChannelBase {
           this.connectReject = null;
         }
       } else {
-        // Reject pending connect promise if we're not reconnecting
         if (this.connectReject) {
           this.connectReject(
             new Error(`WebSocket closed before READY (code=${code})`),
@@ -717,36 +939,63 @@ export class QQChannel extends ChannelBase {
               'session_id'
             ] as string) || '';
           this.tryResume = true;
+
           this.connectReject = null;
           this.startHeartbeat();
-          this.restoreGlobalSessions();
-          this.restoreQQState();
-          this.router
-            .restoreSessions()
-            .then(() => {
-              this.fixRestoredSessions();
-              const all = (
-                this.router as unknown as {
-                  getAll?: () => Array<{
-                    target?: { chatId?: string };
-                    sessionId?: string;
-                  }>;
-                }
-              ).getAll?.();
-              const sessions =
-                all
-                  ?.map((e) => `${e.target?.chatId}:${e.sessionId}`)
-                  .join(', ') || 'none';
-              process.stderr.write(
-                `[QQ:${this.name}] Ready (sessions: ${sessions})\n`,
-              );
-              onReady();
-            })
-            .catch(() => onReady());
+          if (this.coldStart) {
+            this.restoreGlobalSessions();
+            this.restoreQQState();
+            this.router
+              .restoreSessions()
+              .then(() => {
+                this.fixRestoredSessions();
+                const all = (
+                  this.router as unknown as {
+                    getAll?: () => Array<{
+                      target?: { chatId?: string };
+                      sessionId?: string;
+                    }>;
+                  }
+                ).getAll?.();
+                const count = all?.length ?? 0;
+                process.stderr.write(
+                  `[QQ:${this.name}] Ready (${count} sessions)\n`,
+                );
+                this._ready = true;
+                this.coldStart = false;
+                this.attachCronHandler();
+                onReady();
+              })
+              .catch(() => {
+                this._ready = true;
+                this.coldStart = false;
+                this.attachCronHandler();
+                onReady();
+              });
+          } else {
+            process.stderr.write(
+              `[QQ:${this.name}] Ready (warm reconnect, skipping state restore)\n`,
+            );
+            this._ready = true;
+            this.attachCronHandler();
+            onReady();
+          }
         } else if (t === 'C2C_MESSAGE_CREATE') {
           this.handleC2C(msg['d'] as unknown as QQMessageEvent);
         } else if (t === 'GROUP_AT_MESSAGE_CREATE') {
           this.handleGroup(msg['d'] as unknown as QQGroupMessageEvent);
+        } else if (t === 'GROUP_MESSAGE_CREATE') {
+          this.handleGroupAll(msg['d'] as unknown as QQGroupMessageEvent);
+        } else if (t === 'GROUP_ADD_ROBOT') {
+          this.handleGroupAddRobot(msg['d'] as unknown as GroupAddRobotEvent);
+        } else if (t === 'GROUP_DEL_ROBOT') {
+          this.handleGroupDelRobot(msg['d'] as unknown as GroupDelRobotEvent);
+        } else if (t === 'GROUP_MSG_REJECT') {
+          this.handleGroupMsgReject(msg['d'] as unknown as GroupMsgToggleEvent);
+        } else if (t === 'GROUP_MSG_RECEIVE') {
+          this.handleGroupMsgReceive(
+            msg['d'] as unknown as GroupMsgToggleEvent,
+          );
         } else if (t === 'RESUMED') {
           // RESUME success — the process did NOT restart, all in-memory
           // session state, QQ routing state, and global sessions.json are
@@ -755,7 +1004,9 @@ export class QQChannel extends ChannelBase {
           this.reconnectAttempts = 0;
           this.isReconnecting = false;
           this.connectReject = null;
+          this._ready = true;
           this.startHeartbeat();
+          this.attachCronHandler();
           onReady();
         }
         break;
@@ -772,6 +1023,22 @@ export class QQChannel extends ChannelBase {
           `[QQ:${this.name}] Server sent INVALID_SESSION, falling back to IDENTIFY\n`,
         );
         this.tryResume = false;
+        // Cancel any pending debounced save to prevent a TOCTOU race
+        // between saveQQState and the coldStart restore on the next READY.
+        if (this.saveTimer) {
+          clearTimeout(this.saveTimer);
+          this.saveTimer = null;
+        }
+        // Flush state first to persist any debounced updates before
+        // coldStart=true triggers a full restore on the next READY.
+        this.flushQQState();
+        // Mark not ready to prevent concurrent processors from calling
+        // saveQQState() during the INVALID_SESSION recovery window.
+        this._ready = false;
+        // Trigger full state restore on the next READY — the gateway
+        // assigned a new session_id, so in-memory routing state
+        // (chatTypeMap, replyMsgId, msgSeqMap) must be reloaded.
+        this.coldStart = true;
         this.sendIdentify();
         break;
       default:
@@ -797,12 +1064,19 @@ export class QQChannel extends ChannelBase {
       );
       return;
     }
+    // Include GROUP_MESSAGE intent when groupAllPolicy requires it
+    const needsGroupMsg =
+      this.qqConfig.groupAllPolicy === 'keyword' ||
+      this.qqConfig.groupAllPolicy === 'all';
     this.ws.send(
       JSON.stringify({
         op: OpCode.IDENTIFY,
         d: {
           token: `QQBot ${this.accessToken}`,
-          intents: Intent.C2C_MESSAGE | Intent.GROUP_AT_MESSAGE,
+          intents:
+            Intent.C2C_MESSAGE |
+            Intent.GROUP_AT_MESSAGE |
+            (needsGroupMsg ? Intent.GROUP_MESSAGE : 0),
           shard: [0, 1],
           properties: {},
         },
@@ -816,11 +1090,7 @@ export class QQChannel extends ChannelBase {
    * with exponential backoff. Keeps retrying until success.
    */
   private async reconnectWithRetry(): Promise<void> {
-    // Guard: if the channel was disposed (daemon shutdown) while a reconnect
-    // timeout was pending, bail out immediately to avoid an infinite loop.
     if (this.disposed) return;
-    // Guard: prevent parallel reconnection chains when multiple close events
-    // fire in rapid succession, each scheduling reconnectWithRetry.
     if (this.isReconnecting) return;
     this.isReconnecting = true;
 
@@ -836,7 +1106,6 @@ export class QQChannel extends ChannelBase {
     let gatewayAttempted = false;
     for (let attempt = 0; attempt < maxGwRetries; attempt++) {
       try {
-        // Refresh token before reconnect attempt
         try {
           await this.fetchToken();
         } catch {
@@ -848,7 +1117,7 @@ export class QQChannel extends ChannelBase {
         }
         gatewayAttempted = true;
         await this.connectGateway();
-        return; // success
+        return;
       } catch (e: unknown) {
         const msg = e instanceof Error ? e.message : String(e);
         const backoff = Math.min(1000 * 2 ** (attempt + 1), 30000);
@@ -862,9 +1131,8 @@ export class QQChannel extends ChannelBase {
       `[QQ:${this.name}] RC: exhausted ${maxGwRetries} reconnect retries, will retry in 60s\n`,
     );
     if (gatewayAttempted) this.reconnectAttempts++;
-    this.tryResume = false; // fall back to full IDENTIFY next time
-    this.isReconnecting = false; // release guard for future retries
-    // Schedule another attempt with longer delay
+    this.tryResume = false;
+    this.isReconnecting = false;
     this.reconnectTimer = setTimeout(() => this.reconnectWithRetry(), 60000);
     this.reconnectTimer.unref();
   }
@@ -878,7 +1146,6 @@ export class QQChannel extends ChannelBase {
     this.lastHeartbeatAck = Date.now();
     this.heartbeatTimer = setInterval(() => {
       if (this.ws?.readyState !== WebSocket.OPEN) return;
-      // Check if previous heartbeat was acknowledged
       const elapsed = Date.now() - this.lastHeartbeatAck;
       if (elapsed > this.heartbeatInterval * 2) {
         process.stderr.write(
@@ -899,13 +1166,35 @@ export class QQChannel extends ChannelBase {
   }
 
   // ── Message Handlers ───────────────────────────────────────────
+  // ── Bot OpenID extraction ──────────────────────────────────────
+
+  private extractBotOpenId(
+    mentions: QQGroupMessageEvent['mentions'],
+    chatId?: string,
+  ): string {
+    const selfMention = mentions?.find((m) => m.is_you);
+    if (!selfMention) return '';
+    const botOpenId = selfMention.member_openid || selfMention.id || '';
+    if (!/^[A-F0-9]{32}$/i.test(botOpenId)) {
+      process.stderr.write(
+        `[QQ:${this.name}] Invalid botOpenId format: ${sanitizeLogText(botOpenId, 64)}\n`,
+      );
+      return '';
+    }
+    if (chatId) {
+      this.botOpenIdByGroup.set(chatId, botOpenId);
+      this.saveQQState();
+    }
+    return botOpenId;
+  }
+
+  // ── Message Handlers ───────────────────────────────────────────
 
   /** Check if a message ID was already processed (reconnect replay dedup). */
   private isDuplicate(eventId: string): boolean {
     if (this.seenMessages.has(eventId)) return true;
     const now = Date.now();
     this.seenMessages.set(eventId, now);
-    // Evict entries older than 5 minutes
     if (!this.seenCleanupTimer) {
       this.seenCleanupTimer = setInterval(() => {
         const cutoff = Date.now() - 300_000;
@@ -921,99 +1210,309 @@ export class QQChannel extends ChannelBase {
     return false;
   }
 
-  private handleC2C(event: QQMessageEvent): void {
-    if (this.isDuplicate(event.id)) return;
-    // Ignore messages with no text content (images, stickers, etc.)
-    if (!event.content?.trim()) return;
-    // user_openid and author.id are scoped differently — falling back to
-    // author.id may produce a different identity for the same user across
-    // C2C and group contexts, creating two separate sessions. QQ Bot does
-    // not expose a unified user identity, so this is unavoidable.
-    const chatId = event.author.user_openid || event.author.id;
-    this.chatTypeMap.set(chatId, 'c2c');
-    this.replyMsgId.set(chatId, event.id);
-    this.saveQQState();
-    this.handleInbound({
-      channelName: this.name,
-      senderId: chatId,
-      senderName: event.author.username || event.author.id || 'QQ User',
-      chatId,
-      text: event.content,
-      messageId: event.id,
-      isGroup: false,
-      isMentioned: true,
-      isReplyToBot: false,
-    }).catch((e) =>
-      process.stderr.write(`[QQ:${this.name}] C2C handler error: ${e}\n`),
-    );
-  }
-
-  private handleGroup(event: QQGroupMessageEvent): void {
-    if (this.isDuplicate(event.id)) return;
-    if (!event.group_openid) {
-      process.stderr.write(
-        `[QQ:${this.name}] Group message dropped: missing group_openid\n`,
-      );
-      return;
-    }
-    const chatId = event.group_openid;
-    this.chatTypeMap.set(chatId, 'group');
-    this.replyMsgId.set(chatId, event.id);
-    this.saveQQState();
-    const senderName = event.author.username || event.author.id || 'QQ User';
-    // Strip @mention tags from message content. QQ Bot API docs state the API
-    // cleans these, but the format varies across API versions:
-    //   - Legacy: <@!12345> (numeric user ID with bang)
-    //   - V2:     <@D5B53C...> (hex openid, no bang)
-    // Use a broad pattern to handle both. Bound to 64 chars — QQ openids
-    // and user IDs are short; this prevents quadratic backtracking on <@<@... chains.
-    const cleanText = (event.content || '')
-      .replace(/<@[^>]{1,64}>/g, '')
-      .trim();
-    // Ignore messages that have no meaningful text after @mention stripping
-    // (pure @mention, image, or sticker messages).
-    if (!cleanText) return;
-    const isSlash = cleanText.startsWith('/');
-    // We self-prefix and set alreadyPrefixed below, which skips ChannelBase's
-    // [..]/newline/length sanitization — so neutralize the nick here too (same
-    // shared helper), or a crafted QQ nickname could inject brackets/newlines.
-    // Hoisted above the audit log so the log uses the sanitized name too:
-    // event.author.username is attacker-controlled, and a crafted nick bearing
-    // CR/LF/ANSI escapes could otherwise forge or corrupt the operator audit log.
+  /**
+   * Extract common group-message fields shared by handleGroup and handleGroupAll.
+   * Returns null when the message has no meaningful text after @-tag stripping.
+   */
+  private prepareGroupMessage(
+    event: QQGroupMessageEvent,
+    chatId: string,
+  ): {
+    isAtBot: boolean;
+    isSlash: boolean;
+    safeName: string;
+    text: string;
+    senderName: string;
+  } | null {
+    const senderName =
+      event.author?.username ||
+      event.author?.id ||
+      event.author?.member_openid ||
+      'QQ User';
     const safeName = sanitizeSenderName(senderName);
-    // Log slash commands for an audit trail. cleanText is attacker-controlled, so
-    // neutralize it with the shared log sanitizer (same helper as ChannelBase's
-    // dropped-turn log): it renders newlines visibly and strips the C0/DEL controls
-    // PLUS PROMPT_UNSAFE_INVISIBLES — the C1 block (notably NEL U+0085, a line break
-    // that could forge an extra log line), the Unicode line/paragraph separators
-    // U+2028/U+2029, and the bidi overrides — any of which would otherwise inject,
-    // overwrite, or reorder an operator's audit line.
+
+    const content = (event.content || '').trim();
+    const cleanText = content.replace(/<@[^>]{1,64}>/g, '').trim();
+    if (!cleanText) return null;
+
+    const isAtBot = event.mentions?.some((m) => m.is_you) ?? false;
+
+    if (isAtBot && !this.botOpenIdByGroup.has(chatId)) {
+      this.extractBotOpenId(event.mentions, chatId);
+    }
+
+    const isSlash = isAtBot && cleanText.startsWith('/');
+
     if (isSlash) {
       const loggedCmd = sanitizeLogText(cleanText, 80);
       process.stderr.write(
         `[QQ:${this.name}] Slash cmd from ${safeName} (${chatId}): ${loggedCmd}\n`,
       );
     }
-    // Don't prefix slash commands; for normal messages, sanitize the body here
-    // because alreadyPrefixed tells ChannelBase not to rewrite the prefix.
+
+    const groupBotOpenId = this.botOpenIdByGroup.get(chatId);
+    const openIdSuffix = groupBotOpenId ? ` [botOpenId:${groupBotOpenId}]` : '';
     const text = isSlash
-      ? cleanText
-      : `[${safeName}]: ${sanitizePromptText(cleanText)}`;
+      ? sanitizePromptText(cleanText)
+      : `[atMention=${isAtBot}]${openIdSuffix} [${safeName}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
+
+    return { isAtBot, isSlash, safeName, text, senderName };
+  }
+
+  private handleC2C(event: QQMessageEvent): void {
+    if (this.isDuplicate(event.id)) return;
+    if (!event.content?.trim()) return;
+    if (!event.author) {
+      process.stderr.write(
+        `[QQ:${this.name}] C2C message dropped: missing author\n`,
+      );
+      return;
+    }
+    const chatId = event.author.user_openid || event.author.id;
+    if (!chatId) {
+      process.stderr.write(
+        `[QQ:${this.name}] C2C message dropped: no chatId for author\n`,
+      );
+      return;
+    }
+    this.chatTypeMap.set(chatId, 'c2c');
+    this.replyMsgId.set(chatId, event.id);
+    this.saveQQState();
+    const senderName = event.author.username || event.author.id || 'QQ User';
+    const safeName = sanitizeSenderName(senderName);
+    const cleanText = event.content.trim();
+    const isSlash = cleanText.startsWith('/');
+    const text = isSlash
+      ? sanitizePromptText(cleanText)
+      : `[atMention=true] [${safeName}]: ${sanitizePromptText(cleanText)}`;
     this.handleInbound({
       channelName: this.name,
-      senderId: event.author.user_openid || event.author.id,
+      senderId: chatId,
       senderName,
       chatId,
       text,
       messageId: event.id,
-      isGroup: true,
+      isGroup: false,
       isMentioned: true,
-      // QQ Bot only receives group messages when explicitly @mentioned, so
-      // every group message is semantically a reply to the bot.
-      isReplyToBot: true,
+      isReplyToBot: false,
+      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
+    }).catch((e) =>
+      process.stderr.write(`[QQ:${this.name}] C2C handler error: ${e}\n`),
+    );
+  }
+
+  private handleGroup(event: QQGroupMessageEvent): void {
+    if (!event.group_openid) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group message dropped: missing group_openid\n`,
+      );
+      return;
+    }
+    if (!event.author) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group message dropped: missing author\n`,
+      );
+      return;
+    }
+    if (event.author.bot) return;
+    const chatId = event.group_openid;
+    this.chatTypeMap.set(chatId, 'group');
+
+    // Deduplicate before prepareGroupMessage to avoid side effects
+    // on duplicate events from reconnect replay.
+    if (this.isDuplicate(event.id)) return;
+
+    const result = this.prepareGroupMessage(event, chatId);
+    if (!result) return;
+    const { isAtBot, isSlash, text, senderName } = result;
+
+    // GROUP_AT_MESSAGE_CREATE only fires when the bot IS @mentioned, so
+    // finalIsAtBot is unconditionally true. If isAtBot (from mentions array)
+    // was false due to a platform-side mention detection quirk, still treat
+    // it as @-bot to prevent silent message drops.
+    if (!isAtBot) {
+      process.stderr.write(
+        `[QQ:${this.name}] GROUP_AT_MESSAGE_CREATE with isAtBot=false, forcing true (event type guarantees @-bot)\n`,
+      );
+    }
+    const finalIsAtBot = true;
+
+    // Fix the text template: replace [atMention=false] with [atMention=true]
+    // since the event type guarantees the message was @-bot.
+    const correctedText = !isAtBot
+      ? text.replace('[atMention=false]', '[atMention=true]')
+      : text;
+
+    // GROUP_AT_MESSAGE_CREATE always has finalIsAtBot=true, so @-bot
+    // messages are always delivered. Log when active messages are disabled.
+    if (this.groupActiveMsgEnabled.get(chatId) === false) {
+      process.stderr.write(
+        `[QQ:${this.name}] handleGroup: active messages disabled but @-bot allowed through (passive)\n`,
+      );
+    }
+
+    this.replyMsgId.set(chatId, event.id);
+    this.saveQQState();
+    this.handleInbound({
+      channelName: this.name,
+      senderId:
+        event.author.id ||
+        event.author.user_openid ||
+        event.author.member_openid ||
+        'unknown',
+      senderName,
+      chatId,
+      text: correctedText,
+      messageId: event.id,
+      isGroup: true,
+      isMentioned: finalIsAtBot,
+      isReplyToBot: finalIsAtBot,
       ...(isSlash ? {} : { alreadyPrefixed: true as const }),
     }).catch((e) =>
       process.stderr.write(`[QQ:${this.name}] Group handler error: ${e}\n`),
+    );
+  }
+  private handleGroupAll(event: QQGroupMessageEvent): void {
+    if (!event.group_openid) return;
+    const chatId = event.group_openid;
+    const isNewGroup = !this.chatTypeMap.has(chatId);
+    this.chatTypeMap.set(chatId, 'group');
+    if (isNewGroup) this.saveQQState();
+
+    if (this.groupActiveMsgEnabled.get(chatId) === false) {
+      process.stderr.write(
+        `[QQ:${this.name}] handleGroupAll blocked: active messages disabled for ${sanitizeLogText(chatId, 64)}\n`,
+      );
+      return;
+    }
+
+    if (!event.author) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group all-message dropped: missing author\n`,
+      );
+      return;
+    }
+    if (event.author.bot) return;
+
+    const rawPolicy = this.qqConfig.groupAllPolicy;
+    const policy =
+      rawPolicy === 'keyword' || rawPolicy === 'all' ? rawPolicy : 'log';
+
+    if (policy === 'log') {
+      const senderName =
+        event.author?.username ||
+        event.author?.id ||
+        event.author?.member_openid ||
+        'unknown';
+      process.stderr.write(
+        `[QQ:${this.name}] Group ${sanitizeLogText(chatId, 64)}: log policy — message from ${sanitizeLogText(senderName, 64)} not forwarded\n`,
+      );
+      return;
+    }
+
+    if (this.isDuplicate(event.id)) return;
+
+    const result = this.prepareGroupMessage(event, chatId);
+    if (!result) return;
+    const { isSlash, text, senderName, isAtBot } = result;
+
+    if (isAtBot) {
+      this.replyMsgId.set(chatId, event.id);
+      this.saveQQState();
+    }
+
+    if (policy === 'keyword') {
+      if (!this._keywordTriggerCache) {
+        this._keywordTriggerCache = (this.qqConfig.keywordTriggers ?? [])
+          .filter((kw) => kw.length > 0)
+          .map((kw) => kw.toLowerCase().normalize('NFC'));
+      }
+      if (this._keywordTriggerCache.length === 0) return;
+      const cleanText = (event.content || '')
+        .replace(/<@[^>]{1,64}>/g, '')
+        .trim()
+        .toLowerCase()
+        .normalize('NFC');
+      const matched = this._keywordTriggerCache.some((kw) =>
+        cleanText.includes(kw),
+      );
+      if (!matched) return;
+    }
+
+    this.handleInbound({
+      channelName: this.name,
+      chatId,
+      text,
+      senderId:
+        event.author.id ||
+        event.author.user_openid ||
+        event.author.member_openid ||
+        'unknown',
+      senderName,
+      messageId: event.id,
+      isGroup: true,
+      isMentioned: isAtBot,
+      isReplyToBot: isAtBot,
+      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
+    }).catch((e) => {
+      process.stderr.write(`[QQ:${this.name}] handleGroupAll error: ${e}\n`);
+    });
+  }
+
+  // ── Group management events ────────────────────────────────────
+
+  private handleGroupAddRobot(event: GroupAddRobotEvent): void {
+    const groupId = event.group_openid;
+    if (!groupId) return;
+    this.chatTypeMap.set(groupId, 'group');
+    this.saveQQState();
+    process.stderr.write(
+      `[QQ:${this.name}] Added to group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}\n`,
+    );
+  }
+
+  private handleGroupDelRobot(event: GroupDelRobotEvent): void {
+    const groupId = event.group_openid;
+    if (!groupId) return;
+    this.chatTypeMap.delete(groupId);
+    this.groupActiveMsgEnabled.delete(groupId);
+    // msgSeqMap is keyed by message ID, not group_openid — get the
+    // message ID from replyMsgId before deleting the reply entry.
+    const replyEntry = this.replyMsgId.get(groupId);
+    if (replyEntry) this.msgSeqMap.delete(replyEntry);
+    this.replyMsgId.delete(groupId);
+    this.botOpenIdByGroup.delete(groupId);
+    // Clean up cron buffers targeting this group
+    if (this.qqConfig['cron-msg-experimental']) {
+      for (const [sid, entry] of this.cronBuffer) {
+        const target = this.router.getTarget(sid);
+        if (target?.chatId === groupId) {
+          if (entry.timer) clearTimeout(entry.timer);
+          this.cronBuffer.delete(sid);
+        }
+      }
+    }
+    this.saveQQState();
+    process.stderr.write(
+      `[QQ:${this.name}] Removed from group ${sanitizeLogText(groupId, 64)} by ${sanitizeLogText(event.op_member_openid, 64)}\n`,
+    );
+  }
+
+  private handleGroupMsgReject(event: GroupMsgToggleEvent): void {
+    if (!event.group_openid) return;
+    this.groupActiveMsgEnabled.set(event.group_openid, false);
+    this.saveQQState();
+    process.stderr.write(
+      `[QQ:${this.name}] Active msg disabled for group ${sanitizeLogText(event.group_openid, 64)}\n`,
+    );
+  }
+
+  private handleGroupMsgReceive(event: GroupMsgToggleEvent): void {
+    if (!event.group_openid) return;
+    this.groupActiveMsgEnabled.set(event.group_openid, true);
+    this.saveQQState();
+    process.stderr.write(
+      `[QQ:${this.name}] Active msg enabled for group ${sanitizeLogText(event.group_openid, 64)}\n`,
     );
   }
 }
