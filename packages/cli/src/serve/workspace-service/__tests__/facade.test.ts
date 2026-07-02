@@ -642,6 +642,77 @@ describe('createDaemonWorkspaceService', () => {
       expect(result.skills).toEqual([]);
     });
 
+    it('getWorkspaceSkillsStatus replays the last live child status when the channel is idle', async () => {
+      const liveStatus = {
+        v: 1,
+        workspaceCwd: '/ws',
+        initialized: true,
+        skills: [
+          {
+            kind: 'skill',
+            status: 'ok',
+            name: 'review',
+            description: 'Review changed code',
+            level: 'bundled',
+            modelInvocable: true,
+          },
+        ],
+      };
+      let channelLive = true;
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation((_m: string, idle: () => unknown) =>
+          Promise.resolve(channelLive ? liveStatus : idle()),
+        );
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      // Channel live: authoritative skills from the ACP child, cached.
+      const first = await svc.getWorkspaceSkillsStatus(makeCtx());
+      expect(first.initialized).toBe(true);
+      expect(first.skills.map((s) => s.name)).toEqual(['review']);
+
+      // Channel reaped: queryWorkspaceStatus falls back to the empty idle
+      // placeholder, but the facade replays the last live status so
+      // skill-backed slash commands (e.g. /review) keep autocompleting.
+      channelLive = false;
+      const second = await svc.getWorkspaceSkillsStatus(makeCtx());
+      expect(second.initialized).toBe(true);
+      expect(second.skills.map((s) => s.name)).toEqual(['review']);
+    });
+
+    it('getWorkspaceSkillsStatus refreshes the cached status on a newer live answer', async () => {
+      const statuses = [
+        {
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: true,
+          skills: [{ kind: 'skill', status: 'ok', name: 'review' }],
+        },
+        {
+          v: 1,
+          workspaceCwd: '/ws',
+          initialized: true,
+          skills: [
+            { kind: 'skill', status: 'ok', name: 'review' },
+            { kind: 'skill', status: 'ok', name: 'plan' },
+          ],
+        },
+      ];
+      let call = 0;
+      const queryWorkspaceStatus = vi
+        .fn()
+        .mockImplementation(() => Promise.resolve(statuses[call++]));
+      const svc = createDaemonWorkspaceService(
+        makeDeps({ queryWorkspaceStatus, boundWorkspace: '/ws' }),
+      );
+
+      await svc.getWorkspaceSkillsStatus(makeCtx());
+      const refreshed = await svc.getWorkspaceSkillsStatus(makeCtx());
+      expect(refreshed.skills.map((s) => s.name)).toEqual(['review', 'plan']);
+    });
+
     it('getWorkspaceProvidersStatus uses daemon-local provider when present', async () => {
       const queryWorkspaceStatus = vi
         .fn()
