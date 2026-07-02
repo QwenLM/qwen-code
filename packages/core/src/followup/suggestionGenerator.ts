@@ -239,6 +239,15 @@ const ALLOWED_SINGLE_WORDS = new Set([
 ]);
 
 /**
+ * Abbreviations whose trailing period should not look like a sentence boundary.
+ * The negative lookbehind skips common honorifics, abbreviations, and Latin
+ * shorthands (e.g., i.e.) so that "Dr. Smith" or "Weeds vs. Wildflowers" is
+ * not mistaken for two sentences.
+ */
+const MULTIPLE_SENTENCES_RE =
+  /(?<!\b(?:vs|Mr|Mrs|Dr|Ms|Prof|Sr|Jr|St|etc|eg|ie|e\.g|i\.e))[.!?]\s+[A-Z]/;
+
+/**
  * Returns the filter reason if the suggestion should be suppressed, or null if it passes.
  */
 export function getFilterReason(suggestion: string): string | null {
@@ -298,7 +307,7 @@ export function getFilterReason(suggestion: string): string | null {
     if (suggestion.length > 30) return 'too_many_words';
   }
   if (suggestion.length >= 100) return 'too_long';
-  if (/[.!?]\s+[A-Z]/.test(suggestion)) return 'multiple_sentences';
+  if (MULTIPLE_SENTENCES_RE.test(suggestion)) return 'multiple_sentences';
   if (/[\n*]|\*\*/.test(suggestion)) return 'has_formatting';
 
   if (
