@@ -76,12 +76,15 @@ html *::after {
 
 /*
  * Re-enable selection on user-facing text regions: message bodies, code
- * blocks, the editor's contenteditable surface, and any dialog / panel
- * whose root opts in via `data-user-selectable`. Plain attribute selectors
+ * blocks, the editor's contenteditable surface, any dialog / panel whose
+ * root opts in via `data-user-selectable`, and all ARIA dialogs (tool
+ * approval, MCP config, theme picker, etc.). Plain attribute selectors
  * have specificity (0,1,0) which beats the blanket `html *` at (0,0,1).
  */
 [data-user-selectable],
 [data-user-selectable] *,
+[role='dialog'],
+[role='dialog'] *,
 .cm-content,
 .cm-line,
 input,
@@ -95,20 +98,21 @@ textarea,
 /*
  * iOS Safari auto-zooms any <input> / <textarea> / contenteditable whose
  * computed font-size is < 16px when focused. The composer editor sits at
- * 14px in the desktop theme (`.editorArea .cm-content` at specificity
- * 0,2,0), so bump it to 16px on iPhone only — keeps the tighter desktop
- * layout and prevents the jarring zoom-in on mobile. `.app` is prepended
- * to raise specificity to (0,3,0), beating the editor theme selectors.
- * The selector matches both Safari (iPhone) and Chrome-on-iPhone (CriOS).
+ * 14px in the desktop theme (EditorView.theme at specificity 0,2,0 and
+ * `.editorArea .cm-content` in ChatEditor.module.css also at 0,2,0), so
+ * bump it to 16px on iPhone only. `#root [data-composer]` gives specificity
+ * (1,2,0), reliably beating the editor theme selectors. `[data-composer]`
+ * is set on the editorShell div in ChatEditor.tsx; the selector matches
+ * both Safari (iPhone) and Chrome-on-iPhone (CriOS).
  */
 @supports (-webkit-touch-callout: none) {
   @media only screen and (max-device-width: 480px),
     only screen and (-webkit-device-pixel-ratio: 3) and (max-device-width: 900px) {
-    .app .cm-content,
-    .app .cm-line,
-    .app input,
-    .app textarea,
-    .app [contenteditable='true'] {
+    #root [data-composer] .cm-content,
+    #root [data-composer] .cm-line,
+    #root [data-composer] input,
+    #root [data-composer] textarea,
+    #root [data-composer] [contenteditable='true'] {
       font-size: 16px;
     }
   }
