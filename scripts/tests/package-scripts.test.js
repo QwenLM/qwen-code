@@ -155,6 +155,51 @@ describe('package scripts', () => {
     }
   });
 
+  it('exits when a prepare step fails', () => {
+    const binDir = mkdtempSync(path.join(tmpdir(), 'qwen-prepare-fail-'));
+    const logFile = path.join(binDir, 'commands.log');
+    writeFileSync(logFile, '');
+
+    try {
+      if (process.platform === 'win32') {
+        writeFileSync(path.join(binDir, 'husky.cmd'), '@exit /b 7\r\n');
+        writeFileSync(
+          path.join(binDir, 'npm.cmd'),
+          '@echo npm %* >> "%PREPARE_LOG_FILE%"\r\n',
+        );
+      } else {
+        writeFileSync(path.join(binDir, 'husky'), '#!/bin/sh\nexit 7\n');
+        writeFileSync(
+          path.join(binDir, 'npm'),
+          '#!/bin/sh\necho "npm $*" >> "$PREPARE_LOG_FILE"\n',
+        );
+        chmodSync(path.join(binDir, 'husky'), 0o755);
+        chmodSync(path.join(binDir, 'npm'), 0o755);
+      }
+
+      const result = spawnSync(
+        process.execPath,
+        [path.join(root, 'scripts/prepare.js')],
+        {
+          cwd: root,
+          encoding: 'utf8',
+          env: {
+            ...process.env,
+            PATH: `${binDir}${path.delimiter}${process.env.PATH ?? ''}`,
+            PREPARE_LOG_FILE: logFile,
+            QWEN_SKIP_PREPARE: '',
+          },
+        },
+      );
+
+      expect(result.status).toBe(7);
+      expect(result.stderr).toContain('prepare: husky exited with status 7');
+      expect(readFileSync(logFile, 'utf8')).toBe('');
+    } finally {
+      rmSync(binDir, { recursive: true, force: true });
+    }
+  });
+
   it('wires release quality checks to fast explicit validation steps', () => {
     const workflow = readWorkflow('.github/workflows/release.yml');
     const qualityJob = getWorkflowJob(workflow, 'quality');
