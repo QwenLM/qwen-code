@@ -545,6 +545,64 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getCronRecurringMaxAgeDays', () => {
+    const prevEnv = process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      } else {
+        process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = prevEnv;
+      }
+    });
+
+    it('defaults to 7 days and follows the setting', () => {
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(7);
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 30,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(30);
+    });
+
+    it('maps 0 to Infinity (no expiry)', () => {
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 0,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(Infinity);
+    });
+
+    it('QWEN_CODE_CRON_MAX_AGE_DAYS overrides the setting', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '90';
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 30,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(90);
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '0';
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(
+        Infinity,
+      );
+    });
+
+    it('falls back to the default on invalid values', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = 'not-a-number';
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(7);
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: -3,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(7);
+    });
+  });
+
   describe('getTeamMemorySyncEnabled', () => {
     const prevEnv = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
     afterEach(() => {
@@ -3491,7 +3549,8 @@ describe('Server Config (config.ts)', () => {
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     const options = lastCall?.at(-1) as
-      LoadServerHierarchicalMemoryOptions | undefined;
+      | LoadServerHierarchicalMemoryOptions
+      | undefined;
     expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
 
     await options?.onInstructionsLoaded?.({
@@ -5835,8 +5894,9 @@ describe('Model Switching and Config Updates', () => {
     }
 
     it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = new Config(baseParams);
       const parentGenerator = {
         generateContentStream: vi.fn(),
@@ -5883,8 +5943,9 @@ describe('Model Switching and Config Updates', () => {
     });
 
     it('falls back to the parent model id when the runtime view config has no model', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = new Config(baseParams);
       setInstanceFields(
         config,
