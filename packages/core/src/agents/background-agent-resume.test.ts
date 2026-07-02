@@ -1059,6 +1059,10 @@ describe('BackgroundAgentResumeService', () => {
         model: 'agent-model',
         maxSessionTurns: 7,
         maxToolCalls: 11,
+        // Deliberately out of range: the resume path must re-normalize
+        // persisted values with Config semantics (clamp to 1–100), so a
+        // malformed or tampered sidecar cannot bypass the nesting cap.
+        maxSubagentDepth: 5000,
       },
     });
     fs.writeFileSync(
@@ -1121,6 +1125,7 @@ describe('BackgroundAgentResumeService', () => {
     expect(overriddenConfig.getModel()).toBe('agent-model');
     expect(overriddenConfig.getMaxSessionTurns()).toBe(7);
     expect(overriddenConfig.getMaxToolCalls()).toBe(11);
+    expect(overriddenConfig.getMaxSubagentDepth()).toBe(100);
   }, 20000);
 
   it('restores the persisted launch depth so a resumed nested agent keeps its level', async () => {

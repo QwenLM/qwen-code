@@ -1367,7 +1367,7 @@ const SETTINGS_SCHEMA = {
         requiresRestart: false,
         default: 5,
         description:
-          'Maximum number of nested sub-agent levels. 1 disables nesting (sub-agents cannot spawn sub-agents); the default 5 allows a sub-agent to spawn sub-agents up to five levels deep. Values below 1 are clamped to 1. Teammates, forks, and the workflow tool are excluded from nesting.',
+          'Maximum sub-agent nesting depth (1-based levels: a top-level sub-agent is level 1). 1 keeps sub-agents available but disables nesting; the default 5 allows nesting up to five levels deep. Values clamp to the range 1-100; non-finite values fall back to the default. Teammates, forks, and workflow-spawned agents never nest regardless of this setting. Overridable via --max-subagent-depth.',
         showInDialog: false,
       },
       chatCompression: {

@@ -1216,6 +1216,26 @@ function loadMemoryPressureConfig(): MemoryPressureConfig {
   return config;
 }
 
+/**
+ * Normalizes a maxSubagentDepth value: absent or non-finite values fall back
+ * to the default of 5 (NaN would silently block all nesting, Infinity — e.g.
+ * JSON `1e309` — would unbound the recursion cap), and finite values floor
+ * and clamp to 1–100. Values below 1 clamp up so the knob never disables
+ * sub-agents outright — it only bounds nesting; 100 caps typos the way
+ * maxToolCalls' ceiling does.
+ *
+ * Shared by the Config constructor and the resume path that restores
+ * persisted launch flags, so a malformed or tampered agent sidecar cannot
+ * bypass the nesting cap.
+ */
+export function normalizeMaxSubagentDepth(
+  value: number | null | undefined,
+): number {
+  return value == null || !Number.isFinite(value)
+    ? 5
+    : Math.min(100, Math.max(1, Math.floor(value)));
+}
+
 function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
   const raw = process.env[envName];
   if (!raw) {
@@ -1715,16 +1735,7 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
-    // Default 5 (nesting on). Explicit values below 1 clamp to 1 so the knob
-    // never disables sub-agents outright — it only bounds nesting. This
-    // setting is the recursion guardrail, so non-finite values (NaN would
-    // silently block all nesting, Infinity would unbound it) fall back to the
-    // default, and 100 caps typos the way maxToolCalls' ceiling does.
-    this.maxSubagentDepth =
-      params.maxSubagentDepth == null ||
-      !Number.isFinite(params.maxSubagentDepth)
-        ? 5
-        : Math.min(100, Math.max(1, Math.floor(params.maxSubagentDepth)));
+    this.maxSubagentDepth = normalizeMaxSubagentDepth(params.maxSubagentDepth);
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
     const clearContextOnIdle = params.clearContextOnIdle;

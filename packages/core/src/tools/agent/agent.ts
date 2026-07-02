@@ -91,7 +91,11 @@ import {
   formatStopHookBlockingCapWarning,
 } from '../../hooks/stopHookCap.js';
 import { toModelVisibleSubagentResult } from '../../agents/subagent-result.js';
-import { ApprovalMode, Config } from '../../config/config.js';
+import {
+  ApprovalMode,
+  Config,
+  normalizeMaxSubagentDepth,
+} from '../../config/config.js';
 import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
 import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
@@ -440,7 +444,12 @@ function applyPersistedCliFlagOverrides(
     ov.getMaxToolCalls = () => flags.maxToolCalls;
   }
   if (flags.maxSubagentDepth !== undefined) {
-    ov.getMaxSubagentDepth = () => flags.maxSubagentDepth;
+    // Re-normalize across the serialization boundary: a malformed or
+    // tampered sidecar (JSON `1e309` parses to Infinity; JSON.stringify
+    // turns Infinity into null) must not bypass the nesting cap for
+    // resumed agents. Same semantics as the Config constructor.
+    const maxSubagentDepth = normalizeMaxSubagentDepth(flags.maxSubagentDepth);
+    ov.getMaxSubagentDepth = () => maxSubagentDepth;
   }
 }
 
