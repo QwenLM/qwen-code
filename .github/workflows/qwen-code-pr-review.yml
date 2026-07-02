@@ -300,9 +300,9 @@ jobs:
 
   review-pr:
     needs: ['review-config', 'delay-automatic-review', 'authorize']
-    # pull_request_target routing (every path additionally gated by the
-    # `authorize` job = the principal has write+ permission):
-    # - review_requested checks the requester and skips delay
+    # pull_request_target routing (all paths additionally pass through
+    # `authorize`; automatic PR events are precheck-gated, while explicit
+    # review_requested events check the requester and skip delay):
     # - opened/synchronize uses delay-automatic-review
     # - reopened/ready_for_review runs immediately
     # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
