@@ -63,6 +63,7 @@ const CDP_PATH = '/cdp';
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
 const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
+/** Stdio MCP adapter command used by the optional CDP browser automation bridge. */
 const CDP_MCP_COMMAND_ENV = 'QWEN_CDP_MCP_COMMAND';
 const RUNTIME_MCP_RETRY_DELAY_MS = 250;
 const RUNTIME_MCP_RETRY_ATTEMPTS = 20;
@@ -101,6 +102,9 @@ function buildChromeDevToolsMcpRuntimeConfig(
   }
   const command = process.env[CDP_MCP_COMMAND_ENV]?.trim();
   if (!command) {
+    writeStderrLine(
+      `qwen serve: set ${CDP_MCP_COMMAND_ENV} to enable browser automation MCP (chrome-devtools-mcp is no longer bundled)`,
+    );
     return undefined;
   }
   return {

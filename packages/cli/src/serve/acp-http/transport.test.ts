@@ -27,10 +27,7 @@ import {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import {
-  SessionService,
-  Storage,
-} from '@qwen-code/qwen-code-core';
+import { SessionService, Storage } from '@qwen-code/qwen-code-core';
 import {
   resetHomeEnvBootstrapForTesting,
   SettingScope,
@@ -52,10 +49,7 @@ import {
   WorkspaceSettingsPartialPersistError,
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
-import {
-  type AcpHttpHandle,
-  mountAcpHttp,
-} from './index.js';
+import { type AcpHttpHandle, mountAcpHttp } from './index.js';
 import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
@@ -6407,6 +6401,10 @@ describe('ACP WebSocket transport security', () => {
     previousCdpMcpCommand = process.env['QWEN_CDP_MCP_COMMAND'];
   });
 
+  async function yieldImmediate(): Promise<void> {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+
   function startServer(
     opts: {
       token?: string;
@@ -6557,13 +6555,34 @@ describe('ACP WebSocket transport security', () => {
 
   it('does not register chrome-devtools MCP without an explicit CDP MCP command', async () => {
     delete process.env['QWEN_CDP_MCP_COMMAND'];
+    stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     const ws = await wsConnect();
     await initializeCdpBridge(ws);
 
-    await new Promise((resolve) => setTimeout(resolve, 30));
+    await yieldImmediate();
     expect(bridge.runtimeMcpAdds).toHaveLength(0);
     expect(bridge.runtimeMcpRemoves).toHaveLength(0);
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (chrome-devtools-mcp is no longer bundled)',
+    );
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
+  it('treats a whitespace-only CDP MCP command as unset', async () => {
+    process.env['QWEN_CDP_MCP_COMMAND'] = '   ';
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await yieldImmediate();
+    expect(bridge.runtimeMcpAdds).toHaveLength(0);
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (chrome-devtools-mcp is no longer bundled)',
+    );
 
     ws.close();
     await new Promise<void>((resolve) => ws.once('close', () => resolve()));
@@ -6595,6 +6614,21 @@ describe('ACP WebSocket transport security', () => {
       name: 'chrome-devtools',
       originatorClientId: bridge.runtimeMcpAdds[0]?.originatorClientId,
     });
+  });
+
+  it('passes a custom CDP MCP command through to the runtime config', async () => {
+    process.env['QWEN_CDP_MCP_COMMAND'] = '/opt/custom/cdp-adapter';
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+    expect(bridge.runtimeMcpAdds[0]?.config).toMatchObject({
+      command: '/opt/custom/cdp-adapter',
+    });
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
   });
 
   it('keeps chrome-devtools MCP registered while a replacement CDP bridge is active', async () => {
