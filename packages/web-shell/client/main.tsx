@@ -93,6 +93,9 @@ function getSessionIdFromUrl(): string | undefined {
 function replaceStandaloneSessionUrl(sessionId: string | undefined): void {
   const url = new URL(window.location.href);
   url.pathname = sessionId ? `/session/${encodeURIComponent(sessionId)}` : '/';
+  // Strip `theme` so a bookmarked / shared URL with `?theme=light` does not
+  // permanently override the user's stored preference on every page load.
+  url.searchParams.delete('theme');
   if (!import.meta.env.DEV) {
     url.searchParams.delete('token');
     url.searchParams.delete('daemon');

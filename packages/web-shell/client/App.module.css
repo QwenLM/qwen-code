@@ -114,10 +114,13 @@
     /* Show immediately on open; only the close path needs the delay above. */
     transition-delay: 0s;
     /* With `viewport-fit=cover`, the fixed drawer extends behind the status
-       bar and home indicator. Push the sidebar content into the safe area
-       while keeping the backdrop full-screen (it is a sibling, not a child). */
+       bar, home indicator, and landscape notch. Push the sidebar content
+       into the safe area while keeping the backdrop full-screen (it is a
+       sibling, not a child). */
     padding-top: env(safe-area-inset-top);
     padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
   }
 
   .mobileBackdrop {

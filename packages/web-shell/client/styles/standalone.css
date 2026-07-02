@@ -30,12 +30,14 @@ html.theme-light,
 html.theme-light body {
   background: #ffffff;
   color: #0a0a0b;
+  color-scheme: light;
 }
 
 html.theme-dark,
 html.theme-dark body {
   background: #0d0d0d;
   color: #fafafa;
+  color-scheme: dark;
 }
 
 /*
@@ -83,8 +85,8 @@ html *::after {
  */
 [data-user-selectable],
 [data-user-selectable] *,
-[role='dialog'],
-[role='dialog'] *,
+[role='dialog']:not([data-mobile-drawer]),
+[role='dialog']:not([data-mobile-drawer]) *,
 .cm-content,
 .cm-line,
 input,
@@ -100,19 +102,25 @@ textarea,
  * computed font-size is < 16px when focused. The composer editor sits at
  * 14px in the desktop theme (EditorView.theme at specificity 0,2,0 and
  * `.editorArea .cm-content` in ChatEditor.module.css also at 0,2,0), so
- * bump it to 16px on iPhone only. `#root [data-composer]` gives specificity
- * (1,2,0), reliably beating the editor theme selectors. `[data-composer]`
- * is set on the editorShell div in ChatEditor.tsx; the selector matches
- * both Safari (iPhone) and Chrome-on-iPhone (CriOS).
+ * bump it to 16px on iPhone only. The composer uses `#root [data-composer]`
+ * at specificity (1,2,0) to beat the EditorView.theme. Other text inputs
+ * (dialogs, sidebar search) use `#root input[type=...]` at (1,1,0). Both
+ * match Safari (iPhone) and Chrome-on-iPhone (CriOS).
  */
 @supports (-webkit-touch-callout: none) {
   @media only screen and (max-device-width: 480px),
     only screen and (-webkit-device-pixel-ratio: 3) and (max-device-width: 900px) {
     #root [data-composer] .cm-content,
     #root [data-composer] .cm-line,
-    #root [data-composer] input,
-    #root [data-composer] textarea,
-    #root [data-composer] [contenteditable='true'] {
+    #root input[type='text'],
+    #root input[type='search'],
+    #root input[type='password'],
+    #root input[type='email'],
+    #root input[type='url'],
+    #root input[type='tel'],
+    #root input[type='number'],
+    #root textarea,
+    #root [contenteditable='true'] {
       font-size: 16px;
     }
   }
