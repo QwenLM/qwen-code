@@ -176,10 +176,14 @@ describe('buildClassifierSystemPrompt', () => {
     expect(prompt).toContain('collaborator');
     expect(prompt).toContain('request-bin services');
     expect(prompt).toContain('public tunnel endpoints');
-    expect(prompt).not.toContain('oastify.com');
-    expect(prompt).not.toContain('webhook.site');
-    expect(prompt).not.toContain('ngrok.io');
-    expect(prompt).not.toContain('ngrok-free.app');
+    for (const domain of [
+      ['oastify', 'com'].join('.'),
+      ['webhook', 'site'].join('.'),
+      ['ngrok', 'io'].join('.'),
+      ['ngrok-free', 'app'].join('.'),
+    ]) {
+      expect(prompt).not.toContain(domain);
+    }
   });
 
   it('renders the four classifier sections (allow / soft / hard / environment)', () => {

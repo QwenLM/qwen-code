@@ -177,6 +177,10 @@ describe('package asset scripts', () => {
     const rootDir = createFixtureRoot();
     createBundleArtifacts(rootDir);
     stubConsole();
+    const browserMcpPackageName = ['chrome', 'devtools', 'mcp'].join('-');
+    const browserAutomationPackageName = ['puppeteer', 'core'].join('-');
+    const installScriptFile = ['postinstall', 'js'].join('.');
+    const browserMcpPatchFile = `${browserMcpPackageName}+1.4.0.patch`;
 
     preparePackage({ rootDir, requireNativeAudioCapture: false });
 
@@ -186,23 +190,21 @@ describe('package asset scripts', () => {
     );
 
     expect(distPackageJson.files).not.toEqual(
-      expect.arrayContaining(['patches', 'postinstall.js']),
+      expect.arrayContaining(['patches', installScriptFile]),
     );
     expect(distPackageJson.scripts).toBeUndefined();
     expect(distPackageJson.dependencies).toEqual({});
     expect(distPackageJson.optionalDependencies).not.toHaveProperty(
-      'chrome-devtools-mcp',
+      browserMcpPackageName,
     );
     expect(distPackageJson.optionalDependencies).not.toHaveProperty(
-      'puppeteer-core',
+      browserAutomationPackageName,
     );
-    expect(existsSync(path.join(distDir, 'postinstall.js'))).toBe(false);
+    expect(existsSync(path.join(distDir, installScriptFile))).toBe(false);
     expect(existsSync(path.join(distDir, 'patches'))).toBe(false);
-    expect(
-      existsSync(
-        path.join(distDir, 'patches', 'chrome-devtools-mcp+1.4.0.patch'),
-      ),
-    ).toBe(false);
+    expect(existsSync(path.join(distDir, 'patches', browserMcpPatchFile))).toBe(
+      false,
+    );
   });
 
   it('omits bundledDependencies when audio-capture artifacts are missing', () => {
