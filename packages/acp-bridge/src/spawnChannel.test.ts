@@ -236,6 +236,22 @@ describe('createStderrForwarder', () => {
     stderrSpy.mockRestore();
   });
 
+  it('redacts credentials flushed via onEnd (partial line)', () => {
+    const captured: Array<{ line: string; level?: string }> = [];
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const forwarder = createStderrForwarder({
+      prefix: '[p] ',
+      onDiagnosticLine: (l, lvl) => captured.push({ line: l, level: lvl }),
+    });
+    forwarder.onData('Bearer secrettoken123');
+    expect(captured).toHaveLength(0);
+    forwarder.onEnd();
+    expect(captured).toHaveLength(1);
+    expect(captured[0]!.line).not.toContain('secrettoken123');
+    expect(captured[0]!.line).toContain('<redacted>');
+    stderrSpy.mockRestore();
+  });
+
   it('works without onDiagnosticLine (still writes to stderr)', () => {
     const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
     const forwarder = createStderrForwarder({
@@ -390,19 +406,23 @@ describe('getAcpMemoryArgs', () => {
     const args = getAcpMemoryArgs();
     expect(args).toContain('--expose-gc');
     const heapArg = args.find((a) => a.startsWith('--max-old-space-size='));
+    /* eslint-disable vitest/no-conditional-expect -- heapArg presence depends on system memory */
     if (heapArg) {
       const sizeMB = Number(heapArg.split('=')[1]);
       expect(sizeMB).toBeGreaterThan(0);
       expect(sizeMB).toBeLessThanOrEqual(16_384);
     }
+    /* eslint-enable vitest/no-conditional-expect */
   });
 
   it('respects the 16GB cap', () => {
     const args = getAcpMemoryArgs();
     const heapArg = args.find((a) => a.startsWith('--max-old-space-size='));
+    /* eslint-disable vitest/no-conditional-expect -- heapArg presence depends on system memory */
     if (heapArg) {
       const sizeMB = Number(heapArg.split('=')[1]);
       expect(sizeMB).toBeLessThanOrEqual(16_384);
     }
+    /* eslint-enable vitest/no-conditional-expect */
   });
 });
