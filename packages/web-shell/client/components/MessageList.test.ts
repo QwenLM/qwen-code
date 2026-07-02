@@ -476,6 +476,16 @@ describe('getSessionTimelineEntries', () => {
     ]);
   });
 
+  it('does not prefer assistant text before later tool work as the final detail', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('mid'), content: "I'll check" },
+      makeAgentToolGroup('tool', 'Read'),
+    ]);
+
+    expect(entry?.detail).toBe("I'll check · 1 tool call");
+  });
+
   it('uses the final answer detail without exposing thinking content', () => {
     const [entry] = getSessionTimelineEntries([
       makeUserMessage('u1'),
@@ -554,6 +564,17 @@ describe('getSessionTimelineEntries', () => {
     ]);
   });
 
+  it('preserves shell glob syntax in timeline labels', () => {
+    const [entry] = getSessionTimelineEntries([
+      {
+        ...makeUserShellMessage('shell'),
+        command: 'find packages/*/src/*.ts',
+      },
+    ]);
+
+    expect(entry?.label).toBe('find packages/*/src/*.ts');
+  });
+
   it('keeps a single prompt turn as no activity', () => {
     expect(getSessionTimelineEntries([makeUserMessage('u1')])).toEqual([
       {
@@ -574,7 +595,7 @@ describe('getSessionTimelineEntries', () => {
     expect(/[\uD800-\uDFFF]/u.test(entry?.label ?? '')).toBe(false);
   });
 
-  it('cleans markdown markers from timeline labels and details', () => {
+  it('cleans markdown markers from timeline details', () => {
     const [entry] = getSessionTimelineEntries([
       {
         ...makeUserMessage('u1'),
@@ -587,7 +608,7 @@ describe('getSessionTimelineEntries', () => {
       },
     ]);
 
-    expect(entry?.label).toBe('介绍下 agent-reproduce-align');
+    expect(entry?.label).toBe('介绍下 `agent-reproduce-align`');
     expect(entry?.detail).toBe(
       'agent-reproduce-align – 对齐测试技能 用途： 在 Qwen Code 中运行参考代码，中文强调·范围—引用「下划线，保留 snake_case。',
     );

@@ -532,8 +532,11 @@ export function getTurnTimelineNode(item: DisplayItem): TurnTimelineNode {
 function compactTimelineText(
   raw: string | null | undefined,
   maxLength: number,
+  options: { stripMarkdown?: boolean } = {},
 ): string {
-  const compact = cleanTimelineMarkdown(raw).replace(/\s+/g, ' ').trim();
+  const source =
+    options.stripMarkdown === true ? cleanTimelineMarkdown(raw) : (raw ?? '');
+  const compact = source.replace(/\s+/g, ' ').trim();
   if (maxLength <= 0) return '';
   if (!compact) return '';
   const chars = Array.from(compact);
@@ -584,7 +587,7 @@ function timelineDetailSnippetForMessage(message: Message): string {
       // Thinking content may include private model reasoning; keep details label-only.
       return SESSION_TIMELINE_KIND_LABEL.thought;
     case 'assistant':
-      return compactTimelineText(message.content, 120);
+      return compactTimelineText(message.content, 120, { stripMarkdown: true });
     case 'tool_group': {
       const count = message.tools.length;
       return `${count} tool call${count === 1 ? '' : 's'}`;
@@ -593,7 +596,7 @@ function timelineDetailSnippetForMessage(message: Message): string {
       return 'plan update';
     case 'system':
       return isMidTurnInjectedDebugMessage(message)
-        ? compactTimelineText(message.content, 120)
+        ? compactTimelineText(message.content, 120, { stripMarkdown: true })
         : '';
     case 'user':
     case 'user_shell':
@@ -631,7 +634,9 @@ function timelineDetailForTurn(
       if (message.id !== finalAssistantId || message.role !== 'assistant') {
         continue;
       }
-      const finalAnswerDetail = compactTimelineText(message.content, 180);
+      const finalAnswerDetail = compactTimelineText(message.content, 180, {
+        stripMarkdown: true,
+      });
       if (finalAnswerDetail) return finalAnswerDetail;
     }
   }
@@ -669,20 +674,20 @@ export function getSessionTimelineEntries(
 
   const pushTurn = () => {
     if (!turnStart) return;
-    let finalAssistantId: string | null = null;
-    for (let i = turnItems.length - 1; i >= 0; i -= 1) {
-      const item = turnItems[i];
-      if (
-        item?.role === 'assistant' &&
-        compactTimelineText(item.content, 1).length > 0 &&
-        !item.isStreaming
-      ) {
-        finalAssistantId = item.id;
-        break;
-      }
-    }
-
     const timelineItems = groupParallelAgents(turnItems);
+    const finalAssistantIndex = findFinalAnswerIndex(
+      timelineItems,
+      -1,
+      timelineItems.length - 1,
+    );
+    const finalAssistantItem =
+      finalAssistantIndex >= 0 ? timelineItems[finalAssistantIndex] : null;
+    const finalAssistantId =
+      finalAssistantItem?.type === 'message' &&
+      finalAssistantItem.message.role === 'assistant' &&
+      !finalAssistantItem.message.isStreaming
+        ? finalAssistantItem.message.id
+        : null;
     const nodeKinds: TurnTimelineNodeKind[] = [];
     for (const item of timelineItems) {
       if (
