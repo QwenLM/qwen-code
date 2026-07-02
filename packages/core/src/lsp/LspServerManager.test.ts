@@ -582,7 +582,7 @@ describe('LspServerManager', () => {
     expect(manager.getHandles().get('clangd')?.status).toBe('READY');
   });
 
-  it('does not use LSP config env when probing command existence', async () => {
+  it('uses filtered LSP config env when probing command existence', async () => {
     const manager = createTrustedManager();
     vi.spyOn(
       manager as unknown as {
@@ -619,7 +619,7 @@ describe('LspServerManager', () => {
 
     expect(commandExists).toHaveBeenCalledWith(
       'clangd',
-      undefined,
+      { PATH: '/tmp/fake-bin', SAFE_VALUE: '1' },
       '/workspace',
     );
   });

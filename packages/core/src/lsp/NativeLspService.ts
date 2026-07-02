@@ -469,7 +469,6 @@ export class NativeLspService {
     if (openedForServer?.has(uri)) {
       return false;
     }
-    this.lastConnections.set(serverName, handle.connection);
 
     let filePath: string;
     try {
@@ -505,6 +504,7 @@ export class NativeLspService {
       },
     });
 
+    this.lastConnections.set(serverName, handle.connection);
     const nextOpened = openedForServer ?? new Set<string>();
     nextOpened.add(uri);
     this.openedDocuments.set(serverName, nextOpened);

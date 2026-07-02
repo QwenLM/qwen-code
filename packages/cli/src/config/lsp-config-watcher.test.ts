@@ -246,6 +246,25 @@ describe('LspConfigWatcher', () => {
     await stopPromise;
   });
 
+  it('unrefs the debounce timer', async () => {
+    const dir = makeTempDir();
+    const configPath = path.join(dir, '.lsp.json');
+    const watcher = new LspConfigWatcher(dir);
+    watcher.startWatching(vi.fn());
+    const onAll = chokidarMock.handlers.get('all');
+    expect(onAll).toBeDefined();
+
+    onAll?.('change', configPath);
+
+    const refreshTimer = (
+      watcher as unknown as { refreshTimer: NodeJS.Timeout | null }
+    ).refreshTimer;
+    expect(refreshTimer).toBeDefined();
+    expect(refreshTimer?.hasRef()).toBe(false);
+
+    await watcher.stopWatching();
+  });
+
   it('waits for an active listener before stopping', async () => {
     vi.useFakeTimers();
     const dir = makeTempDir();

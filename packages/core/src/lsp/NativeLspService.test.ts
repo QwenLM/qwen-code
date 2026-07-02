@@ -437,6 +437,7 @@ describe('NativeLspService', () => {
       };
       const internals = service as unknown as {
         openedDocuments: Map<string, Set<string>>;
+        lastConnections: Map<string, unknown>;
       };
       internals.openedDocuments.set(
         'typescript-language-server',
@@ -449,6 +450,12 @@ describe('NativeLspService', () => {
       await expect(reinitialize).resolves.toBeDefined();
 
       expect(firstConnection.send).toHaveBeenCalledOnce();
+      expect(internals.lastConnections.has('typescript-language-server')).toBe(
+        false,
+      );
+      expect(internals.lastConnections.get('pyright-langserver')).toBe(
+        secondConnection,
+      );
       expect(secondConnection.send).toHaveBeenCalledWith(
         expect.objectContaining({
           method: 'textDocument/didOpen',

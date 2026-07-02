@@ -419,7 +419,7 @@ export class LspServerManager {
       if (
         !(await this.commandExists(
           handle.config.command,
-          undefined,
+          handle.config.env,
           commandCwd,
         ))
       ) {

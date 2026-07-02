@@ -133,6 +133,13 @@ export class LspConfigWatcher {
         }
       });
     }, LspConfigWatcher.DEBOUNCE_MS);
+    if (
+      typeof this.refreshTimer === 'object' &&
+      this.refreshTimer !== null &&
+      'unref' in this.refreshTimer
+    ) {
+      this.refreshTimer.unref();
+    }
   }
 
   /** Drains debounced changes one at a time while preserving a trailing update. */
