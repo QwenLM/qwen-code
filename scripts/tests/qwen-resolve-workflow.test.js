@@ -185,6 +185,9 @@ describe('qwen resolve workflow', () => {
       'Check principal write permission',
     );
 
+    expect(authorizeJob).toContain(
+      "needs.precheck-pr.outputs.decision == 'allow_triage'",
+    );
     expect(authorizeStep).toContain('pull_request_target)');
     expect(authorizeStep).toContain(
       'echo "should_review=true" >> "$GITHUB_OUTPUT"',
