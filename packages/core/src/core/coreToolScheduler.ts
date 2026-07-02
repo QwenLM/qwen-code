@@ -221,6 +221,25 @@ const TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED = 'background_agent_denied';
 
 const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
 
+const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
+const TOOL_SPAN_STATUS_PERMISSION_DENIED = 'Permission denied for tool';
+const TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED =
+  'Permission denied by permission_request hook';
+const TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED =
+  'Plan mode blocked a non-read-only tool call';
+const TOOL_SPAN_STATUS_NON_INTERACTIVE_DENIED =
+  'Non-interactive mode declined permission';
+const TOOL_SPAN_STATUS_BACKGROUND_AGENT_DENIED =
+  'Background agent cannot prompt for confirmation';
+const TOOL_SPAN_STATUS_TOOL_ERROR = 'Tool execution failed';
+const TOOL_SPAN_STATUS_TOOL_EXCEPTION = 'Tool execution failed with exception';
+const TOOL_SPAN_STATUS_TOOL_CANCELLED = 'Tool execution cancelled by user';
+
+// Timeout-specific observability constants — distinguish timeouts from
+// generic tool errors in OTel traces.
+const TOOL_FAILURE_KIND_TIMEOUT = 'timeout';
+const TOOL_SPAN_STATUS_TOOL_TIMEOUT = 'Tool execution timed out';
+
 /**
  * Builds the failure ToolResult surfaced when a tool call exceeds the
  * execution timeout. Reported as a normal tool error so the model can adapt
@@ -236,19 +255,6 @@ function createToolTimeoutResult(timeoutMs: number): ToolResult {
     error: { message, type: ToolErrorType.EXECUTION_TIMEOUT },
   };
 }
-const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
-const TOOL_SPAN_STATUS_PERMISSION_DENIED = 'Permission denied for tool';
-const TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED =
-  'Permission denied by permission_request hook';
-const TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED =
-  'Plan mode blocked a non-read-only tool call';
-const TOOL_SPAN_STATUS_NON_INTERACTIVE_DENIED =
-  'Non-interactive mode declined permission';
-const TOOL_SPAN_STATUS_BACKGROUND_AGENT_DENIED =
-  'Background agent cannot prompt for confirmation';
-const TOOL_SPAN_STATUS_TOOL_ERROR = 'Tool execution failed';
-const TOOL_SPAN_STATUS_TOOL_EXCEPTION = 'Tool execution failed with exception';
-const TOOL_SPAN_STATUS_TOOL_CANCELLED = 'Tool execution cancelled by user';
 
 const TRUNCATION_PARAM_GUIDANCE =
   'Note: Your previous response was truncated due to max_tokens limit, ' +
@@ -3427,8 +3433,9 @@ export class CoreToolScheduler {
               // tool ignores the abort. A later settle from `promise` is a
               // no-op once this wrapper Promise has already resolved.
               timeoutController?.abort(
-                new Error(
+                new DOMException(
                   `Tool execution timed out after ${toolExecutionTimeoutMs}ms`,
+                  'TimeoutError',
                 ),
               );
               resolve(createToolTimeoutResult(toolExecutionTimeoutMs));
@@ -3904,11 +3911,19 @@ export class CoreToolScheduler {
           toolResult.error.type,
         );
         this.setStatusInternal(callId, 'error', errorResponse);
-        setToolSpanFailure(
-          span,
-          TOOL_FAILURE_KIND_TOOL_ERROR,
-          TOOL_SPAN_STATUS_TOOL_ERROR,
-        );
+        if (toolResult.error.type === ToolErrorType.EXECUTION_TIMEOUT) {
+          setToolSpanFailure(
+            span,
+            TOOL_FAILURE_KIND_TIMEOUT,
+            TOOL_SPAN_STATUS_TOOL_TIMEOUT,
+          );
+        } else {
+          setToolSpanFailure(
+            span,
+            TOOL_FAILURE_KIND_TOOL_ERROR,
+            TOOL_SPAN_STATUS_TOOL_ERROR,
+          );
+        }
       }
     } catch (executionError: unknown) {
       const errorMessage =
