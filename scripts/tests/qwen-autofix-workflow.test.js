@@ -18,11 +18,11 @@ const filterUnattendedCandidates =
   )?.[0] ?? '';
 const issueSandboxImageStep =
   workflow.match(
-    /- name: 'Select issue sandbox image'[\s\S]*?(?=\n      - name: 'Claim issue')/,
+    /- name: 'Select issue sandbox image'[\s\S]*?(?=\n {6}- name: 'Claim issue')/,
   )?.[0] ?? '';
 const reviewSandboxImageStep =
   workflow.match(
-    /- name: 'Select review sandbox image'[\s\S]*?(?=\n      - name: 'Triage and address')/,
+    /- name: 'Select review sandbox image'[\s\S]*?(?=\n {6}- name: 'Triage and address')/,
   )?.[0] ?? '';
 
 describe('qwen-autofix workflow', () => {
