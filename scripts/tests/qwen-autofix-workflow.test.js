@@ -18,7 +18,7 @@ const filterUnattendedCandidates =
   )?.[0] ?? '';
 const checkBotCredentialsStep =
   workflow.match(
-    /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js')/,
+    /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js \(hosted\)')/,
   )?.[0] ?? '';
 const publishPrStep =
   workflow.match(
@@ -32,14 +32,10 @@ const withdrawClaimStep =
   workflow.match(
     /- name: 'Withdraw claim on failure'[\s\S]*?(?=\n[ ]{2}# ==========)/,
   )?.[0] ?? '';
-const issueSandboxImageStep =
+const prepareQwenCliSteps =
   workflow.match(
-    /- name: 'Select issue sandbox image'[\s\S]*?(?=\n {6}- name: 'Claim issue')/,
-  )?.[0] ?? '';
-const reviewSandboxImageStep =
-  workflow.match(
-    /- name: 'Select review sandbox image'[\s\S]*?(?=\n {6}- name: 'Triage and address')/,
-  )?.[0] ?? '';
+    /- name: 'Prepare Qwen Code CLI'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
 
 describe('qwen-autofix workflow', () => {
   it('does not classify tier-2 issues with incomplete fallback comments', () => {
@@ -83,8 +79,14 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'any(. == "autofix/skip" or . == "autofix/in-progress")',
     );
-    // Tier-2 must exclude ready-for-agent bugs so they only flow through tier 1.
+    // Tier-2 must exclude ready-for-agent issues so they only flow through tier 1.
     expect(workflow).toContain('-label:${READY_FOR_AGENT_LABEL}');
+    expect(workflow).toContain(
+      '--search "is:open is:issue label:${READY_FOR_AGENT_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}"',
+    );
+    expect(workflow).not.toContain(
+      'label:${BUG_LABEL} label:${READY_FOR_AGENT_LABEL}',
+    );
   });
 
   it('keeps label-triggered issue routing guarded and diagnosable', () => {
@@ -118,7 +120,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain('sender_trusted=${sender_is_trusted}');
     expect(workflow).toContain("group: 'qwen-autofix-issue'");
     expect(workflow).toContain(
-      '(.labels // []) | map(.name) as $labels | ($labels | index($bug)) and ($labels | index($ready))',
+      '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
     expect(workflow).toContain(
       '[[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e',
@@ -130,7 +132,7 @@ describe('qwen-autofix workflow', () => {
       '"${EVENT_NAME}" == \'workflow_dispatch\' && -n "${FORCED_PR}"',
     );
     expect(workflow).toContain(
-      'is missing ${BUG_LABEL} or ${READY_FOR_AGENT_LABEL}; skipping.',
+      'is missing ${READY_FOR_AGENT_LABEL}; skipping.',
     );
     expect(workflow).not.toContain(
       "contains(github.event.issue.labels.*.name, 'type/bug')",
@@ -169,7 +171,7 @@ describe('qwen-autofix workflow', () => {
     expect(pushAndReportStep.length).toBeGreaterThan(0);
     expect(withdrawClaimStep.length).toBeGreaterThan(0);
     expect(workflow.indexOf("- name: 'Check bot credentials'")).toBeLessThan(
-      workflow.indexOf("- name: 'Set up Node.js'"),
+      workflow.indexOf("- name: 'Set up Node.js (hosted)'"),
     );
     expect(checkBotCredentialsStep).toContain(
       'GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq \'.login\'',
@@ -212,30 +214,28 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('falls back to the floating sandbox image only when the matching version image is missing', () => {
-    expect(issueSandboxImageStep.length).toBeGreaterThan(0);
-    expect(reviewSandboxImageStep.length).toBeGreaterThan(0);
-    for (const step of [issueSandboxImageStep, reviewSandboxImageStep]) {
-      expect(step).toContain('npm view @qwen-code/qwen-code@latest version');
+  it('runs heavy autofix jobs on dedicated runners without sandbox images', () => {
+    expect(workflow).toContain('["self-hosted", "linux", "x64", "autofix"]');
+    expect(workflow).toContain('AUTOFIX_ECS_RUNNER_DISABLED');
+    expect(prepareQwenCliSteps).toHaveLength(2);
+    for (const step of prepareQwenCliSteps) {
       expect(step).toContain(
-        'version_image="ghcr.io/qwenlm/qwen-code:${qwen_version}"',
+        'qwen_version="$(node -p "require(\'./package.json\').version")"',
       );
-      expect(step).toContain('fallback_image="ghcr.io/qwenlm/qwen-code:latest"');
-      expect(step).toContain('docker manifest inspect "${version_image}"');
-      expect(step).toContain('docker manifest inspect "${fallback_image}"');
-      expect(step).toContain('QWEN_SANDBOX_IMAGE=${sandbox_image}');
+      expect(step).toContain('current_version="$(qwen --version');
       expect(step).toContain(
-        'echo "qwen_version=${qwen_version}" >> "${GITHUB_OUTPUT}"',
+        'npm install -g "@qwen-code/qwen-code@${qwen_version}"',
       );
-      expect(step).toContain(
-        '::warning::Sandbox image ${version_image} is not available; falling back to ${fallback_image}.',
-      );
+      expect(step).not.toContain('@latest');
     }
-    expect(workflow).toContain(
-      "version: '${{ steps.issue_sandbox_image.outputs.qwen_version }}'",
-    );
-    expect(workflow).toContain(
-      "version: '${{ steps.review_sandbox_image.outputs.qwen_version }}'",
-    );
+    expect(workflow).toContain('run_shell_command(npx vitest)');
+    expect(workflow).toContain('"sandbox": false');
+    expect(workflow).not.toContain('"sandbox": true');
+    expect(workflow).not.toContain('QwenLM/qwen-code-action@');
+    expect(workflow).not.toContain('Select issue sandbox image');
+    expect(workflow).not.toContain('Select review sandbox image');
+    expect(workflow).not.toContain('QWEN_SANDBOX_IMAGE');
+    expect(workflow).not.toContain('ghcr.io/qwenlm/qwen-code');
+    expect(workflow).not.toContain('npm view @qwen-code/qwen-code@latest');
   });
 });
