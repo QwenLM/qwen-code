@@ -2,26 +2,36 @@ import { useState, useEffect, useRef } from 'react';
 import { dp } from './dialogStyles';
 import { useConnection, useSessions } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
-import { formatRelativeTime } from '../../utils/formatRelativeTime';
+import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
+import { useFilterInput } from '../../hooks/useFilterInput';
+import { SessionRow } from './SessionRow';
 
 interface ResumeDialogProps {
   onSelect: (sessionId: string) => void;
   onClose: () => void;
 }
 
+const LIST_ID = 'resume-session-list';
+const optionId = (index: number) => `${LIST_ID}-opt-${index}`;
+
 export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
   const { t } = useI18n();
   const connection = useConnection();
   const { sessions, loading, error } = useSessions({ autoLoad: true });
   const currentSessionId = connection.sessionId;
-  const [selectedIdx, setSelectedIdx] = useState(0);
-  const [searchQuery, setSearchQuery] = useState('');
+  // -1 = no highlight. The dialog opens with nothing highlighted and resets to
+  // none on filter edits, so Enter in the search box cannot confirm a row the
+  // user didn't pick — the highlight only appears once they press ↓/↑ or hover.
+  const [selectedIdx, setSelectedIdx] = useState(-1);
+  const { filterValue: filterQuery, inputProps } = useFilterInput(() =>
+    setSelectedIdx(-1),
+  );
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
 
-  const filtered = searchQuery
+  const filtered = filterQuery
     ? sessions.filter((s) => {
-        const q = searchQuery.toLowerCase();
+        const q = filterQuery.toLowerCase();
         return (
           (s.displayName || '').toLowerCase().includes(q) ||
           s.sessionId.toLowerCase().includes(q)
@@ -44,89 +54,87 @@ export function ResumeDialog({ onSelect, onClose }: ResumeDialogProps) {
     el?.scrollIntoView({ block: 'nearest' });
   }, [selectedIdx]);
 
+  const confirm = (index: number) => {
+    const session = filtered[index];
+    if (!session) return;
+    onSelect(session.sessionId);
+    onClose();
+  };
+
+  const { keyboardMode } = useListboxKeyboard({
+    itemCount: filtered.length,
+    activeIndex: selectedIdx,
+    onActiveIndexChange: setSelectedIdx,
+    onConfirm: confirm,
+  });
+
   useEffect(() => {
     inputRef.current?.focus();
   }, []);
 
   return (
-    <div className={dp('resume-picker', 'resume-picker-in-shell')}>
-      <div className={dp('resume-picker-search')}>
-        <span className={dp('resume-picker-search-label')}>
+    <div className={dp('picker', 'picker-in-shell')}>
+      <div className={dp('picker-search')}>
+        <span className={dp('picker-search-label')}>
           {t('resume.search')}:{' '}
         </span>
         <input
           ref={inputRef}
-          className={dp('resume-picker-search-input')}
-          value={searchQuery}
-          onChange={(e) => {
-            setSearchQuery(e.target.value);
-            setSelectedIdx(0);
-          }}
+          className={dp('picker-search-input')}
+          aria-label={t('resume.search')}
+          role="combobox"
+          aria-autocomplete="list"
+          aria-expanded="true"
+          aria-controls={LIST_ID}
+          aria-activedescendant={
+            selectedIdx >= 0 && selectedIdx < filtered.length
+              ? optionId(selectedIdx)
+              : undefined
+          }
+          {...inputProps}
           placeholder=""
         />
       </div>
 
-      <div className={dp('resume-picker-sep')} />
+      <div className={dp('picker-sep')} />
 
-      <div className={dp('resume-picker-list')} ref={listRef}>
+      <div
+        id={LIST_ID}
+        role="listbox"
+        className={dp(
+          'picker-list',
+          keyboardMode ? 'picker-keyboard-only' : undefined,
+        )}
+        ref={listRef}
+      >
         {loading && (
-          <div className={dp('resume-picker-empty')}>{t('common.loading')}</div>
+          <div className={dp('picker-empty')}>{t('common.loading')}</div>
         )}
         {!loading && error && (
-          <div className={dp('resume-picker-empty')}>
+          <div className={dp('picker-empty')}>
             {error.message || 'Failed to load sessions'}
           </div>
         )}
         {!loading && !error && filtered.length === 0 && (
-          <div className={dp('resume-picker-empty')}>
-            {searchQuery
-              ? t('resume.noMatch', { query: searchQuery })
+          <div className={dp('picker-empty')}>
+            {filterQuery
+              ? t('resume.noMatch', { query: filterQuery })
               : t('resume.none')}
           </div>
         )}
         {!loading &&
-          filtered.map((s) => {
-            const isCurrent = s.sessionId === currentSessionId;
-            return (
-              <div
-                key={s.sessionId}
-                className={dp(
-                  'resume-picker-item',
-                  'resume-picker-session-item',
-                  isCurrent ? 'resume-picker-item-current' : undefined,
-                )}
-                onClick={() => {
-                  onSelect(s.sessionId);
-                  onClose();
-                }}
-              >
-                <div className={dp('resume-picker-item-row')}>
-                  <span className={dp('resume-picker-item-title')}>
-                    {s.displayName || s.sessionId.slice(0, 8)}
-                  </span>
-                  {isCurrent && (
-                    <span className={dp('resume-picker-item-badge')}>
-                      {t('resume.current')}
-                    </span>
-                  )}
-                </div>
-                <div className={dp('resume-picker-item-meta')}>
-                  <span>
-                    {(s.updatedAt || s.createdAt) &&
-                      formatRelativeTime(s.updatedAt || s.createdAt || '', t)}
-                  </span>
-                  <span className={dp('resume-picker-item-detail')}>
-                    {t('common.clients', { count: s.clientCount ?? 0 })}
-                  </span>
-                  {s.hasActivePrompt && (
-                    <span className={dp('resume-picker-item-detail')}>
-                      {t('resume.activePrompt')}
-                    </span>
-                  )}
-                </div>
-              </div>
-            );
-          })}
+          filtered.map((s, index) => (
+            <SessionRow
+              key={s.sessionId}
+              session={s}
+              optionId={optionId(index)}
+              active={index === selectedIdx}
+              current={s.sessionId === currentSessionId}
+              currentLabel={t('resume.current')}
+              onClick={() => confirm(index)}
+              onActivate={() => setSelectedIdx(index)}
+            />
+          ))}
       </div>
     </div>
   );

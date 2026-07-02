@@ -25,6 +25,7 @@ import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
+import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import {
@@ -411,6 +412,7 @@ export function createServeApp(
       statusProvider,
       workspaceProvidersStatusProvider:
         createWorkspaceProvidersStatusProvider(),
+      workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider(),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
