@@ -21,6 +21,7 @@ import {
 } from '@google/genai';
 import type OpenAI from 'openai';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
+import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
@@ -2751,6 +2752,7 @@ describe('OpenAIContentConverter', () => {
       expect(parts?.[0]).toEqual(
         expect.objectContaining({ thought: true, text: 'chain-of-thought' }),
       );
+      expect(isOpenAIReasoningThoughtPart(parts?.[0] as Part)).toBe(true);
       expect(parts?.[1]).toEqual(
         expect.objectContaining({ text: 'final answer' }),
       );
@@ -2814,6 +2816,7 @@ describe('OpenAIContentConverter', () => {
       expect(parts?.[0]).toEqual(
         expect.objectContaining({ thought: true, text: 'thinking...' }),
       );
+      expect(isOpenAIReasoningThoughtPart(parts?.[0] as Part)).toBe(true);
       expect(parts?.[1]).toEqual(
         expect.objectContaining({ text: 'visible text' }),
       );

@@ -21,6 +21,7 @@ import { GenerateContentResponse, FinishReason } from '@google/genai';
 import type OpenAI from 'openai';
 import { safeJsonParse } from '../../utils/safeJsonParse.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
+import { createOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 import type { RequestContext, StreamingTextDeltaState } from './types.js';
 import { parseTaggedThinkingText } from './taggedThinkingParser.js';
 import {
@@ -1109,7 +1110,7 @@ export function convertOpenAIResponseToGemini(
       (choice.message as ExtendedCompletionMessage).reasoning_content ??
       (choice.message as ExtendedCompletionMessage).reasoning;
     if (reasoningText && !hasThoughtPart(textParts)) {
-      parts.push({ text: reasoningText, thought: true });
+      parts.push(createOpenAIReasoningThoughtPart(reasoningText));
     }
 
     // Handle text content
@@ -1288,7 +1289,7 @@ export function convertOpenAIChunkToGemini(
         normalizedReasoningText &&
         !requestContext.responseParsingOptions?.taggedThinkingTags
       ) {
-        parts.push({ text: normalizedReasoningText, thought: true });
+        parts.push(createOpenAIReasoningThoughtPart(normalizedReasoningText));
       } else if (
         normalizedReasoningText &&
         !requestContext.hasTaggedThinkingThought
@@ -1326,7 +1327,9 @@ export function convertOpenAIChunkToGemini(
       debugLogger.debug(
         'convertOpenAIChunkToGemini: flushing buffered reasoning for tagged stream with no tagged thought',
       );
-      parts.push({ text: requestContext.pendingReasoningText, thought: true });
+      parts.push(
+        createOpenAIReasoningThoughtPart(requestContext.pendingReasoningText),
+      );
       requestContext.pendingReasoningText = undefined;
     }
     if (choice.finish_reason && requestContext.pendingContentParts?.length) {
