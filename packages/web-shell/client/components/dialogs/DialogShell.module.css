@@ -68,6 +68,12 @@
   box-shadow: 0 18px 60px rgba(0, 0, 0, 0.24);
 }
 
+/* The panel receives focus programmatically for keyboard management; suppress
+   the container outline since selection is shown via a roving row highlight. */
+.panel:focus {
+  outline: none;
+}
+
 .sizeSm {
   width: min(100%, 420px);
 }
