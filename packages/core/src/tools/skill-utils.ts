@@ -58,6 +58,71 @@ export interface CollectedAvailableSkills {
 }
 
 /**
+ * WeakMap-based cache keyed by `(skillManager, config)` identity.
+ *
+ * The old module-level singleton (`cachedEntries` + `cacheInvalidated`) was
+ * shared across all callers regardless of which `SkillManager` / `Config`
+ * instance was used.  This broke tests because different test fixtures created
+ * distinct mock instances but read the same cached result.  A WeakMap keyed by
+ * `(skillManager, config)` guarantees per-instance isolation: each unique pair
+ * gets its own cache entry, and entries are automatically reclaimed when the
+ * key objects are garbage-collected.
+ *
+ * Wrapped in an object so we can reassign the entire WeakMap on full
+ * invalidation — avoids `WeakMap.clear()` which is unreliable in some
+ * environments (e.g. vitest mock transformers).
+ */
+let cacheByManager = new WeakMap<
+  object,
+  Map<unknown, CollectedAvailableSkills>
+>();
+
+/**
+ * Computes or returns a cached result for `collectAvailableSkillEntries`
+ * keyed by `(skillManager, config)` identity.
+ */
+function getCachedOrCompute(
+  skillManager: SkillManager,
+  config: Config,
+  compute: () => Promise<CollectedAvailableSkills>,
+): Promise<CollectedAvailableSkills> {
+  // Fast path: check if we already have a cache entry for this pair.
+  const managerCache = cacheByManager.get(skillManager);
+  if (managerCache) {
+    const cached = managerCache.get(config);
+    if (cached) {
+      debugLogger.debug('cache hit (entries=%d)', cached.entries.length);
+      return Promise.resolve(cached);
+    }
+  }
+
+  // Cache miss: compute and store.
+  return compute().then((result) => {
+    let managerCache = cacheByManager.get(skillManager);
+    if (!managerCache) {
+      managerCache = new Map();
+      cacheByManager.set(skillManager, managerCache);
+    }
+    managerCache.set(config, result);
+    debugLogger.debug(
+      'cache populated (skills=%d, commands=%d, entries=%d)',
+      result.availableSkills.length,
+      result.modelInvocableCommands.length,
+      result.entries.length,
+    );
+    return result;
+  });
+}
+
+/**
+ * Invalidates all cached entries. Called by `invalidateCollectedSkillEntriesCache()`.
+ */
+function invalidateAllCache(): void {
+  cacheByManager = new WeakMap();
+  debugLogger.debug('all cache invalidated');
+}
+
+/**
  * Collects the model-facing skill set — active file-based skills + model-invocable
  * commands — applying the same filtering/dedup rules `SkillTool.refreshSkills`
  * used to apply inline. Stateful/async (reads `SkillManager` + `Config`). The
@@ -65,103 +130,93 @@ export interface CollectedAvailableSkills {
  * the Skill tool, the startup snapshot, and activation reminders share identical
  * bytes from one source.
  *
- * Memoised at module level: repeated calls during startup and mid-session
- * (SkillCommandLoader, BundledSkillLoader, buildAvailableSkillsReminder,
- * drainSkillAndCommandReminders) short-circuit to a cached result instead of
- * re-invoking `skillManager.listSkills()` and re-filtering. The cache is
- * invalidated by `invalidateCollectedSkillEntriesCache()`.
+ * Memoised at module level with a WeakMap keyed by `(skillManager, config)`
+ * identity.  Repeated calls during startup and mid-session (SkillCommandLoader,
+ * BundledSkillLoader, buildAvailableSkillsReminder, drainSkillAndCommandReminders)
+ * short-circuit to a cached result instead of re-invoking
+ * `skillManager.listSkills()` and re-filtering.  The cache is invalidated by
+ * `invalidateCollectedSkillEntriesCache()`.
  */
 export async function collectAvailableSkillEntries(
   skillManager: SkillManager,
   config: Config,
 ): Promise<CollectedAvailableSkills> {
-  if (cachedEntries !== null && !cacheInvalidated) {
-    debugLogger.debug('cache hit (entries=%d)', cachedEntries.entries.length);
-    return cachedEntries;
-  }
+  // Build the full computation logic to pass to getCachedOrCompute.
+  const compute = async (): Promise<CollectedAvailableSkills> => {
+    debugLogger.debug('cache miss, recomputing');
 
-  debugLogger.debug('cache miss, recomputing');
+    // Include a skill only when (a) it is not hidden from the model
+    // (`disable-model-invocation`), (b) it is not user-disabled via
+    // `skills.disabled`, and (c) it is unconditional or already activated by a
+    // matching file path this session. Keeps the listing small in large monorepos
+    // where most conditional skills are not yet relevant.
+    const allSkills = await skillManager.listSkills();
+    const disabledNames = config.getDisabledSkillNames();
+    const isDisabled = (name: string) => disabledNames.has(name.toLowerCase());
 
-  // Include a skill only when (a) it is not hidden from the model
-  // (`disable-model-invocation`), (b) it is not user-disabled via
-  // `skills.disabled`, and (c) it is unconditional or already activated by a
-  // matching file path this session. Keeps the listing small in large monorepos
-  // where most conditional skills are not yet relevant.
-  const allSkills = await skillManager.listSkills();
-  const disabledNames = config.getDisabledSkillNames();
-  const isDisabled = (name: string) => disabledNames.has(name.toLowerCase());
+    const availableSkills = allSkills.filter(
+      (s) =>
+        !s.disableModelInvocation &&
+        skillManager.isSkillActive(s) &&
+        !isDisabled(s.name),
+    );
 
-  const availableSkills = allSkills.filter(
-    (s) =>
-      !s.disableModelInvocation &&
-      skillManager.isSkillActive(s) &&
-      !isDisabled(s.name),
-  );
+    // Track still-pending conditional skills so validation can emit a distinct
+    // "gated by paths:" hint. Disabled conditional skills are excluded — no point
+    // hinting at a skill the user explicitly hid.
+    const pendingConditionalSkillNames = new Set(
+      allSkills
+        .filter(
+          (s) =>
+            !s.disableModelInvocation &&
+            s.paths &&
+            s.paths.length > 0 &&
+            !skillManager.isSkillActive(s) &&
+            !isDisabled(s.name),
+        )
+        .map((s) => s.name),
+    );
 
-  // Track still-pending conditional skills so validation can emit a distinct
-  // "gated by paths:" hint. Disabled conditional skills are excluded — no point
-  // hinting at a skill the user explicitly hid.
-  const pendingConditionalSkillNames = new Set(
-    allSkills
-      .filter(
-        (s) =>
-          !s.disableModelInvocation &&
-          s.paths &&
-          s.paths.length > 0 &&
-          !skillManager.isSkillActive(s) &&
-          !isDisabled(s.name),
-      )
-      .map((s) => s.name),
-  );
+    // Merge in model-invocable commands, excluding any whose name appears as a
+    // model-invocable file-based skill (including pending conditional ones). Using
+    // `availableSkills` here would let a path-gated skill leak through and bypass
+    // the pendingConditionalSkillNames validation check. A skill marked
+    // `disable-model-invocation` or user-disabled is intentionally hidden and must
+    // not block an unrelated same-named command/MCP prompt, so it is excluded from
+    // the dedup set.
+    const provider = config.getModelInvocableCommandsProvider();
+    const allCommands = provider ? provider() : [];
+    const fileBasedSkillNames = new Set(
+      allSkills
+        .filter((s) => !s.disableModelInvocation && !isDisabled(s.name))
+        .map((s) => s.name),
+    );
+    const modelInvocableCommands = allCommands.filter(
+      (cmd) => !fileBasedSkillNames.has(cmd.name),
+    );
 
-  // Merge in model-invocable commands, excluding any whose name appears as a
-  // model-invocable file-based skill (including pending conditional ones). Using
-  // `availableSkills` here would let a path-gated skill leak through and bypass
-  // the pendingConditionalSkillNames validation check. A skill marked
-  // `disable-model-invocation` or user-disabled is intentionally hidden and must
-  // not block an unrelated same-named command/MCP prompt, so it is excluded from
-  // the dedup set.
-  const provider = config.getModelInvocableCommandsProvider();
-  const allCommands = provider ? provider() : [];
-  const fileBasedSkillNames = new Set(
-    allSkills
-      .filter((s) => !s.disableModelInvocation && !isDisabled(s.name))
-      .map((s) => s.name),
-  );
-  const modelInvocableCommands = allCommands.filter(
-    (cmd) => !fileBasedSkillNames.has(cmd.name),
-  );
+    const entries: AvailableSkillEntry[] = [
+      ...availableSkills.map((s) => ({
+        name: s.name,
+        description: s.description,
+        whenToUse: s.whenToUse,
+        level: s.level,
+      })),
+      ...modelInvocableCommands.map((c) => ({
+        name: c.name,
+        description: c.description,
+      })),
+    ];
 
-  const entries: AvailableSkillEntry[] = [
-    ...availableSkills.map((s) => ({
-      name: s.name,
-      description: s.description,
-      whenToUse: s.whenToUse,
-      level: s.level,
-    })),
-    ...modelInvocableCommands.map((c) => ({
-      name: c.name,
-      description: c.description,
-    })),
-  ];
-
-  const result: CollectedAvailableSkills = {
-    availableSkills,
-    pendingConditionalSkillNames,
-    modelInvocableCommands,
-    entries,
+    return {
+      availableSkills,
+      pendingConditionalSkillNames,
+      modelInvocableCommands,
+      entries,
+    };
   };
 
-  // Store the result and clear the invalidation flag so subsequent calls use the cache.
-  cachedEntries = result;
-  cacheInvalidated = false;
-  debugLogger.debug(
-    'cache populated (skills=%d, commands=%d, entries=%d)',
-    result.availableSkills.length,
-    result.modelInvocableCommands.length,
-    result.entries.length,
-  );
-  return result;
+  return getCachedOrCompute(skillManager, config, compute);
 }
 
 // File-based skills (with a `level`) first, then commands; each alphabetical by
@@ -220,26 +275,12 @@ ${escapeXml(entry.description)}
 }
 
 /**
- * Module-level cache for `collectAvailableSkillEntries`. Prevents redundant
- * disk scans and filtering work during startup (7+ calls from
- * `SkillCommandLoader`, `BundledSkillLoader`, `buildAvailableSkillsReminder`,
- * and `drainSkillAndCommandReminders`) by memoising the full result.
- *
- * Invalidation is triggered by `invalidateCollectedSkillEntriesCache()`,
- * which is hooked into the `SkillManager` change-listener pipeline so the
- * cache always reflects the current skill set and disabled-skill state.
- */
-let cachedEntries: CollectedAvailableSkills | null = null;
-let cacheInvalidated = false;
-
-/**
  * Invalidates the module-level skill-entries cache. Call this whenever the
  * underlying skill set or disabled-skill state changes so that the next
  * `collectAvailableSkillEntries()` call recomputes from disk.
  */
 export function invalidateCollectedSkillEntriesCache(): void {
-  debugLogger.debug('cache invalidated');
-  cacheInvalidated = true;
+  invalidateAllCache();
 }
 
 /**

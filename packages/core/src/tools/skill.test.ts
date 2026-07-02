@@ -205,6 +205,10 @@ describe('SkillTool', () => {
           body: 'Body text.',
         },
       ]);
+      // Invalidate WeakMap cache keyed by (mockSkillManager, config) so the
+      // new SkillTool picks up the custom mock data instead of the cached
+      // default skills populated by beforeEach.
+      invalidateCollectedSkillEntriesCache();
       new SkillTool(config);
       await vi.runAllTimersAsync();
 
@@ -230,6 +234,7 @@ describe('SkillTool', () => {
           body: 'Body.',
         },
       ]);
+      invalidateCollectedSkillEntriesCache();
       new SkillTool(config);
       await vi.runAllTimersAsync();
 
@@ -248,6 +253,7 @@ describe('SkillTool', () => {
       vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
         () => [{ name: 'mcp<inject>', description: 'unrelated description' }],
       );
+      invalidateCollectedSkillEntriesCache();
       new SkillTool(config);
       await vi.runAllTimersAsync();
 
@@ -271,6 +277,7 @@ describe('SkillTool', () => {
           },
         ],
       );
+      invalidateCollectedSkillEntriesCache();
       new SkillTool(config);
       await vi.runAllTimersAsync();
 
@@ -285,6 +292,7 @@ describe('SkillTool', () => {
 
     it('renders an empty listing when there are no skills', async () => {
       vi.mocked(mockSkillManager.listSkills).mockResolvedValue([]);
+      invalidateCollectedSkillEntriesCache();
 
       new SkillTool(config);
       await vi.runAllTimersAsync();
@@ -299,6 +307,7 @@ describe('SkillTool', () => {
       vi.mocked(mockSkillManager.listSkills).mockRejectedValue(
         new Error('Loading failed'),
       );
+      invalidateCollectedSkillEntriesCache();
 
       const failedSkillTool = new SkillTool(config);
       await vi.runAllTimersAsync();
@@ -400,6 +409,7 @@ describe('SkillTool', () => {
 
     it('should show appropriate message when no skills available', async () => {
       vi.mocked(mockSkillManager.listSkills).mockResolvedValue([]);
+      invalidateCollectedSkillEntriesCache();
 
       const emptySkillTool = new SkillTool(config);
       await vi.runAllTimersAsync();
@@ -428,6 +438,7 @@ describe('SkillTool', () => {
       vi.mocked(mockSkillManager.isSkillActive).mockImplementation(
         (s: SkillConfig) => !s.paths || s.paths.length === 0,
       );
+      invalidateCollectedSkillEntriesCache();
 
       const gatedTool = new SkillTool(config);
       await vi.runAllTimersAsync();
@@ -441,6 +452,7 @@ describe('SkillTool', () => {
       vi.mocked(config.getDisabledSkillNames).mockReturnValue(
         new Set(['testing']),
       );
+      invalidateCollectedSkillEntriesCache();
       const tool = new SkillTool(config);
       await vi.runAllTimersAsync();
 
@@ -476,6 +488,7 @@ describe('SkillTool', () => {
           { name: 'other-cmd', description: 'Unrelated' },
         ],
       );
+      invalidateCollectedSkillEntriesCache();
 
       const tool = new SkillTool(config);
       await vi.runAllTimersAsync();
@@ -510,6 +523,7 @@ describe('SkillTool', () => {
       vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
         () => [{ name: 'tsx-helper', description: 'React TSX helper' }],
       );
+      invalidateCollectedSkillEntriesCache();
 
       const gatedTool = new SkillTool(config);
       await vi.runAllTimersAsync();
@@ -531,6 +545,8 @@ describe('SkillTool', () => {
         },
       ];
 
+      // Invalidate cache so the change listener's refresh picks up new data.
+      invalidateCollectedSkillEntriesCache();
       vi.mocked(mockSkillManager.listSkills).mockResolvedValueOnce(newSkills);
 
       const listener = changeListeners[0];
@@ -556,6 +572,8 @@ describe('SkillTool', () => {
         },
       ];
 
+      // Invalidate cache so refreshSkills recomputes with the new mock data.
+      invalidateCollectedSkillEntriesCache();
       vi.mocked(mockSkillManager.listSkills).mockResolvedValue(newSkills);
 
       await skillTool.refreshSkills();
@@ -934,6 +952,7 @@ describe('SkillTool', () => {
       vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
         () => mockCommands,
       );
+      invalidateCollectedSkillEntriesCache();
 
       new SkillTool(config);
       await vi.runAllTimersAsync();
@@ -1007,6 +1026,7 @@ describe('SkillTool', () => {
       vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
         () => commandsIncludingSkill,
       );
+      invalidateCollectedSkillEntriesCache();
 
       new SkillTool(config);
       await vi.runAllTimersAsync();
@@ -1062,6 +1082,7 @@ describe('SkillTool', () => {
           { name: 'mcp-prompt-a', description: 'An unrelated MCP prompt' },
         ],
       );
+      invalidateCollectedSkillEntriesCache();
 
       new SkillTool(config);
       await vi.runAllTimersAsync();
@@ -1079,6 +1100,8 @@ describe('SkillTool', () => {
       vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
         () => [{ name: 'mcp-prompt-a', description: 'An MCP prompt' }],
       );
+      // Invalidate cache so refreshSkills picks up the mocked commands.
+      invalidateCollectedSkillEntriesCache();
       await skillTool.refreshSkills();
     });
 
@@ -1101,6 +1124,8 @@ describe('SkillTool', () => {
       vi.mocked(config.getModelInvocableCommandsProvider).mockReturnValue(
         () => [{ name: 'mcp-prompt-a', description: 'An MCP prompt' }],
       );
+      // Invalidate cache so refreshSkills picks up the mocked commands.
+      invalidateCollectedSkillEntriesCache();
       await skillTool.refreshSkills();
     });
 
@@ -1406,6 +1431,7 @@ describe('SkillTool', () => {
       vi.mocked(config.getDisabledSkillNames).mockReturnValue(
         new Set(['testing']),
       );
+      invalidateCollectedSkillEntriesCache();
       new SkillTool(config);
       await vi.runAllTimersAsync();
 
@@ -1428,6 +1454,7 @@ describe('SkillTool', () => {
           body: 'skill body',
         },
       ]);
+      invalidateCollectedSkillEntriesCache();
       vi.mocked(config.getDisabledSkillNames).mockReturnValue(
         new Set(['mytool']),
       );
@@ -1464,6 +1491,7 @@ describe('SkillTool', () => {
           { name: 'unrelated', description: 'Unrelated command' },
         ],
       );
+      invalidateCollectedSkillEntriesCache();
       new SkillTool(config);
       await vi.runAllTimersAsync();
 

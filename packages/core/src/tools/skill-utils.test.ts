@@ -109,15 +109,15 @@ describe('collectAvailableSkillEntries cache', () => {
   });
 
   it('cache hit returns same object reference on subsequent call', async () => {
-    const sm1 = createMockSkillManager();
-    const cfg1 = createMockConfig();
-    const sm2 = createMockSkillManager();
-    const cfg2 = createMockConfig();
+    // With WeakMap-based cache keyed by (skillManager, config) identity,
+    // the SAME instances must be reused to demonstrate cache hit.
+    const sm = createMockSkillManager();
+    const cfg = createMockConfig();
 
-    const result1 = await collectAvailableSkillEntries(sm1, cfg1);
-    const result2 = await collectAvailableSkillEntries(sm2, cfg2);
+    const result1 = await collectAvailableSkillEntries(sm, cfg);
+    const result2 = await collectAvailableSkillEntries(sm, cfg);
 
-    // Second call should return the same cached object.
+    // Same instances → cache hit → identical object reference.
     expect(result1).toBe(result2);
   });
 
@@ -192,18 +192,18 @@ describe('collectAvailableSkillEntries cache', () => {
       disableModelInvocation: false,
     };
 
+    // Reuse the SAME (sm, cfg) pair so invalidation targets this entry.
     const sm = createMockSkillManager();
     const cfg = createMockConfig();
 
-    // Use vi.spyOn to ensure the mock is definitely being called
-    const listSkillsSpy = vi
-      .spyOn(sm, 'listSkills')
-      .mockResolvedValue([skill1, skill2]);
+    // Set up the mock directly (sm.listSkills is already a vi.fn).
+    const listSkillsMock = sm.listSkills as ReturnType<typeof vi.fn>;
+    listSkillsMock.mockResolvedValue([skill1, skill2]);
 
     const result1 = await collectAvailableSkillEntries(sm, cfg);
 
     // Verify listSkills was actually called
-    expect(listSkillsSpy).toHaveBeenCalledTimes(1);
+    expect(listSkillsMock).toHaveBeenCalledTimes(1);
 
     // Assert cached content reflects the input skills.
     expect(result1.availableSkills).toHaveLength(2);
@@ -225,11 +225,14 @@ describe('collectAvailableSkillEntries cache', () => {
       body: '# K8s Skill',
       disableModelInvocation: false,
     };
-    listSkillsSpy.mockResolvedValueOnce([differentSkill]);
+    listSkillsMock.mockResolvedValueOnce([differentSkill]);
 
+    // Same instances, but cache was invalidated — should recompute.
     const result2 = await collectAvailableSkillEntries(sm, cfg);
 
     // After invalidation, the new result should reflect the changed data.
+    // With WeakMap cache, result2 is a different object from result1 because
+    // the specific (sm, cfg) entry was invalidated and recomputed.
     expect(result2).not.toBe(result1);
     expect(result2.availableSkills).toHaveLength(1);
     expect(result2.availableSkills[0].name).toBe('k8s-skill');
