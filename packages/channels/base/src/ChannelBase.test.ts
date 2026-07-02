@@ -4784,6 +4784,42 @@ describe('ChannelBase', () => {
       ]);
     });
 
+    it('logs async lifecycle hook errors without disrupting the prompt flow', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValue('ok');
+      const stderr = vi
+        .spyOn(process.stderr, 'write')
+        .mockImplementation(() => true);
+      const ch = createChannel();
+      vi.spyOn(
+        ch as unknown as {
+          onTaskLifecycle: (
+            event: ChannelTaskLifecycleEvent,
+          ) => void | Promise<void>;
+        },
+        'onTaskLifecycle',
+      ).mockImplementation((event) => {
+        if (event.type === 'started') {
+          return Promise.reject(new Error('async hook failed'));
+        }
+        return undefined;
+      });
+
+      try {
+        await ch.handleInbound(envelope());
+
+        expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'ok' }]);
+        await vi.waitFor(() =>
+          expect(stderr).toHaveBeenCalledWith(
+            expect.stringContaining(
+              'onTaskLifecycle threw for started session s-1: async hook failed',
+            ),
+          ),
+        );
+      } finally {
+        stderr.mockRestore();
+      }
+    });
+
     it('emits cancellation lifecycle event for /cancel', async () => {
       let resolvePrompt!: (value: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {
@@ -7811,7 +7847,7 @@ describe('ChannelBase', () => {
         expect.objectContaining({
           type: 'cancelled',
           messageId: 'job-1',
-          reason: 'timeout',
+          reason: 'dropped',
         }),
       ]);
     });

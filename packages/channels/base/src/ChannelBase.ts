@@ -203,9 +203,9 @@ export abstract class ChannelBase {
       const safeToolCall: SanitizedToolCallEvent = {
         sessionId: event.sessionId,
         toolCallId: event.toolCallId,
-        kind: sanitizeLogText(event.kind, 20),
-        title: sanitizeLogText(event.title, 80),
-        status: sanitizeLogText(event.status, 20),
+        kind: sanitizeLogText(event.kind ?? '', 20),
+        title: sanitizeLogText(event.title ?? '', 80),
+        status: sanitizeLogText(event.status ?? '', 20),
       };
       this.emitTaskLifecycle({
         ...this.lifecycleBase(chatId, event.sessionId, active.messageId),
@@ -267,22 +267,36 @@ export abstract class ChannelBase {
   abstract sendMessage(chatId: string, text: string): Promise<void>;
   abstract disconnect(): void;
 
-  protected onTaskLifecycle(_event: ChannelTaskLifecycleEvent): void {}
+  protected onTaskLifecycle(
+    _event: ChannelTaskLifecycleEvent,
+  ): void | Promise<void> {}
 
   private emitTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
     try {
-      this.onTaskLifecycle(event);
+      const result = this.onTaskLifecycle(event);
+      if (result && typeof result.catch === 'function') {
+        result.catch((err: unknown) => {
+          this.logTaskLifecycleError(event, err);
+        });
+      }
     } catch (err) {
-      const channel = sanitizeLogText(this.name, 64);
-      const sessionId = sanitizeLogText(event.sessionId, 64);
-      const message = sanitizeLogText(
-        err instanceof Error ? err.message : String(err),
-        256,
-      );
-      process.stderr.write(
-        `[${channel}] onTaskLifecycle threw for ${event.type} session ${sessionId}: ${message}\n`,
-      );
+      this.logTaskLifecycleError(event, err);
     }
+  }
+
+  private logTaskLifecycleError(
+    event: ChannelTaskLifecycleEvent,
+    err: unknown,
+  ): void {
+    const channel = sanitizeLogText(this.name, 64);
+    const sessionId = sanitizeLogText(event.sessionId, 64);
+    const message = sanitizeLogText(
+      err instanceof Error ? err.message : String(err),
+      256,
+    );
+    process.stderr.write(
+      `[${channel}] onTaskLifecycle threw for ${event.type} session ${sessionId}: ${message}\n`,
+    );
   }
 
   private lifecycleError(err: unknown): string {
@@ -295,7 +309,7 @@ export abstract class ChannelBase {
   private emitTaskCancellation(
     active: ActivePrompt,
     sessionId: string,
-    reason: 'cancel_command' | 'clear' | 'steer' | 'timeout',
+    reason: 'cancel_command' | 'clear' | 'steer' | 'timeout' | 'dropped',
   ): void {
     if (active.cancellationEmitted) {
       return;
@@ -588,7 +602,7 @@ export abstract class ChannelBase {
       } catch (err) {
         await this.settleCancelRequested(promptState);
         if (err instanceof ChannelLoopSkippedError && !promptState.cancelled) {
-          this.emitTaskCancellation(promptState, sessionId, 'timeout');
+          this.emitTaskCancellation(promptState, sessionId, 'dropped');
           promptState.cancelled = true;
         }
         if (
@@ -608,12 +622,8 @@ export abstract class ChannelBase {
           const channel = sanitizeLogText(this.name, 64);
           const safeJobId = sanitizeLogText(job.id, 64);
           const safeSessionId = sanitizeLogText(sessionId, 64);
-          const message = sanitizeLogText(
-            err instanceof Error ? err.message : String(err),
-            256,
-          );
           process.stderr.write(
-            `[${channel}] loop ${safeJobId} threw after cancellation for session ${safeSessionId}: ${message}\n`,
+            `[${channel}] loop ${safeJobId} threw after cancellation for session ${safeSessionId}: ${this.lifecycleError(err)}\n`,
           );
         }
         throw err;
