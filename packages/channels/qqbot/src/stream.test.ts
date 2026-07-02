@@ -372,6 +372,43 @@ describe('onToolCall', () => {
     ch.onToolCall('test-chat', toolCall('sess-1'));
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
+
+  it('clears pendingStreamDelete when onToolCall send fails', async () => {
+    const ch = makeChannel();
+    // Use a deferred promise to control when the send resolves/rejects
+    let rejectSend: (err: Error) => void;
+    const sendPromise = new Promise((_resolve, reject) => {
+      rejectSend = reject;
+    });
+    mockSendQQMessage.mockReturnValue(sendPromise);
+
+    // Start streaming
+    onResponseChunk(ch, 'test-chat', 'text before tool', 'sess-1');
+
+    // onToolCall starts the flush (async send in-flight)
+    ch.onToolCall('test-chat', toolCall('sess-1'));
+
+    // onResponseComplete fires while flushing → sets pendingStreamDelete
+    await onResponseComplete(ch, 'test-chat', 'text before tool', 'sess-1');
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    expect(pendingStreamDelete.has('sess-1')).toBe(true);
+
+    // The send fails
+    rejectSend!(new Error('send failed'));
+
+    // Wait for the promise chain to settle
+    try { await sendPromise; } catch { /* expected */ }
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // pendingStreamDelete should be cleared
+    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+
+    // Buffer should be restored (the catch handler restores it)
+    expect(streamState(ch).get('sess-1')!.buffer).toBe('text before tool');
+  });
 });
 
 describe('onResponseComplete', () => {
@@ -502,6 +539,55 @@ describe('onResponseComplete', () => {
     expect(pendingStreamDelete.has('sess-1')).toBe(false);
     expect(streamState(ch).has('sess-1')).toBe(false);
     expect(flushingSessions.has('sess-1')).toBe(false);
+  });
+
+  it('flushes orphaned buffer when pendingStreamDelete is set and new chunks arrive during idle-flush', async () => {
+    const ch = makeChannel();
+    // Use a pre-resolved promise (same pattern as the deferral test above)
+    const sendPromise = Promise.resolve(mockResponse(true));
+    mockSendQQMessage.mockReturnValue(sendPromise);
+
+    // Start streaming
+    onResponseChunk(ch, 'test-chat', 'initial text', 'sess-1');
+
+    // Fire the idle timer (2s)
+    vi.advanceTimersByTime(2000);
+    await Promise.resolve();
+
+    // idle-flush should have sent the text
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+
+    // onResponseComplete fires while idle-flush is in-flight → pendingStreamDelete
+    await onResponseComplete(ch, 'test-chat', 'initial text', 'sess-1');
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    expect(pendingStreamDelete.has('sess-1')).toBe(true);
+    expect(streamState(ch).has('sess-1')).toBe(true);
+
+    // New chunk arrives during the async send → buffer is re-populated
+    onResponseChunk(ch, 'test-chat', ' + orphaned', 'sess-1');
+    expect(streamState(ch).get('sess-1')!.buffer).toBe(' + orphaned');
+
+    // Resolve the send → .then() fires with pendingStreamDelete + non-empty buffer
+    await sendPromise;
+    // Drain the .then() and .finally() microtasks
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // Orphaned buffer should have been sent
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(mockSendQQMessage).toHaveBeenNthCalledWith(
+      2,
+      'https://api.sgroup.qq.com',
+      '/v2/users/test-chat/messages',
+      'test-token',
+      { markdown: { content: ' + orphaned' }, msg_type: 2 },
+    );
+
+    // StreamState should be cleaned up
+    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    expect(streamState(ch).has('sess-1')).toBe(false);
   });
 });
 
