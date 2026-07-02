@@ -81,10 +81,10 @@ export function assessPullRequestSafety({ pr, diff }) {
       .map((line) => line.slice(1))
       .join('\n');
     checkPatterns(addedText, SENSITIVE_DIFF_PATTERNS, reasons);
-    checkPatterns(addedText, SECRET_VALUE_PATTERNS, reasons);
   }
 
   const prText = `${pr?.title ?? ''}\n${pr?.body ?? ''}\n${addedText}`;
+  checkPatterns(prText, SECRET_VALUE_PATTERNS, reasons);
   checkPatterns(prText, PROMPT_INJECTION_PATTERNS, reasons);
 
   return {

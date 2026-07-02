@@ -93,6 +93,16 @@ test('requires manual review for hardcoded secret values', () => {
   assert.ok(result.reason_codes.includes('secret_value:bearer_token'));
 });
 
+test('requires manual review for hardcoded secret values in PR text', () => {
+  const result = assessPullRequestSafety({
+    pr: pr({ body: 'Temporary key: sk-proj-abcdefghijklmnopqrstuvwxyz012345' }),
+    diff: '+const copy = "Done";\n',
+  });
+
+  assert.equal(result.decision, 'manual_required');
+  assert.ok(result.reason_codes.includes('secret_value:openai_key'));
+});
+
 test('allows package and script changes without risky additions', () => {
   const result = assessPullRequestSafety({
     pr: pr({
