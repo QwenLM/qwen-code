@@ -51,6 +51,7 @@ export {
   sanitizePromptText,
   sanitizeLogText,
 } from './sanitize.js';
+export { isTerminalTaskLifecycleType } from './types.js';
 export type {
   Attachment,
   BlockStreamingChunkConfig,
