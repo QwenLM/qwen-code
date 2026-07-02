@@ -354,8 +354,8 @@ describe('sendMessage', () => {
     const ch = makeChannel({ chatType: 'c2c' });
     mockSendQQMessage.mockRejectedValue(new Error('network down'));
 
-    // sendMessage no longer re-throws; it logs to stderr and resolves gracefully
-    await expect(ch.sendMessage('test-chat-id', 'hello')).resolves.toBeUndefined();
+    // sendMessage re-throws so callers' .catch() handlers fire
+    await expect(ch.sendMessage('test-chat-id', 'hello')).rejects.toThrow('network down');
 
     // No crash, and the catch prevents further attempts
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);

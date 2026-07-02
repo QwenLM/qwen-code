@@ -484,6 +484,7 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] Send error: ${sanitizeLogText(String(e), 200)}\n`,
       );
+      throw e;
     }
   }
 
