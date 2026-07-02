@@ -27,6 +27,7 @@ package-lock.json
 .claude
 .codex
 .worktrees/
+.atlarix
 
 # Qwen Code Configs
 .qwen/*
