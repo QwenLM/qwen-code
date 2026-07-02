@@ -2,6 +2,9 @@ name: 'Qwen PR Safety Precheck'
 
 on:
   workflow_call:
+    secrets:
+      CI_BOT_PAT:
+        required: false
     outputs:
       decision:
         description: 'allow_triage or manual_required'
