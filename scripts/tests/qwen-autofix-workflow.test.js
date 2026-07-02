@@ -36,6 +36,10 @@ const prepareQwenCliSteps =
   workflow.match(
     /- name: 'Prepare Qwen Code CLI'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
   ) ?? [];
+const checkoutWithRetrySteps =
+  workflow.match(
+    /- name: 'Checkout with retry'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
 
 describe('qwen-autofix workflow', () => {
   it('does not classify tier-2 issues with incomplete fallback comments', () => {
@@ -237,5 +241,19 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain('QWEN_SANDBOX_IMAGE');
     expect(workflow).not.toContain('ghcr.io/qwenlm/qwen-code');
     expect(workflow).not.toContain('npm view @qwen-code/qwen-code@latest');
+  });
+
+  it('retries repository checkout for autonomous runner jobs', () => {
+    expect(checkoutWithRetrySteps).toHaveLength(2);
+    for (const step of checkoutWithRetrySteps) {
+      expect(step).toContain('for attempt in 1 2 3; do');
+      expect(step).toContain(
+        'git -c protocol.version=2 fetch --prune --force origin',
+      );
+      expect(step).toContain('+refs/heads/*:refs/remotes/origin/*');
+      expect(step).toContain('git checkout --force "${GITHUB_SHA}"');
+      expect(step).toContain('sleep "$((attempt * 10))"');
+    }
+    expect(workflow).not.toContain('actions/checkout@');
   });
 });

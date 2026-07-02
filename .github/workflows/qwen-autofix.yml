@@ -194,11 +194,30 @@ jobs:
       # human-attended and it would never be retried.
       KNOWN_BOTS: '["qwen-code-ci-bot", "qwen-code-dev-bot", "github-actions", "github-actions[bot]", "gemini-cli-robot"]'
     steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+      - name: 'Checkout with retry'
+        run: |-
+          checkout_repo() {
+            rm -rf .git
+            git init .
+            git remote add origin "https://github.com/${REPO}.git"
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+            git -c protocol.version=2 fetch --prune --force origin \
+              '+refs/heads/*:refs/remotes/origin/*'
+            git checkout --force "${GITHUB_SHA}"
+            git clean -ffdx
+          }
+
+          for attempt in 1 2 3; do
+            if checkout_repo; then
+              exit 0
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              echo '::error::Repository checkout failed after 3 attempts.'
+              exit 1
+            fi
+            echo "::warning::Repository checkout failed on attempt ${attempt}; retrying."
+            sleep "$((attempt * 10))"
+          done
 
       - name: 'Check bot credentials'
         env:
@@ -1004,11 +1023,30 @@ jobs:
       ROUND: '${{ matrix.target.round }}'
       WATERMARK: '${{ matrix.target.watermark }}'
     steps:
-      - name: 'Checkout'
-        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
-        with:
-          fetch-depth: 0
-          persist-credentials: false
+      - name: 'Checkout with retry'
+        run: |-
+          checkout_repo() {
+            rm -rf .git
+            git init .
+            git remote add origin "https://github.com/${REPO}.git"
+            git config --global --add safe.directory "${GITHUB_WORKSPACE}"
+            git -c protocol.version=2 fetch --prune --force origin \
+              '+refs/heads/*:refs/remotes/origin/*'
+            git checkout --force "${GITHUB_SHA}"
+            git clean -ffdx
+          }
+
+          for attempt in 1 2 3; do
+            if checkout_repo; then
+              exit 0
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              echo '::error::Repository checkout failed after 3 attempts.'
+              exit 1
+            fi
+            echo "::warning::Repository checkout failed on attempt ${attempt}; retrying."
+            sleep "$((attempt * 10))"
+          done
 
       - name: 'Set up Node.js (hosted)'
         if: |-
