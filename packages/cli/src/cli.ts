@@ -5,7 +5,7 @@
  */
 
 import { pathToFileURL } from 'node:url';
-import type { ArgumentsCamelCase, Argv } from 'yargs';
+import type { ArgumentsCamelCase, Argv, Options } from 'yargs';
 import { normalizeServeFastPathArgv } from './serve/fast-path-argv.js';
 
 type BootstrapRoute = 'serve' | 'mcp' | 'help' | 'version' | 'default';
@@ -35,6 +35,69 @@ const MCP_COMMANDS = [
   ['approve [name]', 'Approve a pending MCP server'],
   ['reject [name]', 'Reject a pending MCP server'],
 ] as const;
+
+const TOP_LEVEL_HELP_OPTIONS = [
+  ['model', { alias: 'm', type: 'string', description: 'Model' }],
+  [
+    'prompt',
+    {
+      alias: 'p',
+      type: 'string',
+      description: 'Prompt. Appended to input on stdin (if any).',
+    },
+  ],
+  [
+    'prompt-interactive',
+    {
+      alias: 'i',
+      type: 'string',
+      description:
+        'Execute the provided prompt and continue in interactive mode',
+    },
+  ],
+  [
+    'safe-mode',
+    {
+      type: 'boolean',
+      description:
+        'Disable all customizations (context files, hooks, extensions, skills, MCP servers) for troubleshooting.',
+    },
+  ],
+  [
+    'sandbox',
+    {
+      alias: 's',
+      type: 'boolean',
+      description: 'Run in sandbox?',
+    },
+  ],
+  [
+    'output-format',
+    {
+      alias: 'o',
+      type: 'string',
+      choices: ['text', 'json', 'stream-json'],
+      description: 'The format of the CLI output.',
+    },
+  ],
+  [
+    'continue',
+    {
+      alias: 'c',
+      type: 'boolean',
+      description: 'Resume the most recent session for the current project.',
+    },
+  ],
+  [
+    'resume',
+    {
+      alias: 'r',
+      type: 'string',
+      description:
+        'Resume a specific session by its ID. Use without an ID to show session picker.',
+    },
+  ],
+] as const satisfies ReadonlyArray<readonly [string, Options]>;
 
 function writeStdoutLine(line: string): void {
   process.stdout.write(line.endsWith('\n') ? line : `${line}\n`);
@@ -69,6 +132,10 @@ async function buildTopLevelHelpParser() {
     .alias('h', 'help')
     .strict()
     .demandCommand(0, 0);
+
+  for (const [option, config] of TOP_LEVEL_HELP_OPTIONS) {
+    parser.option(option, config);
+  }
 
   for (const [command, description] of TOP_LEVEL_COMMANDS) {
     parser.command(command, description);
@@ -161,6 +228,14 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
     .version(false)
     .help()
     .alias('h', 'help')
+    .strict()
+    .strictCommands()
+    .demandCommand(1, 'You need at least one command before continuing.')
+    .fail((message: string | null, error: Error | undefined, yargs: Argv) => {
+      writeStderrLine(message || error?.message || 'Unknown argument error');
+      yargs.showHelp();
+      process.exitCode = 1;
+    })
     .exitProcess(false);
 
   if (hasFlag(argv.slice(2), '--help', '-h')) {
@@ -168,7 +243,7 @@ async function runMcpFastPath(rawArgv: readonly string[]): Promise<void> {
     return;
   }
 
-  await parser.parseAsync(argv);
+  await parseYargsCommand(parser, argv);
 }
 
 async function parseYargsHelp(
@@ -192,6 +267,27 @@ async function parseYargsHelp(
   });
 }
 
+async function parseYargsCommand(
+  parser: Argv,
+  argv: readonly string[],
+): Promise<void> {
+  await new Promise<void>((resolve) => {
+    parser.parse(
+      argv,
+      (error: Error | undefined, _argv: ArgumentsCamelCase, output: string) => {
+        if (output) {
+          writeStdoutLine(output);
+        }
+        if (error) {
+          writeStderrLine(error.message);
+          process.exitCode = 1;
+        }
+        resolve();
+      },
+    );
+  });
+}
+
 async function initializeProfilers(): Promise<void> {
   const [{ initStartupProfiler }, { initCpuProfiler }] = await Promise.all([
     import('./utils/startupProfiler.js'),
@@ -206,6 +302,15 @@ export async function runCliEntry(
 ): Promise<void> {
   const argv = normalizeServeFastPathArgv(rawArgv);
   const route = resolveBootstrapRoute(argv);
+  let profilersInitialized = false;
+
+  async function ensureProfilersInitialized(): Promise<void> {
+    if (profilersInitialized) {
+      return;
+    }
+    await initializeProfilers();
+    profilersInitialized = true;
+  }
 
   if (route === 'version') {
     await printBootstrapVersion();
@@ -213,6 +318,7 @@ export async function runCliEntry(
   }
 
   if (route === 'serve') {
+    await ensureProfilersInitialized();
     const { tryRunServeFastPath } = await import('./serve/fast-path.js');
     if (await tryRunServeFastPath(argv)) {
       return;
@@ -225,7 +331,7 @@ export async function runCliEntry(
     return;
   }
 
-  await initializeProfilers();
+  await ensureProfilersInitialized();
   const { main } = await import('./gemini.js');
   await main();
 }

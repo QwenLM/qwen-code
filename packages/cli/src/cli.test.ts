@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   mcpHandler: vi.fn(),
   mcpBuilder: vi.fn(),
   mcpListHandler: vi.fn(),
+  mcpAddHandler: vi.fn(),
 }));
 
 vi.mock('./gemini.js', () => ({
@@ -50,6 +51,11 @@ vi.mock('./commands/mcp.js', () => ({
           command: 'list',
           describe: 'List all configured MCP servers',
           handler: mocks.mcpListHandler,
+        })
+        .command({
+          command: 'add <name>',
+          describe: 'Add a server',
+          handler: mocks.mcpAddHandler,
         })
         .demandCommand(1, 'You need at least one command before continuing.');
     },
@@ -92,9 +98,14 @@ describe('runCliEntry', () => {
   };
 
   let stdout: string[];
+  let stderr: string[];
+  let savedExitCode: string | number | null | undefined;
 
   beforeEach(() => {
     stdout = [];
+    stderr = [];
+    savedExitCode = process.exitCode;
+    process.exitCode = undefined;
     vi.clearAllMocks();
     mocks.tryRunServeFastPath.mockResolvedValue(false);
     process.env['CLI_VERSION'] = '9.9.9';
@@ -102,9 +113,14 @@ describe('runCliEntry', () => {
       stdout.push(String(chunk));
       return true;
     });
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderr.push(String(chunk));
+      return true;
+    });
   });
 
   afterEach(() => {
+    process.exitCode = savedExitCode;
     if (savedEnv.CLI_VERSION === undefined) {
       delete process.env['CLI_VERSION'];
     } else {
@@ -131,6 +147,12 @@ describe('runCliEntry', () => {
     expect(helpText).toContain('Manage Qwen Code hooks');
     expect(helpText).toContain('Manage MCP servers');
     expect(helpText).toContain('Run Qwen Code as a local HTTP daemon');
+    expect(helpText).toContain('--model');
+    expect(helpText).toContain('-p, --prompt');
+    expect(helpText).toContain('--safe-mode');
+    expect(helpText).toContain('-s, --sandbox');
+    expect(helpText).toContain('-o, --output-format');
+    expect(helpText).toContain('-r, --resume');
     expect(mocks.main).not.toHaveBeenCalled();
     expect(mocks.tryRunServeFastPath).not.toHaveBeenCalled();
     expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
@@ -168,6 +190,35 @@ describe('runCliEntry', () => {
     expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
   });
 
+  it('fails MCP fast-path validation without loading the full CLI', async () => {
+    await runCliEntry(['mcp', 'doesnotexist']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain('Unknown command: doesnotexist');
+    expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+    expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
+    expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+  });
+
+  it('does not run MCP subcommands with unknown options', async () => {
+    await runCliEntry(['mcp', 'list', '--unknown']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain('Unknown argument: unknown');
+    expect(mocks.mcpListHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
+  it('reports routine MCP argument errors without loading the full CLI', async () => {
+    await runCliEntry(['mcp', 'add']);
+
+    expect(process.exitCode).toBe(1);
+    expect(stderr.join('')).toContain('Not enough non-option arguments');
+    expect(mocks.mcpAddHandler).not.toHaveBeenCalled();
+    expect(mocks.main).not.toHaveBeenCalled();
+  });
+
   it('keeps the serve fast path ahead of the full CLI startup', async () => {
     mocks.tryRunServeFastPath.mockResolvedValue(true);
 
@@ -175,8 +226,19 @@ describe('runCliEntry', () => {
 
     expect(mocks.tryRunServeFastPath).toHaveBeenCalledWith(['serve']);
     expect(mocks.main).not.toHaveBeenCalled();
-    expect(mocks.initStartupProfiler).not.toHaveBeenCalled();
-    expect(mocks.initCpuProfiler).not.toHaveBeenCalled();
+    expect(mocks.initStartupProfiler).toHaveBeenCalledTimes(1);
+    expect(mocks.initCpuProfiler).toHaveBeenCalledTimes(1);
+  });
+
+  it('initializes profilers once when the serve fast path falls back', async () => {
+    mocks.tryRunServeFastPath.mockResolvedValue(false);
+
+    await runCliEntry(['serve']);
+
+    expect(mocks.tryRunServeFastPath).toHaveBeenCalledWith(['serve']);
+    expect(mocks.initStartupProfiler).toHaveBeenCalledTimes(1);
+    expect(mocks.initCpuProfiler).toHaveBeenCalledTimes(1);
+    expect(mocks.main).toHaveBeenCalledTimes(1);
   });
 
   it('initializes profilers and loads gemini on the default path', async () => {
