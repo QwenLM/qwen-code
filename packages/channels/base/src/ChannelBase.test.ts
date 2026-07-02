@@ -2725,6 +2725,54 @@ describe('ChannelBase', () => {
       );
     });
 
+    it('/cancel still delivers the response when cancellation times out then fails', async () => {
+      vi.useFakeTimers();
+      try {
+        let resolvePrompt!: (v: string) => void;
+        const pendingPrompt = new Promise<string>((resolve) => {
+          resolvePrompt = resolve;
+        });
+        let rejectCancel!: (err: Error) => void;
+        const pendingCancel = new Promise<void>((_resolve, reject) => {
+          rejectCancel = reject;
+        });
+        (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+          pendingPrompt,
+        );
+        (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+          pendingCancel,
+        );
+        vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+        const ch = createChannel();
+        ch.enableCancelCommand();
+        const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+        await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+        const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+        await Promise.resolve();
+        resolvePrompt('agent response');
+        await vi.advanceTimersByTimeAsync(3000);
+        rejectCancel(new Error('session not found'));
+        await Promise.all([prompt, cancel]);
+
+        expect(ch.sent).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              text: 'Failed to cancel current request.',
+            }),
+            expect.objectContaining({ text: 'agent response' }),
+          ]),
+        );
+        expect(ch.taskEvents).toEqual([
+          expect.objectContaining({ type: 'started' }),
+          expect.objectContaining({ type: 'completed' }),
+        ]);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('/cancel retries after a failed cancellation while the prompt is still active', async () => {
       let resolvePrompt!: (v: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {
@@ -4909,7 +4957,7 @@ describe('ChannelBase', () => {
       ]);
     });
 
-    it('keeps completion suppressed when cancellation outlives the reconciliation timeout', async () => {
+    it('delivers completion when cancellation outlives the reconciliation timeout', async () => {
       let resolvePrompt!: (value: string) => void;
       const pendingPrompt = new Promise<string>((resolve) => {
         resolvePrompt = resolve;
@@ -4932,30 +4980,30 @@ describe('ChannelBase', () => {
       const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
       await Promise.resolve();
 
-      vi.useFakeTimers();
-      try {
-        resolvePrompt('late response');
-        await Promise.resolve();
-        await vi.advanceTimersByTimeAsync(CLEAR_CANCEL_TIMEOUT_MS);
-        await prompt;
-      } finally {
-        vi.useRealTimers();
-      }
+      resolvePrompt('late response');
+      await new Promise((resolve) =>
+        setTimeout(resolve, CLEAR_CANCEL_TIMEOUT_MS + 20),
+      );
+      await prompt;
 
-      expect(ch.sent).toEqual([]);
-      expect(ch.taskEvents.map((event) => event.type)).toEqual(['started']);
+      expect(ch.sent).toEqual([{ chatId: 'chat1', text: 'late response' }]);
+      expect(ch.taskEvents.map((event) => event.type)).toEqual([
+        'started',
+        'completed',
+      ]);
 
       resolveCancel();
       await cancel;
 
       expect(ch.sent).toEqual([
-        { chatId: 'chat1', text: 'Cancelled current request.' },
+        { chatId: 'chat1', text: 'late response' },
+        { chatId: 'chat1', text: 'Failed to cancel current request.' },
       ]);
       expect(ch.taskEvents.map((event) => event.type)).toEqual([
         'started',
-        'cancelled',
+        'completed',
       ]);
-    });
+    }, 8000);
 
     it('emits one cancellation lifecycle event for repeated /cancel commands', async () => {
       let resolvePrompt!: (value: string) => void;
@@ -5408,6 +5456,47 @@ describe('ChannelBase', () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('keeps block-streaming chunks emitted while a failed cancel is pending', async () => {
+      let resolvePrompt!: (v: string) => void;
+      const pendingPrompt = new Promise<string>((resolve) => {
+        resolvePrompt = resolve;
+      });
+      let rejectCancel!: (err: Error) => void;
+      const pendingCancel = new Promise<void>((_resolve, reject) => {
+        rejectCancel = reject;
+      });
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingPrompt,
+      );
+      (bridge.cancelSession as ReturnType<typeof vi.fn>).mockReturnValue(
+        pendingCancel,
+      );
+      vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+      const ch = createChannel({
+        blockStreaming: 'on',
+        blockStreamingChunk: { minChars: 5, maxChars: 1000 },
+        blockStreamingCoalesce: { idleMs: 500 },
+      });
+      ch.enableCancelCommand();
+      const prompt = ch.handleInbound(envelope({ text: 'long task' }));
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'before ');
+      const cancel = ch.handleInbound(envelope({ text: '/cancel' }));
+      await Promise.resolve();
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'during ');
+      rejectCancel(new Error('session not found'));
+      await cancel;
+      (bridge as unknown as EventEmitter).emit('textChunk', 's-1', 'after');
+      resolvePrompt('before during after');
+      await prompt;
+
+      expect(ch.sent.map((message) => message.text).join('\n')).toContain(
+        'before during after',
+      );
     });
   });
 
@@ -8353,6 +8442,72 @@ describe('ChannelBase', () => {
           runCount: 0,
         }),
       ).rejects.toThrow('api down');
+    });
+
+    it('completes a loop when cancellation settles after proactive delivery', async () => {
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockResolvedValueOnce(
+        'loop response',
+      );
+      let resolveDelivery!: () => void;
+      const delivery = new Promise<void>((resolve) => {
+        resolveDelivery = resolve;
+      });
+      const ch = createChannel();
+      ch.enableCancelCommand();
+      ch.proactiveSupported = true;
+      vi.spyOn(
+        ch as unknown as {
+          pushProactive: (
+            target: { chatId: string },
+            text: string,
+          ) => Promise<void>;
+        },
+        'pushProactive',
+      ).mockImplementation(async () => {
+        await delivery;
+        ch.proactive.push({ chatId: 'chat1', text: 'loop response' });
+      });
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'alice',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: false,
+        enabled: true,
+        createdBy: 'Alice',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledOnce());
+      await vi.waitFor(() =>
+        expect(bridge.cancelSession).not.toHaveBeenCalled(),
+      );
+
+      const cancel = ch.handleInbound(
+        envelope({ text: '/cancel', senderId: 'alice' }),
+      );
+      await Promise.resolve();
+      resolveDelivery();
+      await cancel;
+
+      await expect(loopRun).resolves.toBe('loop response');
+      expect(ch.proactive).toEqual([
+        { chatId: 'chat1', text: 'loop response' },
+      ]);
+      expect(ch.taskEvents).toEqual([
+        expect.objectContaining({ type: 'started', messageId: 'job-1' }),
+        expect.objectContaining({ type: 'completed', messageId: 'job-1' }),
+      ]);
     });
 
     it('disables a stored job when its sender is no longer allowed', async () => {

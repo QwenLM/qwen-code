@@ -91,6 +91,7 @@ type ActivePrompt = {
   cancelPending?: boolean;
   cancellationEmitted?: boolean;
   cancelRequested?: Promise<boolean>;
+  loopDeliveryStarted?: boolean;
   done: Promise<void>;
   resolve: () => void;
   stopStreaming?: () => void;
@@ -575,12 +576,10 @@ export abstract class ChannelBase {
           throw new ChannelLoopSkippedError('loop cancelled before delivery');
         }
         if (response && !promptState.cancelled) {
+          promptState.loopDeliveryStarted = true;
           await this.pushProactive(job.target, response);
         }
         await this.settleCancelRequested(promptState);
-        if (promptState.cancelled) {
-          throw new ChannelLoopSkippedError('loop cancelled before delivery');
-        }
         this.emitTaskLifecycle({
           ...this.lifecycleBase(job.target.chatId, sessionId, job.id),
           type: 'completed',
@@ -744,7 +743,7 @@ export abstract class ChannelBase {
       const cancelled = await Promise.race([
         active.cancelRequested,
         new Promise<boolean>((resolve) => {
-          timer = setTimeout(() => resolve(true), CLEAR_CANCEL_TIMEOUT_MS);
+          timer = setTimeout(() => resolve(false), CLEAR_CANCEL_TIMEOUT_MS);
           timer.unref?.();
         }),
       ]);
@@ -857,6 +856,13 @@ export abstract class ChannelBase {
         );
         return true;
       }
+      if (active.loopDeliveryStarted) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Failed to cancel current request.',
+        );
+        return true;
+      }
 
       const cancelRequested =
         active.cancelRequested ??
@@ -875,6 +881,13 @@ export abstract class ChannelBase {
 
       const cancelSucceeded = await cancelRequested;
       active.cancelPending = false;
+      if (this.activePrompts.get(activeSessionId) !== active) {
+        await this.sendMessage(
+          envelope.chatId,
+          'Failed to cancel current request.',
+        );
+        return true;
+      }
       if (!cancelSucceeded) {
         await this.sendMessage(
           envelope.chatId,
@@ -2439,21 +2452,19 @@ export abstract class ChannelBase {
       promptState.stopStreaming = () => streamer?.stop();
 
       const onChunk = (sid: string, chunk: string) => {
-        if (
-          sid === sessionId &&
-          !promptState.cancelled &&
-          !promptState.cancelPending
-        ) {
-          this.emitTaskLifecycle({
-            ...this.lifecycleBase(
-              envelope.chatId,
-              sessionId,
-              envelope.messageId,
-            ),
-            type: 'text_chunk',
-            chunk,
-          });
-          this.onResponseChunk(envelope.chatId, chunk, sessionId);
+        if (sid === sessionId && !promptState.cancelled) {
+          if (!promptState.cancelPending) {
+            this.emitTaskLifecycle({
+              ...this.lifecycleBase(
+                envelope.chatId,
+                sessionId,
+                envelope.messageId,
+              ),
+              type: 'text_chunk',
+              chunk,
+            });
+            this.onResponseChunk(envelope.chatId, chunk, sessionId);
+          }
           streamer?.push(chunk);
         }
       };
