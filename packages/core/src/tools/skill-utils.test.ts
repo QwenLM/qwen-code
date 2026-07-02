@@ -11,6 +11,8 @@ import {
   invalidateCollectedSkillEntriesCache,
 } from './skill-utils.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
+import type { Config } from '../config/config.js';
+import type { SkillManager } from '../skills/skill-manager.js';
 
 function mockPermissionManager(): {
   pm: PermissionManager;
@@ -67,21 +69,21 @@ describe('applySkillAllowedTools', () => {
 });
 
 describe('collectAvailableSkillEntries cache', () => {
-  function createMockSkillManager() {
+  function createMockSkillManager(): SkillManager {
     return {
       listSkills: vi.fn().mockResolvedValue([]),
       isSkillActive: vi.fn().mockReturnValue(true),
-    };
+    } as unknown as SkillManager;
   }
 
-  function createMockConfig() {
+  function createMockConfig(): Config {
     return {
       get: () => undefined,
       on: () => {},
       getPreventSystemSleepEnabled: () => false,
       getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
       getModelInvocableCommandsProvider: vi.fn().mockReturnValue(undefined),
-    };
+    } as unknown as Config;
   }
 
   // Reset module-level cache before each test so tests are isolated.
