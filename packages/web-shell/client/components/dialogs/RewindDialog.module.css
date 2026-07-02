@@ -19,6 +19,7 @@
 }
 
 .item {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
@@ -35,18 +36,41 @@
   cursor: pointer;
 }
 
+/* Roving cursor (keyboard/hover position) — a plain gray highlight, matching
+   the other list dialogs. */
 .item:hover,
-.itemSelected {
+.itemCursor {
   background: var(--secondary);
 }
 
+/* Confirmed selection: stronger than the cursor — a left accent bar plus a blue
+   title, so the chosen row stays distinguishable from the row merely under the
+   cursor (which only gets the gray background). */
+.itemSelected::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 50%;
+  transform: translateY(-50%);
+  height: 60%;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--agent-blue-500, #4a9eff);
+}
+
+.itemSelected .prompt {
+  color: var(--agent-blue-500, #4a9eff);
+  font-weight: 600;
+}
+
 /* Keyboard mode: the pointer yields to the keyboard, so a cursor resting on a
-   row must not paint a second highlight. Only the selected row keeps its bg. */
+   row must not paint the hover highlight — only the keyboard cursor row does. */
 .keyboardOnly .item:hover {
   background: transparent;
 }
 
-.keyboardOnly .itemSelected:hover {
+.keyboardOnly .itemCursor:hover,
+.keyboardOnly .itemCursor {
   background: var(--secondary);
 }
 

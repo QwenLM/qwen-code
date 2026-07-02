@@ -67,12 +67,12 @@ describe('DialogShell', () => {
     expect(backdrop).toBeTruthy();
 
     act(() => {
-      panel!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      panel!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onClose).not.toHaveBeenCalled();
 
     act(() => {
-      backdrop!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+      backdrop!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onClose).toHaveBeenCalledTimes(1);
   });
@@ -135,6 +135,42 @@ describe('DialogShell', () => {
 
     // Shift+Tab from the first focusable wraps to the last.
     close.focus();
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Tab',
+          shiftKey: true,
+          bubbles: true,
+        }),
+      );
+    });
+    expect(document.activeElement).toBe(last);
+  });
+
+  it('pulls focus into the dialog when Tab is pressed while the panel holds focus', () => {
+    mount(
+      <DialogShell title="Test" onClose={vi.fn()}>
+        <button type="button" data-testid="last">
+          inner
+        </button>
+      </DialogShell>,
+    );
+
+    const panel = document.querySelector<HTMLElement>('[role="dialog"]')!;
+    const close = document.querySelector<HTMLElement>('[data-dialog-close]')!;
+    const last = document.querySelector<HTMLElement>('[data-testid="last"]')!;
+
+    // Focus sits on the panel itself (roving-list fallback). Tab pulls it in.
+    panel.focus();
+    act(() => {
+      document.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }),
+      );
+    });
+    expect(document.activeElement).toBe(close);
+
+    // Shift+Tab from the panel pulls in from the end instead.
+    panel.focus();
     act(() => {
       document.dispatchEvent(
         new KeyboardEvent('keydown', {

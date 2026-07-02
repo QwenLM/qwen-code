@@ -65,21 +65,38 @@ afterEach(() => {
 });
 
 describe('RewindDialog keyboard', () => {
-  it('confirms the rewind for the highlighted snapshot on Enter', async () => {
+  function rewindButton(): HTMLButtonElement {
+    return Array.from(container!.querySelectorAll('button')).find((el) =>
+      /rewind/i.test(el.textContent || ''),
+    ) as HTMLButtonElement;
+  }
+
+  it('does not confirm a target until Enter — the button stays disabled', async () => {
     const rewind = vi.fn().mockResolvedValue(undefined);
     await mount(rewind);
 
-    // Opens with the first snapshot highlighted; Enter rewinds it.
+    // Moving the cursor with arrows must not confirm anything yet.
+    press('ArrowDown');
+    press('ArrowUp');
+    expect(rewind).not.toHaveBeenCalled();
+    expect(rewindButton().disabled).toBe(true);
+
+    // Enter commits the cursor row; it still does not run the rewind itself.
     press('Enter');
-    expect(rewind).toHaveBeenCalledWith('p0');
+    expect(rewind).not.toHaveBeenCalled();
+    expect(rewindButton().disabled).toBe(false);
   });
 
-  it('Enter rewinds the snapshot the arrow keys moved to', async () => {
+  it('the button rewinds the snapshot confirmed via keyboard', async () => {
     const rewind = vi.fn().mockResolvedValue(undefined);
     await mount(rewind);
 
+    // Move cursor to the 2nd snapshot and confirm it with Enter.
     press('ArrowDown');
     press('Enter');
+    act(() => {
+      rewindButton().dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
     expect(rewind).toHaveBeenCalledWith('p1');
   });
 });

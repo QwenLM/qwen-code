@@ -51,6 +51,11 @@ export function RewindDialog({
   const [rewindingPromptId, setRewindingPromptId] = useState<string | null>(
     null,
   );
+  // `cursorIdx` is the roving keyboard/hover highlight; `selectedPromptId` is
+  // the confirmed target the danger button acts on. They are separate so moving
+  // the highlight with the arrow keys does not change what will be rewound until
+  // the user commits with Enter or a click.
+  const [cursorIdx, setCursorIdx] = useState(0);
   const [selectedPromptId, setSelectedPromptId] = useState<string | null>(null);
 
   useEffect(() => {
@@ -82,15 +87,13 @@ export function RewindDialog({
     [blocks, snapshots],
   );
 
+  // Keep the cursor in range as snapshots load / change.
   useEffect(() => {
-    if (items.length > 0 && !selectedPromptId) {
-      setSelectedPromptId(items[0]!.snapshot.promptId);
+    if (cursorIdx >= items.length && items.length > 0) {
+      setCursorIdx(items.length - 1);
     }
-  }, [items, selectedPromptId]);
+  }, [items.length, cursorIdx]);
 
-  const selectedIdx = items.findIndex(
-    ({ snapshot }) => snapshot.promptId === selectedPromptId,
-  );
   const listRef = useRef<HTMLDivElement>(null);
   const isRewinding = rewindingPromptId !== null;
 
@@ -107,25 +110,28 @@ export function RewindDialog({
       });
   };
 
-  // Arrows move the highlight; Enter confirms it (this is a single-select
-  // picker, so Enter runs the rewind for the highlighted snapshot).
+  // Arrows move the cursor (highlight) only; Enter/click commits the cursor row
+  // as the confirmed target. The irreversible rewind stays behind the danger
+  // button, consistent with the other destructive dialogs (delete / release).
+  const commitRow = (index: number) => {
+    const item = items[index];
+    if (item) {
+      setCursorIdx(index);
+      setSelectedPromptId(item.snapshot.promptId);
+    }
+  };
   const { keyboardMode } = useListboxKeyboard({
     itemCount: items.length,
-    activeIndex: selectedIdx < 0 ? 0 : selectedIdx,
-    onActiveIndexChange: (index) => {
-      const item = items[index];
-      if (item) setSelectedPromptId(item.snapshot.promptId);
-    },
-    onConfirm: (index) => handleRewind(items[index]?.snapshot.promptId ?? null),
+    activeIndex: cursorIdx,
+    onActiveIndexChange: setCursorIdx,
+    onConfirm: commitRow,
     enabled: !isRewinding,
   });
 
   useEffect(() => {
-    const el = listRef.current?.children[selectedIdx] as
-      | HTMLElement
-      | undefined;
+    const el = listRef.current?.children[cursorIdx] as HTMLElement | undefined;
     el?.scrollIntoView({ block: 'nearest' });
-  }, [selectedIdx]);
+  }, [cursorIdx]);
 
   if (loading) {
     return <div className={dp('picker-empty')}>{t('rewind.loading')}</div>;
@@ -143,13 +149,12 @@ export function RewindDialog({
         role="listbox"
         tabIndex={0}
         aria-activedescendant={
-          items.length > 0 && selectedIdx >= 0
-            ? optionId(selectedIdx)
-            : undefined
+          items.length > 0 ? optionId(cursorIdx) : undefined
         }
       >
         {items.map(({ snapshot, promptText }, index) => {
-          const selected = selectedPromptId === snapshot.promptId;
+          const isCursor = index === cursorIdx;
+          const isSelected = selectedPromptId === snapshot.promptId;
           const label =
             promptText ||
             t('rewind.promptFallback', {
@@ -160,14 +165,15 @@ export function RewindDialog({
               key={snapshot.promptId}
               id={optionId(index)}
               role="option"
-              aria-selected={selected}
+              aria-selected={isSelected}
               aria-disabled={isRewinding || undefined}
-              className={`${styles.item} ${
-                selected ? styles.itemSelected : ''
+              className={`${styles.item} ${isCursor ? styles.itemCursor : ''} ${
+                isSelected ? styles.itemSelected : ''
               } ${isRewinding ? styles.itemDisabled : ''}`}
               onClick={() => {
-                if (!isRewinding) setSelectedPromptId(snapshot.promptId);
+                if (!isRewinding) commitRow(index);
               }}
+              onMouseMove={() => setCursorIdx(index)}
             >
               <div className={styles.prompt} title={label}>
                 <span className={styles.turn}>#{snapshot.turnIndex + 1}</span>{' '}

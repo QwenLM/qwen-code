@@ -11,6 +11,9 @@ function toolLabel(tool: DaemonWorkspaceToolStatus): string {
   return tool.displayName || tool.name;
 }
 
+const LIST_ID = 'tools-list';
+const optionId = (index: number) => `${LIST_ID}-opt-${index}`;
+
 export function ToolsDialog() {
   const { t } = useI18n();
   const { status, tools, loading, error } = useTools({
@@ -82,6 +85,12 @@ export function ToolsDialog() {
       <div className={dp('picker-sep')} />
 
       <div
+        id={LIST_ID}
+        role="listbox"
+        tabIndex={0}
+        aria-activedescendant={
+          tools.length > 0 ? optionId(selectedIdx) : undefined
+        }
         className={dp(
           'picker-list',
           keyboardMode ? 'picker-keyboard-only' : undefined,
@@ -97,6 +106,10 @@ export function ToolsDialog() {
           return (
             <div
               key={tool.name}
+              id={optionId(i)}
+              role="option"
+              aria-selected={i === selectedIdx}
+              aria-expanded={desc ? expanded : undefined}
               className={dp(
                 'picker-item',
                 'picker-session-item',

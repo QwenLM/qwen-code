@@ -183,6 +183,23 @@ describe('useListboxKeyboard', () => {
     expect(onConfirm).not.toHaveBeenCalled();
   });
 
+  it('does nothing when disabled', () => {
+    const onActiveIndexChange = vi.fn();
+    const onConfirm = vi.fn();
+    mount({
+      itemCount: 3,
+      activeIndex: 1,
+      onActiveIndexChange,
+      onConfirm,
+      enabled: false,
+    });
+
+    press('ArrowDown');
+    press('Enter');
+    expect(onActiveIndexChange).not.toHaveBeenCalled();
+    expect(onConfirm).not.toHaveBeenCalled();
+  });
+
   it('enters keyboard mode on arrow nav and exits on real mouse movement', () => {
     let mode = false;
     mount({

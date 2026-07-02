@@ -19,64 +19,6 @@
   border-radius: 0;
 }
 
-.picker-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 8px 12px;
-}
-
-.picker-close {
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  position: relative;
-  width: 24px;
-  height: 24px;
-  border: 0;
-  border-radius: 4px;
-  background: transparent;
-  color: var(--muted-foreground);
-  cursor: pointer;
-  padding: 0;
-  flex-shrink: 0;
-}
-
-.picker-close:hover {
-  color: var(--foreground);
-  background: var(--muted);
-}
-
-.picker-close::before,
-.picker-close::after {
-  content: '';
-  position: absolute;
-  width: 12px;
-  height: 1.5px;
-  border-radius: 999px;
-  background: currentColor;
-}
-
-.picker-close::before {
-  transform: rotate(45deg);
-}
-
-.picker-close::after {
-  transform: rotate(-45deg);
-}
-
-.picker-title {
-  font-weight: 700;
-  color: var(--foreground);
-  font-size: 14px;
-}
-
-.picker-count {
-  font-size: 12px;
-  color: var(--muted-foreground);
-}
-
 .picker-search {
   display: flex;
   align-items: center;
@@ -98,10 +40,6 @@
   color: var(--foreground);
   font-family: var(--font-mono);
   font-size: 13px;
-}
-
-.picker-search-value {
-  color: var(--foreground);
 }
 
 .picker-search-hint {
@@ -165,11 +103,6 @@
   background: var(--secondary);
 }
 
-.picker-item-current {
-  border-radius: 6px;
-  background: var(--secondary);
-}
-
 .picker-keyboard-only .picker-item:hover {
   background: transparent;
 }
@@ -192,24 +125,12 @@
   width: 100%;
 }
 
-.picker-item-prefix {
-  min-width: 14px;
-  flex-shrink: 0;
-  color: var(--agent-blue-500);
-  font-weight: 700;
-  font-size: 20px;
-  margin-right: 8px;
-  white-space: pre;
-}
-
 .picker-item-title {
   flex: 1 1 auto;
   min-width: 0;
   color: var(--foreground);
-  flex: 1 1 auto;
   font-size: 13px;
   font-weight: 500;
-  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -234,22 +155,6 @@
   font-weight: 700;
 }
 
-.picker-item-number {
-  flex-shrink: 0;
-  min-width: 28px;
-  color: var(--muted-foreground);
-  font-size: 13px;
-  text-align: right;
-}
-
-.picker-item-provider {
-  flex-shrink: 0;
-  color: var(--agent-blue-500);
-  font-size: 13px;
-  font-weight: 700;
-  white-space: nowrap;
-}
-
 .picker-item.selected .picker-item-title {
   color: var(--agent-blue-500);
   font-weight: 700;
@@ -271,12 +176,6 @@
   content: '·';
   margin-right: 8px;
   color: var(--muted-foreground);
-}
-
-.picker-item-check {
-  color: var(--agent-blue-500, #4a9eff);
-  font-weight: bold;
-  margin-left: 4px;
 }
 
 /* "Current value" marker: a left accent bar + a right ✓ that read on their own
@@ -431,32 +330,6 @@
 .mcp-status-disabled,
 .mcp-status-unknown {
   color: var(--muted-foreground);
-}
-.picker-detail-panel {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  padding: 8px 12px;
-  padding-left: 32px;
-  font-size: 13px;
-  flex-shrink: 0;
-}
-
-.picker-detail-row {
-  display: grid;
-  grid-template-columns: 128px minmax(0, 1fr);
-  gap: 8px;
-  align-items: start;
-}
-
-.picker-detail-label {
-  color: var(--muted-foreground);
-  white-space: nowrap;
-}
-
-.picker-detail-value {
-  color: var(--foreground);
-  overflow-wrap: anywhere;
 }
 
 .dialog-inline-button,

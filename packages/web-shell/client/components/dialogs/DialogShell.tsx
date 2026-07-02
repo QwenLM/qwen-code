@@ -94,7 +94,14 @@ export function DialogShell({
         const first = focusables[0];
         const last = focusables[focusables.length - 1];
         const activeEl = document.activeElement;
-        if (event.shiftKey && activeEl === first) {
+        const insideList = focusables.includes(activeEl as HTMLElement);
+        if (!insideList) {
+          // Focus is on the panel itself (e.g. a roving-highlight list where the
+          // options are tabIndex=-1) — pull it into the dialog so Tab can't
+          // escape to the page behind.
+          event.preventDefault();
+          (event.shiftKey ? last : first).focus();
+        } else if (event.shiftKey && activeEl === first) {
           event.preventDefault();
           last.focus();
         } else if (!event.shiftKey && activeEl === last) {
@@ -111,9 +118,10 @@ export function DialogShell({
     };
   }, []);
 
-  const handleBackdropMouseDown = (event: React.MouseEvent<HTMLDivElement>) => {
-    // Only close on a click that starts and ends on the backdrop itself, so a
-    // drag/selection that begins inside the panel never dismisses the dialog.
+  const handleBackdropClick = (event: React.MouseEvent<HTMLDivElement>) => {
+    // Only close on a completed click on the backdrop itself. This lets a press
+    // that starts on the backdrop be cancelled before mouse-up, and it avoids
+    // dismissing the dialog from a click inside the panel that bubbles out.
     if (event.target === event.currentTarget) {
       onClose();
     }
@@ -123,7 +131,7 @@ export function DialogShell({
     <div
       className={`${styles.backdrop} ${themeClass}`}
       data-keyboard-scope
-      onMouseDown={handleBackdropMouseDown}
+      onClick={handleBackdropClick}
     >
       <section
         ref={panelRef}
