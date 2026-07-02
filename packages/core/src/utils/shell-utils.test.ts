@@ -17,7 +17,6 @@ import {
   hasNonFinalTopLevelBackgroundOperator,
   hasUnsafeMonitorBackgroundOperator,
   isCommandAllowed,
-  isCommandNeedsPermission,
   normalizeMonitorCommand,
   stripTrailingBackgroundAmp,
   stripShellWrapper,
@@ -1039,19 +1038,6 @@ describe('getShellConfiguration', () => {
         expect(config.shell).toBe('bash');
       });
     });
-  });
-});
-
-describe('isCommandNeedPermission', () => {
-  it('returns false for read-only commands', async () => {
-    const result = isCommandNeedsPermission('ls');
-    expect(result.requiresPermission).toBe(false);
-  });
-
-  it('returns true for mutating commands with reason', async () => {
-    const result = isCommandNeedsPermission('rm -rf temp');
-    expect(result.requiresPermission).toBe(true);
-    expect(result.reason).toContain('requires permission to execute');
   });
 });
 
