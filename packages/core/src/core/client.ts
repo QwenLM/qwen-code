@@ -122,7 +122,7 @@ import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
-import { isSubagentLikeExecutionContext } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 
 // Hook types and utilities
 import {
@@ -2112,7 +2112,8 @@ export class GeminiClient {
             // SDK clients do not receive the interactive exit-plan flow, so
             // they need plan-only guidance even outside subagent contexts.
             getPlanModeSystemReminder(
-              isSubagentLikeExecutionContext() || this.config.getSdkMode(),
+              shouldUsePlanOnlyReminderInSubagentContext() ||
+                this.config.getSdkMode(),
             ),
           );
         }

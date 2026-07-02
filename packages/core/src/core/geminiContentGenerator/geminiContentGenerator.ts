@@ -21,6 +21,9 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../contentGenerator.js';
+import { createDebugLogger } from '../../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('GEMINI');
 
 /**
  * A wrapper for GoogleGenAI that implements the ContentGenerator interface.
@@ -28,6 +31,9 @@ import type {
 export class GeminiContentGenerator implements ContentGenerator {
   private readonly googleGenAI: GoogleGenAI;
   private readonly contentGeneratorConfig?: ContentGeneratorConfig;
+  // Latch so the effort-clamp warning fires once per generator lifetime
+  // instead of on every request that needs the downgrade.
+  private effortClampWarned = false;
 
   constructor(
     options: {
@@ -125,16 +131,49 @@ export class GeminiContentGenerator implements ContentGenerator {
     }
 
     if (reasoning) {
-      // Gemini exposes LOW / HIGH / UNSPECIFIED. The 'max' tier (a
-      // DeepSeek-specific extension) maps to HIGH here since Gemini has
-      // no higher level.
-      const thinkingLevel = (
-        reasoning.effort === 'low'
-          ? 'LOW'
-          : reasoning.effort === 'high' || reasoning.effort === 'max'
-            ? 'HIGH'
-            : 'THINKING_LEVEL_UNSPECIFIED'
-      ) as ThinkingLevel;
+      // Gemini's thinkingLevel ladder is MINIMAL / LOW / MEDIUM / HIGH — there
+      // is no xhigh/max, so the extra-strong tiers are capped at HIGH. An unset
+      // effort stays UNSPECIFIED so the model picks its own default.
+      let thinkingLevel: ThinkingLevel;
+      switch (reasoning.effort) {
+        case 'low':
+          thinkingLevel = 'LOW' as ThinkingLevel;
+          break;
+        case 'medium':
+          thinkingLevel = 'MEDIUM' as ThinkingLevel;
+          break;
+        case 'high':
+          thinkingLevel = 'HIGH' as ThinkingLevel;
+          break;
+        case 'xhigh':
+        case 'max':
+          // Gemini has no tier above HIGH; log the clamp once (mirroring the
+          // Anthropic generator's one-time clamp warning) so a /effort xhigh|max
+          // that silently runs at HIGH leaves a trace in debug logs.
+          if (!this.effortClampWarned) {
+            debugLogger.warn(
+              `reasoning.effort='${reasoning.effort}' is not supported by Gemini; clamping to 'HIGH'.`,
+            );
+            this.effortClampWarned = true;
+          }
+          thinkingLevel = 'HIGH' as ThinkingLevel;
+          break;
+        case undefined:
+          // No effort set — let the model pick its own default.
+          thinkingLevel = 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel;
+          break;
+        default: {
+          // Exhaustiveness guard: every ReasoningEffort tier (and undefined) is
+          // handled above, so this is unreachable. Adding a new tier without a
+          // matching case makes this a TypeScript compile error rather than a
+          // silent fall-through to UNSPECIFIED. (A `default` is required here by
+          // the eslint default-case rule.)
+          const _exhaustive: never = reasoning.effort;
+          void _exhaustive;
+          thinkingLevel = 'THINKING_LEVEL_UNSPECIFIED' as ThinkingLevel;
+          break;
+        }
+      }
 
       return {
         includeThoughts: true,

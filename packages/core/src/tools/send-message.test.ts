@@ -8,8 +8,11 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { SendMessageTool } from './send-message.js';
 import { BackgroundTaskRegistry } from '../agents/background-tasks.js';
 import { ToolErrorType } from './tool-error.js';
-import type { Config } from '../config/config.js';
+import type { ApprovalMode, Config } from '../config/config.js';
 import { runWithTeammateIdentity } from '../agents/team/identity.js';
+
+const DEFAULT_MODE = 'default' as ApprovalMode;
+const PLAN_MODE = 'plan' as ApprovalMode;
 
 function makeTeamConfig(opts?: {
   teamManager?: {
@@ -17,10 +20,12 @@ function makeTeamConfig(opts?: {
     broadcast: (...args: unknown[]) => Promise<void>;
     requestShutdown?: (...args: unknown[]) => Promise<void>;
   } | null;
+  approvalMode?: ApprovalMode;
 }) {
   return {
     getTeamManager: () => opts?.teamManager ?? null,
     getBackgroundTaskRegistry: () => new BackgroundTaskRegistry(),
+    getApprovalMode: () => opts?.approvalMode ?? DEFAULT_MODE,
   } as unknown as Config;
 }
 
@@ -144,6 +149,38 @@ describe('SendMessageTool — team mode', () => {
     expect(result.error).toBeDefined();
     expect(result.llmContent).toContain('Only the team leader');
     expect(requestShutdown).not.toHaveBeenCalled();
+  });
+
+  it('blocks plan-required teammates before leader approval', async () => {
+    const sendMessage = vi.fn().mockResolvedValue(undefined);
+    const tool = new SendMessageTool(
+      makeTeamConfig({
+        approvalMode: PLAN_MODE,
+        teamManager: {
+          sendMessage,
+          broadcast: vi.fn(),
+        },
+      }),
+    );
+
+    const invocation = tool.build({
+      to: 'alice',
+      message: 'execute this before approval',
+    });
+    const result = await runWithTeammateIdentity(
+      {
+        agentName: 'planner',
+        teamName: 'team',
+        agentId: 'planner@team',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('waiting for leader approval');
+    expect(sendMessage).not.toHaveBeenCalled();
   });
 
   it('validates required params', () => {

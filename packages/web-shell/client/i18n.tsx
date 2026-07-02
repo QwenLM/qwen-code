@@ -297,6 +297,8 @@ const EN: Messages = {
   'contextUsage.messages': 'Messages',
   'contextUsage.mcpTools': 'MCP tools',
   'contextUsage.model': 'Model',
+  'contextUsage.noSession':
+    'No active session yet. Send your first message before viewing context usage.',
   'contextUsage.noApiResponse':
     'No API response yet. Send a message to see actual usage.',
   'contextUsage.overLimit':
@@ -380,6 +382,8 @@ const EN: Messages = {
   'editor.placeholder': 'Type a message or @ file path',
   'editor.shellPlaceholder': 'Enter terminal command',
   'editor.send': 'Send message',
+  'editor.connectionDisconnected':
+    'Connection interrupted. Please try again after it reconnects.',
   'editor.processing': 'Processing. New messages will be queued.',
   'editor.searchHint': 'ctrl+r next · tab accept · enter send · esc cancel',
   'editor.searchLabel': 'reverse-i-search:',
@@ -540,6 +544,8 @@ const EN: Messages = {
   'language.options': 'Available options:',
   'language.set': 'Set UI language',
   'language.usage': 'Usage: /language ui [en|zh-CN]',
+  'localCommand.noSession':
+    'No active session yet. Send your first message before using this command.',
   'local.agents': 'Manage subagents',
   'local.approvalMode': 'Change approval mode',
   'local.auth': 'Connect an LLM provider',
@@ -1515,6 +1521,8 @@ const ZH: Messages = {
   'contextUsage.messages': '消息',
   'contextUsage.mcpTools': 'MCP 工具',
   'contextUsage.model': '模型',
+  'contextUsage.noSession':
+    '当前还没有会话。请先发送第一条消息，再查看上下文使用情况。',
   'contextUsage.noApiResponse':
     '尚无 API 响应。发送一条消息后可查看实际使用量。',
   'contextUsage.overLimit':
@@ -1589,6 +1597,7 @@ const ZH: Messages = {
   'editor.placeholder': '输入消息或 @ 文件路径',
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
+  'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
   'editor.processing': '处理中。新消息会进入队列。',
   'editor.searchHint': 'ctrl+r 下一条 · tab 采纳 · enter 发送 · esc 取消',
   'editor.searchLabel': '历史搜索：',
@@ -1743,6 +1752,8 @@ const ZH: Messages = {
   'language.options': '可用选项：',
   'language.set': '设置 UI 语言',
   'language.usage': '用法：/language ui [en|zh-CN]',
+  'localCommand.noSession':
+    '当前还没有会话。请先发送第一条消息，再使用这个命令。',
   'local.agents': '管理智能体',
   'local.approvalMode': '切换审批模式',
   'local.auth': '连接 LLM provider',

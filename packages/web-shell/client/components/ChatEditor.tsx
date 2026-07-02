@@ -62,6 +62,7 @@ interface ChatEditorProps {
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
   isRunning?: boolean;
+  isPreparing?: boolean;
   /** First Esc armed a cancel — the send button shows an "Esc to stop" hint. */
   cancelArmed?: boolean;
   disabled?: boolean;
@@ -191,6 +192,10 @@ function SendIcon() {
 
 function StopIcon() {
   return <span className={styles.stopIcon} aria-hidden="true" />;
+}
+
+function LoadingIcon() {
+  return <span className={styles.loadingIcon} aria-hidden="true" />;
 }
 
 function QuickActionsIcon() {
@@ -870,6 +875,7 @@ export const ChatEditor = memo(
       onToggleShortcuts,
       onCancel,
       isRunning = false,
+      isPreparing = false,
       cancelArmed = false,
       disabled = false,
       placeholderText = 'Type a message...',
@@ -1569,17 +1575,24 @@ export const ChatEditor = memo(
                 )}
                 <button
                   className={
-                    showCancelButton
-                      ? `${styles.sendBtn} ${styles.sendBtnRunning}`
+                    isPreparing || showCancelButton
+                      ? `${styles.sendBtn} ${styles.sendBtnRunning}${
+                          cancelArmed ? ` ${styles.sendBtnArmed}` : ''
+                        }`
                       : styles.sendBtn
                   }
                   disabled={
-                    showCancelButton
-                      ? !onCancel
-                      : core.disabled || !core.hasContent
+                    isPreparing
+                      ? true
+                      : showCancelButton
+                        ? !onCancel
+                        : core.disabled || !core.hasContent
                   }
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (isPreparing) {
+                      return;
+                    }
                     if (showCancelButton) {
                       onCancel?.();
                       return;
@@ -1587,10 +1600,33 @@ export const ChatEditor = memo(
                     core.submitText();
                   }}
                   aria-label={
-                    showCancelButton ? t('stream.cancel') : t('editor.send')
+                    isPreparing
+                      ? t('common.loading')
+                      : showCancelButton
+                        ? cancelArmed
+                          ? t('stream.cancelArmed')
+                          : t('stream.cancel')
+                        : t('editor.send')
+                  }
+                  title={
+                    isRunning && cancelArmed
+                      ? t('stream.cancelArmed')
+                      : undefined
                   }
                 >
-                  {showCancelButton ? <StopIcon /> : <SendIcon />}
+                  {isPreparing ? (
+                    <LoadingIcon />
+                  ) : showCancelButton ? (
+                    cancelArmed ? (
+                      <span className={styles.escLabel} aria-hidden="true">
+                        Esc
+                      </span>
+                    ) : (
+                      <StopIcon />
+                    )
+                  ) : (
+                    <SendIcon />
+                  )}
                 </button>
                 <span
                   role="status"

@@ -57,32 +57,16 @@
 
 .info {
   border-left-color: var(--agent-blue-500);
-  background-image: linear-gradient(
-    color-mix(in srgb, var(--agent-blue-500) 16%, transparent),
-    color-mix(in srgb, var(--agent-blue-500) 16%, transparent)
-  );
 }
 
 .success {
   border-left-color: var(--success-color);
-  background-image: linear-gradient(
-    color-mix(in srgb, var(--success-color) 16%, transparent),
-    color-mix(in srgb, var(--success-color) 16%, transparent)
-  );
 }
 
 .warning {
   border-left-color: var(--warning-color);
-  background-image: linear-gradient(
-    color-mix(in srgb, var(--warning-color) 18%, transparent),
-    color-mix(in srgb, var(--warning-color) 18%, transparent)
-  );
 }
 
 .error {
   border-left-color: var(--error-color);
-  background-image: linear-gradient(
-    color-mix(in srgb, var(--error-color) 18%, transparent),
-    color-mix(in srgb, var(--error-color) 18%, transparent)
-  );
 }
