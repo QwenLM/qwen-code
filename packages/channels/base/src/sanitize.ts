@@ -72,9 +72,11 @@ export function sanitizePromptText(text: string): string {
   return (
     text
       .replace(PROMPT_UNSAFE_INVISIBLES, ' ')
-      // Match bracket tags NOT at start-of-line so mid-line bracket
-      // patterns (e.g. "see [docs]") are also stripped.
-      .replace(/\[([^\]\r\n]{1,64})\](:?)/g, '$1$2')
+      // Strip injection-style bracket tags like [SYSTEM]: only at the
+      // start of a line (possibly indented with spaces/tabs) — not mid-
+      // sentence brackets like "see [docs] please". The m flag makes ^
+      // match after each line break.
+      .replace(/^([ \t]*)\[([^\]\r\n]{1,64})\](:?)/gm, '$1$2$3')
       // Fold ASCII C0/DEL, including CR/LF/TAB, so attacker-controlled group
       // text cannot create prompt lines outside the adapter's sender attribution.
       // eslint-disable-next-line no-control-regex

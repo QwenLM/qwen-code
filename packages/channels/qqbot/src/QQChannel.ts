@@ -77,11 +77,11 @@ export class QQChannel extends ChannelBase {
   /** Per-group bot OPENID map for multi-group support (member_openid is group-scoped). */
   private botOpenIdByGroup: Map<string, string> = new Map();
   /**
-   * Bot OPENID suffix, set in extractBotOpenId and appended at send time
+   * Bot OPENID suffix per group, set in extractBotOpenId and appended at send time
    * rather than mutating config.instructions. This avoids mutating the
    * shared config object when a per-group OPENID is discovered.
    */
-  private _botOpenIdSuffix: string = '';
+  private _botOpenIdSuffixByGroup: Map<string, string> = new Map();
   /** Set to true after first READY + session restore completes. Guards
    *  against stale textChunk events during startup reconnection. */
   private _ready = false;
@@ -251,7 +251,10 @@ export class QQChannel extends ChannelBase {
               if (target) {
                 this.sendMessage(target.chatId, toFlush)
                   .then(() => {
-                    this.cronBuffer.delete(sessionId);
+                    // Only delete if buffer is still empty — new text
+                    // chunks that arrived during the async send should
+                    // not be discarded.
+                    if (!entry!.buffer) this.cronBuffer.delete(sessionId);
                   })
                   .catch((err) => {
                     process.stderr.write(
@@ -462,7 +465,10 @@ export class QQChannel extends ChannelBase {
             activeBody,
           );
           if (activeResp.ok) {
-            this.msgSeqMap.set(msgId, nextSeq);
+            // Active retry was sent with msg_seq: nextSeq + 1, so record
+            // nextSeq + 1 so the next outbound uses nextSeq + 2 (not a
+            // duplicate of the retry).
+            this.msgSeqMap.set(msgId, nextSeq + 1);
             this.saveQQState();
             return;
           }
@@ -613,6 +619,7 @@ export class QQChannel extends ChannelBase {
     this.replyMsgId.clear();
     this.msgSeqMap.clear();
     this.botOpenIdByGroup.clear();
+    this._botOpenIdSuffixByGroup.clear();
     this.seenMessages.clear();
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
@@ -762,11 +769,14 @@ export class QQChannel extends ChannelBase {
     }
     if (state.buffer) {
       const toFlush = state.buffer;
+      // Clear buffer BEFORE async send (matching idle-flush pattern) so new
+      // text chunks arriving during the send accumulate in a fresh buffer
+      // rather than being discarded by the .then() cleanup below.
+      state.buffer = '';
       // Prevent onResponseComplete from firing during tool-call send.
       this.flushingSessions.add(event.sessionId);
       this.sendMessage(state.chatId, toFlush)
         .then(() => {
-          state.buffer = '';
           // Check for pendingStreamDelete (onResponseComplete deferred)
           if (this.pendingStreamDelete.has(event.sessionId)) {
             this.pendingStreamDelete.delete(event.sessionId);
@@ -1617,7 +1627,10 @@ export class QQChannel extends ChannelBase {
     }
     if (chatId) {
       this.botOpenIdByGroup.set(chatId, botOpenId);
-      this._botOpenIdSuffix = `\n机器人 OPENID: ${botOpenId}`;
+      this._botOpenIdSuffixByGroup.set(
+        chatId,
+        `\n机器人 OPENID: ${botOpenId}`,
+      );
       this.saveQQState();
     }
     return botOpenId;
@@ -1743,6 +1756,10 @@ export class QQChannel extends ChannelBase {
     // to ignore irrelevant bot traffic.
     const isBot = event.author?.bot === true;
     const botTag = isBot ? '[bot] ' : '';
+    // NOTE: Both callers (handleGroup, handleGroupAll) guard against bot
+    // messages before reaching prepareGroupMessage, so isBot is always false
+    // and botTag always '' here. The code is retained as defense-in-depth
+    // in case a future caller skips the guard.
 
     // Log slash commands with safeName for audit trail
     if (isSlash) {
@@ -1762,7 +1779,7 @@ export class QQChannel extends ChannelBase {
 
     const text = isSlash
       ? sanitizePromptText(cleanText)
-      : `[atMention=${isAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}${this._botOpenIdSuffix}`;
+      : `[atMention=${isAtBot}]${openIdSuffix} ${botTag}[${safeName}${senderOpenId ? `(${senderOpenId.slice(0, 8)}…)` : ''}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}${this._botOpenIdSuffixByGroup.get(chatId) || ''}`;
 
     return {
       isAtBot,
@@ -1798,15 +1815,16 @@ export class QQChannel extends ChannelBase {
     if (!result) return;
     const { isAtBot, isSlash, text, senderName } = result;
 
-    // GROUP_AT_MESSAGE_CREATE only fires when the bot IS @mentioned.
-    // If mentions were absent or malformed, default to true to prevent
-    // silent message drops on platform-side mention detection quirks.
+    // GROUP_AT_MESSAGE_CREATE only fires when the bot IS @mentioned, so
+    // finalIsAtBot is unconditionally true. If isAtBot (from mentions array)
+    // was false due to a platform-side mention detection quirk, still treat
+    // it as @-bot to prevent silent message drops.
     if (!isAtBot) {
       process.stderr.write(
         `[QQ:${this.name}] GROUP_AT_MESSAGE_CREATE with isAtBot=false, forcing true (event type guarantees @-bot)\n`,
       );
     }
-    const finalIsAtBot = isAtBot || true;
+    const finalIsAtBot = true;
 
     // When isAtBot was false but finalIsAtBot was forced true, ensure
     // replyMsgId is set (prepareGroupMessage skips it when isAtBot is false).
