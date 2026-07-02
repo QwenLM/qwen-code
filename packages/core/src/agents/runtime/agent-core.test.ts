@@ -610,19 +610,26 @@ describe('AgentCore.prepareTools', () => {
   );
 });
 
-
 describe('AgentCore STREAM_TEXT batching (#2928)', () => {
   it('batches thought and response text separately per chunk', () => {
     const emitter = new AgentEventEmitter();
-    const events = [];
+    const events: Array<{ text: string; thought: boolean }> = [];
     emitter.on(AgentEventType.STREAM_TEXT, (e) => {
-      events.push({ text: e.text, thought: e.thought });
+      events.push({ text: e.text, thought: e.thought ?? false });
     });
     emitter.emit(AgentEventType.STREAM_TEXT, {
-      subagentId: 'test', round: 1, text: 'reasoning', thought: true, timestamp: Date.now(),
+      subagentId: 'test',
+      round: 1,
+      text: 'reasoning',
+      thought: true,
+      timestamp: Date.now(),
     });
     emitter.emit(AgentEventType.STREAM_TEXT, {
-      subagentId: 'test', round: 1, text: 'output', thought: false, timestamp: Date.now(),
+      subagentId: 'test',
+      round: 1,
+      text: 'output',
+      thought: false,
+      timestamp: Date.now(),
     });
     expect(events).toHaveLength(2);
     expect(events[0].thought).toBe(true);
