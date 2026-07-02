@@ -24,6 +24,7 @@ import type {
   ChannelConfig,
   ChannelBaseOptions,
   ChannelAgentBridge,
+  ToolCallEvent,
 } from '@qwen-code/channel-base';
 import WebSocket from 'ws';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
@@ -141,6 +142,21 @@ export class QQChannel extends ChannelBase {
   private msgSeqMap: Map<string, number> = new Map();
 
   /** Path to persisted QQ routing state: chatTypeMap, replyMsgId, msgSeqMap. */
+
+  // ── Streaming state ───────────────────────────────────────────
+  private streamState: Map<
+    string,
+    {
+      chatId: string;
+      buffer: string;
+      timer: ReturnType<typeof setTimeout> | null;
+    }
+  > = new Map();
+  private flushingSessions: Set<string> = new Set();
+  private pendingStreamDelete: Set<string> = new Set();
+  private _reconnectId: number = 0;
+  private blockStreaming: boolean = false;
+
   private readonly qqStatePath: string;
   /**
    * Path to the SessionRouter persistence file we back up before shutdown.
@@ -173,6 +189,7 @@ export class QQChannel extends ChannelBase {
       registerBridgeEvents: options?.registerBridgeEvents ?? !hasExternalRouter,
     });
     this.qqConfig = config as unknown as QQChannelConfig;
+    this.blockStreaming = this.config.blockStreaming === 'on';
     this.qqStatePath = join(stateDir, `${safeName}-state.json`);
     this.globalSessionsPath = hasExternalRouter
       ? join(stateDir, 'sessions.json')
@@ -187,6 +204,7 @@ export class QQChannel extends ChannelBase {
 
   async connect(): Promise<void> {
     this.disposed = false;
+    this._reconnectId++;
     if (!this.config.instructions) {
       this.config.instructions = [
         '## QQ Bot Channel',
@@ -339,6 +357,13 @@ export class QQChannel extends ChannelBase {
     this.chatTypeMap.clear();
     this.replyMsgId.clear();
     this.msgSeqMap.clear();
+    for (const [, state] of this.streamState) {
+      if (state.timer) clearTimeout(state.timer);
+    }
+    this.streamState.clear();
+    this.flushingSessions.clear();
+    this.pendingStreamDelete.clear();
+    this._reconnectId++;
   }
 
   /**
@@ -358,6 +383,122 @@ export class QQChannel extends ChannelBase {
     _messageId?: string,
   ): void {}
 
+  // ── Streaming (idle-flush with per-session buffers) ────────────
+
+  protected override onResponseChunk(
+    chatId: string,
+    chunk: string,
+    sessionId: string,
+  ): void {
+    if (this.blockStreaming) return;
+    let state = this.streamState.get(sessionId);
+    if (!state) {
+      state = { chatId, buffer: chunk, timer: null };
+      this.streamState.set(sessionId, state);
+    } else {
+      state.buffer += chunk;
+      if (state.timer) {
+        clearTimeout(state.timer);
+        state.timer = null;
+      }
+    }
+    const reconnectId = this._reconnectId;
+    state.timer = setTimeout(() => {
+      this.idleFlush(sessionId, reconnectId);
+    }, 2000);
+    state.timer.unref?.();
+  }
+
+  private idleFlush(sessionId: string, reconnectId: number): void {
+    if (this._reconnectId !== reconnectId) return;
+    const state = this.streamState.get(sessionId);
+    if (!state || !state.buffer) return;
+    if (this.flushingSessions.has(sessionId)) return;
+    const buffer = state.buffer;
+    state.buffer = '';
+    this.flushingSessions.add(sessionId);
+    this.sendMessage(state.chatId, buffer)
+      .then(() => {
+        if (this.pendingStreamDelete.has(sessionId)) {
+          this.pendingStreamDelete.delete(sessionId);
+          if (this.streamState.get(sessionId) === state && !state.buffer) {
+            this.streamState.delete(sessionId);
+          }
+        } else {
+          if (this.streamState.get(sessionId) === state) {
+            this.streamState.delete(sessionId);
+          }
+        }
+      })
+      .catch((e: unknown) => {
+        process.stderr.write(
+          `[QQ:${this.name}] idleFlush send failed: ${String(e)}\\n`,
+        );
+        if (this.pendingStreamDelete.has(sessionId)) {
+          this.pendingStreamDelete.delete(sessionId);
+          this.streamState.delete(sessionId);
+        } else {
+          const current = this.streamState.get(sessionId);
+          if (current) {
+            current.buffer = buffer + (current.buffer || '');
+          }
+        }
+      })
+      .finally(() => {
+        this.flushingSessions.delete(sessionId);
+      });
+  }
+
+  override onToolCall(_chatId: string, event: ToolCallEvent): void {
+    const state = this.streamState.get(event.sessionId);
+    if (!state || !state.buffer) return;
+    if (this.flushingSessions.has(event.sessionId)) return;
+    if (state.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    const buffer = state.buffer;
+    state.buffer = '';
+    this.flushingSessions.add(event.sessionId);
+    this.sendMessage(state.chatId, buffer)
+      .then(() => {
+        if (this.pendingStreamDelete.has(event.sessionId)) {
+          this.pendingStreamDelete.delete(event.sessionId);
+          this.streamState.delete(event.sessionId);
+        }
+      })
+      .catch((e: unknown) => {
+        state.buffer = buffer + (state.buffer || '');
+        this.pendingStreamDelete.delete(event.sessionId);
+        process.stderr.write(
+          `[QQ:${this.name}] toolCallFlush send failed: ${String(e)}\\n`,
+        );
+      })
+      .finally(() => {
+        this.flushingSessions.delete(event.sessionId);
+      });
+  }
+
+  protected override async onResponseComplete(
+    chatId: string,
+    fullText: string,
+    sessionId: string,
+  ): Promise<void> {
+    const state = this.streamState.get(sessionId);
+    if (state?.timer) {
+      clearTimeout(state.timer);
+      state.timer = null;
+    }
+    if (state && this.flushingSessions.has(sessionId)) {
+      this.pendingStreamDelete.add(sessionId);
+      return;
+    }
+    const remaining = state?.buffer ?? fullText;
+    this.streamState.delete(sessionId);
+    if (remaining) {
+      await super.onResponseComplete(chatId, remaining, sessionId);
+    }
+  }
   // ── State Persistence (cross-server context continuation) ──────
 
   /** Debounced state persistence to avoid blocking event loop. */

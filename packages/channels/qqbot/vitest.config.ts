@@ -6,6 +6,11 @@ export default defineConfig({
     include: ['src/**/*.test.ts'],
     globals: true,
   },
+  server: {
+    deps: {
+      inline: ['@qwen-code/channel-base'],
+    },
+  },
   resolve: {
     alias: {
       // Resolve the in-repo channel-base to its live SOURCE so a package-local
