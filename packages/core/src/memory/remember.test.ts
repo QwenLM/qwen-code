@@ -354,4 +354,33 @@ describe('remember memory helper', () => {
       }),
     ).rejects.toThrow('aborted');
   });
+
+  it('remember agent always receives the full protocol even when all indexes are empty', async () => {
+    const touched = path.join(getAutoMemoryRoot(projectRoot), 'user.md');
+    vi.mocked(runForkedAgent).mockResolvedValue({
+      status: 'completed',
+      finalText: 'Saved.',
+      filesTouched: [touched],
+      filesWritten: [touched],
+    } satisfies ForkedAgentResult);
+
+    await runManagedRememberByAgent({
+      config: createConfig(projectRoot),
+      projectRoot,
+      content: 'Remember this fact.',
+      contextMode: 'clean',
+    });
+
+    const params = vi.mocked(runForkedAgent).mock.calls[0]?.[0] as {
+      systemPrompt: string;
+    };
+    // Full-protocol markers must be present (forceFullProtocol: true)
+    expect(params.systemPrompt).toContain('## Types of memory');
+    expect(params.systemPrompt).toContain('## What NOT to save in memory');
+    expect(params.systemPrompt).toContain('## When to access memories');
+    expect(params.systemPrompt).toContain('## Before recommending from memory');
+    // Condensed-only markers must NOT appear
+    expect(params.systemPrompt).not.toContain('## Memory types');
+    expect(params.systemPrompt).not.toContain('## Do not save');
+  });
 });

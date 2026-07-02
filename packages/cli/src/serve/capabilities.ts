@@ -264,7 +264,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // only when explicitly requested by option or env.
   client_mcp_over_ws: { since: 'v1' },
   // Plan C "CDP tunnel" (issue #5626): the daemon exposes a `/cdp` WebSocket
-  // where a loopback puppeteer client (chrome-devtools-mcp) drives ONE real tab
+  // where a loopback CDP client drives ONE real tab
   // via the extension's `chrome.debugger`, tunneled over `/acp` as `cdp_*`
   // frames. Advertised when explicitly enabled or when the daemon is serving a
   // Chrome extension origin.

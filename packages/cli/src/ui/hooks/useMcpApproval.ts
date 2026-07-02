@@ -10,7 +10,7 @@ import type {
   MCPServerConfig,
   McpServerScope,
 } from '@qwen-code/qwen-code-core';
-import { isGatedMcpScope } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, isGatedMcpScope } from '@qwen-code/qwen-code-core';
 import { loadMcpApprovals } from '../../config/mcpApprovals.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
 import { appEvents, AppEvent } from '../../utils/events.js';
@@ -79,6 +79,7 @@ export const useMcpApproval = (config: Config) => {
   // live server map + persisted approvals). Reused for both the initial mount
   // and mid-session recomputes triggered by a settings hot-reload.
   const computePending = useCallback((): PendingMcpServer[] => {
+    if (config.getApprovalMode() === ApprovalMode.YOLO) return [];
     const servers = config.getMcpServers() ?? {};
     const approvals = loadMcpApprovals();
     const root = config.getWorkingDir();

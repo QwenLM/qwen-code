@@ -7,6 +7,30 @@ export type ChannelType = string;
 export type GroupPolicy = 'disabled' | 'allowlist' | 'open';
 export type DispatchMode = 'collect' | 'steer' | 'followup';
 
+export interface ChannelIdentityConfig {
+  id?: string;
+  displayName?: string;
+  description?: string;
+}
+
+export interface ChannelRuntimeIdentity {
+  readonly id: string;
+  readonly displayName: string;
+  readonly description?: string;
+}
+
+export type ChannelMemoryScopeMode = 'metadata-only';
+
+export interface ChannelMemoryScopeConfig {
+  namespace?: string;
+  mode?: ChannelMemoryScopeMode;
+}
+
+export interface ChannelRuntimeMemoryScope {
+  readonly namespace: string;
+  readonly mode: ChannelMemoryScopeMode;
+}
+
 export interface GroupConfig {
   requireMention?: boolean; // default: true
   dispatchMode?: DispatchMode;
@@ -36,6 +60,8 @@ export interface ChannelConfig {
   cwd: string;
   approvalMode?: string;
   instructions?: string;
+  identity?: ChannelIdentityConfig;
+  memoryScope?: ChannelMemoryScopeConfig;
   model?: string;
   groupPolicy: GroupPolicy; // default: "disabled"
   groupHistoryLimit?: number;
@@ -103,6 +129,62 @@ export interface SessionTarget {
   chatId: string;
   threadId?: string;
   isGroup?: boolean;
+}
+
+export interface ChannelTaskLifecycleBase {
+  channelName: string;
+  chatId: string;
+  sessionId: string;
+  messageId?: string;
+  identity: ChannelRuntimeIdentity;
+  memoryScope: ChannelRuntimeMemoryScope;
+}
+
+/**
+ * Whitelist of tool-call fields exposed to lifecycle consumers. Kept explicit
+ * (not derived from ToolCallEvent) so a new bridge field can't leak through.
+ */
+export interface SanitizedToolCallEvent {
+  sessionId: string;
+  toolCallId: string;
+  kind: string;
+  title: string;
+  status: string;
+}
+
+/** 'dropped' = loop was disabled/deleted mid-run (not user-cancelled). */
+export type ChannelTaskCancellationReason =
+  | 'cancel_command'
+  | 'clear'
+  | 'steer'
+  | 'timeout'
+  | 'dropped';
+
+export type ChannelTaskLifecycleEvent =
+  | (ChannelTaskLifecycleBase & { type: 'started' })
+  /** `chunk` is raw model output — content, not metadata; deliberately unsanitized. */
+  | (ChannelTaskLifecycleBase & { type: 'text_chunk'; chunk: string })
+  | (ChannelTaskLifecycleBase & {
+      type: 'tool_call';
+      toolCall: SanitizedToolCallEvent;
+    })
+  | (ChannelTaskLifecycleBase & {
+      type: 'cancelled';
+      reason: ChannelTaskCancellationReason;
+    })
+  | (ChannelTaskLifecycleBase & { type: 'completed' })
+  | (ChannelTaskLifecycleBase & {
+      type: 'failed';
+      error: string;
+      /** Where the turn failed: agent generation vs delivery to the platform. */
+      phase: 'agent' | 'delivery';
+    });
+
+/** Terminal lifecycle event types — exactly one is expected per task. */
+export function isTerminalTaskLifecycleType(
+  type: ChannelTaskLifecycleEvent['type'],
+): type is 'completed' | 'cancelled' | 'failed' {
+  return type === 'completed' || type === 'cancelled' || type === 'failed';
 }
 
 export interface ChannelMemoryTarget {
