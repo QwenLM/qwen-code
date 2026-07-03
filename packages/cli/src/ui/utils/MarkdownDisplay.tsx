@@ -19,6 +19,7 @@ import {
   splitMarkdownTableRow,
   TABLE_ROW_RE,
   TABLE_SEPARATOR_RE,
+  CODE_FENCE_RE,
 } from './pending-rendered-height.js';
 // Minimum content lines to keep in a clipped live preview before the
 // "generating more" cue (own constant — not coupled to MaxSizedBox's floor).
@@ -48,7 +49,7 @@ export function countMarkdownSourceBlocks(
 ): MarkdownSourceBlockCounts {
   const codeBlockLanguageCounts = new Map<string, number>();
   const lines = text.split(/\r?\n/);
-  const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+  const codeFenceRegex = CODE_FENCE_RE;
   const mathFenceRegex = /^ *\$\$ *$/;
   let activeCodeFence: string | null = null;
   let inMathBlock = false;
@@ -146,7 +147,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       ? Math.max(MIN_PENDING_CONTENT_LINES, availableTerminalHeight - 2)
       : undefined;
   const headerRegex = /^ *(#{1,4}) +(.*)/;
-  const codeFenceRegex = /^ *(`{3,}|~{3,}) *([^`]*)$/;
+  const codeFenceRegex = CODE_FENCE_RE;
   const ulItemRegex = /^([ \t]*)([-*+]) +(.*)/;
   const olItemRegex = /^([ \t]*)(\d+)\. +(.*)/;
   const hrRegex = /^ *([-*_] *){3,} *$/;

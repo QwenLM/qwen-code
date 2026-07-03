@@ -28,6 +28,8 @@ export const TABLE_ROW_RE = /^\s*\|(.+)\|\s*$/;
 /** A markdown table separator: `| --- | :--: |` etc. */
 export const TABLE_SEPARATOR_RE =
   /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
+/** A fenced code block delimiter. Group 1 is the fence (``` or ~~~ run). */
+export const CODE_FENCE_RE = /^ *(`{3,}|~{3,}) *([^`]*)$/;
 
 const INLINE_MATH_MAX_CHARS = 1024;
 const TABLE_INLINE_MATH_SPAN_RE = new RegExp(
@@ -145,7 +147,9 @@ export interface PendingSliceResult {
  *    — capped because a streaming table is height-clamped by TableRenderer;
  *  - a table that would overflow the remaining budget is cut *before* (kept for
  *    a later chunk / commit) unless it is the first block, in which case it is
- *    kept and the clamp bounds it, then the walk stops.
+ *    kept and the clamp bounds it, then the walk stops;
+ *  - lines inside a fenced code block are charged individually (never treated as
+ *    a table) so the estimate matches the renderer, which renders them as code.
  *
  * The result is an upper bound on the true rendered height of the kept prefix,
  * so callers that slice to `keptLines` can never overflow the viewport.
@@ -158,7 +162,38 @@ export function fitPendingSlice(
 ): PendingSliceResult {
   let rendered = 0;
   let kept = allLines.length;
+  let codeFence = ''; // non-empty while inside a fenced code block
   for (let i = 0; i < allLines.length; ) {
+    const line = allLines[i]!;
+    const fenceMatch = CODE_FENCE_RE.exec(line);
+    if (codeFence) {
+      // Inside a code block: charge the line as code (one row, wrapped), and
+      // close on a matching fence. Never treat contents as a table.
+      if (
+        fenceMatch &&
+        fenceMatch[1]!.startsWith(codeFence[0]!) &&
+        fenceMatch[1]!.length >= codeFence.length
+      ) {
+        codeFence = '';
+      }
+      rendered += estimateWrappedRows(line, contentWidth);
+      if (rendered > budget) {
+        kept = i;
+        break;
+      }
+      i++;
+      continue;
+    }
+    if (fenceMatch) {
+      codeFence = fenceMatch[1]!;
+      rendered += estimateWrappedRows(line, contentWidth);
+      if (rendered > budget) {
+        kept = i;
+        break;
+      }
+      i++;
+      continue;
+    }
     if (isTableStart(allLines, i)) {
       let j = i + 2;
       while (j < allLines.length && TABLE_ROW_RE.test(allLines[j]!)) j++;
@@ -177,7 +212,7 @@ export function fitPendingSlice(
         break;
       }
     } else {
-      rendered += estimateWrappedRows(allLines[i]!, contentWidth);
+      rendered += estimateWrappedRows(line, contentWidth);
       if (rendered > budget) {
         kept = i;
         break;

@@ -153,6 +153,23 @@ describe('fitPendingSlice', () => {
     expect(keptLines).toBe(0);
   });
 
+  it('does not treat table-like lines inside a fenced code block as a table', () => {
+    // 6 lines that render as code (1 row each) → fit budget 6. If the inner
+    // pipe rows were mis-charged as a table (2*1 + 5 = 7 rows), the budget
+    // would be exceeded and the slice would clip.
+    const lines = [
+      '```',
+      '| A | B |',
+      '| - | - |',
+      '| 1 | 2 |',
+      '```',
+      'after',
+    ];
+    const { keptLines, clipped } = fitPendingSlice(lines, 80, 6, CLAMP);
+    expect(clipped).toBe(false);
+    expect(keptLines).toBe(6);
+  });
+
   it('accounts for wrapping of non-table lines', () => {
     // Each line is 30 cols at width 10 → 3 rows. Budget 6 → 2 lines fit.
     const lines = Array.from({ length: 5 }, () => 'a'.repeat(30));
