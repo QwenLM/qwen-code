@@ -11,6 +11,7 @@ import {
   EchartsFullDataBlock,
   createEchartsFullDataRenderer,
   type EchartsFullDataOption,
+  type EchartsFullDataRefResolver,
   type EchartsRuntime,
   type EchartsRuntimeLoader,
 } from './EchartsFullDataBlock';
@@ -53,6 +54,8 @@ async function flushChart(): Promise<void> {
   await act(async () => {
     await Promise.resolve();
     await Promise.resolve();
+    await Promise.resolve();
+    await Promise.resolve();
   });
 }
 
@@ -60,12 +63,14 @@ async function renderEchartsMarkdown({
   code,
   fenceLanguage = 'echarts-fulldata',
   loadEcharts,
+  resolveDataRef,
   language = 'en',
   source = 'assistant',
 }: {
   code: string;
   fenceLanguage?: string;
   loadEcharts?: EchartsRuntimeLoader;
+  resolveDataRef?: EchartsFullDataRefResolver;
   language?: 'en' | 'zh-CN';
   source?: 'assistant' | 'thinking';
 }): Promise<HTMLElement> {
@@ -75,7 +80,10 @@ async function renderEchartsMarkdown({
         <WebShellCustomizationProvider
           value={{
             markdown: {
-              renderCodeBlock: createEchartsFullDataRenderer({ loadEcharts }),
+              renderCodeBlock: createEchartsFullDataRenderer({
+                loadEcharts,
+                resolveDataRef,
+              }),
             },
           }}
         >
@@ -267,6 +275,400 @@ describe('EchartsFullDataBlock', () => {
       ['Tue', '200'],
       ['Mon', '120'],
     ]);
+  });
+
+  it('keeps legacy ECharts option block bodies compatible', async () => {
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        title: { text: 'Legacy option' },
+        version: 'legacy-custom-metadata',
+        dataset: {
+          dimensions: ['day', 'orders'],
+          source: [
+            { day: 'Mon', orders: 120 },
+            { day: 'Tue', orders: 200 },
+          ],
+        },
+        xAxis: { type: 'category' },
+        yAxis: { type: 'value' },
+        series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+      }),
+      loadEcharts: () => runtime,
+    });
+    await flushChart();
+
+    expect(runtime.init).toHaveBeenCalledOnce();
+    expect(setOption.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        dataset: expect.objectContaining({
+          dimensions: ['day', 'orders'],
+          source: [
+            { day: 'Mon', orders: 120 },
+            { day: 'Tue', orders: 200 },
+          ],
+        }),
+      }),
+    );
+    expect(container.textContent).toContain('Legacy option');
+    expect(container.textContent).not.toContain('echarts-fulldata');
+  });
+
+  it('renders inline envelope array rows in chart and data views', async () => {
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        version: 1,
+        data: {
+          kind: 'inline',
+          dimensions: ['day', 'orders'],
+          source: [
+            ['Mon', 120],
+            ['Tue', 200],
+          ],
+        },
+        option: {
+          title: { text: 'Inline envelope' },
+          xAxis: { type: 'category' },
+          yAxis: { type: 'value' },
+          series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+        },
+      }),
+      loadEcharts: () => runtime,
+    });
+    await flushChart();
+
+    expect(setOption.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        dataset: {
+          dimensions: ['day', 'orders'],
+          source: [
+            ['Mon', 120],
+            ['Tue', 200],
+          ],
+        },
+      }),
+    );
+
+    await act(async () => {
+      container.querySelectorAll('button')[1]?.click();
+    });
+
+    expect(getDataRows(container)).toEqual([
+      ['Mon', '120'],
+      ['Tue', '200'],
+    ]);
+  });
+
+  it('rejects inline envelope row length mismatches', async () => {
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        version: 1,
+        data: {
+          kind: 'inline',
+          dimensions: ['day', 'orders'],
+          source: [['Mon', 120], ['Tue']],
+        },
+        option: {
+          xAxis: { type: 'category' },
+          yAxis: { type: 'value' },
+          series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+        },
+      }),
+    });
+
+    expect(container.textContent).toContain(
+      'Chart envelope data.source row 2 has 1 cells; expected 2.',
+    );
+    expect(container.querySelector('pre code')).toBeNull();
+  });
+
+  it('rejects legacy array-row dimension mismatches', async () => {
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        dataset: {
+          dimensions: ['day', 'orders'],
+          source: [['Mon', 120], ['Tue']],
+        },
+        series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+      }),
+    });
+
+    expect(container.textContent).toContain(
+      'Chart data row 2 has 1 cells; expected 2.',
+    );
+    expect(container.querySelector('pre code')).toBeNull();
+  });
+
+  it('rejects legacy dataset cells that cannot be rendered safely', async () => {
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        dataset: {
+          dimensions: ['day', 'orders'],
+          source: [['Mon', { nested: 120 }]],
+        },
+        series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+      }),
+    });
+
+    expect(container.textContent).toContain(
+      'Chart data row 1 cell 2 must be a string, number, boolean, or null.',
+    );
+    expect(container.querySelector('pre code')).toBeNull();
+  });
+
+  it('resolves ref envelope data through the host resolver', async () => {
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+    const resolveDataRef = vi.fn(async () => ({
+      dimensions: ['day', 'orders'],
+      source: [
+        ['Mon', 120],
+        ['Tue', 200],
+      ],
+    }));
+
+    await renderEchartsMarkdown({
+      code: JSON.stringify({
+        version: 1,
+        data: {
+          kind: 'ref',
+          ref: 'artifact://chart-data/orders',
+          format: 'csv',
+          dimensions: ['day', 'orders'],
+        },
+        option: {
+          title: { text: 'Ref envelope' },
+          xAxis: { type: 'category' },
+          yAxis: { type: 'value' },
+          series: [{ type: 'line', encode: { x: 'day', y: 'orders' } }],
+        },
+      }),
+      loadEcharts: () => runtime,
+      resolveDataRef,
+    });
+    await flushChart();
+
+    expect(resolveDataRef).toHaveBeenCalledWith(
+      'artifact://chart-data/orders',
+      {
+        format: 'csv',
+        dimensions: ['day', 'orders'],
+      },
+    );
+    expect(setOption.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        dataset: {
+          dimensions: ['day', 'orders'],
+          source: [
+            ['Mon', 120],
+            ['Tue', 200],
+          ],
+        },
+      }),
+    );
+  });
+
+  it('ignores stale ref resolutions after the chart code changes', async () => {
+    let resolveFirst: (value: {
+      dimensions: string[];
+      source: Array<Array<string | number>>;
+    }) => void = () => {};
+    let resolveSecond: (value: {
+      dimensions: string[];
+      source: Array<Array<string | number>>;
+    }) => void = () => {};
+    const resolveDataRef = vi.fn(
+      (ref: string) =>
+        new Promise<{
+          dimensions: string[];
+          source: Array<Array<string | number>>;
+        }>((resolve) => {
+          if (ref.endsWith('/first')) {
+            resolveFirst = resolve;
+          } else {
+            resolveSecond = resolve;
+          }
+        }),
+    );
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+    const renderer = createEchartsFullDataRenderer({
+      loadEcharts: () => runtime,
+      resolveDataRef,
+    });
+    const contentFor = (ref: string) =>
+      `\`\`\`echarts-fulldata\n${JSON.stringify({
+        version: 1,
+        data: {
+          kind: 'ref',
+          ref,
+          format: 'csv',
+          dimensions: ['day', 'orders'],
+        },
+        option: {
+          title: { text: 'Ref race' },
+          xAxis: { type: 'category' },
+          yAxis: { type: 'value' },
+          series: [{ type: 'line', encode: { x: 'day', y: 'orders' } }],
+        },
+      })}\n\`\`\``;
+    const tree = (ref: string) => (
+      <I18nProvider language="en">
+        <ThemeProvider value="dark">
+          <WebShellCustomizationProvider
+            value={{ markdown: { renderCodeBlock: renderer } }}
+          >
+            <Markdown content={contentFor(ref)} source="assistant" />
+          </WebShellCustomizationProvider>
+        </ThemeProvider>
+      </I18nProvider>
+    );
+
+    const { rerender } = await mount(tree('artifact://chart-data/first'));
+    await flushChart();
+    await rerender(tree('artifact://chart-data/second'));
+    await flushChart();
+
+    await act(async () => {
+      resolveSecond({
+        dimensions: ['day', 'orders'],
+        source: [['Tue', 200]],
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flushChart();
+
+    expect(setOption).toHaveBeenCalledTimes(1);
+    expect(setOption.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({
+        dataset: {
+          dimensions: ['day', 'orders'],
+          source: [['Tue', 200]],
+        },
+      }),
+    );
+
+    await act(async () => {
+      resolveFirst({
+        dimensions: ['day', 'orders'],
+        source: [['Mon', 120]],
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flushChart();
+
+    expect(setOption).toHaveBeenCalledTimes(1);
+  });
+
+  it('reports missing and unsupported ref resolver states without showing raw code', async () => {
+    const missingResolver = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        version: 1,
+        data: {
+          kind: 'ref',
+          ref: 'artifact://chart-data/orders',
+          format: 'csv',
+          dimensions: ['day', 'orders'],
+        },
+        option: {
+          series: [{ type: 'bar' }],
+        },
+      }),
+    });
+    expect(missingResolver.textContent).toContain(
+      'Chart data reference resolver is unavailable.',
+    );
+    expect(missingResolver.querySelector('pre code')).toBeNull();
+
+    const resolveDataRef = vi.fn();
+    const unsupportedScheme = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        version: 1,
+        data: {
+          kind: 'ref',
+          ref: 'https://example.test/data.json',
+          format: 'json',
+          dimensions: ['day', 'orders'],
+        },
+        option: {
+          series: [{ type: 'bar' }],
+        },
+      }),
+      resolveDataRef,
+    });
+    expect(resolveDataRef).not.toHaveBeenCalled();
+    expect(unsupportedScheme.textContent).toContain(
+      'Chart envelope data.ref must use artifact:// or session-file://.',
+    );
+    expect(unsupportedScheme.querySelector('pre code')).toBeNull();
+  });
+
+  it('rejects resolved ref data over the dataset limits', async () => {
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        version: 1,
+        data: {
+          kind: 'ref',
+          ref: 'session-file://chart-data/orders',
+          format: 'csv',
+          dimensions: ['period'],
+        },
+        option: {
+          series: [{ type: 'bar' }],
+        },
+      }),
+      loadEcharts: () => runtime,
+      resolveDataRef: () => ({
+        dimensions: ['period'],
+        source: Array.from({ length: 2001 }, (_, index) => [`P${index}`]),
+      }),
+    });
+    await flushChart();
+
+    expect(container.textContent).toContain(
+      'Chart data has too many rows. Maximum supported rows: 2000.',
+    );
+    expect(setOption).not.toHaveBeenCalled();
   });
 
   it('normalizes {c} label templates for object-row datasets', async () => {

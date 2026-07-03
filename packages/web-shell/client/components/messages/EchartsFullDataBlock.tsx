@@ -14,7 +14,7 @@ import styles from './EchartsFullDataBlock.module.css';
 
 export const ECHARTS_FULLDATA_LANGUAGE = 'echarts-fulldata';
 
-type DatasetCell = string | number | boolean | null;
+export type DatasetCell = string | number | boolean | null;
 type DatasetRow = Record<string, DatasetCell> | DatasetCell[];
 type DatasetSource = DatasetRow[];
 type DatasetDimension = string | { name?: string };
@@ -46,6 +46,21 @@ export type EchartsRuntimeLoader = () =>
   | EchartsRuntime
   | Promise<EchartsRuntime>;
 
+export interface EchartsFullDataResolvedDataset {
+  dimensions: string[];
+  source: DatasetCell[][];
+}
+
+export interface EchartsFullDataRefMeta {
+  dimensions: string[];
+  format: 'csv' | 'json';
+}
+
+export type EchartsFullDataRefResolver = (
+  ref: string,
+  meta: EchartsFullDataRefMeta,
+) => EchartsFullDataResolvedDataset | Promise<EchartsFullDataResolvedDataset>;
+
 export interface EchartsFullDataBlockProps {
   /**
    * Chart option. Must be JSON-serializable; functions and other non-JSON
@@ -60,6 +75,7 @@ export interface EchartsFullDataBlockProps {
 
 export interface EchartsFullDataRendererOptions {
   loadEcharts?: EchartsRuntimeLoader;
+  resolveDataRef?: EchartsFullDataRefResolver;
 }
 
 interface EchartsFullDataBlockFromCodeProps {
@@ -67,6 +83,7 @@ interface EchartsFullDataBlockFromCodeProps {
   isStreaming: boolean;
   theme: ChartTheme;
   loadEcharts?: EchartsRuntimeLoader;
+  resolveDataRef?: EchartsFullDataRefResolver;
 }
 
 const CHART_THEME = {
@@ -127,6 +144,8 @@ const MAX_OPTION_DEPTH = 40;
 const MAX_DATA_ROWS = 2_000;
 const MAX_DATA_CELLS = 40_000;
 const MAX_SERIES_COUNT = 100;
+const SUPPORTED_DATA_REF_PREFIXES = ['artifact://', 'session-file://'];
+const SUPPORTED_DATA_REF_FORMATS = new Set(['csv', 'json']);
 const noop = () => {};
 
 // Sanitization is intentionally two-layered: top-level option keys are an
@@ -772,6 +791,88 @@ function formatCell(value: DatasetCell | undefined): string {
   return String(value);
 }
 
+type ParseOptionResult = {
+  option?: EchartsFullDataOption;
+  parseError?: string;
+};
+
+type ParseOptionMaybePromise = ParseOptionResult | Promise<ParseOptionResult>;
+
+function validateDatasetSize(
+  rowCount: number,
+  columnCount: number,
+  cellCount = rowCount * Math.max(columnCount, 1),
+): string | undefined {
+  if (rowCount === 0) {
+    return 'Chart data must include dataset.source.';
+  }
+  if (rowCount > MAX_DATA_ROWS) {
+    return `Chart data has too many rows. Maximum supported rows: ${MAX_DATA_ROWS}.`;
+  }
+
+  if (cellCount > MAX_DATA_CELLS) {
+    return `Chart data has too many cells. Maximum supported cells: ${MAX_DATA_CELLS}.`;
+  }
+
+  return undefined;
+}
+
+function validateDatasetCell(
+  value: unknown,
+  rowIndex: number,
+  cellIndex: number,
+): string | undefined {
+  if (
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    value === null
+  ) {
+    return undefined;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    return undefined;
+  }
+  return `Chart data row ${rowIndex + 1} cell ${cellIndex + 1} must be a string, number, boolean, or null.`;
+}
+
+function validateDatasetRows(
+  option: EchartsFullDataOption,
+): string | undefined {
+  const rows = getRows(option);
+  const columns = getColumns(option);
+  let cellCount = 0;
+  let maxColumnCount = columns.length;
+
+  for (const [rowIndex, row] of rows.entries()) {
+    if (Array.isArray(row)) {
+      if (columns.length > 0 && row.length !== columns.length) {
+        return `Chart data row ${rowIndex + 1} has ${row.length} cells; expected ${columns.length}.`;
+      }
+      maxColumnCount = Math.max(maxColumnCount, row.length);
+      cellCount += row.length;
+      for (const [cellIndex, cell] of row.entries()) {
+        const cellError = validateDatasetCell(cell, rowIndex, cellIndex);
+        if (cellError) return cellError;
+      }
+      continue;
+    }
+
+    if (!isObject(row)) {
+      return `Chart data row ${rowIndex + 1} must be an object or array.`;
+    }
+
+    const values = Object.values(row);
+    maxColumnCount = Math.max(maxColumnCount, values.length);
+    cellCount += values.length;
+    for (const [cellIndex, cell] of values.entries()) {
+      const cellError = validateDatasetCell(cell, rowIndex, cellIndex);
+      if (cellError) return cellError;
+    }
+  }
+
+  return validateDatasetSize(rows.length, maxColumnCount, cellCount);
+}
+
 function validateOptionShape(
   option: EchartsFullDataOption,
 ): string | undefined {
@@ -779,19 +880,8 @@ function validateOptionShape(
     return 'Chart data is too deeply nested.';
   }
 
-  const rows = getRows(option);
-  if (rows.length === 0) {
-    return 'Chart data must include dataset.source.';
-  }
-  if (rows.length > MAX_DATA_ROWS) {
-    return `Chart data has too many rows. Maximum supported rows: ${MAX_DATA_ROWS}.`;
-  }
-
-  const columns = getColumns(option);
-  const cellCount = rows.length * Math.max(columns.length, 1);
-  if (cellCount > MAX_DATA_CELLS) {
-    return `Chart data has too many cells. Maximum supported cells: ${MAX_DATA_CELLS}.`;
-  }
+  const datasetError = validateDatasetRows(option);
+  if (datasetError) return datasetError;
 
   const seriesCount = getSeriesList(option.series).length;
   if (seriesCount > MAX_SERIES_COUNT) {
@@ -801,10 +891,205 @@ function validateOptionShape(
   return undefined;
 }
 
-function parseOption(code: string): {
-  option?: EchartsFullDataOption;
+function normalizeEnvelopeDataset(value: unknown): {
+  dataset?: EchartsFullDataResolvedDataset;
   parseError?: string;
 } {
+  if (!isObject(value)) {
+    return { parseError: 'Chart envelope data must be an object.' };
+  }
+
+  const dimensions = value.dimensions;
+  if (
+    !Array.isArray(dimensions) ||
+    dimensions.length === 0 ||
+    !dimensions.every((dimension) => typeof dimension === 'string')
+  ) {
+    return {
+      parseError: 'Chart envelope data.dimensions must be a string array.',
+    };
+  }
+
+  const source = value.source;
+  if (!Array.isArray(source)) {
+    return {
+      parseError: 'Chart envelope data.source must be an array of rows.',
+    };
+  }
+
+  const sizeError = validateDatasetSize(source.length, dimensions.length);
+  if (sizeError) return { parseError: sizeError };
+
+  const rows: DatasetCell[][] = [];
+  for (const [rowIndex, row] of source.entries()) {
+    if (!Array.isArray(row)) {
+      return {
+        parseError: `Chart envelope data.source row ${rowIndex + 1} must be an array.`,
+      };
+    }
+    if (row.length !== dimensions.length) {
+      return {
+        parseError: `Chart envelope data.source row ${rowIndex + 1} has ${row.length} cells; expected ${dimensions.length}.`,
+      };
+    }
+
+    const nextRow: DatasetCell[] = [];
+    for (const [cellIndex, cell] of row.entries()) {
+      if (
+        typeof cell === 'string' ||
+        typeof cell === 'boolean' ||
+        cell === null
+      ) {
+        nextRow.push(cell);
+        continue;
+      }
+      if (typeof cell === 'number' && Number.isFinite(cell)) {
+        nextRow.push(cell);
+        continue;
+      }
+      return {
+        parseError: `Chart envelope data.source row ${rowIndex + 1} cell ${cellIndex + 1} must be a string, number, boolean, or null.`,
+      };
+    }
+    rows.push(nextRow);
+  }
+
+  return { dataset: { dimensions: [...dimensions], source: rows } };
+}
+
+function injectDatasetAndValidate(
+  option: EchartsFullDataOption,
+  dataset: EchartsFullDataResolvedDataset,
+): ParseOptionResult {
+  const normalized: EchartsFullDataOption = {
+    ...option,
+    dataset: {
+      dimensions: dataset.dimensions,
+      source: dataset.source,
+    },
+  };
+  const shapeError = validateOptionShape(normalized);
+  return shapeError ? { parseError: shapeError } : { option: normalized };
+}
+
+function isEchartsFullDataEnvelope(value: EchartsObject): boolean {
+  return 'version' in value && 'data' in value && 'option' in value;
+}
+
+function normalizeDataRef(ref: unknown): {
+  ref?: string;
+  parseError?: string;
+} {
+  if (typeof ref !== 'string' || ref.trim().length === 0) {
+    return {
+      parseError: 'Chart envelope data.ref must be a non-empty string.',
+    };
+  }
+  const trimmed = ref.trim();
+  const normalized = trimmed.toLowerCase();
+  const isSupported = SUPPORTED_DATA_REF_PREFIXES.some((prefix) =>
+    normalized.startsWith(prefix),
+  );
+  if (!isSupported) {
+    return {
+      parseError:
+        'Chart envelope data.ref must use artifact:// or session-file://.',
+    };
+  }
+  return { ref: trimmed };
+}
+
+function normalizeDataRefMeta(data: EchartsObject): {
+  meta?: EchartsFullDataRefMeta;
+  parseError?: string;
+} {
+  const dimensions = data.dimensions;
+  if (
+    !Array.isArray(dimensions) ||
+    dimensions.length === 0 ||
+    !dimensions.every((dimension) => typeof dimension === 'string')
+  ) {
+    return {
+      parseError: 'Chart envelope data.dimensions must be a string array.',
+    };
+  }
+
+  const format = data.format;
+  if (typeof format !== 'string' || !SUPPORTED_DATA_REF_FORMATS.has(format)) {
+    return {
+      parseError: 'Chart envelope data.format must be "csv" or "json".',
+    };
+  }
+
+  return {
+    meta: {
+      dimensions: [...dimensions],
+      format: format as EchartsFullDataRefMeta['format'],
+    },
+  };
+}
+
+function normalizeEnvelope(
+  envelope: EchartsObject,
+  resolveDataRef?: EchartsFullDataRefResolver,
+): ParseOptionMaybePromise {
+  if (envelope.version !== 1) {
+    return { parseError: 'Chart envelope version must be 1.' };
+  }
+  if (!isObject(envelope.option)) {
+    return { parseError: 'Chart envelope option must be an object.' };
+  }
+  if (!isObject(envelope.data)) {
+    return { parseError: 'Chart envelope data must be an object.' };
+  }
+
+  const option = envelope.option as EchartsFullDataOption;
+  const { data } = envelope;
+  if (data.kind === 'inline') {
+    const { dataset, parseError } = normalizeEnvelopeDataset(data);
+    if (parseError || !dataset) return { parseError };
+    return injectDatasetAndValidate(option, dataset);
+  }
+
+  if (data.kind !== 'ref') {
+    return {
+      parseError: 'Chart envelope data.kind must be "inline" or "ref".',
+    };
+  }
+
+  const { ref, parseError } = normalizeDataRef(data.ref);
+  if (parseError || !ref) return { parseError };
+  const { meta, parseError: metaError } = normalizeDataRefMeta(data);
+  if (metaError || !meta) return { parseError: metaError };
+  if (!resolveDataRef) {
+    return { parseError: 'Chart data reference resolver is unavailable.' };
+  }
+
+  return Promise.resolve()
+    .then(() => resolveDataRef(ref, meta))
+    .then((resolved) => {
+      const result = normalizeEnvelopeDataset({
+        kind: 'inline',
+        dimensions: resolved?.dimensions,
+        source: resolved?.source,
+      });
+      if (result.parseError || !result.dataset) {
+        return { parseError: result.parseError };
+      }
+      return injectDatasetAndValidate(option, result.dataset);
+    })
+    .catch((error: unknown) => ({
+      parseError:
+        error instanceof Error
+          ? `Chart data reference could not be resolved: ${error.message}`
+          : 'Chart data reference could not be resolved.',
+    }));
+}
+
+function parseOption(
+  code: string,
+  resolveDataRef?: EchartsFullDataRefResolver,
+): ParseOptionMaybePromise {
   if (code.length > MAX_CHART_CODE_LENGTH) {
     return {
       parseError: `Chart data is too large. Maximum supported size: ${MAX_CHART_CODE_LENGTH} characters.`,
@@ -815,6 +1100,12 @@ function parseOption(code: string): {
     const parsed = JSON.parse(code) as unknown;
     if (!isObject(parsed)) {
       return { parseError: 'Chart data must be a JSON object.' };
+    }
+    if (exceedsMaxDepth(parsed, MAX_OPTION_DEPTH)) {
+      return { parseError: 'Chart data is too deeply nested.' };
+    }
+    if (isEchartsFullDataEnvelope(parsed)) {
+      return normalizeEnvelope(parsed, resolveDataRef);
     }
     const option = parsed as EchartsFullDataOption;
     const shapeError = validateOptionShape(option);
@@ -828,8 +1119,15 @@ function parseOption(code: string): {
   }
 }
 
+function isPromiseResult(
+  value: ParseOptionMaybePromise,
+): value is Promise<ParseOptionResult> {
+  return typeof (value as Promise<ParseOptionResult>).then === 'function';
+}
+
 export function createEchartsFullDataRenderer({
   loadEcharts,
+  resolveDataRef,
 }: EchartsFullDataRendererOptions = {}): CodeBlockRenderer {
   return function renderEchartsFullDataBlock(
     info: WebShellCodeBlockRenderInfo,
@@ -846,6 +1144,7 @@ export function createEchartsFullDataRenderer({
         isStreaming={info.isStreaming}
         theme={info.theme}
         loadEcharts={loadEcharts}
+        resolveDataRef={resolveDataRef}
       />
     );
   };
@@ -856,11 +1155,32 @@ function EchartsFullDataBlockFromCode({
   isStreaming,
   theme,
   loadEcharts,
+  resolveDataRef,
 }: EchartsFullDataBlockFromCodeProps) {
-  const { option, parseError } = useMemo<{
-    option?: EchartsFullDataOption;
-    parseError?: string;
-  }>(() => (isStreaming ? {} : parseOption(code)), [code, isStreaming]);
+  const parsed = useMemo<ParseOptionMaybePromise>(
+    () => (isStreaming ? {} : parseOption(code, resolveDataRef)),
+    [code, isStreaming, resolveDataRef],
+  );
+  const [resolvedParsed, setResolvedParsed] = useState<ParseOptionResult>({});
+  const isResolvingRef = isPromiseResult(parsed);
+
+  useEffect(() => {
+    if (!isResolvingRef) {
+      setResolvedParsed({});
+      return;
+    }
+
+    let cancelled = false;
+    setResolvedParsed({});
+    parsed.then((result) => {
+      if (!cancelled) setResolvedParsed(result);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [isResolvingRef, parsed]);
+
+  const { option, parseError } = isResolvingRef ? resolvedParsed : parsed;
 
   return (
     <EchartsFullDataBlock

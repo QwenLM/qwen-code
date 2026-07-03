@@ -132,8 +132,12 @@ export {
   createEchartsFullDataRenderer,
 } from './components/messages/EchartsFullDataBlock';
 export type {
+  DatasetCell,
   EchartsFullDataBlockProps,
   EchartsFullDataOption,
+  EchartsFullDataRefMeta,
+  EchartsFullDataRefResolver,
+  EchartsFullDataResolvedDataset,
   EchartsFullDataRendererOptions,
   EchartsInstance,
   EchartsRuntime,
