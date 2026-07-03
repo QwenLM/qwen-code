@@ -106,6 +106,7 @@ export async function fetchGatewayUrl(
   });
 
   if (!resp.ok) {
+    await resp.body?.cancel().catch(() => {});
     throw new Error(`QQ Bot gateway request failed (HTTP ${resp.status})`);
   }
 
