@@ -35,10 +35,7 @@ export async function fetchAccessToken(
   });
 
   if (!resp.ok) {
-    // Drain the response body to prevent Undici connection leaks on
-    // repeated token failures; do NOT read or log the body — it may
-    // contain raw tokens.
-    await resp.body?.cancel().catch(() => undefined);
+    process.stderr.write(`[QQ] Token request failed (HTTP ${resp.status})\n`);
     throw new Error(`QQ Bot token request failed (HTTP ${resp.status})`);
   }
 

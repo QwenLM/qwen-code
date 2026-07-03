@@ -1076,7 +1076,7 @@ describe('restoreQQState validation filters', () => {
     expect(msgSeqMap.has('g')).toBe(false);
   });
 
-  it('filters non-safe-integer msgSeqMap values (fractional, overflow, Infinity)', () => {
+  it('filters non-safe-integer msgSeqMap values (fractional, overflow, Infinity, -Infinity)', () => {
     vi.mocked(existsSync).mockReturnValue(true);
     // Number.MAX_SAFE_INTEGER + 1 = 9007199254740992 — loses precision
     // 1e999 evaluates to Infinity in JavaScript — not a safe integer
@@ -1086,7 +1086,7 @@ describe('restoreQQState validation filters', () => {
           ['a', 1.5],
           ['b', Number.MAX_SAFE_INTEGER + 1],
           ['c', Infinity],
-          ['d', Number.POSITIVE_INFINITY],
+          ['d', -Infinity],
           ['e', 42],
           ['f', 0],
         ],
