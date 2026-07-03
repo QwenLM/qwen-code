@@ -1217,6 +1217,15 @@ describe('ReadFileTool', () => {
         const invocation = tool.build(params);
         expect(typeof invocation).not.toBe('string');
       });
+
+      it('should allow reading qwen-ignored files when respect_qwen_ignore is false via per-call override', () => {
+        const ignoredFilePath = path.join(tempRootDir, 'foo.bar');
+        const invocation = tool.build({
+          file_path: ignoredFilePath,
+          file_filtering_options: { respect_qwen_ignore: false },
+        });
+        expect(typeof invocation).not.toBe('string');
+      });
     });
 
     describe('with .gitignore', () => {
@@ -1229,16 +1238,26 @@ describe('ReadFileTool', () => {
         );
       });
 
-      it('should throw error if path is ignored by .gitignore when respectGitIgnore is true', () => {
+      it('should throw error if path is ignored by .gitignore when respect_git_ignore is true via per-call override', () => {
         const ignoredFilePath = path.join(tempRootDir, 'secret.env');
         const params: ReadFileToolParams = {
           file_path: ignoredFilePath,
+          file_filtering_options: { respect_git_ignore: true },
         };
         const expectedError = `File path '${ignoredFilePath}' is ignored by .gitignore pattern(s).`;
         expect(() => tool.build(params)).toThrow(expectedError);
       });
 
-      it('should allow reading git-ignored files when respectGitIgnore is false', () => {
+      it('should allow reading git-ignored files by default (respect_git_ignore defaults to false)', () => {
+        const ignoredFilePath = path.join(tempRootDir, 'secret.env');
+        const params: ReadFileToolParams = {
+          file_path: ignoredFilePath,
+        };
+        const invocation = tool.build(params);
+        expect(typeof invocation).not.toBe('string');
+      });
+
+      it('should allow reading git-ignored files when respect_git_ignore is false', () => {
         const ignoredFilePath = path.join(tempRootDir, 'secret.env');
         const params: ReadFileToolParams = {
           file_path: ignoredFilePath,
@@ -1257,10 +1276,16 @@ describe('ReadFileTool', () => {
         expect(typeof invocation).not.toBe('string');
       });
 
-      it('should respect per-call file_filtering_options to override git-ignore', () => {
+      it('should respect per-call file_filtering_options to enable git-ignore', () => {
         const ignoredFilePath = path.join(tempRootDir, 'secret.env');
 
-        // With respect_git_ignore: true (default from config), should reject
+        // By default (no file_filtering_options), should allow git-ignored files
+        const defaultInvocation = tool.build({
+          file_path: ignoredFilePath,
+        });
+        expect(typeof defaultInvocation).not.toBe('string');
+
+        // With respect_git_ignore: true, should reject
         expect(() =>
           tool.build({
             file_path: ignoredFilePath,
@@ -1274,6 +1299,17 @@ describe('ReadFileTool', () => {
           file_filtering_options: { respect_git_ignore: false },
         });
         expect(typeof invocation).not.toBe('string');
+      });
+
+      it('should throw error for files inside a git-ignored directory when respect_git_ignore is true', () => {
+        const ignoredDirPath = path.join(tempRootDir, 'ignored-dir');
+        const ignoredFilePath = path.join(ignoredDirPath, 'data.txt');
+        expect(() =>
+          tool.build({
+            file_path: ignoredFilePath,
+            file_filtering_options: { respect_git_ignore: true },
+          }),
+        ).toThrow(/\.gitignore/);
       });
     });
   });

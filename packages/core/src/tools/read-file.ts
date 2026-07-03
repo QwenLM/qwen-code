@@ -516,8 +516,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
     const fileService = this.config.getFileService();
     const configOpts = this.config.getFileFilteringOptions();
     const respectGitIgnore =
-      params.file_filtering_options?.respect_git_ignore ??
-      configOpts.respectGitIgnore;
+      params.file_filtering_options?.respect_git_ignore ?? false;
     const respectQwenIgnore =
       params.file_filtering_options?.respect_qwen_ignore ??
       configOpts.respectQwenIgnore;
