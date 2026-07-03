@@ -3227,8 +3227,13 @@ describe('Session', () => {
             update: expect.objectContaining({
               sessionUpdate: 'tool_call_update',
               status: 'failed',
-              _meta: expect.not.objectContaining({
-                artifacts: expect.anything(),
+              _meta: expect.objectContaining({
+                artifacts: [
+                  {
+                    title: 'Failure artifact',
+                    workspacePath: 'reports/failure.html',
+                  },
+                ],
               }),
             }),
           }),
