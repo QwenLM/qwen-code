@@ -377,7 +377,11 @@ function fuzzyRankCommands(
       if (command) matches.push(command);
     }
     return matches;
-  } catch {
+  } catch (error) {
+    console.warn(
+      '[web-shell] slash fuzzy search failed, falling back to substring match:',
+      error,
+    );
     const lp = query.toLowerCase();
     return commands.filter((command) =>
       command.name.toLowerCase().includes(lp),

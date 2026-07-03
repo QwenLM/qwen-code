@@ -31,6 +31,7 @@ import {
   getComposerTagValue,
 } from '../hooks/useComposerCore';
 import { ModeIcon } from './ModeIcon';
+import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
 import styles from './ChatEditor.module.css';
@@ -682,20 +683,9 @@ function SlashCommandPanel({
     '--slash-column-gap': hasDetailColumn ? '2ch' : '0px',
   } as CSSProperties;
 
-  let lastSection: string | undefined;
-  const sectionCounts = new Map<string, number>();
-  if (menu.kind === 'command') {
-    for (const item of menu.items) {
-      if (item.section) {
-        sectionCounts.set(
-          item.section,
-          (sectionCounts.get(item.section) ?? 0) + 1,
-        );
-      }
-    }
-  }
-
   if (!anchorRect) return null;
+
+  const rowPlans = planSlashSectionRows(menu.items, menu.kind);
 
   const positionedPanelStyle = {
     ...panelStyle,
@@ -729,22 +719,19 @@ function SlashCommandPanel({
             onScroll={() => setHoverDetail(null)}
           >
             {menu.items.map((item, index) => {
-              const section = item.section;
-              const showSection =
-                menu.kind === 'command' &&
-                section !== undefined &&
-                section !== lastSection;
-              lastSection = section ?? lastSection;
+              const plan = rowPlans[index];
               return (
                 <div key={`${item.id}:${index}`} className={styles.slashEntry}>
-                  {showSection && (
+                  {plan.showHeader && (
                     <>
-                      {index > 0 && <div className={styles.slashSection} />}
+                      {plan.showDivider && (
+                        <div className={styles.slashSection} />
+                      )}
                       <div className={styles.slashSectionHeader}>
-                        <span>{section}</span>
-                        {section && sectionCounts.get(section) ? (
+                        <span>{item.section}</span>
+                        {plan.count > 0 ? (
                           <span className={styles.slashSectionCount}>
-                            {sectionCounts.get(section)}
+                            {plan.count}
                           </span>
                         ) : null}
                       </div>

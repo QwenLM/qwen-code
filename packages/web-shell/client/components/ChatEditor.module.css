@@ -181,7 +181,9 @@
 .slashPanel {
   position: fixed;
   z-index: var(--web-shell-popover-z-index, 1000);
-  --slash-panel-max-height: min(calc(12 * (22px + 10px) + 6px + 12px), 40vh);
+  /* Round cap sized for ~12 command rows plus their section headers/dividers,
+     bounded by 45vh so it stays proportional on short viewports. */
+  --slash-panel-max-height: min(460px, 45vh);
   --slash-anchor-width: 620px;
   --slash-command-col: 20ch;
   --slash-desc-col: 32ch;

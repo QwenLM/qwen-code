@@ -254,6 +254,21 @@ describe('getSlashCommandCompletionResult', () => {
     );
   });
 
+  it('returns null when fuzzy search matches nothing', () => {
+    const commands: CommandInfo[] = [
+      { name: 'clear', description: 'Clear', source: 'builtin-command' },
+    ];
+    const result = getSlashCommandCompletionResult(
+      '/zzzzzzz',
+      8,
+      commands,
+      [],
+      'en',
+      getTranslator('en'),
+    );
+    expect(result).toBeNull();
+  });
+
   it('honors panel category order and filtered commands', () => {
     const commands: CommandInfo[] = [
       {
