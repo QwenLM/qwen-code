@@ -1,4 +1,5 @@
 import { spawnSync } from 'node:child_process';
+import { realpathSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 export interface FilesystemIsolationPlan {
@@ -27,7 +28,11 @@ function canUseSandboxExec(): boolean {
     return false;
   }
 
-  const probe = spawnSync('sandbox-exec', ['-p', '(version 1) (allow default)', '/usr/bin/true'], { stdio: 'ignore' });
+  const probe = spawnSync(
+    'sandbox-exec',
+    ['-p', '(version 1) (allow default)', '/usr/bin/true'],
+    { stdio: 'ignore' },
+  );
   sandboxExecUsableCache = probe.status === 0;
   return sandboxExecUsableCache;
 }
@@ -36,11 +41,43 @@ function escapeSandboxPath(path: string): string {
   return path.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
+function sandboxWriteRoots(sessionDir: string): string[] {
+  const resolved = resolve(sessionDir);
+  try {
+    const real = realpathSync.native(resolved);
+    return real === resolved ? [resolved] : [resolved, real];
+  } catch {
+    return [resolved];
+  }
+}
+
+export function combineFirejailFilesystemIsolation(
+  args: string[],
+  sessionRoot: string,
+): string[] | null {
+  const separatorIndex = args.indexOf('--');
+  if (separatorIndex === -1) {
+    return null;
+  }
+
+  const outerArgs = args.slice(0, separatorIndex);
+  const innerArgs = args.slice(separatorIndex + 1);
+  return [
+    ...outerArgs,
+    `--private=${sessionRoot}`,
+    `--whitelist=${sessionRoot}`,
+    '--',
+    ...innerArgs,
+  ];
+}
+
 export function buildDarwinSandboxProfile(
   sessionDir: string,
   options?: FilesystemIsolationOptions,
 ): string {
-  const escapedRoot = escapeSandboxPath(resolve(sessionDir));
+  const writeAllows = sandboxWriteRoots(sessionDir).map(
+    (root) => `(allow file-write* (subpath "${escapeSandboxPath(root)}"))`,
+  );
   const profileParts = [
     '(version 1)',
     '(deny default)',
@@ -48,7 +85,7 @@ export function buildDarwinSandboxProfile(
     '(allow sysctl-read)',
     '(allow file-read*)',
     '(deny file-write*)',
-    `(allow file-write* (subpath "${escapedRoot}"))`,
+    ...writeAllows,
   ];
 
   if (options?.includeNetworkDeny) {
@@ -95,10 +132,16 @@ export function applyFilesystemIsolation(
         command: 'bwrap',
         args: [
           '--die-with-parent',
-          '--ro-bind', '/', '/',
-          '--bind', sessionRoot, sessionRoot,
-          '--proc', '/proc',
-          '--dev', '/dev',
+          '--ro-bind',
+          '/',
+          '/',
+          '--bind',
+          sessionRoot,
+          sessionRoot,
+          '--proc',
+          '/proc',
+          '--dev',
+          '/dev',
           '--',
           command,
           ...args,
@@ -107,11 +150,33 @@ export function applyFilesystemIsolation(
     }
 
     if (existsOnPath('firejail')) {
+      if (command === 'firejail') {
+        const combinedArgs = combineFirejailFilesystemIsolation(
+          args,
+          sessionRoot,
+        );
+        if (combinedArgs) {
+          return {
+            status: 'enforced',
+            backend: 'firejail',
+            command: 'firejail',
+            args: combinedArgs,
+          };
+        }
+      }
+
       return {
         status: 'enforced',
         backend: 'firejail',
         command: 'firejail',
-        args: ['--quiet', `--private=${sessionRoot}`, `--whitelist=${sessionRoot}`, '--', command, ...args],
+        args: [
+          '--quiet',
+          `--private=${sessionRoot}`,
+          `--whitelist=${sessionRoot}`,
+          '--',
+          command,
+          ...args,
+        ],
       };
     }
   }
