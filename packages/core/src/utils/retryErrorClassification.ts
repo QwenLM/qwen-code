@@ -137,12 +137,12 @@ export function classifyRetryError(
       details.transport === 'sse' ? 'sse-provider' : 'http';
 
     if (statusCode === 529) {
-      // Retryable here: this PR retries 529 via isTransientCapacityError and
-      // does not implement model/provider fallback. Labeling it
-      // "fallback-eligible" would imply behavior that does not exist yet.
+      // 529 Overloaded: the provider is at capacity. Same-model retries
+      // are still attempted (isTransientCapacityError covers 529), but
+      // once those exhaust the request is eligible for model fallback.
       return {
         kind,
-        diagnosis: 'retryable',
+        diagnosis: 'fallback-eligible',
         reason: 'capacity-overload',
         ...common,
       };
@@ -294,4 +294,49 @@ function getProviderFields(error: unknown): ProviderFields {
     ...(providerMessage !== undefined ? { providerMessage } : {}),
     ...(requestId !== undefined ? { requestId } : {}),
   };
+}
+
+/**
+ * Reasons that indicate capacity/availability issues eligible for model fallback.
+ * These are errors where trying a different model may succeed when same-model
+ * retries have been exhausted.
+ */
+const FALLBACK_ELIGIBLE_REASONS = new Set([
+  'rate-limit', // 429, 503
+  'capacity-overload', // 529
+  'server-error', // 5xx
+]);
+
+/**
+ * Determines whether a classified error is eligible for model fallback.
+ *
+ * Returns true when the error reason indicates capacity/availability issues
+ * (rate-limit, capacity-overload, server-error) where trying a different
+ * model may succeed.
+ *
+ * Returns false for:
+ * - `fail-fast` diagnosis (auth, billing, quota, client errors)
+ * - `unknown` diagnosis
+ * - Transport errors (retried at the connection level, not model-level)
+ *
+ * @param classification - The result of `classifyRetryError`.
+ * @returns Whether the error qualifies for model fallback after retries exhaust.
+ */
+export function isFallbackEligible(
+  classification: RetryErrorClassification,
+): boolean {
+  // fail-fast and unknown errors should not trigger fallback
+  if (
+    classification.diagnosis === 'fail-fast' ||
+    classification.diagnosis === 'unknown'
+  ) {
+    return false;
+  }
+
+  // Transport errors are retried at the connection level, not model level
+  if (classification.kind === 'transport') {
+    return false;
+  }
+
+  return FALLBACK_ELIGIBLE_REASONS.has(classification.reason);
 }

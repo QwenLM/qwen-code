@@ -28,8 +28,12 @@ import {
   isRateLimitError,
   type RetryInfo,
 } from '../utils/rateLimit.js';
-import { classifyRetryError } from '../utils/retryErrorClassification.js';
+import {
+  classifyRetryError,
+  isFallbackEligible,
+} from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
+import type { ContentGenerator } from './contentGenerator.js';
 import {
   DEFAULT_TOKEN_LIMIT,
   ESCALATED_MAX_TOKENS,
@@ -246,6 +250,23 @@ export enum StreamEventType {
    * agent UI, subagent loop) can surface it without each call site running
    * its own compaction step. */
   COMPRESSED = 'compressed',
+  /** Emitted when the primary model (or a prior fallback) exhausted its retry
+   * budget on a capacity/availability error and the system is switching to the
+   * next fallback model. The UI should discard partial content and display a
+   * notification about the model switch. */
+  MODEL_FALLBACK = 'model_fallback',
+}
+
+/** Information about a model fallback transition. */
+export interface ModelFallbackInfo {
+  /** The model that exhausted its retry budget. */
+  fromModel: string;
+  /** The model the system is switching to. */
+  toModel: string;
+  /** HTTP status code that triggered the fallback (e.g. 429, 503, 529). */
+  errorCode?: number;
+  /** 1-based index of the fallback in the configured fallback chain. */
+  fallbackIndex: number;
 }
 
 export type StreamEvent =
@@ -260,7 +281,8 @@ export type StreamEvent =
       /** Set when the retry raised the automatic max output token limit. */
       maxOutputTokensEscalated?: number;
     }
-  | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo };
+  | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
+  | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
 
 /**
  * Options for retrying due to invalid content from the model.
@@ -2660,7 +2682,167 @@ export class GeminiChat {
               ),
             );
           }
-          throw lastError;
+
+          // === Model fallback chain ===
+          // When the primary model's retries exhaust on a capacity/availability
+          // error, try configured fallback models in sequence. Each fallback
+          // model gets its own fresh retry budget.
+          //
+          // Constraints:
+          // - Do NOT trigger fallback when persistent mode is active
+          //   (QWEN_CODE_UNATTENDED_RETRY) — persistent mode retries the primary
+          //   model indefinitely by design.
+          // - Maximum 3 fallback transitions (capped by config normalization).
+          // - Fallback is only for capacity/availability errors (429/503/529/5xx),
+          //   not for auth/billing/client errors.
+          const fallbackModels = self.config.getModelFallbacks();
+          const lastErrorClassification = classifyRetryError(lastError, {
+            authType: cgConfig?.authType,
+            extraRetryErrorCodes,
+          });
+
+          if (
+            fallbackModels.length > 0 &&
+            isFallbackEligible(lastErrorClassification) &&
+            !isUnattendedMode()
+          ) {
+            let fallbackSucceeded = false;
+            let fallbackIndex = 0;
+            let currentModel = model;
+
+            for (const fallbackModelId of fallbackModels) {
+              fallbackIndex++;
+              // Skip fallback models that match the current/primary model
+              if (
+                fallbackModelId === model ||
+                fallbackModelId === currentModel
+              ) {
+                debugLogger.warn(
+                  `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
+                    `same as current model.`,
+                );
+                continue;
+              }
+
+              debugLogger.warn(
+                `[FALLBACK] Primary model "${currentModel}" exhausted retries ` +
+                  `(reason: ${lastErrorClassification.reason}, ` +
+                  `status: ${lastErrorClassification.statusCode ?? 'unknown'}). ` +
+                  `Switching to fallback model "${fallbackModelId}" ` +
+                  `(${fallbackIndex}/${fallbackModels.length}).`,
+              );
+
+              // Resolve the fallback model's content generator
+              let fallbackGenerator: ContentGenerator;
+              let fallbackRetryAuthType: string | undefined;
+              let fallbackRetryErrorCodes: readonly number[] | undefined;
+              let resolvedFallbackModel: string;
+              try {
+                const resolved = await self.config
+                  .getBaseLlmClient()
+                  .resolveForModel(fallbackModelId, { failClosed: true });
+                fallbackGenerator = resolved.contentGenerator;
+                fallbackRetryAuthType = resolved.retryAuthType;
+                fallbackRetryErrorCodes = resolved.retryErrorCodes;
+                resolvedFallbackModel = resolved.model;
+              } catch (resolveError) {
+                debugLogger.warn(
+                  `[FALLBACK] Failed to resolve fallback model ` +
+                    `"${fallbackModelId}": ` +
+                    `${resolveError instanceof Error ? resolveError.message : String(resolveError)}. ` +
+                    `Skipping to next fallback.`,
+                );
+                continue;
+              }
+
+              // Emit fallback event so the UI can notify the user
+              yield {
+                type: StreamEventType.MODEL_FALLBACK,
+                info: {
+                  fromModel: currentModel,
+                  toModel: resolvedFallbackModel,
+                  errorCode: lastErrorClassification.statusCode,
+                  fallbackIndex,
+                },
+              };
+
+              // Clear any partial state from the failed attempt
+              self.clearPendingPartialState();
+
+              // Run the fallback model with its own retry loop.
+              // Use a fresh stream-level retry budget: the fallback model's
+              // retryWithBackoff (inside makeApiCallWithFallbackGenerator)
+              // handles HTTP-level retries, and we run the stream-level rate
+              // limit + transport retry loop here for the fallback model.
+              try {
+                const fallbackStream =
+                  await self.makeApiCallWithFallbackGenerator(
+                    resolvedFallbackModel,
+                    requestContents,
+                    params,
+                    prompt_id,
+                    fallbackGenerator,
+                    fallbackRetryAuthType,
+                    fallbackRetryErrorCodes,
+                  );
+
+                for await (const chunk of fallbackStream) {
+                  yield { type: StreamEventType.CHUNK, value: chunk };
+                }
+
+                // Fallback succeeded
+                lastError = null;
+                fallbackSucceeded = true;
+                debugLogger.info(
+                  `[FALLBACK] Successfully completed request with ` +
+                    `fallback model "${resolvedFallbackModel}".`,
+                );
+                break;
+              } catch (fallbackError) {
+                // Classify the fallback error to decide whether to continue
+                // to the next fallback or give up
+                const fallbackClassification = classifyRetryError(
+                  fallbackError,
+                  {
+                    authType: fallbackRetryAuthType,
+                    extraRetryErrorCodes: fallbackRetryErrorCodes,
+                  },
+                );
+
+                debugLogger.warn(
+                  `[FALLBACK] Fallback model "${resolvedFallbackModel}" also ` +
+                    `failed (reason: ${fallbackClassification.reason}, ` +
+                    `status: ${fallbackClassification.statusCode ?? 'unknown'}). ` +
+                    `${fallbackIndex < fallbackModels.length ? 'Trying next fallback.' : 'No more fallbacks.'}`,
+                );
+
+                lastError = fallbackError;
+                currentModel = resolvedFallbackModel;
+
+                // Only continue to next fallback if this error is also
+                // fallback-eligible. Auth/client errors should fail immediately.
+                if (!isFallbackEligible(fallbackClassification)) {
+                  debugLogger.warn(
+                    `[FALLBACK] Error from "${resolvedFallbackModel}" is not ` +
+                      `fallback-eligible (${fallbackClassification.reason}). ` +
+                      `Stopping fallback chain.`,
+                  );
+                  break;
+                }
+              }
+            }
+
+            if (!fallbackSucceeded) {
+              debugLogger.warn(
+                '[FALLBACK] All fallback models exhausted. ' +
+                  'Throwing last error.',
+              );
+            }
+          }
+
+          if (lastError) {
+            throw lastError;
+          }
         }
       } finally {
         sleepInhibitorHandle.release();
@@ -2736,6 +2918,82 @@ export class GeminiChat {
           `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
         );
       },
+      onRetry: (info) => {
+        logApiRetry(
+          this.config,
+          new ApiRetryEvent({
+            model,
+            promptId: prompt_id,
+            attemptNumber: info.attempt,
+            error: info.error,
+            statusCode: info.errorStatus,
+            retryDelayMs: info.delayMs,
+            subagentName: subagentNameContext.getStore(),
+          }),
+        );
+      },
+    });
+
+    return this.processStreamResponse(model, streamResponse);
+  }
+
+  /**
+   * Variant of {@link makeApiCallAndProcessStream} that uses an explicitly
+   * provided content generator instead of the session's primary generator.
+   * Used by the model fallback chain: each fallback model resolves its own
+   * generator via `resolveForModel`, and this method threads it through
+   * the same retry + stream-processing pipeline.
+   *
+   * @param model - The model ID to use for the API call.
+   * @param requestContents - The conversation history to send.
+   * @param params - SendMessage parameters (config, abort signal, etc.).
+   * @param prompt_id - Prompt ID for telemetry correlation.
+   * @param contentGenerator - The content generator for the fallback model.
+   * @param retryAuthType - Auth type for retry classification.
+   * @param retryErrorCodes - Provider-specific retry error codes.
+   * @returns An async generator yielding processed stream chunks.
+   */
+  private async makeApiCallWithFallbackGenerator(
+    model: string,
+    requestContents: Content[],
+    params: SendMessageParameters,
+    prompt_id: string,
+    contentGenerator: ContentGenerator,
+    retryAuthType?: string,
+    retryErrorCodes?: readonly number[],
+  ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const apiCall = () =>
+      contentGenerator.generateContentStream(
+        {
+          model,
+          contents: requestContents,
+          config: { ...this.generationConfig, ...params.config },
+        },
+        prompt_id,
+      );
+    const streamResponse = await retryWithBackoff(apiCall, {
+      shouldRetryOnError: (error: unknown) => {
+        if (error instanceof Error) {
+          if (isSchemaDepthError(error.message)) return false;
+          if (isInvalidArgumentError(error.message)) return false;
+        }
+
+        const status = getErrorStatus(error);
+        if (status === 400) return false;
+        if (status === 429) return true;
+        if (status && status >= 500 && status < 600) return true;
+
+        if (isRateLimitError(error, retryErrorCodes)) return true;
+
+        return false;
+      },
+      authType: retryAuthType,
+      extraRetryErrorCodes: retryErrorCodes,
+      // Fallback models do NOT enter persistent retry mode. Persistent mode
+      // is the caller's explicit opt-in for the primary model only; applying
+      // it to every fallback would defeat the purpose of the chain.
+      persistentMode: false,
+      signal: params.config?.abortSignal,
       onRetry: (info) => {
         logApiRetry(
           this.config,

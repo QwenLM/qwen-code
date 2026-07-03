@@ -72,6 +72,9 @@ export enum GeminiEventType {
   UserPromptSubmitBlocked = 'user_prompt_submit_blocked',
   StopHookLoop = 'stop_hook_loop',
   ActiveGoal = 'active_goal',
+  /** The system switched to a fallback model after the primary (or prior
+   *  fallback) exhausted retries on a capacity/availability error. */
+  ModelFallback = 'model_fallback',
 }
 
 export type ServerGeminiRetryEvent = {
@@ -80,6 +83,18 @@ export type ServerGeminiRetryEvent = {
   /** When true, the retry is a continuation (recovery) rather than a fresh
    *  restart. The UI should keep accumulated text so the continuation appends. */
   isContinuation?: boolean;
+};
+
+export type ServerGeminiModelFallbackEvent = {
+  type: GeminiEventType.ModelFallback;
+  /** The model that exhausted its retry budget. */
+  fromModel: string;
+  /** The model the system is switching to. */
+  toModel: string;
+  /** HTTP status code that triggered the fallback (e.g. 429, 503, 529). */
+  errorCode?: number;
+  /** 1-based index of the fallback in the configured chain. */
+  fallbackIndex: number;
 };
 
 export interface StructuredError {
@@ -408,6 +423,7 @@ export type ServerGeminiStreamEvent =
   | ServerGeminiStopHookLoopEvent
   | ServerGeminiLoopDetectedEvent
   | ServerGeminiMaxSessionTurnsEvent
+  | ServerGeminiModelFallbackEvent
   | ServerGeminiThoughtEvent
   | ServerGeminiToolCallConfirmationEvent
   | ServerGeminiToolCallRequestEvent
@@ -465,6 +481,24 @@ export class Turn {
             isContinuation: streamEvent.isContinuation,
           };
           continue; // Skip to the next event in the stream
+        }
+
+        // Surface model fallback transitions from the chat stream as the
+        // top-level ModelFallback event. The UI uses this to notify the user
+        // that the system switched to a different model due to capacity issues.
+        if (streamEvent.type === 'model_fallback') {
+          // Clear accumulated state from the failed model's partial response
+          this.pendingToolCalls.length = 0;
+          this.pendingCitations.clear();
+          this.finishReason = undefined;
+          yield {
+            type: GeminiEventType.ModelFallback,
+            fromModel: streamEvent.info.fromModel,
+            toModel: streamEvent.info.toModel,
+            errorCode: streamEvent.info.errorCode,
+            fallbackIndex: streamEvent.info.fallbackIndex,
+          };
+          continue;
         }
 
         // Surface auto-compaction that fired inside chat.sendMessageStream

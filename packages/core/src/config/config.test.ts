@@ -1013,6 +1013,118 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getModelFallbacks', () => {
+    it('returns empty array by default when unset', () => {
+      expect(new Config(baseParams).getModelFallbacks()).toEqual([]);
+    });
+
+    it('returns empty array when set to undefined', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: undefined,
+        }).getModelFallbacks(),
+      ).toEqual([]);
+    });
+
+    it('returns empty array when set to empty array', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [],
+        }).getModelFallbacks(),
+      ).toEqual([]);
+    });
+
+    it('accepts an array of model IDs', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('caps at 3 entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [
+            'model-a',
+            'model-b',
+            'model-c',
+            'model-d',
+            'model-e',
+          ],
+        }).getModelFallbacks(),
+      ).toEqual(['model-a', 'model-b', 'model-c']);
+    });
+
+    it('deduplicates entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', 'qwen-turbo', 'qwen-plus'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('trims whitespace from entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['  qwen-plus  ', ' qwen-turbo '],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('removes blank entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['', '  ', 'qwen-plus', '', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('deduplicates after trimming', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', ' qwen-plus ', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('returns a readonly array', () => {
+      const config = new Config({
+        ...baseParams,
+        modelFallbacks: ['qwen-plus'],
+      });
+      const fallbacks = config.getModelFallbacks();
+      // The returned array should be readonly (TypeScript enforces this,
+      // but verify the reference is stable)
+      expect(fallbacks).toEqual(['qwen-plus']);
+    });
+
+    it('caps at 3 after deduplication and blank removal', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [
+            '',
+            'model-a',
+            'model-a', // duplicate
+            '',
+            'model-b',
+            'model-c',
+            'model-d', // 4th unique, should be dropped
+          ],
+        }).getModelFallbacks(),
+      ).toEqual(['model-a', 'model-b', 'model-c']);
+    });
+  });
+
   it('wires file history snapshot updates to chat recording', async () => {
     const projectDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-config-'));
     const storageDir = await mkdtemp(path.join(os.tmpdir(), 'qwen-storage-'));

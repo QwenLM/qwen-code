@@ -874,6 +874,72 @@ describe('parseArguments', () => {
     const argv = await parseArguments();
     expect(argv.bare).toBe(true);
   });
+
+  describe('--fallback-model flag', () => {
+    it('parses a single fallback model', async () => {
+      process.argv = ['node', 'script.js', '--fallback-model', 'qwen-plus'];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual(['qwen-plus']);
+    });
+
+    it('parses repeated --fallback-model flags', async () => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--fallback-model',
+        'qwen-plus',
+        '--fallback-model',
+        'qwen-turbo',
+      ];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('splits comma-separated values in a single flag', async () => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--fallback-model',
+        'qwen-plus,qwen-turbo',
+      ];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('combines repeated flags with comma-separated values', async () => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--fallback-model',
+        'qwen-plus,qwen-turbo',
+        '--fallback-model',
+        'qwen-max',
+      ];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual([
+        'qwen-plus',
+        'qwen-turbo',
+        'qwen-max',
+      ]);
+    });
+
+    it('trims whitespace around comma-separated values', async () => {
+      process.argv = [
+        'node',
+        'script.js',
+        '--fallback-model',
+        ' qwen-plus , qwen-turbo ',
+      ];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('defaults to undefined when not provided', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      expect(argv.fallbackModel).toBeUndefined();
+    });
+  });
 });
 
 describe('loadCliConfig', () => {

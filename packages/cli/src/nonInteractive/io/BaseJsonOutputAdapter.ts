@@ -645,6 +645,17 @@ export abstract class BaseJsonOutputAdapter {
         this.appendText(state, errorText, null);
         break;
       }
+      case GeminiEventType.ModelFallback:
+        // Surface model fallback transitions so non-interactive consumers
+        // (CI pipelines, SDK clients) can observe capacity-driven model
+        // switches without parsing assistant content.
+        this.emitSystemMessage('model_fallback', {
+          fromModel: event.fromModel,
+          toModel: event.toModel,
+          errorCode: event.errorCode,
+          fallbackIndex: event.fallbackIndex,
+        });
+        break;
       default:
         break;
     }
