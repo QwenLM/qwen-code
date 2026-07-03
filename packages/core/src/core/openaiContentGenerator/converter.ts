@@ -1081,11 +1081,27 @@ function convertOpenAITextToParts(
   return parseTaggedThinkingText(text);
 }
 
-function parseToolCallArgs(argsJson?: string | null): Record<string, unknown> {
-  const parsed = safeJsonParse<unknown>(argsJson ?? '', {});
-  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-    ? (parsed as Record<string, unknown>)
+function normalizeToolCallArgs(args: unknown): Record<string, unknown> {
+  return args && typeof args === 'object' && !Array.isArray(args)
+    ? (args as Record<string, unknown>)
     : {};
+}
+
+function parseToolCallArgs(argsJson?: string | null): Record<string, unknown> {
+  if (!argsJson) return {};
+
+  const parsed = safeJsonParse<unknown>(argsJson, {});
+  const args = normalizeToolCallArgs(parsed);
+  if (
+    argsJson.trim() &&
+    (parsed !== args ||
+      (Object.keys(args).length === 0 && argsJson.trim() !== '{}'))
+  ) {
+    debugLogger.debug(
+      `Failed to parse tool call arguments, using {}: "${argsJson.slice(0, 200)}"`,
+    );
+  }
+  return args;
 }
 
 function generateToolCallId(): string {
@@ -1388,7 +1404,7 @@ export function convertOpenAIChunkToGemini(
             functionCall: {
               id: toolCall.id || generateToolCallId(),
               name: toolCall.name,
-              args: toolCall.args,
+              args: normalizeToolCallArgs(toolCall.args),
             },
           });
         }

@@ -42,7 +42,23 @@ export interface RequestContext {
   modalities: InputModalities;
   startTime: number;
   toolCallParser?: StreamingToolCallParser;
+  /**
+   * Sentinel for legacy `function_call` (pre-`tool_calls`) streaming.
+   *
+   * Set when a name-only legacy delta arrives. Cleared when argument chunks
+   * arrive, when modern `tool_calls` takes precedence, when the parser emits
+   * a buffered call, or during stream-finalization cleanup.
+   *
+   * INVARIANT: this flag must be cleared whenever the parser buffer for the
+   * same legacy call is non-empty; otherwise a zero-argument fallback could
+   * duplicate a call emitted by `StreamingToolCallParser`.
+   */
   legacyFunctionCallWithoutArguments?: { name: string };
+  /**
+   * Marks that this stream used legacy `function_call` chunks. If the parser
+   * later detects truncated JSON, the converter suppresses repaired partial
+   * legacy calls while preserving the existing modern `tool_calls` behavior.
+   */
   legacyFunctionCallInProgress?: boolean;
   responseParsingOptions?: OpenAIResponseParsingOptions;
   taggedThinkingParser?: TaggedThinkingParser;
