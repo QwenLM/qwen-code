@@ -282,7 +282,7 @@ describe('qwen-autofix workflow', () => {
     expect(prepareBranchAndFeedbackStep).not.toContain('git clean');
   });
 
-  it('clears persistent autofix workdirs before using self-hosted runners', () => {
+  it('clears persistent autofix workdirs before agent steps run', () => {
     expect(resetAutofixWorkspaceSteps).toHaveLength(2);
     expect(workflow).toContain("WORKDIR: '/tmp/autofix'");
     expect(workflow).toContain(
