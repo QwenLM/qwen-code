@@ -35,9 +35,9 @@ export interface WebShellCodeBlockRenderInfo {
 }
 
 /**
- * Return a non-boolean React node to replace the default code block. Return
- * `null`, `undefined`, or a boolean to decline and fall back to the built-in
- * code block renderer. Expensive renderers should debounce or defer work while
+ * Return a React node to replace the default code block rendering. Return
+ * `null`, `undefined`, or `false` to decline and fall back to the built-in code
+ * block renderer. Expensive renderers should debounce or defer work while
  * `info.isStreaming` is true.
  */
 export type CodeBlockRenderer = (

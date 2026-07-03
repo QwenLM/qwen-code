@@ -96,7 +96,7 @@ describe('EchartsFullDataBlock', () => {
     await flushChart();
 
     expect(runtime.init).toHaveBeenCalledOnce();
-    expect(runtime.init).toHaveBeenCalledWith(expect.any(HTMLElement));
+    expect(runtime.init).toHaveBeenCalledWith(expect.any(HTMLElement), 'dark');
     const renderedOption = setOption.mock.calls[0]?.[0] as
       | EchartsFullDataOption
       | undefined;
@@ -338,6 +338,49 @@ describe('EchartsFullDataBlock', () => {
     expect(runtime.init).toHaveBeenCalledOnce();
   });
 
+  it('observes chart container resize after initialization', async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    const observe = vi.fn();
+    const disconnect = vi.fn();
+    class ResizeObserverStub {
+      observe = observe;
+      disconnect = disconnect;
+    }
+    globalThis.ResizeObserver =
+      ResizeObserverStub as unknown as typeof ResizeObserver;
+    const option: EchartsFullDataOption = {
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [{ day: 'Mon', orders: 120 }],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+    };
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption: vi.fn(),
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    try {
+      await render(
+        <EchartsFullDataBlock
+          option={option}
+          theme="dark"
+          loadEcharts={() => runtime}
+        />,
+      );
+      await flushChart();
+
+      expect(observe).toHaveBeenCalledWith(expect.any(HTMLElement));
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
   it('reports synchronous loader failures inside the chart card', async () => {
     const consoleError = vi
       .spyOn(console, 'error')
@@ -364,6 +407,36 @@ describe('EchartsFullDataBlock', () => {
     await flushChart();
 
     expect(container.textContent).toContain('loader failed');
+    expect(consoleError).toHaveBeenCalledWith(
+      '[web-shell] echarts-fulldata render failed:',
+      expect.any(Error),
+    );
+  });
+
+  it('reports async loader rejections inside the chart card', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const option: EchartsFullDataOption = {
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [{ day: 'Mon', orders: 120 }],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+    };
+
+    const container = await render(
+      <EchartsFullDataBlock
+        option={option}
+        theme="dark"
+        loadEcharts={() => Promise.reject(new Error('async loader failed'))}
+      />,
+    );
+    await flushChart();
+
+    expect(container.textContent).toContain('async loader failed');
     expect(consoleError).toHaveBeenCalledWith(
       '[web-shell] echarts-fulldata render failed:',
       expect.any(Error),
@@ -492,6 +565,47 @@ describe('EchartsFullDataBlock', () => {
     await flushChart();
 
     expect(container.textContent).toContain('Chart runtime is unavailable.');
+    expect(
+      container.querySelector('[data-testid="echarts-fulldata-chart"]'),
+    ).toBeNull();
+  });
+
+  it('caps the rendered data table rows', async () => {
+    const rows = Array.from({ length: 501 }, (_, index) => ({
+      day: `Day ${index + 1}`,
+      orders: index + 1,
+    }));
+    const option: EchartsFullDataOption = {
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: rows,
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+    };
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption: vi.fn(),
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await render(
+      <EchartsFullDataBlock
+        option={option}
+        theme="dark"
+        loadEcharts={() => runtime}
+      />,
+    );
+    await flushChart();
+    await act(async () => {
+      container.querySelectorAll('button')[1]?.click();
+    });
+
+    expect(container.textContent).toContain('Showing 500 of 501 rows');
+    expect(container.querySelectorAll('tbody tr')).toHaveLength(500);
   });
 
   it('rejects syntactically valid JSON that is not an option object', async () => {

@@ -40,6 +40,10 @@ export type EchartsRuntimeLoader = () =>
   | Promise<EchartsRuntime>;
 
 export interface EchartsFullDataBlockProps {
+  /**
+   * Chart option. Must be JSON-serializable; functions and other non-JSON
+   * values are stripped during internal cloning.
+   */
   option?: EchartsFullDataOption;
   parseError?: string;
   isStreaming?: boolean;
@@ -115,6 +119,7 @@ const MAX_CHART_CODE_LENGTH = 500_000;
 const MAX_OPTION_DEPTH = 40;
 const MAX_DATA_ROWS = 2_000;
 const MAX_DATA_CELLS = 40_000;
+const MAX_TABLE_ROWS = 500;
 
 const SAFE_TOP_LEVEL_OPTION_KEYS = new Set([
   'angleAxis',
@@ -831,8 +836,16 @@ function EchartsDataTable({
     return <div className={styles.state}>No data</div>;
   }
 
+  const visibleRows = rows.slice(0, MAX_TABLE_ROWS);
+  const isTruncated = rows.length > visibleRows.length;
+
   return (
     <div className={styles.tableWrap} data-testid="echarts-fulldata-table">
+      {isTruncated && (
+        <div className={styles.tableNotice}>
+          Showing {visibleRows.length} of {rows.length} rows
+        </div>
+      )}
       <table className={styles.table}>
         <thead>
           <tr>
@@ -842,7 +855,7 @@ function EchartsDataTable({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, rowIndex) => (
+          {visibleRows.map((row, rowIndex) => (
             <tr key={rowIndex}>
               {columns.map((column, columnIndex) => (
                 <td key={column}>
@@ -905,7 +918,7 @@ export function EchartsFullDataBlock({
       .then(loadEcharts)
       .then((runtime) => {
         if (disposed || !chartRef.current) return;
-        const nextChart = runtime.init(chartRef.current);
+        const nextChart = runtime.init(chartRef.current, theme);
         try {
           nextChart.setOption(cloneOptionForChart(option, theme));
         } catch (error) {
@@ -919,8 +932,16 @@ export function EchartsFullDataBlock({
 
         chart = nextChart;
         const onResize = () => chart?.resize();
+        const observer =
+          typeof ResizeObserver === 'undefined'
+            ? undefined
+            : new ResizeObserver(onResize);
+        observer?.observe(chartRef.current);
         window.addEventListener('resize', onResize);
-        removeResize = () => window.removeEventListener('resize', onResize);
+        removeResize = () => {
+          observer?.disconnect();
+          window.removeEventListener('resize', onResize);
+        };
         setChartReady(true);
       })
       .catch((error: unknown) => {
@@ -987,6 +1008,8 @@ export function EchartsFullDataBlock({
               ref={chartRef}
               className={styles.chartSurface}
               data-testid="echarts-fulldata-chart"
+              role="img"
+              aria-label={title}
             />
             {!chartReady && (
               <div className={styles.chartOverlay}>

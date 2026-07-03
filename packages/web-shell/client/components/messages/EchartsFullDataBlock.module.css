@@ -141,6 +141,17 @@
   scrollbar-color: var(--border) transparent;
 }
 
+.tableNotice {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  background: color-mix(in srgb, var(--subtle-bg) 72%, var(--background));
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
 .table {
   width: max-content;
   min-width: 100%;
