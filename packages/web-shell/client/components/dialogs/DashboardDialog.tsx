@@ -202,7 +202,9 @@ function WorkspaceSection({
               ))}
             </dl>
           )}
-          {section.data && <pre>{JSON.stringify(section.data, null, 2)}</pre>}
+          {section.data != null && (
+            <pre>{JSON.stringify(section.data, null, 2)}</pre>
+          )}
           {section.error && (
             <div
               className={`${styles.chip} ${styles.chipErr}`}
@@ -366,8 +368,8 @@ export function DashboardDialog() {
                 Issues ({data.issues.length})
               </div>
               <div className={styles.cardBody}>
-                {data.issues.map((issue, i) => (
-                  <div key={i} className={styles.issue}>
+                {data.issues.map((issue) => (
+                  <div key={issue.code} className={styles.issue}>
                     <span
                       className={`${styles.issueCode} ${styles.chip} ${
                         issue.severity === 'error'
@@ -396,17 +398,11 @@ export function DashboardDialog() {
                 <KV label="Uptime" value={fmtUptime(data.daemon.uptimeMs)} />
                 <KV label="Mode" value={data.daemon.mode} />
                 <KV label="Workspace" value={data.daemon.workspaceCwd} />
-                {data.daemon.qwenCodeVersion && (
-                  <KV
-                    label="Version"
-                    value={data.daemon.qwenCodeVersion as string}
-                  />
+                {typeof data.daemon.qwenCodeVersion === 'string' && (
+                  <KV label="Version" value={data.daemon.qwenCodeVersion} />
                 )}
-                {data.daemon.daemonId && (
-                  <KV
-                    label="Daemon ID"
-                    value={data.daemon.daemonId as string}
-                  />
+                {typeof data.daemon.daemonId === 'string' && (
+                  <KV label="Daemon ID" value={data.daemon.daemonId} />
                 )}
                 {(data.daemon.startup as
                   | Record<string, unknown>
@@ -627,10 +623,10 @@ export function DashboardDialog() {
                         </tr>
                       </thead>
                       <tbody>
-                        {data.full.sessions.map((s, i) => {
+                        {data.full.sessions.map((s) => {
                           const sid = s.sessionId as string;
                           return (
-                            <tr key={i}>
+                            <tr key={sid}>
                               <td title={sid}>
                                 {sid.length > 12
                                   ? `${sid.slice(0, 12)}...`

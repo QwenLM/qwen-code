@@ -949,7 +949,7 @@ export function WebShellSidebar({
             aria-label={t('sidebar.dashboard')}
             onClick={onOpenDashboard}
           >
-            <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
+            <span className={styles.navIcon}>
               <IconDashboard />
             </span>
             {!collapsed && <span>{t('sidebar.dashboard')}</span>}
