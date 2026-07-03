@@ -39,9 +39,15 @@ import type {
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
+import {
+  ClientMcpRegistrar,
+  type ClientMcpFrame,
+} from '@qwen-code/qwen-code-core';
+import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeClient } from './bridgeClient.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import type { MidTurnQueueEntry } from './bridgeTypes.js';
+import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
 
@@ -779,6 +785,157 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const client = makeClientWithEntry('sess:x', undefined);
     const err = await client
       .extMethod('craft/somethingElse', { sessionId: 'sess:x' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RequestError);
+    expect((err as RequestError).code).toBe(-32601);
+  });
+});
+
+/**
+ * Reverse tool channel (issue #5626, Phase 2). The ACP child's session
+ * `McpClientManager` routes a client-hosted (extension) MCP server's
+ * `sendSdkMcpMessage` UP to the parent via the
+ * `qwen/control/client_mcp/message` ext-method. `BridgeClient.extMethod`
+ * answers it by reaching the per-WS-connection `ClientMcpRegistrar` (looked up
+ * by `server` name through the injected `clientMcpSender`), which carries the
+ * JSON-RPC frame down the daemon WS and resolves with the correlated response.
+ *
+ * These tests exercise the REAL `BridgeClient.extMethod` + the REAL
+ * `ClientMcpRegistrar` round-trip (the child side is simulated by calling
+ * `extMethod` directly with the exact param shape `acpAgent.buildClientMcpSender`
+ * sends; the WS/extension side is simulated by answering frames via
+ * `resolveMessage`). Server-name routing + the `{ payload }` envelope are
+ * the contract this method owns.
+ */
+describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message)', () => {
+  const thrower = () => {
+    throw new Error('test: permission flow should not run');
+  };
+
+  /**
+   * Build a `BridgeClient` whose `clientMcpSender` resolves `server` to a real
+   * `ClientMcpRegistrar`'s sender (mirroring `ClientMcpSenderRegistry.lookup` in
+   * the serve layer). The registrar pushes outbound frames to `onFrame` so the
+   * test can answer them like the extension's WS would.
+   */
+  function makeClientWithRegistrar(registrar: ClientMcpRegistrar): BridgeClient {
+    const sender: ClientMcpMessageSender = (serverName: string) =>
+      registrar.hasServer(serverName)
+        ? (payload: unknown) =>
+            registrar.sendSdkMcpMessage(serverName, payload as JSONRPCMessage)
+        : undefined;
+    return new BridgeClient(
+      (() => undefined) as never, // resolveEntry: client_mcp/message is sessionless
+      (() => undefined) as never, // resolvePendingRestoreEvents
+      { request: thrower } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      sender, // clientMcpSender
+    );
+  }
+
+  it('round-trips a JSON-RPC request through the registrar and returns { payload }', async () => {
+    const outbound: ClientMcpFrame[] = [];
+    const registrar = new ClientMcpRegistrar({
+      sendFrame: (frame) => {
+        outbound.push(frame);
+      },
+    });
+    registrar.registerServer('chrome-tools');
+    const client = makeClientWithRegistrar(registrar);
+
+    // Simulate the child's `buildClientMcpSender` call shape exactly.
+    const callP = client.extMethod('qwen/control/client_mcp/message', {
+      server: 'chrome-tools',
+      payload: { jsonrpc: '2.0', id: 7, method: 'tools/list' },
+    });
+
+    // The registrar put one outbound frame on the (simulated) WS — answer it
+    // like the extension would, echoing the correlation id.
+    await vi.waitFor(() => expect(outbound).toHaveLength(1));
+    const frame = outbound[0];
+    expect(frame.server).toBe('chrome-tools');
+    expect(frame.payload).toMatchObject({ method: 'tools/list', id: 7 });
+    registrar.resolveMessage(frame.id, {
+      jsonrpc: '2.0',
+      id: 7,
+      result: { tools: [{ name: 'chrome_read_page' }] },
+    } as JSONRPCMessage);
+
+    const result = await callP;
+    // The ext-method wraps the client-hosted reply in `{ payload }`.
+    expect(result).toEqual({
+      payload: {
+        jsonrpc: '2.0',
+        id: 7,
+        result: { tools: [{ name: 'chrome_read_page' }] },
+      },
+    });
+  });
+
+  it('round-trips a notification (no id) as a synthetic ack envelope', async () => {
+    const outbound: ClientMcpFrame[] = [];
+    const registrar = new ClientMcpRegistrar({
+      sendFrame: (frame) => {
+        outbound.push(frame);
+      },
+    });
+    registrar.registerServer('chrome-tools');
+    const client = makeClientWithRegistrar(registrar);
+
+    // `notifications/initialized` has no JSON-RPC id — the registrar
+    // fire-and-forgets and resolves with a synthetic ack (no WS response).
+    const result = await client.extMethod('qwen/control/client_mcp/message', {
+      server: 'chrome-tools',
+      payload: { jsonrpc: '2.0', method: 'notifications/initialized' },
+    });
+    expect(outbound).toHaveLength(1);
+    expect((result as { payload?: unknown }).payload).toBeDefined();
+  });
+
+  it('rejects (invalidParams) when the named server is not connected', async () => {
+    const registrar = new ClientMcpRegistrar({ sendFrame: () => {} });
+    // No registerServer call — the lookup returns undefined.
+    const client = makeClientWithRegistrar(registrar);
+    const err = await client
+      .extMethod('qwen/control/client_mcp/message', {
+        server: 'gone',
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RequestError);
+    expect((err as RequestError).code).toBe(-32602);
+  });
+
+  it('rejects (invalidParams) on a malformed frame (missing server)', async () => {
+    const registrar = new ClientMcpRegistrar({ sendFrame: () => {} });
+    const client = makeClientWithRegistrar(registrar);
+    const err = await client
+      .extMethod('qwen/control/client_mcp/message', {
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RequestError);
+    expect((err as RequestError).code).toBe(-32602);
+  });
+
+  it('rejects (methodNotFound) when no clientMcpSender is wired (Mode A / tests)', async () => {
+    // The default 5-arg construction omits the sender entirely.
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      (() => undefined) as never,
+      { request: thrower } as never,
+      0,
+      Infinity,
+    );
+    const err = await client
+      .extMethod('qwen/control/client_mcp/message', {
+        server: 'chrome-tools',
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RequestError);
     expect((err as RequestError).code).toBe(-32601);

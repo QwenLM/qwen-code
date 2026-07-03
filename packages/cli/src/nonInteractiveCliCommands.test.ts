@@ -376,6 +376,58 @@ describe('handleSlashCommand', () => {
     }
   });
 
+  it('passes a submit_prompt modelOverride through to the result', async () => {
+    const mockCommand = {
+      name: 'custom',
+      description: 'Custom command with a per-turn model override',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Run on the override model' }],
+        modelOverride: 'glm-5.1',
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.content).toEqual([{ text: 'Run on the override model' }]);
+      expect(result.modelOverride).toBe('glm-5.1');
+    }
+  });
+
+  it('omits modelOverride when the command does not set one', async () => {
+    const mockCommand = {
+      name: 'custom',
+      description: 'Custom command without a model override',
+      kind: CommandKind.FILE,
+      action: vi.fn().mockResolvedValue({
+        type: 'submit_prompt',
+        content: [{ text: 'Run on the session model' }],
+      }),
+    };
+    mockGetCommands.mockReturnValue([mockCommand]);
+
+    const result = await handleSlashCommand(
+      '/custom',
+      abortController,
+      mockConfig,
+      mockSettings,
+    );
+
+    expect(result.type).toBe('submit_prompt');
+    if (result.type === 'submit_prompt') {
+      expect(result.modelOverride).toBeUndefined();
+    }
+  });
+
   it('records successful SKILL submit_prompt commands in session metrics', async () => {
     const mockSkillCommand = {
       name: 'review',
@@ -508,9 +560,7 @@ describe('handleSlashCommand', () => {
   });
 
   it('records SKILL submit_prompt commands as failures when hooks throw', async () => {
-    mockFireUserPromptExpansionEvent.mockRejectedValue(
-      new Error('hook crash'),
-    );
+    mockFireUserPromptExpansionEvent.mockRejectedValue(new Error('hook crash'));
     const mockSkillCommand = {
       name: 'review',
       description: 'Review code',

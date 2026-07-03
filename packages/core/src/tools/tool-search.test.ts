@@ -12,6 +12,14 @@ import { ToolRegistry } from './tool-registry.js';
 import { DiscoveredMCPTool } from './mcp-tool.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { ToolSearchTool, scoreTool, tokenize } from './tool-search.js';
+import type { ToolResult } from './tools.js';
+import { CronCreateTool } from './cron-create.js';
+import { CronDeleteTool } from './cron-delete.js';
+import { CronListTool } from './cron-list.js';
+import { LoopWakeupTool } from './loop-wakeup.js';
+import { ToolNames } from './tool-names.js';
+import { runWithAgentContext } from '../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
 
 const baseConfigParams: ConfigParameters = {
   cwd: '/tmp',
@@ -52,6 +60,12 @@ describe('tokenize', () => {
 
   it('filters empty tokens', () => {
     expect(tokenize('   foo    bar  ')).toEqual(['foo', 'bar']);
+  });
+
+  it('drops natural-language filler words and trailing punctuation', () => {
+    expect(tokenize('How do I stop this cron?')).toEqual(['stop', 'cron']);
+    expect(tokenize('please +cron, tasks!')).toEqual(['+cron', 'tasks']);
+    expect(tokenize('C++ C# search')).toEqual(['c++', 'c#', 'search']);
   });
 });
 
@@ -126,6 +140,32 @@ describe('scoreTool', () => {
       description: 'this tool does slack things',
     });
     expect(scoreTool(tool, ['slack'])).toBe(2); // SCORE_DESC_BUILTIN
+  });
+
+  it.each([
+    ['cancel', 'cron_delete'],
+    ['clear', 'cron_delete'],
+    ['delete', 'cron_remove'],
+    ['remove', 'cron_delete'],
+    ['stop', 'cron_delete'],
+  ])('bridges action alias "%s" to %s', (term, toolName) => {
+    const tool = new MockTool({
+      name: toolName,
+      description: 'scheduled task',
+      searchHint: 'cron task',
+    });
+
+    expect(scoreTool(tool, [term])).toBe(16);
+  });
+
+  it('does not add the alias bonus for a direct action-term match', () => {
+    const tool = new MockTool({
+      name: 'cron_stop',
+      description: 'scheduled task',
+      searchHint: 'cron task',
+    });
+
+    expect(scoreTool(tool, ['stop'])).toBe(10);
   });
 
   it('returns 0 when no term matches', () => {
@@ -246,6 +286,76 @@ describe('ToolSearchTool', () => {
     // Unrelated tools should not surface on a 'schedule' query.
     expect(content).not.toContain('"name":"lsp"');
     expect(content).not.toContain('"name":"ask_user_question"');
+  });
+
+  it('finds the cron delete tool for natural-language stop requests', async () => {
+    registry.registerTool(new CronCreateTool(config));
+    registry.registerTool(new CronListTool(config));
+    registry.registerTool(new CronDeleteTool(config));
+    registry.registerTool(new LoopWakeupTool(config));
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({
+        query: 'how do I stop this cron or loop wakeup?',
+        max_results: 1,
+      })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"cron_delete"');
+    expect(content).not.toContain('"name":"cron_create"');
+  });
+
+  it('matches required action aliases when filtering candidates', async () => {
+    registry.registerTool(new CronCreateTool(config));
+    registry.registerTool(new CronListTool(config));
+    registry.registerTool(new CronDeleteTool(config));
+    registry.registerTool(new LoopWakeupTool(config));
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({
+        query: '+stop cron',
+        max_results: 1,
+      })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"cron_delete"');
+    expect(content).not.toContain('No tools found');
+  });
+
+  it('finds the cron list tool for natural-language task visibility requests', async () => {
+    registry.registerTool(new CronCreateTool(config));
+    registry.registerTool(new CronListTool(config));
+    registry.registerTool(new CronDeleteTool(config));
+    registry.registerTool(new LoopWakeupTool(config));
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'show active loop tasks', max_results: 1 })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"cron_list"');
+    expect(content).not.toContain('"name":"cron_create"');
+  });
+
+  it('still finds the loop wakeup tool for scheduling loop wakeups', async () => {
+    registry.registerTool(new CronCreateTool(config));
+    registry.registerTool(new CronListTool(config));
+    registry.registerTool(new CronDeleteTool(config));
+    registry.registerTool(new LoopWakeupTool(config));
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: 'schedule loop wakeup', max_results: 1 })
+      .execute(new AbortController().signal);
+
+    const content = String(result.llmContent);
+    expect(content).toContain('"name":"loop_wakeup"');
+    expect(content).not.toContain('"name":"cron_delete"');
   });
 
   it('returns a friendly message when nothing matches', async () => {
@@ -479,6 +589,190 @@ describe('ToolSearchTool', () => {
     expect(String(result.llmContent)).toContain('"name":"always_loaded"');
     expect(registry.isDeferredToolRevealed('always_loaded')).toBe(false);
     expect(setToolsSpy).not.toHaveBeenCalled();
+  });
+
+  it('select: exit_plan_mode remains inspectable in the main session', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.EXIT_PLAN_MODE,
+        shouldDefer: true,
+        alwaysLoad: true,
+      }),
+    );
+    const setToolsSpy = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+      setTools: setToolsSpy,
+      refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+    } as never);
+
+    const tool = new ToolSearchTool(config);
+    const result = await tool
+      .build({ query: `select:${ToolNames.EXIT_PLAN_MODE}` })
+      .execute(new AbortController().signal);
+
+    expect(String(result.llmContent)).toContain(
+      `"name":"${ToolNames.EXIT_PLAN_MODE}"`,
+    );
+    expect(registry.isDeferredToolRevealed(ToolNames.EXIT_PLAN_MODE)).toBe(
+      false,
+    );
+    expect(setToolsSpy).not.toHaveBeenCalled();
+  });
+
+  it.each<{
+    toolName: string;
+    shouldDefer: boolean;
+    alwaysLoad: boolean;
+  }>([
+    {
+      toolName: ToolNames.ENTER_PLAN_MODE,
+      shouldDefer: false,
+      alwaysLoad: false,
+    },
+    {
+      toolName: ToolNames.EXIT_PLAN_MODE,
+      shouldDefer: true,
+      alwaysLoad: true,
+    },
+  ])(
+    'select: rejects $toolName inside subagent-like context without revealing or syncing tools',
+    async ({ toolName, shouldDefer, alwaysLoad }) => {
+      registry.registerTool(
+        new MockTool({
+          name: toolName,
+          shouldDefer,
+          alwaysLoad,
+        }),
+      );
+      const setToolsSpy = vi.fn().mockResolvedValue(undefined);
+      vi.spyOn(config, 'getGeminiClient').mockReturnValue({
+        setTools: setToolsSpy,
+        refreshStartupContextReminder: vi.fn().mockResolvedValue(undefined),
+      } as never);
+
+      const tool = new ToolSearchTool(config);
+      const contextCases: Array<{
+        run: (callback: () => Promise<ToolResult>) => Promise<ToolResult>;
+      }> = [
+        {
+          run: (callback) => runWithAgentContext('agent-1', callback),
+        },
+        {
+          run: (callback) =>
+            runWithTeammateIdentity(
+              {
+                agentId: 'agent@test',
+                agentName: 'agent',
+                teamName: 'test',
+                isTeamLead: false,
+              },
+              callback,
+            ),
+        },
+      ];
+
+      for (const { run } of contextCases) {
+        const result = await run(() =>
+          tool
+            .build({ query: `select:${toolName}` })
+            .execute(new AbortController().signal),
+        );
+
+        expect(String(result.llmContent)).toContain(
+          'not available inside subagents',
+        );
+        expect(String(result.llmContent)).toContain('return your plan');
+        expect(result.error?.message).toContain(
+          'not available inside subagents',
+        );
+        expect(result.error?.message).toContain('return your plan');
+        expect(String(result.returnDisplay)).toContain('1 unavailable');
+        expect(String(result.llmContent)).not.toContain(`"name":"${toolName}"`);
+        expect(registry.isDeferredToolRevealed(toolName)).toBe(false);
+        expect(setToolsSpy).not.toHaveBeenCalled();
+      }
+    },
+  );
+
+  it('select: loads allowed tools while rejecting plan lifecycle tools inside subagent context', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.READ_FILE,
+        shouldDefer: false,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.ENTER_PLAN_MODE,
+        shouldDefer: false,
+      }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const result = await runWithAgentContext('agent-1', () =>
+      tool
+        .build({
+          query: `select:${ToolNames.READ_FILE},${ToolNames.ENTER_PLAN_MODE}`,
+        })
+        .execute(new AbortController().signal),
+    );
+
+    expect(String(result.llmContent)).toContain(
+      `"name":"${ToolNames.READ_FILE}"`,
+    );
+    expect(String(result.llmContent)).not.toContain(
+      `"name":"${ToolNames.ENTER_PLAN_MODE}"`,
+    );
+    expect(String(result.llmContent)).toContain(
+      'not available inside subagents',
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.returnDisplay).toBe('Loaded 1 tool(s), 1 unavailable');
+  });
+
+  it('select: lets plan-required teammates inspect exit_plan_mode but not enter_plan_mode', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.EXIT_PLAN_MODE,
+        shouldDefer: true,
+        alwaysLoad: true,
+      }),
+    );
+    registry.registerTool(
+      new MockTool({
+        name: ToolNames.ENTER_PLAN_MODE,
+        shouldDefer: false,
+      }),
+    );
+
+    const tool = new ToolSearchTool(config);
+    const result = await runWithTeammateIdentity(
+      {
+        agentId: 'planner@test',
+        agentName: 'planner',
+        teamName: 'test',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () =>
+        tool
+          .build({
+            query: `select:${ToolNames.EXIT_PLAN_MODE},${ToolNames.ENTER_PLAN_MODE}`,
+          })
+          .execute(new AbortController().signal),
+    );
+
+    expect(String(result.llmContent)).toContain(
+      `"name":"${ToolNames.EXIT_PLAN_MODE}"`,
+    );
+    expect(String(result.llmContent)).not.toContain(
+      `"name":"${ToolNames.ENTER_PLAN_MODE}"`,
+    );
+    expect(String(result.llmContent)).toContain(
+      `${ToolNames.ENTER_PLAN_MODE} is not available`,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.returnDisplay).toBe('Loaded 1 tool(s), 1 unavailable');
   });
 
   it('+must-word filters candidates whose name does not contain the required term', async () => {

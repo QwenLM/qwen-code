@@ -860,9 +860,18 @@ export interface NotificationOutput extends HookOutput {
 }
 
 /**
+ * Context usage data included in Stop hook stdin payload
+ */
+export interface ContextUsageData {
+  context_usage: number;
+  context_limit: number;
+  input_tokens: number;
+}
+
+/**
  * Stop hook input
  */
-export interface StopInput extends HookInput {
+export interface StopInput extends HookInput, Partial<ContextUsageData> {
   stop_hook_active: boolean;
   last_assistant_message: string;
 }

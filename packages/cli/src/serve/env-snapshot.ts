@@ -13,7 +13,7 @@ import {
   STATUS_SCHEMA_VERSION,
   type ServeEnvCell,
   type ServeWorkspaceEnvStatus,
-} from './status.js';
+} from '@qwen-code/acp-bridge/status';
 
 function formatMemoryUsage(bytes: number): string {
   const gb = bytes / (1024 * 1024 * 1024);

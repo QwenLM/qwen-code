@@ -28,6 +28,7 @@ import {
   WarningMessage,
   ErrorMessage,
   RetryCountdownMessage,
+  VisionNoticeMessage,
   SuccessMessage,
   AwayRecapMessage,
 } from './messages/StatusMessages.js';
@@ -107,6 +108,10 @@ const ClickableThinkMessage: React.FC<{
 }) => {
   const ref = useRef<DOMElement>(null);
   const { openThinkingViewer } = useThinkingViewer();
+  // Click-to-expand needs SGR mouse tracking. We do NOT pass `bypassVpGate`, so
+  // useMouseEvents enables it only in VP mode; in non-VP the click handler
+  // stays dormant and native terminal scrollback is preserved (the block still
+  // expands via Alt+T — the "option+t to expand" affordance it already shows).
   const isActive = !isPending && !expanded;
   const sanitizedViewerText = useMemo(
     () => escapeAnsiCtrlCodes(viewerText),
@@ -174,6 +179,7 @@ function getHistoryItemMarginTop(item: HistoryItem): number {
     case 'stop_hook_loop':
     case 'stop_hook_system_message':
     case 'goal_status':
+    case 'vision_notice':
       return 0;
     default:
       return 1;
@@ -231,6 +237,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
               [
               {new Date(itemForDisplay.timestamp).toLocaleTimeString('en-US', {
                 hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
               })}
               ]
             </Text>
@@ -299,6 +308,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'retry_countdown' && (
         <RetryCountdownMessage text={itemForDisplay.text} />
+      )}
+      {itemForDisplay.type === 'vision_notice' && (
+        <VisionNoticeMessage text={itemForDisplay.text} />
       )}
       {itemForDisplay.type === 'about' && (
         <AboutBox {...itemForDisplay.systemInfo} width={boxWidth} />

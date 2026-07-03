@@ -121,10 +121,12 @@ export interface SlashCommandProcessorActions {
   openModelDialog: (options?: {
     fastModelMode?: boolean;
     voiceModelMode?: boolean;
+    visionModelMode?: boolean;
   }) => void;
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
+  openEffortDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
@@ -828,6 +830,9 @@ export const useSlashCommandProcessor = (
                     case 'voice-model':
                       actions.openModelDialog({ voiceModelMode: true });
                       return { type: 'handled' };
+                    case 'vision-model':
+                      actions.openModelDialog({ visionModelMode: true });
+                      return { type: 'handled' };
                     case 'trust':
                       actions.openTrustDialog();
                       return { type: 'handled' };
@@ -854,6 +859,9 @@ export const useSlashCommandProcessor = (
                       return { type: 'handled' };
                     case 'approval-mode':
                       actions.openApprovalModeDialog();
+                      return { type: 'handled' };
+                    case 'effort':
+                      actions.openEffortDialog();
                       return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
@@ -959,6 +967,7 @@ export const useSlashCommandProcessor = (
                     type: 'submit_prompt',
                     content,
                     onComplete: result.onComplete,
+                    modelOverride: result.modelOverride,
                   };
                 }
                 case 'confirm_shell_commands': {

@@ -41,9 +41,17 @@ import {
   type AgentDialogEntry,
   type DialogEntry,
   type DreamDialogEntry,
+  compareActiveThenTerminal,
   entryId,
 } from '../../hooks/useBackgroundTaskView.js';
 import { localizeToolDisplayName, t } from '../../../i18n/index.js';
+import {
+  ancestorChain,
+  computeAgentTreeInfo,
+  computeUserBlockingIds,
+  statusGlyph,
+  treeRowPrefix,
+} from './agent-forest.js';
 
 // `DialogEntry['status']` widens the shell status union with the agent-only
 // `paused` state, so dialog handlers can switch on a single combined enum.
@@ -170,13 +178,16 @@ function terminalStatusPresentation(
 const FOREGROUND_ROW_PREFIX = '[blocking]';
 const SHELL_ROW_PREFIX = '[shell]';
 
-function rowLabel(entry: DialogEntry): string {
+function rowLabel(entry: DialogEntry, userBlocking: boolean): string {
   switch (entry.kind) {
     case 'agent': {
       const label = buildBackgroundEntryLabel(entry, { includePrefix: false });
-      const base = entry.isBackgrounded
-        ? label
-        : `${FOREGROUND_ROW_PREFIX} ${label}`;
+      // `[blocking]` warns that cancelling ends the USER's turn. That is
+      // only true when the whole ancestor chain is foreground — a nested
+      // foreground child awaited by a background parent blocks that
+      // parent, not the user. The caller resolves the verdict via
+      // computeUserBlockingIds.
+      const base = userBlocking ? `${FOREGROUND_ROW_PREFIX} ${label}` : label;
       // Flag agents with a parked approval so the user can spot which row to
       // open from the list without entering each detail view.
       return entry.pendingApprovals?.length
@@ -212,6 +223,35 @@ function rowLabel(entry: DialogEntry): string {
       );
     }
   }
+}
+
+/**
+ * The detail view's Parent line for a nested agent: a breadcrumb of the
+ * present ancestor chain (`main › researcher — <description>`), rooted at
+ * '…' when the chain breaks before the top level, or the launch-time
+ * `parentName` when the immediate parent is already gone. Undefined for
+ * top-level agents (they get no Parent section).
+ */
+function formatParentBreadcrumb(
+  entry: AgentDialogEntry,
+  lookup: (id: string) => AgentTask | undefined,
+): string | undefined {
+  if (entry.parentAgentId == null) return undefined;
+  const { chain, terminatedBy } = ancestorChain(entry, lookup);
+  if (chain.length === 0) {
+    return `${entry.parentName ?? t('unknown agent')} · ${t('no longer running')}`;
+  }
+  // ancestorChain returns nearest-first; the breadcrumb reads root-first.
+  const rootFirst = [...chain].reverse();
+  const crumbs = [
+    terminatedBy === 'root' ? 'main' : '…',
+    ...rootFirst.map((p) => p.subagentType ?? 'agent'),
+  ].join(' › ');
+  const immediateParent = chain[0];
+  const desc = immediateParent.description
+    ? ` — ${immediateParent.description}`
+    : '';
+  return `${crumbs}${desc}`;
 }
 
 function elapsedFor(entry: { startTime: number; endTime?: number }): string {
@@ -295,6 +335,14 @@ const ListBody: React.FC<{
   const hiddenBelow = entries.length - windowEnd;
   const visible = entries.slice(windowStart, windowEnd);
 
+  // Nested-agent affordances, computed over the FULL roster (not the
+  // window) so indent and the [blocking] verdict don't change as the
+  // selection scrolls a parent out of view. The entries arrive already
+  // grouped depth-first (useBackgroundTaskView applies
+  // reorderChildrenUnderParents), so indentation lines up with position.
+  const treeInfo = computeAgentTreeInfo(entries);
+  const blockingIds = computeUserBlockingIds(entries);
+
   return (
     <Box flexDirection="column">
       <Box paddingX={1}>
@@ -318,13 +366,25 @@ const ListBody: React.FC<{
             : terminal
               ? terminal.labelColor
               : theme.text.primary;
+          const treePrefix =
+            entry.kind === 'agent'
+              ? treeRowPrefix(entry, treeInfo.get(entry.agentId))
+              : '';
           return (
             <Box key={entryId(entry)} flexDirection="row" paddingX={1}>
               <Text color={isSelected ? theme.text.accent : undefined}>
                 {isSelected ? '> ' : '  '}
               </Text>
+              {treePrefix !== '' && (
+                <Text color={theme.text.secondary}>{treePrefix}</Text>
+              )}
               <Text color={labelColor}>
-                {escapeAnsiCtrlCodes(rowLabel(entry))}
+                {escapeAnsiCtrlCodes(
+                  rowLabel(
+                    entry,
+                    entry.kind === 'agent' && blockingIds.has(entry.agentId),
+                  ),
+                )}
               </Text>
             </Box>
           );
@@ -588,22 +648,51 @@ const AgentDetailBody: React.FC<{
   maxHeight: number;
   maxWidth: number;
 }> = ({ entry, maxHeight, maxWidth }) => {
+  const config = useConfig();
   const title = escapeAnsiCtrlCodes(
     `${entry.subagentType ?? 'Agent'} \u203A ${buildBackgroundEntryLabel(entry, { includePrefix: false })}`,
   );
 
   const terminal = terminalStatusPresentation(entry.status);
   const dimSubtitleParts: string[] = [elapsedFor(entry)];
-  if (entry.stats?.totalTokens) {
+  if (entry.stats?.outputTokens) {
     dimSubtitleParts.push(
       t('{{count}} tokens', {
-        count: formatTokenCount(entry.stats.totalTokens),
+        count: formatTokenCount(entry.stats.outputTokens),
       }),
     );
   }
   if (entry.stats?.toolUses !== undefined) {
     dimSubtitleParts.push(formatToolUseCount(entry.stats.toolUses));
   }
+  // Nesting badge: launch depth is 0-based, user-facing levels are 1-based
+  // (a top-level sub-agent is level 1 and gets no badge).
+  if ((entry.depth ?? 0) > 0) {
+    dimSubtitleParts.push(
+      t('nested \u00B7 level {{level}} of {{max}}', {
+        level: String((entry.depth ?? 0) + 1),
+        max: String(config.getMaxSubagentDepth()),
+      }),
+    );
+  }
+
+  // Parent breadcrumb + live children, resolved from the registry at
+  // render time (the detail body re-renders on activity ticks, so both
+  // stay current). Every lookup tolerates eviction: a missing ancestor
+  // truncates the breadcrumb with '\u2026', a fully-gone parent falls back to
+  // the launch-time parentName captured at registration.
+  const registry = config.getBackgroundTaskRegistry();
+  const parentLine = formatParentBreadcrumb(entry, (id) => registry.get(id));
+  // Same active-first / newest-first ordering as the main roster: getAll()
+  // is insertion-ordered, so without the sort a parent with more than five
+  // children would hide its still-running newest child behind its oldest
+  // completed ones.
+  const childAgents = registry
+    .getAll()
+    .filter((task) => task.parentAgentId === entry.agentId)
+    .sort(compareActiveThenTerminal);
+  const visibleChildAgents = childAgents.slice(0, 5);
+  const hiddenChildCount = childAgents.length - visibleChildAgents.length;
 
   // Registry stores activities newest-last; keep that order so the live
   // row sits at the bottom of the Progress block. Cap at 5 in case the
@@ -645,6 +734,52 @@ const AgentDetailBody: React.FC<{
           {dimSubtitleParts.join(' \u00B7 ')}
         </Text>
       </Box>
+
+      {parentLine !== undefined && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Parent')}
+            </Text>
+          </Box>
+          <Box>
+            <Text color={theme.text.secondary} wrap="truncate-end">
+              {`  ${escapeAnsiCtrlCodes(parentLine)}`}
+            </Text>
+          </Box>
+        </Fragment>
+      )}
+
+      {visibleChildAgents.length > 0 && (
+        <Fragment>
+          <Box />
+          <Box>
+            <Text bold dimColor>
+              {t('Sub-agents')}
+              <Text
+                color={theme.text.secondary}
+              >{` (${childAgents.length})`}</Text>
+            </Text>
+          </Box>
+          {visibleChildAgents.map((child) => (
+            <Box key={child.agentId}>
+              <Text color={theme.text.secondary} wrap="truncate-end">
+                {`  ${statusGlyph(child.status)} ${escapeAnsiCtrlCodes(
+                  `${child.subagentType ?? 'agent'} \u2014 ${child.description}`,
+                )} \u00B7 ${elapsedFor(child)}`}
+              </Text>
+            </Box>
+          ))}
+          {hiddenChildCount > 0 && (
+            <Box>
+              <Text color={theme.text.secondary}>
+                {`  \u2026 ${t('{{count}} more', { count: String(hiddenChildCount) })}`}
+              </Text>
+            </Box>
+          )}
+        </Fragment>
+      )}
 
       {activities.length > 0 && (
         <Fragment>
@@ -1320,9 +1455,15 @@ export const BackgroundTasksDialog: React.FC<BackgroundTasksDialogProps> = ({
       selectedEntry.kind === 'agent' && selectedEntry.status === 'paused';
     if (!isCancelable && !isAbandonable) return;
     const entryKey = entryId(selectedEntry);
-    const isForegroundAgent =
-      selectedEntry.kind === 'agent' && !selectedEntry.isBackgrounded;
-    if (isForegroundAgent && pendingCancelEntryId !== entryKey) {
+    // Two-step confirm only when cancelling would end the USER's turn —
+    // the same chain-aware verdict as the `[blocking]` row prefix. A
+    // foreground child awaited by a *background* parent unblocks that
+    // parent, not the user, so it cancels on the first press like any
+    // background entry.
+    const isUserBlockingAgent =
+      selectedEntry.kind === 'agent' &&
+      computeUserBlockingIds(entries).has(selectedEntry.agentId);
+    if (isUserBlockingAgent && pendingCancelEntryId !== entryKey) {
       setPendingCancelEntryId(entryKey);
       return;
     }

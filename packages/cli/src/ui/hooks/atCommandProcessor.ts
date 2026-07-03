@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, Extension } from '@qwen-code/qwen-code-core';
 import {
   getErrorMessage,
   isNodeError,
@@ -27,6 +27,16 @@ import type {
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import { matchMcpServerPrefix } from './mcpResourceRef.js';
+import {
+  parseExtensionRef,
+  matchExtensionByRef,
+  buildExtensionRef,
+} from './extension-mention-ref.js';
+import {
+  buildExtensionMentionContext,
+  EXTENSION_CONTEXT_BUDGET,
+  getExtensionDisplayName,
+} from '../../utils/extension-mention.js';
 
 export interface ResolveAtCommandParams {
   query: string;
@@ -205,6 +215,13 @@ export async function resolveAtCommandQuery({
     uri: string;
   }> = [];
 
+  // Extension references (`@ext:<name>`) collected during the loop.
+  const activeExtensions = config.getActiveExtensions?.() ?? [];
+  const extensionMentions: Array<{
+    originalAtPath: string;
+    extension: Extension;
+  }> = [];
+
   for (const atPathPart of atPathCommandParts) {
     const originalAtPath = atPathPart.content; // e.g., "@file.txt" or "@"
 
@@ -216,6 +233,28 @@ export async function resolveAtCommandQuery({
     }
 
     const pathName = originalAtPath.substring(1);
+
+    // Extension reference (`@ext:<name>`): detected BEFORE MCP/filesystem
+    // resolution. Only matches when the path starts with `ext:` and the name
+    // corresponds to an active extension.
+    const extRef = parseExtensionRef(pathName);
+    if (extRef) {
+      const extension = matchExtensionByRef(extRef.name, activeExtensions);
+      if (extension) {
+        if (
+          !extensionMentions.some((m) => m.extension.name === extension.name)
+        ) {
+          extensionMentions.push({ originalAtPath, extension });
+        }
+        atPathToResolvedSpecMap.set(originalAtPath, pathName);
+        continue;
+      }
+      onDebugMessage(
+        `Extension "${extRef.name}" not found among active extensions. ` +
+          `Available: ${activeExtensions.map((e) => e.name).join(', ') || '(none)'}`,
+      );
+      continue;
+    }
 
     // MCP resource reference (`@server:uri`): detected BEFORE filesystem
     // resolution so a resource URI containing ':' / '//' isn't mistaken for
@@ -444,8 +483,12 @@ export async function resolveAtCommandQuery({
 
   // Fallback for lone "@" or completely invalid @-commands resulting in empty
   // initialQueryText — only when there is nothing to read at all (no valid
-  // file paths AND no resource references).
-  if (pathSpecsToRead.length === 0 && mcpResourceRefs.length === 0) {
+  // file paths, resource references, or extension mentions).
+  if (
+    pathSpecsToRead.length === 0 &&
+    mcpResourceRefs.length === 0 &&
+    extensionMentions.length === 0
+  ) {
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
       // If the only thing was a lone @, pass original query (which might have spaces)
@@ -461,8 +504,42 @@ export async function resolveAtCommandQuery({
     };
   }
 
+  // Build extension context parts and display cards for @-mentioned extensions.
+  // Processed BEFORE file reads so that extension labels/displays are available
+  // in the file-read error path (mirroring how resourceDisplays/resourceLabels
+  // are already built before the file read).
+  // Aggregate cap across all extensions to prevent unbounded context injection.
+  let extensionContextBudgetRemaining = EXTENSION_CONTEXT_BUDGET;
+
+  const extensionParts: Part[] = [];
+  const extensionDisplays: IndividualToolCallDisplay[] = [];
+  const extensionLabels: string[] = [];
+  for (let i = 0; i < extensionMentions.length; i++) {
+    const { extension } = extensionMentions[i];
+    const displayName = getExtensionDisplayName(extension);
+    const callId = `client-extension-${userMessageTimestamp}-${i}`;
+
+    const context = await buildExtensionMentionContext(extension, {
+      remainingBudget: extensionContextBudgetRemaining,
+      signal,
+      onDebugMessage,
+    });
+    extensionContextBudgetRemaining = context.remainingBudget;
+
+    extensionParts.push({ text: context.text });
+    extensionLabels.push(buildExtensionRef(extension.name));
+    extensionDisplays.push({
+      callId,
+      name: 'Activate Extension',
+      description: `Activated extension ${displayName}`,
+      status: ToolCallStatus.Success,
+      resultDisplay: undefined,
+      confirmationDetails: undefined,
+    });
+  }
+
   // Read files (if any). A hard read error aborts the turn, as before — but
-  // any resource tool-cards already gathered are still surfaced.
+  // any extension/resource tool-cards already gathered are still surfaced.
   const fileParts: Part[] = [];
   let fileDisplays: IndividualToolCallDisplay[] = [];
   if (pathSpecsToRead.length > 0) {
@@ -477,7 +554,6 @@ export async function resolveAtCommandQuery({
         ? result.contentParts
         : [result.contentParts];
 
-      // Create individual tool call displays for each file read
       fileDisplays = result.files.map((file, index) => ({
         callId: `client-read-${userMessageTimestamp}-${index}`,
         name: file.isDirectory ? 'Read Directory' : 'Read File',
@@ -492,7 +568,6 @@ export async function resolveAtCommandQuery({
       }));
 
       if (parts.length > 0 && !result.error) {
-        // readManyFiles now returns properly formatted parts with headers and prefixes
         for (const part of parts) {
           fileParts.push(typeof part === 'string' ? { text: part } : part);
         }
@@ -512,14 +587,19 @@ export async function resolveAtCommandQuery({
         typeof errorToolCallDisplay.resultDisplay === 'string'
           ? errorToolCallDisplay.resultDisplay
           : undefined;
-      // Resource labels are merged in too: a resource may have been read
-      // successfully before the file read failed, and its card is already in
-      // `resourceDisplays` above — the audit trail must not drop it.
-      const labelsOnError = [...contentLabelsForDisplay, ...resourceLabels];
+      const labelsOnError = [
+        ...extensionLabels,
+        ...contentLabelsForDisplay,
+        ...resourceLabels,
+      ];
       return {
         processedQuery: null,
         shouldProceed: false,
-        toolDisplays: [...resourceDisplays, errorToolCallDisplay],
+        toolDisplays: [
+          ...extensionDisplays,
+          ...resourceDisplays,
+          errorToolCallDisplay,
+        ],
         filesRead: labelsOnError,
         recording: {
           filesRead: labelsOnError,
@@ -537,15 +617,20 @@ export async function resolveAtCommandQuery({
   // positional alignment, so grouping is safe.
   const processedQueryParts: PartListUnion = [
     { text: initialQueryText },
+    ...extensionParts,
     ...fileParts,
     ...resourceParts,
   ];
-  const allLabels = [...contentLabelsForDisplay, ...resourceLabels];
+  const allLabels = [
+    ...extensionLabels,
+    ...contentLabelsForDisplay,
+    ...resourceLabels,
+  ];
 
   return {
     processedQuery: processedQueryParts,
     shouldProceed: true,
-    toolDisplays: [...fileDisplays, ...resourceDisplays],
+    toolDisplays: [...extensionDisplays, ...fileDisplays, ...resourceDisplays],
     filesRead: allLabels,
     recording: {
       filesRead: allLabels,

@@ -1,15 +1,14 @@
 .wrap {
-  margin: 8px 0;
+  margin: 0;
 }
 
 .summary {
   width: 100%;
   margin: 0;
-  padding: 2px 0;
   border: none;
   border-radius: 0;
   background: transparent;
-  color: #a1a2a3;
+  color: var(--muted-foreground);
   display: flex;
   align-items: center;
   gap: 7px;
@@ -21,12 +20,18 @@
 
 .summary:hover,
 .summary:focus-visible {
-  color: var(--text-primary);
+  color: var(--primary);
   outline: none;
 }
 
+.summary:hover .summaryTextActive,
+.summary:focus-visible .summaryTextActive {
+  background-image: none;
+  -webkit-text-fill-color: currentColor;
+}
+
 .summaryIcon {
-  width: 14px;
+  min-width: 14px;
   height: 14px;
   display: inline-flex;
   align-items: center;
@@ -39,9 +44,16 @@
   display: block;
 }
 
+.summaryStatus {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  line-height: 1;
+}
+
 .summaryToolIcon {
-  width: 14px;
-  height: 14px;
+  width: 13px;
+  height: 13px;
   display: block;
 }
 
@@ -56,14 +68,13 @@
 }
 
 .summaryTextActive {
-  color: #a1a2a3;
   background-image: linear-gradient(
     105deg,
-    #a1a2a3 0%,
-    #a1a2a3 46%,
+    var(--muted-foreground) 0%,
+    var(--muted-foreground) 46%,
     rgba(255, 255, 255, 0.92) 50%,
-    #a1a2a3 54%,
-    #a1a2a3 100%
+    var(--muted-foreground) 54%,
+    var(--muted-foreground) 100%
   );
   background-size: 300% 100%;
   background-position: 150% 0;
@@ -114,8 +125,8 @@
 }
 
 .group {
-  background: var(--bg-secondary);
-  border: 1px solid var(--border-color);
+  background: var(--muted);
+  border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 8px 12px;
   margin: 5px 0;
@@ -128,17 +139,17 @@
   align-items: center;
   gap: 6px;
   font-size: 13px;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-weight: 600;
   margin-bottom: 6px;
 }
 
 .headerDot {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .headerCount {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-weight: 400;
 }
 
@@ -146,7 +157,7 @@
   display: flex;
   flex-direction: column;
   gap: 0;
-  /* border-left: 2px solid var(--border-color); */
+  /* border-left: 2px solid var(--border); */
   padding-left: 10px;
 }
 
@@ -161,12 +172,12 @@
 }
 
 .row:hover {
-  background: var(--bg-tertiary);
+  background: var(--secondary);
 }
 
 .rowStats {
   font-size: 11px;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   white-space: nowrap;
   flex-shrink: 0;
   margin-left: auto;
@@ -174,7 +185,7 @@
 
 .rowDesc {
   font-size: 12px;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -183,11 +194,11 @@
 }
 
 .rowTool {
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
 }
 
 .detail {
   margin-top: 4px;
   padding: 6px 0 2px;
-  border-top: 1px solid var(--border-color);
+  border-top: 1px solid var(--border);
 }

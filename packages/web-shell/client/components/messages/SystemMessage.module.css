@@ -1,15 +1,38 @@
 .message {
-  padding: 4px 10px;
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  padding: 4px 0;
   font-size: 14px;
+  color: var(--muted-foreground);
   border-radius: 4px;
-  margin: 8px 0;
+  margin: 0;
 }
 
 .flushMessage {
-  margin-bottom: 8px;
+  margin-bottom: 0;
+}
+
+.message::before {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--card-foreground);
+  content: '';
+  margin-top: 0.55em;
+}
+
+.noMarker::before {
+  display: none;
+}
+
+.content {
+  min-width: 0;
 }
 
 .message pre {
+  display: inline;
   margin: 0;
   white-space: pre-wrap;
   word-wrap: break-word;
@@ -24,31 +47,43 @@
 }
 
 .info {
-  background: var(--info-bg);
-  border: 1px solid var(--info-border);
-  color: var(--accent-color);
+  background: transparent;
+  border: 0;
+}
+
+.recap {
+  gap: 0;
+  padding: 8px 12px;
+  border: 1px solid color-mix(in srgb, var(--agent-blue-500) 22%, var(--border));
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--agent-blue-100) 42%, var(--background));
+  color: var(--agent-blue-500);
+}
+
+.recap::before {
+  display: none;
 }
 
 .modelSwitch {
-  color: var(--text-primary);
+  color: var(--foreground);
 }
 
 .error {
-  background: var(--error-bg);
-  border: 1px solid var(--error-border);
+  background: transparent;
+  border: 0;
   color: var(--error-color);
 }
 
 .warning {
-  background: var(--warning-bg);
-  border: 1px solid var(--warning-border);
+  background: transparent;
+  border: 0;
   color: var(--warning-color);
 }
 
 .retryHint {
   margin-top: 6px;
   font-size: 12px;
-  color: var(--text-secondary, #888);
+  color: var(--muted-foreground, #888);
   font-style: italic;
 }
 
@@ -57,7 +92,7 @@
   border: none;
   padding: 0;
   margin: 0;
-  color: var(--text-secondary, #888);
+  color: var(--muted-foreground, #888);
   font: inherit;
   font-style: italic;
   cursor: pointer;
@@ -65,5 +100,19 @@
 }
 
 .retryButton:hover {
-  color: var(--text-primary, #fff);
+  color: var(--foreground, #fff);
+}
+
+/* Right-aligned, subtle marker for a user-cancelled (ESC) stream — reads as a
+   user-side action and keeps the same divider treatment as a turn status row. */
+.cancelled {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
+  padding: 10px 0;
+  margin-bottom: 5px;
+  font-size: 14px;
+  line-height: 1.4;
+  color: var(--muted-foreground);
 }

@@ -33,6 +33,13 @@ import {
 } from '../goals/activeGoalStore.js';
 import { abortGoalForStopHookCap } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
+import { buildContextUsage } from '../hooks/context-usage.js';
+import {
+  DEFAULT_TOKEN_LIMIT,
+  ESCALATED_MAX_TOKENS,
+  parsePositiveIntegerEnvValue,
+  tokenLimit,
+} from './tokenLimits.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -115,6 +122,7 @@ import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
+import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 
 // Hook types and utilities
 import {
@@ -427,7 +435,8 @@ export class GeminiClient {
       const text =
         message.parts
           ?.filter(
-            (part): part is { text: string } => typeof part.text === 'string',
+            (part): part is { text: string } =>
+              typeof part.text === 'string' && !part.thought,
           )
           .map((part) => part.text)
           .join('') ?? '';
@@ -464,14 +473,14 @@ export class GeminiClient {
    *     one and the new one — and the model would see context the user
    *     thought had been undone.
    */
-  stripOrphanedUserEntriesFromHistory() {
+  stripOrphanedUserEntriesFromHistory(): Content[] {
     const chat = this.getChat();
     const before = chat.getHistoryLength();
-    chat.stripOrphanedUserEntriesFromHistory();
+    const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
     const after = chat.getHistoryLength();
     if (after >= before) {
       // Nothing to strip — leave caches and IDE context alone.
-      return;
+      return strippedEntries;
     }
     // Stripped trailing user entries can include read_file
     // functionResponses from a failed-then-retried request. The
@@ -488,6 +497,7 @@ export class GeminiClient {
     // entirely or send only a diff against a now-removed baseline. Match
     // the invalidation `setHistory()` / `truncateHistory()` already do.
     this.forceFullIdeContext = true;
+    return strippedEntries;
   }
 
   /**
@@ -1648,9 +1658,49 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    let strippedRetryEntries: Content[] = [];
+    // Snapshot of GeminiChat's user-content push counter, taken right after the
+    // strip. The Retry's re-submitted content is the first thing the send
+    // pushes, so if the counter advances at all that content landed.
+    let pushCountAfterStrip = 0;
+    const currentPushCount = () =>
+      this.getChat().getUserContentPushCount?.() ?? 0;
+
+    const restoreStrippedRetryEntries = () => {
+      if (strippedRetryEntries.length === 0) {
+        return;
+      }
+      // `chat.sendMessageStream` pushes the re-submitted user content back into
+      // history before the API call. Restore the stripped entries only when
+      // that push never landed (the send threw before pushing, or the push was
+      // rolled back on a setup error) — otherwise re-adding would duplicate it.
+      //
+      // Gate on the push counter, not on history length: auto-compression
+      // inside `sendMessageStream` runs BEFORE the push and shrinks history
+      // independently of it, so a length comparison can read "history didn't
+      // grow" even after a successful push and duplicate the prompt. The counter
+      // only advances on a push that survived (it's decremented if the push is
+      // rolled back), so it is invariant under compression.
+      const pushCountNow = currentPushCount();
+      if (pushCountNow <= pushCountAfterStrip) {
+        // Diagnostic: restoring means the send never pushed the re-submitted
+        // content. If the counter were ever wrong, this line is the anchor for
+        // a silent duplicate/loss.
+        debugLogger.info('[Retry] restoring stripped orphan entries', {
+          entries: strippedRetryEntries.length,
+          pushCountAfterStrip,
+          pushCountNow,
+        });
+        for (const entry of strippedRetryEntries) {
+          this.getChat().addHistory(entry);
+        }
+      }
+      strippedRetryEntries = [];
+    };
 
     if (messageType === SendMessageType.Retry) {
-      this.stripOrphanedUserEntriesFromHistory();
+      strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
+      pushCountAfterStrip = currentPushCount();
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
@@ -1773,7 +1823,10 @@ export class GeminiClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
-        if (this.config.isManagedMemoryAvailable()) {
+        if (
+          this.config.isManagedMemoryAvailable() &&
+          this.config.getManagedAutoMemoryEnabled()
+        ) {
           // A previous recall may still be pending (slow side-query, new user
           // turn arrived before it settled). Abort it before installing the
           // new handle so the orphan doesn't keep running indefinitely.
@@ -2056,7 +2109,12 @@ export class GeminiClient {
         // add plan mode system reminder if approval mode is plan
         if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
           systemReminders.push(
-            getPlanModeSystemReminder(this.config.getSdkMode()),
+            // SDK clients do not receive the interactive exit-plan flow, so
+            // they need plan-only guidance even outside subagent contexts.
+            getPlanModeSystemReminder(
+              shouldUsePlanOnlyReminderInSubagentContext() ||
+                this.config.getSdkMode(),
+            ),
           );
         }
 
@@ -2143,9 +2201,10 @@ export class GeminiClient {
           didUpdateIdeContextState = true;
         }
 
-        // Always-on safety checks (consecutive-identical tool-call guard +
-        // per-turn tool-call cap). These fire before the skipLoopDetection
-        // gate so they cannot be bypassed by configuration.
+        // Always-on safety checks (consecutive-identical tool-call guard,
+        // shell inspection stagnation, and per-turn tool-call cap). These fire
+        // before the skipLoopDetection gate so they cannot be bypassed by
+        // configuration.
         const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
         if (alwaysOnLoop) {
           // Drop every tool call collected before the guard fired so the run
@@ -2175,9 +2234,10 @@ export class GeminiClient {
         // interruptions. Only the historically false-positive-prone heuristics
         // (content/thought repetition, read-file and action stagnation,
         // global-duplicate and alternating tool-call patterns) sit behind this
-        // flag. The precise consecutive-identical guard and the per-turn cap
-        // run unconditionally in checkAlwaysOnSafeties above, so the documented
-        // escape hatch only relaxes the heuristics (see nonInteractiveCli.ts).
+        // flag. The precise consecutive-identical guard, shell inspection
+        // stagnation guard, and per-turn cap run unconditionally in
+        // checkAlwaysOnSafeties above, so the documented escape hatch only
+        // relaxes the heuristics (see nonInteractiveCli.ts).
         const skipLoopDetection = this.config.getSkipLoopDetection();
         const heuristicLoop =
           !skipLoopDetection &&
@@ -2281,6 +2341,12 @@ export class GeminiClient {
         const responseText =
           this.getLastModelMessageText() || '[no response text]';
 
+        const contextUsage = buildContextUsage(
+          this.config.getContentGeneratorConfig()?.contextWindowSize ??
+            DEFAULT_TOKEN_LIMIT,
+          uiTelemetryService.getLastPromptTokenCount(),
+        );
+
         const response = await messageBus.request<
           HookExecutionRequest,
           HookExecutionResponse
@@ -2291,6 +2357,7 @@ export class GeminiClient {
             input: {
               stop_hook_active: true,
               last_assistant_message: responseText,
+              ...contextUsage,
             },
             signal,
           },
@@ -2522,6 +2589,7 @@ export class GeminiClient {
       normalCompletion = true;
       return turn;
     } finally {
+      restoreStrippedRetryEntries();
       // Belt-and-suspenders: abort the prefetch on any exit other than the
       // bottom-of-try `return turn`. Catches uncaught exceptions and guards
       // against future early-return sites that forget to call cancel.
@@ -2646,14 +2714,33 @@ export class GeminiClient {
     signal?: AbortSignal,
     customInstructions?: string,
   ): Promise<ChatCompressionInfo> {
+    // Compute reservedOutputTokens using the same fallback logic as
+    // GeminiChat.sendMessageStream so the cheap-gate thresholds align with
+    // the real available input budget (issue #5950).
+    const cgConfig = this.config.getContentGeneratorConfig();
+    const model = this.config.getModel();
+    const parsedEnvMaxTokens = parsePositiveIntegerEnvValue(
+      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+    );
+    const hasUserMaxTokensOverride =
+      (cgConfig?.samplingParams?.max_tokens !== undefined &&
+        cgConfig?.samplingParams?.max_tokens !== null) ||
+      parsedEnvMaxTokens !== undefined;
+    const reservedOutputTokens: number = hasUserMaxTokensOverride
+      ? (cgConfig?.samplingParams?.max_tokens ?? parsedEnvMaxTokens ?? 0)
+      : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output'));
+
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
     const info = await this.getChat().tryCompress(
       prompt_id,
-      this.config.getModel(),
+      model,
       force,
       signal,
-      customInstructions ? { customInstructions } : undefined,
+      {
+        ...(customInstructions ? { customInstructions } : undefined),
+        reservedOutputTokens,
+      },
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const chat = this.getChat();

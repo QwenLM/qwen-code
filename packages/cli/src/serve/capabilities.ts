@@ -67,6 +67,10 @@ export const SERVE_CAPABILITY_REGISTRY = {
   // hierarchical QWEN.md state and accepts append/replace writes scoped
   // to either the bound workspace or the global ~/.qwen directory.
   workspace_memory: { since: 'v1' },
+  workspace_memory_remember: {
+    since: 'v1',
+    modes: ['workspace', 'clean'],
+  },
   // Workspace agents CRUD (`GET/POST /workspace/agents` +
   // `GET/POST/DELETE /workspace/agents/:agentType`). Wraps
   // `SubagentManager` over HTTP so remote clients can list / read /
@@ -84,6 +88,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_lsp: { since: 'v1' },
   session_status: { since: 'v1' },
   session_close: { since: 'v1' },
+  session_archive: { since: 'v1' },
   session_metadata: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
   // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`
@@ -248,6 +253,22 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_branch: { since: 'v1' },
   rate_limit: { since: 'v1' },
   workspace_reload: { since: 'v1' },
+  // Phase 2 "reverse tool channel" (issue #5626). A connected WS client (e.g.
+  // the Chrome extension) can host an MCP server that the daemon's agent
+  // calls by carrying `mcp_message` JSON-RPC frames over the daemon WS,
+  // reusing the SDK-MCP-server control-plane pattern. Inbound WS frame types:
+  // `mcp_register` { server }, `mcp_message` { id, server, payload }
+  // (bidirectional, request/response correlated by `id`), `mcp_unregister`
+  // { server }. Advertised CONDITIONALLY so clients pre-flight this tag before
+  // attempting to register a client-hosted server. `runQwenServe` enables it
+  // only when explicitly requested by option or env.
+  client_mcp_over_ws: { since: 'v1' },
+  // Plan C "CDP tunnel" (issue #5626): the daemon exposes a `/cdp` WebSocket
+  // where a loopback CDP client drives ONE real tab
+  // via the extension's `chrome.debugger`, tunneled over `/acp` as `cdp_*`
+  // frames. Advertised when explicitly enabled or when the daemon is serving a
+  // Chrome extension origin.
+  cdp_tunnel_over_ws: { since: 'v1' },
   // Daemon hosts the `/voice/stream` WebSocket: the browser captures audio and
   // streams raw PCM, the daemon transcribes server-side via the configured
   // `voiceModel` (credentials never reach the client). Advertised
@@ -278,6 +299,16 @@ export interface AdvertiseFeatureToggles {
   sessionShellCommandEnabled?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
+  /**
+   * Whether the daemon will accept client-hosted MCP servers over the WS
+   * (`client_mcp_over_ws`, issue #5626).
+   */
+  clientMcpOverWsEnabled?: boolean;
+  /**
+   * Whether the daemon exposes the Plan C `/cdp` tunnel endpoint
+   * (`cdp_tunnel_over_ws`, issue #5626).
+   */
+  cdpTunnelOverWsEnabled?: boolean;
   voiceWsAvailable?: boolean;
 }
 
@@ -345,6 +376,8 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],
+  ['client_mcp_over_ws', (toggles) => toggles.clientMcpOverWsEnabled === true],
+  ['cdp_tunnel_over_ws', (toggles) => toggles.cdpTunnelOverWsEnabled === true],
   [
     // Advertised whenever the `/voice/stream` WS endpoint exists. A configured
     // token (or `--require-auth`) no longer suppresses it: browsers can't set

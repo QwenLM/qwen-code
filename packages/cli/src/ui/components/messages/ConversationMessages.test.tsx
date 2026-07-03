@@ -5,7 +5,11 @@
  */
 
 import { render } from 'ink-testing-library';
-import { ThinkMessage, ThinkMessageContent } from './ConversationMessages.js';
+import {
+  ThinkMessage,
+  ThinkMessageContent,
+  toggleKeyHint,
+} from './ConversationMessages.js';
 
 describe('<ThinkMessage />', () => {
   const defaultProps = {
@@ -19,7 +23,7 @@ describe('<ThinkMessage />', () => {
     );
     const output = lastFrame();
     expect(output).toContain('Thinking');
-    expect(output).not.toContain('alt+t to expand');
+    expect(output).not.toContain(`${toggleKeyHint} to expand`);
   });
 
   it('should render collapsed line when committed and not expanded', () => {
@@ -28,7 +32,7 @@ describe('<ThinkMessage />', () => {
     );
     const output = lastFrame();
     expect(output).toContain('Thinking');
-    expect(output).toContain('alt+t to expand');
+    expect(output).toContain(`${toggleKeyHint} to expand`);
     expect(output).not.toContain('Analyzing the code structure');
   });
 
@@ -45,7 +49,7 @@ describe('<ThinkMessage />', () => {
       <ThinkMessage {...defaultProps} isPending={false} />,
     );
     const output = lastFrame();
-    expect(output).toContain('alt+t to expand');
+    expect(output).toContain(`${toggleKeyHint} to expand`);
     expect(output).not.toContain('Analyzing the code structure');
   });
 
@@ -61,7 +65,7 @@ describe('<ThinkMessage />', () => {
     const output = lastFrame();
     expect(output).toContain('Thought for');
     expect(output).toContain('15s');
-    expect(output).toContain('alt+t to expand');
+    expect(output).toContain(`${toggleKeyHint} to expand`);
   });
 
   it('should show present-tense duration while pending (streaming)', () => {
