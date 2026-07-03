@@ -320,7 +320,7 @@ export class QQChannel extends ChannelBase {
             return;
           }
           process.stderr.write(
-            `[QQ:${this.name}] Plain-text fallback failed: ${fallbackRes.status}\n`,
+            `[QQ:${this.name}] MESSAGE DROPPED: plain-text fallback failed (HTTP ${fallbackRes.status}) for ${sanitizeLogText(chatId, 64)}\n`,
           );
         }
         return;
