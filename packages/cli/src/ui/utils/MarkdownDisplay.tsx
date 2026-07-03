@@ -14,7 +14,12 @@ import { useSettings } from '../contexts/SettingsContext.js';
 import { MermaidDiagram } from './MermaidDiagram.js';
 import { renderInlineLatex } from './latexRenderer.js';
 import { useRenderMode } from '../contexts/RenderModeContext.js';
-import { fitPendingSlice } from './pending-rendered-height.js';
+import {
+  fitPendingSlice,
+  splitMarkdownTableRow,
+  TABLE_ROW_RE,
+  TABLE_SEPARATOR_RE,
+} from './pending-rendered-height.js';
 // Minimum content lines to keep in a clipped live preview before the
 // "generating more" cue (own constant — not coupled to MaxSizedBox's floor).
 const MIN_PENDING_CONTENT_LINES = 1;
@@ -99,71 +104,6 @@ const LIST_ITEM_PREFIX_PADDING = 1;
 const LIST_ITEM_TEXT_FLEX_GROW = 1;
 const BLOCKQUOTE_PREFIX_PADDING = 1;
 const MATH_BLOCK_PREFIX_PADDING = 1;
-const INLINE_MATH_MAX_CHARS = 1024;
-const TABLE_INLINE_MATH_SPAN_RE = new RegExp(
-  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
-  'y',
-);
-
-function readTableInlineMathSpan(row: string, index: number): string | null {
-  TABLE_INLINE_MATH_SPAN_RE.lastIndex = index;
-  return TABLE_INLINE_MATH_SPAN_RE.exec(row)?.[0] ?? null;
-}
-
-function splitMarkdownTableRow(row: string): string[] {
-  const cells: string[] = [];
-  let current = '';
-  let activeCodeFenceLength = 0;
-
-  for (let index = 0; index < row.length; index++) {
-    const char = row[index]!;
-    if (char === '\\') {
-      const next = row[index + 1];
-      if (next === '|') {
-        current += '|';
-        index += 1;
-        continue;
-      }
-      current += char;
-      continue;
-    }
-
-    if (char === '`') {
-      let runLength = 1;
-      while (row[index + runLength] === '`') {
-        runLength += 1;
-      }
-      if (activeCodeFenceLength === 0) {
-        activeCodeFenceLength = runLength;
-      } else if (runLength === activeCodeFenceLength) {
-        activeCodeFenceLength = 0;
-      }
-      current += '`'.repeat(runLength);
-      index += runLength - 1;
-      continue;
-    }
-
-    if (char === '$' && activeCodeFenceLength === 0) {
-      const mathSpan = readTableInlineMathSpan(row, index);
-      if (mathSpan) {
-        current += mathSpan;
-        index += mathSpan.length - 1;
-        continue;
-      }
-    }
-
-    if (char === '|' && activeCodeFenceLength === 0) {
-      cells.push(current.trim());
-      current = '';
-      continue;
-    }
-
-    current += char;
-  }
-
-  cells.push(current.trim());
-  return cells;
-}
 
 const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   text,
@@ -212,9 +152,10 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   const hrRegex = /^ *([-*_] *){3,} *$/;
   const blockquoteRegex = /^ *> ?(.*)$/;
   const mathFenceRegex = /^ *\$\$ *$/;
-  const tableRowRegex = /^\s*\|(.+)\|\s*$/;
-  const tableSeparatorRegex =
-    /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
+  // Single source of truth for table detection (shared with pending-rendered-
+  // height.ts so the height estimator and the renderer never diverge).
+  const tableRowRegex = TABLE_ROW_RE;
+  const tableSeparatorRegex = TABLE_SEPARATOR_RE;
 
   // Rendered-height-aware slice of the pending preview (shared with
   // useGeminiStream's incremental commit — see pending-rendered-height.ts — so the

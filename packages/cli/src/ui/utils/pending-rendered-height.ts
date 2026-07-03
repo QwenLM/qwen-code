@@ -23,9 +23,82 @@ import { getCachedStringWidth } from './textUtils.js';
  *  rows). */
 export const TABLE_CHROME_ROWS = 5;
 
-const TABLE_ROW_RE = /^\s*\|(.+)\|\s*$/;
-const TABLE_SEPARATOR_RE =
+/** A markdown table row: `| ... |`. Group 1 captures the inner cells. */
+export const TABLE_ROW_RE = /^\s*\|(.+)\|\s*$/;
+/** A markdown table separator: `| --- | :--: |` etc. */
+export const TABLE_SEPARATOR_RE =
   /^(?=.*\|)\s*\|?\s*(:?-+:?)\s*(\|\s*(:?-+:?)\s*)*\|?\s*$/;
+
+const INLINE_MATH_MAX_CHARS = 1024;
+const TABLE_INLINE_MATH_SPAN_RE = new RegExp(
+  String.raw`(?<![\w$])\$(?![\s\d$])(?=[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\S\$)[^$\n]{1,${INLINE_MATH_MAX_CHARS}}\$(?![\w$])`,
+  'y',
+);
+
+function readTableInlineMathSpan(row: string, index: number): string | null {
+  TABLE_INLINE_MATH_SPAN_RE.lastIndex = index;
+  return TABLE_INLINE_MATH_SPAN_RE.exec(row)?.[0] ?? null;
+}
+
+/**
+ * Splits one markdown table row into its cells, honouring escaped pipes
+ * (`\|`), inline code spans and inline math spans. Shared so table detection
+ * and the renderer agree on column counts.
+ */
+export function splitMarkdownTableRow(row: string): string[] {
+  const cells: string[] = [];
+  let current = '';
+  let activeCodeFenceLength = 0;
+
+  for (let index = 0; index < row.length; index++) {
+    const char = row[index]!;
+    if (char === '\\') {
+      const next = row[index + 1];
+      if (next === '|') {
+        current += '|';
+        index += 1;
+        continue;
+      }
+      current += char;
+      continue;
+    }
+
+    if (char === '`') {
+      let runLength = 1;
+      while (row[index + runLength] === '`') {
+        runLength += 1;
+      }
+      if (activeCodeFenceLength === 0) {
+        activeCodeFenceLength = runLength;
+      } else if (runLength === activeCodeFenceLength) {
+        activeCodeFenceLength = 0;
+      }
+      current += '`'.repeat(runLength);
+      index += runLength - 1;
+      continue;
+    }
+
+    if (char === '$' && activeCodeFenceLength === 0) {
+      const mathSpan = readTableInlineMathSpan(row, index);
+      if (mathSpan) {
+        current += mathSpan;
+        index += mathSpan.length - 1;
+        continue;
+      }
+    }
+
+    if (char === '|' && activeCodeFenceLength === 0) {
+      cells.push(current.trim());
+      current = '';
+      continue;
+    }
+
+    current += char;
+  }
+
+  cells.push(current.trim());
+  return cells;
+}
 
 /** Estimated terminal rows a non-table line occupies once wrapped to `width`. */
 export function estimateWrappedRows(line: string, width: number): number {
@@ -33,13 +106,24 @@ export function estimateWrappedRows(line: string, width: number): number {
   return Math.max(1, Math.ceil(getCachedStringWidth(line) / width));
 }
 
-/** True when `lines[i]` starts a markdown table (a row followed by a separator). */
+/**
+ * True when `lines[i]` starts a markdown table: a `| ... |` row immediately
+ * followed by a separator row whose column count matches the header's. The
+ * column-count check mirrors the renderer's own table detection so this and
+ * MarkdownDisplay agree on what counts as a table.
+ */
 export function isTableStart(lines: string[], i: number): boolean {
-  return (
-    TABLE_ROW_RE.test(lines[i]!) &&
-    i + 1 < lines.length &&
-    TABLE_SEPARATOR_RE.test(lines[i + 1]!)
-  );
+  const header = lines[i];
+  if (header === undefined || i + 1 >= lines.length) return false;
+  const headerMatch = TABLE_ROW_RE.exec(header);
+  if (!headerMatch) return false;
+  const separator = lines[i + 1]!;
+  if (!TABLE_SEPARATOR_RE.test(separator)) return false;
+  const headerCols = splitMarkdownTableRow(headerMatch[1]!).length;
+  const sepCols = splitMarkdownTableRow(separator).filter(
+    (cell) => cell.length > 0,
+  ).length;
+  return headerCols === sepCols;
 }
 
 export interface PendingSliceResult {

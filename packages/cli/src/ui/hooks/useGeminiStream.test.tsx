@@ -298,6 +298,7 @@ describe('useGeminiStream', () => {
   const renderTestHook = (
     initialToolCalls: TrackedToolCall[] = [],
     geminiClient?: any,
+    availableTerminalHeightRef?: { current: number },
   ) => {
     let currentToolCalls = initialToolCalls;
     const setToolCalls = (newToolCalls: TrackedToolCall[]) => {
@@ -351,6 +352,9 @@ describe('useGeminiStream', () => {
           () => {},
           80,
           24,
+          undefined, // midTurnDrainRef
+          undefined, // logger
+          availableTerminalHeightRef,
         );
       },
       {
@@ -4438,24 +4442,26 @@ describe('useGeminiStream', () => {
         vi.advanceTimersByTime(60);
       });
 
-      // The pending item is bounded to the rendered-row budget (< 20 lines).
+      // terminalHeight=24, no ref → fallback viewport max(4, 24-12)=12,
+      // commit budget max(4, 12-5)=7. The pending item must stay near that
+      // budget (≤ 8 rendered rows here, one row per short line), NOT merely
+      // ≤ the 20-line input — a regression that stopped multi-iteration
+      // committing would leave ~18 lines pending and must fail this.
       const pendingItems = result.current.pendingHistoryItems;
       expect(pendingItems.length).toBeGreaterThan(0);
       const pendingText = pendingItems[0]?.text ?? '';
       const pendingLineCount =
         pendingText.length === 0 ? 0 : pendingText.split('\n').length;
-      expect(pendingLineCount).toBeLessThanOrEqual(20);
+      expect(pendingLineCount).toBeLessThanOrEqual(8);
 
-      // There should also be committed content (the split-off chunk)
-      // The pending item itself is set via setPendingHistoryItem (not addItem),
-      // so mockAddItem only captures the committed chunk.
+      // 25 lines at a budget of ~7 means several commits, not one — verifies
+      // the `while` loop iterates rather than committing a single chunk.
       const contentItems = mockAddItem.mock.calls
         .map(([item]) => item as HistoryItem)
         .filter(
           (item) => item.type === 'gemini' || item.type === 'gemini_content',
         );
-      expect(contentItems.length).toBeGreaterThanOrEqual(1);
-      // The committed chunk should have more lines than the pending item
+      expect(contentItems.length).toBeGreaterThanOrEqual(2);
       const committedText = contentItems[0].text;
       const committedLineCount = committedText.split('\n').length;
       expect(committedLineCount).toBeGreaterThan(pendingLineCount);
@@ -4464,6 +4470,98 @@ describe('useGeminiStream', () => {
         result.current.cancelOngoingRequest();
       });
 
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    const streamContent = async (
+      result: { current: ReturnType<typeof useGeminiStream> },
+      content: string,
+    ) => {
+      let releaseStream!: () => void;
+      const holdStream = new Promise<void>((resolve) => {
+        releaseStream = resolve;
+      });
+      const chunks: string[] = [];
+      for (let i = 0; i < content.length; i += 200) {
+        chunks.push(content.substring(i, i + 200));
+      }
+      const mockStream = (async function* () {
+        for (const chunk of chunks) {
+          yield { type: ServerGeminiEventType.Content, value: chunk };
+        }
+        await holdStream;
+      })();
+      mockSendMessageStream.mockReturnValue(mockStream);
+      act(() => {
+        void result.current.submitQuery('test query');
+      });
+      await act(async () => {
+        await Promise.resolve();
+        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      await act(async () => {
+        vi.advanceTimersByTime(60);
+      });
+      return releaseStream;
+    };
+
+    const geminiContentItems = () =>
+      mockAddItem.mock.calls
+        .map(([item]) => item as HistoryItem)
+        .filter(
+          (item) => item.type === 'gemini' || item.type === 'gemini_content',
+        );
+
+    it('breaks the commit loop when no safe split point exists (no hang)', async () => {
+      vi.useFakeTimers();
+      // findLastSafeSplitPoint returning 0 (e.g. content entirely inside an
+      // open code fence) must break the loop, not spin forever. The oversized
+      // buffer then stays pending rather than being committed.
+      vi.mocked(findLastSafeSplitPoint).mockReturnValue(0);
+
+      const { result } = renderTestHook();
+      const longContent = Array.from(
+        { length: 25 },
+        (_, i) => `line ${i + 1}`,
+      ).join('\n');
+      const releaseStream = await streamContent(result, longContent);
+
+      // Did not hang (we got here) and nothing was committed via the loop.
+      expect(geminiContentItems().length).toBe(0);
+      const pendingText = result.current.pendingHistoryItems[0]?.text ?? '';
+      expect(pendingText.split('\n').length).toBe(25);
+
+      act(() => result.current.cancelOngoingRequest());
+      await act(async () => {
+        releaseStream();
+      });
+    });
+
+    it('uses availableTerminalHeightRef when populated (not the fallback budget)', async () => {
+      vi.useFakeTimers();
+      vi.mocked(findLastSafeSplitPoint).mockImplementation(
+        (s: string, cap?: number) =>
+          cap === undefined ? s.length : Math.min(cap, s.length),
+      );
+
+      // ref = 30 → commit budget max(4, 30-5) = 25. A 20-line message fits, so
+      // it is NOT split. (The fallback path — terminalHeight 24 → budget 7 —
+      // would have split it, so this distinguishes the two code paths.)
+      const { result } = renderTestHook([], undefined, { current: 30 });
+      const content = Array.from(
+        { length: 20 },
+        (_, i) => `line ${i + 1}`,
+      ).join('\n');
+      const releaseStream = await streamContent(result, content);
+
+      expect(geminiContentItems().length).toBe(0);
+      const pendingText = result.current.pendingHistoryItems[0]?.text ?? '';
+      expect(pendingText.split('\n').length).toBe(20);
+
+      act(() => result.current.cancelOngoingRequest());
       await act(async () => {
         releaseStream();
       });

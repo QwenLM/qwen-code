@@ -10,7 +10,22 @@ import {
   estimateWrappedRows,
   isTableStart,
   fitPendingSlice,
+  splitMarkdownTableRow,
 } from './pending-rendered-height.js';
+
+describe('splitMarkdownTableRow', () => {
+  it('splits a simple row into trimmed cells', () => {
+    expect(splitMarkdownTableRow('a | b | c')).toEqual(['a', 'b', 'c']);
+  });
+
+  it('keeps escaped pipes inside a cell', () => {
+    expect(splitMarkdownTableRow('a \\| b | c')).toEqual(['a | b', 'c']);
+  });
+
+  it('does not split on a pipe inside an inline code span', () => {
+    expect(splitMarkdownTableRow('`a | b` | c')).toEqual(['`a | b`', 'c']);
+  });
+});
 
 describe('estimateWrappedRows', () => {
   it('returns 1 for a line that fits within the width', () => {
@@ -54,6 +69,16 @@ describe('isTableStart', () => {
 
   it('is false when the header is the last line (no next line)', () => {
     expect(isTableStart(['| A | B |'], 0)).toBe(false);
+  });
+
+  it('is false when the separator column count differs from the header', () => {
+    // 2-column header but a 3-column separator → not a table (matches the
+    // renderer, which rejects the mismatch and treats it as plain text).
+    expect(isTableStart(['| A | B |', '| --- | --- | --- |'], 0)).toBe(false);
+  });
+
+  it('is true when header and separator column counts match', () => {
+    expect(isTableStart(['| A | B |', '| --- | --- |'], 0)).toBe(true);
   });
 });
 
