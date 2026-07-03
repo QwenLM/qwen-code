@@ -103,11 +103,11 @@ export function App() {
 | `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`       | UI 语言                           |
 | `onLanguageChange`  | `(language: WebShellLanguage) => void`     | `/language ui` 切换 UI 语言后触发 |
 
-## 可选图表 Skill
+## 可选图表 Renderer
 
 `WebShell` 支持宿主通过 `customization.markdown.renderCodeBlock` 接管特定
 fenced code block 的渲染。图表类场景可以注册内置的
-`echarts-fulldata` renderer，并按需安装本包提供的可选 skill 模板：
+`echarts-fulldata` renderer：
 
 ```tsx
 import { createEchartsFullDataRenderer } from '@qwen-code/web-shell';
@@ -124,13 +124,9 @@ import { createEchartsFullDataRenderer } from '@qwen-code/web-shell';
 renderer 会把 `echarts-fulldata` code block 替换为图表卡片，并内置图表/数据
 icon 切换；ECharts runtime 由宿主通过 `loadEcharts` 提供。
 
-```text
-packages/web-shell/skills/qwencode-viz/SKILL.md
-```
-
-这个 skill 不会被 Qwen Code core 自动加载。只有确认当前 Web Shell 宿主已经
-注册 `echarts-fulldata` renderer 时，宿主才应该把它复制、安装或注入到自己的
-skills 来源中。
+如果需要让模型主动输出 `echarts-fulldata` block，宿主应在自己的 skills 来源中
+提供对应 skill，并且只在确认当前 Web Shell 宿主已经注册 renderer 时启用。`@qwen-code/web-shell`
+不内置或分发这个 skill。
 
 `echarts-fulldata` 的 block body 是纯 JSON ECharts option，并通过
 `dataset.source` 承载完整表格数据：renderer 直接用 option 渲染 ECharts，并从
