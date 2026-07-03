@@ -1,9 +1,9 @@
 {
   "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
-  "name": "io.github.mobile-next/mobile-mcp",
-  "description": "MCP server for iOS and Android Mobile Development, Automation and Testing",
+  "name": "io.github.qwenlm/mobile-mcp",
+  "description": "MCP server for iOS and Android Mobile Development, Automation and Testing (qwen-code fork with relative coordinate support)",
   "repository": {
-    "url": "https://github.com/mobile-next/mobile-mcp",
+    "url": "https://github.com/QwenLM/qwen-code",
     "source": "github"
   },
   "version": "{{VERSION}}",
@@ -11,7 +11,7 @@
     {
       "registryType": "npm",
       "registryBaseUrl": "https://registry.npmjs.org",
-      "identifier": "@mobilenext/mobile-mcp",
+      "identifier": "@qwen-code/mobile-mcp",
       "version": "{{VERSION}}",
       "transport": {
         "type": "stdio"

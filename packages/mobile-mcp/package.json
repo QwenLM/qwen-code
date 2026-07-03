@@ -53,7 +53,7 @@
     "husky": "^9.1.7",
     "typescript": "5.8.2"
   },
-  "main": "index.js",
+  "main": "lib/index.js",
   "bin": {
     "mcp-server-mobile": "lib/index.js"
   },
