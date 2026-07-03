@@ -13369,6 +13369,53 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
       );
     }
   });
+
+  it('default fsFactory consumes IDE multi-root workspace env', async () => {
+    const { createServeApp } = await import('./server.js');
+    const scratch = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-serve-multi-root-'),
+    );
+    const primary = path.join(scratch, 'primary');
+    const second = path.join(scratch, 'second');
+    await fsp.mkdir(primary);
+    await fsp.mkdir(second);
+    await fsp.writeFile(path.join(second, 'file.txt'), 'x');
+    const previous = process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];
+    process.env['QWEN_CODE_IDE_WORKSPACE_PATH'] = [primary, second].join(
+      path.delimiter,
+    );
+    try {
+      const app = createServeApp(
+        {
+          port: 0,
+          hostname: '127.0.0.1',
+          workspace: primary,
+        } as Parameters<typeof createServeApp>[0],
+        () => 0,
+      );
+      type FsCtx = { route: string };
+      type WfsLite = {
+        resolve: (input: string, intent: 'read') => Promise<string>;
+      };
+      const fsFactory = (
+        app.locals as {
+          fsFactory?: { forRequest: (ctx: FsCtx) => WfsLite };
+        }
+      ).fsFactory;
+      const fs = fsFactory!.forRequest({ route: 'TEST /op' });
+
+      await expect(
+        fs.resolve(path.join(second, 'file.txt'), 'read'),
+      ).resolves.toBe(realpathSync.native(path.join(second, 'file.txt')));
+    } finally {
+      if (previous === undefined) {
+        delete process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];
+      } else {
+        process.env['QWEN_CODE_IDE_WORKSPACE_PATH'] = previous;
+      }
+      await fsp.rm(scratch, { recursive: true, force: true });
+    }
+  });
 });
 
 // -- Issue #4175 PR 21 — auth device-flow integration tests ----------------

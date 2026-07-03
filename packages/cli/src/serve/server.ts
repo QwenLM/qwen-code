@@ -93,7 +93,10 @@ import {
   sendPermissionVoteError as sendPermissionVoteErrorResponse,
   type SendBridgeError,
 } from './server/error-response.js';
-import { resolveBridgeFsFactory } from './server/fs-factory.js';
+import {
+  resolveBoundWorkspacesFromIdeEnv,
+  resolveBridgeFsFactory,
+} from './server/fs-factory.js';
 import {
   createBuildWorkspaceCtx,
   parseAndValidateWorkspaceClientId,
@@ -314,7 +317,7 @@ export function createServeApp(
     );
   }
   const fsFactory = resolveBridgeFsFactory({
-    boundWorkspaces: [boundWorkspace],
+    boundWorkspaces: resolveBoundWorkspacesFromIdeEnv(boundWorkspace),
     injected: deps.fsFactory,
     trusted: false,
   });
