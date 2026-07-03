@@ -290,16 +290,7 @@ export class QQChannel extends ChannelBase {
           }
         }
 
-        // Passive reply: both markdown and active retry failed
-        if (msgId) {
-          if (resp.status !== 429) {
-            process.stderr.write(
-              `[QQ:${this.name}] MESSAGE DROPPED: both passive and active send failed for ${sanitizeLogText(chatId, 64)}\n`,
-            );
-          }
-          this.saveQQState();
-          return;
-        }
+        if (msgId) return;
 
         // Plain-text fallback for active messages (no reply context)
         const plainBody: Record<string, unknown> = {
@@ -678,7 +669,6 @@ export class QQChannel extends ChannelBase {
           this.replyMsgId.delete(chatId);
         }
       }
-      this.saveQQState();
     }, 60_000);
     this.replyMsgIdCleanupTimer.unref();
   }
