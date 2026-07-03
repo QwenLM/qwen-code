@@ -15,9 +15,18 @@ import type {
 } from '@agentclientprotocol/sdk';
 import type {
   AvailableCommand,
+  ChannelLoopToolHandler,
   ChannelAgentBridge,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
+import {
+  CHANNEL_LOOP_MCP_SERVER_NAME,
+  CLIENT_MCP_MESSAGE_METHOD,
+  CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  ChannelLoopMcpServer,
+  WORKSPACE_MCP_RUNTIME_ADD_METHOD,
+  type JsonRpcMessage,
+} from './ChannelLoopTools.js';
 export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
 
 export interface AcpBridgeOptions {
@@ -57,6 +66,9 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private connection: ClientSideConnection | null = null;
   private options: AcpBridgeOptions;
   private _availableCommands: AvailableCommand[] = [];
+  private channelLoopMcpServer: ChannelLoopMcpServer | undefined;
+  private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
+  private channelLoopMcpRegistered = false;
 
   constructor(options: AcpBridgeOptions) {
     super();
@@ -82,7 +94,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     this.child = spawn(process.execPath, args, {
       cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: { ...process.env, QWEN_CODE_DISABLE_CRON: '1' },
       shell: false,
     });
 
@@ -136,6 +148,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           return { outcome: { outcome: 'selected', optionId } };
         },
 
+        extMethod: async (
+          method: string,
+          params: Record<string, unknown>,
+        ): Promise<Record<string, unknown>> =>
+          this.handleExtMethod(method, params),
+
         extNotification: async (): Promise<void> => {},
       }),
       stream,
@@ -145,16 +163,34 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       protocolVersion: PROTOCOL_VERSION,
       clientCapabilities: {},
     });
+    await this.registerChannelLoopMcpServer();
+  }
+
+  registerChannelLoopToolHandler(handler: ChannelLoopToolHandler): void {
+    if (!this.channelLoopToolHandlers.includes(handler)) {
+      this.channelLoopToolHandlers.push(handler);
+    }
+    this.channelLoopMcpServer ??= new ChannelLoopMcpServer({
+      create: (sessionId, input) =>
+        this.resolveChannelLoopToolHandler(sessionId).create(sessionId, input),
+      list: (sessionId) =>
+        this.resolveChannelLoopToolHandler(sessionId).list(sessionId),
+      cancel: (sessionId, id) =>
+        this.resolveChannelLoopToolHandler(sessionId).cancel(sessionId, id),
+    });
+    void this.registerChannelLoopMcpServer();
   }
 
   async newSession(cwd: string): Promise<string> {
     const conn = this.ensureConnection();
+    await this.registerChannelLoopMcpServer();
     const response = await conn.newSession({ cwd, mcpServers: [] });
     return response.sessionId;
   }
 
   async loadSession(sessionId: string, cwd: string): Promise<string> {
     const conn = this.ensureConnection();
+    await this.registerChannelLoopMcpServer();
     const response = await conn.loadSession({
       sessionId,
       cwd,
@@ -272,5 +308,80 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       throw new Error('Not connected to ACP agent');
     }
     return this.connection;
+  }
+
+  private async registerChannelLoopMcpServer(): Promise<void> {
+    if (
+      !this.connection ||
+      !this.channelLoopMcpServer ||
+      this.channelLoopMcpRegistered
+    ) {
+      return;
+    }
+    try {
+      await this.connection.extMethod(WORKSPACE_MCP_RUNTIME_ADD_METHOD, {
+        name: CHANNEL_LOOP_MCP_SERVER_NAME,
+        originatorClientId: 'channel',
+        config: {
+          type: 'sdk',
+          [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
+        },
+      });
+      this.channelLoopMcpRegistered = true;
+    } catch (error) {
+      process.stderr.write(
+        `[AcpBridge] Failed to register channel loop MCP server: ${error instanceof Error ? error.message : String(error)}\n`,
+      );
+    }
+  }
+
+  private async handleExtMethod(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (method === CLIENT_MCP_MESSAGE_METHOD) {
+      return this.handleClientMcpMessage(params);
+    }
+    if (method === 'craft/drainMidTurnQueue') {
+      return { messages: [] };
+    }
+    throw new Error(`Method not found: ${method}`);
+  }
+
+  private async handleClientMcpMessage(
+    params: Record<string, unknown>,
+  ): Promise<Record<string, unknown>> {
+    if (!this.channelLoopMcpServer) {
+      throw new Error('Channel loop MCP server is not registered.');
+    }
+    const server = params['server'];
+    if (server !== CHANNEL_LOOP_MCP_SERVER_NAME) {
+      throw new Error(`Unknown client MCP server: ${String(server)}`);
+    }
+    const payload = params['payload'];
+    if (typeof payload !== 'object' || payload === null) {
+      throw new Error('Invalid client MCP payload.');
+    }
+    const sessionId =
+      typeof params['sessionId'] === 'string'
+        ? (params['sessionId'] as string)
+        : undefined;
+    const response = await this.channelLoopMcpServer.handleMessage(
+      payload as JsonRpcMessage,
+      { sessionId },
+    );
+    return { payload: response };
+  }
+
+  private resolveChannelLoopToolHandler(
+    sessionId: string,
+  ): ChannelLoopToolHandler {
+    const handler = this.channelLoopToolHandlers.find(
+      (candidate) => candidate.canHandle?.(sessionId) === true,
+    );
+    if (handler) return handler;
+    const fallback = this.channelLoopToolHandlers[0];
+    if (fallback) return fallback;
+    throw new Error('Channel loop MCP server is not registered.');
   }
 }

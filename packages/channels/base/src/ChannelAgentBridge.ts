@@ -18,6 +18,19 @@ export interface ToolCallEvent {
   rawInput?: Record<string, unknown>;
 }
 
+export interface ChannelLoopToolCreateInput {
+  cron: string;
+  prompt: string;
+  recurring?: boolean;
+}
+
+export interface ChannelLoopToolHandler {
+  canHandle?(sessionId: string): boolean;
+  create(sessionId: string, input: ChannelLoopToolCreateInput): Promise<string>;
+  list(sessionId: string): Promise<string>;
+  cancel(sessionId: string, id: string): Promise<string>;
+}
+
 export interface SessionDiedEvent {
   sessionId: string;
   reason?: string;
@@ -60,4 +73,5 @@ export interface ChannelAgentBridge {
     signal?: AbortSignal,
   ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
   listSessions?(): BridgeSessionInfo[];
+  registerChannelLoopToolHandler?(handler: ChannelLoopToolHandler): void;
 }
