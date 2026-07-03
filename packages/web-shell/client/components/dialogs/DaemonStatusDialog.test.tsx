@@ -558,4 +558,37 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('Loading daemon status');
     expect(text).not.toContain('Failed to load daemon status');
   });
+
+  it('renders the workspace empty-state when no sections are reported', () => {
+    fullState = {
+      report: { ...fullReport, full: { ...fullReport.full, workspace: {} } },
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    expect(container!.textContent ?? '').toContain(
+      'No workspace diagnostics reported',
+    );
+  });
+
+  it('contains a malformed daemon response instead of crashing the shell', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // channelWorker is required by the wire type, but an older daemon could
+    // omit it; the inner render would throw on `.enabled` without the boundary.
+    summaryState = {
+      report: {
+        ...summaryReport,
+        runtime: { ...summaryReport.runtime, channelWorker: undefined },
+      },
+      loading: false,
+      error: undefined,
+    };
+    fullState = { report: undefined, loading: false, error: undefined };
+    mount();
+    // The error boundary fallback renders instead of the throw escaping.
+    expect(container!.textContent ?? '').toContain(
+      'Failed to load daemon status',
+    );
+    errorSpy.mockRestore();
+  });
 });

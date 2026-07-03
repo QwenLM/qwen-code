@@ -6,6 +6,7 @@ import {
   type DaemonStatusReportSection,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
+import { ErrorBoundary } from '../ErrorBoundary';
 import styles from './DaemonStatusDialog.module.css';
 
 // The cheap in-memory summary is polled continuously; the expensive detail
@@ -161,9 +162,13 @@ function FullDetail({ report }: { report: DaemonStatusReport }) {
         )}
       </Card>
       <Card title={t('daemon.full.workspace.title')}>
-        {workspaceEntries.map(([name, section]) => (
-          <WorkspaceSectionRow key={name} name={name} section={section} />
-        ))}
+        {workspaceEntries.length === 0 ? (
+          <div className={styles.empty}>{t('daemon.full.workspace.empty')}</div>
+        ) : (
+          workspaceEntries.map(([name, section]) => (
+            <WorkspaceSectionRow key={name} name={name} section={section} />
+          ))
+        )}
       </Card>
       <Card title={t('daemon.full.auth.title')}>
         <Row
@@ -186,7 +191,7 @@ function FullDetail({ report }: { report: DaemonStatusReport }) {
   );
 }
 
-export function DaemonStatusDialog() {
+function DaemonStatusDialogInner() {
   const { t } = useI18n();
   // Two independent fetches: the summary drives the always-live top cards and
   // rides the auto-refresh interval; the full report backs the detail sections
@@ -535,5 +540,25 @@ export function DaemonStatusDialog() {
         <div className={styles.empty}>{t('daemon.details.loading')}</div>
       )}
     </div>
+  );
+}
+
+// A malformed or partial daemon response — most likely exactly when the daemon
+// is sick and this dashboard is most needed — must not white-screen the whole
+// web shell. Contain any render throw to the dialog. resetKeys clears the
+// fallback on the next open so a transient bad payload recovers.
+export function DaemonStatusDialog() {
+  const { t } = useI18n();
+  return (
+    <ErrorBoundary
+      label="daemon-status"
+      fallback={
+        <div className={styles.dialog}>
+          <div className={styles.empty}>{t('daemon.loadFailed')}</div>
+        </div>
+      }
+    >
+      <DaemonStatusDialogInner />
+    </ErrorBoundary>
   );
 }
