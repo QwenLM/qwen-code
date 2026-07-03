@@ -957,7 +957,10 @@ export class BridgeClient implements Client {
       );
       return;
     }
-    if (!this.ownsSession(sessionId)) {
+    if (
+      !this.ownsSession(sessionId) &&
+      !this.inFlightRestoreIds.has(sessionId)
+    ) {
       writeStderrLine(
         `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_not_owned`,
       );

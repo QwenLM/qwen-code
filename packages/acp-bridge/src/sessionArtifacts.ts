@@ -204,7 +204,8 @@ export class SessionArtifactStore {
       for (const artifact of coalesceByIdentity(normalizedResults)) {
         const existing =
           this.artifacts.get(artifact.id) ??
-          this.findPublishedUpgradeTarget(artifact);
+          this.findPublishedUpgradeTarget(artifact) ??
+          this.findPublishedWorkspaceTarget(artifact);
         if (!existing) {
           const stored: StoredArtifact = {
             ...artifact,
@@ -221,10 +222,13 @@ export class SessionArtifactStore {
 
         const updated = mergeArtifact(existing, artifact);
         if (updated.changed) {
-          this.artifacts.set(existing.id, updated.artifact);
+          if (updated.artifact.id !== existing.id) {
+            this.artifacts.delete(existing.id);
+          }
+          this.artifacts.set(updated.artifact.id, updated.artifact);
           changes.push({
             action: 'updated',
-            artifactId: existing.id,
+            artifactId: updated.artifact.id,
             artifact: toPublicArtifact(updated.artifact),
           });
         }
@@ -278,6 +282,27 @@ export class SessionArtifactStore {
       }
     }
 
+    return undefined;
+  }
+
+  private findPublishedWorkspaceTarget(
+    artifact: NormalizedArtifact,
+  ): StoredArtifact | undefined {
+    if (artifact.storage !== 'workspace' || !artifact.workspacePath) {
+      return undefined;
+    }
+    const managedId = managedIdForWorkspacePath(
+      this.workspaceCwd,
+      artifact.workspacePath,
+    );
+    for (const existing of this.artifacts.values()) {
+      if (
+        existing.storage === 'published' &&
+        existing.managedId === managedId
+      ) {
+        return existing;
+      }
+    }
     return undefined;
   }
 
@@ -461,9 +486,10 @@ export class SessionArtifactStore {
         workspacePath,
         this.getRealWorkspaceCwd(),
       );
-    } catch {
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
       throw new SessionArtifactValidationError(
-        'workspacePath could not be inspected',
+        `workspacePath could not be inspected: ${reason}`,
         'workspacePath',
       );
     }
@@ -496,6 +522,11 @@ export class SessionArtifactStore {
           error instanceof Error ? error.message : String(error),
         )}`,
       );
+      if (options.onError === 'missing') {
+        artifact.status = 'missing';
+        artifact.sizeBytes = undefined;
+        artifact.lastStatAt = options.now ?? Date.now();
+      }
       return;
     }
   }
@@ -565,12 +596,6 @@ export class SessionArtifactStore {
         `[artifacts] session=${this.sessionId} action=dropped reason="max artifacts exceeded" artifactId=${artifact.id}`,
       );
       removePriorChange(changes, artifact.id);
-      removed.push({
-        action: 'removed',
-        artifactId: artifact.id,
-        artifact: toPublicArtifact(artifact),
-        reason: 'eviction',
-      });
     }
 
     return removed;
@@ -605,6 +630,8 @@ function mergeBatchArtifact(
   if (publishedUpgrade) {
     const merged: NormalizedArtifact = {
       ...existing,
+      id: next.id,
+      identityKey: next.identityKey,
       kind: next.kind,
       storage: 'published',
       status: next.status,
@@ -614,7 +641,7 @@ function mergeBatchArtifact(
       url: next.url ?? existing.url,
       mimeType: next.mimeType ?? existing.mimeType,
       sizeBytes: next.sizeBytes ?? existing.sizeBytes,
-      metadata: mergeMetadata(existing.metadata, next),
+      metadata: mergeMetadata(existing, next),
       trustedPublisher: true,
       createdAt: existing.createdAt,
       receivedSeq: existing.receivedSeq,
@@ -629,7 +656,7 @@ function mergeBatchArtifact(
     ...existing,
     status: next.status,
     sizeBytes: mergeSizeBytes(existing, next),
-    metadata: mergeMetadata(existing.metadata, next),
+    metadata: mergeMetadata(existing, next),
     clientRetained: existing.clientRetained || next.clientRetained,
     trustedPublisher: existing.trustedPublisher || next.trustedPublisher,
     lastStatAt: next.lastStatAt ?? existing.lastStatAt,
@@ -654,9 +681,14 @@ function mergeArtifact(
   const publishedUpdate = publishedUpgrade || publishedRefresh;
   const next: StoredArtifact = {
     ...existing,
+    id: publishedUpdate ? incoming.id : existing.id,
+    identityKey: publishedUpdate ? incoming.identityKey : existing.identityKey,
     kind: publishedUpdate ? incoming.kind : existing.kind,
     storage: publishedUpgrade ? 'published' : existing.storage,
-    status: incoming.status,
+    status:
+      existing.storage === 'published' && !publishedUpdate
+        ? existing.status
+        : incoming.status,
     managedId: publishedUpdate
       ? (incoming.managedId ?? existing.managedId)
       : existing.managedId,
@@ -668,8 +700,14 @@ function mergeArtifact(
     mimeType: publishedUpdate
       ? (incoming.mimeType ?? existing.mimeType)
       : existing.mimeType,
-    sizeBytes: mergeSizeBytes(existing, incoming),
-    metadata: mergeMetadata(existing.metadata, incoming),
+    sizeBytes:
+      existing.storage === 'published' && !publishedUpdate
+        ? existing.sizeBytes
+        : mergeSizeBytes(existing, incoming),
+    metadata:
+      existing.storage === 'published' && !publishedUpdate
+        ? existing.metadata
+        : mergeMetadata(existing, incoming),
     source: existing.source,
     retentionSource: existing.retentionSource,
     trustedPublisher: existing.trustedPublisher || incoming.trustedPublisher,
@@ -750,13 +788,17 @@ function mergeSizeBytes(
 }
 
 function mergeMetadata(
-  existing: Record<string, string | number | boolean | null> | undefined,
+  existing: DaemonSessionArtifact,
   incoming: NormalizedArtifact,
 ): Record<string, string | number | boolean | null> | undefined {
-  if (!incoming.metadata || incoming.source === 'hook') {
-    return existing;
+  if (
+    !incoming.metadata ||
+    incoming.source === 'hook' ||
+    incoming.source !== existing.source
+  ) {
+    return existing.metadata;
   }
-  const merged = { ...(existing ?? {}) };
+  const merged = { ...(existing.metadata ?? {}) };
   let changed = false;
   for (const [key, value] of Object.entries(incoming.metadata)) {
     if (!Object.hasOwn(merged, key)) {
@@ -765,13 +807,13 @@ function mergeMetadata(
     }
   }
   if (!changed) {
-    return existing;
+    return existing.metadata;
   }
   if (!isMetadataWithinLimit(merged)) {
     writeStderrLine(
       `[artifacts] action=metadata_merge_dropped artifactId=${incoming.id} reason="metadata limit exceeded"`,
     );
-    return existing;
+    return existing.metadata;
   }
   return merged;
 }

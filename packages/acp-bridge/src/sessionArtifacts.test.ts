@@ -320,10 +320,13 @@ describe('SessionArtifactStore', () => {
       { strict: true, trustedPublisher: true },
     );
 
+    const publishedId = upgraded.changes[0]?.artifact?.id;
+    expect(publishedId).toBeDefined();
+    expect(publishedId).not.toBe(created.changes[0]?.artifactId);
     expect(upgraded.changes).toHaveLength(1);
     expect(upgraded.changes[0]).toMatchObject({
       action: 'updated',
-      artifactId: created.changes[0]?.artifactId,
+      artifactId: publishedId,
       artifact: {
         storage: 'published',
         title: 'Published dashboard',
@@ -332,7 +335,7 @@ describe('SessionArtifactStore', () => {
       },
     });
     expect(upgraded.changes[0]?.artifact).not.toHaveProperty('workspacePath');
-    expect((await store.list()).artifacts).toHaveLength(1);
+    expect((await store.list()).artifacts).toMatchObject([{ id: publishedId }]);
 
     const republished = await store.upsertMany(
       [
@@ -350,8 +353,9 @@ describe('SessionArtifactStore', () => {
     expect(republished.changes).toHaveLength(1);
     expect(republished.changes[0]).toMatchObject({
       action: 'updated',
-      artifactId: created.changes[0]?.artifactId,
+      artifactId: publishedId,
       artifact: {
+        id: publishedId,
         storage: 'published',
         title: 'Republished dashboard',
         managedId: managedIdForWorkspacePath('reports/dashboard.html'),
@@ -371,11 +375,11 @@ describe('SessionArtifactStore', () => {
     const artifactUrl = pathToFileURL(artifactPath).href;
     await fs.writeFile(artifactPath, 'hello');
 
-    const created = await store.upsertMany(
+    await store.upsertMany(
       [{ title: 'Draft', workspacePath: 'reports/dashboard.html' }],
       { strict: true },
     );
-    await store.upsertMany(
+    const upgraded = await store.upsertMany(
       [
         {
           title: 'Published dashboard',
@@ -387,6 +391,7 @@ describe('SessionArtifactStore', () => {
       ],
       { strict: true, trustedPublisher: true },
     );
+    const publishedId = upgraded.changes[0]?.artifactId;
 
     const repeated = await store.upsertMany(
       [{ title: 'Draft again', workspacePath: 'reports/dashboard.html' }],
@@ -396,7 +401,7 @@ describe('SessionArtifactStore', () => {
     expect(repeated.changes).toEqual([]);
     const artifact = (await store.list()).artifacts[0];
     expect(artifact).toMatchObject({
-      id: created.changes[0]?.artifactId,
+      id: publishedId,
       storage: 'published',
       status: 'available',
       url: artifactUrl,
@@ -410,7 +415,7 @@ describe('SessionArtifactStore', () => {
       await expect(store.list()).resolves.toMatchObject({
         artifacts: [
           expect.objectContaining({
-            id: created.changes[0]?.artifactId,
+            id: publishedId,
             storage: 'published',
             status: 'available',
           }),
@@ -562,14 +567,9 @@ describe('SessionArtifactStore', () => {
         { title: 'Second link', url: 'https://example.com/second' },
       ]);
 
-      expect(overflow.changes).toHaveLength(2);
+      expect(overflow.changes).toHaveLength(1);
       expect(overflow.changes[0]?.artifact).toMatchObject({
         title: 'First link',
-      });
-      expect(overflow.changes[1]).toMatchObject({
-        action: 'removed',
-        artifact: expect.objectContaining({ title: 'Second link' }),
-        reason: 'eviction',
       });
       await expect(store.list()).resolves.toMatchObject({
         artifacts: [{ title: 'First link' }],
@@ -682,7 +682,7 @@ describe('SessionArtifactStore', () => {
       source: 'tool',
       toolName: 'first_tool',
       clientRetained: true,
-      metadata: { owner: 'first', retainedBy: 'client' },
+      metadata: { owner: 'first' },
     });
     expect(clientUpdate.changes[0]?.artifact).not.toHaveProperty('clientId');
 
@@ -711,7 +711,6 @@ describe('SessionArtifactStore', () => {
       toolName: 'first_tool',
       metadata: {
         owner: 'first',
-        retainedBy: 'client',
         toolKey: 'added',
         toString: 'own-key',
       },
@@ -773,6 +772,44 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('does not merge client metadata into a published tool artifact', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-published-metadata-source',
+      workspaceCwd: workspace,
+    });
+
+    await store.upsertMany(
+      [
+        {
+          title: 'Published',
+          storage: 'published',
+          url: 'https://example.com/published',
+          metadata: { publisher: 'tool' },
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    const clientUpdate = await store.upsertMany([
+      {
+        title: 'Client link',
+        source: 'client',
+        clientId: 'client-1',
+        url: 'https://example.com/published',
+        metadata: { injected: 'client' },
+      },
+    ]);
+
+    expect(clientUpdate.changes[0]?.artifact).toMatchObject({
+      source: 'tool',
+      clientRetained: true,
+      metadata: { publisher: 'tool' },
+    });
+    expect(clientUpdate.changes[0]?.artifact?.metadata).not.toHaveProperty(
+      'injected',
+    );
+  });
+
   it('coalesces duplicate identities within one upsert batch', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's5-coalesce',
@@ -809,7 +846,7 @@ describe('SessionArtifactStore', () => {
       source: 'tool',
       toolName: 'first_tool',
       clientRetained: true,
-      metadata: { owner: 'tool', retainedBy: 'client' },
+      metadata: { owner: 'tool' },
     });
     expect(result.changes[0]?.artifact).not.toHaveProperty('clientId');
     expect(result.changes[0]?.artifact).not.toHaveProperty('hookEventName');
@@ -1426,7 +1463,7 @@ describe('SessionArtifactStore', () => {
       ).rejects.toMatchObject({
         code: 'VALIDATION_FAILED',
         field: 'workspacePath',
-        message: 'workspacePath could not be inspected',
+        message: 'workspacePath could not be inspected: permission denied',
       });
 
       await expect(
@@ -1441,7 +1478,7 @@ describe('SessionArtifactStore', () => {
     }
   });
 
-  it('preserves workspace artifact status when list refresh hits a transient fs error', async () => {
+  it('marks workspace artifact missing when list refresh hits a transient fs error', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's7-list-refresh-error',
       workspaceCwd: workspace,
@@ -1464,7 +1501,8 @@ describe('SessionArtifactStore', () => {
 
     try {
       const artifact = (await store.list()).artifacts[0];
-      expect(artifact).toMatchObject({ status: 'available', sizeBytes: 5 });
+      expect(artifact).toMatchObject({ status: 'missing' });
+      expect(artifact).not.toHaveProperty('sizeBytes');
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('status_refresh_failed');
       expect(logged).toContain('permission denied');

@@ -1101,6 +1101,60 @@ describe('BridgeClient — artifact ingress', () => {
     }
   });
 
+  it('allows artifact events during an in-flight restore on this channel', async () => {
+    const sessionId = 'sess:restore-artifact-event';
+    const publish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: {
+        inputBatchLimit: () => 400,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+    );
+    client.markRestoreInFlight(sessionId);
+    try {
+      await client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        hookEventName: 'PostToolUse',
+        artifacts: [
+          {
+            title: 'Restored hook artifact',
+            url: 'https://example.com/restored-hook',
+          },
+        ],
+      });
+
+      expect(upsertMany).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({
+            source: 'hook',
+            hookEventName: 'PostToolUse',
+            title: 'Restored hook artifact',
+          }),
+        ],
+        undefined,
+      );
+    } finally {
+      client.clearRestoreInFlight(sessionId);
+    }
+  });
+
   it('logs and drops artifact events when store ingestion fails', async () => {
     const sessionId = 'sess:artifact-error';
     const publish = vi.fn().mockReturnValue(true);
