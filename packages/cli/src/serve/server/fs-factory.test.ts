@@ -8,7 +8,7 @@ import { promises as fsp, realpathSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   resolveBoundWorkspacesFromIdeEnv,
   resolveBridgeFsFactory,
@@ -29,9 +29,9 @@ async function mkScratch(): Promise<string> {
 
 afterEach(async () => {
   await Promise.all(
-    scratches.splice(0).map((scratch) =>
-      fsp.rm(scratch, { recursive: true, force: true }),
-    ),
+    scratches
+      .splice(0)
+      .map((scratch) => fsp.rm(scratch, { recursive: true, force: true })),
   );
 });
 
@@ -74,6 +74,20 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
     const roots = resolveBoundWorkspacesFromIdeEnv(primary, primary);
 
     expect(roots).toEqual([realpathSync.native(primary)]);
+  });
+
+  it('falls back to the primary workspace when IDE env canonicalization fails', async () => {
+    const scratch = await mkScratch();
+    const primary = path.join(scratch, 'primary');
+    await fsp.mkdir(primary);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    const roots = resolveBoundWorkspacesFromIdeEnv(primary, 'x'.repeat(5000));
+
+    expect(roots).toEqual([realpathSync.native(primary)]);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('failed to canonicalize IDE workspace paths'),
+    );
   });
 
   it('passes nested IDE roots through so registration rejects them loudly', async () => {

@@ -83,7 +83,15 @@ export function resolveBoundWorkspacesFromIdeEnv(
     ideWorkspacePath
       ?.split(path.delimiter)
       .filter((workspace) => workspace.length > 0) ?? [];
-  const envCanonical = canonicalizeWorkspaces(envWorkspaces);
+  let envCanonical: string[];
+  try {
+    envCanonical = canonicalizeWorkspaces(envWorkspaces);
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: failed to canonicalize IDE workspace paths, using primary only: ${err}`,
+    );
+    return canonicalizeWorkspaces([primaryWorkspace]);
+  }
   const workspaces = canonicalizeWorkspaces([
     primaryWorkspace,
     ...envCanonical,
