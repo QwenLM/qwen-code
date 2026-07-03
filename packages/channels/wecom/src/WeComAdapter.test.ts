@@ -200,7 +200,9 @@ describe('WeComChannel', () => {
     expect(stderr).not.toHaveBeenCalledWith(expect.stringContaining('secret'));
 
     logger.warn('No aesKey provided:', 'https://example.invalid/file');
-    expect(stderr).toHaveBeenCalledWith('[WeCom:bot] SDK warn event.\n');
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] SDK warn: No aesKey provided:\n',
+    );
     expect(stderr).not.toHaveBeenCalledWith(
       expect.stringContaining('https://example.invalid/file'),
     );
@@ -298,6 +300,23 @@ describe('WeComChannel', () => {
     });
   });
 
+  it('logs malformed message payloads without processing them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+
+    lastClient().emit('message.text', undefined);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(channel.envelopes).toHaveLength(0);
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] dropping message with unrecognized payload structure.\n',
+    );
+    stderr.mockRestore();
+  });
+
   it('normalizes group, voice, mixed, quote, and file messages', async () => {
     const channel = new TestWeComChannel(
       'bot',
@@ -331,6 +350,7 @@ describe('WeComChannel', () => {
           },
         ],
       },
+      image: { url: 'https://example.invalid/image', aeskey: 'k1' },
       quote: {
         msgtype: 'voice',
         voice: { content: 'previous voice text' },
@@ -358,6 +378,7 @@ describe('WeComChannel', () => {
       'https://example.invalid/file',
       'k2',
     );
+    expect(client.downloadFile).toHaveBeenCalledTimes(2);
     const mixed = channel.envelopes[0]!;
     expect(mixed.chatId).toBe('group-1');
     expect(mixed.isGroup).toBe(true);
@@ -582,6 +603,38 @@ describe('WeComChannel', () => {
     });
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(fetch).not.toHaveBeenCalled();
+    expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('blocks IPv6 transition media URLs before probing them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    for (const [index, url] of [
+      'https://[::]/internal-api',
+      'https://[::a9fe:a9fe]/latest/meta-data/',
+      'https://[2002:a9fe:a9fe::]/latest/meta-data/',
+      'https://[2001::a9fe:a9fe]/latest/meta-data/',
+    ].entries()) {
+      client.emit('message.image', {
+        msgid: `msg-ipv6-transition-${index}`,
+        msgtype: 'image',
+        chattype: 'single',
+        from: { userid: 'alice' },
+        image: { url, aeskey: 'k1' },
+      });
+    }
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(4));
     expect(fetch).not.toHaveBeenCalled();
     expect(client.downloadFile).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(

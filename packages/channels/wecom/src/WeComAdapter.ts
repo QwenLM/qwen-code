@@ -225,7 +225,12 @@ export class WeComChannel extends ChannelBase {
 
   private async onMessage(payload: unknown): Promise<void> {
     const body = extractBody(payload);
-    if (!body) return;
+    if (!body) {
+      process.stderr.write(
+        `[WeCom:${this.name}] dropping message with unrecognized payload structure.\n`,
+      );
+      return;
+    }
 
     const messageId = getString(body, 'msgid');
     if (messageId && this.seenMessages.has(messageId)) return;
@@ -497,14 +502,16 @@ function isSecureWebSocketUrl(value: string): boolean {
 }
 
 function createWeComLogger(name: string): WeComLogger {
-  const write = (level: 'warn' | 'error'): void => {
-    process.stderr.write(`[WeCom:${name}] SDK ${level} event.\n`);
+  const write = (level: 'warn' | 'error', message: string): void => {
+    process.stderr.write(
+      `[WeCom:${name}] SDK ${level}: ${sanitizeLogText(message, 200)}\n`,
+    );
   };
   return {
     debug: () => {},
     info: () => {},
-    warn: () => write('warn'),
-    error: () => write('error'),
+    warn: (message: string) => write('warn', message),
+    error: (message: string) => write('error', message),
   };
 }
 
@@ -572,9 +579,11 @@ function collectInboundMediaRefs(
   if (depth > 3) return [];
 
   const refs: InboundMediaRef[] = [];
+  const seenUrls = new Set<string>();
   const add = (type: WeComMediaType, source: Record<string, unknown>): void => {
     const url = getString(source, 'url');
-    if (!url) return;
+    if (!url || seenUrls.has(url)) return;
+    seenUrls.add(url);
     refs.push({
       type,
       url,
@@ -591,7 +600,9 @@ function collectInboundMediaRefs(
     const record = asRecord(item);
     if (!record) continue;
     const itemType = getString(record, 'msgtype');
-    if (itemType === 'image') add('image', getRecord(record, 'image') ?? {});
+    if (isWeComMediaType(itemType)) {
+      add(itemType, getRecord(record, itemType) ?? {});
+    }
   }
 
   add('image', getRecord(body, 'image') ?? {});
@@ -797,9 +808,10 @@ async function isSafeInboundMediaUrl(rawUrl: string): Promise<boolean> {
     return parts ? isPublicIpv4(parts) : false;
   }
   if (ipVersion === 6) {
-    const mapped = parseMappedIpv4(host);
-    if (mapped) return isPublicIpv4(mapped);
+    const embedded = parseEmbeddedIpv4(host);
+    if (embedded) return isPublicIpv4(embedded);
     return !(
+      host === '::' ||
       host === '::1' ||
       host.startsWith('fc') ||
       host.startsWith('fd') ||
@@ -826,8 +838,8 @@ function isPublicIpAddress(address: string): boolean {
     return parts ? isPublicIpv4(parts) : false;
   }
   if (ipVersion === 6) {
-    const mapped = parseMappedIpv4(host);
-    if (mapped) return isPublicIpv4(mapped);
+    const embedded = parseEmbeddedIpv4(host);
+    if (embedded) return isPublicIpv4(embedded);
     return !(
       host === '::' ||
       host === '::1' ||
@@ -854,12 +866,84 @@ function parseMappedIpv4(host: string): number[] | undefined {
   if (!host.startsWith('::ffff:')) return undefined;
   const suffix = host.slice('::ffff:'.length);
   if (suffix.includes('.')) {
-    return suffix.split('.').map((part) => Number(part));
+    return parseIpv4Parts(suffix);
   }
   const groups = suffix.split(':');
   if (groups.length !== 2) return undefined;
   const high = parseHexGroup(groups[0]);
   const low = parseHexGroup(groups[1]);
+  if (high === undefined || low === undefined) return undefined;
+  return [high >> 8, high & 0xff, low >> 8, low & 0xff];
+}
+
+function parseEmbeddedIpv4(host: string): number[] | undefined {
+  const mapped = parseMappedIpv4(host);
+  if (mapped) return mapped;
+
+  const groups = expandIpv6Groups(host);
+  if (!groups) return undefined;
+  if (
+    groups.slice(0, 6).every((group) => group === 0) &&
+    (groups[6] !== 0 || groups[7] !== 0)
+  ) {
+    return hexGroupsToIpv4(groups[6], groups[7]);
+  }
+  if (groups[0] === 0x2002) {
+    return hexGroupsToIpv4(groups[1], groups[2]);
+  }
+  if (groups[0] === 0x2001 && groups[1] === 0) {
+    return hexGroupsToIpv4(groups[6], groups[7]);
+  }
+  return undefined;
+}
+
+function expandIpv6Groups(host: string): number[] | undefined {
+  const normalized = normalizeIpv6DottedSuffix(host);
+  if (!normalized) return undefined;
+
+  const parts = normalized.split('::');
+  if (parts.length > 2) return undefined;
+  const left = parseIpv6GroupList(parts[0]);
+  const right = parseIpv6GroupList(parts[1]);
+  if (!left || !right) return undefined;
+
+  if (parts.length === 1) {
+    return left.length === 8 ? left : undefined;
+  }
+
+  const fill = 8 - left.length - right.length;
+  if (fill < 1) return undefined;
+  return [...left, ...Array<number>(fill).fill(0), ...right];
+}
+
+function normalizeIpv6DottedSuffix(host: string): string | undefined {
+  if (!host.includes('.')) return host;
+  const lastColon = host.lastIndexOf(':');
+  if (lastColon === -1) return undefined;
+  const ipv4 = parseIpv4Parts(host.slice(lastColon + 1));
+  if (!ipv4) return undefined;
+  const high = (ipv4[0] << 8) | ipv4[1];
+  const low = (ipv4[2] << 8) | ipv4[3];
+  return `${host.slice(0, lastColon + 1)}${high.toString(
+    16,
+  )}:${low.toString(16)}`;
+}
+
+function parseIpv6GroupList(value: string | undefined): number[] | undefined {
+  if (!value) return [];
+  const groups: number[] = [];
+  for (const group of value.split(':')) {
+    const parsed = parseHexGroup(group);
+    if (parsed === undefined) return undefined;
+    groups.push(parsed);
+  }
+  return groups;
+}
+
+function hexGroupsToIpv4(
+  high: number | undefined,
+  low: number | undefined,
+): number[] | undefined {
   if (high === undefined || low === undefined) return undefined;
   return [high >> 8, high & 0xff, low >> 8, low & 0xff];
 }
