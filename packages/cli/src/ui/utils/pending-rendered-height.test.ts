@@ -25,6 +25,14 @@ describe('splitMarkdownTableRow', () => {
   it('does not split on a pipe inside an inline code span', () => {
     expect(splitMarkdownTableRow('`a | b` | c')).toEqual(['`a | b`', 'c']);
   });
+
+  it('does not split on a pipe inside a multi-backtick code span', () => {
+    expect(splitMarkdownTableRow('``a | b`` | c')).toEqual(['``a | b``', 'c']);
+  });
+
+  it('does not split on a pipe inside an inline math span', () => {
+    expect(splitMarkdownTableRow('$a|b$ | c')).toEqual(['$a|b$', 'c']);
+  });
 });
 
 describe('estimateWrappedRows', () => {
@@ -168,6 +176,36 @@ describe('fitPendingSlice', () => {
     const { keptLines, clipped } = fitPendingSlice(lines, 80, 6, CLAMP);
     expect(clipped).toBe(false);
     expect(keptLines).toBe(6);
+  });
+
+  it('tracks tilde (~~~) fences too', () => {
+    const lines = [
+      '~~~',
+      '| A | B |',
+      '| - | - |',
+      '| 1 | 2 |',
+      '~~~',
+      'after',
+    ];
+    const { keptLines, clipped } = fitPendingSlice(lines, 80, 6, CLAMP);
+    expect(clipped).toBe(false);
+    expect(keptLines).toBe(6);
+  });
+
+  it('charges the taller vertical-format height for multi-column tables', () => {
+    // A 4-column, 6-row table: horizontal ≈ 2*6+5 = 17 rows, but the vertical
+    // (key-value) fallback is 6*4 + 5 + 2 = 31 rows. With budget 20 the
+    // horizontal estimate would keep it; the (correct) vertical estimate must
+    // cut before it so a narrow-terminal vertical render can't overflow.
+    const lines = [
+      'intro',
+      '| A | B | C | D |',
+      '| - | - | - | - |',
+      ...Array.from({ length: 6 }, (_, i) => `| ${i} | ${i} | ${i} | ${i} |`),
+    ];
+    const { keptLines, clipped } = fitPendingSlice(lines, 80, 20, CLAMP);
+    expect(clipped).toBe(true);
+    expect(keptLines).toBe(1); // cut before the table
   });
 
   it('accounts for wrapping of non-table lines', () => {

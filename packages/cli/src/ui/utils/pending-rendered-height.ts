@@ -197,8 +197,21 @@ export function fitPendingSlice(
     if (isTableStart(allLines, i)) {
       let j = i + 2;
       while (j < allLines.length && TABLE_ROW_RE.test(allLines[j]!)) j++;
+      const dataRows = j - (i + 2);
+      // TableRenderer renders EITHER the horizontal format (~2 rows per data
+      // row + chrome) OR, on a narrow terminal / when cells wrap tall, the
+      // vertical key-value format (colCount label:value lines per row + a
+      // separator between rows + marginY). We can't cheaply predict which, so
+      // charge the taller of the two — an upper bound — capped by the clamp
+      // that TableRenderer applies. Under-charging (assuming horizontal) would
+      // let a vertical-format table overflow the viewport and lock it to top.
+      const colCount = splitMarkdownTableRow(
+        TABLE_ROW_RE.exec(allLines[i]!)![1]!,
+      ).length;
+      const horizontalRows = 2 * dataRows + TABLE_CHROME_ROWS;
+      const verticalRows = dataRows * colCount + Math.max(0, dataRows - 1) + 2;
       const cost = Math.min(
-        2 * (j - (i + 2)) + TABLE_CHROME_ROWS,
+        Math.max(horizontalRows, verticalRows),
         tableClampRows,
       );
       if (rendered + cost > budget && i > 0) {
