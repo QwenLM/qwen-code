@@ -2414,24 +2414,15 @@ export class Config {
     this.mcpDiscoveryPromise = manager
       .discoverAllMcpToolsIncremental(this)
       .then(async () => {
-        // After background discovery completes, push the newly-registered
-        // MCP tools into the active GeminiChat so the next model request
-        // sees both the updated declarations and added-tool reminder deltas.
-        // Interactive mode also calls setTools() via AppContainer's
-        // batch-flush effect — this trailing call is idempotent there, but
-        // it's the ONLY path that updates `chat.tools` for non-interactive
-        // runs (no AppContainer).
-        // Without this, `chat.tools` would be frozen at the built-in-only
-        // snapshot taken inside `geminiClient.initialize()` → `startChat()`,
-        // and `runNonInteractive` / stream-json / ACP would silently lose
-        // progressive MCP tools — a regression vs the legacy synchronous path.
-        try {
-          await this.geminiClient?.setTools();
-        } catch (err) {
-          this.debugLogger.error(
-            `setTools() after background MCP discovery failed: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
+        // Background MCP discovery completes — tools are registered in the
+        // ToolRegistry. Under the proxy-tool approach (KV-cache
+        // preservation), we do NOT call setTools() here. The `dispatch`
+        // proxy tool is already in the stable API declaration list, and
+        // discovered tools are invoked via dispatch({tool:"...",
+        // args:{...}}) — the model learns about them through ToolSearch
+        // results and the per-turn "added MCP tools" reminder. Calling
+        // setTools() would change the request prefix and bust the
+        // KV-cache.
       })
       .catch((err: unknown) => {
         this.debugLogger.error(
@@ -6020,6 +6011,13 @@ export class Config {
     }
 
     // --- Core tools (always registered) ---
+    // Dispatch is the universal proxy-tool for invoking any discovered tool
+    // by name. It is always in the API tool list so the request prefix never
+    // changes — preserving the LLM server's KV-cache.
+    await registerLazy(ToolNames.DISPATCH, async () => {
+      const { DispatchTool } = await import('../tools/dispatch.js');
+      return new DispatchTool(this);
+    });
     await registerLazy(ToolNames.TOOL_SEARCH, async () => {
       const { ToolSearchTool } = await import('../tools/tool-search.js');
       return new ToolSearchTool(this);

@@ -62,6 +62,7 @@ export const ToolNames = {
   WORKFLOW: 'workflow',
   ARTIFACT: 'artifact',
   RECORD_ARTIFACT: 'record_artifact',
+  DISPATCH: 'dispatch',
 } as const;
 
 /**
@@ -109,6 +110,7 @@ export const ToolDisplayNames = {
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',
   RECORD_ARTIFACT: 'RecordArtifact',
+  DISPATCH: 'Dispatch',
 } as const;
 
 // Migration from old tool names to new tool names
