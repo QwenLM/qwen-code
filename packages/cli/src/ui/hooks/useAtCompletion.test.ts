@@ -921,7 +921,7 @@ describe('useAtCompletion', () => {
       expect(serverSug?.isDirectory).toBe(true);
     });
 
-    it('does not suggest servers for the empty @ trigger (files only)', async () => {
+    it('suggests MCP mentions for the empty @ trigger alongside files', async () => {
       testRootDir = await createTmpDir({ 'file.txt': '' });
       const resourceConfig = {
         ...mockConfig,
@@ -942,7 +942,7 @@ describe('useAtCompletion', () => {
       });
       const values = result.current.suggestions.map((s) => s.value);
       expect(values).toContain('file.txt');
-      expect(values).not.toContain('mcp:myserver');
+      expect(values).toContain('mcp:myserver');
       expect(values).not.toContain('myserver:');
     });
 

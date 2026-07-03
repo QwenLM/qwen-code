@@ -150,7 +150,6 @@ function getMcpServerMentionSuggestions(
 ): Suggestion[] {
   if (!config) return [];
   if (config.isTrustedFolder?.() === false) return [];
-  if (pattern.length === 0) return [];
   const mcpServers = config.getMcpServers?.() || {};
   const query = pattern.startsWith('mcp:')
     ? pattern.slice('mcp:'.length).toLowerCase()
