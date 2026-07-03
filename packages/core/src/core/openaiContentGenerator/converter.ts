@@ -1317,6 +1317,7 @@ export function convertOpenAIChunkToGemini(
     // Handle tool calls using the stream-local parser
     if (choice.delta?.tool_calls?.length) {
       requestContext.legacyFunctionCallWithoutArguments = undefined;
+      requestContext.legacyFunctionCallInProgress = undefined;
       if (choice.delta.function_call) {
         debugLogger.debug(
           `Ignoring legacy function_call "${choice.delta.function_call.name ?? '<pending>'}" because tool_calls is non-empty`,
@@ -1346,6 +1347,7 @@ export function convertOpenAIChunkToGemini(
       }
     } else if (choice.delta?.function_call) {
       const functionCall = choice.delta.function_call;
+      requestContext.legacyFunctionCallInProgress = true;
       if (functionCall.name) {
         debugLogger.debug(
           `Using legacy function_call fallback (streaming): ${functionCall.name}`,
@@ -1372,8 +1374,12 @@ export function convertOpenAIChunkToGemini(
       // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
       // even when output was cut off mid-JSON due to max_tokens.
       toolCallsTruncated = toolCallParser.hasIncompleteToolCalls();
+      const legacyFunctionCallTruncated =
+        toolCallsTruncated && requestContext.legacyFunctionCallInProgress;
 
-      const completedToolCalls = toolCallParser.getCompletedToolCalls();
+      const completedToolCalls = legacyFunctionCallTruncated
+        ? []
+        : toolCallParser.getCompletedToolCalls();
 
       for (const toolCall of completedToolCalls) {
         if (toolCall.name) {
@@ -1387,15 +1393,19 @@ export function convertOpenAIChunkToGemini(
           });
         }
       }
-      if (requestContext.legacyFunctionCallWithoutArguments) {
+      if (
+        requestContext.legacyFunctionCallWithoutArguments &&
+        !legacyFunctionCallTruncated
+      ) {
         parts.push(
           createFunctionCallPart(
             requestContext.legacyFunctionCallWithoutArguments.name,
             '{}',
           ),
         );
-        requestContext.legacyFunctionCallWithoutArguments = undefined;
       }
+      requestContext.legacyFunctionCallWithoutArguments = undefined;
+      requestContext.legacyFunctionCallInProgress = undefined;
     }
 
     // If tool call JSON was truncated, override to "length" so downstream
