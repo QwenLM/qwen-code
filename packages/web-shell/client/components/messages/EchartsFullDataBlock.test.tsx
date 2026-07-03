@@ -504,6 +504,80 @@ describe('EchartsFullDataBlock', () => {
     );
   });
 
+  it('recovers from chart errors after option changes', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const dispose = vi.fn();
+    const setOption = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error('setOption failed');
+      })
+      .mockImplementation(() => {});
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose,
+      })),
+    };
+    const baseOption: EchartsFullDataOption = {
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [{ day: 'Mon', orders: 120 }],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+    };
+    const nextOption: EchartsFullDataOption = {
+      ...baseOption,
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [{ day: 'Tue', orders: 200 }],
+      },
+    };
+
+    const { container, root } = await mount(
+      <I18nProvider language="en">
+        <EchartsFullDataBlock
+          option={baseOption}
+          theme="dark"
+          loadEcharts={() => runtime}
+        />
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    expect(container.textContent).toContain('setOption failed');
+    expect(
+      container.querySelector('[data-testid="echarts-fulldata-chart"]'),
+    ).not.toBeNull();
+
+    await act(async () => {
+      root.render(
+        <I18nProvider language="en">
+          <EchartsFullDataBlock
+            option={nextOption}
+            theme="dark"
+            loadEcharts={() => runtime}
+          />
+        </I18nProvider>,
+      );
+    });
+    await flushChart();
+
+    expect(container.textContent).not.toContain('setOption failed');
+    expect(runtime.init).toHaveBeenCalledTimes(2);
+    expect(setOption).toHaveBeenCalledTimes(2);
+    expect(dispose).toHaveBeenCalledOnce();
+    expect(consoleError).toHaveBeenCalledWith(
+      '[web-shell] echarts-fulldata render failed:',
+      expect.any(Error),
+    );
+  });
+
   it('sanitizes unsafe chart option fields before calling ECharts', async () => {
     const option: EchartsFullDataOption = {
       dataset: {
@@ -587,7 +661,7 @@ describe('EchartsFullDataBlock', () => {
     expect(container.textContent).toContain('Chart runtime is unavailable.');
     expect(
       container.querySelector('[data-testid="echarts-fulldata-chart"]'),
-    ).toBeNull();
+    ).not.toBeNull();
   });
 
   it('caps the rendered data table rows', async () => {

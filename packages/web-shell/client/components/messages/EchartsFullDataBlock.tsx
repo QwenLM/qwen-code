@@ -954,7 +954,6 @@ export function EchartsFullDataBlock({
       setChartReady(false);
       return;
     }
-    if (!chartRef.current) return;
     if (!loadEcharts) {
       setChartReady(false);
       setChartError('Chart runtime is unavailable.');
@@ -966,6 +965,7 @@ export function EchartsFullDataBlock({
     let removeResize = () => {};
     setChartError(null);
     setChartReady(false);
+    if (!chartRef.current) return;
 
     Promise.resolve()
       .then(loadEcharts)
@@ -1053,24 +1053,26 @@ export function EchartsFullDataBlock({
       ) : parseError ? (
         <div className={styles.state}>{parseError}</div>
       ) : mode === 'chart' ? (
-        chartError ? (
-          <div className={styles.state}>{chartError}</div>
-        ) : (
-          <div className={styles.chartFrame}>
-            <div
-              ref={chartRef}
-              className={styles.chartSurface}
-              data-testid="echarts-fulldata-chart"
-              role="img"
-              aria-label={title}
-            />
-            {!chartReady && (
+        <div className={styles.chartFrame}>
+          <div
+            ref={chartRef}
+            className={styles.chartSurface}
+            data-testid="echarts-fulldata-chart"
+            role="img"
+            aria-label={title}
+          />
+          {chartError ? (
+            <div className={styles.chartOverlay}>
+              <div className={styles.state}>{chartError}</div>
+            </div>
+          ) : (
+            !chartReady && (
               <div className={styles.chartOverlay}>
                 <ChartLoadingState />
               </div>
-            )}
-          </div>
-        )
+            )
+          )}
+        </div>
       ) : (
         <EchartsDataTable columns={columns} rows={rows} />
       )}
