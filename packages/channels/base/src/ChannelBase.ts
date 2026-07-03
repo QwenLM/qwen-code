@@ -31,6 +31,7 @@ import {
 import type {
   AvailableCommand,
   ChannelAgentBridge,
+  ChannelLoopToolCreateInput,
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
@@ -200,6 +201,14 @@ export abstract class ChannelBase {
   ): void => {
     this.onSessionDied(event.sessionId);
   };
+  private readonly channelLoopToolHandler = {
+    canHandle: (sessionId: string) => this.router.getTarget(sessionId)?.channelName === this.name,
+    create: (sessionId: string, input: ChannelLoopToolCreateInput) =>
+      this.createLoopFromTool(sessionId, input),
+    list: (sessionId: string) => this.listLoopsFromTool(sessionId),
+    cancel: (sessionId: string, id: string) =>
+      this.cancelLoopFromTool(sessionId, id),
+  };
 
   dispatchToolCall(event: ToolCallEvent): void {
     const target = this.router.getTarget(event.sessionId);
@@ -264,6 +273,7 @@ export abstract class ChannelBase {
       new SessionRouter(bridge, config.cwd, config.sessionScope);
 
     this.registerSharedCommands();
+    bridge.registerChannelLoopToolHandler?.(this.channelLoopToolHandler);
 
     // When running standalone, register bridge listeners directly.
     // In gateway mode, the ChannelManager dispatches events instead.
@@ -474,6 +484,7 @@ export abstract class ChannelBase {
       job.target.chatId,
       job.target.threadId,
       job.cwd,
+      job.target.isGroup,
     );
     const label = sanitizeQuotedText(job.label || job.id, 80);
     const createdBy = sanitizeSenderName(job.createdBy || 'unknown');
@@ -1561,6 +1572,100 @@ export abstract class ChannelBase {
     return true;
   }
 
+  private async createLoopFromTool(
+    sessionId: string,
+    input: ChannelLoopToolCreateInput,
+  ): Promise<string> {
+    if (!this.loopController) return 'Channel loops are not configured.';
+    if (!this.supportsProactiveSend()) {
+      return 'This channel does not support proactive loop messages.';
+    }
+    if (this.config.sessionScope === 'single') {
+      return 'Loops are not supported when sessionScope is single.';
+    }
+    const target = this.router.getTarget(sessionId);
+    if (!target) return 'No channel target is bound to this session.';
+    if (target.channelName !== this.name) {
+      return 'No channel target is bound to this session.';
+    }
+    if (!this.supportsProactiveTarget(target)) {
+      return 'This channel does not support proactive loop messages for this chat target.';
+    }
+
+    try {
+      this.loopController.validateCron(input.cron);
+    } catch (err) {
+      return `Invalid cron expression: ${err instanceof Error ? err.message : String(err)}`;
+    }
+
+    const prompt = sanitizePromptText(input.prompt.trim());
+    if (Array.from(prompt).length > MAX_LOOP_PROMPT_CHARS) {
+      return `Loop prompt is too long; keep it under ${MAX_LOOP_PROMPT_CHARS} characters.`;
+    }
+
+    const loopInput: ChannelLoopInput = {
+      channelName: this.name,
+      target,
+      cwd: this.config.cwd,
+      cron: input.cron,
+      prompt,
+      label: truncateLoopLabel(prompt),
+      recurring: input.recurring !== false,
+      createdBy: sanitizeSenderName(target.senderId || 'agent'),
+    };
+    let job: ChannelLoop | undefined;
+    if (this.loopController.createForTarget) {
+      job = await this.loopController.createForTarget(
+        loopInput,
+        MAX_LOOP_JOBS_PER_TARGET,
+      );
+    } else {
+      const existingJobs = await this.loopController.listForTarget(
+        this.name,
+        target,
+      );
+      if (
+        existingJobs.filter((existingJob) => existingJob.enabled).length <
+        MAX_LOOP_JOBS_PER_TARGET
+      ) {
+        job = await this.loopController.create(loopInput);
+      }
+    }
+    if (!job) {
+      return 'Too many loops for this chat. Cancel an existing loop before adding another.';
+    }
+
+    return `Loop ${job.id}: ${job.cron}`;
+  }
+
+  private async listLoopsFromTool(sessionId: string): Promise<string> {
+    if (!this.loopController) return 'Channel loops are not configured.';
+    const target = this.router.getTarget(sessionId);
+    if (!target) return 'No channel target is bound to this session.';
+    if (target.channelName !== this.name) {
+      return 'No channel target is bound to this session.';
+    }
+    const jobs = await this.loopController.listForTarget(this.name, target);
+    if (jobs.length === 0) return 'No loops.';
+    return jobs.map((job) => this.formatLoopListLine(job)).join('\n');
+  }
+
+  private async cancelLoopFromTool(
+    sessionId: string,
+    id: string,
+  ): Promise<string> {
+    if (!this.loopController) return 'Channel loops are not configured.';
+    const target = this.router.getTarget(sessionId);
+    if (!target) return 'No channel target is bound to this session.';
+    if (target.channelName !== this.name) {
+      return 'No channel target is bound to this session.';
+    }
+    const jobs = await this.loopController.listForTarget(this.name, target);
+    const match = jobs.find((job) => job.id === id);
+    const disabled = match ? await this.loopController.disable(id) : false;
+    return disabled ? `Cancelled loop ${id}.` : `No loop ${id}.`;
+  }
+
   private async handleLoopList(envelope: Envelope): Promise<boolean> {
     if (!this.loopController) return true;
     const jobs = await this.loopController.listForTarget(
@@ -2218,6 +2323,7 @@ export abstract class ChannelBase {
       envelope.chatId,
       envelope.threadId,
       this.config.cwd,
+      envelope.isGroup,
     );
 
     // Bang (!) execution — a private 1:1 session has a single operator, so

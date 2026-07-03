@@ -8477,4 +8477,19 @@ describe('deliverClientMcpMessage — reverse tool channel (#5626)', () => {
       payload: message,
     });
   });
+
+  it('passes the session id to client-hosted MCP extMethod calls when available', async () => {
+    const payload = { jsonrpc: '2.0', id: 1, result: { tools: [] } };
+    const extMethod = vi.fn().mockResolvedValue({ payload });
+    const connection = { extMethod } as unknown as Args[0];
+
+    await expect(
+      deliverClientMcpMessage(connection, 'srv', message, 'session-1'),
+    ).resolves.toBe(payload);
+    expect(extMethod).toHaveBeenCalledWith(expect.anything(), {
+      server: 'srv',
+      payload: message,
+      sessionId: 'session-1',
+    });
+  });
 });

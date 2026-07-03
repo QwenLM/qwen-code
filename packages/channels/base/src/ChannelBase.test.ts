@@ -8,7 +8,10 @@ import type {
   ChannelTaskLifecycleEvent,
   Envelope,
 } from './types.js';
-import type { ChannelAgentBridge } from './ChannelAgentBridge.js';
+import type {
+  ChannelAgentBridge,
+  ChannelLoopToolHandler,
+} from './ChannelAgentBridge.js';
 import { ChannelBase, CLEAR_CANCEL_TIMEOUT_MS } from './ChannelBase.js';
 import type { ChannelBaseOptions } from './ChannelBase.js';
 import type { ChannelLoop, ChannelLoopInput } from './ChannelLoopStore.js';
@@ -111,6 +114,7 @@ class TestChannel extends ChannelBase {
 function createBridge(): ChannelAgentBridge {
   const emitter = new EventEmitter();
   let sessionCounter = 0;
+  let channelLoopToolHandler: ChannelLoopToolHandler | undefined;
   const bridge = Object.assign(emitter, {
     newSession: vi.fn().mockImplementation(() => `s-${++sessionCounter}`),
     loadSession: vi.fn(),
@@ -121,6 +125,10 @@ function createBridge(): ChannelAgentBridge {
     isConnected: true,
     availableCommands: [],
     setBridge: vi.fn(),
+    registerChannelLoopToolHandler: vi.fn((handler: ChannelLoopToolHandler) => {
+      channelLoopToolHandler = handler;
+    }),
+    getChannelLoopToolHandler: () => channelLoopToolHandler,
   });
   return bridge as unknown as ChannelAgentBridge;
 }
@@ -1540,6 +1548,185 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toBe(
         'Loops are not supported when sessionScope is single.',
       );
+    });
+
+    it('channel loop tool creates a proactive loop for the current session target', async () => {
+      const created: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+        cron: '*/5 * * * *',
+        prompt: 'drink water',
+        recurring: true,
+        enabled: true,
+        createdBy: 'user1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const createForTarget = vi.fn().mockResolvedValue(created);
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(envelope({ text: 'hello' }));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+      const result = await handler!.create('s-1', {
+        cron: '*/5 * * * *',
+        prompt: 'drink water',
+      });
+
+      expect(createForTarget).toHaveBeenCalledWith(
+        {
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'user1',
+            chatId: 'chat1',
+            threadId: undefined,
+            isGroup: false,
+          },
+          cwd: '/tmp',
+          cron: '*/5 * * * *',
+          prompt: 'drink water',
+          label: 'drink water',
+          recurring: true,
+          createdBy: 'user1',
+        },
+        10,
+      );
+      expect(result).toBe('Loop job-1: */5 * * * *');
+    });
+
+    it('channel loop tool keeps group targets proactive-capable', async () => {
+      const created: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'group1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '*/1 * * * *',
+        prompt: 'drink water',
+        recurring: true,
+        enabled: true,
+        createdBy: 'user1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const createForTarget = vi.fn().mockResolvedValue(created);
+      const ch = createChannel(
+        { groupPolicy: 'open', sessionScope: 'thread' },
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(
+        envelope({
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot hello',
+        }),
+      );
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+      const result = await handler!.create('s-1', {
+        cron: '*/1 * * * *',
+        prompt: 'drink water',
+      });
+
+      expect(createForTarget).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: expect.objectContaining({
+            chatId: 'group1',
+            isGroup: true,
+          }),
+        }),
+        10,
+      );
+      expect(result).toBe('Loop job-1: */1 * * * *');
+    });
+
+    it('channel loop tool lists and cancels loops for the current session target', async () => {
+      const job: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'user1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+        label: 'post summary',
+      };
+      const listForTarget = vi.fn().mockResolvedValue([job]);
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget,
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      await ch.handleInbound(envelope({ text: 'hello' }));
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+
+      await expect(handler!.list('s-1')).resolves.toContain('job-1');
+      await expect(handler!.cancel('s-1', 'job-1')).resolves.toBe(
+        'Cancelled loop job-1.',
+      );
+      expect(disable).toHaveBeenCalledWith('job-1');
     });
 
     it('/schedule is not a local command', async () => {

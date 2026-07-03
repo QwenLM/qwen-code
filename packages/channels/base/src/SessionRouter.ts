@@ -77,19 +77,35 @@ export class SessionRouter {
     chatId: string,
     threadId?: string,
     cwd?: string,
+    isGroup?: boolean,
   ): Promise<string> {
     const key = this.routingKey(channelName, senderId, chatId, threadId);
     let failedCreateWaits = 0;
     for (;;) {
       const existing = this.toSession.get(key);
       if (existing) {
+        this.updateTarget(existing, {
+          channelName,
+          senderId,
+          chatId,
+          threadId,
+          isGroup,
+        });
         return existing;
       }
 
       const creating = this.creatingSessions.get(key);
       if (creating) {
         try {
-          return await creating;
+          const sessionId = await creating;
+          this.updateTarget(sessionId, {
+            channelName,
+            senderId,
+            chatId,
+            threadId,
+            isGroup,
+          });
+          return sessionId;
         } catch (err) {
           if (this.creatingSessions.get(key) === creating) {
             this.creatingSessions.delete(key);
@@ -119,6 +135,7 @@ export class SessionRouter {
             senderId,
             chatId,
             threadId,
+            isGroup,
           });
           this.toCwd.set(sessionId, sessionCwd);
           this.persist();
@@ -247,6 +264,20 @@ export class SessionRouter {
     this.toTarget.delete(sessionId);
     this.toCwd.delete(sessionId);
     return sessionId;
+  }
+
+  private updateTarget(sessionId: string, next: SessionTarget): void {
+    const current = this.toTarget.get(sessionId);
+    if (!current) return;
+    const changed =
+      current.channelName !== next.channelName ||
+      current.senderId !== next.senderId ||
+      current.chatId !== next.chatId ||
+      current.threadId !== next.threadId ||
+      current.isGroup !== next.isGroup;
+    if (!changed) return;
+    this.toTarget.set(sessionId, next);
+    this.persist();
   }
 
   /** Get all session entries for crash recovery. */
