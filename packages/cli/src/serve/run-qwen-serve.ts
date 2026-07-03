@@ -1140,6 +1140,11 @@ function createBootstrapServeApp(input: {
             read: 0,
           },
         },
+        activity: {
+          activePrompts: 0,
+          lastActivityAt: null,
+          idleSinceMs: null,
+        },
         process: process.memoryUsage(),
       },
       ...(detail.detail === 'full'
@@ -1240,7 +1245,7 @@ function isCorsPreflightRequest(req: Request): boolean {
     Boolean(req.headers.origin) &&
     Boolean(
       req.headers['access-control-request-method'] ||
-        req.headers['access-control-request-headers'],
+      req.headers['access-control-request-headers'],
     )
   );
 }

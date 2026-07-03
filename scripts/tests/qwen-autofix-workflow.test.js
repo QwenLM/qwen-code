@@ -360,6 +360,7 @@ describe('qwen-autofix workflow', () => {
       ),
     );
     expect(prepareBranchAndFeedbackStep).not.toContain('git clean');
+    expect(prepareBranchAndFeedbackStep).not.toContain('git diff --quiet');
   });
 
   it('clears persistent autofix workdirs before agent steps run', () => {
