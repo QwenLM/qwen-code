@@ -17,6 +17,8 @@ on:
 jobs:
   build-and-publish:
     runs-on: 'ubuntu-latest'
+    environment:
+      name: 'production-release'
     permissions:
       contents: 'read'
     steps:
