@@ -10,6 +10,7 @@ import type {
 
 const mocks = vi.hoisted(() => {
   const instances: MockWSClient[] = [];
+  const lookup = vi.fn(async () => [{ address: '203.0.113.10', family: 4 }]);
   const state = {
     autoAuthenticate: true,
   };
@@ -51,11 +52,14 @@ const mocks = vi.hoisted(() => {
     }
   }
 
-  return { MockWSClient, instances, state };
+  return { MockWSClient, instances, lookup, state };
 });
 
 vi.mock('@wecom/aibot-node-sdk', () => ({
   WSClient: mocks.MockWSClient,
+}));
+vi.mock('node:dns/promises', () => ({
+  lookup: mocks.lookup,
 }));
 
 import { WeComChannel, safeRealpath } from './WeComAdapter.js';
@@ -128,6 +132,7 @@ describe('WeComChannel', () => {
       vi.fn(async () => new Response('ok')),
     );
     vi.clearAllMocks();
+    mocks.lookup.mockResolvedValue([{ address: '203.0.113.10', family: 4 }]);
   });
 
   afterEach(() => {
@@ -566,6 +571,68 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('blocks CGNAT media URLs before probing them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-cgnat-ip',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://100.100.100.200/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(fetch).not.toHaveBeenCalled();
+    expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('blocks media hostnames that resolve to private addresses', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    mocks.lookup.mockResolvedValueOnce([
+      { address: '169.254.169.254', family: 4 },
+    ]);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-rebinding-host',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://metadata.example.com/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(mocks.lookup).toHaveBeenCalledWith('metadata.example.com', {
+      all: true,
+    });
+    expect(fetch).not.toHaveBeenCalled();
+    expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
   it('does not follow redirects while probing inbound media', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -797,6 +864,55 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('continues sending later media when one media send fails', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const parent = join(tmpdir(), 'channel-files');
+    mkdirSync(parent, { recursive: true });
+    const dir = mkdtempSync(join(parent, 'wecom-test-'));
+    writeFileSync(
+      join(dir, 'first.png'),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    );
+    writeFileSync(
+      join(dir, 'second.png'),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    );
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ cwd: dir }),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+    client.uploadMedia = vi
+      .fn()
+      .mockResolvedValueOnce({ media_id: 'media-1' })
+      .mockResolvedValueOnce({ media_id: 'media-2' });
+    client.sendMediaMessage = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('network failed'))
+      .mockResolvedValueOnce({ headers: { req_id: 'media-req-2' } });
+
+    await channel.sendMessage(
+      'chat-1',
+      '[IMAGE: first.png]\n[IMAGE: second.png]',
+    );
+
+    expect(client.uploadMedia).toHaveBeenCalledTimes(2);
+    expect(client.sendMediaMessage).toHaveBeenCalledTimes(2);
+    expect(client.sendMediaMessage).toHaveBeenLastCalledWith(
+      'chat-1',
+      'image',
+      'media-2',
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('media send failed for image'),
+    );
+    stderr.mockRestore();
+  });
+
   it('does not upload arbitrary files from non-image media markers', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -822,7 +938,10 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('rejects model-emitted image paths outside the channel file directory', async () => {
+  it('skips model-emitted image paths outside the channel file directory', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const dir = mkdtempSync(join(tmpdir(), 'wecom-cwd-'));
     const secretPath = join(dir, '.env');
     writeFileSync(secretPath, 'OPENAI_API_KEY=sk-secret');
@@ -834,10 +953,13 @@ describe('WeComChannel', () => {
     await channel.connect();
     const client = lastClient();
 
-    await expect(
-      channel.sendMessage('chat-1', `[IMAGE: ${secretPath}]`),
-    ).rejects.toThrow('outside allowed outbound directory');
+    await channel.sendMessage('chat-1', `[IMAGE: ${secretPath}]`);
+
     expect(client.uploadMedia).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('outside allowed outbound directory'),
+    );
+    stderr.mockRestore();
   });
 
   it('ignores missing optional media allowlist directories', () => {

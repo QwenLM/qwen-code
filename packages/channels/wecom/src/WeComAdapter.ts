@@ -12,6 +12,7 @@ import { basename, join, resolve, win32, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Buffer } from 'node:buffer';
 import { isIP } from 'node:net';
+import { lookup } from 'node:dns/promises';
 import { WSClient } from '@wecom/aibot-node-sdk';
 import { ChannelBase, sanitizeLogText } from '@qwen-code/channel-base';
 import type {
@@ -197,19 +198,28 @@ export class WeComChannel extends ChannelBase {
         );
         continue;
       }
-      const file = readOutboundMedia(item.path, this.config.cwd);
-      const upload = await client.uploadMedia(file.data, {
-        type: item.type,
-        filename: file.fileName,
-      });
-      const mediaId = extractMediaId(upload);
-      if (!mediaId) {
+      try {
+        const file = readOutboundMedia(item.path, this.config.cwd);
+        const upload = await client.uploadMedia(file.data, {
+          type: item.type,
+          filename: file.fileName,
+        });
+        const mediaId = extractMediaId(upload);
+        if (!mediaId) {
+          process.stderr.write(
+            `[WeCom:${this.name}] upload returned no media_id, skipping.\n`,
+          );
+          continue;
+        }
+        await client.sendMediaMessage(chatId, item.type, mediaId);
+      } catch (err) {
         process.stderr.write(
-          `[WeCom:${this.name}] upload returned no media_id, skipping.\n`,
+          `[WeCom:${this.name}] media send failed for ${item.type}: ${sanitizeLogText(
+            String(err),
+            200,
+          )}\n`,
         );
-        continue;
       }
-      await client.sendMediaMessage(chatId, item.type, mediaId);
     }
   }
 
@@ -316,7 +326,7 @@ export class WeComChannel extends ChannelBase {
   }
 
   private async canDownloadAttachment(ref: InboundMediaRef): Promise<boolean> {
-    if (!isSafeInboundMediaUrl(ref.url)) {
+    if (!(await isSafeInboundMediaUrl(ref.url))) {
       process.stderr.write(
         `[WeCom:${this.name}] skipping ${ref.type} attachment with unsafe media URL.\n`,
       );
@@ -763,7 +773,7 @@ async function responseBodyWithinLimit(response: Response): Promise<boolean> {
   }
 }
 
-function isSafeInboundMediaUrl(rawUrl: string): boolean {
+async function isSafeInboundMediaUrl(rawUrl: string): Promise<boolean> {
   let url: URL;
   try {
     url = new URL(rawUrl);
@@ -780,7 +790,8 @@ function isSafeInboundMediaUrl(rawUrl: string): boolean {
 
   const ipVersion = isIP(host);
   if (ipVersion === 4) {
-    return isPublicIpv4(host.split('.').map((part) => Number(part)));
+    const parts = parseIpv4Parts(host);
+    return parts ? isPublicIpv4(parts) : false;
   }
   if (ipVersion === 6) {
     const mapped = parseMappedIpv4(host);
@@ -793,7 +804,47 @@ function isSafeInboundMediaUrl(rawUrl: string): boolean {
     );
   }
   if (!host.includes('.')) return false;
-  return true;
+  try {
+    const records = await lookup(host, { all: true });
+    return (
+      records.length > 0 &&
+      records.every((record) => isPublicIpAddress(record.address))
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isPublicIpAddress(address: string): boolean {
+  const host = address.toLowerCase().replace(/^\[|\]$/g, '');
+  const ipVersion = isIP(host);
+  if (ipVersion === 4) {
+    const parts = parseIpv4Parts(host);
+    return parts ? isPublicIpv4(parts) : false;
+  }
+  if (ipVersion === 6) {
+    const mapped = parseMappedIpv4(host);
+    if (mapped) return isPublicIpv4(mapped);
+    return !(
+      host === '::' ||
+      host === '::1' ||
+      host.startsWith('fc') ||
+      host.startsWith('fd') ||
+      host.startsWith('fe80:')
+    );
+  }
+  return false;
+}
+
+function parseIpv4Parts(host: string): number[] | undefined {
+  const parts = host.split('.').map((part) => Number(part));
+  if (
+    parts.length !== 4 ||
+    parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)
+  ) {
+    return undefined;
+  }
+  return parts;
 }
 
 function parseMappedIpv4(host: string): number[] | undefined {
@@ -822,6 +873,7 @@ function isPublicIpv4(parts: number[]): boolean {
     a === 0 ||
     a === 10 ||
     a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 168)
