@@ -24,6 +24,11 @@ test('uses docs_only for uppercase and extensionless docs', () => {
   );
 });
 
+test('falls back to full for root docs names used as directories', () => {
+  assert.equal(classifyChangedFiles(['README.md/evil.ts']), 'full');
+  assert.equal(classifyChangedFiles(['LICENSE.txt/src/index.ts']), 'full');
+});
+
 test('uses github_ci_only for the allowed GitHub CI helper files', () => {
   assert.equal(
     classifyChangedFiles([...GITHUB_CI_ONLY_FILES]),

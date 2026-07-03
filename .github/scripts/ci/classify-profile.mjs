@@ -17,7 +17,7 @@ function isDocsOnlyFile(file) {
   const normalized = file.replace(/\\/g, '/');
   return (
     /^docs\/.+\.(?:md|mdx)$/i.test(normalized) ||
-    /^(?:README|CHANGELOG|CONTRIBUTING|CODE_OF_CONDUCT|SECURITY|SUPPORT|LICENSE|NOTICE)(?:\..*)?$/i.test(
+    /^(?:README|CHANGELOG|CONTRIBUTING|CODE_OF_CONDUCT|SECURITY|SUPPORT|LICENSE|NOTICE)(?:\.[^/]*)?$/i.test(
       normalized,
     )
   );
