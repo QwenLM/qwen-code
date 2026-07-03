@@ -7,11 +7,12 @@ on:
     inputs:
       version:
         description: 'Version to publish (without v prefix, e.g. 0.1.0)'
-        required: 'true'
+        required: true
       dry_run:
         description: 'Dry run (build only, no publish)'
+        required: false
         type: 'boolean'
-        default: 'true'
+        default: true
 
 permissions:
   contents: 'read'
