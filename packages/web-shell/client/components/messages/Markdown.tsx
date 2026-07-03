@@ -1,12 +1,10 @@
 import {
-  Component,
   createContext,
   memo,
   useContext,
   useEffect,
   useMemo,
   useState,
-  type ErrorInfo,
   type ReactNode,
 } from 'react';
 import { useTheme } from '../../themeContext';
@@ -27,6 +25,7 @@ import {
   type MarkdownTableMode,
   type MarkdownContentSource,
 } from '../../customization';
+import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 import styles from './Markdown.module.css';
 
@@ -431,72 +430,6 @@ function PlainMarkdownTable({ children }: { children?: ReactNode }) {
   );
 }
 
-class EnhancedMarkdownTableBoundary extends Component<
-  { children: ReactNode; fallback: ReactNode; resetKey: string },
-  { hasError: boolean; resetKey: string }
-> {
-  state = { hasError: false, resetKey: this.props.resetKey };
-
-  static getDerivedStateFromError() {
-    return { hasError: true };
-  }
-
-  static getDerivedStateFromProps(
-    props: { resetKey: string },
-    state: { resetKey: string },
-  ) {
-    if (props.resetKey !== state.resetKey) {
-      return { hasError: false, resetKey: props.resetKey };
-    }
-    return null;
-  }
-
-  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error(
-      '[web-shell] enhanced markdown table failed:',
-      error,
-      errorInfo.componentStack,
-    );
-  }
-
-  render() {
-    return this.state.hasError ? this.props.fallback : this.props.children;
-  }
-}
-
-class CustomCodeBlockBoundary extends Component<
-  { children: ReactNode; fallback: ReactNode; resetKey: string },
-  { hasError: boolean; resetKey: string }
-> {
-  state = { hasError: false, resetKey: this.props.resetKey };
-
-  static getDerivedStateFromError() {
-    return { hasError: true };
-  }
-
-  static getDerivedStateFromProps(
-    props: { resetKey: string },
-    state: { resetKey: string },
-  ) {
-    if (props.resetKey !== state.resetKey) {
-      return { hasError: false, resetKey: props.resetKey };
-    }
-    return null;
-  }
-
-  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error(
-      '[web-shell] custom code block renderer failed:',
-      error,
-      errorInfo.componentStack,
-    );
-  }
-
-  render() {
-    return this.state.hasError ? this.props.fallback : this.props.children;
-  }
-}
-
 // Carries the streaming flag to CodeBlock via context instead of a closure, so
 // the `code` renderer below can be a single stable reference. Toggling
 // isStreaming then no longer changes the `code` element type, so React reuses
@@ -549,27 +482,37 @@ function MarkdownFencedCode({
     </CodeBlock>
   );
   const language = extractRawFenceLanguage(className);
+  const { resolvedLang: resolvedLanguage } = resolveFenceLanguage(language);
   const canUseCustomRenderer = !!source && !!className && !!language;
 
   if (canUseCustomRenderer) {
     try {
       const custom = markdown?.renderCodeBlock?.({
         language,
+        resolvedLanguage,
         className,
         code,
         isStreaming: !!isStreaming,
         source,
         theme: appTheme,
       });
-      if (custom != null) {
+      if (custom != null && typeof custom !== 'boolean') {
         return (
-          <CustomCodeBlockBoundary fallback={fallback} resetKey={code}>
+          <ErrorBoundary
+            fallback={fallback}
+            label={`custom code block component render (lang=${language})`}
+            resetKeys={[language, isStreaming ? 'streaming' : code]}
+          >
             {custom}
-          </CustomCodeBlockBoundary>
+          </ErrorBoundary>
         );
       }
     } catch (error) {
-      console.error('[web-shell] custom code block renderer failed:', error);
+      console.error(
+        '[web-shell] custom code block renderer call failed (lang=%s):',
+        language,
+        error,
+      );
     }
   }
 
@@ -622,14 +565,15 @@ function createComponents(
       if (tableMode === 'advanced') {
         const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
         return (
-          <EnhancedMarkdownTableBoundary
+          <ErrorBoundary
             fallback={fallback}
-            resetKey={tableResetKey}
+            label="enhanced markdown table"
+            resetKeys={[tableResetKey]}
           >
             <EnhancedMarkdownTable fallback={fallback}>
               {children}
             </EnhancedMarkdownTable>
-          </EnhancedMarkdownTableBoundary>
+          </ErrorBoundary>
         );
       }
       return <PlainMarkdownTable>{children}</PlainMarkdownTable>;

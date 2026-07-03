@@ -13,7 +13,8 @@
   },
   "files": [
     "dist/index.js",
-    "dist/types"
+    "dist/types",
+    "skills"
   ],
   "scripts": {
     "dev": "vite",

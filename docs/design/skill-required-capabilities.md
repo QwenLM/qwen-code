@@ -1,6 +1,7 @@
 # Skill Required Capabilities Design
 
-Status: discussion draft
+Status: design note; this PR proceeds with Option B and leaves
+`required-capabilities` as a future proposal.
 
 ## Context
 
@@ -13,20 +14,25 @@ That output contract is only useful in clients that can render it. In the CLI,
 ACP clients, or any other surface without a matching renderer, the same response
 would appear as a large code block instead of a chart.
 
-The current bundled `web-shell-charts` skill relies on wording to tell the model
+The initial bundled chart skill proposal relied on wording to tell the model
 that the format is for Web Shell. This is a soft guard. If the skill is exposed
 in a non-Web-Shell session, the model can still choose an output format that the
 client cannot render.
+
+For the current PR, Qwen Code keeps the renderer extension point in Web Shell
+but does not bundle `qwencode-viz` in core. The Web Shell package may include an
+optional skill template, and hosts should install or inject that skill only when
+they also register an `echarts-fulldata` renderer.
 
 ## Problem
 
 Qwen Code needs a clear way to decide whether a host-specific skill should be
 shown to the model and to users.
 
-For `web-shell-charts`, the concrete question is:
+For `qwencode-viz`, the concrete question is:
 
 - Should core support a generic `required-capabilities` skill metadata field?
-- Or should `web-shell-charts` not be a core bundled skill at all, and instead be
+- Or should `qwencode-viz` not be a core bundled skill at all, and instead be
   supplied only by Web Shell clients that install or inject it?
 
 ## Goals
@@ -35,7 +41,7 @@ For `web-shell-charts`, the concrete question is:
   cannot satisfy their output contract.
 - Keep startup skill reminders, explicit skill activation, slash-command
   discovery, and skill validation consistent.
-- Avoid hardcoding `web-shell-charts` as a special case.
+- Avoid hardcoding `qwencode-viz` as a special case.
 - Preserve existing skill behavior when no capability requirement is declared.
 - Keep the design extensible for future host capabilities, not only ECharts.
 
@@ -71,7 +77,7 @@ Add a generic skill frontmatter field:
 
 ```yaml
 ---
-name: web-shell-charts
+name: qwencode-viz
 description: Render analytical charts in Web Shell using echarts-fulldata fenced code blocks.
 required-capabilities:
   - markdown.codeBlock.echarts-fulldata
@@ -209,7 +215,7 @@ capabilities from session creation time.
 
 ### Pros
 
-- Keeps `web-shell-charts` as one canonical bundled skill.
+- Keeps `qwencode-viz` as one canonical bundled skill.
 - Prevents host-specific output contracts from leaking into unsupported
   clients.
 - Creates a reusable mechanism for future renderer-specific or host-specific
@@ -222,18 +228,20 @@ capabilities from session creation time.
 - Requires client/session capability plumbing across Web Shell, daemon, SDK, and
   ACP surfaces.
 - Needs careful documentation for shared-session behavior.
-- May be more machinery than needed if `web-shell-charts` is the only expected
+- May be more machinery than needed if `qwencode-viz` is the only expected
   capability-gated skill.
 
 ## Option B: Client-Supplied Skill
 
 Do not add a generic `required-capabilities` field. Instead, avoid bundling
-`web-shell-charts` in core. The Web Shell client, or any client that supports
-the renderer, supplies the skill itself.
+`qwencode-viz` in core. The Web Shell client, or any client that supports the
+renderer, supplies the skill itself.
 
 Possible distribution models:
 
-- The Web Shell host installs `.qwen/skills/web-shell-charts/SKILL.md`.
+- The Web Shell host installs `.qwen/skills/qwencode-viz/SKILL.md`.
+- The Web Shell package ships an optional non-auto-loaded skill template that a
+  host can copy or install when chart rendering is enabled.
 - The Web Shell integration ships an extension skill package.
 - The Web Shell integration injects equivalent model instructions only when its
   chart renderer is enabled.
@@ -261,21 +269,28 @@ provide it.
 
 ## Recommendation
 
-Discuss this as a product/API boundary decision.
+For this PR, use Option B.
+
+That keeps the core skill system unchanged and avoids exposing
+`echarts-fulldata` instructions in unsupported clients. The Web Shell renderer
+hook remains useful for any host-owned block renderer, while chart-specific
+model instructions become an explicit host opt-in.
+
+Longer term, discuss this as a product/API boundary decision.
 
 Choose Option A if maintainers expect Qwen Code to support more client-rendered
 output contracts over time. In that case, `required-capabilities` is a small
 general contract that keeps skill exposure honest across CLI, Web Shell, ACP,
 and future clients.
 
-Choose Option B if `web-shell-charts` is expected to remain a Web-Shell-only
+Choose Option B if `qwencode-viz` is expected to remain a Web-Shell-only
 extension and maintainers do not want core skills to depend on client rendering
 features. In that case, the current bundled skill should be removed from core
 and supplied by Web Shell clients that support `echarts-fulldata`.
 
-The recommended default is Option A only if maintainers are comfortable making
-client/session capabilities part of the skill system. Otherwise, keep the chart
-skill client-owned.
+The recommended future default is Option A only if maintainers are comfortable
+making client/session capabilities part of the skill system. Otherwise, keep
+host-renderer skills client-owned.
 
 ## Open Questions
 
@@ -309,6 +324,10 @@ If Option A is implemented, add tests for:
 
 Existing skills require no migration because the new field is optional.
 
+For the current Option B path, remove the chart skill from core bundled skills.
+If the Web Shell package includes a template, it must not be loaded by core
+automatically; hosts opt in by installing or injecting it.
+
 If Option A is accepted, add:
 
 ```yaml
@@ -316,8 +335,8 @@ required-capabilities:
   - markdown.codeBlock.echarts-fulldata
 ```
 
-to `web-shell-charts`.
+to a future bundled `qwencode-viz`.
 
-If Option B is accepted, remove `web-shell-charts` from core bundled skills and
+If Option B is accepted, remove the chart skill from core bundled skills and
 document how Web Shell clients can install or inject it when they register an
 `echarts-fulldata` renderer.

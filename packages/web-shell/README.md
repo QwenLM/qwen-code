@@ -103,6 +103,24 @@ export function App() {
 | `language`          | `'en' \| 'zh-CN' \| 'zh' \| 'zh-cn'`       | UI 语言                           |
 | `onLanguageChange`  | `(language: WebShellLanguage) => void`     | `/language ui` 切换 UI 语言后触发 |
 
+## 可选图表 Skill
+
+`WebShell` 支持宿主通过 `customization.markdown.renderCodeBlock` 接管特定
+fenced code block 的渲染。图表类场景可以注册 `echarts-fulldata` renderer，并
+按需安装本包提供的可选 skill 模板：
+
+```text
+packages/web-shell/skills/qwencode-viz/SKILL.md
+```
+
+这个 skill 不会被 Qwen Code core 自动加载。只有确认当前 Web Shell 宿主已经
+注册 `echarts-fulldata` renderer 时，宿主才应该把它复制、安装或注入到自己的
+skills 来源中。
+
+`echarts-fulldata` 的 block body 是 data-only JSON ECharts option。宿主应使用
+`JSON.parse` 解析，不能用 `eval`、`new Function` 或 script injection 执行模型
+生成内容。
+
 ## 架构说明
 
 ```text

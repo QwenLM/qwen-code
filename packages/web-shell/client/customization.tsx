@@ -18,6 +18,11 @@ export interface MarkdownRenderContext {
 export interface WebShellCodeBlockRenderInfo {
   /** Raw fenced-code language from the markdown class name. */
   language: string;
+  /**
+   * Canonical Shiki language id after applying built-in aliases, or `text`
+   * when the language is unsupported by the fallback highlighter.
+   */
+  resolvedLanguage: string;
   className?: string;
   code: string;
   /** True while the assistant message is still streaming partial content. */
@@ -27,9 +32,10 @@ export interface WebShellCodeBlockRenderInfo {
 }
 
 /**
- * Return a React node to replace the default code block, or `null`/`undefined`
- * to decline and fall back to the built-in code block renderer. Expensive
- * renderers should debounce or defer work while `info.isStreaming` is true.
+ * Return a non-boolean React node to replace the default code block. Return
+ * `null`, `undefined`, or a boolean to decline and fall back to the built-in
+ * code block renderer. Expensive renderers should debounce or defer work while
+ * `info.isStreaming` is true.
  */
 export type CodeBlockRenderer = (
   info: WebShellCodeBlockRenderInfo,
@@ -41,6 +47,11 @@ export interface WebShellMarkdownCustomization {
     context: MarkdownRenderContext,
   ) => string;
   renderCodeBlock?: CodeBlockRenderer;
+  /**
+   * Custom markdown components override Web Shell's built-ins. In particular,
+   * `components.code` replaces the default code renderer, so `renderCodeBlock`
+   * will not be called for that source.
+   */
   components?: Components;
   remarkPlugins?: Options['remarkPlugins'];
   rehypePlugins?: Options['rehypePlugins'];
