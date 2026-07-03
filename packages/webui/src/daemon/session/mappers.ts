@@ -181,7 +181,11 @@ export function mapWorkspaceSkills(
 } {
   if (!status) return { commands: [], skills: [] };
 
-  const commands = status.skills.map((skill) => ({
+  const availableSkills = status.skills.filter(
+    (skill) => skill.status === 'ok',
+  );
+
+  const commands = availableSkills.map((skill) => ({
     name: skill.name,
     description: skill.description || '',
     ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
@@ -195,7 +199,7 @@ export function mapWorkspaceSkills(
 
   return {
     commands,
-    skills: status.skills.map((skill) => skill.name),
+    skills: availableSkills.map((skill) => skill.name),
   };
 }
 
