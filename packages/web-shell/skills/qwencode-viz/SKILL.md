@@ -32,24 +32,25 @@ Markdown, tables, or prose instead.
 Emit one fenced code block whose language tag is exactly `echarts-fulldata`.
 
 The block body must be **one valid JSON object** that can be parsed directly with
-`JSON.parse`. The top-level object must contain:
+`JSON.parse`. That object is the Apache ECharts option.
 
-- `inputData`: The complete tabular data used by the chart, for hosts that want
-  to offer a chart/table toggle or inspect the source data.
-- `option`: The Apache ECharts option used to render the chart.
+To support chart/table toggles, the option must be dataset-backed:
 
-`inputData` must include `columns` and `rows`. Each column must have a stable
-`field`; `label` and `type` are recommended. Each row must be an object keyed by
-the column fields.
+- Put the complete tabular data in `dataset.source`.
+- Prefer `dataset.dimensions` to declare stable column order.
+- Use object rows in `dataset.source`, keyed by the dimension names.
+- Use `series.encode` to map dimensions to axes, values, labels, tooltips, or
+  other visual channels.
+- Use a single `dataset` object unless the chart genuinely requires multiple
+  datasets.
 
 ```echarts-fulldata
 {
-  "inputData": {
-    "columns": [
-      { "field": "day", "label": "Day", "type": "string" },
-      { "field": "orders", "label": "Orders", "type": "number" }
-    ],
-    "rows": [
+  "title": { "text": "Weekly orders" },
+  "tooltip": { "trigger": "axis" },
+  "dataset": {
+    "dimensions": ["day", "orders"],
+    "source": [
       { "day": "Mon", "orders": 120 },
       { "day": "Tue", "orders": 200 },
       { "day": "Wed", "orders": 150 },
@@ -57,22 +58,9 @@ the column fields.
       { "day": "Fri", "orders": 240 }
     ]
   },
-  "option": {
-    "title": { "text": "Weekly orders" },
-    "tooltip": { "trigger": "axis" },
-    "dataset": {
-      "source": [
-        { "day": "Mon", "orders": 120 },
-        { "day": "Tue", "orders": 200 },
-        { "day": "Wed", "orders": 150 },
-        { "day": "Thu", "orders": 80 },
-        { "day": "Fri", "orders": 240 }
-      ]
-    },
-    "xAxis": { "type": "category" },
-    "yAxis": { "type": "value" },
-    "series": [{ "type": "bar", "encode": { "x": "day", "y": "orders" } }]
-  }
+  "xAxis": { "type": "category" },
+  "yAxis": { "type": "value" },
+  "series": [{ "type": "bar", "encode": { "x": "day", "y": "orders" } }]
 }
 ```
 
@@ -84,8 +72,8 @@ the column fields.
 - Do not ask the host to use `eval`, `new Function`, or script injection.
 - Do not reference local files, URLs, the DOM, globals, network requests,
   randomness, timers, `document`, `window`, or the filesystem.
-- Put all chart data inside `inputData.rows`. If the chart uses ECharts
-  `dataset.source` or `series.data`, keep it consistent with `inputData.rows`.
+- Put all chart data inside `dataset.source`. Avoid duplicating the same data in
+  `xAxis.data` or `series.data` when `dataset` plus `encode` can express it.
 - If the data is too large, aggregate or sample it first, and explain that
   treatment outside the block.
 
@@ -95,7 +83,7 @@ When a chart is appropriate, respond in this order:
 
 1. One short takeaway describing the main point shown by the chart.
 2. One `echarts-fulldata` fenced code block containing the complete JSON
-   payload with `inputData` and `option`.
+   ECharts option with `dataset.source`.
 3. Optional notes such as metric definitions, aggregation choices, or reading
    guidance.
 
