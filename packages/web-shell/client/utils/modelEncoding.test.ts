@@ -31,6 +31,33 @@ describe('encodeVisionModelForSetting', () => {
       'extra:model(name)',
     );
   });
+
+  it('passes through already-encoded colon format unchanged', () => {
+    // If someone somehow passes an already-encoded authType:modelId,
+    // it should be left alone — not double-encoded.
+    expect(encodeVisionModelForSetting('qwen-oauth:qwen-vl-max')).toBe(
+      'qwen-oauth:qwen-vl-max',
+    );
+  });
+
+  it('passes through malformed — bare authType only', () => {
+    // '(authType)' has no modelId before the parens and no text
+    // before the opening paren that can serve as group 1, so the
+    // regex won't match and we get the input back unchanged.
+    expect(encodeVisionModelForSetting('(authType)')).toBe('(authType)');
+  });
+
+  it('passes through malformed — unclosed paren', () => {
+    expect(encodeVisionModelForSetting('modelId(')).toBe('modelId(');
+  });
+
+  it('passes through malformed — double-parens inside', () => {
+    expect(encodeVisionModelForSetting('a((b))')).toBe('a((b))');
+  });
+
+  it('passes through empty string unchanged', () => {
+    expect(encodeVisionModelForSetting('')).toBe('');
+  });
 });
 
 describe('encodeFastModelForSetting', () => {
@@ -86,6 +113,11 @@ describe('decodeVisionModelForPicker', () => {
 
   it('passes through empty string unchanged', () => {
     expect(decodeVisionModelForPicker('')).toBe('');
+  });
+
+  it('passes through leading-colon malformed input', () => {
+    // colonIdx === 0, which is not > 0, so passthrough
+    expect(decodeVisionModelForPicker(':modelId')).toBe(':modelId');
   });
 });
 
