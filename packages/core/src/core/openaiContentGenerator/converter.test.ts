@@ -292,6 +292,64 @@ describe('OpenAIContentConverter', () => {
       expect(fnB?.args).toEqual({ file_path: '/b/y.ts' });
       expect(fnB?.id).toBe('call_B');
     });
+
+    it('emits no-argument tool calls that stream an empty arguments string', () => {
+      // Providers may finish a no-argument tool call with `arguments: ""`
+      // and no follow-up fragment (e.g. llama.cpp-style servers). The call
+      // must reach the caller with empty args instead of being dropped,
+      // which would make the whole turn look empty and trigger retries.
+      const stream = withStreamParser(new StreamingToolCallParser());
+
+      const opener = {
+        object: 'chat.completion.chunk',
+        id: 'noargs-open',
+        created: 1,
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_noargs',
+                  type: 'function' as const,
+                  function: { name: 'list_sessions', arguments: '' },
+                },
+              ],
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      const finisher = {
+        object: 'chat.completion.chunk',
+        id: 'noargs-finish',
+        created: 2,
+        model: 'test',
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: 'tool_calls',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk;
+
+      converter.convertOpenAIChunkToGemini(opener, stream);
+      const result = converter.convertOpenAIChunkToGemini(finisher, stream);
+
+      const fn = result.candidates?.[0]?.content?.parts?.find(
+        (p: Part) => p.functionCall,
+      )?.functionCall;
+
+      expect(fn?.name).toBe('list_sessions');
+      expect(fn?.args).toEqual({});
+      expect(fn?.id).toBe('call_noargs');
+    });
   });
 
   describe('convertGeminiRequestToOpenAI', () => {

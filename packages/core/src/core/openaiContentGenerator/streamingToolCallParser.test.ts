@@ -391,11 +391,25 @@ describe('StreamingToolCallParser', () => {
       expect(completed).toHaveLength(0);
     });
 
-    it('should not return tool calls with empty buffer', () => {
-      parser.addChunk(0, '', 'call_1', 'function1'); // Empty buffer
+    it('should return no-argument tool calls with empty args when buffer is empty', () => {
+      // For tools without parameters, some providers stream
+      // `arguments: ""` (or omit the field) and never send an argument
+      // fragment. The call must survive with empty args, matching the
+      // non-streaming path.
+      parser.addChunk(0, '', 'call_1', 'function1');
 
       const completed = parser.getCompletedToolCalls();
-      expect(completed).toHaveLength(0);
+      expect(completed).toEqual([
+        { id: 'call_1', name: 'function1', args: {}, index: 0 },
+      ]);
+    });
+
+    it('should return empty args for whitespace-only argument buffers', () => {
+      parser.addChunk(0, '   ', 'call_1', 'function1');
+
+      const completed = parser.getCompletedToolCalls();
+      expect(completed).toHaveLength(1);
+      expect(completed[0].args).toEqual({});
     });
   });
 

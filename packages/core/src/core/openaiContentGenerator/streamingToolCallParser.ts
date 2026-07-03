@@ -265,7 +265,7 @@ export class StreamingToolCallParser {
 
     for (const [index, buffer] of this.buffers.entries()) {
       const meta = this.toolCallMeta.get(index);
-      if (meta?.name && buffer.trim()) {
+      if (meta?.name) {
         if (meta.id) {
           if (emittedIds.has(meta.id)) {
             continue;
@@ -275,21 +275,27 @@ export class StreamingToolCallParser {
 
         let args: Record<string, unknown> = {};
 
-        // Try to parse the final buffer
-        try {
-          args = JSON.parse(buffer);
-        } catch {
-          // Try with repair (auto-close strings)
-          const inString = this.inStrings.get(index);
-          if (inString) {
-            try {
-              args = JSON.parse(buffer + '"');
-            } catch {
-              // If all parsing fails, use safeJsonParse as fallback
+        // An empty buffer is a legal end state: for no-argument tools some
+        // providers stream `arguments: ""` (or omit the field entirely) and
+        // never send an argument fragment. Keep args as {} to match the
+        // non-streaming path in converter.ts.
+        if (buffer.trim()) {
+          // Try to parse the final buffer
+          try {
+            args = JSON.parse(buffer);
+          } catch {
+            // Try with repair (auto-close strings)
+            const inString = this.inStrings.get(index);
+            if (inString) {
+              try {
+                args = JSON.parse(buffer + '"');
+              } catch {
+                // If all parsing fails, use safeJsonParse as fallback
+                args = safeJsonParse(buffer, {});
+              }
+            } else {
               args = safeJsonParse(buffer, {});
             }
-          } else {
-            args = safeJsonParse(buffer, {});
           }
         }
 
