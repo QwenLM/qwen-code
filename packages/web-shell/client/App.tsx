@@ -218,6 +218,14 @@ const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
 
+/** Maps each ModelDialogMode to its i18n title key — single source of truth. */
+const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
+  main: 'model.select',
+  fast: 'model.setFast',
+  voice: 'model.setVoice',
+  vision: 'model.setVision',
+};
+
 function isVisibleComposerModel(model: { id: string }): boolean {
   return !HIDDEN_COMPOSER_MODEL_IDS.has(model.id);
 }
@@ -1647,6 +1655,12 @@ export function App({
   const currentVoiceModel = (() => {
     const value = workspaceSettings.find(
       (setting) => setting.key === 'voiceModel',
+    )?.values.effective;
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  })();
+  const currentVisionModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'visionModel',
     )?.values.effective;
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
@@ -3315,7 +3329,11 @@ export function App({
 
   const handleVisionModelSelect = useCallback(
     (modelId: string) => {
-      setWorkspaceSetting('workspace', 'visionModel', modelId).catch(
+      // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
+      // Core's resolveVisionModelSelection() expects `authType:modelId`.
+      const match = modelId.match(/^(.+)\(([^()]+)\)$/);
+      const encoded = match ? `${match[2]}:${match[1]}` : modelId;
+      setWorkspaceSetting('workspace', 'visionModel', encoded).catch(
         (error: unknown) => reportError(error, t('model.setVision')),
       );
     },
@@ -3456,15 +3474,7 @@ export function App({
           )}
           {modelDialogMode && (
             <DialogShell
-              title={
-                modelDialogMode === 'fast'
-                  ? t('model.setFast')
-                  : modelDialogMode === 'voice'
-                    ? t('model.setVoice')
-                    : modelDialogMode === 'vision'
-                      ? t('model.setVision')
-                      : t('model.select')
-              }
+              title={t(MODE_TITLE_KEY[modelDialogMode])}
               size="lg"
               onClose={() => setModelDialogMode(null)}
             >
@@ -3472,18 +3482,23 @@ export function App({
                 mode={modelDialogMode}
                 models={modelDialogMode === 'voice' ? voiceModels : undefined}
                 currentModelId={
-                  modelDialogMode === 'voice' ? currentVoiceModel : undefined
+                  modelDialogMode === 'voice'
+                    ? currentVoiceModel
+                    : modelDialogMode === 'vision'
+                      ? currentVisionModel
+                      : undefined
                 }
                 onSelect={(modelId) => {
-                  if (modelDialogMode === 'fast') {
-                    handleFastModelSelect(modelId);
-                  } else if (modelDialogMode === 'voice') {
-                    handleVoiceModelSelect(modelId);
-                  } else if (modelDialogMode === 'vision') {
-                    handleVisionModelSelect(modelId);
-                  } else {
-                    handleModelSelect(modelId);
-                  }
+                  const handlers: Record<
+                    ModelDialogMode,
+                    (id: string) => void
+                  > = {
+                    main: handleModelSelect,
+                    fast: handleFastModelSelect,
+                    voice: handleVoiceModelSelect,
+                    vision: handleVisionModelSelect,
+                  };
+                  handlers[modelDialogMode ?? 'main'](modelId);
                   setModelDialogMode(null);
                 }}
               />
