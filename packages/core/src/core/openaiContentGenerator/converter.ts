@@ -332,7 +332,7 @@ export async function convertGeminiToolsToOpenAI(
 
     if (actualTool.functionDeclarations) {
       for (const func of actualTool.functionDeclarations) {
-        if (func.name && func.description) {
+        if (func.name) {
           let parameters: Record<string, unknown> | undefined;
 
           // Handle both Gemini tools (parameters) and MCP tools (parametersJsonSchema)
@@ -358,7 +358,7 @@ export async function convertGeminiToolsToOpenAI(
             type: 'function',
             function: {
               name: func.name,
-              description: func.description,
+              description: func.description ?? '',
               parameters,
             },
           });

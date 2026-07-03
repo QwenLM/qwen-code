@@ -4544,7 +4544,7 @@ describe('OpenAIContentConverter', () => {
       expect(result[0].function.name).toBe('dynamic_tool');
     });
 
-    it('should skip functions without name or description', async () => {
+    it('should preserve functions without description and skip functions without name', async () => {
       const geminiTools = [
         {
           functionDeclarations: [
@@ -4566,8 +4566,10 @@ describe('OpenAIContentConverter', () => {
 
       const result = await converter.convertGeminiToolsToOpenAI(geminiTools);
 
-      expect(result).toHaveLength(1);
+      expect(result).toHaveLength(2);
       expect(result[0].function.name).toBe('valid_tool');
+      expect(result[1].function.name).toBe('missing_description');
+      expect(result[1].function.description).toBe('');
     });
 
     it('should handle tools without functionDeclarations', async () => {
