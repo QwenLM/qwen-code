@@ -198,6 +198,28 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: 'Check bot credentials'
+        env:
+          GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
+        run: |-
+          if [[ -z "${GITHUB_TOKEN}" ]]; then
+            echo '::error::CI_DEV_BOT_PAT is required to run the issue autofix job.'
+            exit 1
+          fi
+          api_error_file="$(mktemp)"
+          if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          echo "CI_DEV_BOT_PAT authenticates as ${bot_actor}"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
+
       - name: 'Set up Node.js'
         uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
         with:
@@ -517,6 +539,27 @@ jobs:
                 done
           fi
 
+      - name: 'Select issue sandbox image'
+        id: 'issue_sandbox_image'
+        if: |-
+          ${{ steps.decision.outputs.go_issue != '' }}
+        run: |-
+          qwen_version="$(npm view @qwen-code/qwen-code@latest version)"
+          version_image="ghcr.io/qwenlm/qwen-code:${qwen_version}"
+          fallback_image="ghcr.io/qwenlm/qwen-code:latest"
+          sandbox_image="${version_image}"
+          if docker manifest inspect "${version_image}" > /dev/null 2>&1; then
+            echo "Using sandbox image ${sandbox_image}"
+          elif docker manifest inspect "${fallback_image}" > /dev/null 2>&1; then
+            sandbox_image="${fallback_image}"
+            echo "::warning::Sandbox image ${version_image} is not available; falling back to ${fallback_image}."
+          else
+            echo "::error::Neither sandbox image ${version_image} nor ${fallback_image} is available."
+            exit 1
+          fi
+          echo "QWEN_SANDBOX_IMAGE=${sandbox_image}" >> "${GITHUB_ENV}"
+          echo "qwen_version=${qwen_version}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Claim issue'
         id: 'claim'
         if: |-
@@ -552,6 +595,7 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          version: '${{ steps.issue_sandbox_image.outputs.qwen_version }}'
           settings_json: |-
             {
               "maxSessionTurns": 400,
@@ -620,13 +664,12 @@ jobs:
             7. **Commit**: a single Conventional Commit on the branch, e.g.
                `fix(core): <summary> (#${{ steps.decision.outputs.go_issue }})`.
             8. **Write outputs**:
-               - /tmp/autofix/pr-title.txt — Conventional Commit style PR title.
-               - /tmp/autofix/pr-body.md — PR description following
-                 .github/pull_request_template.md, with motivation and
-                 changes in prose, a Reviewer Test Plan, and `Fixes #${{ steps.decision.outputs.go_issue }}`.
-                 Do not hard-wrap lines.
                - /tmp/autofix/e2e-report.md — E2E evidence: exact commands,
                  before/after behavior, and test output excerpts.
+               - Use the project skill `prepare-pr`
+                 (.qwen/skills/prepare-pr/SKILL.md) to write
+                 /tmp/autofix/pr-title.txt and /tmp/autofix/pr-body.md for
+                 issue #${{ steps.decision.outputs.go_issue }}.
 
             If at any point you conclude the fix is beyond confident reach,
             STOP: write /tmp/autofix/failure.md with what you learned and
@@ -729,7 +772,21 @@ jobs:
             echo '::error::CI_DEV_BOT_PAT is required to publish the PR as qwen-code-dev-bot.'
             exit 1
           fi
+          api_error_file="$(mktemp)"
+          if ! publish_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          echo "CI_DEV_BOT_PAT authenticates as ${publish_actor}"
+          if [[ "${publish_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as ${publish_actor}; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
           BRANCH="autofix/issue-${ISSUE}"
+          git config --local --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
           git push --force-with-lease origin "${BRANCH}"
 
@@ -749,11 +806,16 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
           COMMENT_ID: '${{ steps.claim.outputs.comment_id }}'
+          PUBLISH_OUTCOME: '${{ steps.publish.outcome }}'
         run: |-
           if [[ -f "${WORKDIR}/failure.md" ]]; then
             REASON='no further automated attempts will be made on this issue.'
             DETAIL="$(head -c 1500 "${WORKDIR}/failure.md")"
             LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label 'autofix/skip')
+          elif [[ "${PUBLISH_OUTCOME}" == 'failure' ]]; then
+            REASON='the issue will be eligible for a future automated attempt.'
+            DETAIL='The agent produced and verified a fix, but publishing the PR failed. Check the Publish PR step logs for the CI_DEV_BOT_PAT actor, git push, PR creation, or PR comment error.'
+            LABEL_ARGS=(--remove-label 'autofix/in-progress')
           else
             REASON='the issue will be eligible for a future automated attempt.'
             DETAIL='The run failed before producing a verified fix.'
@@ -1011,6 +1073,25 @@ jobs:
           echo '--- feedback.md ---'
           cat "${WORKDIR}/feedback.md"
 
+      - name: 'Select review sandbox image'
+        id: 'review_sandbox_image'
+        run: |-
+          qwen_version="$(npm view @qwen-code/qwen-code@latest version)"
+          version_image="ghcr.io/qwenlm/qwen-code:${qwen_version}"
+          fallback_image="ghcr.io/qwenlm/qwen-code:latest"
+          sandbox_image="${version_image}"
+          if docker manifest inspect "${version_image}" > /dev/null 2>&1; then
+            echo "Using sandbox image ${sandbox_image}"
+          elif docker manifest inspect "${fallback_image}" > /dev/null 2>&1; then
+            sandbox_image="${fallback_image}"
+            echo "::warning::Sandbox image ${version_image} is not available; falling back to ${fallback_image}."
+          else
+            echo "::error::Neither sandbox image ${version_image} nor ${fallback_image} is available."
+            exit 1
+          fi
+          echo "QWEN_SANDBOX_IMAGE=${sandbox_image}" >> "${GITHUB_ENV}"
+          echo "qwen_version=${qwen_version}" >> "${GITHUB_OUTPUT}"
+
       - name: 'Triage and address'
         id: 'address'
         uses: 'QwenLM/qwen-code-action@5fd6818d04d64e87d255ee4d5f77995e32fbf4c2'
@@ -1021,6 +1102,7 @@ jobs:
           OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          version: '${{ steps.review_sandbox_image.outputs.qwen_version }}'
           settings_json: |-
             {
               "maxSessionTurns": 400,
@@ -1214,9 +1296,23 @@ jobs:
             echo '::error::CI_DEV_BOT_PAT is required to push and report as qwen-code-dev-bot.'
             exit 1
           fi
+          api_error_file="$(mktemp)"
+          if ! bot_actor="$(GH_TOKEN="${GITHUB_TOKEN}" gh api user --jq '.login' 2>"${api_error_file}")"; then
+            api_error="$(tr '\r\n' ' ' < "${api_error_file}")"
+            rm -f "${api_error_file}"
+            echo "::error::Failed to verify CI_DEV_BOT_PAT identity with gh api user: ${api_error:-unknown error}."
+            exit 1
+          fi
+          rm -f "${api_error_file}"
+          echo "CI_DEV_BOT_PAT authenticates as ${bot_actor}"
+          if [[ "${bot_actor}" != "${AUTOFIX_BOT}" ]]; then
+            echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
+            exit 1
+          fi
 
           if [[ "${OUTCOME}" == "fixed" ]]; then
             NEXT_ROUND="$(( ROUND + 1 ))"
+            git config --local --unset-all http.https://github.com/.extraheader || true
             git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
             git push --force-with-lease origin "${BRANCH}"
             {

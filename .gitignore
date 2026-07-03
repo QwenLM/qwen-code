@@ -27,6 +27,7 @@ package-lock.json
 .claude
 .codex
 .worktrees/
+.atlarix/
 
 # Qwen Code Configs
 .qwen/*
@@ -120,6 +121,7 @@ coverage/
 # Dev symlink: qc-helper bundled skill docs (created by scripts/dev.js)
 packages/core/src/skills/bundled/qc-helper/docs
 tmp/
+.worktrees/
 
 # code graph skills
 .venv

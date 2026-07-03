@@ -46,6 +46,7 @@ import {
   mapProviderStatus,
   mapSessionContextModels,
   mapSupportedCommands,
+  mapWorkspaceSkills,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import {
@@ -421,20 +422,41 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               !reconnectSessionId &&
               !shouldCreateFreshSession
             ) {
-              const providerResult = await Promise.allSettled([
+              // Fetch skills alongside providers so skill-backed slash
+              // commands (e.g. /review) can autocomplete before the first
+              // prompt. Both are session-less workspace queries; the
+              // session-scoped supported-commands snapshot (which also carries
+              // custom/MCP/workflow commands) still lands once the first prompt
+              // creates a session.
+              const [providerResult, skillsResult] = await Promise.allSettled([
                 client.workspaceProviders(),
+                client.workspaceSkills(),
               ]);
-              if (providerResult[0].status === 'rejected') {
+              if (providerResult.status === 'rejected') {
                 console.warn(
                   '[DaemonSessionProvider] workspaceProviders failed in deferred connect:',
-                  providerResult[0].reason,
+                  providerResult.reason,
+                );
+              }
+              if (skillsResult.status === 'rejected') {
+                console.warn(
+                  '[DaemonSessionProvider] workspaceSkills failed in deferred connect:',
+                  skillsResult.reason,
                 );
               }
               const providers =
-                providerResult[0].status === 'fulfilled'
-                  ? providerResult[0].value
+                providerResult.status === 'fulfilled'
+                  ? providerResult.value
                   : undefined;
               const providerModelStatus = mapProviderStatus(providers);
+              const {
+                commands: deferredSkillCommands,
+                skills: deferredSkills,
+              } = mapWorkspaceSkills(
+                skillsResult.status === 'fulfilled'
+                  ? skillsResult.value
+                  : undefined,
+              );
               setConnection((current) => ({
                 ...current,
                 status: 'connected',
@@ -445,6 +467,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 contextWindow: providerModelStatus.contextWindow,
                 providers,
                 capabilities: caps,
+                ...(deferredSkillCommands.length > 0
+                  ? { commands: deferredSkillCommands }
+                  : {}),
+                ...(deferredSkills.length > 0
+                  ? { skills: deferredSkills }
+                  : {}),
               }));
               return;
             }
@@ -588,6 +616,117 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
           setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
 
+          const pendingLoad = pendingSessionLoadRef.current;
+          const pendingLoadToResolve =
+            pendingLoad?.sessionId === activeSession.sessionId
+              ? pendingLoad
+              : undefined;
+
+          // Feed replay snapshot (compacted history + live journal) into
+          // the store before starting the SSE loop. The SSE stream begins
+          // from lastEventId, so only post-snapshot events are delivered.
+          //
+          // This runs before the providers/commands/context fetches below:
+          // the snapshot is already in hand, so the transcript paints one
+          // metadata round-trip earlier (visible on high-latency mobile).
+          //
+          // The deferred store.reset() runs here — in the same synchronous
+          // block as store.dispatch() — so the queueMicrotask notification
+          // only fires once with the fully-populated state.
+          const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
+          const replayEvents = [...compactedReplay, ...liveJournal];
+          const replayInjected =
+            shouldInjectReplaySnapshot && replayEvents.length > 0;
+          if (needsStoreReset && !replayInjected) {
+            // Reset needed but no replay data (e.g. fresh session) — reset
+            // immediately since there is no dispatch to batch with.
+            store.reset();
+          }
+          if (replayInjected) {
+            const replayOpts = {
+              ...eventOptionsRef.current,
+              suppressOwnUserEcho: false,
+            };
+            const allUiEvents: DaemonUiEvent[] = [];
+            for (const replayEvent of replayEvents) {
+              try {
+                const replayUiEvents = normalizeAndFilterEvent(
+                  replayEvent,
+                  activeSession.clientId,
+                  replayOpts,
+                  setConnection,
+                  { updateConnection: false },
+                );
+                allUiEvents.push(
+                  ...filterDaemonUiEventsForTranscript(
+                    replayEvent,
+                    replayUiEvents,
+                    addNotice,
+                  ),
+                );
+                if (replayEvent.type === 'turn_complete') {
+                  const stopReason =
+                    (replayEvent.data as DaemonTurnCompleteData | undefined)
+                      ?.stopReason ?? 'end_turn';
+                  allUiEvents.push(
+                    assistantDoneFromTurnEvent(replayEvent, stopReason),
+                  );
+                } else if (replayEvent.type === 'turn_error') {
+                  allUiEvents.push(
+                    assistantDoneFromTurnEvent(replayEvent, 'error'),
+                  );
+                }
+              } catch (error) {
+                const message =
+                  error instanceof Error ? error.message : String(error);
+                addNotice({
+                  severity: 'warning',
+                  category: 'protocol',
+                  operation: 'normalize_event',
+                  code: 'daemon.replay_event_malformed',
+                  message: 'Skipped malformed replay event',
+                  debugMessage: message,
+                  recoverable: true,
+                });
+                console.warn(
+                  '[DaemonSessionProvider] skipped malformed replay event:',
+                  error,
+                );
+              }
+            }
+            if (needsStoreReset) {
+              store.reset();
+            }
+            if (allUiEvents.length > 0) {
+              store.dispatch(allUiEvents);
+              bumpWorkspaceEventSignals(allUiEvents, setWorkspaceEventSignals);
+            }
+            for (const replayEvent of replayEvents) {
+              settleActivePromptFromTurnEvent(
+                activePromptsRef.current,
+                settledPromptsRef.current,
+                activeSession.sessionId,
+                replayEvent,
+                store,
+                setPromptStatus,
+                passiveAssistantDoneTimerRef,
+                { requireBoundPromptId: true },
+              );
+            }
+            setConnection((c) => ({ ...c, catchingUp: undefined }));
+          }
+          if (pendingLoadToResolve) {
+            pendingSessionLoadRef.current = undefined;
+            clearTimeout(pendingLoadToResolve.timeout);
+            if (
+              skipNextCleanupDetachSessionIdRef.current ===
+              activeSession.sessionId
+            ) {
+              skipNextCleanupDetachSessionIdRef.current = undefined;
+            }
+            pendingLoadToResolve.resolve();
+          }
+
           const canReuseSessionMetadata =
             attachedExistingSession &&
             connectionRef.current.commands !== undefined &&
@@ -693,9 +832,13 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             context: context ?? current.context,
             capabilities: capabilities ?? current.capabilities,
             catchingUp:
-              isSameSessionReconnect ||
-              activeSession.lastEventId != null ||
-              undefined,
+              // Replay already injected above — keep the cleared flag rather
+              // than re-arming it (nothing before SSE would clear it again).
+              replayInjected
+                ? current.catchingUp
+                : isSameSessionReconnect ||
+                  activeSession.lastEventId != null ||
+                  undefined,
           }));
           if (loadWarningTexts.length > 0) {
             store.dispatch(
@@ -704,114 +847,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 text,
               })),
             );
-          }
-
-          const pendingLoad = pendingSessionLoadRef.current;
-          const pendingLoadToResolve =
-            pendingLoad?.sessionId === activeSession.sessionId
-              ? pendingLoad
-              : undefined;
-
-          // Feed replay snapshot (compacted history + live journal) into
-          // the store before starting the SSE loop. The SSE stream begins
-          // from lastEventId, so only post-snapshot events are delivered.
-          //
-          // The deferred store.reset() runs here — in the same synchronous
-          // block as store.dispatch() — so the queueMicrotask notification
-          // only fires once with the fully-populated state.
-          const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
-          const replayEvents = [...compactedReplay, ...liveJournal];
-          if (
-            needsStoreReset &&
-            !(shouldInjectReplaySnapshot && replayEvents.length > 0)
-          ) {
-            // Reset needed but no replay data (e.g. fresh session) — reset
-            // immediately since there is no dispatch to batch with.
-            store.reset();
-          }
-          if (shouldInjectReplaySnapshot && replayEvents.length > 0) {
-            const replayOpts = {
-              ...eventOptionsRef.current,
-              suppressOwnUserEcho: false,
-            };
-            const allUiEvents: DaemonUiEvent[] = [];
-            for (const replayEvent of replayEvents) {
-              try {
-                const replayUiEvents = normalizeAndFilterEvent(
-                  replayEvent,
-                  activeSession.clientId,
-                  replayOpts,
-                  setConnection,
-                  { updateConnection: false },
-                );
-                allUiEvents.push(
-                  ...filterDaemonUiEventsForTranscript(
-                    replayEvent,
-                    replayUiEvents,
-                    addNotice,
-                  ),
-                );
-                if (replayEvent.type === 'turn_complete') {
-                  const stopReason =
-                    (replayEvent.data as DaemonTurnCompleteData | undefined)
-                      ?.stopReason ?? 'end_turn';
-                  allUiEvents.push(
-                    assistantDoneFromTurnEvent(replayEvent, stopReason),
-                  );
-                } else if (replayEvent.type === 'turn_error') {
-                  allUiEvents.push(
-                    assistantDoneFromTurnEvent(replayEvent, 'error'),
-                  );
-                }
-              } catch (error) {
-                const message =
-                  error instanceof Error ? error.message : String(error);
-                addNotice({
-                  severity: 'warning',
-                  category: 'protocol',
-                  operation: 'normalize_event',
-                  code: 'daemon.replay_event_malformed',
-                  message: 'Skipped malformed replay event',
-                  debugMessage: message,
-                  recoverable: true,
-                });
-                console.warn(
-                  '[DaemonSessionProvider] skipped malformed replay event:',
-                  error,
-                );
-              }
-            }
-            if (needsStoreReset) {
-              store.reset();
-            }
-            if (allUiEvents.length > 0) {
-              store.dispatch(allUiEvents);
-              bumpWorkspaceEventSignals(allUiEvents, setWorkspaceEventSignals);
-            }
-            for (const replayEvent of replayEvents) {
-              settleActivePromptFromTurnEvent(
-                activePromptsRef.current,
-                settledPromptsRef.current,
-                activeSession.sessionId,
-                replayEvent,
-                store,
-                setPromptStatus,
-                passiveAssistantDoneTimerRef,
-                { requireBoundPromptId: true },
-              );
-            }
-            setConnection((c) => ({ ...c, catchingUp: undefined }));
-          }
-          if (pendingLoadToResolve) {
-            pendingSessionLoadRef.current = undefined;
-            clearTimeout(pendingLoadToResolve.timeout);
-            if (
-              skipNextCleanupDetachSessionIdRef.current ===
-              activeSession.sessionId
-            ) {
-              skipNextCleanupDetachSessionIdRef.current = undefined;
-            }
-            pendingLoadToResolve.resolve();
           }
           let sawEvent = false;
           let resyncRequested = false;

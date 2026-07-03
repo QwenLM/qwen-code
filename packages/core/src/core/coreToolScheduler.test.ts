@@ -838,6 +838,68 @@ describe('CoreToolScheduler', () => {
     );
   });
 
+  it('aborts and fails a tool call that exceeds the execution timeout', async () => {
+    const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+    process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '30';
+    try {
+      let toolSawAbort = false;
+      // A tool that never settles on its own — it resolves only once its
+      // AbortSignal fires, proving the timeout actually cancels the tool
+      // rather than merely abandoning it.
+      const execute = vi.fn(
+        (_params: unknown, signal?: AbortSignal) =>
+          new Promise<ToolResult>((resolve) => {
+            signal?.addEventListener('abort', () => {
+              toolSawAbort = true;
+              resolve({
+                llmContent: 'aborted late',
+                returnDisplay: 'aborted late',
+              });
+            });
+          }),
+      );
+      const toolsByName = new Map<string, MockTool>([
+        [
+          'read_file',
+          new MockTool({ name: 'read_file', canUpdateOutput: true, execute }),
+        ],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({ toolsByName });
+
+      await scheduler.schedule(
+        [
+          {
+            callId: 'timeout-1',
+            name: 'read_file',
+            args: { file_path: 'a.ts' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-timeout',
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      const completedCall = (
+        onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+      )[0];
+      expect(completedCall.status).toBe('error');
+      if (completedCall.status === 'error') {
+        expect(completedCall.response.errorType).toBe(
+          ToolErrorType.EXECUTION_TIMEOUT,
+        );
+        expect(completedCall.response.error?.message).toContain('timed out');
+      }
+      expect(toolSawAbort).toBe(true);
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+      } else {
+        process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = previousTimeout;
+      }
+    }
+  });
+
   it('executes only the first request for duplicate callIds in one batch', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'first result',

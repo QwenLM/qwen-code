@@ -209,6 +209,7 @@ const sdkMocks = vi.hoisted(() => {
     sessions,
     capabilities,
     workspaceProviders,
+    workspaceSkills,
     MockDaemonClient,
     MockDaemonSessionClient,
     workspaceMcpTools,
@@ -423,6 +424,54 @@ describe('DaemonSessionProvider', () => {
     expect(connection).not.toHaveProperty('sessionId');
   });
 
+  it('populates skill slash commands during deferred connect (before first prompt)', async () => {
+    sdkMocks.workspaceProviders.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      providers: [],
+    });
+    sdkMocks.workspaceSkills.mockResolvedValueOnce({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      skills: [
+        {
+          kind: 'skill',
+          status: 'ok',
+          name: 'review',
+          description: 'Review a GitHub pull request',
+          level: 'bundled',
+          modelInvocable: true,
+        },
+      ],
+    });
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+
+    expect(
+      sdkMocks.MockDaemonSessionClient.createOrAttach,
+    ).not.toHaveBeenCalled();
+    expect(connection?.status).toBe('connected');
+    expect(connection).not.toHaveProperty('sessionId');
+    expect(connection?.skills).toEqual(['review']);
+    expect(connection?.commands).toEqual([
+      expect.objectContaining({
+        name: 'review',
+        description: 'Review a GitHub pull request',
+      }),
+    ]);
+  });
+
   it('warns when deferred workspace providers fail', async () => {
     const error = new Error('providers unavailable');
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
@@ -446,6 +495,35 @@ describe('DaemonSessionProvider', () => {
     });
     expect(warn).toHaveBeenCalledWith(
       '[DaemonSessionProvider] workspaceProviders failed in deferred connect:',
+      error,
+    );
+  });
+
+  it('warns when deferred workspace skills fail', async () => {
+    const error = new Error('skills unavailable');
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    sdkMocks.workspaceSkills.mockRejectedValueOnce(error);
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: undefined,
+    });
+
+    // Skills failing must not block the deferred connect: providers still
+    // resolve and the connection reports connected, just without skill commands.
+    expect(connection).toMatchObject({
+      status: 'connected',
+      workspaceCwd: '/mock-workspace',
+    });
+    expect(connection).not.toHaveProperty('commands');
+    expect(warn).toHaveBeenCalledWith(
+      '[DaemonSessionProvider] workspaceSkills failed in deferred connect:',
       error,
     );
   });
@@ -2421,6 +2499,39 @@ describe('DaemonSessionProvider', () => {
     const last = states[states.length - 1];
     expect(last?.status).toBe('connected');
     expect(last?.catchingUp).toBeFalsy();
+  });
+
+  it('does not re-arm catchingUp after injecting replay for a resumed session', async () => {
+    const session = createMockSession({
+      lastEventId: 5,
+      replaySnapshot: createTextReplaySnapshot('replayed transcript'),
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(session);
+
+    const states: DaemonConnectionState[] = [];
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    function Harness() {
+      const connection = useDaemonConnection();
+      states.push(connection);
+      blocks = useDaemonTranscriptBlocks();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, { autoConnect: true });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'replayed transcript' },
+    ]);
+    expect(states.every((s) => !s.catchingUp)).toBe(true);
+    expect(states[states.length - 1]).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-1',
+      catchingUp: undefined,
+    });
   });
 
   it('never sets catchingUp on a fresh subscription (no Last-Event-ID)', async () => {
