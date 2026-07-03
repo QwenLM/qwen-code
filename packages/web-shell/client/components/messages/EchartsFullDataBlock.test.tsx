@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { WebShellCustomizationProvider } from '../../customization';
+import { I18nProvider } from '../../i18n';
 import { ThemeProvider } from '../../themeContext';
 import { Markdown } from './Markdown';
 import {
@@ -42,7 +43,8 @@ async function mount(node: ReactNode): Promise<{
 }
 
 async function render(node: ReactNode): Promise<HTMLElement> {
-  return (await mount(node)).container;
+  return (await mount(<I18nProvider language="en">{node}</I18nProvider>))
+    .container;
 }
 
 async function flushChart(): Promise<void> {
@@ -50,6 +52,14 @@ async function flushChart(): Promise<void> {
     await Promise.resolve();
     await Promise.resolve();
   });
+}
+
+function getDataRows(container: HTMLElement): string[][] {
+  return Array.from(container.querySelectorAll('tbody tr')).map((row) =>
+    Array.from(row.querySelectorAll('td'))
+      .slice(1)
+      .map((cell) => cell.textContent?.trim() ?? ''),
+  );
 }
 
 afterEach(async () => {
@@ -135,20 +145,36 @@ describe('EchartsFullDataBlock', () => {
       buttons[1]?.click();
     });
 
+    const headerTexts = Array.from(container.querySelectorAll('th')).map(
+      (cell) => cell.textContent?.trim() ?? '',
+    );
+    expect(headerTexts[1]).toContain('day');
+    expect(headerTexts[2]).toContain('orders');
+    expect(container.textContent).toContain('Quick copy');
     expect(
-      Array.from(container.querySelectorAll('th')).map((cell) =>
-        cell.textContent?.trim(),
-      ),
-    ).toEqual(['day', 'orders']);
-    expect(
-      Array.from(container.querySelectorAll('tbody tr')).map((row) =>
-        Array.from(row.querySelectorAll('td')).map((cell) =>
-          cell.textContent?.trim(),
-        ),
-      ),
-    ).toEqual([
+      container.querySelector('button[aria-label="Sort by orders"]'),
+    ).not.toBeNull();
+    expect(getDataRows(container)).toEqual([
       ['Mon', '120'],
       ['Tue', '200'],
+    ]);
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('button[aria-label="Sort by orders"]')
+        ?.click();
+    });
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>(
+          'button[aria-label="Sort by orders, ascending"]',
+        )
+        ?.click();
+    });
+
+    expect(getDataRows(container)).toEqual([
+      ['Tue', '200'],
+      ['Mon', '120'],
     ]);
   });
 
@@ -236,13 +262,7 @@ describe('EchartsFullDataBlock', () => {
       container.querySelectorAll('button')[1]?.click();
     });
 
-    expect(
-      Array.from(container.querySelectorAll('tbody tr')).map((row) =>
-        Array.from(row.querySelectorAll('td')).map((cell) =>
-          cell.textContent?.trim(),
-        ),
-      ),
-    ).toEqual([
+    expect(getDataRows(container)).toEqual([
       ['Mon', '120'],
       ['Tue', '200'],
     ]);

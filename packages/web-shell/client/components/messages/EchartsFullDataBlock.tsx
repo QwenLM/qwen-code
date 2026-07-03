@@ -3,6 +3,12 @@ import type {
   CodeBlockRenderer,
   WebShellCodeBlockRenderInfo,
 } from '../../customization';
+import {
+  EnhancedTable,
+  MAX_ENHANCED_TABLE_COLUMNS,
+  MAX_ENHANCED_TABLE_ROWS,
+  type EnhancedTableData,
+} from './EnhancedMarkdownTable';
 import styles from './EchartsFullDataBlock.module.css';
 
 export const ECHARTS_FULLDATA_LANGUAGE = 'echarts-fulldata';
@@ -119,7 +125,6 @@ const MAX_CHART_CODE_LENGTH = 500_000;
 const MAX_OPTION_DEPTH = 40;
 const MAX_DATA_ROWS = 2_000;
 const MAX_DATA_CELLS = 40_000;
-const MAX_TABLE_ROWS = 500;
 
 const SAFE_TOP_LEVEL_OPTION_KEYS = new Set([
   'angleAxis',
@@ -825,18 +830,41 @@ function DataIcon() {
   );
 }
 
-function EchartsDataTable({
+function toEnhancedTableData(
+  columns: string[],
+  rows: DatasetSource,
+): EnhancedTableData {
+  return {
+    headers: columns.map((column, columnIndex) => ({
+      key: `header-${columnIndex}-${column}`,
+      content: column,
+      text: column,
+      isHeader: true,
+    })),
+    rows: rows.map((row, rowIndex) => ({
+      key: `row-${rowIndex}`,
+      cells: columns.map((column, columnIndex) => {
+        const text = formatCell(getCell(row, column, columnIndex));
+        return {
+          key: `row-${rowIndex}-${columnIndex}`,
+          content: text,
+          text,
+          isHeader: false,
+        };
+      }),
+    })),
+    columnCount: columns.length,
+  };
+}
+
+function SimpleDatasetTable({
   columns,
   rows,
 }: {
   columns: string[];
   rows: DatasetSource;
 }) {
-  if (columns.length === 0 || rows.length === 0) {
-    return <div className={styles.state}>No data</div>;
-  }
-
-  const visibleRows = rows.slice(0, MAX_TABLE_ROWS);
+  const visibleRows = rows.slice(0, MAX_ENHANCED_TABLE_ROWS);
   const isTruncated = rows.length > visibleRows.length;
 
   return (
@@ -849,8 +877,8 @@ function EchartsDataTable({
       <table className={styles.table}>
         <thead>
           <tr>
-            {columns.map((column) => (
-              <th key={column}>{column}</th>
+            {columns.map((column, columnIndex) => (
+              <th key={`${columnIndex}-${column}`}>{column}</th>
             ))}
           </tr>
         </thead>
@@ -858,7 +886,7 @@ function EchartsDataTable({
           {visibleRows.map((row, rowIndex) => (
             <tr key={rowIndex}>
               {columns.map((column, columnIndex) => (
-                <td key={column}>
+                <td key={`${columnIndex}-${column}`}>
                   {formatCell(getCell(row, column, columnIndex))}
                 </td>
               ))}
@@ -866,6 +894,31 @@ function EchartsDataTable({
           ))}
         </tbody>
       </table>
+    </div>
+  );
+}
+
+function EchartsDataTable({
+  columns,
+  rows,
+}: {
+  columns: string[];
+  rows: DatasetSource;
+}) {
+  if (columns.length === 0 || rows.length === 0) {
+    return <div className={styles.state}>No data</div>;
+  }
+
+  if (
+    rows.length > MAX_ENHANCED_TABLE_ROWS ||
+    columns.length > MAX_ENHANCED_TABLE_COLUMNS
+  ) {
+    return <SimpleDatasetTable columns={columns} rows={rows} />;
+  }
+
+  return (
+    <div data-testid="echarts-fulldata-table">
+      <EnhancedTable table={toEnhancedTableData(columns, rows)} />
     </div>
   );
 }
