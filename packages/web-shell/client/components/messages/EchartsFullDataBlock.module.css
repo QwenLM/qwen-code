@@ -91,6 +91,25 @@
   text-align: center;
 }
 
+.loading {
+  min-height: 220px;
+}
+
+.spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border);
+  border-top-color: var(--foreground);
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
 .tableWrap {
   min-height: 240px;
   overflow: auto;

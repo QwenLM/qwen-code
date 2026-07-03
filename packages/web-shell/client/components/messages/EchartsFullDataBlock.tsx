@@ -40,6 +40,7 @@ export type EchartsRuntimeLoader = () =>
 export interface EchartsFullDataBlockProps {
   option?: EchartsFullDataOption;
   parseError?: string;
+  isStreaming?: boolean;
   theme: 'dark' | 'light';
   loadEcharts?: EchartsRuntimeLoader;
 }
@@ -140,6 +141,7 @@ export function createEchartsFullDataRenderer({
       <EchartsFullDataBlock
         option={option}
         parseError={parseError}
+        isStreaming={info.isStreaming}
         theme={info.theme}
         loadEcharts={loadEcharts}
       />
@@ -210,9 +212,22 @@ function EchartsDataTable({
   );
 }
 
+function ChartLoadingState() {
+  return (
+    <div
+      className={`${styles.state} ${styles.loading}`}
+      role="status"
+      aria-label="Rendering chart"
+    >
+      <span className={styles.spinner} aria-hidden="true" />
+    </div>
+  );
+}
+
 export function EchartsFullDataBlock({
   option,
   parseError,
+  isStreaming = false,
   theme,
   loadEcharts,
 }: EchartsFullDataBlockProps) {
@@ -287,7 +302,9 @@ export function EchartsFullDataBlock({
           </div>
         )}
       </div>
-      {parseError ? (
+      {parseError && isStreaming ? (
+        <ChartLoadingState />
+      ) : parseError ? (
         <div className={styles.state}>{parseError}</div>
       ) : mode === 'chart' ? (
         chartError ? (

@@ -133,4 +133,32 @@ describe('EchartsFullDataBlock', () => {
     expect(container.textContent).not.toContain('echarts-fulldata');
     expect(container.querySelector('pre code')).toBeNull();
   });
+
+  it('shows loading instead of parse errors while chart JSON is streaming', async () => {
+    const container = await render(
+      <ThemeProvider value="dark">
+        <WebShellCustomizationProvider
+          value={{
+            markdown: {
+              renderCodeBlock: createEchartsFullDataRenderer(),
+            },
+          }}
+        >
+          <Markdown
+            content={'```echarts-fulldata\n{\n  "title"\n```'}
+            source="assistant"
+            isStreaming
+          />
+        </WebShellCustomizationProvider>
+      </ThemeProvider>,
+    );
+
+    expect(
+      container.querySelector('[data-testid="echarts-fulldata-rendered"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[role="status"]')).not.toBeNull();
+    expect(container.textContent).not.toContain('Expected property');
+    expect(container.textContent).not.toContain('echarts-fulldata');
+    expect(container.querySelector('pre code')).toBeNull();
+  });
 });
