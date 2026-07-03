@@ -181,8 +181,13 @@ export function publicErrorStatus(code: string): number {
 export class WorkspaceRememberTaskLane {
   private static readonly MAX_TASKS = 1000;
   private static readonly TERMINAL_TASK_TTL_MS = 5 * 60_000;
+  // Two-tier pending capacity: all tasks share the global cap, while
+  // forget/dream share a smaller sub-cap so bursts cannot starve remember.
   private static readonly MAX_PENDING = 16;
   private static readonly MAX_NON_REMEMBER_PENDING = 8;
+  private static readonly NON_REMEMBER_KINDS = new Set<WorkspaceMemoryTaskKind>(
+    ['forget', 'dream'],
+  );
   private readonly tasks = new Map<string, WorkspaceMemoryTaskRecord>();
   private tail: Promise<void> = Promise.resolve();
 
@@ -226,7 +231,7 @@ export class WorkspaceRememberTaskLane {
     // Keep forget/dream from occupying the whole serial lane so remember stays
     // available during heavier destructive or compaction bursts.
     if (
-      kind !== 'remember' &&
+      WorkspaceRememberTaskLane.NON_REMEMBER_KINDS.has(kind) &&
       this.pendingCount('forget') + this.pendingCount('dream') >=
         WorkspaceRememberTaskLane.MAX_NON_REMEMBER_PENDING
     ) {
