@@ -7317,7 +7317,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         {
           message: [
             { text: 'describe this image' },
