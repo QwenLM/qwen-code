@@ -10,6 +10,9 @@ import { describe, expect, it, vi } from 'vitest';
 import { createMutationGate } from './auth.js';
 import type {
   AcpSessionBridge,
+  BridgeWorkspaceMemoryDreamResult,
+  BridgeWorkspaceMemoryForgetRequest,
+  BridgeWorkspaceMemoryForgetResult,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
 } from './acp-session-bridge.js';
@@ -63,13 +66,21 @@ function buildBridgeStub(opts: {
   rememberImpl?: (
     req: BridgeWorkspaceMemoryRememberRequest,
   ) => Promise<BridgeWorkspaceMemoryRememberResult>;
+  forgetImpl?: (
+    req: BridgeWorkspaceMemoryForgetRequest,
+  ) => Promise<BridgeWorkspaceMemoryForgetResult>;
+  dreamImpl?: () => Promise<BridgeWorkspaceMemoryDreamResult>;
   publishImpl?: (event: RecordedEvent) => void;
 }): AcpSessionBridge & {
   events: RecordedEvent[];
   rememberCalls: BridgeWorkspaceMemoryRememberRequest[];
+  forgetCalls: BridgeWorkspaceMemoryForgetRequest[];
+  dreamCalls: number;
 } {
   const events: RecordedEvent[] = [];
   const rememberCalls: BridgeWorkspaceMemoryRememberRequest[] = [];
+  const forgetCalls: BridgeWorkspaceMemoryForgetRequest[] = [];
+  let dreamCalls = 0;
   const known =
     opts.knownIds instanceof Set
       ? opts.knownIds
@@ -81,10 +92,34 @@ function buildBridgeStub(opts: {
       filesTouched: ['/mem/project/MEMORY.md'],
       touchedScopes: ['project'],
     }));
+  const forgetImpl =
+    opts.forgetImpl ??
+    (async () => ({
+      summary: 'forgot',
+      removedEntries: [
+        {
+          topic: 'project',
+          summary: 'old preference',
+          filePath: '/mem/project/project.md',
+        },
+      ],
+      touchedTopics: ['project'],
+    }));
+  const dreamImpl =
+    opts.dreamImpl ??
+    (async () => ({
+      summary: 'dreamed',
+      touchedTopics: ['project'],
+      dedupedEntries: 1,
+    }));
 
   return {
     events,
     rememberCalls,
+    forgetCalls,
+    get dreamCalls() {
+      return dreamCalls;
+    },
     publishWorkspaceEvent(event: RecordedEvent) {
       if (opts.publishImpl) {
         opts.publishImpl(event);
@@ -100,6 +135,14 @@ function buildBridgeStub(opts: {
     ) {
       rememberCalls.push(req);
       return rememberImpl(req);
+    },
+    async runWorkspaceMemoryForget(req: BridgeWorkspaceMemoryForgetRequest) {
+      forgetCalls.push(req);
+      return forgetImpl(req);
+    },
+    async runWorkspaceMemoryDream() {
+      dreamCalls++;
+      return dreamImpl();
     },
     async isWorkspaceMemoryRememberAvailable() {
       if (opts.availableImpl) return opts.availableImpl();
@@ -156,6 +199,8 @@ function buildBridgeStub(opts: {
   } as unknown as AcpSessionBridge & {
     events: RecordedEvent[];
     rememberCalls: BridgeWorkspaceMemoryRememberRequest[];
+    forgetCalls: BridgeWorkspaceMemoryForgetRequest[];
+    dreamCalls: number;
   };
 }
 
@@ -246,6 +291,93 @@ describe('workspace memory remember routes', () => {
     });
   });
 
+  it('queues and completes a hidden workspace forget task', async () => {
+    const bridge = buildBridgeStub({ knownIds: ['client-1'] });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/forget')
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({ query: 'old preference' })
+      .expect(202);
+
+    const taskId = post.body.taskId as string;
+    expect(taskId).toMatch(/^forget-/);
+    await waitFor(() => bridge.forgetCalls.length === 1);
+    await waitFor(() => bridge.events.length === 1);
+
+    const get = await request(app)
+      .get(`/workspace/memory/forget/${taskId}`)
+      .set('X-Qwen-Client-Id', 'client-1')
+      .expect(200);
+    expect(get.body).toMatchObject({
+      taskId,
+      status: 'completed',
+      result: {
+        summary: 'forgot',
+        touchedTopics: ['project'],
+        removedEntries: [
+          {
+            topic: 'project',
+            summary: 'old preference',
+            filePath: '/mem/project/project.md',
+          },
+        ],
+      },
+    });
+    expect(bridge.forgetCalls[0]).toEqual({ query: 'old preference' });
+    expect(bridge.events[0]).toMatchObject({
+      type: 'memory_changed',
+      originatorClientId: 'client-1',
+      data: {
+        scope: 'managed',
+        source: 'workspace_memory_forget',
+        taskId,
+        touchedScopes: ['project'],
+      },
+    });
+  });
+
+  it('queues and completes a hidden workspace dream task', async () => {
+    const bridge = buildBridgeStub({ knownIds: ['client-1'] });
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/dream')
+      .set('X-Qwen-Client-Id', 'client-1')
+      .send({})
+      .expect(202);
+
+    const taskId = post.body.taskId as string;
+    expect(taskId).toMatch(/^dream-/);
+    await waitFor(() => bridge.dreamCalls === 1);
+    await waitFor(() => bridge.events.length === 1);
+
+    const get = await request(app)
+      .get(`/workspace/memory/dream/${taskId}`)
+      .set('X-Qwen-Client-Id', 'client-1')
+      .expect(200);
+    expect(get.body).toMatchObject({
+      taskId,
+      status: 'completed',
+      result: {
+        summary: 'dreamed',
+        touchedTopics: ['project'],
+        dedupedEntries: 1,
+      },
+    });
+    expect(bridge.events[0]).toMatchObject({
+      type: 'memory_changed',
+      originatorClientId: 'client-1',
+      data: {
+        scope: 'managed',
+        source: 'workspace_memory_dream',
+        taskId,
+        touchedScopes: ['project'],
+      },
+    });
+  });
+
   it('requires auth for task polling', async () => {
     const bridge = buildBridgeStub({});
     const app = buildApp(bridge, {
@@ -299,6 +431,19 @@ describe('workspace memory remember routes', () => {
       .expect(404)
       .expect((res) => expect(res.body.code).toBe('remember_task_not_found'));
     await request(app)
+      .post('/workspace/memory/forget')
+      .send({ query: '   ' })
+      .expect(400)
+      .expect((res) => expect(res.body.code).toBe('invalid_query'));
+    await request(app)
+      .get('/workspace/memory/forget/forget-missing')
+      .expect(404)
+      .expect((res) => expect(res.body.code).toBe('forget_task_not_found'));
+    await request(app)
+      .get('/workspace/memory/dream/dream-missing')
+      .expect(404)
+      .expect((res) => expect(res.body.code).toBe('dream_task_not_found'));
+    await request(app)
       .get('/workspace/memory/remember/remember-missing')
       .set('X-Qwen-Client-Id', 'missing')
       .expect(400)
@@ -342,6 +487,21 @@ describe('workspace memory remember routes', () => {
       .set('X-Qwen-Client-Id', 'client-1')
       .expect(404);
     await request(app).get(`/workspace/memory/remember/${taskId}`).expect(200);
+  });
+
+  it('does not expose a task through a different memory task endpoint', async () => {
+    const bridge = buildBridgeStub({});
+    const app = buildApp(bridge);
+
+    const post = await request(app)
+      .post('/workspace/memory/forget')
+      .send({ query: 'old preference' })
+      .expect(202);
+    const taskId = post.body.taskId as string;
+
+    await request(app).get(`/workspace/memory/remember/${taskId}`).expect(404);
+    await request(app).get(`/workspace/memory/dream/${taskId}`).expect(404);
+    await request(app).get(`/workspace/memory/forget/${taskId}`).expect(200);
   });
 
   it('rejects task polling after the client detaches', async () => {
@@ -443,6 +603,48 @@ describe('workspace memory remember routes', () => {
     expect(bridge.events).toHaveLength(0);
   });
 
+  it('serializes remember, forget, and dream tasks in one lane', async () => {
+    const remember = deferred<BridgeWorkspaceMemoryRememberResult>();
+    const forget = deferred<BridgeWorkspaceMemoryForgetResult>();
+    const dream = deferred<BridgeWorkspaceMemoryDreamResult>();
+    const starts: string[] = [];
+    const bridge = buildBridgeStub({
+      rememberImpl: vi.fn(async () => {
+        starts.push('remember');
+        return remember.promise;
+      }),
+      forgetImpl: vi.fn(async () => {
+        starts.push('forget');
+        return forget.promise;
+      }),
+      dreamImpl: vi.fn(async () => {
+        starts.push('dream');
+        return dream.promise;
+      }),
+    });
+    const app = buildApp(bridge);
+
+    await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'remember one' })
+      .expect(202);
+    await request(app)
+      .post('/workspace/memory/forget')
+      .send({ query: 'forget one' })
+      .expect(202);
+    await request(app).post('/workspace/memory/dream').send({}).expect(202);
+
+    await waitFor(() => starts.length === 1);
+    expect(starts).toEqual(['remember']);
+    remember.resolve({ filesTouched: [], touchedScopes: [] });
+    await waitFor(() => starts.length === 2);
+    expect(starts).toEqual(['remember', 'forget']);
+    forget.resolve({ removedEntries: [], touchedTopics: [] });
+    await waitFor(() => starts.length === 3);
+    expect(starts).toEqual(['remember', 'forget', 'dream']);
+    dream.resolve({ touchedTopics: [], dedupedEntries: 0 });
+  });
+
   it('does not publish memory_changed for no-op remember results', async () => {
     const bridge = buildBridgeStub({
       rememberImpl: vi.fn(async () => ({
@@ -461,6 +663,43 @@ describe('workspace memory remember routes', () => {
     await waitFor(() => bridge.rememberCalls.length === 1);
     await request(app)
       .get(`/workspace/memory/remember/${post.body.taskId}`)
+      .expect(200)
+      .expect((res) => expect(res.body.status).toBe('completed'));
+    expect(bridge.events).toHaveLength(0);
+  });
+
+  it('does not publish memory_changed for no-op forget or dream results', async () => {
+    const bridge = buildBridgeStub({
+      forgetImpl: vi.fn(async () => ({
+        summary: 'nothing matched',
+        removedEntries: [],
+        touchedTopics: [],
+      })),
+      dreamImpl: vi.fn(async () => ({
+        summary: 'nothing changed',
+        touchedTopics: [],
+        dedupedEntries: 0,
+      })),
+    });
+    const app = buildApp(bridge);
+
+    const forgetPost = await request(app)
+      .post('/workspace/memory/forget')
+      .send({ query: 'missing' })
+      .expect(202);
+    const dreamPost = await request(app)
+      .post('/workspace/memory/dream')
+      .send({})
+      .expect(202);
+
+    await waitFor(() => bridge.forgetCalls.length === 1);
+    await waitFor(() => bridge.dreamCalls === 1);
+    await request(app)
+      .get(`/workspace/memory/forget/${forgetPost.body.taskId}`)
+      .expect(200)
+      .expect((res) => expect(res.body.status).toBe('completed'));
+    await request(app)
+      .get(`/workspace/memory/dream/${dreamPost.body.taskId}`)
       .expect(200)
       .expect((res) => expect(res.body.status).toBe('completed'));
     expect(bridge.events).toHaveLength(0);

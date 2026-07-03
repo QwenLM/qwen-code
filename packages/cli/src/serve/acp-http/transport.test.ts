@@ -405,6 +405,12 @@ class FakeBridge {
   async runWorkspaceMemoryRemember() {
     return { summary: 'remembered', filesTouched: [], touchedScopes: [] };
   }
+  async runWorkspaceMemoryForget() {
+    return { summary: 'forgot', removedEntries: [], touchedTopics: [] };
+  }
+  async runWorkspaceMemoryDream() {
+    return { summary: 'dreamed', touchedTopics: [], dedupedEntries: 0 };
+  }
   async isWorkspaceMemoryRememberAvailable() {
     return true;
   }
@@ -981,6 +987,18 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/workspace/memory/remember/get',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/forget',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/forget/get',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/dream',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/dream/get',
     );
   });
 
@@ -5926,6 +5944,80 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         expect(completed.result).toMatchObject({
           status: 'completed',
           result: { summary: 'No memory files updated.' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/workspace/memory/forget queues and polls hidden tasks', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 82,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'old preference' },
+        });
+        const queued = (await reader.next()) as {
+          result: { taskId: string; status: string };
+        };
+        expect(queued.result).toMatchObject({
+          status: 'queued',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 83,
+          method: '_qwen/workspace/memory/forget/get',
+          params: { taskId: queued.result.taskId },
+        });
+        const completed = (await reader.next()) as {
+          result: { status: string; result: { summary: string } };
+        };
+        expect(completed.result).toMatchObject({
+          status: 'completed',
+          result: { summary: 'forgot' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/workspace/memory/dream queues and polls hidden tasks', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 84,
+          method: '_qwen/workspace/memory/dream',
+          params: {},
+        });
+        const queued = (await reader.next()) as {
+          result: { taskId: string; status: string };
+        };
+        expect(queued.result).toMatchObject({
+          status: 'queued',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/workspace/memory/dream/get',
+          params: { taskId: queued.result.taskId },
+        });
+        const completed = (await reader.next()) as {
+          result: { status: string; result: { summary: string } };
+        };
+        expect(completed.result).toMatchObject({
+          status: 'completed',
+          result: { summary: 'dreamed' },
         });
       } finally {
         reader.close();

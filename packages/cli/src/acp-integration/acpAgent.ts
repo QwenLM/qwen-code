@@ -61,6 +61,7 @@ import {
   unregisterGoalHook,
   ToolNames,
   FORK_SUBAGENT_TYPE,
+  runManagedAutoMemoryDream,
   runManagedRememberByAgent,
   matchesAnyServerPattern,
 } from '@qwen-code/qwen-code-core';
@@ -250,6 +251,13 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+function createHiddenWorkspaceMemoryConfig(config: Config): Config {
+  const hiddenConfig = Object.create(config) as Config;
+  hiddenConfig.getChatRecordingService = () => undefined;
+  hiddenConfig.getTranscriptPath = () => '';
+  return hiddenConfig;
+}
 
 function collapseForkDirective(directive: string, maxLength: number): string {
   const oneLine = directive.replace(/\s+/g, ' ').trim();
@@ -5477,6 +5485,117 @@ class QwenAgent implements Agent {
             err instanceof Error && err.message
               ? err.message
               : 'Workspace memory remember failed',
+            {
+              errorKind: code,
+            },
+          );
+        }
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget: {
+        const query = params['query'];
+        if (typeof query !== 'string' || !query.trim()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing query',
+          );
+        }
+        if (!this.config.isManagedMemoryAvailable()) {
+          throw new RequestError(
+            -32009,
+            'Managed memory is unavailable for this daemon workspace',
+            { errorKind: 'managed_memory_unavailable' },
+          );
+        }
+
+        try {
+          const projectRoot = this.config.getProjectRoot();
+          const hiddenConfig = createHiddenWorkspaceMemoryConfig(this.config);
+          const result = await this.config
+            .getMemoryManager()
+            .forget(projectRoot, query.trim(), { config: hiddenConfig });
+          return {
+            summary:
+              result.systemMessage ??
+              (result.removedEntries.length > 0
+                ? `Forgot ${result.removedEntries.length} memory entr${result.removedEntries.length === 1 ? 'y' : 'ies'}.`
+                : 'No managed auto-memory entries matched.'),
+            removedEntries: result.removedEntries,
+            touchedTopics: result.touchedTopics,
+          } as unknown as Record<string, unknown>;
+        } catch (err) {
+          if (err instanceof RequestError) {
+            throw err;
+          }
+          const code = extractRememberErrorCode(err);
+          if (code === 'managed_memory_unavailable') {
+            throw new RequestError(
+              -32009,
+              'Managed memory is unavailable for this daemon workspace',
+              { errorKind: 'managed_memory_unavailable' },
+            );
+          }
+          throw new RequestError(
+            -32099,
+            err instanceof Error && err.message
+              ? err.message
+              : 'Workspace memory forget failed',
+            {
+              errorKind: code,
+            },
+          );
+        }
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream: {
+        if (!this.config.isManagedMemoryAvailable()) {
+          throw new RequestError(
+            -32009,
+            'Managed memory is unavailable for this daemon workspace',
+            { errorKind: 'managed_memory_unavailable' },
+          );
+        }
+
+        const childSignal = AbortSignal.timeout(
+          WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
+        );
+        try {
+          const result = await runManagedAutoMemoryDream(
+            this.config.getProjectRoot(),
+            new Date(),
+            createHiddenWorkspaceMemoryConfig(this.config),
+            childSignal,
+            {
+              trigger: 'manual',
+              recordMetadata: true,
+              suppressChatRecording: true,
+            },
+          );
+          return {
+            summary: result.systemMessage,
+            touchedTopics: result.touchedTopics,
+            dedupedEntries: result.dedupedEntries,
+          } as unknown as Record<string, unknown>;
+        } catch (err) {
+          if (err instanceof RequestError) {
+            throw err;
+          }
+          if (childSignal.aborted) {
+            throw new RequestError(-32099, 'Workspace memory dream timed out', {
+              errorKind: 'remember_timeout',
+            });
+          }
+          const code = extractRememberErrorCode(err);
+          if (code === 'managed_memory_unavailable') {
+            throw new RequestError(
+              -32009,
+              'Managed memory is unavailable for this daemon workspace',
+              { errorKind: 'managed_memory_unavailable' },
+            );
+          }
+          throw new RequestError(
+            -32099,
+            err instanceof Error && err.message
+              ? err.message
+              : 'Workspace memory dream failed',
             {
               errorKind: code,
             },
