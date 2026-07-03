@@ -779,9 +779,6 @@ export async function buildAvailableCommandsSnapshot(
     if (command.kind !== CommandKind.SKILL || !command.skillDetail) {
       continue;
     }
-    if (disabledSkillNames.has(command.skillDetail.name.toLowerCase())) {
-      continue;
-    }
     const existing = skillDetailsByName.get(command.skillDetail.name);
     skillDetailsByName.set(command.skillDetail.name, {
       ...existing,
