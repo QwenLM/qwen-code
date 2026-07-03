@@ -44,6 +44,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_prompt: { since: 'v1' },
   session_cancel: { since: 'v1' },
   session_events: { since: 'v1' },
+  session_artifacts: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
   // `GET /session/:id/events`. Old daemons silently lack both — SDK

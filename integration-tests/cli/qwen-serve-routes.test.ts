@@ -247,6 +247,7 @@ describe('qwen serve — capabilities envelope', () => {
       'session_prompt',
       'session_cancel',
       'session_events',
+      'session_artifacts',
       'slow_client_warning',
       'typed_event_schema',
       'session_set_model',

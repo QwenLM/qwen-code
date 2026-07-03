@@ -38,7 +38,6 @@ import type {
   DaemonSessionActions,
   SettledPrompt,
   PendingSessionLoad,
-  SessionSwitchOptions,
 } from './types.js';
 
 interface RefBox<T> {
@@ -90,6 +89,7 @@ export function getConnectionAfterSessionClear(
   return {
     ...next,
     status: 'connected',
+    loadingTranscript: undefined,
     catchingUp: undefined,
     error: undefined,
   };
@@ -189,11 +189,11 @@ export function createDaemonSessionActions({
   function startSessionSwitch(
     sessionId: string,
     mode: 'load' | 'resume',
-    opts?: SessionSwitchOptions,
   ): Promise<void> {
     manualSessionClearRef.current = false;
     const loadPromise = startPendingSessionLoad(sessionId, mode);
-    const currentSessionId = sessionRef.current?.sessionId;
+    const currentSession = sessionRef.current;
+    const currentSessionId = currentSession?.sessionId;
     const activePrompt = currentSessionId
       ? activePromptsRef.current.get(currentSessionId)
       : undefined;
@@ -204,32 +204,37 @@ export function createDaemonSessionActions({
       activePromptsRef.current.delete(currentSessionId);
     }
     resetCurrentSessionActivePrompt();
+    if (currentSession) {
+      void currentSession.detach().catch((error: unknown) => {
+        console.warn(
+          '[DaemonSessionActions] detach before session switch failed:',
+          error,
+        );
+      });
+    }
+    sessionRef.current = undefined;
     setConnection((current) => ({
       ...current,
       status: 'connecting',
+      sessionId,
+      clientId: undefined,
+      displayName: undefined,
       error: undefined,
-      catchingUp: true,
+      loadingTranscript: true,
+      catchingUp: undefined,
     }));
     setPromptStatus('idle');
     settledPromptsRef.current.clear();
     clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-    if (!opts?.deferTranscriptReset) {
-      store.reset();
-    }
+    store.reset();
     setRestoreMode(mode);
     setRestoreSessionId(sessionId);
     setRestoreSessionNonce((nonce) => nonce + 1);
-    if (!opts?.deferTranscriptReset) {
-      return loadPromise;
-    }
     return loadPromise.catch((error: unknown) => {
       if (!isAbortError(error)) {
-        store.reset();
-        const message = error instanceof Error ? error.message : String(error);
         setConnection((current) => ({
           ...current,
-          status: 'disconnected',
-          error: message,
+          loadingTranscript: undefined,
           catchingUp: undefined,
         }));
       }
@@ -548,12 +553,12 @@ export function createDaemonSessionActions({
       }
     },
 
-    async loadSession(sessionId, opts) {
-      return startSessionSwitch(sessionId, 'load', opts);
+    async loadSession(sessionId) {
+      return startSessionSwitch(sessionId, 'load');
     },
 
-    async resumeSession(sessionId, opts) {
-      return startSessionSwitch(sessionId, 'resume', opts);
+    async resumeSession(sessionId) {
+      return startSessionSwitch(sessionId, 'resume');
     },
 
     async createSession() {

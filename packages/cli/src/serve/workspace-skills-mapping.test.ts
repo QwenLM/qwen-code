@@ -34,13 +34,24 @@ describe('mapSkillConfigToStatus', () => {
     });
   });
 
-  it('marks a disable-model-invocation skill as disabled', () => {
+  it('keeps a disable-model-invocation skill available for manual use', () => {
     const status = mapSkillConfigToStatus(
       makeSkill({ name: 'internal', disableModelInvocation: true }),
     );
 
-    expect(status.status).toBe('disabled');
+    expect(status.status).toBe('ok');
     expect(status.modelInvocable).toBe(false);
+    expect(status.name).toBe('internal');
+  });
+
+  it('marks a settings-disabled skill as disabled', () => {
+    const status = mapSkillConfigToStatus(
+      makeSkill({ name: 'internal' }),
+      new Set(['internal']),
+    );
+
+    expect(status.status).toBe('disabled');
+    expect(status.modelInvocable).toBe(true);
     expect(status.name).toBe('internal');
   });
 

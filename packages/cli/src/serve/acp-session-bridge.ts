@@ -123,3 +123,5 @@ export {
   MAX_WORKSPACE_PATH_LENGTH,
   canonicalizeWorkspace,
 } from '@qwen-code/acp-bridge/workspacePaths';
+
+export { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';

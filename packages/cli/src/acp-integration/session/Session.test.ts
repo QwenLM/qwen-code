@@ -463,6 +463,7 @@ describe('Session', () => {
         .mockReturnValue(mockBackgroundShellRegistry),
       getMonitorRegistry: vi.fn().mockReturnValue(mockMonitorRegistry),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
+      getDisabledSkillNames: vi.fn().mockReturnValue(new Set<string>()),
     } as unknown as Config;
 
     mockClient = {
@@ -1569,6 +1570,68 @@ describe('Session', () => {
       expect([...meta.availableSkills].sort()).toEqual(
         meta.availableSkillDetails.map((detail) => detail.name).sort(),
       );
+    });
+
+    it('omits skills disabled in settings from availableSkills and details', async () => {
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'disabled-command',
+          description: 'Disabled slash skill',
+          kind: 'skill',
+          skillDetail: {
+            name: 'disabled-command',
+            description: 'Disabled slash skill',
+            body: 'Hidden instructions',
+            level: 'project',
+          },
+        },
+      ]);
+      mockConfig.getDisabledSkillNames = vi
+        .fn()
+        .mockReturnValue(new Set(['disabled-skill', 'disabled-command']));
+      mockConfig.getSkillManager = vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([
+          {
+            name: 'enabled-skill',
+            description: 'Enabled skill',
+            body: 'Visible instructions',
+            filePath: '/skills/enabled-skill/SKILL.md',
+            level: 'project',
+          },
+          {
+            name: 'disabled-skill',
+            description: 'Disabled skill',
+            body: 'Hidden instructions',
+            filePath: '/skills/disabled-skill/SKILL.md',
+            level: 'project',
+          },
+        ]),
+      });
+
+      await session.sendAvailableCommandsUpdate();
+
+      const update = vi
+        .mocked(mockClient.sessionUpdate)
+        .mock.calls.map(([call]) => call)
+        .find(
+          (call) => call.update.sessionUpdate === 'available_commands_update',
+        ) as {
+        update: {
+          availableCommands: Array<{ name: string }>;
+          _meta: {
+            availableSkills: string[];
+            availableSkillDetails: Array<{ name: string }>;
+          };
+        };
+      };
+      expect(
+        update.update.availableCommands.map((command) => command.name),
+      ).not.toContain('disabled-command');
+      const meta = update.update._meta;
+      expect(meta.availableSkills).toEqual(['enabled-skill']);
+      expect(meta.availableSkillDetails.map((detail) => detail.name)).toEqual([
+        'enabled-skill',
+      ]);
     });
 
     it('swallows errors and does not throw', async () => {
@@ -3173,6 +3236,12 @@ describe('Session', () => {
               llmContent: 'nope',
               returnDisplay: 'failed',
               error: { message: 'tool blew up' },
+              artifacts: [
+                {
+                  title: 'Failure artifact',
+                  workspacePath: 'reports/failure.html',
+                },
+              ],
             }),
           }),
         };
@@ -3215,6 +3284,23 @@ describe('Session', () => {
           .find((ev) => ev.function_name === 'read_file');
         expect(toolEvent?.status).toBe('error');
         expect(toolEvent?.success).toBe(false);
+        expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+          expect.objectContaining({
+            sessionId: 'test-session-id',
+            update: expect.objectContaining({
+              sessionUpdate: 'tool_call_update',
+              status: 'failed',
+              _meta: expect.objectContaining({
+                artifacts: [
+                  {
+                    title: 'Failure artifact',
+                    workspacePath: 'reports/failure.html',
+                  },
+                ],
+              }),
+            }),
+          }),
+        );
       });
     });
 
@@ -8731,10 +8817,24 @@ describe('Session', () => {
       describe('PostToolUse hook', () => {
         it('fires PostToolUse hook after successful tool execution', async () => {
           const messageBus = {
-            request: vi.fn().mockResolvedValue({
-              success: true,
-              output: {},
-            }),
+            request: vi
+              .fn()
+              .mockImplementation(async (request: { eventName: string }) => ({
+                success: true,
+                output:
+                  request.eventName === 'PostToolUse'
+                    ? {
+                        hookSpecificOutput: {
+                          artifacts: [
+                            {
+                              title: 'Success report',
+                              workspacePath: 'reports/success.html',
+                            },
+                          ],
+                        },
+                      }
+                    : { decision: 'allow' },
+              })),
           };
           mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
           mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
@@ -8791,6 +8891,22 @@ describe('Session', () => {
               }),
             }),
             expect.anything(),
+          );
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            'qwen/notify/session/artifact-event',
+            expect.objectContaining({
+              sessionId: 'test-session-id',
+              source: 'hook',
+              hookEventName: 'PostToolUse',
+              toolName: 'read_file',
+              toolCallId: 'call-1',
+              artifacts: [
+                {
+                  title: 'Success report',
+                  workspacePath: 'reports/success.html',
+                },
+              ],
+            }),
           );
         });
 
@@ -8861,10 +8977,24 @@ describe('Session', () => {
       describe('PostToolUseFailure hook', () => {
         it('fires PostToolUseFailure hook when tool execution fails', async () => {
           const messageBus = {
-            request: vi.fn().mockResolvedValue({
-              success: true,
-              output: {},
-            }),
+            request: vi
+              .fn()
+              .mockImplementation(async (request: { eventName: string }) => ({
+                success: true,
+                output:
+                  request.eventName === 'PostToolUseFailure'
+                    ? {
+                        hookSpecificOutput: {
+                          artifacts: [
+                            {
+                              title: 'Failure report',
+                              workspacePath: 'reports/failure.html',
+                            },
+                          ],
+                        },
+                      }
+                    : { decision: 'allow' },
+              })),
           };
           mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
           mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
@@ -8917,6 +9047,22 @@ describe('Session', () => {
               }),
             }),
             expect.anything(),
+          );
+          expect(mockClient.extNotification).toHaveBeenCalledWith(
+            'qwen/notify/session/artifact-event',
+            expect.objectContaining({
+              sessionId: 'test-session-id',
+              source: 'hook',
+              hookEventName: 'PostToolUseFailure',
+              toolName: 'read_file',
+              toolCallId: 'call-1',
+              artifacts: [
+                {
+                  title: 'Failure report',
+                  workspacePath: 'reports/failure.html',
+                },
+              ],
+            }),
           );
         });
       });
@@ -9656,6 +9802,52 @@ describe('Session', () => {
         isOutputMarkdown: true,
       };
     }
+
+    it('does not fire PostToolBatch hooks from the ACP session path', async () => {
+      const messageBus = {
+        request: vi.fn().mockImplementation(async (request) => ({
+          success: true,
+          output: { decision: 'allow', eventName: request.eventName },
+        })),
+      };
+      mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+      mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+      mockConfig.hasHooksForEvent = vi
+        .fn()
+        .mockImplementation(
+          (eventName: string) => eventName === 'PostToolBatch',
+        );
+      mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'tool output',
+        returnDisplay: 'tool output',
+      });
+      mockToolRegistry.getTool.mockReturnValue(
+        mockAllowedTool('read_file', execute),
+      );
+
+      await (session as unknown as ToolCallInternals).runToolCalls(
+        new AbortController().signal,
+        'prompt-batch-artifacts',
+        [
+          {
+            id: 'read_call',
+            name: 'read_file',
+            args: { path: 'README.md' },
+          },
+        ],
+      );
+
+      expect(
+        messageBus.request.mock.calls.some(
+          ([request]) => request.eventName === 'PostToolBatch',
+        ),
+      ).toBe(false);
+      expect(mockClient.extNotification).not.toHaveBeenCalledWith(
+        'qwen/notify/session/artifact-event',
+        expect.objectContaining({ hookEventName: 'PostToolBatch' }),
+      );
+    });
 
     it('marks cancelled ask_user_question as a turn stop', async () => {
       const execute = vi.fn().mockResolvedValue({

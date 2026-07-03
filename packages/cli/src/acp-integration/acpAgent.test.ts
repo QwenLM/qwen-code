@@ -1610,6 +1610,23 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         skillRoot: '/secret',
         hooks: { pre: ['secret-hook'] },
       },
+      {
+        name: 'manual-only',
+        description: 'Manual only',
+        level: 'project',
+        argumentHint: '[topic]',
+        disableModelInvocation: true,
+        body: 'manual secret body',
+        filePath: '/manual/SKILL.md',
+      },
+      {
+        name: 'disabled-skill',
+        description: 'Disabled by settings',
+        level: 'project',
+        disableModelInvocation: false,
+        body: 'disabled secret body',
+        filePath: '/disabled/SKILL.md',
+      },
     ]);
     mockConfig = {
       ...mockConfig,
@@ -1639,6 +1656,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       isMcpServerDisabled: vi
         .fn()
         .mockImplementation((name: string) => name === 'disabled'),
+      getDisabledSkillNames: vi
+        .fn()
+        .mockReturnValue(new Set(['disabled-skill'])),
       getSkillManager: vi.fn().mockReturnValue({ listSkills }),
       getAuthType: vi.fn().mockReturnValue('qwen'),
       getAllConfiguredModels: vi.fn().mockReturnValue([
@@ -1812,9 +1832,28 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
           argumentHint: '[path]',
           modelInvocable: true,
         },
+        {
+          kind: 'skill',
+          status: 'ok',
+          name: 'manual-only',
+          description: 'Manual only',
+          level: 'project',
+          argumentHint: '[topic]',
+          modelInvocable: false,
+        },
+        {
+          kind: 'skill',
+          status: 'disabled',
+          name: 'disabled-skill',
+          description: 'Disabled by settings',
+          level: 'project',
+          modelInvocable: true,
+        },
       ],
     });
     expect(JSON.stringify(skills)).not.toContain('secret skill body');
+    expect(JSON.stringify(skills)).not.toContain('manual secret body');
+    expect(JSON.stringify(skills)).not.toContain('disabled secret body');
     expect(JSON.stringify(skills)).not.toContain('/secret');
     expect(JSON.stringify(skills)).not.toContain('secret-hook');
 

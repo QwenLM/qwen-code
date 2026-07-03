@@ -9,10 +9,11 @@ import { Storage } from '../config/storage.js';
 
 let tmpDir: string;
 
-function makeConfig() {
-  const scheduler = new CronScheduler(tmpDir);
+function makeConfig(maxAgeDays = 7) {
+  const scheduler = new CronScheduler(tmpDir, maxAgeDays * 24 * 60 * 60 * 1000);
   return {
     getCronScheduler: () => scheduler,
+    getCronRecurringMaxAgeDays: () => maxAgeDays,
     getProjectRoot: () => tmpDir,
     _scheduler: scheduler,
   } as unknown as import('../config/config.js').Config & {
@@ -52,6 +53,34 @@ describe('CronCreateTool', () => {
     expect(result.llmContent).toContain('Auto-expires after 7 days');
     expect(result.llmContent).toContain('Session-only');
     expect(config._scheduler.list()).toHaveLength(1);
+  });
+
+  it('reports a configured recurring max age in days', async () => {
+    config = makeConfig(30);
+    tool = new CronCreateTool(config);
+    const invocation = tool.build({
+      cron: '*/5 * * * *',
+      prompt: 'check status',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('Auto-expires after 30 days');
+    expect(tool.description).toContain('auto-expire after 30 days');
+  });
+
+  it('reports no expiry when the recurring max age is disabled', async () => {
+    config = makeConfig(Infinity);
+    tool = new CronCreateTool(config);
+    const invocation = tool.build({
+      cron: '*/5 * * * *',
+      prompt: 'check status',
+    });
+    const result = await invocation.execute(new AbortController().signal);
+    expect(result.error).toBeUndefined();
+    expect(result.llmContent).toContain('Never auto-expires');
+    expect(tool.description).toContain('never auto-expire');
+    const job = config._scheduler.list()[0]!;
+    expect(job.expiresAt).toBe(Infinity);
   });
 
   it('creates a one-shot job when recurring=false', async () => {

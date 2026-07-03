@@ -88,7 +88,7 @@ If the interval does not cleanly divide its unit (for example `7m` gives uneven 
    - `prompt`: the parsed prompt from above, verbatim (slash commands are passed through unchanged)
    - `recurring`: `true`
    - `durable`: `true` if the user's language implies persistence ("keep doing this", "set this up permanently", "every day even after restart"). Otherwise omit (defaults to session-only).
-2. Briefly confirm: what is scheduled, the cron expression, the human-readable cadence, that recurring tasks auto-expire after 7 days, and that they can cancel sooner with CronDelete (include the job ID).
+2. Briefly confirm: what is scheduled, the cron expression, the human-readable cadence, the auto-expiry (7 days after creation by default — the CronCreate tool description states the configured limit, which may differ or be disabled), and that they can cancel sooner with CronDelete (include the job ID).
 3. Then immediately execute the parsed prompt now. Do not wait for the first cron fire.
    - If it is a slash command, invoke it via the Skill tool.
    - Otherwise, act on it directly.

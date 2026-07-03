@@ -5,7 +5,7 @@ import { useListboxKeyboard } from '../../hooks/useListboxKeyboard';
 import { dp } from './dialogStyles';
 import styles from './ModelDialog.module.css';
 
-export type ModelDialogMode = 'main' | 'fast' | 'voice';
+export type ModelDialogMode = 'main' | 'fast' | 'voice' | 'vision';
 
 interface ModelDialogProps {
   mode?: ModelDialogMode;
@@ -107,6 +107,7 @@ export function ModelDialog({
   const listRef = useRef<HTMLDivElement>(null);
   const isFastMode = mode === 'fast';
   const isVoiceMode = mode === 'voice';
+  const isVisionMode = mode === 'vision';
   const currentIdx = availableModels.findIndex((m) => m.id === currentModel);
   const [activeIndex, setActiveIndex] = useState(
     currentIdx >= 0 ? currentIdx : 0,
@@ -171,7 +172,9 @@ export function ModelDialog({
             ? t('model.setFast')
             : isVoiceMode
               ? t('model.setVoice')
-              : t('model.select')
+              : isVisionMode
+                ? t('model.setVision')
+                : t('model.select')
         }
       >
         {availableModels.length === 0 ? (
