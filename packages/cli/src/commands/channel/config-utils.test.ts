@@ -167,6 +167,17 @@ describe('parseChannelConfig', () => {
     expect(result.groups).toEqual({ g1: { mentionKeywords: ['@bot'] } });
   });
 
+  it('drops empty identity and memory scope objects', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'bare',
+      identity: { id: '', displayName: null, description: undefined },
+      memoryScope: { namespace: '', mode: undefined },
+    });
+
+    expect(result.identity).toBeUndefined();
+    expect(result.memoryScope).toBeUndefined();
+  });
+
   it('rejects a non-object identity', async () => {
     await expect(
       parseChannelConfig('bot', { type: 'bare', identity: 'ops' }),

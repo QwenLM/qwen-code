@@ -82,7 +82,7 @@ const external = [
 const BUNDLE_CHUNK_DIR = 'chunks';
 
 const mainBuild = esbuild.build({
-  entryPoints: { cli: 'packages/cli/index.ts' },
+  entryPoints: { cli: 'packages/cli/src/cli.ts' },
   bundle: true,
   outdir: 'dist',
   entryNames: '[name]',

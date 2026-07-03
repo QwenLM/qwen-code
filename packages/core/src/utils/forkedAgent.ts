@@ -581,6 +581,7 @@ export async function runForkedAgent(
 
     const context = new ContextState();
     context.set('task_prompt', params.taskPrompt);
+    context.set('hook_context', '');
     const execute = () =>
       runWithForkedModelRuntime(modelRuntime, async () => {
         await headless.execute(context, params.abortSignal);

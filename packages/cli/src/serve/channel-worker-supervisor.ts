@@ -12,6 +12,7 @@ import {
   QWEN_SERVER_TOKEN_ENV,
 } from './channel-worker-env.js';
 import { sanitizeLogText } from '@qwen-code/channel-base';
+import { redactLogCredentials } from '@qwen-code/acp-bridge/logRedaction';
 
 const DEFAULT_CHANNEL_WORKER_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_CHANNEL_WORKER_HEARTBEAT_TIMEOUT_MS = 45_000;
@@ -290,7 +291,10 @@ function sensitiveEnvValues(env: NodeJS.ProcessEnv): string[] {
     /(^|_)(TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIAL|PASSWORD|PASSWD|PASSPHRASE|BASIC_AUTH|AUTH_TOKEN|AUTHORIZATION|SESSION_SECRET|SESSION_TOKEN|SESSION_KEY|SESSION_COOKIE|DSN|CONNECTION_STRING)($|_)/i;
   return Object.entries(env)
     .filter(([key, value]) => sensitiveKey.test(key) && value !== undefined)
-    .map(([, value]) => value!)
+    .flatMap(([, value]) => {
+      const lines = value!.split('\n').filter((l) => l.length >= 4);
+      return lines.length > 0 ? [value!, ...lines] : [value!];
+    })
     .filter((value) => value.length >= 4);
 }
 
@@ -321,7 +325,10 @@ function createWorkerLogRedactor(opts: WorkerLogRedactionOptions) {
     for (const secretPattern of secretPatterns) {
       redacted = redacted.replace(secretPattern, '<redacted>');
     }
-    return redacted;
+    // Pattern-based redaction for runtime-acquired credentials (Bearer
+    // tokens, Authorization headers, API key prefixes, etc.) that are
+    // not in the worker's process.env.
+    return redactLogCredentials(redacted);
   };
 }
 
@@ -729,9 +736,11 @@ export function createChannelWorkerSupervisor(
         if (message.pid !== undefined && currentPid !== undefined) {
           if (message.pid !== currentPid) return;
         }
+        // Use daemon clock, not worker-supplied message.at — a compromised
+        // adapter could inject arbitrary data via the IPC heartbeat.
         snapshot = {
           ...snapshot,
-          lastHeartbeatAt: message.at ?? new Date().toISOString(),
+          lastHeartbeatAt: new Date().toISOString(),
         };
         armStaleHeartbeatTimer(startedChild);
       };
