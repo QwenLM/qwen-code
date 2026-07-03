@@ -10570,13 +10570,18 @@ describe('createServeApp', () => {
   });
 
   describe('PATCH /session/:id/metadata', () => {
+    const tokenOpts: ServeOptions = { ...baseOpts, token: 'secret' };
+    const auth = (req: request.Test): request.Test =>
+      req
+        .set('Host', `127.0.0.1:${tokenOpts.port}`)
+        .set('Authorization', 'Bearer secret');
+
     it('200 on successful metadata update', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      const res = await request(app)
-        .patch('/session/session-A/metadata')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ displayName: 'My Session' });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).patch('/session/session-A/metadata'),
+      ).send({ displayName: 'My Session' });
       expect(res.status).toBe(200);
       expect(res.body).toEqual({
         sessionId: 'session-A',
@@ -10591,22 +10596,20 @@ describe('createServeApp', () => {
 
     it('requires mutation auth before updating metadata', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp({ ...baseOpts, token: 'secret' }, undefined, {
-        bridge,
-      });
+      const noTokenApp = createServeApp(baseOpts, undefined, { bridge });
 
-      const noAuth = await request(app)
+      const noToken = await request(noTokenApp)
         .patch('/session/session-A/metadata')
         .set('Host', `127.0.0.1:${baseOpts.port}`)
         .send({ displayName: 'blocked' });
-      expect(noAuth.status).toBe(401);
+      expect(noToken.status).toBe(401);
+      expect(noToken.body.code).toBe('token_required');
       expect(bridge.updateMetadataCalls).toHaveLength(0);
 
-      const authed = await request(app)
-        .patch('/session/session-A/metadata')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .set('Authorization', 'Bearer secret')
-        .send({ displayName: 'allowed' });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const authed = await auth(
+        request(app).patch('/session/session-A/metadata'),
+      ).send({ displayName: 'allowed' });
       expect(authed.status).toBe(200);
       expect(bridge.updateMetadataCalls).toHaveLength(1);
       expect(bridge.updateMetadataCalls[0]?.metadata).toEqual({
@@ -10616,10 +10619,8 @@ describe('createServeApp', () => {
 
     it('passes client identity context', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      const res = await request(app)
-        .patch('/session/session-A/metadata')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(request(app).patch('/session/session-A/metadata'))
         .set('X-Qwen-Client-Id', 'client-1')
         .send({ displayName: 'test' });
       expect(res.status).toBe(200);
@@ -10630,11 +10631,10 @@ describe('createServeApp', () => {
 
     it('400 when displayName is not a string', async () => {
       const bridge = fakeBridge();
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      const res = await request(app)
-        .patch('/session/session-A/metadata')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ displayName: 123 });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).patch('/session/session-A/metadata'),
+      ).send({ displayName: 123 });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_metadata');
       expect(res.body.field).toBe('displayName');
@@ -10646,11 +10646,10 @@ describe('createServeApp', () => {
           throw new SessionNotFoundError(sessionId);
         },
       });
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      const res = await request(app)
-        .patch('/session/missing/metadata')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ displayName: 'test' });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).patch('/session/missing/metadata'),
+      ).send({ displayName: 'test' });
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('missing');
     });
@@ -10664,11 +10663,10 @@ describe('createServeApp', () => {
           );
         },
       });
-      const app = createServeApp(baseOpts, undefined, { bridge });
-      const res = await request(app)
-        .patch('/session/session-A/metadata')
-        .set('Host', `127.0.0.1:${baseOpts.port}`)
-        .send({ displayName: 'x'.repeat(300) });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+      const res = await auth(
+        request(app).patch('/session/session-A/metadata'),
+      ).send({ displayName: 'x'.repeat(300) });
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_metadata');
     });

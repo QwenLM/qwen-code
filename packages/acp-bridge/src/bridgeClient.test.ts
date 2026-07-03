@@ -604,8 +604,8 @@ describe('BridgeClient — artifact ingress', () => {
       } as Parameters<BridgeClient['sessionUpdate']>[0]);
 
       expect(publish.mock.calls.map(([event]) => event.type)).toEqual([
-        'artifact_changed',
         'session_update',
+        'artifact_changed',
       ]);
       expect(publish).toHaveBeenCalledWith(
         expect.objectContaining({ type: 'session_update' }),

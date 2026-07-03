@@ -244,6 +244,28 @@ describe('ToolCallEmitter', () => {
       });
     });
 
+    it('omits structured artifacts from failed tool results', async () => {
+      await emitter.emitResult({
+        toolName: ToolNames.RECORD_ARTIFACT,
+        callId: 'call-failed-artifact',
+        success: false,
+        message: [],
+        error: new Error('record failed'),
+        artifacts: [{ title: 'Dropped', url: 'https://example.com/drop' }],
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-failed-artifact',
+          status: 'failed',
+          _meta: expect.not.objectContaining({
+            artifacts: expect.anything(),
+          }),
+        }),
+      );
+    });
+
     it('should handle diff display format', async () => {
       await emitter.emitResult({
         toolName: 'edit_file',

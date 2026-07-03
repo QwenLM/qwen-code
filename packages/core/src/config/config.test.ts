@@ -1800,6 +1800,31 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
     });
 
+    it('registers only record_artifact for daemon artifact metadata', async () => {
+      const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
+      process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
+      try {
+        const config = new Config({
+          ...baseParams,
+          interactive: false,
+          sdkMode: false,
+        });
+        await config.initialize();
+
+        const registeredNames = (
+          ToolRegistry.prototype.registerFactory as Mock
+        ).mock.calls.map((call) => call[0]);
+        expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
+        expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+      } finally {
+        if (originalForceEnable === undefined) {
+          delete process.env['QWEN_CODE_ENABLE_ARTIFACT'];
+        } else {
+          process.env['QWEN_CODE_ENABLE_ARTIFACT'] = originalForceEnable;
+        }
+      }
+    });
+
     describe('isArtifactEnabled', () => {
       const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
       const originalDisable = process.env['QWEN_CODE_DISABLE_ARTIFACT'];
@@ -1863,7 +1888,7 @@ describe('Server Config (config.ts)', () => {
         expect(config.isArtifactEnabled()).toBe(false);
       });
 
-      it('lets QWEN_CODE_ENABLE_ARTIFACT force-enable daemon CLI use', () => {
+      it('keeps the Artifact tool disabled for daemon CLI env enablement', () => {
         process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
 
         const config = new Config({
@@ -1872,7 +1897,8 @@ describe('Server Config (config.ts)', () => {
           sdkMode: false,
         });
 
-        expect(config.isArtifactEnabled()).toBe(true);
+        expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
       });
 
       it('lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use', () => {

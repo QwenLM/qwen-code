@@ -4903,14 +4903,21 @@ export class Config {
   isArtifactEnabled(): boolean {
     // Artifacts are experimental and opt-in. Publishing writes outside the
     // project and opens a browser, so it is limited to interactive, non-SDK
-    // sessions by default. QWEN_CODE_DISABLE_ARTIFACT hard-disables;
-    // QWEN_CODE_ENABLE_ARTIFACT force-enables non-SDK daemon sessions for the
-    // session artifact API.
+    // sessions. QWEN_CODE_DISABLE_ARTIFACT hard-disables both artifact tools;
+    // QWEN_CODE_ENABLE_ARTIFACT only force-enables the metadata-only
+    // record_artifact tool for non-SDK daemon sessions.
+    if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
+    if (this.sdkMode) return false;
+    if (!this.interactive) return false;
+    if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
+    return this.artifactEnabled;
+  }
+
+  isRecordArtifactEnabled(): boolean {
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode) return false;
     if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
-    if (!this.interactive) return false;
-    return this.artifactEnabled;
+    return this.isArtifactEnabled();
   }
 
   getArtifactPublisherKind(): 'local' | 'host' | 'oss' {
@@ -6021,6 +6028,8 @@ export class Config {
         );
         return new ArtifactTool(this);
       });
+    }
+    if (this.isRecordArtifactEnabled()) {
       await registerLazy(ToolNames.RECORD_ARTIFACT, async () => {
         const { RecordArtifactTool } = await import(
           '../tools/record-artifact.js'

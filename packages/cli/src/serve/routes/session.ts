@@ -985,7 +985,7 @@ export function registerSessionRoutes(
 
   app.patch(
     '/session/:id/metadata',
-    mutate(),
+    mutate({ strict: true }),
     withMutableSession('PATCH /session/:id/metadata', (req, res, sessionId) => {
       const body = safeBody(req);
       const clientId = parseClientIdHeader(req, res);

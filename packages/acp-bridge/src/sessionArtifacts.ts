@@ -531,11 +531,15 @@ export class SessionArtifactStore {
     const candidates = Array.from(this.artifacts.values()).filter(
       (artifact) => !createdInThisBatch.has(artifact.id),
     );
+    const now = Date.now();
+    const staleWorkspaceCandidates = candidates
+      .filter((artifact) => artifact.workspacePath)
+      .filter((artifact) => shouldRefreshWorkspaceStatus(artifact, now));
     await runInBatches(
-      candidates,
+      staleWorkspaceCandidates,
       WORKSPACE_STATUS_REFRESH_BATCH_SIZE,
       (artifact) =>
-        this.refreshWorkspaceStatus(artifact, { onError: 'preserve' }),
+        this.refreshWorkspaceStatus(artifact, { onError: 'preserve', now }),
     );
     const sourceCounts = countByRetentionSource(this.artifacts.values());
 
@@ -662,6 +666,9 @@ function mergeArtifact(
       ? (incoming.managedId ?? existing.managedId)
       : existing.managedId,
     url: publishedUpdate ? (incoming.url ?? existing.url) : existing.url,
+    workspacePath: publishedUpdate
+      ? undefined
+      : (existing.workspacePath ?? incoming.workspacePath),
     mimeType: publishedUpdate
       ? (incoming.mimeType ?? existing.mimeType)
       : existing.mimeType,

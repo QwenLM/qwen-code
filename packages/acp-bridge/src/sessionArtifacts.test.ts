@@ -1219,6 +1219,59 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('restores workspacePath when a healed artifact is recorded again', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's7-symlink-healed',
+      workspaceCwd: workspace,
+    });
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+      await fs.writeFile(path.join(outside, 'secret.txt'), 'secret');
+      const created = await store.upsertMany(
+        [{ title: 'Report', workspacePath: 'report.txt' }],
+        { strict: true },
+      );
+
+      await fs.rm(path.join(workspace, 'report.txt'));
+      await fs.symlink(
+        path.join(outside, 'secret.txt'),
+        path.join(workspace, 'report.txt'),
+      );
+
+      vi.useFakeTimers();
+      vi.setSystemTime(new Date(Date.now() + 6_000));
+      expect((await store.list()).artifacts[0]).not.toHaveProperty(
+        'workspacePath',
+      );
+
+      await fs.rm(path.join(workspace, 'report.txt'));
+      await fs.writeFile(path.join(workspace, 'report.txt'), 'healed');
+      const healed = await store.upsertMany([
+        { title: 'Report', workspacePath: 'report.txt' },
+      ]);
+
+      expect(healed.changes).toContainEqual(
+        expect.objectContaining({
+          action: 'updated',
+          artifactId: created.changes[0]?.artifactId,
+          artifact: expect.objectContaining({
+            status: 'available',
+            workspacePath: 'report.txt',
+            sizeBytes: 6,
+          }),
+        }),
+      );
+      expect((await store.list()).artifacts[0]).toMatchObject({
+        status: 'available',
+        workspacePath: 'report.txt',
+      });
+    } finally {
+      vi.useRealTimers();
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
   it('resets cached workspace realpath after a refresh failure', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's7-realpath-error',
@@ -1344,6 +1397,8 @@ describe('SessionArtifactStore', () => {
       { title: 'Still missing', workspacePath: 'still-missing.txt' },
     ]);
     await fs.writeFile(path.join(workspace, 'restored.txt'), 'ok');
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
 
     const overflow = await store.upsertMany([
       { title: 'New link', url: 'https://example.com/new' },
@@ -1359,6 +1414,33 @@ describe('SessionArtifactStore', () => {
     expect(
       (await store.list()).artifacts.map((artifact) => artifact.id),
     ).toContain(restored.changes[0]?.artifactId);
+  });
+
+  it('keeps fresh cached workspace status during overflow eviction', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's8-fresh-overflow-cache',
+      workspaceCwd: workspace,
+      maxArtifacts: 2,
+    });
+    const restored = await store.upsertMany([
+      { title: 'Restored later', workspacePath: 'restored.txt' },
+    ]);
+    await store.upsertMany([
+      { title: 'Still missing', workspacePath: 'still-missing.txt' },
+    ]);
+    await fs.writeFile(path.join(workspace, 'restored.txt'), 'ok');
+
+    const overflow = await store.upsertMany([
+      { title: 'New link', url: 'https://example.com/new' },
+    ]);
+
+    expect(overflow.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: restored.changes[0]?.artifactId,
+        reason: 'eviction',
+      }),
+    );
   });
 
   it('evicts from over-reserved sources before older artifacts from other sources', async () => {

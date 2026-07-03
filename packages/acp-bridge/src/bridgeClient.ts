@@ -624,14 +624,6 @@ export class BridgeClient implements Client {
           entry.sessionId,
         )
       : [];
-    if (entry) {
-      if (artifacts.length > 0) {
-        await this.upsertAndPublishArtifacts(entry, artifacts, {
-          trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
-        });
-      }
-    }
-
     const publishParams = sanitizeSessionUpdateArtifacts(params, updateMeta);
     events.publish({
       type: 'session_update',
@@ -639,6 +631,13 @@ export class BridgeClient implements Client {
       ...originator,
       ...(serverTimestamp !== undefined ? { _meta: { serverTimestamp } } : {}),
     });
+    if (entry) {
+      if (artifacts.length > 0) {
+        await this.upsertAndPublishArtifacts(entry, artifacts, {
+          trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
+        });
+      }
+    }
   }
 
   /**
