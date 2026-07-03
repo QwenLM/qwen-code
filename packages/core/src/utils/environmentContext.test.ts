@@ -790,6 +790,25 @@ describe('changed capability reminders', () => {
     expect(result).toContain('"mcp__old__tool"');
   });
 
+  it('renders tool_search hint for MCP tools in mixed added and removed reminders', () => {
+    const result = buildChangedMcpToolsReminder(
+      [
+        {
+          name: 'mcp__new__tool',
+          description: 'New tool',
+          serverName: 'new',
+        },
+      ],
+      ['mcp__old__tool'],
+    );
+
+    expect(result).not.toBeNull();
+    expect(result).toContain('reachable via `tool_search`');
+    expect(result).toContain('Call with `select:<name>`');
+    expect(result).toContain('"mcp__new__tool"');
+    expect(result).toContain('"mcp__old__tool"');
+  });
+
   it('renders added and removed agents', () => {
     const result = buildChangedAgentsReminder(
       [{ name: 'reviewer', description: 'Reviews code' }],
@@ -812,5 +831,19 @@ describe('changed capability reminders', () => {
     expect(result).toContain('became available after startup');
     expect(result).not.toContain('changed after startup');
     expect(result).toContain('"reviewer"');
+  });
+
+  it('caps agent descriptions in reminders', () => {
+    const result = buildAddedAgentsReminder([
+      {
+        name: 'reviewer',
+        description: `${'A'.repeat(500)}\nsecond line should be omitted`,
+      },
+    ]);
+
+    expect(result).not.toBeNull();
+    expect(result).toContain('"reviewer"');
+    expect(result).not.toContain('second line should be omitted');
+    expect(result).not.toContain('A'.repeat(500));
   });
 });

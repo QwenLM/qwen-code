@@ -8746,6 +8746,131 @@ Other open files:
       );
       priv().announcedAgentReminderNames = new Set(['old-agent']);
       priv().agentRemindersInitialized = true;
+      vi.mocked(buildChangedAgentsReminder).mockClear();
+    });
+
+    it('returns early when the Agent tool is not registered', async () => {
+      const toolReg = mockConfig.getToolRegistry();
+      vi.mocked(toolReg!.getTool).mockReturnValue(undefined);
+      const listSubagents = vi.fn().mockResolvedValue([]);
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents,
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(listSubagents).not.toHaveBeenCalled();
+      expect(buildChangedAgentsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('seeds current agents on first drain without emitting a reminder', async () => {
+      priv().announcedAgentReminderNames = new Set();
+      priv().agentRemindersInitialized = false;
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'seed-agent',
+            description: 'Seed agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(priv().agentRemindersInitialized).toBe(true);
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['seed-agent']),
+      );
+      expect(buildChangedAgentsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('returns early when listing agents fails', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi
+          .fn()
+          .mockRejectedValue(new Error('agent list failed')),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['old-agent']),
+      );
+      expect(buildChangedAgentsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('emits no reminder when agents are unchanged', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'old-agent',
+            description: 'Old agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(buildChangedAgentsReminder).toHaveBeenCalledWith([], []);
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('announces added-only agents', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'old-agent',
+            description: 'Old agent',
+          },
+          {
+            name: 'new-agent',
+            description: 'New agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(buildChangedAgentsReminder).toHaveBeenCalledWith(
+        [{ name: 'new-agent', description: 'New agent' }],
+        [],
+      );
+      expect(addHistorySpy).toHaveBeenCalled();
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['old-agent', 'new-agent']),
+      );
+    });
+
+    it('announces removed-only agents', async () => {
+      priv().announcedAgentReminderNames = new Set(['old-agent', 'stay-agent']);
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'stay-agent',
+            description: 'Stay agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(buildChangedAgentsReminder).toHaveBeenCalledWith(
+        [],
+        ['old-agent'],
+      );
+      expect(addHistorySpy).toHaveBeenCalled();
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['stay-agent']),
+      );
     });
 
     it('announces added and removed agents', async () => {
@@ -8774,6 +8899,27 @@ Other open files:
           },
         ],
       });
+    });
+
+    it('keeps agent reminder state unchanged if history append fails', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'new-agent',
+            description: 'New agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      vi.spyOn(client.getChat(), 'addHistory').mockImplementation(() => {
+        throw new Error('history failed');
+      });
+
+      await expect(priv().drainAgentReminders()).rejects.toThrow(
+        'history failed',
+      );
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['old-agent']),
+      );
     });
   });
 });

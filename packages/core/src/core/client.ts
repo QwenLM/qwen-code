@@ -232,6 +232,9 @@ export class GeminiClient {
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
   private announcedDeferredToolNames = new Set<string>();
+  // MCP-only subset the model has actually seen via startup or delta reminders.
+  // `announcedDeferredToolNames` is broader and exists for deferred tool-search
+  // dedup; MCP add/remove deltas need this narrower model-visible set.
   private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
   private pendingRemovedMcpToolNames = new Set<string>();
@@ -1146,7 +1149,6 @@ export class GeminiClient {
     for (const name of this.announcedAgentReminderNames) {
       if (!currentByName.has(name)) {
         removedAgentNames.push(name);
-        this.announcedAgentReminderNames.delete(name);
       }
     }
 
@@ -1158,7 +1160,6 @@ export class GeminiClient {
         name: agent.name,
         description: agent.description,
       });
-      this.announcedAgentReminderNames.add(agent.name);
     }
 
     const reminder = buildChangedAgentsReminder(addedAgents, removedAgentNames);
@@ -1169,6 +1170,13 @@ export class GeminiClient {
       role: 'user',
       parts: [{ text: reminder }],
     });
+
+    for (const name of removedAgentNames) {
+      this.announcedAgentReminderNames.delete(name);
+    }
+    for (const agent of addedAgents) {
+      this.announcedAgentReminderNames.add(agent.name);
+    }
   }
 
   private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
