@@ -1079,18 +1079,11 @@ describe('restoreQQState validation filters', () => {
   it('filters non-safe-integer msgSeqMap values (fractional, overflow, Infinity, -Infinity)', () => {
     vi.mocked(existsSync).mockReturnValue(true);
     // Number.MAX_SAFE_INTEGER + 1 = 9007199254740992 — loses precision
-    // 1e999 evaluates to Infinity in JavaScript — not a safe integer
+    // 1e999 / -1e999 are parsed as Infinity / -Infinity by JSON.parse
+    // Use raw JSON string: JSON.stringify(Infinity) → "null", which
+    // bypasses Number.isSafeInteger (caught by typeof check instead).
     vi.mocked(readFileSync).mockReturnValue(
-      JSON.stringify({
-        msgSeqMap: [
-          ['a', 1.5],
-          ['b', Number.MAX_SAFE_INTEGER + 1],
-          ['c', Infinity],
-          ['d', -Infinity],
-          ['e', 42],
-          ['f', 0],
-        ],
-      }),
+      '{"msgSeqMap":[["a",1.5],["b",9007199254740992],["c",1e999],["d",-1e999],["e",42],["f",0]]}',
     );
 
     const ch = makeChannel();
