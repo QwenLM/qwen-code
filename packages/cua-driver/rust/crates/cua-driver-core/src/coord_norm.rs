@@ -87,7 +87,8 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
             }
         } else if screenshot_w == 0 {
             // No window basis available — two distinct cases:
-            //  1. Desktop-scope (no pid/window_id): fall back to screen size.
+            //  1. Desktop-scope (no pid/window_id): use desktop screenshot size
+            //     (physical pixels from get_desktop_state).
             //  2. Window-scope but get_window_state not yet called: leave as-is
             //     to avoid mapping against the wrong basis.
             let has_window_target = args.get("pid").is_some_and(|v| !v.is_null())
@@ -95,7 +96,7 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
             if has_window_target {
                 continue;
             }
-            match screen {
+            match desktop_screenshot_size() {
                 Some(s) => s,
                 None => continue,
             }
@@ -297,52 +298,73 @@ pub fn ingest_window_size(tool: &str, args: &Value, result: &ToolResult) {
 
 // ── Screen-size cache (for move_cursor, which is screen-space) ────────────────
 
-/// Screen size (from `get_screen_size`) — the basis for move_cursor's
-/// screen-space coordinates. Single global; the agent cursor overlay lives on
-/// the main display.
+/// Logical screen size (from `get_screen_size`) — the basis for move_cursor's
+/// screen-space coordinates. The agent cursor overlay operates in CGEvent screen
+/// points (logical), not physical pixels.
 static SCREEN_SIZE: OnceLock<Mutex<Option<(u32, u32)>>> = OnceLock::new();
 
 fn screen_cache() -> &'static Mutex<Option<(u32, u32)>> {
     SCREEN_SIZE.get_or_init(|| Mutex::new(None))
 }
 
-/// Cache the screen size for normalizing move_cursor coordinates.
+/// Cache the logical screen size for normalizing move_cursor coordinates.
 pub fn put_screen_size(w: u32, h: u32) {
     if let Ok(mut c) = screen_cache().lock() {
         *c = Some((w, h));
     }
 }
 
-/// The cached screen size, if a `get_screen_size` has been seen.
+/// The cached logical screen size, if a `get_screen_size` has been seen.
 pub fn screen_size() -> Option<(u32, u32)> {
     screen_cache().lock().ok().and_then(|c| *c)
 }
 
-/// Ingest the screen size from a `get_screen_size` or `get_desktop_state`
-/// result into the cache. For desktop-scope coordinate normalization the
-/// relevant basis is the **screenshot pixel size** (what the model sees),
-/// not the logical display size — on Retina displays these differ by the
-/// backing scale factor.
+// ── Desktop screenshot-size cache (for desktop-scope clicks) ────────────────
+
+/// Physical screenshot size (from `get_desktop_state`) — the basis for
+/// desktop-scope click/scroll coordinates. The model reasons over the full-
+/// display PNG at native pixel size, so denormalization must map 0–1000 to
+/// physical pixels. Separate from `SCREEN_SIZE` (logical points) because
+/// move_cursor operates in screen points while desktop-scope clicks operate
+/// in screenshot pixels.
+static DESKTOP_SCREENSHOT_SIZE: OnceLock<Mutex<Option<(u32, u32)>>> = OnceLock::new();
+
+fn desktop_screenshot_cache() -> &'static Mutex<Option<(u32, u32)>> {
+    DESKTOP_SCREENSHOT_SIZE.get_or_init(|| Mutex::new(None))
+}
+
+/// Cache the desktop screenshot size (physical pixels) for desktop-scope coords.
+pub fn put_desktop_screenshot_size(w: u32, h: u32) {
+    if let Ok(mut c) = desktop_screenshot_cache().lock() {
+        *c = Some((w, h));
+    }
+}
+
+/// The cached desktop screenshot size, if a `get_desktop_state` has been seen.
+pub fn desktop_screenshot_size() -> Option<(u32, u32)> {
+    desktop_screenshot_cache().lock().ok().and_then(|c| *c)
+}
+
+/// Ingest screen/desktop sizes from tool results into the appropriate caches.
+/// `get_screen_size` → logical points (for move_cursor).
+/// `get_desktop_state` → physical screenshot pixels (for desktop-scope clicks).
 pub fn ingest_screen_size(tool: &str, result: &ToolResult) {
     if tool != "get_screen_size" && tool != "get_desktop_state" {
         return;
     }
     if let Some(sc) = result.structured_content.as_ref() {
-        let (w, h) = if tool == "get_desktop_state" {
-            // Use screenshot_width/height (physical pixels) — this is the
-            // image the model reasons over and the basis normalize_result
-            // rewrites to 1000. Using screen_width (logical points) would
-            // produce 1/scale coordinate drift on Retina displays.
+        if tool == "get_desktop_state" {
             let w = sc.get("screenshot_width").and_then(|v| v.as_u64());
             let h = sc.get("screenshot_height").and_then(|v| v.as_u64());
-            (w, h)
+            if let (Some(w), Some(h)) = (w, h) {
+                put_desktop_screenshot_size(w as u32, h as u32);
+            }
         } else {
             let w = sc.get("width").and_then(|v| v.as_u64());
             let h = sc.get("height").and_then(|v| v.as_u64());
-            (w, h)
-        };
-        if let (Some(w), Some(h)) = (w, h) {
-            put_screen_size(w as u32, h as u32);
+            if let (Some(w), Some(h)) = (w, h) {
+                put_screen_size(w as u32, h as u32);
+            }
         }
     }
 }
@@ -613,19 +635,19 @@ mod tests {
     // ---- desktop-scope ----
 
     #[test]
-    fn denormalize_click_falls_back_to_screen_for_desktop_scope() {
-        put_screen_size(2560, 1440);
+    fn denormalize_click_falls_back_to_desktop_screenshot_size() {
+        put_desktop_screenshot_size(3840, 2160);
         let mut args = json!({ "x": 500.0, "y": 500.0 });
         // screenshot_w=0 simulates no window cache (desktop-scope, no pid)
         denormalize_args("click", &mut args, 0, 0);
-        assert_eq!(args["x"], json!(1280.0)); // 500/1000*2560
-        assert_eq!(args["y"], json!(720.0));  // 500/1000*1440
+        assert_eq!(args["x"], json!(1920.0)); // 500/1000*3840
+        assert_eq!(args["y"], json!(1080.0)); // 500/1000*2160
     }
 
     #[test]
     fn denormalize_click_skips_window_scope_without_cache() {
-        put_screen_size(2560, 1440);
-        // pid present but no get_window_state yet → must NOT fall back to screen
+        put_desktop_screenshot_size(3840, 2160);
+        // pid present but no get_window_state yet → must NOT fall back
         let mut args = json!({ "pid": 42, "x": 500.0, "y": 500.0 });
         denormalize_args("click", &mut args, 0, 0);
         assert_eq!(args["x"], json!(500.0)); // unchanged
@@ -633,13 +655,25 @@ mod tests {
     }
 
     #[test]
+    fn denormalize_move_cursor_not_affected_by_desktop_cache() {
+        // move_cursor uses screen_size (logical), not desktop_screenshot_size.
+        // Even if desktop cache is populated, move_cursor must use screen cache.
+        put_screen_size(1920, 1080);
+        put_desktop_screenshot_size(3840, 2160);
+        let mut args = json!({ "x": 500.0, "y": 500.0 });
+        denormalize_args("move_cursor", &mut args, 0, 0);
+        assert_eq!(args["x"], json!(960.0));  // 500/1000*1920 (logical)
+        assert_eq!(args["y"], json!(540.0));  // 500/1000*1080 (logical)
+    }
+
+    #[test]
     fn normalize_result_rewrites_get_desktop_state() {
         let mut r = ToolResult::text("ok")
             .with_structured(json!({
-                "screenshot_width": 2560,
-                "screenshot_height": 1440,
-                "screen_width": 1280,
-                "screen_height": 800,
+                "screenshot_width": 3840,
+                "screenshot_height": 2160,
+                "screen_width": 1920,
+                "screen_height": 1080,
             }));
         normalize_result("get_desktop_state", &mut r);
         let sc = r.structured_content.as_ref().unwrap();
@@ -649,9 +683,8 @@ mod tests {
 
     #[test]
     fn ingest_screen_size_from_get_desktop_state() {
-        // Retina display: screen_width is logical points, screenshot_width is
-        // physical pixels. The cache must store screenshot (physical) dimensions
-        // because that's the image basis the model operates on.
+        // Retina: get_desktop_state writes to desktop_screenshot cache (physical),
+        // NOT to screen cache (logical).
         let r = ToolResult::text("ok")
             .with_structured(json!({
                 "screen_width": 1920,
@@ -661,6 +694,15 @@ mod tests {
                 "scale_factor": 2.0,
             }));
         ingest_screen_size("get_desktop_state", &r);
-        assert_eq!(screen_size(), Some((3840, 2160)));
+        assert_eq!(desktop_screenshot_size(), Some((3840, 2160)));
+    }
+
+    #[test]
+    fn ingest_get_screen_size_does_not_pollute_desktop_cache() {
+        let r = ToolResult::text("ok")
+            .with_structured(json!({ "width": 1920, "height": 1080, "scale_factor": 2.0 }));
+        ingest_screen_size("get_screen_size", &r);
+        assert_eq!(screen_size(), Some((1920, 1080)));
+        // desktop cache should not be touched
     }
 }
