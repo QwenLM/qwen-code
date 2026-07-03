@@ -35,10 +35,7 @@ export async function fetchAccessToken(
   });
 
   if (!resp.ok) {
-    const body = await resp.text().catch(() => '');
-    throw new Error(
-      `QQ Bot token request failed (HTTP ${resp.status}): ${body.slice(0, 80)}`,
-    );
+    throw new Error(`QQ Bot token request failed (HTTP ${resp.status})`);
   }
 
   const data = (await resp.json()) as {
@@ -57,12 +54,7 @@ export async function fetchAccessToken(
 /**
  * Validate the WebSocket Gateway URL to enforce TLS.
  * - Enforces wss:// protocol (hard boundary — throws on non-wss).
- * - Logs a stderr warning for unexpected hostnames (advisory only).
- *
- * The real security value is blocking a ws:// cleartext downgrade that would
- * leak the bot token in the IDENTIFY frame. Since data.url comes from QQ's
- * authenticated TLS /gateway endpoint, exploitability is low — this is
- * defense-in-depth, not true SSRF prevention.
+ * - Rejects unexpected hostnames (hard boundary — throws on non-approved).
  */
 export function validateGatewayUrl(url: string): string {
   try {
@@ -72,15 +64,15 @@ export function validateGatewayUrl(url: string): string {
         `QQ Bot gateway URL must use wss:// protocol, got: ${parsed.protocol}`,
       );
     }
-    // Advisory: warn on unexpected gateway hostnames
+    // Hard reject: only allow known QQ/Tencent gateway hostnames
     const hostname = parsed.hostname.toLowerCase();
     if (
       !hostname.endsWith('.qq.com') &&
       !hostname.endsWith('.tencent.com') &&
       !hostname.endsWith('.tencentcs.com')
     ) {
-      process.stderr.write(
-        `[QQ] Warning: unexpected gateway hostname: ${hostname}\n`,
+      throw new Error(
+        `QQ Bot gateway URL has unexpected hostname: ${hostname}`,
       );
     }
     return url;

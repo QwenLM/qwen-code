@@ -220,14 +220,9 @@ describe('validateGatewayUrl', () => {
     expect(validateGatewayUrl(url)).toBe(url);
   });
 
-  it('warns on unknown hostname (advisory)', () => {
-    const spy = vi.spyOn(process.stderr, 'write');
+  it('rejects unknown hostname', () => {
     const url = 'wss://evil.example.com/ws';
-    expect(validateGatewayUrl(url)).toBe(url);
-    expect(spy).toHaveBeenCalledWith(
-      expect.stringContaining('unexpected gateway hostname'),
-    );
-    spy.mockRestore();
+    expect(() => validateGatewayUrl(url)).toThrow('unexpected hostname');
   });
 
   it('rejects invalid URLs', () => {

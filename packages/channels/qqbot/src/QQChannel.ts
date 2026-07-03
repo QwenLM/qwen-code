@@ -214,7 +214,9 @@ export class QQChannel extends ChannelBase {
           );
           await this.sleep(2000);
         } else {
-          throw e;
+          throw new Error(
+            sanitizeLogText(e instanceof Error ? e.message : String(e), 200),
+          );
         }
       }
     }
@@ -448,10 +450,11 @@ export class QQChannel extends ChannelBase {
         ) as Map<string, string>;
       }
       if (raw.msgSeqMap) {
-        // Validate: entries must be non-negative numbers
+        // Validate: entries must be non-negative safe integers
         this.msgSeqMap = new Map(
           (raw.msgSeqMap as Array<[string, unknown]>).filter(
-            ([, v]) => typeof v === 'number' && v >= 0,
+            ([, v]) =>
+              typeof v === 'number' && Number.isSafeInteger(v) && v >= 0,
           ),
         ) as Map<string, number>;
       }
