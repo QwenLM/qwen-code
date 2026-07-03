@@ -53,6 +53,30 @@ export function resolveDaemonTelemetryRoute(
       sessionId: sessionMetadata[1],
     };
   }
+  const sessionArtifacts = path.match(/^\/session\/([^/]+)\/artifacts$/);
+  if (sessionArtifacts?.[1]) {
+    if (req.method === 'GET') {
+      return {
+        route: 'GET /session/:id/artifacts',
+        sessionId: sessionArtifacts[1],
+      };
+    }
+    if (req.method === 'POST') {
+      return {
+        route: 'POST /session/:id/artifacts',
+        sessionId: sessionArtifacts[1],
+      };
+    }
+  }
+  const sessionArtifact = path.match(
+    /^\/session\/([^/]+)\/artifacts\/([^/]+)$/,
+  );
+  if (sessionArtifact?.[1] && req.method === 'DELETE') {
+    return {
+      route: 'DELETE /session/:id/artifacts/:artifactId',
+      sessionId: sessionArtifact[1],
+    };
+  }
   const sessionPermission = path.match(
     /^\/session\/([^/]+)\/permission\/([^/]+)$/,
   );
