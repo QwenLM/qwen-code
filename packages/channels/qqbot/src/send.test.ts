@@ -256,6 +256,22 @@ describe('session persistence paths', () => {
   });
 });
 
+// Security model for group sender-name sanitization:
+//   QQ group message authors supply their own nickname (username), which is
+//   attacker-controlled. The channel prepends `[sanitizeLogText(name, 64)]:`
+//   before each message body. An unsanitized name could contain:
+//
+//   - Newlines or ANSI escapes → forge fake audit entries in handleGroup logs
+//   - Unicode line breaks (NEL U+0085, C1 U+009B, LS U+2028) → bypass regex-
+//     based line-splitting, creating a second visual line in audit output
+//   - BiDi overrides (RLO U+202E) → reverse text in terminals that render it
+//   - Brackets `[]` → prematurely close the [name] tag so attacker content
+//     appears outside the bracket, impersonating a system message
+//
+//   `sanitizeLogText` (imported via vi.importActual so a trojan-source
+//   regression is caught) neutralizes: escape sequences, control chars,
+//   newlines, Unicode line separators, and BiDi overrides. The tests below
+//   validate each threat class individually.
 describe('group sender-name sanitization', () => {
   function makeChannel() {
     return new QQChannel(
@@ -878,6 +894,10 @@ describe('sendMessage', () => {
 
     const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
 
+    const saveSpy = vi.spyOn(
+      ch as unknown as { saveQQState: () => void },
+      'saveQQState',
+    );
     mockSendQQMessage.mockRejectedValue(new Error('network error'));
 
     await expect(ch.sendMessage('test-chat-id', 'hello')).rejects.toThrow(
@@ -885,6 +905,7 @@ describe('sendMessage', () => {
     );
 
     expect(msgSeqMap.get('msg-new')).toBe(0);
+    expect(saveSpy).toHaveBeenCalled();
   });
 });
 

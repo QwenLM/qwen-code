@@ -275,6 +275,9 @@ export class QQChannel extends ChannelBase {
             activeBody,
           );
           if (activeResp.ok) {
+            process.stderr.write(
+              `[QQ:${this.name}] Active retry succeeded for ${sanitizeLogText(chatId, 64)}\n`,
+            );
             const current = this.replyMsgId.get(chatId);
             if (current?.msgId === msgId) {
               this.msgSeqMap.set(msgId, nextSeq);
@@ -312,7 +315,7 @@ export class QQChannel extends ChannelBase {
           plainBody,
         );
         if (!fallbackRes.ok) {
-          await fallbackRes.text().catch(() => '');
+          const fbErrBody = await fallbackRes.text().catch(() => '');
           if (fallbackRes.status === 429) {
             process.stderr.write(
               `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on plain-text fallback for ${sanitizeLogText(chatId, 64)}\n`,
@@ -320,9 +323,13 @@ export class QQChannel extends ChannelBase {
             return;
           }
           process.stderr.write(
-            `[QQ:${this.name}] MESSAGE DROPPED: plain-text fallback failed (HTTP ${fallbackRes.status}) for ${sanitizeLogText(chatId, 64)}\n`,
+            `[QQ:${this.name}] MESSAGE DROPPED: plain-text fallback failed (HTTP ${fallbackRes.status}: ${sanitizeLogText(fbErrBody, 200)}) for ${sanitizeLogText(chatId, 64)}\n`,
           );
+          return;
         }
+        process.stderr.write(
+          `[QQ:${this.name}] Plain-text fallback succeeded for ${sanitizeLogText(chatId, 64)}\n`,
+        );
         return;
       }
 
@@ -332,8 +339,8 @@ export class QQChannel extends ChannelBase {
       // Rollback on failure if we haven't already
       if (msgId && !rollbackApplied) {
         this.msgSeqMap.set(msgId, nextSeq - 1);
-        this.saveQQState();
       }
+      if (msgId) this.saveQQState();
       // Note: sendQQMessage only throws on network/timeout errors, never HTTP status.
       // Rate-limit (429) handling is in the resp.status checks above.
       process.stderr.write(
@@ -1113,7 +1120,7 @@ export class QQChannel extends ChannelBase {
           clearInterval(this.seenCleanupTimer!);
           this.seenCleanupTimer = null;
         }
-      }, 60_000);
+      }, 60_000).unref();
     }
     return false;
   }
