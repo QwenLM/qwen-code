@@ -7,10 +7,10 @@ Use these first for independent categories:
 ```text
 #1d4ed8 blue
 #b45309 orange
+#166534 green
 #7c3aed purple
 #0891b2 cyan
 #be123c rose
-#166534 green
 ```
 
 Start with three to five colors. If the chart needs more categories than that,

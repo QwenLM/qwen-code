@@ -101,6 +101,7 @@ describe('package asset scripts', () => {
       'packages/core/src/skills/bundled/dataviz/references/palette.md',
       '# Palette\n',
     );
+    writeFile(rootDir, 'dist/bundled/dataviz/scripts/stale.test.js', 'stale\n');
     stubConsole();
 
     copyBundleAssets({ root: rootDir });
@@ -162,6 +163,18 @@ describe('package asset scripts', () => {
           'dataviz',
           'scripts',
           'chart.spec.tsx',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'stale.test.js',
         ),
       ),
     ).toBe(false);

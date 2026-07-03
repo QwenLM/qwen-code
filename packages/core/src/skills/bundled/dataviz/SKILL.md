@@ -4,7 +4,6 @@ description: Design guidance for charts, graphs, dashboards, maps, and data visu
 when_to_use: When creating or revising charts, graphs, dashboards, maps, plots, inline SVG, D3, Plotly, Recharts, matplotlib, or any Artifact page that visualizes data.
 allowedTools:
   - read_file
-  - run_shell_command
 ---
 
 # Dataviz

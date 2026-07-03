@@ -68,6 +68,7 @@ export function copyBundleAssets({ root = defaultRoot } = {}) {
   );
   if (existsSync(bundledSkillsDir)) {
     const destBundledDir = join(distDir, 'bundled');
+    fs.rmSync(destBundledDir, { recursive: true, force: true });
     copyRecursiveSync(bundledSkillsDir, destBundledDir, {
       skipEntry: isBundledSkillTestFile,
     });
