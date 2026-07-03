@@ -2458,6 +2458,134 @@ describe('ChatCompressionService.compress cheap-gate uses computeThresholds.auto
   });
 });
 
+describe('ChatCompressionService.compress cheap-gate respects reservedOutputTokens', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function makeFakeChat(): GeminiChat {
+    const history: Content[] = [
+      { role: 'user', parts: [{ text: 'msg1' }] },
+      { role: 'model', parts: [{ text: 'msg2' }] },
+    ];
+    const getHistoryMock = vi.fn().mockReturnValue(history);
+    return {
+      getHistory: getHistoryMock,
+      getHistoryShallow: getHistoryMock,
+    } as unknown as GeminiChat;
+  }
+
+  function makeFakeConfig(opts: { contextWindowSize: number }): Config {
+    return {
+      getChatCompression: vi.fn(),
+      getAutoCompactThreshold: vi.fn(),
+      getBaseLlmClient: vi.fn(),
+      getContentGeneratorConfig: vi
+        .fn()
+        .mockReturnValue({ contextWindowSize: opts.contextWindowSize }),
+      getHookSystem: vi.fn().mockReturnValue({
+        fireSessionStartEvent: vi.fn().mockResolvedValue(undefined),
+        firePreCompactEvent: vi.fn().mockResolvedValue(undefined),
+        firePostCompactEvent: vi.fn().mockResolvedValue(undefined),
+      }),
+      getModel: () => 'test-model',
+      getApprovalMode: () => 'default',
+      getDebugLogger: () => ({ warn: vi.fn(), debug: vi.fn() }),
+      getTargetDir: () => '/tmp/test-workspace',
+    } as unknown as Config;
+  }
+
+  it('without reservedOutputTokens, 131K window NOOPs at 90K (auto ≈ 98K)', async () => {
+    const spy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({ text: 's', usage: {} } as never);
+
+    const result = await new ChatCompressionService().compress(makeFakeChat(), {
+      promptId: 'p',
+      force: false,
+      model: 'qwen-test',
+      config: makeFakeConfig({ contextWindowSize: 131_072 }),
+      consecutiveFailures: 0,
+      originalTokenCount: 90_000,
+    });
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+  });
+
+  it('with 64K reservedOutputTokens, 131K window triggers compression at 60K input', async () => {
+    // Without reservation: computeThresholds(131072).auto ≈ 98K → 60K < 98K → NOOP
+    // With 64K reservation: computeThresholds(131072 - 64000 = 67072).auto ≈ 47K → 60K > 47K → triggers
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>summary</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+
+    const result = await new ChatCompressionService().compress(makeFakeChat(), {
+      promptId: 'p',
+      force: false,
+      model: 'qwen-test',
+      config: makeFakeConfig({ contextWindowSize: 131_072 }),
+      consecutiveFailures: 0,
+      originalTokenCount: 60_000,
+      reservedOutputTokens: 64_000,
+    });
+
+    expect(spy).toHaveBeenCalled();
+    expect(result.info.compressionStatus).not.toBe(CompressionStatus.NOOP);
+  });
+
+  it('without reservedOutputTokens, behavior is unchanged (backward compat)', async () => {
+    const spy = vi
+      .spyOn(sideQueryModule, 'runSideQuery')
+      .mockResolvedValue({ text: 's', usage: {} } as never);
+
+    // computeThresholds(200_000).auto ≈ 167K; 160K < 167K → NOOP
+    const result = await new ChatCompressionService().compress(makeFakeChat(), {
+      promptId: 'p',
+      force: false,
+      model: 'qwen-test',
+      config: makeFakeConfig({ contextWindowSize: 200_000 }),
+      consecutiveFailures: 0,
+      originalTokenCount: 160_000,
+      // reservedOutputTokens is not provided
+    });
+
+    expect(spy).not.toHaveBeenCalled();
+    expect(result.info.compressionStatus).toBe(CompressionStatus.NOOP);
+  });
+
+  it('reservedOutputTokens >= contextWindowSize clamps to zero (no crash)', async () => {
+    const spy = vi.spyOn(sideQueryModule, 'runSideQuery').mockResolvedValue({
+      text: '<state_snapshot>summary</state_snapshot>',
+      usage: {
+        promptTokenCount: 1000,
+        candidatesTokenCount: 500,
+        totalTokenCount: 1500,
+      },
+    } as never);
+
+    // reservedOutputTokens == contextWindowSize → effective window = 0
+    // computeThresholds(0).auto ≈ 0 → any tokens > 0 triggers compression
+    const result = await new ChatCompressionService().compress(makeFakeChat(), {
+      promptId: 'p',
+      force: false,
+      model: 'qwen-test',
+      config: makeFakeConfig({ contextWindowSize: 131_072 }),
+      consecutiveFailures: 0,
+      originalTokenCount: 1000,
+      reservedOutputTokens: 131_072,
+    });
+
+    expect(spy).toHaveBeenCalled();
+    expect(result.info.compressionStatus).not.toBe(CompressionStatus.NOOP);
+  });
+});
+
 describe('ChatCompressionService.compress — single-turn computer-use regression', () => {
   afterEach(() => {
     vi.restoreAllMocks();

@@ -177,6 +177,38 @@ describe('qwen resolve workflow', () => {
       ? workflow.slice(resolveJobStart)
       : workflow.slice(resolveJobStart, resolveJobStart + 1 + nextJob);
   const reviewJob = job(workflow, 'review-pr');
+  const authorizeJob = job(workflow, 'authorize');
+
+  it('does not require fork PR authors to have write permission for automatic review', () => {
+    const authorizeStep = step(
+      authorizeJob,
+      'Check principal write permission',
+    );
+
+    expect(authorizeJob).toContain(
+      "needs.precheck-pr.outputs.decision == 'allow_triage'",
+    );
+    expect(authorizeStep).toMatch(
+      /if \[ "\$PR_ACTION" = "review_requested" \]; then\s+principal="\$SENDER"/,
+    );
+    const reviewRequestedBranch = authorizeStep.slice(
+      authorizeStep.indexOf('if [ "$PR_ACTION" = "review_requested" ]; then'),
+      authorizeStep.indexOf('else'),
+    );
+    expect(reviewRequestedBranch).toContain('principal="$SENDER"');
+    expect(reviewRequestedBranch).not.toContain(
+      'echo "should_review=true" >> "$GITHUB_OUTPUT"',
+    );
+    expect(reviewRequestedBranch).not.toContain('exit 0');
+    expect(authorizeStep).toContain('pull_request_target)');
+    expect(authorizeStep).toContain(
+      'Automatic PR review allowed for PR #${PR_NUMBER} after same-repo/precheck gate.',
+    );
+    expect(authorizeStep).toContain(
+      'echo "should_review=true" >> "$GITHUB_OUTPUT"',
+    );
+    expect(authorizeStep).not.toContain('principal="$PR_AUTHOR"');
+  });
 
   it('keeps the authorization and scope guards on resolve-pr', () => {
     // /resolve must require write+ permission before any credentialed push.

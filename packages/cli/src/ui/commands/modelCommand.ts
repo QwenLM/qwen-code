@@ -9,6 +9,7 @@ import type {
   CommandContext,
   OpenDialogActionReturn,
   MessageActionReturn,
+  SubmitPromptActionReturn,
 } from './types.js';
 import { CommandKind } from './types.js';
 import { t } from '../../i18n/index.js';
@@ -18,10 +19,14 @@ import {
   type AvailableModel,
   type Config,
   isImageCapable,
+  parseVisionModelSetting,
   resolveModelId,
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../../config/settings.js';
-import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
+import {
+  isInlineModelOverrideAllowed,
+  parseAcpModelOption,
+} from '../../utils/acpModelUtils.js';
 import {
   formatUnsupportedVoiceModelMessage,
   isSelectableVoiceModel,
@@ -38,6 +43,14 @@ const COMPACTION_MODEL_CONFIGURATION_HINT =
 
 const VISION_MODEL_CONFIGURATION_HINT =
   'Configure an image-capable model in settings.modelProviders and ensure the required environment variables are set. Run /model --vision <model-id> to set it, or leave it unset to auto-pick a same-provider vision model.';
+
+function formatVisionModelSettingForDisplay(setting: string): string {
+  const parsed = parseVisionModelSetting(setting);
+  if (!parsed) return setting.replace(/\0/g, '\\0');
+  return parsed.baseUrl
+    ? `${parsed.selector} (${parsed.baseUrl})`
+    : parsed.selector;
+}
 
 function persistSetting(
   settings: LoadedSettings,
@@ -170,6 +183,45 @@ function formatUnavailableCompactionModelMessage(
   );
 }
 
+function formatAmbiguousVisionModelMessage(
+  modelName: string,
+  matchingModels: AvailableModel[],
+): string {
+  const endpoints = matchingModels
+    .map((model) => model.baseUrl ?? '(default endpoint)')
+    .join(', ');
+  const qualifiedSelectors = Array.from(
+    new Set(
+      matchingModels
+        .map((model) =>
+          model.authType ? `${model.authType}:${model.id}` : undefined,
+        )
+        .filter((selector): selector is string => selector !== undefined),
+    ),
+  );
+  const scriptedHint =
+    qualifiedSelectors.length > 1
+      ? `\n${t(
+          'For scripts, pass an auth-qualified selector such as {{selector}}.',
+          {
+            selector: qualifiedSelectors[0],
+          },
+        )}`
+      : '';
+  return (
+    t("Vision model '{{modelName}}' matches multiple configured endpoints.", {
+      modelName,
+    }) +
+    '\n' +
+    t('Matching endpoints: {{endpoints}}.', { endpoints }) +
+    '\n' +
+    t(
+      'Run /model --vision without an argument and choose the exact endpoint.',
+    ) +
+    scriptedHint
+  );
+}
+
 // Shown when a user pins a model that isn't known to accept images. The pin is
 // still honored, but the bridge will send images to it, so flag it. Reuses the
 // same translated key the model dialog emits (ModelDialog.tsx) so both paths
@@ -229,10 +281,10 @@ export const modelCommand: SlashCommand = {
   completionPriority: 100,
   get description() {
     return t(
-      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, [model-id] to switch immediately).',
+      'Switch the model for this session (--fast for suggestion model, --voice for voice transcription model, --vision for the vision bridge model, --compaction for chat compression model, [model-id] to switch immediately, or [model-id] [prompt] to run a one-off prompt on another model; the inline prompt is sent verbatim without @file expansion).',
     );
   },
-  argumentHint: '[--fast|--voice|--vision|--compaction] [<model-id>]',
+  argumentHint: '[--fast|--voice|--vision|--compaction] [<model-id>] | <model-id> <prompt>',
   kind: CommandKind.BUILT_IN,
   supportedModes: ['interactive', 'non_interactive', 'acp'] as const,
   completion: async (context, partialArg) => {
@@ -293,7 +345,9 @@ export const modelCommand: SlashCommand = {
   action: async (
     context: CommandContext,
     actionArgs: string,
-  ): Promise<OpenDialogActionReturn | MessageActionReturn> => {
+  ): Promise<
+    OpenDialogActionReturn | MessageActionReturn | SubmitPromptActionReturn
+  > => {
     const { services } = context;
     const { config, settings } = services;
 
@@ -472,14 +526,17 @@ export const modelCommand: SlashCommand = {
         // current vision model (non-interactive).
         if (context.executionMode !== 'interactive') {
           const visionModel =
-            context.services.settings?.merged?.visionModel?.trim() ||
-            t('not set');
+            context.services.settings?.merged?.visionModel?.trim();
           return {
             type: 'message',
             messageType: 'info',
             content: t(
               'Current vision model: {{visionModel}}\nUse "/model --vision <model-id>" to set the vision bridge model.',
-              { visionModel },
+              {
+                visionModel: visionModel
+                  ? formatVisionModelSettingForDisplay(visionModel)
+                  : t('not set'),
+              },
             ),
           };
         }
@@ -516,9 +573,17 @@ export const modelCommand: SlashCommand = {
           ? config.getAvailableModelsForAuthType(selector.authType)
           : config.getAllConfiguredModels()
       ).filter((m) => !m.fastOnly && !m.voiceOnly);
-      const matched = availableModels.find(
+      const matchingModels = availableModels.filter(
         (model) => model.id === selector.modelId,
       );
+      if (matchingModels.length > 1) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: formatAmbiguousVisionModelMessage(modelName, matchingModels),
+        };
+      }
+      const matched = matchingModels[0];
       if (!matched) {
         return {
           type: 'message',
@@ -548,9 +613,15 @@ export const modelCommand: SlashCommand = {
         };
       }
 
-      persistSetting(settings, 'visionModel', modelName);
+      const qualifiedModelName = `${
+        selector.authType ?? matched.authType
+      }:${selector.modelId}`;
+      const visionModel = matched.baseUrl
+        ? `${qualifiedModelName}\0${matched.baseUrl}`
+        : qualifiedModelName;
+      persistSetting(settings, 'visionModel', visionModel);
       // Sync runtime Config so the vision bridge picks it up without a restart.
-      config.setVisionModel(modelName);
+      config.setVisionModel(visionModel);
       // The pin is honored even if the model isn't image-capable (the user may
       // know better than our metadata), but warn — the bridge sends images to it.
       const visionWarning = isImageCapable(matched)
@@ -660,15 +731,16 @@ export const modelCommand: SlashCommand = {
       };
     }
 
-    const modelName = args.trim().split(/\s+/)[0] ?? '';
+    // `/model <id>` switches the session model; `/model <id> <prompt>` runs the
+    // prompt on <id> for this turn only (inline one-shot override) without
+    // changing or persisting the session model.
+    const trimmedArgs = args.trim();
+    const firstSpace = trimmedArgs.search(/\s/);
+    const modelName =
+      firstSpace === -1 ? trimmedArgs : trimmedArgs.slice(0, firstSpace);
+    const inlinePrompt =
+      firstSpace === -1 ? '' : trimmedArgs.slice(firstSpace + 1).trim();
     if (modelName) {
-      if (!settings) {
-        return {
-          type: 'message',
-          messageType: 'error',
-          content: t('Settings service not available.'),
-        };
-      }
       const parsed = parseAcpModelOption(modelName);
       const targetAuthType = parsed.authType ?? authType;
       const availableModels = config
@@ -684,6 +756,61 @@ export const modelCommand: SlashCommand = {
             targetAuthType,
             availableModels,
           ),
+        };
+      }
+
+      if (inlinePrompt) {
+        // ACP hosts send the prompt on the session model via a separate
+        // pipeline that doesn't thread a per-turn override, so the inline form
+        // would silently run on the default model. Reject it there rather than
+        // mislead; the two-step `/model <id>` flow still works in ACP.
+        if (context.executionMode === 'acp') {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t(
+              "Inline one-shot override isn't supported in this mode — run '/model {{model}}' first, then send your prompt.",
+              { model: modelName },
+            ),
+          };
+        }
+        // The per-turn override reuses the active provider's endpoint and
+        // credentials and only swaps the model id; it cannot rebuild
+        // baseUrl/envKey for a different provider. So the target must resolve to
+        // the SAME provider identity, not merely the same auth type — otherwise
+        // a same-id model owned by a different (e.g. OpenAI-compatible) provider
+        // would be sent to the active endpoint/account. Reject an explicit
+        // different auth type outright (the `(authType)` suffix), then require
+        // the provider identity (baseUrl + envKey) to match the active content
+        // generator via the shared check that consumers also enforce. Mismatches
+        // are pointed at the two-step `/model <id>` flow, which does switch
+        // providers.
+        const sameAuthType = targetAuthType === authType;
+        if (
+          !sameAuthType ||
+          !isInlineModelOverrideAllowed(config, parsed.modelId)
+        ) {
+          return {
+            type: 'message',
+            messageType: 'error',
+            content: t(
+              "Inline one-shot override can't switch providers. '{{model}}' belongs to a different provider — run '/model {{model}}' first, then send your prompt.",
+              { model: modelName },
+            ),
+          };
+        }
+        return {
+          type: 'submit_prompt',
+          content: inlinePrompt,
+          modelOverride: parsed.modelId,
+        };
+      }
+
+      if (!settings) {
+        return {
+          type: 'message',
+          messageType: 'error',
+          content: t('Settings service not available.'),
         };
       }
       const effectiveModelName = await switchMainModel(

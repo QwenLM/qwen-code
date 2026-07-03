@@ -4,7 +4,12 @@ import {
   applyTurnCollapse,
   findDisplayItemIndex,
   findTurnIdForIndex,
+  getSessionTimelineEntries,
+  getSessionTimelineRangeForIndexes,
+  getSessionTimelineSignature,
+  getTurnTimelineNode,
   getDisplayItemVirtualKey,
+  getTurnIdByDisplayIndex,
   groupParallelAgents,
   shouldUseVirtualScroll,
   VIRTUAL_SCROLL_THRESHOLD,
@@ -30,7 +35,8 @@ function collapseOf(
       : items.findIndex(
           (item) =>
             item.type === 'message' &&
-            item.message.role === 'user' &&
+            (item.message.role === 'user' ||
+              item.message.role === 'user_shell') &&
             item.message.id === idxOrTurnId,
         );
   if (idx < 0) return undefined;
@@ -122,6 +128,10 @@ function makeMultiToolGroup(id: string): Message {
 
 function makeUserMessage(id: string): Message {
   return { id, role: 'user', content: 'hello' };
+}
+
+function makeUserShellMessage(id: string): Message {
+  return { id, role: 'user_shell', command: 'npm test' };
 }
 
 function makeAssistantMessage(id: string): Message {
@@ -299,6 +309,401 @@ describe('groupParallelAgents', () => {
   });
 });
 
+describe('getTurnTimelineNode', () => {
+  const item = (message: Message): DisplayItem => ({
+    type: 'message',
+    key: message.id,
+    message,
+  });
+
+  it('classifies thinking blocks as thought nodes', () => {
+    expect(
+      getTurnTimelineNode(item(makeThinkingMessage('think'))),
+    ).toMatchObject({
+      kind: 'thought',
+    });
+  });
+
+  it('classifies mid-turn assistant text as commentary nodes', () => {
+    expect(
+      getTurnTimelineNode(item(makeAssistantMessage('assistant'))),
+    ).toMatchObject({
+      kind: 'commentary',
+    });
+  });
+
+  it('does not add a node to the final assistant answer', () => {
+    expect(
+      getTurnTimelineNode({
+        ...item(makeAssistantMessage('assistant')),
+        turnCollapse: {
+          turnId: 'user',
+          collapsed: false,
+          hiddenCount: 1,
+        },
+      }),
+    ).toMatchObject({
+      kind: 'none',
+    });
+  });
+
+  it('classifies tool groups and plans', () => {
+    expect(
+      getTurnTimelineNode(item(makeMultiToolGroup('tools'))),
+    ).toMatchObject({
+      kind: 'tool',
+      label: '2 tool calls',
+    });
+    expect(getTurnTimelineNode(item(makePlanMessage('plan')))).toMatchObject({
+      kind: 'plan',
+    });
+  });
+
+  it('classifies grouped parallel agents', () => {
+    const [agents] = groupParallelAgents([
+      makeAgentToolGroup('a1', 'Agent', 1000),
+      makeAgentToolGroup('a2', 'Agent', 2000),
+    ]);
+    expect(getTurnTimelineNode(agents)).toMatchObject({
+      kind: 'agents',
+      timestamp: 1000,
+    });
+  });
+
+  it('classifies mid-turn status and ignores plain user rows', () => {
+    expect(
+      getTurnTimelineNode(
+        item({
+          id: 'status',
+          role: 'system',
+          content: 'inserted',
+          variant: 'info',
+          source: 'mid_turn_message_injected',
+        }),
+      ),
+    ).toMatchObject({ kind: 'status' });
+    expect(getTurnTimelineNode(item(makeUserMessage('user')))).toMatchObject({
+      kind: 'none',
+    });
+  });
+});
+
+describe('getSessionTimelineSignature', () => {
+  it('keeps streaming text updates from invalidating the timeline cache', () => {
+    const before = getSessionTimelineSignature([
+      makeUserMessage('u1'),
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'partial',
+        isStreaming: true,
+      },
+    ]);
+    const during = getSessionTimelineSignature([
+      makeUserMessage('u1'),
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'partial with more tokens',
+        isStreaming: true,
+      },
+    ]);
+    const complete = getSessionTimelineSignature([
+      makeUserMessage('u1'),
+      {
+        id: 'a1',
+        role: 'assistant',
+        content: 'partial with more tokens',
+        isStreaming: false,
+      },
+    ]);
+
+    expect(during).toBe(before);
+    expect(complete).not.toBe(before);
+  });
+});
+
+describe('getSessionTimelineEntries', () => {
+  it('returns no entries for an empty transcript', () => {
+    expect(getSessionTimelineEntries([])).toEqual([]);
+  });
+
+  it('builds one entry per user turn', () => {
+    expect(
+      getSessionTimelineEntries([
+        makeUserMessage('u1'),
+        makeThinkingMessage('think'),
+        makeMultiToolGroup('tools'),
+        makePlanMessage('plan'),
+        makeAssistantMessage('a1'),
+        makeUserMessage('u2'),
+        makeAssistantMessage('a2'),
+      ]),
+    ).toEqual([
+      {
+        id: 'u1',
+        label: 'hello',
+        detail: 'response',
+        timestamp: undefined,
+        nodeKinds: ['thought', 'tool', 'plan'],
+      },
+      {
+        id: 'u2',
+        label: 'hello',
+        detail: 'response',
+        timestamp: undefined,
+        nodeKinds: [],
+      },
+    ]);
+  });
+
+  it('prefers the visible final answer over hidden turn steps', () => {
+    expect(
+      getSessionTimelineEntries([
+        makeUserMessage('u1'),
+        makeAssistantMessage('mid'),
+        makeThinkingMessage('think'),
+        makeAssistantMessage('final'),
+      ]),
+    ).toEqual([
+      {
+        id: 'u1',
+        label: 'hello',
+        detail: 'response',
+        timestamp: undefined,
+        nodeKinds: ['commentary', 'thought'],
+      },
+    ]);
+  });
+
+  it('does not prefer assistant text before later tool work as the final detail', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('mid'), content: "I'll check" },
+      makeAgentToolGroup('tool', 'Read'),
+    ]);
+
+    expect(entry?.detail).toBe("I'll check · 1 tool call");
+  });
+
+  it('uses the final answer detail without exposing thinking content', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      makeThinkingMessage('think', 'private reasoning details'),
+      makeAssistantMessage('final'),
+    ]);
+
+    expect(entry?.detail).toBe('response');
+    expect(entry?.detail).not.toContain('private');
+  });
+
+  it('falls back to a thinking summary when there is no final answer', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      makeThinkingMessage('think', 'private reasoning details'),
+    ]);
+
+    expect(entry?.detail).toBe('thinking');
+    expect(entry?.detail).not.toContain('private');
+  });
+
+  it('keeps streaming assistant content in the active turn detail', () => {
+    expect(
+      getSessionTimelineEntries([
+        makeUserMessage('u1'),
+        {
+          ...makeAssistantMessage('stream'),
+          content: 'draft',
+          isStreaming: true,
+        },
+      ]),
+    ).toEqual([
+      {
+        id: 'u1',
+        label: 'hello',
+        detail: 'draft',
+        timestamp: undefined,
+        nodeKinds: ['commentary'],
+      },
+    ]);
+  });
+
+  it('summarizes grouped parallel agents in the turn detail', () => {
+    expect(
+      getSessionTimelineEntries([
+        makeUserMessage('u1'),
+        makeAgentToolGroup('agent-1'),
+        makeAgentToolGroup('agent-2'),
+        makeAssistantMessage('final'),
+      ]),
+    ).toEqual([
+      {
+        id: 'u1',
+        label: 'hello',
+        detail: 'response',
+        timestamp: undefined,
+        nodeKinds: ['agents'],
+      },
+    ]);
+  });
+
+  it('handles empty assistant content and user shell turns', () => {
+    const entries = getSessionTimelineEntries([
+      makeUserShellMessage('shell'),
+      { id: 'empty', role: 'assistant' } as Message,
+      makeMultiToolGroup('tools'),
+    ]);
+    expect(entries).toEqual([
+      {
+        id: 'shell',
+        label: 'npm test',
+        detail: '2 tool calls',
+        timestamp: undefined,
+        nodeKinds: ['tool'],
+      },
+    ]);
+  });
+
+  it('preserves shell glob syntax in timeline labels', () => {
+    const [entry] = getSessionTimelineEntries([
+      {
+        ...makeUserShellMessage('shell'),
+        command: 'find packages/*/src/*.ts',
+      },
+    ]);
+
+    expect(entry?.label).toBe('find packages/*/src/*.ts');
+  });
+
+  it('keeps a single prompt turn as no activity', () => {
+    expect(getSessionTimelineEntries([makeUserMessage('u1')])).toEqual([
+      {
+        id: 'u1',
+        label: 'hello',
+        detail: 'No activity',
+        timestamp: undefined,
+        nodeKinds: [],
+      },
+    ]);
+  });
+
+  it('truncates timeline text without splitting emoji', () => {
+    const [entry] = getSessionTimelineEntries([
+      { ...makeUserMessage('u1'), content: '😀'.repeat(40) },
+    ]);
+    expect(entry?.label.endsWith('…')).toBe(true);
+    expect(/[\uD800-\uDFFF]/u.test(entry?.label ?? '')).toBe(false);
+  });
+
+  it('cleans markdown markers from timeline details', () => {
+    const [entry] = getSessionTimelineEntries([
+      {
+        ...makeUserMessage('u1'),
+        content: '介绍下 `agent-reproduce-align`',
+      },
+      {
+        ...makeAssistantMessage('a1'),
+        content:
+          '**agent-reproduce-align** – 对齐测试技能\n\n**用途：** 在 [Qwen Code](https://example.com) 中运行参考代码，中文*强调*·*范围*—*引用*「_下划线_，保留 snake_case。',
+      },
+    ]);
+
+    expect(entry?.label).toBe('介绍下 `agent-reproduce-align`');
+    expect(entry?.detail).toBe(
+      'agent-reproduce-align – 对齐测试技能 用途： 在 Qwen Code 中运行参考代码，中文强调·范围—引用「下划线，保留 snake_case。',
+    );
+  });
+
+  it('cleans preview markdown without rewriting code text', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      {
+        ...makeAssistantMessage('a1'),
+        content:
+          '# Title\n> quoted\n- item\n~~gone~~\n![alt text](url)\n`*literal*`\n```ts\n**code**\n```',
+      },
+    ]);
+
+    expect(entry?.detail).toBe(
+      'Title quoted item gone alt text *literal* **code**',
+    );
+  });
+
+  it('falls back when the final answer cleans to an empty detail', () => {
+    const [entry] = getSessionTimelineEntries([
+      makeUserMessage('u1'),
+      { ...makeAssistantMessage('a1'), content: '![](url)' },
+    ]);
+
+    expect(entry?.detail).toBe('assistant update');
+    expect(entry?.nodeKinds).toEqual(['commentary']);
+  });
+});
+
+describe('getSessionTimelineRangeForIndexes', () => {
+  it('maps visible rows to a timeline range and current turn', () => {
+    const messages = [
+      makeUserMessage('u1'),
+      makeMultiToolGroup('tools'),
+      makeAssistantMessage('a1'),
+      makeUserMessage('u2'),
+      makeThinkingMessage('think'),
+      makeAssistantMessage('a2'),
+      makeUserMessage('u3'),
+      makeAssistantMessage('a3'),
+    ];
+    const entries = getSessionTimelineEntries(messages);
+    const entryIndexById = new Map(
+      entries.map((entry, index) => [entry.id, index]),
+    );
+    const visibleItems = groupParallelAgents(messages);
+    const turnIdByDisplayIndex = getTurnIdByDisplayIndex(visibleItems);
+
+    expect(
+      getSessionTimelineRangeForIndexes(
+        visibleItems,
+        [1, 2, 3, 4],
+        entryIndexById,
+        3,
+        turnIdByDisplayIndex,
+      ),
+    ).toEqual({
+      startIndex: 0,
+      endIndex: 1,
+      currentIndex: 1,
+    });
+  });
+
+  it('returns null when visible rows do not belong to a turn', () => {
+    const entryIndexById = new Map<string, number>([['u1', 0]]);
+    expect(
+      getSessionTimelineRangeForIndexes([], [0], entryIndexById, 0),
+    ).toBeNull();
+  });
+
+  it('ignores out-of-bounds rows when mapping the visible range', () => {
+    const messages = [makeUserMessage('u1'), makeAssistantMessage('a1')];
+    const entries = getSessionTimelineEntries(messages);
+    const entryIndexById = new Map(
+      entries.map((entry, index) => [entry.id, index]),
+    );
+    const visibleItems = groupParallelAgents(messages);
+
+    expect(
+      getSessionTimelineRangeForIndexes(
+        visibleItems,
+        [-1, 0, 99],
+        entryIndexById,
+        99,
+      ),
+    ).toEqual({
+      startIndex: 0,
+      endIndex: 0,
+      currentIndex: 0,
+    });
+  });
+});
+
 describe('getDisplayItemVirtualKey', () => {
   it('keeps message and grouped rows in separate key namespaces', () => {
     expect(
@@ -315,6 +720,32 @@ describe('getDisplayItemVirtualKey', () => {
         agents: [makeAgentToolGroup('a').tools[0]],
       }),
     ).toBe('group:header');
+  });
+
+  it('keys live turn rows by their start time', () => {
+    expect(
+      getDisplayItemVirtualKey({
+        type: 'turn_collapse',
+        key: 'u1',
+        turnCollapse: {
+          turnId: 'u1',
+          collapsed: false,
+          hiddenCount: 0,
+          liveStartedAt: 1_000,
+        },
+      }),
+    ).toBe('tc:u1:1000');
+    expect(
+      getDisplayItemVirtualKey({
+        type: 'turn_collapse',
+        key: 'u1',
+        turnCollapse: {
+          turnId: 'u1',
+          collapsed: true,
+          hiddenCount: 1,
+        },
+      }),
+    ).toBe('tc:u1');
   });
 });
 
@@ -505,6 +936,22 @@ describe('applyTurnCollapse', () => {
     expect(flattenedRowIds(out)).toEqual(['u1', 'tc-u1', 'g1', 'a1']);
     expect(collapseOf(out, 0)?.collapsed).toBe(false);
     expect(collapseOf(out, 0)?.hiddenCount).toBe(1);
+  });
+
+  it('collapses a completed user shell turn', () => {
+    const items = groupParallelAgents([
+      makeUserShellMessage('shell'),
+      makeMultiToolGroup('g1'),
+      makeAssistantMessage('a1'),
+    ]);
+    const out = collapseItems(items);
+    expect(rowIds(out)).toEqual(['shell', 'tc-shell', 'a1']);
+    expect(collapseOf(out, 'shell')).toEqual({
+      turnId: 'shell',
+      collapsed: true,
+      hiddenCount: 1,
+      toolCallCount: 2,
+    });
   });
 
   it('collapsing the active turn folds to prompt + seam (no stranded line)', () => {
@@ -1223,5 +1670,22 @@ describe('findTurnIdForIndex', () => {
       makeUserMessage('u1'),
     ]);
     expect(findTurnIdForIndex(items, 0)).toBeNull();
+  });
+
+  it('precomputes turn ids for display rows', () => {
+    const items = groupParallelAgents([
+      makeAssistantMessage('pre'),
+      makeUserMessage('u1'),
+      makeMultiToolGroup('g1'),
+      makeUserShellMessage('shell'),
+      makeMultiToolGroup('g2'),
+    ]);
+    expect(getTurnIdByDisplayIndex(items)).toEqual([
+      null,
+      'u1',
+      'u1',
+      'shell',
+      'shell',
+    ]);
   });
 });

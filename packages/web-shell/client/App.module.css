@@ -13,6 +13,18 @@
   flex-direction: column;
   height: 100%;
   min-height: 0;
+  /*
+   * Safe-area padding for mobile devices with notch / home indicator.
+   * With `viewport-fit=cover` in index.html the page extends behind the
+   * status-bar, home-indicator, and landscape notch regions; these env()
+   * insets push the content back into the visible safe area. On desktop
+   * or phones without notches every inset evaluates to 0 so nothing
+   * changes.
+   */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
   background: var(--background);
   color: var(--foreground);
   font-family: var(--font-mono);
@@ -49,6 +61,89 @@
   overflow: hidden;
 }
 
+.mobileDrawer {
+  display: contents;
+}
+
+.mobileBackdrop {
+  display: none;
+}
+
+.hamburgerButton {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: var(--radius);
+}
+
+.hamburgerButton:hover {
+  background: var(--accent);
+}
+
+.hamburgerButton svg {
+  width: 20px;
+  height: 20px;
+}
+
+@media (max-width: 760px) {
+  .mobileDrawer {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 50;
+    pointer-events: none;
+    visibility: hidden;
+    /* Keep the panel visible until the backdrop finishes fading out so they
+       disappear together instead of the panel vanishing a frame early. */
+    transition: visibility 0s linear 200ms;
+  }
+
+  .mobileDrawerOpen {
+    visibility: visible;
+    pointer-events: auto;
+    /* Show immediately on open; only the close path needs the delay above. */
+    transition-delay: 0s;
+    /* With `viewport-fit=cover`, the fixed drawer extends behind the status
+       bar, home indicator, and landscape notch. Push the sidebar content
+       into the safe area while keeping the backdrop full-screen (it is a
+       sibling, not a child). */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .mobileBackdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 49;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 200ms ease;
+  }
+
+  .mobileDrawerOpen .mobileBackdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .hamburgerButton {
+    display: flex;
+  }
+}
+
 .appChatEmpty.appWithSidebar {
   justify-content: flex-start;
   overflow: hidden;
@@ -59,9 +154,42 @@
   overflow-y: auto;
 }
 
+@media (max-width: 760px) {
+  .appChatEmpty .hamburgerButton {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+}
+
 .app,
 .app * {
   box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+:where(.app button) {
+  padding: 0;
+}
+
+.app *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.app *::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+.app *::-webkit-scrollbar-thumb {
+  border: 2px solid var(--scrollbar-track);
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+}
+
+.app *::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
 }
 
 .themeDark {
@@ -127,6 +255,9 @@
   --chat-editor-accent-color: #4a9eff;
   --chat-editor-selection-bg: #3d5a7a;
   --chat-editor-selection-color: #ffffff;
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: #3a3a3a;
+  --scrollbar-thumb-hover: #525252;
 }
 
 .themeLight {
@@ -192,6 +323,9 @@
   --chat-editor-accent-color: #0b66c3;
   --chat-editor-selection-bg: rgba(11, 102, 195, 0.18);
   --chat-editor-selection-color: var(--chat-editor-text-primary);
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: #c7c9cc;
+  --scrollbar-thumb-hover: #aeb1b5;
 }
 
 .content {
@@ -307,6 +441,15 @@
   padding: 0;
 }
 
+/* Esc-clear hint, shown in the composer's top status slot (where the streaming
+   loader sits) — the two never coexist, so it stays clear of the queue. */
+.escClearStatus {
+  flex-shrink: 0;
+  padding: 4px 0;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
 .emptyWelcomeFooter {
   padding: 12px 0 0;
 }
@@ -371,6 +514,29 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.queuedPromptState {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  color: var(--secondary-foreground);
+}
+
+.queuedPromptSpinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 999px;
+  animation: queuedPromptSpin 0.8s linear infinite;
+}
+
+@keyframes queuedPromptSpin {
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 .queuedPromptActions {

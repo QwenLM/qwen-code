@@ -191,6 +191,24 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('_qwen/health');
   });
 
+  it('GET /workspace/:id/sessions maps to session/list', () => {
+    const result = matchRoute('/workspace/%2Fwork%2Fa/sessions', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('session/list');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+      new URLSearchParams('size=50&archiveState=archived&cursor=123'),
+    );
+    expect(params).toEqual({
+      workspaceCwd: '/work/a',
+      cursor: '123',
+      archiveState: 'archived',
+      _meta: { size: 50 },
+    });
+  });
+
   // ---- POST /session/:id/model → session/set_model --------------------
 
   it('POST /session/:id/model maps to session/set_model', () => {
@@ -421,6 +439,30 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ content: 'hi' });
   });
 
+  it('POST /workspace/memory/remember maps to _qwen/workspace/memory/remember', () => {
+    const result = matchRoute('/workspace/memory/remember', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/remember');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { content: 'hi', contextMode: 'clean' },
+      'POST',
+    );
+    expect(params).toEqual({ content: 'hi', contextMode: 'clean' });
+  });
+
+  it('GET /workspace/memory/remember/:taskId maps to _qwen/workspace/memory/remember/get', () => {
+    const result = matchRoute('/workspace/memory/remember/remember%2Fa', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/remember/get');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ taskId: 'remember/a' });
+  });
+
   it('GET /workspace/agents maps to _qwen/workspace/agents/list', () => {
     const result = matchRoute('/workspace/agents', 'GET');
     expect(result).not.toBeNull();
@@ -639,6 +681,21 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ sessionIds: ['a', 'b'] });
   });
 
+  it('POST /sessions/archive maps to _qwen/sessions/archive', () => {
+    const result = matchRoute('/sessions/archive', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/sessions/archive');
+    expect(
+      result!.mapping.extractParams([], { sessionIds: ['s-1'] }, 'POST'),
+    ).toEqual({ sessionIds: ['s-1'] });
+  });
+
+  it('POST /sessions/unarchive maps to _qwen/sessions/unarchive', () => {
+    const result = matchRoute('/sessions/unarchive', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/sessions/unarchive');
+  });
+
   // ---- Removed routes (no dispatcher handler) ----------------------------
 
   it('returns null for removed route /session/:id/approval-mode', () => {
@@ -668,5 +725,99 @@ describe('acpRouteTable – matchRoute', () => {
     const result = matchRoute('/session/has%20space/prompt', 'POST');
     expect(result).not.toBeNull();
     expect(result!.segments[0]).toBe('has space');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Query-backed routes coerce searchParams into typed JSON-RPC params
+// ---------------------------------------------------------------------------
+
+describe('acpRouteTable – query param coercion', () => {
+  function extract(path: string, method: string) {
+    const url = new URL(`http://d${path}`);
+    const m = matchRoute(url.pathname, method)!;
+    expect(m).not.toBeNull();
+    return {
+      method: m.mapping.method,
+      params: m.mapping.extractParams(
+        m.segments,
+        undefined,
+        method,
+        url.searchParams,
+      ),
+    };
+  }
+
+  it('GET /file forwards path (string) + maxBytes/line/limit as NUMBERS', () => {
+    const { method, params } = extract(
+      '/file?path=src%2Fa.ts&maxBytes=123&line=4&limit=10',
+      'GET',
+    );
+    expect(method).toBe('_qwen/file/read');
+    expect(params).toEqual({
+      path: 'src/a.ts',
+      maxBytes: 123,
+      line: 4,
+      limit: 10,
+    });
+    // The daemon requires real numbers — a regression to strings would break it.
+    expect(typeof params['maxBytes']).toBe('number');
+  });
+
+  it('GET /file omits absent optional params', () => {
+    const { params } = extract('/file?path=a.ts', 'GET');
+    expect(params).toEqual({ path: 'a.ts' });
+  });
+
+  it('GET /file treats an EMPTY numeric param as absent, not 0 (M3BYd)', () => {
+    // `?maxBytes=` is present-but-empty; `Number('')` is 0 — must be omitted so
+    // the daemon doesn't honor an unintended 0.
+    const { params } = extract('/file?path=a.ts&maxBytes=', 'GET');
+    expect(params).toEqual({ path: 'a.ts' });
+    expect('maxBytes' in params).toBe(false);
+  });
+
+  it('GET /file/bytes forwards path + offset/maxBytes as numbers', () => {
+    const { method, params } = extract(
+      '/file/bytes?path=a.bin&offset=8&maxBytes=64',
+      'GET',
+    );
+    expect(method).toBe('_qwen/file/read_bytes');
+    expect(params).toEqual({ path: 'a.bin', offset: 8, maxBytes: 64 });
+  });
+
+  it('GET /stat, /list forward path', () => {
+    expect(extract('/stat?path=a.ts', 'GET').params).toEqual({ path: 'a.ts' });
+    expect(extract('/list?path=dir', 'GET').params).toEqual({ path: 'dir' });
+  });
+
+  it('GET /glob forwards pattern', () => {
+    expect(extract('/glob?pattern=**%2F*.ts', 'GET').params).toEqual({
+      pattern: '**/*.ts',
+    });
+  });
+
+  it('GET context-usage coerces detail to the boolean true', () => {
+    const { method, params } = extract(
+      '/session/s1/context-usage?detail=true',
+      'GET',
+    );
+    expect(method).toBe('_qwen/session/context_usage');
+    expect(params).toEqual({ sessionId: 's1', detail: true });
+    expect(params['detail']).toBe(true); // not the string 'true'
+  });
+
+  it('GET context-usage without detail omits it (sessionId only)', () => {
+    expect(extract('/session/s1/context-usage', 'GET').params).toEqual({
+      sessionId: 's1',
+    });
+  });
+
+  it('GET context-usage with present-but-empty detail (`?detail=`) omits it, not `false`', () => {
+    // Mirror the numeric `?maxBytes=` rule: an empty value is "not set", so we
+    // must not forward `{ detail: false }` for a param the caller never set.
+    const { params } = extract('/session/s1/context-usage?detail=', 'GET');
+    expect(params).toEqual({ sessionId: 's1' });
+    expect('detail' in params).toBe(false);
   });
 });

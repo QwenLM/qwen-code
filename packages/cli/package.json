@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/qwen-code",
-  "version": "0.19.3",
+  "version": "0.19.5",
   "description": "Qwen Code",
   "repository": {
     "type": "git",
@@ -37,7 +37,7 @@
     "dist"
   ],
   "config": {
-    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.3"
+    "sandboxImageUri": "ghcr.io/qwenlm/qwen-code:0.19.5"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.14.1",
@@ -53,6 +53,7 @@
     "@qwen-code/channel-telegram": "file:../channels/telegram",
     "@qwen-code/channel-weixin": "file:../channels/weixin",
     "@qwen-code/qwen-code-core": "file:../core",
+    "@qwen-code/sdk": "file:../sdk-typescript",
     "@qwen-code/web-templates": "file:../web-templates",
     "@types/update-notifier": "^6.0.8",
     "ansi-regex": "^6.2.2",
@@ -75,13 +76,13 @@
     "prompts": "^2.4.2",
     "react": "^19.2.4",
     "read-package-up": "^11.0.0",
-    "shell-quote": "^1.8.3",
-    "simple-git": "^3.28.0",
+    "shell-quote": "^1.9.0",
+    "simple-git": "^3.36.0",
     "string-width": "^7.1.0",
     "strip-ansi": "^7.1.0",
     "strip-json-comments": "^3.1.1",
-    "tar": "^7.5.2",
-    "undici": "^6.22.0",
+    "tar": "^7.5.19",
+    "undici": "^6.27.0",
     "update-notifier": "^7.3.1",
     "wrap-ansi": "^10.0.0",
     "ws": "^8.18.0",

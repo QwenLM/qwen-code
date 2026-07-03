@@ -652,6 +652,7 @@ export interface EditorHandle extends WebShellComposerApi {
   getText(): string;
   hasInput(): boolean;
   retryLast(): void;
+  restoreImages(images: readonly PromptImage[]): void;
 }
 
 // ---- Compartments (shared) ----
@@ -753,7 +754,7 @@ export interface UseComposerCoreOptions {
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   queuedMessages?: string[];
-  onPopQueuedMessages?: () => string | null;
+  onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
   onFocusFooter?: () => boolean;
@@ -888,7 +889,6 @@ export function useComposerCore(
     slashCommandCategoryOrder,
     queuedMessages = [],
     onPopQueuedMessages,
-    onClearQueuedMessages,
     currentMode = 'default',
     onFocusFooter,
     dialogOpen = false,
@@ -925,8 +925,6 @@ export function useComposerCore(
   queuedMessagesRef.current = queuedMessages;
   const onPopQueuedMessagesRef = useRef(onPopQueuedMessages);
   onPopQueuedMessagesRef.current = onPopQueuedMessages;
-  const onClearQueuedMessagesRef = useRef(onClearQueuedMessages);
-  onClearQueuedMessagesRef.current = onClearQueuedMessages;
   const followupStateRef = useRef(followupState);
   followupStateRef.current = followupState;
   const onAcceptFollowupRef = useRef(onAcceptFollowup);
@@ -1339,6 +1337,7 @@ export function useComposerCore(
     const completionSources = [
       createAtCompletionSource(
         () => workspaceActionsRef.current?.globWorkspace,
+        () => workspaceActionsRef.current?.loadExtensionsStatus,
       ),
     ];
 
@@ -1461,8 +1460,10 @@ export function useComposerCore(
             setShellMode(false);
             return true;
           }
-          if (queuedMessagesRef.current.length === 0) return false;
-          return onClearQueuedMessagesRef.current?.() ?? false;
+          // Don't clear the queue on Escape — let it fall through to the
+          // window handler, where Escape cancels the in-flight turn (queued
+          // prompts are preserved and drain once it settles).
+          return false;
         },
       },
       {
@@ -1512,16 +1513,7 @@ export function useComposerCore(
             return true;
           }
           if (queuedMessagesRef.current.length > 0) {
-            const queuedText = onPopQueuedMessagesRef.current?.();
-            if (queuedText) {
-              const current = view.state.doc.toString();
-              const next = current.trim()
-                ? `${queuedText}\n${current}`
-                : queuedText;
-              view.dispatch({
-                changes: { from: 0, to: view.state.doc.length, insert: next },
-                selection: { anchor: next.length },
-              });
+            if (onPopQueuedMessagesRef.current?.()) {
               return true;
             }
           }
@@ -2583,6 +2575,9 @@ export function useComposerCore(
     removeTag: removeTopTag,
     insertText,
     retryLast,
+    restoreImages: (images) => {
+      setPastedImages((prev) => [...prev, ...images]);
+    },
     submit,
   };
 

@@ -31,6 +31,7 @@ import {
   appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
 } from '../hooks/stopHookCap.js';
+import { toModelVisibleSubagentResult } from './subagent-result.js';
 import { runWithAgentContext } from './runtime/agent-context.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
 import type { ApprovalMode } from '../config/config.js';
@@ -934,8 +935,15 @@ export class BackgroundAgentResumeService {
           }
 
           const terminateMode = subagent.getTerminateMode();
-          const finalText = appendStopHookBlockingCapWarning(
+          const modelVisibleText = toModelVisibleSubagentResult(
             subagent.getFinalText(),
+            terminateMode,
+          );
+          const finalText = appendStopHookBlockingCapWarning(
+            terminateMode === AgentTerminateMode.GOAL
+              ? modelVisibleText ||
+                  '(subagent produced no model-visible output)'
+              : modelVisibleText,
             stopHookWarning,
           );
           const stats = getCompletionStats(subagent, liveToolCallCount);
@@ -1182,6 +1190,9 @@ export class BackgroundAgentResumeService {
     },
   ): Promise<void> {
     const hookSystem = this.config.getHookSystem();
+    // Always set hook_context so ${hook_context} in systemPrompt does not
+    // throw when no hook is configured or the hook returns no additional context.
+    contextState.set('hook_context', '');
     if (!hookSystem) return;
 
     try {
@@ -1254,6 +1265,7 @@ export class BackgroundAgentResumeService {
           'task_prompt',
           typedStopOutput.getEffectiveReason(),
         );
+        continueContext.set('hook_context', '');
         await subagent.execute(continueContext, signal);
 
         if (signal?.aborted) return undefined;

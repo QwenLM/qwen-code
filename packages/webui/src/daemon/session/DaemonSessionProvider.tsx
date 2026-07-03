@@ -46,6 +46,7 @@ import {
   mapProviderStatus,
   mapSessionContextModels,
   mapSupportedCommands,
+  mapWorkspaceSkills,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import {
@@ -68,6 +69,10 @@ import {
   parseSidechannelMidTurnInjected,
   publishSidechannelMidTurnInjected,
 } from '../midTurnInjectedSidechannel.js';
+import {
+  isPendingPromptEvent,
+  publishPendingPromptEvent,
+} from '../pendingPromptVersion.js';
 import type {
   ActivePrompt,
   AddDaemonSessionNotice,
@@ -170,32 +175,33 @@ const INITIAL_WORKSPACE_EVENT_SIGNALS: DaemonWorkspaceEventSignals = {
  * and risking transcript wipes if reconnect later attaches a different
  * session and hits the sessionId-change `store.reset()` branch.
  *
- * 404/410 (session-not-found) normally keep the reconnect-then-recreate
- * behavior, unless the caller opts into leaving missing sessions disconnected.
+ * 404/410 (session-not-found) leave the requested session disconnected instead
+ * of silently creating a replacement empty session.
  */
 const AUTH_FAILURE_HTTP_STATUSES = new Set([401, 403]);
+const UNHANDLED_SESSION = Symbol('unhandled session');
 
-export function DaemonSessionProvider({
-  baseUrl,
-  token,
-  workspaceCwd,
-  initialSessionId,
-  clientId,
-  createSessionRequest,
-  maxQueued = 1024,
-  maxBlocks = DEFAULT_MAX_BLOCKS,
-  suppressOwnUserEcho = true,
-  includeRawEvent = false,
-  autoConnect = true,
-  autoReconnect = true,
-  missingSessionBehavior = 'create',
-  reconnectDelayMs = 1_000,
-  maxReconnectDelayMs = 10_000,
-  heartbeatIntervalMs = 30_000,
-  heartbeatFailureThreshold = 3,
-  loadWarnings,
-  children,
-}: DaemonSessionProviderProps) {
+export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
+  const {
+    baseUrl,
+    token,
+    workspaceCwd,
+    sessionId,
+    clientId,
+    createSessionRequest,
+    maxQueued = 1024,
+    maxBlocks = DEFAULT_MAX_BLOCKS,
+    suppressOwnUserEcho = true,
+    includeRawEvent = false,
+    autoConnect = true,
+    autoReconnect = true,
+    reconnectDelayMs = 1_000,
+    maxReconnectDelayMs = 10_000,
+    heartbeatIntervalMs = 30_000,
+    heartbeatFailureThreshold = 3,
+    loadWarnings,
+    children,
+  } = props;
   const workspace = useOptionalDaemonWorkspace();
   const resolvedBaseUrl = baseUrl ?? workspace?.baseUrl;
   const resolvedToken = token ?? workspace?.token;
@@ -206,8 +212,19 @@ export function DaemonSessionProvider({
   workspaceCapabilitiesRef.current = workspace?.capabilities;
   const workspaceGetCapabilitiesRef = useRef(workspace?.getCapabilities);
   workspaceGetCapabilitiesRef.current = workspace?.getCapabilities;
+  const initialRestoreSessionIdRef = useRef(sessionId);
+  const initialRestoreSessionId = initialRestoreSessionIdRef.current;
+  // Captured once at mount: if the host did not provide an initial session,
+  // keep the provider empty until the first prompt creates one. Later
+  // sessionId prop changes are handled by the controlled-session effect below.
+  const shouldDeferInitialSessionCreation =
+    initialRestoreSessionId === undefined;
   const resolvedWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
   resolvedWorkspaceCwdRef.current = resolvedWorkspaceCwd;
+  const activeWorkspaceCwdRef = useRef(resolvedWorkspaceCwd);
+  if (resolvedWorkspaceCwd) {
+    activeWorkspaceCwdRef.current = resolvedWorkspaceCwd;
+  }
 
   const store = useMemo(
     () => createDaemonTranscriptStore({ maxBlocks }),
@@ -225,6 +242,10 @@ export function DaemonSessionProvider({
     ReturnType<typeof setTimeout> | undefined
   >(undefined);
   const heartbeatSupportedRef = useRef(false);
+  const manualSessionClearRef = useRef(false);
+  const skipNextCleanupDetachSessionIdRef = useRef<string | undefined>(
+    undefined,
+  );
   const settledRestoredActivePromptSessionsRef = useRef<
     WeakSet<DaemonSessionClient>
   >(new WeakSet());
@@ -244,14 +265,18 @@ export function DaemonSessionProvider({
   createSessionRequestRef.current = createSessionRequest;
   const [promptStatus, setPromptStatus] = useState<DaemonPromptStatus>('idle');
   const [restoreSessionId, setRestoreSessionId] = useState<string | undefined>(
-    initialSessionId,
+    initialRestoreSessionId,
   );
   const [restoreMode, setRestoreMode] = useState<'load' | 'resume'>('load');
   const [restoreSessionNonce, setRestoreSessionNonce] = useState(0);
+  const [attachSessionNonce, setAttachSessionNonce] = useState(0);
   const [newSessionNonce, setNewSessionNonce] = useState(0);
   const [connection, setConnection] = useState<DaemonConnectionState>({
     status: autoConnect ? 'connecting' : 'idle',
+    ...(initialRestoreSessionId ? { sessionId: initialRestoreSessionId } : {}),
   });
+  const connectionRef = useRef(connection);
+  connectionRef.current = connection;
   const noticeIdRef = useRef(0);
   const [notices, setNotices] = useState<DaemonSessionNotice[]>([]);
   const addNotice = useCallback<AddDaemonSessionNotice>((input) => {
@@ -280,6 +305,14 @@ export function DaemonSessionProvider({
   const [workspaceEventSignals, setWorkspaceEventSignals] =
     useState<DaemonWorkspaceEventSignals>(INITIAL_WORKSPACE_EVENT_SIGNALS);
   const hasCurrentSessionActivePromptRef = useRef<() => boolean>(() => false);
+  const mountedRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     if (!autoConnect) return undefined;
@@ -341,11 +374,26 @@ export function DaemonSessionProvider({
           let isSameSessionReconnect = false;
           let shouldInjectReplaySnapshot = false;
           let needsStoreReset = false;
+          let attachedExistingSession = false;
           // Only populated when this attempt (re)loads the session: a reused
           // session object carries the snapshot from its original load, whose
           // usage may be older than the in-memory count.
           let replayTokenUsage: DaemonConnectionState['tokenUsage'];
           let replayTokenCount: number | undefined;
+          if (!session) {
+            const existingSession = sessionRef.current;
+            if (
+              existingSession &&
+              !restoreSessionId &&
+              !reconnectSessionId &&
+              !shouldCreateFreshSession
+            ) {
+              session = existingSession;
+              reconnectSessionId = existingSession.sessionId;
+              lastSessionIdRef.current = existingSession.sessionId;
+              attachedExistingSession = true;
+            }
+          }
           if (!session) {
             setConnection((current) => ({
               ...current,
@@ -366,6 +414,68 @@ export function DaemonSessionProvider({
               caps.features.includes('client_heartbeat');
             const effectWorkspaceCwd =
               resolvedWorkspaceCwdRef.current ?? caps.workspaceCwd;
+            activeWorkspaceCwdRef.current = effectWorkspaceCwd;
+            if (
+              (shouldDeferInitialSessionCreation ||
+                manualSessionClearRef.current) &&
+              !restoreSessionId &&
+              !reconnectSessionId &&
+              !shouldCreateFreshSession
+            ) {
+              // Fetch skills alongside providers so skill-backed slash
+              // commands (e.g. /review) can autocomplete before the first
+              // prompt. Both are session-less workspace queries; the
+              // session-scoped supported-commands snapshot (which also carries
+              // custom/MCP/workflow commands) still lands once the first prompt
+              // creates a session.
+              const [providerResult, skillsResult] = await Promise.allSettled([
+                client.workspaceProviders(),
+                client.workspaceSkills(),
+              ]);
+              if (providerResult.status === 'rejected') {
+                console.warn(
+                  '[DaemonSessionProvider] workspaceProviders failed in deferred connect:',
+                  providerResult.reason,
+                );
+              }
+              if (skillsResult.status === 'rejected') {
+                console.warn(
+                  '[DaemonSessionProvider] workspaceSkills failed in deferred connect:',
+                  skillsResult.reason,
+                );
+              }
+              const providers =
+                providerResult.status === 'fulfilled'
+                  ? providerResult.value
+                  : undefined;
+              const providerModelStatus = mapProviderStatus(providers);
+              const {
+                commands: deferredSkillCommands,
+                skills: deferredSkills,
+              } = mapWorkspaceSkills(
+                skillsResult.status === 'fulfilled'
+                  ? skillsResult.value
+                  : undefined,
+              );
+              setConnection((current) => ({
+                ...current,
+                status: 'connected',
+                workspaceCwd: effectWorkspaceCwd,
+                models: providerModelStatus.models,
+                currentModel: providerModelStatus.currentModel,
+                currentMode: providerModelStatus.currentMode,
+                contextWindow: providerModelStatus.contextWindow,
+                providers,
+                capabilities: caps,
+                ...(deferredSkillCommands.length > 0
+                  ? { commands: deferredSkillCommands }
+                  : {}),
+                ...(deferredSkills.length > 0
+                  ? { skills: deferredSkills }
+                  : {}),
+              }));
+              return;
+            }
             const restoreMethod =
               restoreSessionId && restoreMode === 'resume'
                 ? DaemonSessionClient.resume
@@ -506,115 +616,6 @@ export function DaemonSessionProvider({
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
           setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
 
-          const [providerResult, commandResult, contextResult] =
-            await Promise.allSettled([
-              client.workspaceProviders(),
-              activeSession.supportedCommands(),
-              activeSession.context(),
-            ]);
-          const providers =
-            providerResult.status === 'fulfilled'
-              ? providerResult.value
-              : undefined;
-          const supportedCommands =
-            commandResult.status === 'fulfilled'
-              ? commandResult.value
-              : undefined;
-          const context =
-            contextResult.status === 'fulfilled'
-              ? contextResult.value
-              : undefined;
-          const loadWarningTexts = [
-            providerResult.status === 'rejected'
-              ? loadWarningsRef.current?.models
-              : undefined,
-            commandResult.status === 'rejected'
-              ? loadWarningsRef.current?.commands
-              : undefined,
-            contextResult.status === 'rejected'
-              ? loadWarningsRef.current?.context
-              : undefined,
-          ].filter((warning): warning is string => Boolean(warning));
-          const providerModelStatus = mapProviderStatus(providers);
-          const contextModelStatus = mapSessionContextModels(context);
-          const sessionModels =
-            contextModelStatus && contextModelStatus.models.length > 0
-              ? contextModelStatus.models
-              : providerModelStatus.models;
-          const sessionCurrentModel =
-            contextModelStatus?.currentModel ??
-            providerModelStatus.currentModel;
-          const providerContextWindow =
-            sessionCurrentModel === providerModelStatus.currentModel
-              ? providerModelStatus.contextWindow
-              : providerModelStatus.models.find(
-                  (model) => model.id === sessionCurrentModel,
-                )?.contextWindow;
-          const sessionContextWindow =
-            contextModelStatus?.contextWindow ??
-            sessionModels.find((model) => model.id === sessionCurrentModel)
-              ?.contextWindow ??
-            providerContextWindow;
-          const { commands, skills } = mapSupportedCommands(supportedCommands);
-          const currentMode = getCurrentMode(context);
-
-          setConnection((current) => ({
-            status: 'connected',
-            sessionId: activeSession.sessionId,
-            // Surface the bound client id so consumers can recognize their own
-            // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
-            ...(activeSession.clientId
-              ? { clientId: activeSession.clientId }
-              : {}),
-            workspaceCwd: activeSession.workspaceCwd,
-            commands,
-            skills,
-            models: sessionModels,
-            currentModel: sessionCurrentModel,
-            currentMode,
-            displayName:
-              getSessionDisplayName(activeSession.state) ??
-              (current.sessionId === activeSession.sessionId
-                ? current.displayName
-                : undefined),
-            tokenUsage:
-              // Keep token usage in sync with tokenCount: replay usage
-              // supersedes in-memory state, same-session reconnect keeps it,
-              // and a different session without replay usage starts empty.
-              replayTokenUsage !== undefined
-                ? replayTokenUsage
-                : current.sessionId === activeSession.sessionId
-                  ? current.tokenUsage
-                  : undefined,
-            tokenCount:
-              // A freshly loaded snapshot covers everything up to the SSE
-              // resume point, so its usage supersedes the in-memory count;
-              // without one (or with a usage-less replay) keep the
-              // same-session value and start anything else at 0.
-              replayTokenCount !== undefined
-                ? replayTokenCount
-                : current.sessionId === activeSession.sessionId
-                  ? (current.tokenCount ?? 0)
-                  : 0,
-            contextWindow: sessionContextWindow,
-            providers,
-            supportedCommands,
-            context,
-            capabilities,
-            catchingUp:
-              isSameSessionReconnect ||
-              activeSession.lastEventId != null ||
-              undefined,
-          }));
-          if (loadWarningTexts.length > 0) {
-            store.dispatch(
-              loadWarningTexts.map((text) => ({
-                type: 'status' as const,
-                text,
-              })),
-            );
-          }
-
           const pendingLoad = pendingSessionLoadRef.current;
           const pendingLoadToResolve =
             pendingLoad?.sessionId === activeSession.sessionId
@@ -625,20 +626,23 @@ export function DaemonSessionProvider({
           // the store before starting the SSE loop. The SSE stream begins
           // from lastEventId, so only post-snapshot events are delivered.
           //
+          // This runs before the providers/commands/context fetches below:
+          // the snapshot is already in hand, so the transcript paints one
+          // metadata round-trip earlier (visible on high-latency mobile).
+          //
           // The deferred store.reset() runs here — in the same synchronous
           // block as store.dispatch() — so the queueMicrotask notification
           // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
-          if (
-            needsStoreReset &&
-            !(shouldInjectReplaySnapshot && replayEvents.length > 0)
-          ) {
+          const replayInjected =
+            shouldInjectReplaySnapshot && replayEvents.length > 0;
+          if (needsStoreReset && !replayInjected) {
             // Reset needed but no replay data (e.g. fresh session) — reset
             // immediately since there is no dispatch to batch with.
             store.reset();
           }
-          if (shouldInjectReplaySnapshot && replayEvents.length > 0) {
+          if (replayInjected) {
             const replayOpts = {
               ...eventOptionsRef.current,
               suppressOwnUserEcho: false,
@@ -714,9 +718,136 @@ export function DaemonSessionProvider({
           if (pendingLoadToResolve) {
             pendingSessionLoadRef.current = undefined;
             clearTimeout(pendingLoadToResolve.timeout);
+            if (
+              skipNextCleanupDetachSessionIdRef.current ===
+              activeSession.sessionId
+            ) {
+              skipNextCleanupDetachSessionIdRef.current = undefined;
+            }
             pendingLoadToResolve.resolve();
           }
 
+          const canReuseSessionMetadata =
+            attachedExistingSession &&
+            connectionRef.current.commands !== undefined &&
+            connectionRef.current.skills !== undefined &&
+            connectionRef.current.supportedCommands !== undefined &&
+            connectionRef.current.context !== undefined;
+          const [providerResult, commandResult, contextResult] =
+            canReuseSessionMetadata
+              ? [undefined, undefined, undefined]
+              : await Promise.allSettled([
+                  client.workspaceProviders(),
+                  activeSession.supportedCommands(),
+                  activeSession.context(),
+                ]);
+          const providers =
+            providerResult?.status === 'fulfilled'
+              ? providerResult.value
+              : undefined;
+          const supportedCommands =
+            commandResult?.status === 'fulfilled'
+              ? commandResult.value
+              : undefined;
+          const context =
+            contextResult?.status === 'fulfilled'
+              ? contextResult.value
+              : undefined;
+          const loadWarningTexts = [
+            providerResult?.status === 'rejected'
+              ? loadWarningsRef.current?.models
+              : undefined,
+            commandResult?.status === 'rejected'
+              ? loadWarningsRef.current?.commands
+              : undefined,
+            contextResult?.status === 'rejected'
+              ? loadWarningsRef.current?.context
+              : undefined,
+          ].filter((warning): warning is string => Boolean(warning));
+          const providerModelStatus = mapProviderStatus(providers);
+          const contextModelStatus = mapSessionContextModels(context);
+          const sessionModels =
+            contextModelStatus && contextModelStatus.models.length > 0
+              ? contextModelStatus.models
+              : providerModelStatus.models;
+          const sessionCurrentModel =
+            contextModelStatus?.currentModel ??
+            providerModelStatus.currentModel;
+          const providerContextWindow =
+            sessionCurrentModel === providerModelStatus.currentModel
+              ? providerModelStatus.contextWindow
+              : providerModelStatus.models.find(
+                  (model) => model.id === sessionCurrentModel,
+                )?.contextWindow;
+          const sessionContextWindow =
+            contextModelStatus?.contextWindow ??
+            sessionModels.find((model) => model.id === sessionCurrentModel)
+              ?.contextWindow ??
+            providerContextWindow;
+          const { commands, skills } = mapSupportedCommands(supportedCommands);
+          const currentMode =
+            getCurrentMode(context) ?? providerModelStatus.currentMode;
+
+          setConnection((current) => ({
+            status: 'connected',
+            sessionId: activeSession.sessionId,
+            // Surface the bound client id so consumers can recognize their own
+            // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
+            ...(activeSession.clientId
+              ? { clientId: activeSession.clientId }
+              : {}),
+            workspaceCwd: activeSession.workspaceCwd,
+            commands: commands.length > 0 ? commands : current.commands,
+            skills: skills.length > 0 ? skills : current.skills,
+            models: sessionModels.length > 0 ? sessionModels : current.models,
+            currentModel: sessionCurrentModel ?? current.currentModel,
+            currentMode: currentMode ?? current.currentMode,
+            displayName:
+              getSessionDisplayName(activeSession.state) ??
+              (current.sessionId === activeSession.sessionId
+                ? current.displayName
+                : undefined),
+            tokenUsage:
+              // Keep token usage in sync with tokenCount: replay usage
+              // supersedes in-memory state, same-session reconnect keeps it,
+              // and a different session without replay usage starts empty.
+              replayTokenUsage !== undefined
+                ? replayTokenUsage
+                : current.sessionId === activeSession.sessionId
+                  ? current.tokenUsage
+                  : undefined,
+            tokenCount:
+              // A freshly loaded snapshot covers everything up to the SSE
+              // resume point, so its usage supersedes the in-memory count;
+              // without one (or with a usage-less replay) keep the
+              // same-session value and start anything else at 0.
+              replayTokenCount !== undefined
+                ? replayTokenCount
+                : current.sessionId === activeSession.sessionId
+                  ? (current.tokenCount ?? 0)
+                  : 0,
+            contextWindow: sessionContextWindow ?? current.contextWindow,
+            providers: providers ?? current.providers,
+            supportedCommands: supportedCommands ?? current.supportedCommands,
+            context: context ?? current.context,
+            capabilities: capabilities ?? current.capabilities,
+            catchingUp:
+              // Replay already injected above — keep the cleared flag rather
+              // than re-arming it (nothing before SSE would clear it again).
+              replayInjected
+                ? current.catchingUp
+                : isSameSessionReconnect ||
+                  activeSession.lastEventId != null ||
+                  undefined,
+          }));
+          if (loadWarningTexts.length > 0) {
+            store.dispatch(
+              loadWarningTexts.map((text) => ({
+                type: 'status' as const,
+                text,
+              })),
+            );
+          }
           let sawEvent = false;
           let resyncRequested = false;
           const requestEpochResetReload = () => {
@@ -751,6 +882,9 @@ export function DaemonSessionProvider({
             signal: abort.signal,
             maxQueued,
           })) {
+            if (sessionRef.current?.sessionId !== activeSession.sessionId) {
+              break;
+            }
             if (!sawEvent) {
               sawEvent = true;
               reconnectAttempt = 0;
@@ -767,6 +901,13 @@ export function DaemonSessionProvider({
                 // Keep the sidechannel for queue dedupe, but still normalize the
                 // event below so chat UIs can render the inserted-message status.
                 publishSidechannelMidTurnInjected(midTurnInjected);
+              }
+              if (isPendingPromptEvent(event)) {
+                publishPendingPromptEvent(event);
+                if (event.type === 'pending_prompt_started') {
+                  clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+                  setPromptStatus('waiting');
+                }
               }
               const normalizedUiEvents = normalizeAndFilterEvent(
                 event,
@@ -1012,6 +1153,12 @@ export function DaemonSessionProvider({
             }));
             return;
           }
+          if (manualSessionClearRef.current) {
+            session = undefined;
+            sessionRef.current = undefined;
+            hasCurrentSessionActivePromptRef.current = () => false;
+            return;
+          }
           if (!disposed && !abort.signal.aborted && !resyncRequested) {
             // Keep the session handle after a normal SSE close so the next
             // subscription can resume from DaemonSessionClient.lastEventId.
@@ -1044,10 +1191,6 @@ export function DaemonSessionProvider({
           const failedSessionId = session?.sessionId;
           const isAuthFailure = isAuthFailureHttpError(error);
           const isTerminal = isTerminalSessionHttpError(error);
-          const shouldDisconnectMissingSession =
-            isTerminal &&
-            !isAuthFailure &&
-            missingSessionBehavior === 'disconnect';
           if (failedSessionId && (isAuthFailure || isTerminal)) {
             const active = activePromptsRef.current.get(failedSessionId);
             active?.controller.abort();
@@ -1066,6 +1209,12 @@ export function DaemonSessionProvider({
             (pendingLoad.sessionId === restoreSessionId ||
               pendingLoad.sessionId === reconnectSessionId)
           ) {
+            if (
+              skipNextCleanupDetachSessionIdRef.current ===
+              pendingLoad.sessionId
+            ) {
+              skipNextCleanupDetachSessionIdRef.current = undefined;
+            }
             pendingSessionLoadRef.current = undefined;
             clearTimeout(pendingLoad.timeout);
             pendingLoad.reject(error);
@@ -1080,20 +1229,14 @@ export function DaemonSessionProvider({
               setConnection({ status: 'error', error: message });
               return;
             }
-            if (shouldDisconnectMissingSession) {
-              setConnection((current) => ({
-                ...current,
-                status: 'disconnected',
-                sessionId: undefined,
-                error: message,
-                catchingUp: undefined,
-              }));
-              return;
-            }
-            reconnectSessionId = undefined;
-            if (restoreSessionId) {
-              setRestoreSessionId(undefined);
-            }
+            setConnection((current) => ({
+              ...current,
+              status: 'disconnected',
+              sessionId: undefined,
+              error: message,
+              catchingUp: undefined,
+            }));
+            return;
           } else {
             // Retriable error (network failure, timeout, etc.) — preserve
             // the session so the next iteration skips the full load() and
@@ -1157,14 +1300,20 @@ export function DaemonSessionProvider({
       hasCurrentSessionActivePromptRef.current = () => false;
       setPromptStatus('idle');
       clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
-      if (pendingSessionLoadRef.current) {
+      const keepSessionForNextEffect =
+        session?.sessionId === skipNextCleanupDetachSessionIdRef.current;
+      const isUnmounting = !mountedRef.current;
+      if (
+        pendingSessionLoadRef.current &&
+        (!keepSessionForNextEffect || isUnmounting)
+      ) {
         clearTimeout(pendingSessionLoadRef.current.timeout);
         pendingSessionLoadRef.current.reject(
           new DOMException('Session load interrupted by cleanup', 'AbortError'),
         );
         pendingSessionLoadRef.current = undefined;
       }
-      if (session?.clientId) {
+      if ((!keepSessionForNextEffect || isUnmounting) && session?.clientId) {
         void detachDaemonClient({
           baseUrl: resolvedBaseUrl!,
           token: resolvedToken,
@@ -1174,12 +1323,13 @@ export function DaemonSessionProvider({
           console.warn('[DaemonSessionProvider] detach failed:', err),
         );
       }
-      sessionRef.current = undefined;
+      if (!keepSessionForNextEffect || isUnmounting) {
+        sessionRef.current = undefined;
+      }
     };
   }, [
     autoConnect,
     autoReconnect,
-    missingSessionBehavior,
     resolvedBaseUrl,
     resolvedToken,
     workspaceCwd,
@@ -1190,8 +1340,10 @@ export function DaemonSessionProvider({
     restoreSessionId,
     restoreMode,
     restoreSessionNonce,
+    attachSessionNonce,
     newSessionNonce,
     clientId,
+    shouldDeferInitialSessionCreation,
     clearNotices,
     addNotice,
   ]);
@@ -1199,6 +1351,7 @@ export function DaemonSessionProvider({
   useEffect(() => {
     if (
       !heartbeatSupportedRef.current ||
+      connection.status !== 'connected' ||
       heartbeatIntervalMs <= 0 ||
       heartbeatFailureThreshold <= 0 ||
       !connection.sessionId
@@ -1240,7 +1393,12 @@ export function DaemonSessionProvider({
       disposed = true;
       clearInterval(timer);
     };
-  }, [connection.sessionId, heartbeatFailureThreshold, heartbeatIntervalMs]);
+  }, [
+    connection.sessionId,
+    connection.status,
+    heartbeatFailureThreshold,
+    heartbeatIntervalMs,
+  ]);
 
   const actions = useMemo<DaemonSessionActions>(
     () =>
@@ -1252,6 +1410,8 @@ export function DaemonSessionProvider({
         pendingSessionLoadRef,
         pendingSessionLoadIdRef,
         heartbeatSupportedRef,
+        manualSessionClearRef,
+        skipNextCleanupDetachSessionIdRef,
         passiveAssistantDoneTimerRef,
         hasSessionActivePrompt: () =>
           hasCurrentSessionActivePromptRef.current(),
@@ -1262,18 +1422,69 @@ export function DaemonSessionProvider({
           ...createSessionRequestRef.current,
           sessionScope: 'thread',
           workspaceCwd:
-            resolvedWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
+            activeWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
         }),
+        createDetachedSession: () => {
+          const client =
+            workspaceClientRef.current ??
+            new DaemonClient({
+              baseUrl: resolvedBaseUrl!,
+              token: resolvedToken,
+            });
+          const request = {
+            ...createSessionRequestRef.current,
+            sessionScope: 'thread' as const,
+            workspaceCwd:
+              activeWorkspaceCwdRef.current ?? sessionRef.current?.workspaceCwd,
+          };
+          const requestClientId = clientId
+            ? clientIdRef.current
+            : getStableClientId(undefined);
+          return DaemonSessionClient.createOrAttach(
+            client,
+            request,
+            requestClientId,
+          );
+        },
+        getConnection: () => connectionRef.current,
         addNotice,
         setConnection,
         setPromptStatus,
         setRestoreSessionId,
         setRestoreMode,
         setRestoreSessionNonce,
+        setAttachSessionNonce,
         setNewSessionNonce,
       }),
-    [addNotice, store],
+    [addNotice, clientId, resolvedBaseUrl, resolvedToken, store],
   );
+  const lastHandledSessionIdRef = useRef<
+    string | undefined | typeof UNHANDLED_SESSION
+  >(UNHANDLED_SESSION);
+
+  useEffect(() => {
+    if (lastHandledSessionIdRef.current === sessionId) return;
+    lastHandledSessionIdRef.current = sessionId;
+
+    const currentSessionId = connectionRef.current.sessionId;
+    if (sessionId === currentSessionId) return;
+
+    const request = sessionId
+      ? actions.loadSession(sessionId, { deferTranscriptReset: true })
+      : currentSessionId
+        ? actions.clearSession()
+        : undefined;
+
+    if (!request) return;
+
+    void request.catch((error: unknown) => {
+      console.warn(
+        '[DaemonSessionProvider] controlled session transition failed:',
+        error,
+      );
+    });
+  }, [actions, sessionId]);
+
   return (
     <DaemonStoreContext.Provider value={store}>
       <DaemonConnectionContext.Provider value={connection}>

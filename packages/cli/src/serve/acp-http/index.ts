@@ -10,12 +10,14 @@ import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import { RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { DaemonWorkspaceService } from '../workspace-service/types.js';
 import type { WorkspaceFileSystemFactory } from '../fs/index.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
 import type { ParsedAllowOriginPatterns } from '../auth.js';
 import { AcpDispatcher } from './dispatch.js';
+import type { WorkspaceRememberTaskLane } from '../workspace-remember.js';
 import {
   ConnectionRegistry,
   type AcpConnection,
@@ -23,7 +25,15 @@ import {
 import { SseStream } from './sse-stream.js';
 import { WsStream } from './ws-stream.js';
 import type { RateLimitTier } from '../rate-limit.js';
-import { RPC, error as rpcError, isRequest, parseInbound } from './json-rpc.js';
+import { SessionArchiveCoordinator } from '../server/session-archive.js';
+import {
+  RPC,
+  error as rpcError,
+  isRequest,
+  logSafe,
+  parseInbound,
+} from './json-rpc.js';
+import { parseLastEventId } from '../sse-last-event-id.js';
 import {
   ClientMcpWsConnection,
   type ClientMcpServerProvider,
@@ -52,6 +62,61 @@ const CDP_PATH = '/cdp';
  * packages can't share a module).
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
+const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
+/** Stdio MCP adapter command used by the optional CDP browser automation bridge. */
+const CDP_MCP_COMMAND_ENV = 'QWEN_CDP_MCP_COMMAND';
+const RUNTIME_MCP_RETRY_DELAY_MS = 250;
+const RUNTIME_MCP_RETRY_ATTEMPTS = 20;
+
+function formatCdpEndpointHost(hostname: string | undefined): string {
+  const host = hostname?.trim() || '127.0.0.1';
+  if (host === '0.0.0.0' || host === '::' || host === '[::]') {
+    return '127.0.0.1';
+  }
+  const unbracketed =
+    host.startsWith('[') && host.endsWith(']') ? host.slice(1, -1) : host;
+  return unbracketed.includes(':') ? `[${unbracketed}]` : unbracketed;
+}
+
+function isAcpChannelUnavailable(err: unknown): boolean {
+  return (
+    (err as { data?: { errorKind?: unknown } } | undefined)?.data?.errorKind ===
+    'acp_channel_unavailable'
+  );
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildChromeDevToolsMcpRuntimeConfig(
+  localPort: number | undefined,
+  hostname: string | undefined,
+): Record<string, unknown> | undefined {
+  if (
+    localPort === undefined ||
+    !Number.isInteger(localPort) ||
+    localPort <= 0
+  ) {
+    return undefined;
+  }
+  const command = process.env[CDP_MCP_COMMAND_ENV]?.trim();
+  if (!command) {
+    writeStderrLine(
+      `qwen serve: set ${CDP_MCP_COMMAND_ENV} to enable browser automation MCP (chrome-devtools-mcp is no longer bundled)`,
+    );
+    return undefined;
+  }
+  return {
+    command,
+    args: [
+      '--wsEndpoint',
+      `ws://${formatCdpEndpointHost(hostname)}:${localPort}/cdp`,
+    ],
+    alwaysLoadTools: true,
+    [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
+  };
+}
 
 /**
  * Browsers cannot set an `Authorization` header on a WebSocket, so the Web
@@ -101,6 +166,16 @@ function extractUpgradeBearer(req: IncomingMessage): string | undefined {
  */
 const CONN_GRACE_MS = 10_000;
 
+/**
+ * Grace window after a SESSION-scoped SSE stream closes at the transport level
+ * (proxy idle-close, network blip) without an explicit `session/close`. The
+ * binding — ownership, in-flight prompt, bridge-client — is kept alive so a
+ * reconnect within the window resumes via ring replay (§1.8) instead of being
+ * rejected (403) and re-spawning. Short enough to bound the runaway-prompt
+ * cost if the client never returns. Mirrors `CONN_GRACE_MS`.
+ */
+const SESSION_GRACE_MS = 10_000;
+
 const WS_EXEMPT_METHODS = new Set([
   '_qwen/session/heartbeat',
   '_qwen/session/update_metadata',
@@ -127,6 +202,7 @@ const WS_READ_METHODS = new Set([
   '_qwen/workspace/agents/list',
   '_qwen/workspace/agents/get',
   '_qwen/workspace/memory',
+  '_qwen/workspace/memory/remember/get',
   '_qwen/workspace/auth/status',
   '_qwen/workspace/auth/device_flow/get',
   '_qwen/file/read',
@@ -139,11 +215,25 @@ const WS_READ_METHODS = new Set([
 function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
   if (!localPort) return false;
   const parsed = new URL(origin);
+  // Both schemes: under `--tls-cert/--tls-key` the loopback ACP client
+  // speaks https, so its Origin header carries `https://`.
   const allowed = new Set([
     `http://localhost:${localPort}`,
     `http://127.0.0.1:${localPort}`,
     `http://[::1]:${localPort}`,
+    `https://localhost:${localPort}`,
+    `https://127.0.0.1:${localPort}`,
+    `https://[::1]:${localPort}`,
   ]);
+  // RFC 7230 §5.4: browsers omit the port in the Origin header when it
+  // matches the scheme default (http→80, https→443). Accept the port-less
+  // forms so the check doesn't fail on default ports.
+  if (localPort === 80 || localPort === 443) {
+    for (const host of ['localhost', '127.0.0.1', '[::1]']) {
+      allowed.add(`http://${host}`);
+      allowed.add(`https://${host}`);
+    }
+  }
   return allowed.has(parsed.origin.toLowerCase());
 }
 
@@ -172,8 +262,13 @@ export interface MountAcpHttpOptions {
    * tool channel. Mirrors the REST CORS allowlist (`allowOriginCors`).
    */
   allowedOrigins?: ParsedAllowOriginPatterns;
+  /** Hostname the daemon is listening on; used by local MCP child processes. */
+  hostname?: string;
   /** Effective direct session shell policy for ACP initialize/dispatch. */
   sessionShellCommandEnabled?: boolean;
+  archiveCoordinator?: SessionArchiveCoordinator;
+  /** Shared lane for sessionless workspace remember tasks. */
+  workspaceRememberLane: WorkspaceRememberTaskLane;
   /** Rate limit checker for WS messages (WS bypasses Express middleware). */
   checkRate?: (key: string, tier: RateLimitTier) => boolean;
   /**
@@ -263,18 +358,24 @@ export function mountAcpHttp(
   if (!enabled) return undefined;
 
   const path = opts.path ?? '/acp';
-  const dispatcher = new AcpDispatcher(
-    bridge,
-    opts.boundWorkspace,
-    opts.workspace,
-    opts.fsFactory,
-    opts.deviceFlowRegistry,
-    opts.sessionShellCommandEnabled === true,
-  );
+  const dispatcherRef: { current?: AcpDispatcher } = {};
   // When a session/connection tears down with a permission still pending,
   // cancel it on the bridge so the agent's prompt isn't left blocked.
   const registry = new ConnectionRegistry(
-    (req, clientId) => dispatcher.cancelAbandonedPermission(req, clientId),
+    (req, clientId) => {
+      // Defensive, matching the `detachClient` callback below: if a future
+      // refactor introduces async work between registry and dispatcher
+      // creation, a teardown racing in here must not crash
+      // `abandonPendingForSession`. Log and report "not cancelled" instead of
+      // throwing through the teardown path.
+      if (!dispatcherRef.current) {
+        writeStderrLine(
+          'qwen serve: /acp abandonPending called before dispatcher initialized (skipped)',
+        );
+        return false;
+      }
+      return dispatcherRef.current.cancelAbandonedPermission(req, clientId);
+    },
     // Best-effort bridge detach so a torn-down connection's bridge-stamped
     // client ids don't linger in the bridge's voter/known-client sets.
     (sessionId, clientId) => {
@@ -288,6 +389,139 @@ export function mountAcpHttp(
     },
     opts.maxConnections,
   );
+  let cdpMcpRegistered = false;
+  let cdpMcpRegistering: Promise<void> | undefined;
+  let cdpMcpTerminalSkipLogged = false;
+
+  async function removeChromeDevToolsMcp(
+    originatorClientId: string,
+  ): Promise<void> {
+    if (!cdpMcpRegistered) return;
+    cdpMcpRegistered = false;
+    try {
+      await bridge.removeRuntimeMcpServer(
+        CHROME_DEVTOOLS_MCP_SERVER_NAME,
+        originatorClientId,
+      );
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: failed to remove ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  }
+
+  function removeChromeDevToolsMcpIfUnused(originatorClientId: string): void {
+    void (async () => {
+      if (opts.cdpTunnelRegistry?.hasActive()) return;
+      if (cdpMcpRegistering) await cdpMcpRegistering;
+      if (opts.cdpTunnelRegistry?.hasActive()) return;
+      await removeChromeDevToolsMcp(originatorClientId);
+    })().catch((err) => {
+      writeStderrLine(
+        `qwen serve: failed to clean up ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    });
+  }
+
+  function ensureChromeDevToolsMcpRegistered(
+    localPort: number | undefined,
+    originatorClientId: string,
+  ): void {
+    if (opts.token) {
+      if (!cdpMcpTerminalSkipLogged) {
+        writeStderrLine(
+          `qwen serve: ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP skipped because /cdp requires bearer auth`,
+        );
+        cdpMcpTerminalSkipLogged = true;
+      }
+      return;
+    }
+    if (cdpMcpRegistered || cdpMcpRegistering || cdpMcpTerminalSkipLogged) {
+      return;
+    }
+    const runtimeConfig = buildChromeDevToolsMcpRuntimeConfig(
+      localPort,
+      opts.hostname,
+    );
+    if (!runtimeConfig) {
+      cdpMcpTerminalSkipLogged = true;
+      return;
+    }
+    cdpMcpRegistering = (async () => {
+      try {
+        let result: Awaited<ReturnType<typeof bridge.addRuntimeMcpServer>>;
+        for (let attempt = 0; ; attempt++) {
+          try {
+            result = await bridge.addRuntimeMcpServer(
+              CHROME_DEVTOOLS_MCP_SERVER_NAME,
+              runtimeConfig,
+              originatorClientId,
+            );
+            break;
+          } catch (err) {
+            if (
+              !isAcpChannelUnavailable(err) ||
+              attempt >= RUNTIME_MCP_RETRY_ATTEMPTS ||
+              !opts.cdpTunnelRegistry?.hasActive()
+            ) {
+              throw err;
+            }
+            await delay(RUNTIME_MCP_RETRY_DELAY_MS);
+          }
+        }
+        if ((result as { skipped?: boolean }).skipped) {
+          writeStderrLine(
+            `qwen serve: ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP skipped: ${
+              (result as { reason?: string }).reason ?? 'unknown'
+            }`,
+          );
+          return;
+        }
+        if ((result as { shadowedSettings?: boolean }).shadowedSettings) {
+          await bridge
+            .removeRuntimeMcpServer(
+              CHROME_DEVTOOLS_MCP_SERVER_NAME,
+              originatorClientId,
+            )
+            .catch(() => {});
+          cdpMcpTerminalSkipLogged = true;
+          writeStderrLine(
+            `qwen serve: ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP skipped because settings already define it`,
+          );
+          return;
+        }
+        cdpMcpRegistered = true;
+        if (!opts.cdpTunnelRegistry?.hasActive()) {
+          await removeChromeDevToolsMcp(originatorClientId);
+        }
+      } catch (err) {
+        writeStderrLine(
+          `qwen serve: failed to add ${CHROME_DEVTOOLS_MCP_SERVER_NAME} runtime MCP: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      } finally {
+        cdpMcpRegistering = undefined;
+      }
+    })();
+  }
+
+  const dispatcher = new AcpDispatcher(
+    bridge,
+    opts.boundWorkspace,
+    opts.workspace,
+    opts.workspaceRememberLane,
+    opts.fsFactory,
+    opts.deviceFlowRegistry,
+    opts.sessionShellCommandEnabled === true,
+    registry,
+    opts.archiveCoordinator ?? new SessionArchiveCoordinator(),
+  );
+  dispatcherRef.current = dispatcher;
 
   // ── POST /acp ──────────────────────────────────────────────────────
   app.post(path, async (req: Request, res: Response) => {
@@ -469,21 +703,38 @@ export function mountAcpHttp(
           // idle TTL. After the grace window, reap UNLESS a reconnect
           // re-attached the conn stream (clears the timer) OR a session
           // stream is still live (client is active — only the conn stream
-          // blipped, don't kill its sessions/prompts).
+          // blipped, don't kill its sessions/prompts) OR a session is itself
+          // mid-reconnect within its OWN grace window (`hasRecoverableSession`)
+          // — reaping then would 404 the imminent session resume and abort the
+          // in-flight prompt before SESSION_GRACE_MS promised.
           conn.clearGraceTimer();
-          conn.connGraceTimer = setTimeout(() => {
+          // Reap iff the grace has elapsed and this dead conn stream is still
+          // current with nothing live or mid-reconnect. Shared by the grace
+          // timer and the post-session-grace re-check (below) so a connection
+          // blocked from reaping by a then-recoverable session doesn't linger
+          // until the 30-min idle sweep after that session finally tears down.
+          const reapConnIfDead = () => {
             if (
               registry.get(connId) === conn &&
               conn.connStream === stream &&
-              !conn.hasLiveSessionStream()
+              conn.connGraceExpired &&
+              !conn.hasLiveSessionStream() &&
+              !conn.hasRecoverableSession()
             ) {
               writeStderrLine(
                 `qwen serve: /acp reaping connection ${connId.slice(0, 8)} (conn stream gone, no live session stream)`,
               );
               registry.delete(connId);
             }
+          };
+          conn.connGraceTimer = setTimeout(() => {
+            conn.connGraceExpired = true;
+            reapConnIfDead();
           }, CONN_GRACE_MS);
           conn.connGraceTimer.unref?.();
+          // When a session's reclaim grace expires it may have been the last
+          // thing blocking this reap; re-evaluate then too.
+          conn.onSessionGraceExpired = reapConnIfDead;
         },
         () => conn.touch(),
       );
@@ -508,46 +759,84 @@ export function mountAcpHttp(
     const stream = new SseStream(
       res,
       () => {
-        // Stream closed (tab close / network drop / crash): stop the event
-        // pump AND abort any in-flight prompt for this session — otherwise
-        // the agent keeps running (quota, FIFO) until idle TTL.
+        // Transport-level close (tab close / network drop / proxy idle-close):
+        // stop THIS stream's event pump only. The prompt + ownership are NOT
+        // torn down here — `detachSessionStream` (below) keeps them across a
+        // grace window so a reconnect can resume (§1.8). Only an expired grace,
+        // an explicit `session/close`, or connection teardown aborts the prompt.
         ac.abort();
-        // BUT only abort the prompt when THIS is still the session's live
-        // stream. A reconnect already installed a newer stream — the prompt
-        // must survive the old stream's close. CONTRACT: this identity guard
-        // pairs with `attachSessionStream`'s install-before-close ordering
-        // (connection-registry.ts) — keep both in lockstep.
-        if (conn.sessions.get(sessionId)?.stream === stream) {
-          conn.sessions.get(sessionId)?.promptAbort?.abort();
-        }
       },
       () => conn.touch(),
     );
     // Open (write SSE headers + `retry:`) BEFORE attaching, so the protocol
     // handshake precedes any buffered frames the attach flushes.
     stream.open();
-    conn.attachSessionStream(sessionId, stream, ac);
-    // Identity-guarded close: only tear down if THIS stream is still the
-    // session's current one (a reconnect between settle and this microtask
-    // would otherwise kill the fresh stream).
-    const closeIfCurrent = () => {
-      if (conn.sessions.get(sessionId)?.stream === stream) {
+    // Resume cursor: an EventSource/SSE client auto-resends the last `id:` it
+    // saw as `Last-Event-ID` on reconnect. Drives the EventBus ring replay so
+    // content frames produced during a mid-turn proxy gap are recovered (§1.8).
+    const lastEventId = parseLastEventId(
+      headerOf(req, 'last-event-id'),
+      '/acp ',
+    );
+    // Pass the resume cursor INTO attach: when resuming, attach skips flushing
+    // id-bearing buffered frames because the ring replay below redelivers every
+    // bus event after `lastEventId` exactly once — including any frame lost
+    // in-flight to the dead socket (whose id sits below the buffer's ids but
+    // above the client's cursor). Advancing the cursor past the buffer instead
+    // would silently drop that frame; flushing AND replaying would double-send.
+    // Id-less JSON-RPC replies are still flushed (they aren't ring events).
+    conn.attachSessionStream(sessionId, stream, ac, lastEventId);
+    // When the pump settles, branch on WHY:
+    //  • the transport closed the stream (proxy idle-close / tab close) →
+    //    DETACH with a grace window: keep ownership + the in-flight prompt so a
+    //    reconnect resumes (§1.8); full teardown only if no reconnect arrives.
+    //  • the pump ended while the stream is still open (subprocess done /
+    //    iterator error) → the stream is a zombie; full close now.
+    // Both are identity-guarded so a stale stream can't act on a newer one.
+    // INVARIANT (cross-file, mirrors the CONTRACT comment in
+    // `connection-registry.ts` `attachSessionStream`): the identity checks below
+    // (`conn.sessions.get(sessionId)?.stream === stream`) are load-bearing and
+    // depend on `attachSessionStream` installing the NEW stream BEFORE the old
+    // one's pump settles here. If a refactor closed the old stream first, this
+    // settling pump would see `stream !== current` and fall into the "superseded"
+    // no-op while the reclaim is mid-flight — skipping detach-with-grace and
+    // aborting the prompt instead of keeping it alive for reconnect. The
+    // identity guard, not a flag, is what keeps a stale close from tearing down a
+    // fresh reclaim. Covered by connection-registry.test.ts "detachSessionStream
+    // is a no-op for a stale stream after reclaim (identity guard)".
+    const onPumpSettled = () => {
+      if (stream.isClosed) {
+        // Transport-closed → detach-with-grace. detachSessionStream logs the
+        // detach breadcrumb itself (with the grace window).
+        conn.detachSessionStream(sessionId, stream, SESSION_GRACE_MS);
+      } else if (conn.sessions.get(sessionId)?.stream === stream) {
+        // Pump ended while the stream is still open (subprocess done / iterator
+        // error) → the stream is a zombie; full close now. Logged so the
+        // operator trail can tell this apart from a transport-close detach.
+        writeStderrLine(
+          `qwen serve: /acp session stream pump ended while open ` +
+            `(${logSafe(sessionId)}) — closing`,
+        );
         conn.closeSessionStream(sessionId);
+      } else {
+        // Guard mismatch: a stale stream's pump settled after a newer reclaim
+        // already took over. No-op, but log it so the trail isn't silent.
+        writeStderrLine(
+          `qwen serve: /acp session stream pump settled for a superseded ` +
+            `stream (${logSafe(sessionId)}) — no-op`,
+        );
       }
     };
-    void dispatcher.pumpSessionEvents(conn, sessionId, ac.signal).then(
-      // NORMAL completion (iterator returned `done` — subprocess ended): close
-      // so the stream isn't a zombie heartbeating with nothing left to deliver.
-      closeIfCurrent,
-      (err: unknown) => {
+    void dispatcher
+      .pumpSessionEvents(conn, sessionId, ac.signal, lastEventId)
+      .then(onPumpSettled, (err: unknown) => {
         writeStderrLine(
-          `qwen serve: /acp event pump error (${sessionId}): ${
-            err instanceof Error ? err.message : String(err)
-          }`,
+          `qwen serve: /acp event pump error (${logSafe(sessionId)}, lastEventId=${
+            lastEventId ?? 'none'
+          }): ${logSafe(err instanceof Error ? err.message : String(err))}`,
         );
-        closeIfCurrent();
-      },
-    );
+        onPumpSettled();
+      });
   });
 
   // ── DELETE /acp ────────────────────────────────────────────────────
@@ -609,6 +898,7 @@ export function mountAcpHttp(
       const rawAddr =
         (socket as unknown as { remoteAddress?: string }).remoteAddress ??
         'ws-unknown';
+      const localPort = (socket as { localPort?: number }).localPort;
       const logReject = (reason: string) => {
         writeStderrLine(
           `qwen serve: WebSocket upgrade rejected (${reason}) from ${rawAddr}`,
@@ -651,13 +941,23 @@ export function mountAcpHttp(
       // the REST middleware does; extract port from the socket.
       if (fromLoopback) {
         const host = (req.headers['host'] ?? '').toLowerCase();
-        const localPort = (socket as { localPort?: number }).localPort;
         const allowed = new Set([
           `localhost:${localPort}`,
           `127.0.0.1:${localPort}`,
           `[::1]:${localPort}`,
           `host.docker.internal:${localPort}`,
         ]);
+        // RFC 7230 §5.4: browsers omit the port suffix when it matches the
+        // scheme default (http→80, https→443). On TLS/port 443 the browser
+        // sends `Host: localhost`, which won't match `localhost:443` and
+        // every WS upgrade is rejected. Mirror the REST host allowlist
+        // (auth.ts) and accept the port-less forms on default ports.
+        if (localPort === 80 || localPort === 443) {
+          allowed.add('localhost');
+          allowed.add('127.0.0.1');
+          allowed.add('[::1]');
+          allowed.add('host.docker.internal');
+        }
         if (!allowed.has(host)) {
           logReject(`host-not-allowed ${host || '(missing)'}`);
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
@@ -672,7 +972,6 @@ export function mountAcpHttp(
       const origin = req.headers['origin'];
       if (origin) {
         try {
-          const localPort = (socket as { localPort?: number }).localPort;
           const isLoopbackOrigin = isSameLoopbackOrigin(origin, localPort);
           // `--allow-origin` allowlist (same match semantics as the REST
           // `allowOriginCors`): lets an explicitly permitted non-loopback
@@ -786,6 +1085,9 @@ export function mountAcpHttp(
           if (cdpBridgeUnregister) {
             cdpBridgeUnregister();
             cdpBridgeUnregister = undefined;
+            removeChromeDevToolsMcpIfUnused(
+              connRef?.connectionId ?? 'cdp-bridge',
+            );
           }
         });
 
@@ -1122,6 +1424,7 @@ export function mountAcpHttp(
               };
               cdpBridgeUnregister =
                 opts.cdpTunnelRegistry.register(cdpEndpoint);
+              ensureChromeDevToolsMcpRegistered(localPort, conn.connectionId);
               writeStderrLine(
                 `qwen serve: /acp connection ${conn.connectionId.slice(0, 8)} registered as CDP bridge`,
               );

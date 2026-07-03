@@ -4,14 +4,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { X509Certificate } from 'node:crypto';
 import * as fs from 'node:fs';
 import type { Server } from 'node:http';
+import * as https from 'node:https';
 import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import express, {
   type Application,
   type NextFunction,
   type Request,
+  type RequestHandler,
   type Response,
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
@@ -32,6 +35,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { isLoopbackBind } from './loopback-binds.js';
+import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
 import {
   allowOriginCors,
@@ -76,24 +80,32 @@ import {
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
+import type {
+  ChannelWorkerSupervisor,
+  CreateChannelWorkerSupervisorOptions,
+} from './channel-worker-supervisor.js';
+import { QWEN_SERVER_TOKEN_ENV } from './channel-worker-env.js';
+import { channelSelectionNames } from './channel-selection.js';
 import {
   finalizeStartupProfile,
   profileCheckpoint,
 } from '../utils/startupProfiler.js';
+import type { ServiceInfo } from '../commands/channel/pidfile.js';
+import { findCliEntryPath } from '../commands/channel/cli-entry-path.js';
 
-const QWEN_SERVER_TOKEN_ENV = 'QWEN_SERVER_TOKEN';
-// Reverse tool channel opt-in (issue #5626, Phase 2). `=1` advertises the
-// `client_mcp_over_ws` capability and accepts client-hosted MCP servers over
-// the daemon WS. Off by default while the contract settles.
+// Reverse MCP channel; enabled only by explicit option or env opt-in.
 const QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV = 'QWEN_SERVE_CLIENT_MCP_OVER_WS';
-// CDP tunnel opt-in (Plan C, issue #5626). `=1` advertises `cdp_tunnel_over_ws`
-// and exposes the `/cdp` WebSocket. Off by default while the contract settles.
+// CDP tunnel; default-on for Chrome-extension origins or explicit env opt-in.
 const QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV = 'QWEN_SERVE_CDP_TUNNEL_OVER_WS';
 const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
+// Let the first /health response flush before evaluating the runtime graph.
+const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
+// Keep manual/non-probed starts moving; health probes cancel this fallback.
+const FAST_PATH_RUNTIME_START_FALLBACK_MS = 1_000;
 const RUNTIME_STARTUP_TIMEOUT_ENV = 'QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS';
 const MAX_EVENT_RING_SIZE = 1_000_000;
 const DEFAULT_MAX_SESSIONS = 20;
@@ -157,6 +169,20 @@ function parseDeadlineEnv(
     );
   }
   return parsed;
+}
+
+function envFlagDisabled(raw: string | undefined): boolean {
+  if (raw === undefined) return false;
+  const normalized = raw.trim().toLowerCase();
+  return normalized === '0' || normalized === 'false';
+}
+
+function hasChromeExtensionOrigin(origins: readonly string[] | undefined) {
+  return (
+    origins?.some((origin) =>
+      origin.trim().toLowerCase().startsWith('chrome-extension://'),
+    ) === true
+  );
 }
 
 function createDaemonTelemetryRuntimeConfig(
@@ -317,6 +343,22 @@ function formatHostForUrl(host: string): string {
   return host;
 }
 
+export function formatChannelWorkerDaemonUrl(
+  host: string,
+  port: number,
+): string {
+  const normalized = host.trim().toLowerCase();
+  if (
+    normalized === '' ||
+    normalized === '0.0.0.0' ||
+    normalized === '::' ||
+    normalized === '[::]'
+  ) {
+    return `http://127.0.0.1:${port}`;
+  }
+  return `http://${formatHostForUrl(host)}:${port}`;
+}
+
 /**
  * Pull the `context.fileName` snapshot out of merged settings into a
  * typed string, falling back to `undefined` when the value is missing
@@ -403,6 +445,74 @@ type SettingsRuntime = typeof import('../config/settings.js');
 type LoadedSettingsAdapterRuntime =
   typeof import('../config/loadedSettingsAdapter.js');
 type TrustedFoldersRuntime = typeof import('../config/trustedFolders.js');
+type ChannelServicePidfile = {
+  readServiceInfo(): ServiceInfo | null;
+  writeServeServiceInfo(opts: {
+    channels: string[];
+    servePid?: number;
+    workerPid?: number;
+  }): void;
+  reserveServeServiceInfo(opts: {
+    channels: string[];
+    servePid?: number;
+  }): void;
+  removeServiceInfo(): void;
+  removeServeServiceInfo?(servePid?: number): boolean;
+};
+type ChannelWorkerRuntime = {
+  createChannelWorkerSupervisor(
+    opts: CreateChannelWorkerSupervisorOptions,
+  ): ChannelWorkerSupervisor;
+  channelServicePidfile: ChannelServicePidfile;
+};
+
+let channelWorkerRuntimePromise: Promise<ChannelWorkerRuntime> | undefined;
+async function loadChannelWorkerRuntime(): Promise<ChannelWorkerRuntime> {
+  channelWorkerRuntimePromise ??= Promise.all([
+    import('./channel-worker-supervisor.js'),
+    import('../commands/channel/pidfile.js'),
+  ])
+    .then(([supervisor, pidfile]) => ({
+      createChannelWorkerSupervisor: supervisor.createChannelWorkerSupervisor,
+      channelServicePidfile: pidfile,
+    }))
+    .catch((err: unknown) => {
+      channelWorkerRuntimePromise = undefined;
+      throw err;
+    });
+  return channelWorkerRuntimePromise;
+}
+
+function createDisabledChannelWorkerSupervisor(): ChannelWorkerSupervisor {
+  const snapshot = {
+    enabled: false,
+    state: 'disabled' as const,
+    channels: [],
+  };
+  return {
+    async start() {},
+    async stop() {},
+    killAllSync() {},
+    snapshot: () => ({ ...snapshot, channels: [] }),
+  };
+}
+
+function writeServeChannelReservation(
+  channelServicePidfile: ChannelServicePidfile,
+  channels: string[],
+): void {
+  channelServicePidfile.reserveServeServiceInfo({
+    channels,
+    servePid: process.pid,
+  });
+}
+
+function channelServicePidfileConflictError(info: ServiceInfo): Error {
+  const owner = info.owner === 'serve' ? 'qwen serve' : 'qwen channel start';
+  return new Error(
+    `Channel service is already running under ${owner} (PID ${info.pid}). Stop it before starting qwen serve --channel.`,
+  );
+}
 
 function normalizeInstallModelIds(
   req: ServeAuthProviderInstallRequest,
@@ -495,10 +605,20 @@ export interface RunQwenServeDeps {
    */
   resolveOnListen?: boolean;
   /**
+   * Internal serve fast-path mode: keep bootstrap /health responsive before
+   * starting the heavier runtime graph. A fallback timer still starts runtime
+   * when no health probe arrives. Only applies with resolveOnListen.
+   */
+  deferRuntimeUntilFirstHealth?: boolean;
+  /**
    * Bounds background runtime mounting after the listener is ready. Defaults to
    * QWEN_SERVE_RUNTIME_STARTUP_TIMEOUT_MS, then 120s. Use 0 to disable.
    */
   runtimeStartupTimeoutMs?: number;
+  channelWorkerSupervisorFactory?: (
+    opts: CreateChannelWorkerSupervisorOptions,
+  ) => ChannelWorkerSupervisor;
+  channelServicePidfile?: ChannelServicePidfile;
 }
 
 function shouldPreheatBridge(deps: RunQwenServeDeps): boolean {
@@ -572,6 +692,7 @@ async function loadServeRuntimeModules() {
     workspaceTypesModule,
     daemonStatusProviderModule,
     workspaceProvidersStatusModule,
+    workspaceSkillsStatusModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -580,6 +701,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-service/types.js'),
     import('./daemon-status-provider.js'),
     import('./workspace-providers-status.js'),
+    import('./workspace-skills-status.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -594,6 +716,8 @@ async function loadServeRuntimeModules() {
       daemonStatusProviderModule.createDaemonStatusProvider,
     createWorkspaceProvidersStatusProvider:
       workspaceProvidersStatusModule.createWorkspaceProvidersStatusProvider,
+    createWorkspaceSkillsStatusProvider:
+      workspaceSkillsStatusModule.createWorkspaceSkillsStatusProvider,
   };
 }
 
@@ -719,12 +843,35 @@ function installSameOriginOriginStrip(
       const port = getPort();
       if (port !== cachedStripPort) {
         cachedStripPort = port;
+        // Both schemes: under `--tls-cert/--tls-key` the loopback web
+        // shell is served over https, so its same-origin requests carry
+        // an `https://` Origin. Loopback hosts are trusted as same-origin
+        // regardless of scheme, so listing both is safe even on plain HTTP
+        // (the https entries simply never match without TLS).
         cachedSelfOrigins = new Set([
           `http://127.0.0.1:${port}`,
           `http://localhost:${port}`,
           `http://[::1]:${port}`,
           `http://host.docker.internal:${port}`,
+          `https://127.0.0.1:${port}`,
+          `https://localhost:${port}`,
+          `https://[::1]:${port}`,
+          `https://host.docker.internal:${port}`,
         ]);
+        // RFC 7230 §5.4: browsers omit the port in the Origin header when
+        // it matches the scheme default (http→80, https→443). Accept the
+        // port-less forms so the origin check doesn't fail on port 443.
+        if (port === 80 || port === 443) {
+          for (const host of [
+            '127.0.0.1',
+            'localhost',
+            '[::1]',
+            'host.docker.internal',
+          ]) {
+            cachedSelfOrigins.add(`http://${host}`);
+            cachedSelfOrigins.add(`https://${host}`);
+          }
+        }
       }
       if (cachedSelfOrigins.has(origin)) {
         delete req.headers.origin;
@@ -801,6 +948,15 @@ export async function waitForRuntimeStartingForShutdown(
   });
 }
 
+const BOOTSTRAP_HEALTH_PATH = '/health';
+const BOOTSTRAP_CAPABILITIES_PATH = '/capabilities';
+const BOOTSTRAP_DAEMON_STATUS_PATH = '/daemon/status';
+const BOOTSTRAP_SERVE_PATHS = new Set([
+  BOOTSTRAP_HEALTH_PATH,
+  BOOTSTRAP_CAPABILITIES_PATH,
+  BOOTSTRAP_DAEMON_STATUS_PATH,
+]);
+
 function createBootstrapServeApp(input: {
   opts: ServeOptions;
   getPort: () => number;
@@ -811,6 +967,10 @@ function createBootstrapServeApp(input: {
   sessionShellCommandEnabled: boolean;
   permissionPolicy: PermissionPolicy | undefined;
   getRuntimeError: () => string | undefined;
+  getChannelWorkerSnapshot: () => ReturnType<
+    ChannelWorkerSupervisor['snapshot']
+  >;
+  onHealthServed?: () => void;
 }): Application {
   const {
     opts,
@@ -822,6 +982,8 @@ function createBootstrapServeApp(input: {
     sessionShellCommandEnabled,
     permissionPolicy,
     getRuntimeError,
+    getChannelWorkerSnapshot,
+    onHealthServed,
   } = input;
   const app = express();
 
@@ -843,21 +1005,24 @@ function createBootstrapServeApp(input: {
       return;
     }
 
+    if (onHealthServed) {
+      res.once('finish', onHealthServed);
+    }
     res.status(200).json({ status: 'ok' });
   };
   const loopback = isLoopbackBind(opts.hostname);
   const exposeHealthPreAuth = loopback && !opts.requireAuth;
   if (exposeHealthPreAuth) {
-    app.get('/health', healthHandler);
+    app.get(BOOTSTRAP_HEALTH_PATH, healthHandler);
   }
 
   app.use(bearerAuth(opts.token));
 
   if (!exposeHealthPreAuth) {
-    app.get('/health', healthHandler);
+    app.get(BOOTSTRAP_HEALTH_PATH, healthHandler);
   }
 
-  app.get('/capabilities', (_req: Request, res: Response): void => {
+  app.get(BOOTSTRAP_CAPABILITIES_PATH, (_req: Request, res: Response): void => {
     res.status(200).json(
       createBootstrapCapabilities({
         opts,
@@ -869,7 +1034,7 @@ function createBootstrapServeApp(input: {
     );
   });
 
-  app.get('/daemon/status', (req: Request, res: Response): void => {
+  app.get(BOOTSTRAP_DAEMON_STATUS_PATH, (req: Request, res: Response): void => {
     const detail = parseDaemonStatusDetail(req.query['detail']);
     if (!detail.ok || !detail.detail) {
       res.status(400).json({
@@ -879,6 +1044,7 @@ function createBootstrapServeApp(input: {
       return;
     }
     const runtimeError = getRuntimeError();
+    const channelWorker = getChannelWorkerSnapshot();
     const runtimeFailed = runtimeError !== undefined;
     const issue: DaemonStatusIssue = runtimeError
       ? {
@@ -952,6 +1118,7 @@ function createBootstrapServeApp(input: {
           policy: permissionPolicy ?? 'first-responder',
         },
         channel: { live: false },
+        channelWorker,
         transport: {
           restSseActive: 0,
           acp: {
@@ -1008,18 +1175,90 @@ function createBootstrapServeApp(input: {
 function createDelegatingServeApp(
   bootstrapApp: Application,
   getRuntimeApp: () => Application | undefined,
+  options: {
+    waitForDeferredRuntimeRoutes?: boolean;
+    startRuntime?: () => void;
+    runtimeReady?: Promise<void>;
+    authenticateDeferredRuntimeRequest?: RequestHandler;
+  } = {},
 ): Application {
   const app = express();
   app.use((req: Request, res: Response, next: NextFunction) => {
-    const target = getRuntimeApp() ?? bootstrapApp;
-    const handler = target as unknown as (
-      req: Request,
-      res: Response,
-      next: NextFunction,
-    ) => void;
-    handler(req, res, next);
+    const dispatch = async (): Promise<void> => {
+      let target = getRuntimeApp();
+      if (
+        !target &&
+        options.waitForDeferredRuntimeRoutes === true &&
+        !isBootstrapServeRoute(req) &&
+        !isCorsPreflightRequest(req) &&
+        options.startRuntime &&
+        options.runtimeReady
+      ) {
+        if (
+          options.authenticateDeferredRuntimeRequest &&
+          !runSynchronousRequestGate(
+            options.authenticateDeferredRuntimeRequest,
+            req,
+            res,
+            next,
+          )
+        ) {
+          return;
+        }
+        options.startRuntime();
+        try {
+          await options.runtimeReady;
+        } catch {
+          // Fall through to the bootstrap app so it can report the startup error.
+        }
+        target = getRuntimeApp();
+      }
+      const handler = (target ?? bootstrapApp) as unknown as (
+        req: Request,
+        res: Response,
+        next: NextFunction,
+      ) => void;
+      handler(req, res, next);
+    };
+    void dispatch().catch(next);
   });
   return app;
+}
+
+function isBootstrapServeRoute(req: Request): boolean {
+  const path =
+    req.path.length > 1 && req.path.endsWith('/')
+      ? req.path.slice(0, -1)
+      : req.path;
+  return BOOTSTRAP_SERVE_PATHS.has(path);
+}
+
+function isCorsPreflightRequest(req: Request): boolean {
+  return (
+    req.method === 'OPTIONS' &&
+    Boolean(req.headers.origin) &&
+    Boolean(
+      req.headers['access-control-request-method'] ||
+        req.headers['access-control-request-headers'],
+    )
+  );
+}
+
+function runSynchronousRequestGate(
+  handler: RequestHandler,
+  req: Request,
+  res: Response,
+  next: NextFunction,
+): boolean {
+  let passed = false;
+  handler(req, res, (err?: unknown) => {
+    if (err) {
+      next(err);
+      return;
+    }
+    passed = true;
+  });
+  return passed;
 }
 
 /**
@@ -1089,24 +1328,95 @@ export async function runQwenServe(
       QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV,
       process.env[QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV],
     );
+  const clientMcpOverWsEnv = process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV];
+  const cdpTunnelOverWsEnv = process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV];
+  const chromeExtensionOriginAllowed = hasChromeExtensionOrigin(
+    optsIn.allowOrigins,
+  );
   const opts: ServeOptions = {
     ...optsIn,
     token,
     promptDeadlineMs,
     writerIdleTimeoutMs,
-    // Reverse tool channel (issue #5626, Phase 2). Opt-in via env until the
-    // public contract settles — the WS `mcp_register` / `mcp_message` frames
-    // and the child↔parent `client_mcp/message` round-trip stay dormant
-    // otherwise. An explicit `clientMcpOverWs` in `optsIn` (embedded callers)
-    // still wins.
     clientMcpOverWs:
       optsIn.clientMcpOverWs ??
-      process.env[QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV] === '1',
-    // CDP tunnel (Plan C, issue #5626). Opt-in via env until the contract
-    // settles; an explicit `cdpTunnelOverWs` in `optsIn` still wins.
+      (!envFlagDisabled(clientMcpOverWsEnv) &&
+        clientMcpOverWsEnv !== undefined),
     cdpTunnelOverWs:
       optsIn.cdpTunnelOverWs ??
-      process.env[QWEN_SERVE_CDP_TUNNEL_OVER_WS_ENV] === '1',
+      (!envFlagDisabled(cdpTunnelOverWsEnv) &&
+        (cdpTunnelOverWsEnv !== undefined || chromeExtensionOriginAllowed)),
+  };
+  const channelRuntime = opts.channelSelection
+    ? await loadChannelWorkerRuntime()
+    : undefined;
+  const channelServicePidfile =
+    deps.channelServicePidfile ?? channelRuntime?.channelServicePidfile;
+  let channelPidfileReserved = false;
+  const removeCurrentServePidfile = (): void => {
+    if (!opts.channelSelection || !channelServicePidfile) return;
+    if (!channelPidfileReserved) return;
+    if (channelServicePidfile.removeServeServiceInfo) {
+      if (channelServicePidfile.removeServeServiceInfo(process.pid)) {
+        channelPidfileReserved = false;
+      }
+      return;
+    }
+    const info = channelServicePidfile.readServiceInfo();
+    if (
+      info?.owner === 'serve' &&
+      info.pid === process.pid &&
+      info.servePid === process.pid
+    ) {
+      channelServicePidfile.removeServiceInfo();
+      channelPidfileReserved = false;
+    }
+  };
+  const reserveChannelServicePidfile = (): void => {
+    if (!opts.channelSelection) return;
+    if (!channelServicePidfile) {
+      throw new Error('Channel service pidfile runtime is not available.');
+    }
+    const channelPidfileNames = channelSelectionNames(opts.channelSelection);
+    const existingChannelService = channelServicePidfile.readServiceInfo();
+    if (existingChannelService) {
+      throw channelServicePidfileConflictError(existingChannelService);
+    }
+    try {
+      writeServeChannelReservation(channelServicePidfile, channelPidfileNames);
+      channelPidfileReserved = true;
+    } catch (err) {
+      if (err && typeof err === 'object' && 'code' in err) {
+        const code = (err as { code?: unknown }).code;
+        if (code === 'EEXIST') {
+          const info = channelServicePidfile.readServiceInfo();
+          if (info) {
+            throw channelServicePidfileConflictError(info);
+          }
+          try {
+            writeServeChannelReservation(
+              channelServicePidfile,
+              channelPidfileNames,
+            );
+            channelPidfileReserved = true;
+            return;
+          } catch (retryErr) {
+            if (
+              retryErr &&
+              typeof retryErr === 'object' &&
+              'code' in retryErr &&
+              (retryErr as { code?: unknown }).code === 'EEXIST'
+            ) {
+              throw new Error(
+                'Channel service is already starting. Retry after the current startup finishes.',
+              );
+            }
+            throw retryErr;
+          }
+        }
+      }
+      throw err;
+    }
   };
   validateRateLimitOptions(opts);
 
@@ -1124,6 +1434,72 @@ export async function runQwenServe(
         `combination. Use --port for the port, e.g. ` +
         `"--hostname ${host} --port ${port}".`,
     );
+  }
+
+  // TLS is both-or-nothing: a cert without a key (or vice versa) can't
+  // start an HTTPS listener, so fail loud at boot instead of silently
+  // falling back to plain HTTP — the operator asked for TLS and a silent
+  // downgrade would serve the web shell over an insecure transport they
+  // believe is encrypted.
+  let tlsOptions: { cert: Buffer; key: Buffer } | undefined;
+  if ((opts.tlsCert && !opts.tlsKey) || (!opts.tlsCert && opts.tlsKey)) {
+    throw new Error(
+      `--tls-cert and --tls-key must be provided together (got only ` +
+        `--tls-${opts.tlsCert ? 'cert' : 'key'}).`,
+    );
+  }
+  if (opts.tlsCert && opts.tlsKey) {
+    let cert: Buffer;
+    let key: Buffer;
+    try {
+      cert = fs.readFileSync(opts.tlsCert);
+    } catch (err) {
+      throw new Error(
+        `Failed to read --tls-cert "${opts.tlsCert}": ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    try {
+      key = fs.readFileSync(opts.tlsKey);
+    } catch (err) {
+      throw new Error(
+        `Failed to read --tls-key "${opts.tlsKey}": ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    // Fail loud at boot on an expired (or unparseable) certificate. Node's
+    // https.createServer happily starts with an expired cert, then every TLS
+    // handshake is rejected client-side (NET::ERR_CERT_DATE_INVALID) while
+    // /health stays green — a silent outage that's hard to diagnose. Surface
+    // it here with an actionable message instead.
+    let x509: X509Certificate;
+    try {
+      x509 = new X509Certificate(cert);
+    } catch (err) {
+      throw new Error(
+        `--tls-cert "${opts.tlsCert}" is not a valid certificate: ` +
+          `${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    const now = Date.now();
+    if (new Date(x509.validTo).getTime() < now) {
+      throw new Error(
+        `--tls-cert "${opts.tlsCert}" expired on ${x509.validTo}. ` +
+          `Renew the certificate and restart.`,
+      );
+    }
+    // Symmetric to the expiry guard: a cert whose validity window hasn't
+    // started yet (notBefore > now, e.g. clock skew or a freshly minted
+    // cert) also boots cleanly but fails every handshake client-side with
+    // NET::ERR_CERT_DATE_INVALID. Fail loud here too.
+    if (new Date(x509.validFrom).getTime() > now) {
+      throw new Error(
+        `--tls-cert "${opts.tlsCert}" is not yet valid (validFrom: ` +
+          `${x509.validFrom}). Check the certificate's notBefore date or ` +
+          `the system clock.`,
+      );
+    }
+    tlsOptions = { cert, key };
   }
 
   if (!isLoopbackBind(opts.hostname) && !token) {
@@ -1427,23 +1803,7 @@ export async function runQwenServe(
         ? String(opts.mcpClientBudget)
         : undefined,
     QWEN_SERVE_MCP_BUDGET_MODE: opts.mcpBudgetMode,
-    // CDP tunnel (Plan C, #5626): forward the flag + bound port so the spawned
-    // ACP child can auto-register chrome-devtools-mcp against this `/cdp`
-    // endpoint. Only meaningful with a fixed `--port`: the override map is frozen
-    // at bridge construction, so an ephemeral `--port 0` (resolved only after
-    // `listen`) can't be threaded here. Leave the port unset in that case so the
-    // child surfaces a clear diagnostic instead of a bogus port "0".
     QWEN_SERVE_CDP_TUNNEL_OVER_WS: opts.cdpTunnelOverWs ? '1' : undefined,
-    QWEN_SERVE_CDP_TUNNEL_PORT:
-      opts.cdpTunnelOverWs && opts.port > 0 ? String(opts.port) : undefined,
-    // Tell the child whether `/cdp` requires bearer auth. The ACP child can't
-    // inherit QWEN_SERVER_TOKEN (the spawn path scrubs it) and chrome-devtools-
-    // mcp is launched with `--wsEndpoint` only, so it can't authenticate against
-    // an auth-gated `/cdp`. The child uses this flag to skip auto-registering the
-    // browser tools (with a diagnostic) instead of registering tools that can't
-    // connect. See buildCdpTunnelMcpServer in acpAgent.ts.
-    QWEN_SERVE_CDP_TUNNEL_AUTH_REQUIRED:
-      opts.cdpTunnelOverWs && (token || opts.requireAuth) ? '1' : undefined,
   };
 
   const cliVersionPromise = getCliVersion();
@@ -1503,11 +1863,39 @@ export async function runQwenServe(
   let markRuntimeReady!: () => void;
   let markRuntimeFailed!: (err: Error) => void;
   let runtimeStartupSettled = false;
+  let startRuntimeAfterHealth: (() => void) | undefined;
+  let startRuntimeForRequest: (() => void) | undefined;
+  const deferRuntimeUntilFirstHealth =
+    deps.resolveOnListen === true && deps.deferRuntimeUntilFirstHealth === true;
   const runtimeReady = new Promise<void>((resolve, reject) => {
     markRuntimeReady = resolve;
     markRuntimeFailed = reject;
   });
   void runtimeReady.catch(() => {});
+  let channelWorker: ChannelWorkerSupervisor =
+    createDisabledChannelWorkerSupervisor();
+  const getChannelWorkerSnapshot = () => channelWorker.snapshot();
+  const writeChannelWorkerPidfile = (
+    snapshot = channelWorker.snapshot(),
+    options: { clearWorkerPid?: boolean } = {},
+  ): void => {
+    if (!opts.channelSelection || !channelServicePidfile) return;
+    try {
+      channelServicePidfile.writeServeServiceInfo({
+        channels: snapshot.channels,
+        servePid: process.pid,
+        ...(!options.clearWorkerPid && snapshot.pid !== undefined
+          ? { workerPid: snapshot.pid }
+          : {}),
+      });
+    } catch (err) {
+      daemonLog.warn(
+        `failed to write channel worker pidfile metadata: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+  };
 
   const handleBridge =
     deps.bridge ??
@@ -1647,6 +2035,8 @@ export async function runQwenServe(
     const statusProvider = runtime.createDaemonStatusProvider();
     const workspaceProvidersStatusProvider =
       runtime.createWorkspaceProvidersStatusProvider();
+    const workspaceSkillsStatusProvider =
+      runtime.createWorkspaceSkillsStatusProvider();
     // Reverse tool channel (issue #5626, Phase 2). ONE sender registry shared
     // between the bridge (which answers the ACP child's `client_mcp/message`
     // ext-method via `clientMcpSender`) and the WS provider in `createServeApp`
@@ -1777,6 +2167,7 @@ export async function runQwenServe(
       contextFilename: contextFilenameForInit ?? 'QWEN.md',
       statusProvider,
       workspaceProvidersStatusProvider,
+      workspaceSkillsStatusProvider,
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,
@@ -1814,6 +2205,7 @@ export async function runQwenServe(
       startup,
       fsFactory,
       daemonLog,
+      getChannelWorkerSnapshot,
       workspace: workspaceService,
       // Reverse tool channel (#5626): the SAME registry wired into `bridge` above,
       // so the WS provider and the child-answering bridge share one sender map.
@@ -1874,8 +2266,10 @@ export async function runQwenServe(
     runtimeAppForCleanup = runtime.app;
     runtimeApp = runtime.app;
     bridgeRef = runtime.bridge;
-    runtimeStartupSettled = true;
-    markRuntimeReady();
+    if (!opts.channelSelection) {
+      runtimeStartupSettled = true;
+      markRuntimeReady();
+    }
   }
 
   cliVersion ??= await cliVersionPromise;
@@ -1890,9 +2284,19 @@ export async function runQwenServe(
     sessionShellCommandEnabled,
     permissionPolicy,
     getRuntimeError: () => runtimeStartupError,
+    getChannelWorkerSnapshot,
+    onHealthServed: deferRuntimeUntilFirstHealth
+      ? () => startRuntimeAfterHealth?.()
+      : undefined,
   });
   const app =
-    runtimeApp ?? createDelegatingServeApp(bootstrapApp, () => runtimeApp);
+    runtimeApp ??
+    createDelegatingServeApp(bootstrapApp, () => runtimeApp, {
+      waitForDeferredRuntimeRoutes: deferRuntimeUntilFirstHealth,
+      startRuntime: () => startRuntimeForRequest?.(),
+      runtimeReady,
+      authenticateDeferredRuntimeRequest: bearerAuth(opts.token),
+    });
 
   // Node's `app.listen()` wants the unbracketed IPv6 literal (`::1`) but
   // operators conventionally type `[::1]` (or copy/paste from URLs that
@@ -1942,8 +2346,15 @@ export async function runQwenServe(
     );
   }
 
+  reserveChannelServicePidfile();
+
   return await new Promise<RunHandle>((resolve, reject) => {
-    const server = app.listen(opts.port, listenHostname, () => {
+    // When TLS is configured, wrap the Express app in an HTTPS listener
+    // (`https.Server extends http.Server`, so everything downstream —
+    // `server.maxConnections`, `server.address()`, `attachServer(server)`,
+    // graceful close — is unchanged). Otherwise `app.listen()` keeps the
+    // existing plain-HTTP path bit-for-bit.
+    const onListening = () => {
       startup.listenerReadyAt = new Date().toISOString();
       startup.processToListenMs = Math.round(process.uptime() * 1000);
       startup.runQwenServeToListenMs = Math.round(
@@ -1979,7 +2390,61 @@ export async function runQwenServe(
       // else: leave unset (Node's default = unlimited at this layer).
       const addr = server.address();
       actualPort = typeof addr === 'object' && addr ? addr.port : opts.port;
-      const url = `http://${formatHostForUrl(opts.hostname)}:${actualPort}`;
+      const scheme = tlsOptions ? 'https' : 'http';
+      const url = `${scheme}://${formatHostForUrl(opts.hostname)}:${actualPort}`;
+      try {
+        if (opts.channelSelection) {
+          const createSupervisor =
+            deps.channelWorkerSupervisorFactory ??
+            channelRuntime?.createChannelWorkerSupervisor;
+          if (!createSupervisor) {
+            throw new Error(
+              'Channel worker supervisor runtime is not available.',
+            );
+          }
+          channelWorker = createSupervisor({
+            cliEntryPath: findCliEntryPath(),
+            daemonUrl: formatChannelWorkerDaemonUrl(opts.hostname, actualPort),
+            ...(token ? { daemonToken: token } : {}),
+            workspace: boundWorkspace,
+            selection: opts.channelSelection,
+            onReady: (snapshot) => {
+              writeChannelWorkerPidfile(snapshot);
+            },
+            onLog: ({ stream, line }) => {
+              const message = `channel worker ${stream}: ${line}`;
+              if (stream === 'stderr') {
+                daemonLog.warn(message);
+              } else {
+                daemonLog.info(message);
+              }
+            },
+            onExit: (snapshot) => {
+              daemonLog.warn(
+                `channel worker exited (state=${snapshot.state}, pid=${snapshot.pid ?? 'unknown'}, ` +
+                  `code=${snapshot.exitCode ?? 'null'}, signal=${snapshot.signal ?? 'null'}, ` +
+                  `error=${snapshot.error ?? 'none'}, restartCount=${snapshot.restartCount ?? 0}, ` +
+                  `nextRestartAt=${snapshot.nextRestartAt ?? 'none'}, ` +
+                  `staleHeartbeatAt=${snapshot.staleHeartbeatAt ?? 'none'})`,
+              );
+              writeChannelWorkerPidfile(snapshot, { clearWorkerPid: true });
+            },
+          });
+        }
+      } catch (err) {
+        removeCurrentServePidfile();
+        const error = err instanceof Error ? err : new Error(String(err));
+        server.close((closeErr) => {
+          if (closeErr) {
+            daemonLog.error(
+              'server close after channel worker setup error failed',
+              closeErr,
+            );
+          }
+          reject(error);
+        });
+        return;
+      }
       writeStdoutLine(
         `qwen serve listening on ${url} (mode=${opts.mode}, ` +
           `workspace=${boundWorkspace})`,
@@ -2007,6 +2472,12 @@ export async function runQwenServe(
         writeStderrLine(
           `qwen serve: bearer auth disabled (loopback default). Set ${QWEN_SERVER_TOKEN_ENV} to enable.`,
         );
+        if (opts.clientMcpOverWs === true) {
+          writeStderrLine(
+            `qwen serve: client-hosted MCP tools are accepted over the WebSocket without auth. ` +
+              `Set ${QWEN_SERVE_CLIENT_MCP_OVER_WS_ENV}=0 to disable.`,
+          );
+        }
       } else if (opts.requireAuth) {
         // The boot check above guarantees `token` is set whenever
         // `--require-auth` is on, so this branch only fires alongside
@@ -2019,10 +2490,11 @@ export async function runQwenServe(
             'on every route, including loopback /health).',
         );
       }
-
       let shuttingDown = false;
       let closePromise: Promise<void> | undefined;
       let runtimeStartupTimer: NodeJS.Timeout | undefined;
+      let runtimeStartAfterHealthTimer: NodeJS.Timeout | undefined;
+      let runtimeStartFallbackTimer: NodeJS.Timeout | undefined;
       const runtimeStartupTimeoutMs = resolveRuntimeStartupTimeoutMs(
         deps.runtimeStartupTimeoutMs,
       );
@@ -2030,6 +2502,31 @@ export async function runQwenServe(
         if (!runtimeStartupTimer) return;
         clearTimeout(runtimeStartupTimer);
         runtimeStartupTimer = undefined;
+      };
+      const clearRuntimeStartFallbackTimer = (): void => {
+        if (!runtimeStartFallbackTimer) return;
+        clearTimeout(runtimeStartFallbackTimer);
+        runtimeStartFallbackTimer = undefined;
+      };
+      const clearRuntimeStartAfterHealthTimer = (): void => {
+        if (!runtimeStartAfterHealthTimer) return;
+        clearTimeout(runtimeStartAfterHealthTimer);
+        runtimeStartAfterHealthTimer = undefined;
+      };
+      const cancelDeferredRuntimeStartup = (): void => {
+        if (
+          !deferRuntimeUntilFirstHealth ||
+          runtimeStarting ||
+          runtimeStartupSettled
+        )
+          return;
+        daemonLog.info(
+          'deferred runtime: cancelled, server closed before startup',
+        );
+        runtimeStartupSettled = true;
+        const error = new Error(RUNTIME_STARTUP_CANCELLED_MESSAGE);
+        runtimeStartupError = error.message;
+        markRuntimeFailed(error);
       };
       const shutdownBridgeAfterFailedStartup = async (
         bridge: AcpSessionBridge | undefined,
@@ -2047,6 +2544,14 @@ export async function runQwenServe(
             bridgeRef = undefined;
           }
         }
+      };
+      const stopChannelWorkerAfterFailedStartup = async (): Promise<void> => {
+        await channelWorker.stop().catch((stopErr) => {
+          daemonLog.error(
+            'channel worker stop after runtime startup error failed',
+            stopErr instanceof Error ? stopErr : null,
+          );
+        });
       };
       const failRuntimeStartup = async (
         err: unknown,
@@ -2070,8 +2575,32 @@ export async function runQwenServe(
         }
         writeStderrLine(`qwen serve: runtime startup failed: ${message}`);
         daemonLog.error('runtime startup failed', error);
-        markRuntimeFailed(error);
+        await stopChannelWorkerAfterFailedStartup();
+        removeCurrentServePidfile();
         await shutdownBridgeAfterFailedStartup(bridgeForCleanup ?? bridgeRef);
+        markRuntimeFailed(error);
+      };
+      const armRuntimeStartupTimer = (): void => {
+        if (runtimeStartupTimeoutMs <= 0 || runtimeStartupTimer) return;
+        runtimeStartupTimer = setTimeout(() => {
+          void failRuntimeStartup(
+            new Error(
+              `Daemon runtime startup timed out after ${runtimeStartupTimeoutMs}ms.`,
+            ),
+          );
+        }, runtimeStartupTimeoutMs);
+        runtimeStartupTimer.unref();
+      };
+      const completeRuntimeStartup = async (): Promise<void> => {
+        if (runtimeStartupSettled) return;
+        if (opts.channelSelection) {
+          await channelWorker.start();
+          if (runtimeStartupSettled) return;
+        }
+        if (runtimeStartupSettled) return;
+        runtimeStartupSettled = true;
+        clearRuntimeStartupTimer();
+        markRuntimeReady();
       };
       const startBridgePreheat = (bridge: AcpSessionBridge): void => {
         startup.preheat.status = 'running';
@@ -2098,6 +2627,9 @@ export async function runQwenServe(
       };
       const startRuntime = (): void => {
         if (runtimeStarting) return;
+        armRuntimeStartupTimer();
+        clearRuntimeStartAfterHealthTimer();
+        clearRuntimeStartFallbackTimer();
         runtimeStarting = buildRuntime()
           .then(async (runtime) => {
             if (runtimeStartupSettled) {
@@ -2121,21 +2653,40 @@ export async function runQwenServe(
             if (shouldPreheat) {
               startBridgePreheat(runtime.bridge);
             }
-            runtimeStartupSettled = true;
-            clearRuntimeStartupTimer();
-            markRuntimeReady();
+            await completeRuntimeStartup();
           })
           .catch((err) => failRuntimeStartup(err));
-        if (runtimeStartupTimeoutMs > 0) {
-          runtimeStartupTimer = setTimeout(() => {
-            void failRuntimeStartup(
-              new Error(
-                `Daemon runtime startup timed out after ${runtimeStartupTimeoutMs}ms.`,
-              ),
-            );
-          }, runtimeStartupTimeoutMs);
-          runtimeStartupTimer.unref();
+      };
+      startRuntimeForRequest = startRuntime;
+      const scheduleRuntimeStartFallback = (): void => {
+        if (shuttingDown || runtimeStarting || runtimeStartFallbackTimer)
+          return;
+        daemonLog.info(
+          `deferred runtime: scheduling fallback start in ${FAST_PATH_RUNTIME_START_FALLBACK_MS}ms`,
+        );
+        runtimeStartFallbackTimer = setTimeout(() => {
+          runtimeStartFallbackTimer = undefined;
+          if (shuttingDown) return;
+          daemonLog.info('deferred runtime: fallback timer fired, starting');
+          startRuntime();
+        }, FAST_PATH_RUNTIME_START_FALLBACK_MS);
+        runtimeStartFallbackTimer.unref();
+      };
+      startRuntimeAfterHealth = (): void => {
+        if (shuttingDown || runtimeStarting || runtimeStartAfterHealthTimer) {
+          return;
         }
+        clearRuntimeStartFallbackTimer();
+        daemonLog.info(
+          `deferred runtime: health served, scheduling start in ${FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS}ms`,
+        );
+        runtimeStartAfterHealthTimer = setTimeout(() => {
+          runtimeStartAfterHealthTimer = undefined;
+          if (shuttingDown) return;
+          daemonLog.info('deferred runtime: health timer fired, starting');
+          startRuntime();
+        }, FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS);
+        runtimeStartAfterHealthTimer.unref();
       };
 
       // Forward declaration so handle.close can detach the listener after
@@ -2155,7 +2706,9 @@ export async function runQwenServe(
           // `qwen` processes in the operator's `ps` output.
           daemonLog.warn(`received ${signal} during drain — forcing exit`);
           try {
+            channelWorker.killAllSync();
             bridgeRef?.killAllSync();
+            removeCurrentServePidfile();
           } catch (err) {
             daemonLog.error(
               'force-kill error',
@@ -2177,6 +2730,11 @@ export async function runQwenServe(
           process.exit(1);
         }
       };
+      const onUncaughtExceptionMonitor = () => {
+        if (process.listenerCount('uncaughtException') === 0) {
+          removeCurrentServePidfile();
+        }
+      };
 
       const handle: RunHandle = {
         server,
@@ -2194,12 +2752,14 @@ export async function runQwenServe(
           if (closePromise) return closePromise;
           closePromise = new Promise<void>((res, rej) => {
             shuttingDown = true;
+            clearRuntimeStartAfterHealthTimer();
+            clearRuntimeStartFallbackTimer();
+            cancelDeferredRuntimeStartup();
             // NOTE: the SIGINT/SIGTERM handlers stay attached during the
-            // drain. Their `if (shuttingDown) return` guard makes a second
-            // signal a no-op. Detaching them up front would leave Node's
-            // default signal behavior in charge — a second SIGTERM mid-drain
-            // would terminate the process and orphan agent children. We
-            // detach AFTER drain completes (`finish` below).
+            // drain so a second signal can take the explicit force-exit path
+            // above. Detaching them up front would leave Node's default signal
+            // behavior in charge and could orphan agent children. We detach
+            // AFTER drain completes (`finish` below).
 
             // Two-phase shutdown:
             //   1. `bridge.shutdown()` — tears down agent children with
@@ -2233,6 +2793,10 @@ export async function runQwenServe(
               settled = true;
               process.removeListener('SIGINT', onSignal);
               process.removeListener('SIGTERM', onSignal);
+              process.removeListener(
+                'uncaughtExceptionMonitor',
+                onUncaughtExceptionMonitor,
+              );
               void (
                 coreRuntimePromise
                   ? coreRuntimePromise.then((core) => core.shutdownTelemetry())
@@ -2320,6 +2884,15 @@ export async function runQwenServe(
                   rl.setDraining(true);
                   rl.dispose();
                 }
+                // The worker owns daemon-backed sessions; disconnect it before
+                // tearing down the ACP bridge it is attached to.
+                await channelWorker.stop().catch((err) => {
+                  daemonLog.error(
+                    'channel worker stop error',
+                    err instanceof Error ? err : null,
+                  );
+                });
+                removeCurrentServePidfile();
                 const bridgeForShutdown = bridgeRef;
                 if (bridgeForShutdown) {
                   await bridgeForShutdown.shutdown().catch((err) => {
@@ -2383,6 +2956,7 @@ export async function runQwenServe(
 
       process.on('SIGINT', onSignal);
       process.on('SIGTERM', onSignal);
+      process.on('uncaughtExceptionMonitor', onUncaughtExceptionMonitor);
 
       // Swap the boot-error listener for a runtime-error one
       // before resolving. `server.once('error', reject)` at the
@@ -2402,6 +2976,14 @@ export async function runQwenServe(
         if (shouldPreheat) {
           startBridgePreheat(bridgeRef);
         }
+        if (opts.channelSelection && !runtimeStartupSettled) {
+          armRuntimeStartupTimer();
+          runtimeStarting = completeRuntimeStartup().catch((err) =>
+            failRuntimeStartup(err, bridgeRef),
+          );
+        }
+      } else if (deferRuntimeUntilFirstHealth) {
+        scheduleRuntimeStartFallback();
       } else {
         startRuntime();
       }
@@ -2426,7 +3008,33 @@ export async function runQwenServe(
           },
         );
       }
+    };
+    let server: Server;
+    if (tlsOptions) {
+      let httpsServer: https.Server;
+      try {
+        httpsServer = https.createServer(tlsOptions, app);
+      } catch (err) {
+        // createSecureContext throws a raw OpenSSL string (e.g.
+        // "error:0B080074:...key values mismatch") when cert/key don't pair.
+        // Wrap it so the operator gets the same actionable framing as the
+        // --tls-cert/--tls-key read errors above.
+        reject(
+          new Error(
+            `--tls-cert "${opts.tlsCert}" and --tls-key "${opts.tlsKey}" ` +
+              `could not be loaded (do they match?): ` +
+              `${err instanceof Error ? err.message : String(err)}`,
+          ),
+        );
+        return;
+      }
+      server = httpsServer.listen(opts.port, listenHostname, onListening);
+    } else {
+      server = app.listen(opts.port, listenHostname, onListening);
+    }
+    server.once('error', (err) => {
+      removeCurrentServePidfile();
+      reject(err);
     });
-    server.once('error', reject);
   });
 }

@@ -1634,4 +1634,35 @@ describe('MemoryManager', () => {
       expect(result.skippedReason).toBe('memory_pressure');
     });
   });
+
+  describe('appendToUserMemory', () => {
+    it('forwards options to buildManagedAutoMemoryPrompt', () => {
+      const mgr = new MemoryManager();
+
+      // Without forceFullProtocol (all indexes empty → condensed path)
+      const condensed = mgr.appendToUserMemory(
+        '',
+        '/project/.qwen/memory',
+        null,
+      );
+
+      // With forceFullProtocol → full verbose path
+      const full = mgr.appendToUserMemory(
+        '',
+        '/project/.qwen/memory',
+        null,
+        undefined,
+        undefined,
+        { forceFullProtocol: true },
+      );
+
+      // Condensed path uses short section headers
+      expect(condensed).toContain('## Memory types');
+      expect(condensed).not.toContain('## Types of memory');
+
+      // Full path uses verbose section headers
+      expect(full).toContain('## Types of memory');
+      expect(full).toContain('## What NOT to save in memory');
+    });
+  });
 });

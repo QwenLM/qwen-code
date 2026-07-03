@@ -33,6 +33,7 @@ import type { Config } from '../config/config.js';
 import {
   DEFAULT_TOKEN_LIMIT,
   ESCALATED_MAX_TOKENS,
+  parsePositiveIntegerEnvValue,
   tokenLimit,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
@@ -55,7 +56,14 @@ import {
   type CompactTrigger,
 } from '../services/chatCompressionService.js';
 import { acquireSleepInhibitor } from '../services/sleepInhibitor.js';
-import { resolveSlimmingConfig } from '../services/compactionInputSlimming.js';
+import {
+  resolveCompactionTuning,
+  resolveSlimmingConfig,
+} from '../services/compactionInputSlimming.js';
+import {
+  InMemoryImagePayloadStore,
+  prepareImagePayloadsForRequest,
+} from '../services/image-payload-references.js';
 import {
   estimateContentTokens,
   estimatePromptTokens,
@@ -292,6 +300,12 @@ interface TryCompressOptions {
    * on the user's stated concern.
    */
   customInstructions?: string;
+  /**
+   * Output tokens reserved by the model (e.g. max_tokens / escalated limit).
+   * Threaded to the compression service so the cheap-gate computes
+   * thresholds against the real available input budget.
+   */
+  reservedOutputTokens?: number;
 }
 
 const INVALID_CONTENT_RETRY_OPTIONS: ContentRetryOptions = {
@@ -1422,6 +1436,8 @@ export class GeminiChat {
     | Parameters<ChatRecordingService['recordAssistantTurn']>[0]
     | null = null;
 
+  private readonly imagePayloadStore = new InMemoryImagePayloadStore();
+
   /**
    * Monotonically counts user-content pushes that survived into history.
    * Incremented when `sendMessageStream` pushes the user content and decremented
@@ -1484,8 +1500,30 @@ export class GeminiChat {
    * Public history readers still use {@link getHistory}, which returns a
    * defensive deep copy for caller mutation safety.
    */
-  private getRequestHistory(): Content[] {
-    return extractCuratedHistory(this.history).map(copyContentContainer);
+  private getRequestHistory(currentUserContent?: Content): Content[] {
+    const curatedHistory = extractCuratedHistory(this.history);
+    const preserveImagePartsForContentIndex = currentUserContent
+      ? curatedHistory.findIndex((content) => content === currentUserContent)
+      : -1;
+    const requestHistory = curatedHistory.map(copyContentContainer);
+    const preserveLastUserImagePartCount =
+      preserveImagePartsForContentIndex === -1
+        ? (currentUserContent?.parts?.length ?? 0)
+        : 0;
+    const preserveImagePartsForContentIndexOption =
+      preserveImagePartsForContentIndex === -1
+        ? undefined
+        : preserveImagePartsForContentIndex;
+    const { maxRecentImages } = resolveCompactionTuning(
+      this.config.getChatCompression(),
+    );
+    return prepareImagePayloadsForRequest(requestHistory, {
+      maxRecentImages,
+      preserveImagePartsForContentIndex:
+        preserveImagePartsForContentIndexOption,
+      preserveLastUserImagePartCount,
+      store: this.imagePayloadStore,
+    });
   }
 
   /**
@@ -1552,6 +1590,7 @@ export class GeminiChat {
       precomputedEffectiveTokens: options?.precomputedEffectiveTokens,
       trigger: options?.trigger,
       customInstructions: options?.customInstructions,
+      reservedOutputTokens: options?.reservedOutputTokens,
       signal,
     });
 
@@ -1746,6 +1785,32 @@ export class GeminiChat {
     let compressionInfo: ChatCompressionInfo;
     let requestContents: Content[];
     let userContentAdded = false;
+
+    // Compute the output budget the model can actually use. Declared at
+    // function level so the reactive-compression path inside the generator
+    // closure can also access it.
+    //
+    // The subagent path sets params.config.maxOutputTokens explicitly; the
+    // interactive path leaves it undefined but will escalate to
+    // max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')) on MAX_TOKENS.
+    // Pre-reserving that space prevents the dead zone between the adjusted
+    // auto threshold and an unadjusted hard threshold (issue #5950).
+    const cgConfigForThresholds = this.config.getContentGeneratorConfig();
+    const parsedEnvMaxTokensForThreshold = parsePositiveIntegerEnvValue(
+      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+    );
+    const hasUserMaxTokensOverrideForThreshold =
+      (cgConfigForThresholds?.samplingParams?.max_tokens !== undefined &&
+        cgConfigForThresholds?.samplingParams?.max_tokens !== null) ||
+      parsedEnvMaxTokensForThreshold !== undefined;
+    const effectiveReservedOutput: number =
+      params.config?.maxOutputTokens ??
+      (hasUserMaxTokensOverrideForThreshold
+        ? (cgConfigForThresholds?.samplingParams?.max_tokens ??
+          parsedEnvMaxTokensForThreshold ??
+          0)
+        : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')));
+    let currentUserContent: Content | undefined;
     try {
       // The send-lock above is held but the generator's `finally` (which
       // resolves it) has not run yet. Any setup error before returning the
@@ -1774,9 +1839,12 @@ export class GeminiChat {
       // force=true already bypasses that breaker, while hard-rescue itself is
       // bounded by hardRescueFailureCount so persistent pre-send rescue
       // failures fall through to reactive overflow after a few strikes.
-      const contextLimit =
-        this.config.getContentGeneratorConfig()?.contextWindowSize ??
-        DEFAULT_TOKEN_LIMIT;
+      const rawContextLimit =
+        cgConfigForThresholds?.contextWindowSize ?? DEFAULT_TOKEN_LIMIT;
+      const contextLimit = Math.max(
+        0,
+        rawContextLimit - effectiveReservedOutput,
+      );
       const { hard } = computeThresholds(
         contextLimit,
         this.config.getAutoCompactThreshold(),
@@ -1844,6 +1912,7 @@ export class GeminiChat {
             // classified correctly while the pending user message preserves
             // any active tool-call / response pairing.
             trigger: shouldForceFromHard ? 'auto' : undefined,
+            reservedOutputTokens: effectiveReservedOutput,
           },
         );
       }
@@ -1915,6 +1984,7 @@ export class GeminiChat {
 
       // Add user content to history ONCE before any attempts.
       this.history.push(userContent);
+      currentUserContent = userContent;
       userContentAdded = true;
       // Record that the user content landed (see `userContentPushCount`). The
       // setup-error path below decrements this if it rolls the push back.
@@ -1946,7 +2016,7 @@ export class GeminiChat {
               .join(', '),
         );
       }
-      requestContents = this.getRequestHistory();
+      requestContents = this.getRequestHistory(currentUserContent);
     } catch (error) {
       if (userContentAdded) {
         this.history.pop();
@@ -1995,10 +2065,13 @@ export class GeminiChat {
         // Max output tokens escalation: when no user/env override is set and
         // the model hits MAX_TOKENS, retry once with the escalated limit.
         let maxTokensEscalated = false;
+        const parsedEnvMaxTokens = parsePositiveIntegerEnvValue(
+          process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+        );
         const hasUserMaxTokensOverride =
           (cgConfig?.samplingParams?.max_tokens !== undefined &&
             cgConfig?.samplingParams?.max_tokens !== null) ||
-          !!process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+          parsedEnvMaxTokens !== undefined;
 
         let lastFinishReason: string | undefined;
 
@@ -2233,6 +2306,7 @@ export class GeminiChat {
                     {
                       originalTokenCountOverride: reactiveOriginalTokenCount,
                       trigger: 'auto',
+                      reservedOutputTokens: effectiveReservedOutput,
                     },
                   );
 
@@ -2245,7 +2319,8 @@ export class GeminiChat {
                     // other retry branches in case a future in-place
                     // tryCompress stops resetting it.
                     popPartialIfPushed();
-                    requestContents = self.getRequestHistory();
+                    requestContents =
+                      self.getRequestHistory(currentUserContent);
                     debugLogger.info(
                       `Reactive compression succeeded: ` +
                         `${reactiveInfo.originalTokenCount} -> ` +
@@ -2488,7 +2563,7 @@ export class GeminiChat {
             // model's continuation appends to the previous partial output.
             yield { type: StreamEventType.RETRY, isContinuation: true };
             // Re-send with the updated history (includes partial + recovery)
-            const recoveryContents = self.getRequestHistory();
+            const recoveryContents = self.getRequestHistory(currentUserContent);
             escalatedFinishReason = undefined;
             try {
               const recoveryStream = await self.makeApiCallAndProcessStream(

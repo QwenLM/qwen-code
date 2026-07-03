@@ -108,6 +108,49 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     });
   });
 
+  describe('getResponseParsingOptions', () => {
+    it('should enable tagged thinking parsing for GLM models', () => {
+      const glmProvider = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, model: 'glm-5.2' },
+        mockCliConfig,
+      );
+
+      expect(glmProvider.getResponseParsingOptions()).toEqual({
+        taggedThinkingTags: true,
+      });
+    });
+
+    it('should match GLM models case-insensitively', () => {
+      const glmProvider = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, model: 'GLM-5.1' },
+        mockCliConfig,
+      );
+
+      expect(glmProvider.getResponseParsingOptions()).toEqual({
+        taggedThinkingTags: true,
+      });
+    });
+
+    it('should use the request model override when provided', () => {
+      expect(provider.getResponseParsingOptions('glm-5.2')).toEqual({
+        taggedThinkingTags: true,
+      });
+    });
+
+    it('should let a non-GLM request model override a configured GLM model', () => {
+      const glmProvider = new DashScopeOpenAICompatibleProvider(
+        { ...mockContentGeneratorConfig, model: 'glm-5.2' },
+        mockCliConfig,
+      );
+
+      expect(glmProvider.getResponseParsingOptions('qwen-max')).toEqual({});
+    });
+
+    it('should not enable tagged thinking parsing for non-GLM models', () => {
+      expect(provider.getResponseParsingOptions()).toEqual({});
+    });
+  });
+
   describe('isDashScopeProvider', () => {
     it('should return true for QWEN_OAUTH auth type', () => {
       const config = {
@@ -570,6 +613,116 @@ describe('DashScopeOpenAICompatibleProvider', () => {
       const lastMessage = result.messages[1];
       expect(lastMessage.role).toBe('user');
       expect(lastMessage.content).toBe('Hello!');
+    });
+
+    it('sends enable_thinking:true on a qwen model when a reasoning effort is set', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        { ...baseRequest },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBe(true);
+    });
+
+    it('strips the pipeline-injected nested reasoning when enable_thinking is added on a qwen model', () => {
+      // The pipeline injects a nested `reasoning: { effort }` object for
+      // OpenAI-compatible endpoints. qwen drives thinking via `enable_thinking`,
+      // so shipping both would send two competing knobs — the nested form must
+      // be dropped (mirrors deepseek.ts / zai.ts).
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const requestWithReasoning = {
+        ...baseRequest,
+        reasoning: { effort: 'high' },
+      } as unknown as Parameters<typeof generator.buildRequest>[0];
+      const result = generator.buildRequest(
+        requestWithReasoning,
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBe(true);
+      expect(result['reasoning']).toBeUndefined();
+    });
+
+    it('vision model: injects enable_thinking and strips nested reasoning on a qwen-vl model', () => {
+      // The vision branch of buildRequest duplicates the enable_thinking / strip
+      // logic; exercise it directly so a divergence from the text path is caught.
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'qwen-vl-max',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const requestWithReasoning = {
+        ...baseRequest,
+        model: 'qwen-vl-max',
+        reasoning: { effort: 'high' },
+      } as unknown as Parameters<typeof generator.buildRequest>[0];
+      const result = generator.buildRequest(
+        requestWithReasoning,
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBe(true);
+      expect(result['reasoning']).toBeUndefined();
+      expect(result['vl_high_resolution_images']).toBe(true);
+    });
+
+    it('keeps the nested reasoning for a non-qwen wire model (no enable_thinking, no strip)', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'glm-4.6',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const requestWithReasoning = {
+        ...baseRequest,
+        model: 'glm-4.6',
+        reasoning: { effort: 'high' },
+      } as unknown as Parameters<typeof generator.buildRequest>[0];
+      const result = generator.buildRequest(
+        requestWithReasoning,
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBeUndefined();
+      expect(result['reasoning']).toEqual({ effort: 'high' });
+    });
+
+    it('omits enable_thinking when no reasoning effort is set', () => {
+      const result = provider.buildRequest(
+        { ...baseRequest },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBeUndefined();
+    });
+
+    it('does not send enable_thinking for a non-qwen wire model even with effort set', () => {
+      const generator = new DashScopeOpenAICompatibleProvider(
+        {
+          ...mockContentGeneratorConfig,
+          model: 'glm-4.6',
+          reasoning: { effort: 'high' },
+        } as ContentGeneratorConfig,
+        mockCliConfig,
+      );
+      const result = generator.buildRequest(
+        { ...baseRequest, model: 'glm-4.6' },
+        'test-prompt-id',
+      ) as unknown as Record<string, unknown>;
+      expect(result['enable_thinking']).toBeUndefined();
     });
 
     it('should add cache control to system message only for non-streaming requests with tools', () => {

@@ -4,10 +4,77 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, expect, it } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { FatalSandboxError, QWEN_DIR } from '@qwen-code/qwen-code-core';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { isContainerPathWithinWorkdir } from './sandbox-path.js';
+import { resolveSeatbeltProfileFile, start_sandbox } from './sandbox.js';
 import { parseSandboxImageName } from './sandboxImageName.js';
 import { parseSandboxMountSpec } from './sandboxMounts.js';
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  vi.unstubAllEnvs();
+});
+
+describe('resolveSeatbeltProfileFile', () => {
+  it('strips the chunks segment from bundled seatbelt profile paths', () => {
+    const bundleDir = path.resolve(path.sep, 'tmp', 'qwen', 'lib');
+    const chunkUrl = pathToFileURL(
+      path.join(bundleDir, 'chunks', 'sandbox-AAAA.js'),
+    ).toString();
+
+    expect(resolveSeatbeltProfileFile('permissive-open', chunkUrl)).toBe(
+      path.join(bundleDir, 'sandbox-macos-permissive-open.sb'),
+    );
+  });
+
+  it('keeps source-mode seatbelt profile paths next to the module', () => {
+    const utilsDir = path.resolve(
+      path.sep,
+      'repo',
+      'packages',
+      'cli',
+      'src',
+      'utils',
+    );
+    const sourceUrl = pathToFileURL(
+      path.join(utilsDir, 'sandbox.ts'),
+    ).toString();
+
+    expect(resolveSeatbeltProfileFile('restrictive-closed', sourceUrl)).toBe(
+      path.join(utilsDir, 'sandbox-macos-restrictive-closed.sb'),
+    );
+  });
+
+  it('keeps custom seatbelt profiles under project settings', () => {
+    const bundleDir = path.resolve(path.sep, 'tmp', 'qwen', 'lib');
+    const chunkUrl = pathToFileURL(
+      path.join(bundleDir, 'chunks', 'sandbox-AAAA.js'),
+    ).toString();
+
+    expect(resolveSeatbeltProfileFile('project-profile', chunkUrl)).toBe(
+      path.join(QWEN_DIR, 'sandbox-macos-project-profile.sb'),
+    );
+  });
+
+  it('throws missing file errors with the resolved seatbelt profile path', async () => {
+    vi.stubEnv('SEATBELT_PROFILE', 'permissive-open');
+    vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+
+    const expectedPath = resolveSeatbeltProfileFile('permissive-open');
+
+    await expect(
+      start_sandbox({ command: 'sandbox-exec', image: '' }),
+    ).rejects.toThrow(
+      new FatalSandboxError(
+        `Missing macos seatbelt profile file '${expectedPath}'`,
+      ),
+    );
+  });
+});
 
 describe('isContainerPathWithinWorkdir', () => {
   it('allows the workdir itself', () => {

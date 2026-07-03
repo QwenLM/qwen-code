@@ -2,6 +2,7 @@ export { getGlobalQwenDir, resolvePath } from './paths.js';
 export { AcpBridge } from './AcpBridge.js';
 export type {
   AvailableCommand,
+  BridgeSessionInfo,
   ChannelAgentBridge,
   SessionDiedEvent,
   ToolCallEvent,
@@ -21,7 +22,23 @@ export type {
 export { BlockStreamer } from './BlockStreamer.js';
 export type { BlockStreamerOptions } from './BlockStreamer.js';
 export { ChannelBase } from './ChannelBase.js';
-export type { ChannelBaseOptions } from './ChannelBase.js';
+export type {
+  ChannelBaseOptions,
+  ChannelLoopController,
+} from './ChannelBase.js';
+export { ChannelLoopScheduler } from './ChannelLoopScheduler.js';
+export type {
+  ChannelLoopSchedulerOptions,
+  ChannelLoopRunner,
+} from './ChannelLoopScheduler.js';
+export { ChannelLoopStore } from './ChannelLoopStore.js';
+export type {
+  ChannelLoop,
+  ChannelLoopInput,
+  ChannelLoopPatch,
+  ChannelLoopStatus,
+  ChannelLoopStoreOptions,
+} from './ChannelLoopStore.js';
 export { PairingStore } from './PairingStore.js';
 export type { PairingRequest } from './PairingStore.js';
 export { GroupGate } from './GroupGate.js';
@@ -34,17 +51,27 @@ export {
   sanitizePromptText,
   sanitizeLogText,
 } from './sanitize.js';
+export { isTerminalTaskLifecycleType } from './types.js';
 export type {
   Attachment,
   BlockStreamingChunkConfig,
   BlockStreamingCoalesceConfig,
   ChannelConfig,
+  ChannelIdentityConfig,
+  ChannelMemoryScopeConfig,
+  ChannelMemoryScopeMode,
   ChannelPlugin,
+  ChannelRuntimeIdentity,
+  ChannelRuntimeMemoryScope,
+  ChannelTaskCancellationReason,
+  ChannelTaskLifecycleBase,
+  ChannelTaskLifecycleEvent,
   ChannelType,
   DispatchMode,
   Envelope,
   GroupConfig,
   GroupPolicy,
+  SanitizedToolCallEvent,
   SenderPolicy,
   SessionScope,
   SessionTarget,

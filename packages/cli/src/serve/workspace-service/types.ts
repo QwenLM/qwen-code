@@ -38,6 +38,7 @@ import type {
 import type { WorkspaceVoiceStatus } from '../../services/voice-service.js';
 import type { VoiceMode } from '../../services/voice-settings.js';
 import type { WorkspaceProvidersStatusProvider } from '../workspace-providers-status.js';
+import type { WorkspaceSkillsStatusProvider } from '../workspace-skills-status.js';
 
 // ---------------------------------------------------------------------------
 // WorkspaceRequestContext
@@ -323,6 +324,15 @@ export interface DaemonWorkspaceServiceDeps {
    * instead of querying the ACP child.
    */
   workspaceProvidersStatusProvider?: WorkspaceProvidersStatusProvider;
+
+  /**
+   * Daemon-local skill enumeration. Used as a fallback for
+   * `/workspace/skills` when the ACP child cannot answer (e.g. before the
+   * first prompt on a cold daemon whose preheat has not yet — or cannot —
+   * bring the child up), so skill-backed slash commands autocomplete without
+   * waiting on the child. The live child stays authoritative when present.
+   */
+  workspaceSkillsStatusProvider?: WorkspaceSkillsStatusProvider;
 
   /**
    * Returns whether the ACP channel is currently live. Used by

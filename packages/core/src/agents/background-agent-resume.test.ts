@@ -44,7 +44,17 @@ describe('BackgroundAgentResumeService', () => {
     });
   });
 
-  function createService(options: { stopHookBlockingCap?: number } = {}) {
+  function createService(
+    options: {
+      stopHookBlockingCap?: number;
+      hookSystem?:
+        | {
+            fireSubagentStartEvent: ReturnType<typeof vi.fn>;
+            fireSubagentStopEvent: ReturnType<typeof vi.fn>;
+          }
+        | undefined;
+    } = {},
+  ) {
     const subagentManager = {
       loadSubagent: vi.fn(async (name: string) =>
         name === 'researcher'
@@ -56,10 +66,13 @@ describe('BackgroundAgentResumeService', () => {
       ),
       createAgentHeadless: vi.fn(),
     };
-    const hookSystem = {
-      fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
-      fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
-    };
+    const hookSystem =
+      options.hookSystem !== undefined
+        ? options.hookSystem
+        : {
+            fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+            fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+          };
     // Stub registry exposed on both `parent.getToolRegistry()` and the
     // override built by `createApprovalModeOverride` (which now rebuilds
     // the tool registry on the resumed agent's Config so bound tools
@@ -471,6 +484,261 @@ describe('BackgroundAgentResumeService', () => {
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
+  });
+
+  it('sets hook_context to empty string when no hook system is configured', async () => {
+    const sessionId = 'session-no-hook';
+    const agentId = 'agent-no-hook';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume without hooks',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume without hooks' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume without hooks',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume without hooks',
+      outputFile,
+      metaPath,
+    });
+
+    const execute = vi.fn(
+      async (_context: { get: (key: string) => unknown }) => undefined,
+    );
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager } = createService({
+      hookSystem: undefined,
+    });
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    expect(execute).toHaveBeenCalledTimes(1);
+    const contextArg = execute.mock.calls[0]![0] as {
+      get: (key: string) => unknown;
+    };
+    expect(contextArg.get('hook_context')).toBe('');
+  });
+
+  it('returns only model-visible subagent output when resumed background agents complete', async () => {
+    const sessionId = 'session-resume-sanitized';
+    const agentId = 'agent-resume-sanitized';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume with tagged result',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Resume with tagged result' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume with tagged result',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume with tagged result',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        rounds: 0,
+        totalToolCalls: 0,
+        successfulToolCalls: 0,
+        failedToolCalls: 0,
+        successRate: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        thoughtTokens: 0,
+        cachedTokens: 0,
+        totalTokens: 0,
+        toolUsage: [],
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () =>
+        [
+          '<analysis>',
+          'Scratchpad details should stay out of the parent context.',
+          '</analysis>',
+          '',
+          '<summary>',
+          'Resume completed successfully',
+          '</summary>',
+        ].join('\n'),
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    expect(registry.get(agentId)?.result).toBe('Resume completed successfully');
+  });
+
+  it('stores a fallback when resumed output has no model-visible text', async () => {
+    const sessionId = 'session-resume-empty-visible';
+    const agentId = 'agent-resume-empty-visible';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume with scratchpad-only result',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: {
+          role: 'user',
+          parts: [{ text: 'Resume with scratchpad-only result' }],
+        },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume with scratchpad-only result',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume with scratchpad-only result',
+      outputFile,
+      metaPath,
+    });
+
+    const subagent = {
+      execute: vi.fn(async () => undefined),
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        rounds: 0,
+        totalToolCalls: 0,
+        successfulToolCalls: 0,
+        failedToolCalls: 0,
+        successRate: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        thoughtTokens: 0,
+        cachedTokens: 0,
+        totalTokens: 0,
+        toolUsage: [],
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => '<analysis>scratch only</analysis>',
+    };
+
+    const { service, subagentManager } = createService();
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    await vi.waitFor(() => {
+      expect(registry.get(agentId)?.status).toBe('completed');
+    });
+    expect(registry.get(agentId)?.result).toBe(
+      '(subagent produced no model-visible output)',
+    );
   });
 
   it('can resume into the final background concurrency slot', async () => {

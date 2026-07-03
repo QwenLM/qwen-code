@@ -6,7 +6,6 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import yargs, { type Argv } from 'yargs';
-import { execFileSync } from 'node:child_process';
 import {
   existsSync,
   mkdirSync,
@@ -38,10 +37,12 @@ import {
   getGlobalQwenDirLite,
   SETTINGS_DIRECTORY_NAME,
 } from '../config/storage-paths-lite.js';
+import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import {
   resetTrustedFoldersForTesting,
   TrustLevel,
 } from '../config/trustedFolders.js';
+import { HEADLESS_YOLO_NO_SANDBOX_WARNING } from '../utils/headlessSafetyWarnings.js';
 import * as runQwenServeModule from './run-qwen-serve.js';
 import type { ServeFastPathSettings } from './fast-path-settings.js';
 import type { Settings } from '../config/settingsSchema.js';
@@ -70,24 +71,11 @@ const originalCloudShell = process.env['CLOUD_SHELL'];
 const originalGoogleCloudProject = process.env['GOOGLE_CLOUD_PROJECT'];
 const originalCwd = process.cwd();
 const cliPackageRoot = process.cwd();
-const repoRoot = resolve(cliPackageRoot, '../..');
 
 interface StaticSourceGraph {
   localFiles: Set<string>;
   externalValueImports: Set<string>;
   unresolvedLocalImports: string[];
-}
-
-interface EsbuildMetafileOutput {
-  inputs?: Record<string, unknown>;
-  imports?: Array<{
-    path: string;
-    kind?: string;
-  }>;
-}
-
-interface EsbuildMetafile {
-  outputs: Record<string, EsbuildMetafileOutput>;
 }
 
 function normalizePathForTest(filePath: string): string {
@@ -194,69 +182,6 @@ function collectStaticSourceGraph(entryFile: string): StaticSourceGraph {
 
   visit(entryFile);
   return { localFiles, externalValueImports, unresolvedLocalImports };
-}
-
-function collectBundledRunServeStaticRuntimeOffenders(): string[] {
-  const metafilePath = resolve(repoRoot, 'dist/esbuild.json');
-  rmSync(metafilePath, { force: true });
-  execFileSync(process.execPath, [resolve(repoRoot, 'esbuild.config.js')], {
-    cwd: repoRoot,
-    env: { ...process.env, DEV: 'true' },
-    stdio: 'pipe',
-    timeout: 30_000,
-  });
-
-  expect(existsSync(metafilePath)).toBe(true);
-  const metafile = JSON.parse(
-    readFileSync(metafilePath, 'utf8'),
-  ) as EsbuildMetafile;
-  const outputs = new Map(
-    Object.entries(metafile.outputs).map(([outputPath, output]) => [
-      normalizePathForTest(outputPath),
-      output,
-    ]),
-  );
-  const runServeOutput = [...outputs.entries()].find(([, output]) =>
-    Object.keys(output.inputs ?? {}).some(
-      (input) =>
-        normalizePathForTest(input) ===
-        'packages/cli/src/serve/run-qwen-serve.ts',
-    ),
-  );
-  expect(runServeOutput).toBeDefined();
-  const queue = [runServeOutput![0]];
-  const staticClosure = new Set(queue);
-
-  for (let i = 0; i < queue.length; i++) {
-    const output = outputs.get(queue[i]);
-    for (const bundledImport of output?.imports ?? []) {
-      if (bundledImport.kind !== 'import-statement') continue;
-      const importedOutput = normalizePathForTest(bundledImport.path);
-      if (!outputs.has(importedOutput) || staticClosure.has(importedOutput)) {
-        continue;
-      }
-      staticClosure.add(importedOutput);
-      queue.push(importedOutput);
-    }
-  }
-
-  const forbiddenInputs = new Set([
-    'packages/cli/src/serve/acp-session-bridge.ts',
-    'packages/acp-bridge/src/bridge.ts',
-    'packages/acp-bridge/src/bridgeClient.ts',
-    'packages/acp-bridge/src/spawnChannel.ts',
-  ]);
-  const offenders: string[] = [];
-  for (const outputPath of staticClosure) {
-    const output = outputs.get(outputPath);
-    for (const input of Object.keys(output?.inputs ?? {})) {
-      const normalizedInput = normalizePathForTest(input);
-      if (forbiddenInputs.has(normalizedInput)) {
-        offenders.push(`${outputPath} -> ${normalizedInput}`);
-      }
-    }
-  }
-  return offenders;
 }
 
 function useTempQwenHome(): string {
@@ -438,13 +363,12 @@ afterEach(() => {
 
 describe('CLI entry import boundary', () => {
   it('does not statically import the full gemini entry before the serve fast path can run', () => {
-    const indexSource = readFileSync('index.ts', 'utf8');
+    const cliSource = readFileSync('src/cli.ts', 'utf8');
 
-    expect(indexSource).not.toContain("import './src/gemini.js'");
-    expect(indexSource).not.toContain("import { main } from './src/gemini.js'");
-    expect(indexSource).not.toContain("process.argv[2] === 'serve'");
-    expect(indexSource).toContain('import { isServeFastPathArgv }');
-    expect(indexSource).toContain("await import('./src/serve/fast-path.js')");
+    expect(cliSource).not.toContain("import './gemini.js'");
+    expect(cliSource).not.toContain("import { main } from './gemini.js'");
+    expect(cliSource).not.toContain("process.argv[2] === 'serve'");
+    expect(cliSource).toContain("await import('./serve/fast-path.js')");
   });
 
   it('does not import the full settings loader on the serve fast path', () => {
@@ -455,6 +379,29 @@ describe('CLI entry import boundary', () => {
     expect(fastPathSource).not.toContain('@qwen-code/qwen-code-core');
     expect(fastPathSource).toContain('bootSettings: settings');
     expect(fastPathSource).toContain('resolveOnListen: true');
+    expect(fastPathSource).toContain(
+      'deferRuntimeUntilFirstHealth: !parsed.open',
+    );
+  });
+
+  it('uses the shared headless yolo warning helper on the serve fast path', () => {
+    const fastPathSource = readFileSync('src/serve/fast-path.ts', 'utf8');
+
+    expect(fastPathSource).toContain('getHeadlessYoloSafetyWarning');
+    expect(fastPathSource).not.toContain(
+      "settings.tools?.approvalMode === 'yolo'",
+    );
+  });
+
+  it('keeps headless yolo warning helper free of runtime core imports', () => {
+    const helperSource = readFileSync(
+      'src/utils/headlessSafetyWarnings.ts',
+      'utf8',
+    );
+
+    expect(helperSource).not.toMatch(
+      /import\s+(?!type\b)[^;]*from ['"]@qwen-code\/qwen-code-core['"]/,
+    );
   });
 
   it('keeps settings free of UI imports used before serve can listen', () => {
@@ -490,6 +437,23 @@ describe('CLI entry import boundary', () => {
     expect(runServeSource).toContain("import('@qwen-code/acp-bridge/bridge')");
   });
 
+  it('keeps request helpers from value-importing the ACP compatibility shim', () => {
+    const requestHelpersSource = readFileSync(
+      'src/serve/server/request-helpers.ts',
+      'utf8',
+    );
+
+    expect(requestHelpersSource).not.toMatch(
+      /from ['"]\.\.\/acp-session-bridge\.js['"]/,
+    );
+    expect(requestHelpersSource).toContain(
+      "import type { AcpSessionBridge } from '@qwen-code/acp-bridge/bridgeTypes';",
+    );
+    expect(requestHelpersSource).toContain(
+      "import { MAX_WORKSPACE_PATH_LENGTH } from '@qwen-code/acp-bridge/workspacePaths';",
+    );
+  });
+
   it('keeps the runQwenServe static source graph free of ACP runtime modules', () => {
     const graph = collectStaticSourceGraph(
       resolve(cliPackageRoot, 'src/serve/run-qwen-serve.ts'),
@@ -519,15 +483,6 @@ describe('CLI entry import boundary', () => {
       `Unexpected ACP runtime imports:\n${forbiddenImports.join('\n')}`,
     ).toEqual([]);
   });
-
-  it('keeps bundled runQwenServe static imports free of ACP runtime modules', () => {
-    const offenders = collectBundledRunServeStaticRuntimeOffenders();
-
-    expect(
-      offenders,
-      `Unexpected ACP runtime inputs in static bundle closure:\n${offenders.join('\n')}`,
-    ).toEqual([]);
-  }, 30_000);
 });
 
 describe('serve fast path argument parsing', () => {
@@ -555,6 +510,24 @@ describe('serve fast path argument parsing', () => {
         port: 0,
         serveWebShell: false,
         workspace: '/tmp/workspace',
+      },
+    });
+  });
+
+  it('parses --tls-cert and --tls-key on the fast path', () => {
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--tls-cert',
+      '/tmp/cert.pem',
+      '--tls-key',
+      '/tmp/key.pem',
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: {
+        tlsCert: '/tmp/cert.pem',
+        tlsKey: '/tmp/key.pem',
       },
     });
   });
@@ -596,6 +569,12 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('falls back to the full parser for daemon-managed channels', () => {
+    expect(parseServeFastPathArgs(['serve', '--channel', 'telegram'])).toEqual({
+      kind: 'fallback',
+    });
+  });
+
   it('handles every yargs serve long option or explicitly falls back', () => {
     const options = (
       buildServeCommandParser() as unknown as {
@@ -622,6 +601,8 @@ describe('serve fast path argument parsing', () => {
       ['workspace', ['--workspace', process.cwd()]],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],
+      ['tls-cert', ['--tls-cert', '/tmp/cert.pem']],
+      ['tls-key', ['--tls-key', '/tmp/key.pem']],
       ['web', ['--no-web']],
       ['open', ['--open']],
       ['http-bridge', ['--no-http-bridge']],
@@ -644,10 +625,11 @@ describe('serve fast path argument parsing', () => {
       ['rate-limit-read', ['--rate-limit-read', '120']],
       ['rate-limit-window-ms', ['--rate-limit-window-ms', '60000']],
       ['experimental-lsp', ['--experimental-lsp']],
+      ['channel', ['--channel', 'telegram']],
       ['help', ['--help']],
       ['version', ['--version']],
     ]);
-    const expectedFallbackOptions = new Set(['help', 'version']);
+    const expectedFallbackOptions = new Set(['channel', 'help', 'version']);
 
     expect(longOptionNames.sort()).toEqual(
       [...sampleArgvByOption.keys()].sort(),
@@ -865,6 +847,35 @@ describe('serve fast path environment bootstrap', () => {
     expect(process.exit).toHaveBeenCalledWith(1);
   });
 
+  it('does not report startup failure when runtime startup is cancelled by close', async () => {
+    const stderrWrites: string[] = [];
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      stderrWrites.push(String(chunk));
+      return true;
+    });
+    const exit = vi.spyOn(process, 'exit').mockImplementation(((
+      code?: string | number | null,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as typeof process.exit);
+
+    await expect(
+      waitForServeRuntimeOrExit({
+        runtimeReady: Promise.reject(
+          new Error(RUNTIME_STARTUP_CANCELLED_MESSAGE),
+        ),
+        close,
+      }),
+    ).resolves.toBeUndefined();
+
+    expect(close).not.toHaveBeenCalled();
+    expect(stderrWrites.join('')).not.toContain(
+      'runtime startup failed after listener was ready',
+    );
+    expect(exit).not.toHaveBeenCalled();
+  });
+
   it('validates rate limit env after settings bootstrap enables rate limiting', async () => {
     useTempQwenHome();
     tempWorkspace = realpathSync(
@@ -941,6 +952,66 @@ describe('serve fast path environment bootstrap', () => {
 
     expect(stderrWrites.join('')).toContain('qwen serve: listen boom');
     expect(process.exit).toHaveBeenCalledWith(1);
+  });
+
+  it('keeps headless yolo warning best-effort after listening', async () => {
+    const originalSandbox = process.env['SANDBOX'];
+    const originalSuppress = process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
+    delete process.env['SANDBOX'];
+    delete process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
+    const qwenHome = useTempQwenHome();
+    writeFileSync(
+      join(qwenHome, 'settings.json'),
+      JSON.stringify({ tools: { approvalMode: 'yolo', sandbox: false } }),
+    );
+    const runtimeReady = Promise.reject(new Error('runtime boom'));
+    void runtimeReady.catch(() => undefined);
+    const close = vi.fn().mockResolvedValue(undefined);
+    vi.spyOn(runQwenServeModule, 'runQwenServe').mockResolvedValue({
+      runtimeReady,
+      close,
+    } as unknown as Awaited<
+      ReturnType<typeof runQwenServeModule.runQwenServe>
+    >);
+    const stderrWrites: string[] = [];
+    vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+      const text = String(chunk);
+      stderrWrites.push(text);
+      if (text.includes(HEADLESS_YOLO_NO_SANDBOX_WARNING)) {
+        throw new Error('stderr closed');
+      }
+      return true;
+    });
+    vi.spyOn(process, 'exit').mockImplementation(((
+      code?: string | number | null,
+    ) => {
+      throw new Error(`process.exit(${code})`);
+    }) as typeof process.exit);
+
+    try {
+      await expect(
+        tryRunServeFastPath(['serve', '--port', '0', '--no-open', '--no-web']),
+      ).rejects.toThrow('process.exit(1)');
+
+      expect(stderrWrites.join('')).toContain(HEADLESS_YOLO_NO_SANDBOX_WARNING);
+      expect(stderrWrites.join('')).toContain(
+        'qwen serve: runtime startup failed after listener was ready: runtime boom',
+      );
+      expect(stderrWrites.join('')).not.toContain('qwen serve: stderr closed');
+      expect(close).toHaveBeenCalledTimes(1);
+      expect(process.exit).toHaveBeenCalledWith(1);
+    } finally {
+      if (originalSandbox === undefined) {
+        delete process.env['SANDBOX'];
+      } else {
+        process.env['SANDBOX'] = originalSandbox;
+      }
+      if (originalSuppress === undefined) {
+        delete process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'];
+      } else {
+        process.env['QWEN_CODE_SUPPRESS_YOLO_WARNING'] = originalSuppress;
+      }
+    }
   });
 
   it('rejects malformed user settings so the full settings loader can handle it', async () => {

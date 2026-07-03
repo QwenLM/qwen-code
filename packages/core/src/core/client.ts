@@ -34,7 +34,12 @@ import {
 import { abortGoalForStopHookCap } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
-import { DEFAULT_TOKEN_LIMIT } from './tokenLimits.js';
+import {
+  DEFAULT_TOKEN_LIMIT,
+  ESCALATED_MAX_TOKENS,
+  parsePositiveIntegerEnvValue,
+  tokenLimit,
+} from './tokenLimits.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -117,6 +122,7 @@ import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
+import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 
 // Hook types and utilities
 import {
@@ -2103,7 +2109,12 @@ export class GeminiClient {
         // add plan mode system reminder if approval mode is plan
         if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
           systemReminders.push(
-            getPlanModeSystemReminder(this.config.getSdkMode()),
+            // SDK clients do not receive the interactive exit-plan flow, so
+            // they need plan-only guidance even outside subagent contexts.
+            getPlanModeSystemReminder(
+              shouldUsePlanOnlyReminderInSubagentContext() ||
+                this.config.getSdkMode(),
+            ),
           );
         }
 
@@ -2703,14 +2714,33 @@ export class GeminiClient {
     signal?: AbortSignal,
     customInstructions?: string,
   ): Promise<ChatCompressionInfo> {
+    // Compute reservedOutputTokens using the same fallback logic as
+    // GeminiChat.sendMessageStream so the cheap-gate thresholds align with
+    // the real available input budget (issue #5950).
+    const cgConfig = this.config.getContentGeneratorConfig();
+    const model = this.config.getModel();
+    const parsedEnvMaxTokens = parsePositiveIntegerEnvValue(
+      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+    );
+    const hasUserMaxTokensOverride =
+      (cgConfig?.samplingParams?.max_tokens !== undefined &&
+        cgConfig?.samplingParams?.max_tokens !== null) ||
+      parsedEnvMaxTokens !== undefined;
+    const reservedOutputTokens: number = hasUserMaxTokensOverride
+      ? (cgConfig?.samplingParams?.max_tokens ?? parsedEnvMaxTokens ?? 0)
+      : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output'));
+
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
     const info = await this.getChat().tryCompress(
       prompt_id,
-      this.config.getModel(),
+      model,
       force,
       signal,
-      customInstructions ? { customInstructions } : undefined,
+      {
+        ...(customInstructions ? { customInstructions } : undefined),
+        reservedOutputTokens,
+      },
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const chat = this.getChat();

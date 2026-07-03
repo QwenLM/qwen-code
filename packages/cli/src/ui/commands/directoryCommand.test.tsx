@@ -5,12 +5,12 @@
  */
 
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { directoryCommand, getDirPathCompletions } from './directoryCommand.js';
 import {
-  directoryCommand,
   expandHomeDir,
-  getDirPathCompletions,
-} from './directoryCommand.js';
-import type { Config, WorkspaceContext } from '@qwen-code/qwen-code-core';
+  type Config,
+  type WorkspaceContext,
+} from '@qwen-code/qwen-code-core';
 import type { CommandContext, SlashCommandActionReturn } from './types.js';
 import { SettingScope } from '../../config/settings.js';
 import * as os from 'node:os';
@@ -187,6 +187,17 @@ describe('directoryCommand', () => {
           `Successfully added directories:\n- ${newPath}`,
         ),
       });
+    });
+
+    it('should expand Windows-style home-relative paths before adding directories', async () => {
+      const homeProject = path.join(os.homedir(), 'new-project');
+
+      if (!addCommand?.action) throw new Error('No action');
+      await addCommand.action(mockContext, '~\\new-project');
+
+      expect(mockWorkspaceContext.addDirectory).toHaveBeenCalledWith(
+        homeProject,
+      );
     });
 
     it('should persist added directories to workspace settings', async () => {
@@ -493,6 +504,33 @@ describe('getDirPathCompletions', () => {
         const dirname = path.dirname(suggestion.value);
         expect(dirname).toContain(tempTestDir);
       });
+    });
+
+    it('should complete Windows-style home-relative paths', () => {
+      const homeSubdir = fs.mkdtempSync(
+        path.join(os.homedir(), `qwen-dir-complete-${process.pid}-`),
+      );
+      const partialName = path.basename(homeSubdir).slice(0, -2);
+
+      try {
+        const results = getDirPathCompletions(`~\\${partialName}`);
+
+        expect(results.length).toBeGreaterThan(0);
+        expect(
+          results.some(
+            (suggestion) => suggestion.value === homeSubdir + path.sep,
+          ),
+        ).toBe(true);
+        results.forEach((suggestion) => {
+          expect(suggestion.isDirectory).toBe(true);
+          expect(path.basename(suggestion.value.slice(0, -1))).toContain(
+            partialName,
+          );
+          expect(suggestion.value.endsWith(path.sep)).toBe(true);
+        });
+      } finally {
+        fs.rmSync(homeSubdir, { recursive: true, force: true });
+      }
     });
 
     it('should support comma-separated paths with isDirectory flag on last segment', () => {

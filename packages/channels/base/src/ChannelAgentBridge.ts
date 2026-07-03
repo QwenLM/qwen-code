@@ -29,8 +29,15 @@ interface ChannelAgentBridgeEventMap {
   toolCall: [ToolCallEvent];
 }
 
+export interface BridgeSessionInfo {
+  sessionId: string;
+  workspaceCwd: string;
+  hasActivePrompt: boolean;
+}
+
 export interface ChannelAgentBridge {
   readonly availableCommands: AvailableCommand[];
+  getAvailableCommands?(sessionId: string): AvailableCommand[];
   on<K extends keyof ChannelAgentBridgeEventMap>(
     eventName: K,
     listener: (...args: ChannelAgentBridgeEventMap[K]) => void,
@@ -52,4 +59,5 @@ export interface ChannelAgentBridge {
     command: string,
     signal?: AbortSignal,
   ): Promise<{ exitCode: number | null; output: string; aborted: boolean }>;
+  listSessions?(): BridgeSessionInfo[];
 }

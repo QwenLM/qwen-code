@@ -127,6 +127,7 @@ export interface SlashCommandProcessorActions {
   openTrustDialog: () => void;
   openPermissionsDialog: () => void;
   openApprovalModeDialog: () => void;
+  openEffortDialog: () => void;
   openResumeDialog: (matchedSessions?: SessionListItem[]) => void;
   handleResume: (sessionId: string) => Promise<void>;
   handleBranch: (name?: string) => Promise<void>;
@@ -863,6 +864,9 @@ export const useSlashCommandProcessor = (
                     case 'approval-mode':
                       actions.openApprovalModeDialog();
                       return { type: 'handled' };
+                    case 'effort':
+                      actions.openEffortDialog();
+                      return { type: 'handled' };
                     case 'resume':
                       if (result.sessionId) {
                         await actions.handleResume(result.sessionId);
@@ -967,6 +971,7 @@ export const useSlashCommandProcessor = (
                     type: 'submit_prompt',
                     content,
                     onComplete: result.onComplete,
+                    modelOverride: result.modelOverride,
                   };
                 }
                 case 'confirm_shell_commands': {
