@@ -132,6 +132,10 @@ function createMockConfig() {
   return {
     getModel: vi.fn().mockReturnValue('test-model'),
     getToolRegistry: vi.fn().mockReturnValue(registry),
+    getMonitorRegistry: vi.fn().mockReturnValue({
+      setAgentNotificationCallback: vi.fn(),
+      cancelRunningForOwner: vi.fn(),
+    }),
     getSessionId: vi.fn().mockReturnValue('test-session'),
     getPlansDir: vi.fn().mockReturnValue('/tmp/plans'),
     getApprovalMode: vi.fn().mockReturnValue(DEFAULT_MODE),
@@ -218,6 +222,51 @@ describe('InProcessBackend', () => {
 
     expect(backend.getActiveAgentId()).toBe('agent-1');
     expect(backend.getAgent('agent-1')).toBeDefined();
+  });
+
+  it('routes owned monitor notifications into the agent message queue', async () => {
+    // AgentInteractive frames tool bodies under the agent identity, so a
+    // monitor it starts is agent-owned — and owned-monitor dispatch has no
+    // session fallback. Spawn must register the routing; stop must tear it
+    // down and cancel anything still running.
+    const mockConfig = createMockConfig();
+    const monitorRegistry = (
+      mockConfig as unknown as {
+        getMonitorRegistry: () => {
+          setAgentNotificationCallback: ReturnType<typeof vi.fn>;
+          cancelRunningForOwner: ReturnType<typeof vi.fn>;
+        };
+      }
+    ).getMonitorRegistry();
+    const localBackend = new InProcessBackend(
+      mockConfig as unknown as ConstructorParameters<
+        typeof InProcessBackend
+      >[0],
+    );
+    await localBackend.init();
+    await localBackend.spawnAgent(createSpawnConfig('agent-1'));
+
+    expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
+      'agent-1',
+      expect.any(Function),
+    );
+    const callback = monitorRegistry.setAgentNotificationCallback.mock
+      .calls[0]![1] as (displayText: string, modelText: string) => void;
+
+    const agent = localBackend.getAgent('agent-1')!;
+    const enqueueSpy = vi.spyOn(agent, 'enqueueMessage');
+    callback('display text', 'model text');
+    expect(enqueueSpy).toHaveBeenCalledWith('model text');
+
+    localBackend.stopAgent('agent-1');
+    expect(monitorRegistry.cancelRunningForOwner).toHaveBeenCalledWith(
+      'agent-1',
+      { notify: false },
+    );
+    expect(monitorRegistry.setAgentNotificationCallback).toHaveBeenCalledWith(
+      'agent-1',
+      undefined,
+    );
   });
 
   it('should set first spawned agent as active', async () => {

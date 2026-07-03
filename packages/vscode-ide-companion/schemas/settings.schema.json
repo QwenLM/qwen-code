@@ -592,6 +592,11 @@
           "type": "number",
           "default": -1
         },
+        "maxSubagentDepth": {
+          "description": "Maximum sub-agent nesting depth (1-based levels: a top-level sub-agent is level 1). 1 keeps sub-agents available but disables nesting; the default 5 allows nesting up to five levels deep. Values clamp to the range 1-100; non-finite values fall back to the default. Teammates, forks, and workflow-spawned agents never nest regardless of this setting. Overridable via --max-subagent-depth.",
+          "type": "number",
+          "default": 5
+        },
         "chatCompression": {
           "description": "Chat compression settings.",
           "type": "object",

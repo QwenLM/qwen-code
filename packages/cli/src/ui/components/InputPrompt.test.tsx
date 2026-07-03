@@ -5097,7 +5097,12 @@ describe('InputPrompt', () => {
       unmount();
     });
 
-    it('Enter on the live panel maps visible agents back to their bg entry index', async () => {
+    it('Enter on the live panel maps the DISPLAYED row back to its bg entry index', async () => {
+      // The snapshot is newest-first but the panel renders oldest-first
+      // (panelDisplayOrder). Selecting panel row 2 must open the agent the
+      // user sees there — 'first-live-agent' (snapshot index 1) — not the
+      // mirrored snapshot position. Pins the fix for the wrong-detail bug
+      // found during the nested-subagents-ui E2E dry-run.
       mockedUseBackgroundTaskViewState.mockReturnValue({
         entries: [
           { kind: 'shell', shellId: 'bg-shell' },
@@ -5126,7 +5131,9 @@ describe('InputPrompt', () => {
       stdin.write('\r'); // Enter
       await wait();
 
-      expect(mockViewActions.setBgSelectedIndex).toHaveBeenCalledWith(3);
+      // Display order: main, second-live-agent (row 1), first-live-agent
+      // (row 2). Row 2 → snapshot index 1.
+      expect(mockViewActions.setBgSelectedIndex).toHaveBeenCalledWith(1);
       expect(mockViewActions.enterBgDetailFromPanel).toHaveBeenCalled();
       expect(mockViewActions.setLivePanelFocused).toHaveBeenCalledWith(false);
       unmount();

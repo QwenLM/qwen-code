@@ -1005,6 +1005,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       maxSessionTurns: undefined,
       maxWallTime: undefined,
       maxToolCalls: undefined,
+      maxSubagentDepth: undefined,
       experimentalLsp: undefined,
       channel: undefined,
       chatRecording: undefined,
