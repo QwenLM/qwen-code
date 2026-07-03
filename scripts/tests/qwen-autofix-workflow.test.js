@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
 const sandboxImageResolverScript = readFileSync(
   '.github/scripts/resolve-sandbox-image.mjs',
   'utf8',
@@ -112,6 +113,9 @@ describe('qwen-autofix workflow', () => {
       "sender_permission='${sender_permission:-none}'",
     );
     expect(workflow).toContain(
+      '[[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true',
+    );
+    expect(workflow).toContain(
       'issue event ignored: state_open=$([[ "${ISSUE_STATE}" == \'open\' ]]',
     );
     expect(workflow).toContain('bug=${issue_is_bug}');
@@ -160,6 +164,28 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'elif [[ "$(jq -r \'.state // ""\' "${forced_issue_json}")" != \'OPEN\' ]]; then',
     );
+    expect(workflow).toContain(
+      'workflow_dispatch is a maintainer-initiated escape hatch',
+    );
+    expect(workflow).toContain(
+      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}"',
+    );
+    expect(workflow).toContain(
+      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e --arg approved "${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(workflow).toContain(
+      'is missing ${AUTOFIX_APPROVED_LABEL}; skipping.',
+    );
+  });
+
+  it('keeps release-failure autofix issues approved for scheduled fallback', () => {
+    expect(releaseWorkflow).toContain(
+      'Safe to auto-apply approval: release-failure issue content is',
+    );
+    expect(releaseWorkflow).toContain(
+      '--add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(releaseWorkflow).toContain('--label "${AUTOFIX_APPROVED_LABEL}"');
   });
 
   it('keeps publish credential failures diagnosable', () => {
