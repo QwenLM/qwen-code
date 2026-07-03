@@ -117,9 +117,10 @@ packages/web-shell/skills/qwencode-viz/SKILL.md
 注册 `echarts-fulldata` renderer 时，宿主才应该把它复制、安装或注入到自己的
 skills 来源中。
 
-`echarts-fulldata` 的 block body 是 data-only JSON ECharts option。宿主应使用
-`JSON.parse` 解析，不能用 `eval`、`new Function` 或 script injection 执行模型
-生成内容。
+`echarts-fulldata` 的 block body 是纯 JSON payload，外层包含 `inputData` 和
+`option`：宿主可用 `option` 渲染 ECharts，也可用 `inputData` 提供表格视图或
+图表/表格切换。宿主应使用 `JSON.parse` 解析，不能用 `eval`、`new Function` 或
+script injection 执行模型生成内容。
 
 ## 架构说明
 
