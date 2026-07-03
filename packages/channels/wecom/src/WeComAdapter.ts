@@ -31,6 +31,7 @@ interface WeComClientOptions {
   botId: string;
   secret: string;
   wsUrl?: string;
+  logger?: WeComLogger;
 }
 
 interface WeComClient {
@@ -40,7 +41,7 @@ interface WeComClient {
   sendMessage(chatId: string, message: unknown): Promise<unknown>;
   uploadMedia(
     data: Buffer,
-    options: { mediaType: WeComMediaType; filename: string },
+    options: { type: WeComMediaType; filename: string },
   ): Promise<unknown>;
   sendMediaMessage(
     chatId: string,
@@ -51,6 +52,13 @@ interface WeComClient {
     url: string,
     aesKey?: string,
   ): Promise<{ buffer: Buffer; filename?: string }>;
+}
+
+interface WeComLogger {
+  debug(message: string, ...args: unknown[]): void;
+  info(message: string, ...args: unknown[]): void;
+  warn(message: string, ...args: unknown[]): void;
+  error(message: string, ...args: unknown[]): void;
 }
 
 const ClientCtor = WSClient as unknown as new (
@@ -91,6 +99,7 @@ export class WeComChannel extends ChannelBase {
     const options: WeComClientOptions = {
       botId: this.wecom.botId,
       secret: this.wecom.secret,
+      logger: createWeComLogger(this.name),
     };
     if (this.wecom.wsUrl) {
       options.wsUrl = this.wecom.wsUrl;
@@ -149,9 +158,15 @@ export class WeComChannel extends ChannelBase {
     }
 
     for (const item of media) {
+      if (item.type !== 'image') {
+        process.stderr.write(
+          `[WeCom:${this.name}] skipping unsupported outbound media marker: ${item.type}\n`,
+        );
+        continue;
+      }
       const file = readOutboundMedia(item.path, this.config.cwd);
       const upload = await this.client.uploadMedia(file.data, {
-        mediaType: item.type,
+        type: item.type,
         filename: file.fileName,
       });
       const mediaId = extractMediaId(upload);
@@ -291,6 +306,21 @@ function readOptionalString(
 ): string | undefined {
   const value = config[key];
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function createWeComLogger(name: string): WeComLogger {
+  const write = (level: 'warn' | 'error', parts: unknown[]): void => {
+    const text = parts.map((part) => String(part)).join(' ');
+    process.stderr.write(
+      `[WeCom:${name}] SDK ${level}: ${sanitizeLogText(text, 300)}\n`,
+    );
+  };
+  return {
+    debug: () => {},
+    info: () => {},
+    warn: (...parts) => write('warn', parts),
+    error: (...parts) => write('error', parts),
+  };
 }
 
 function extractBody(payload: unknown): Record<string, unknown> | undefined {

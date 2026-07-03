@@ -161,6 +161,19 @@ describe('parseChannelConfig', () => {
     delete process.env['TEST_SEC'];
   });
 
+  it('does not resolve known credential fields twice', async () => {
+    process.env['TEST_TOKEN'] = '$TOKEN_LITERAL_VALUE';
+
+    const result = await parseChannelConfig('bot', {
+      type: 'telegram',
+      token: '$TEST_TOKEN',
+    });
+
+    expect(result.token).toBe('$TOKEN_LITERAL_VALUE');
+
+    delete process.env['TEST_TOKEN'];
+  });
+
   it('preserves explicit config values over defaults', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',

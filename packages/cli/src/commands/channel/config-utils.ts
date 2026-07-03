@@ -125,16 +125,11 @@ export async function parseChannelConfig(
   }
 
   // Resolve env vars for known credential fields
-  const token =
-    resolveOptionalStringField(name, resolvedRawConfig, 'token') ?? '';
-  const clientId = resolveOptionalStringField(
-    name,
-    resolvedRawConfig,
-    'clientId',
-  );
+  const token = resolveOptionalStringField(name, rawConfig, 'token') ?? '';
+  const clientId = resolveOptionalStringField(name, rawConfig, 'clientId');
   const clientSecret = resolveOptionalStringField(
     name,
-    resolvedRawConfig,
+    rawConfig,
     'clientSecret',
   );
 

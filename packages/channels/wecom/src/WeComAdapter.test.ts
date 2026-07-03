@@ -115,6 +115,9 @@ describe('WeComChannel', () => {
   });
 
   it('connects the official SDK with bot credentials', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const channel = new WeComChannel(
       'bot',
       makeConfig({ wsUrl: 'wss://example.invalid/ws' }),
@@ -130,6 +133,21 @@ describe('WeComChannel', () => {
       wsUrl: 'wss://example.invalid/ws',
     });
     expect(client.connect).toHaveBeenCalledTimes(1);
+    const logger = client.options['logger'] as {
+      debug(message: string): void;
+      warn(message: string, ...args: unknown[]): void;
+      error(message: string, ...args: unknown[]): void;
+    };
+    expect(logger).toBeDefined();
+
+    logger.debug('body={"text":"secret","aeskey":"key"}');
+    expect(stderr).not.toHaveBeenCalledWith(expect.stringContaining('secret'));
+
+    logger.warn('No aesKey provided:', 'https://example.invalid/file');
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('[WeCom:bot] SDK warn: No aesKey provided:'),
+    );
+    stderr.mockRestore();
   });
 
   it('normalizes text messages into envelopes', async () => {
@@ -343,7 +361,7 @@ describe('WeComChannel', () => {
       markdown: { content: 'result\n\n`[IMAGE: /tmp/example.png]`' },
     });
     expect(client.uploadMedia).toHaveBeenCalledWith(expect.any(Buffer), {
-      mediaType: 'image',
+      type: 'image',
       filename: 'out.png',
     });
     expect(client.sendMediaMessage).toHaveBeenCalledWith(
@@ -351,6 +369,31 @@ describe('WeComChannel', () => {
       'image',
       'media-1',
     );
+  });
+
+  it('does not upload arbitrary files from non-image media markers', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const dir = mkdtempSync(join(tmpdir(), 'wecom-test-'));
+    const filePath = join(dir, 'secret.txt');
+    writeFileSync(filePath, 'secret');
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ cwd: dir }),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    await channel.sendMessage('chat-1', `[FILE: ${filePath}]`);
+
+    expect(client.uploadMedia).not.toHaveBeenCalled();
+    expect(client.sendMediaMessage).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('skipping unsupported outbound media marker'),
+    );
+    stderr.mockRestore();
   });
 
   it('ignores missing optional media allowlist directories', () => {
