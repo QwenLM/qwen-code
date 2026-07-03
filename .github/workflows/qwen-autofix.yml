@@ -799,11 +799,11 @@ jobs:
             DETAIL="$(head -c 1500 "${WORKDIR}/failure.md")"
             LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label 'autofix/skip')
           elif [[ "${PUBLISH_OUTCOME}" == 'failure' ]]; then
-            REASON='the issue will require maintainer re-approval before any future automated attempt.'
+            REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
             DETAIL='The agent produced and verified a fix, but publishing the PR failed. Check the Publish PR step logs for the CI_DEV_BOT_PAT actor, git push, PR creation, or PR comment error.'
             LABEL_ARGS=(--remove-label 'autofix/in-progress')
           else
-            REASON='the issue will require maintainer re-approval before any future automated attempt.'
+            REASON='the issue will require the `autofix/approved` label to be re-added before any future automated attempt.'
             DETAIL='The run failed before producing a verified fix.'
             LABEL_ARGS=(--remove-label 'autofix/in-progress')
           fi

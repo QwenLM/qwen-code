@@ -223,7 +223,7 @@ describe('qwen-autofix workflow', () => {
 
   it('requires re-approval when transient autofix failures withdraw a claim', () => {
     expect(withdrawClaimStep).toContain(
-      'the issue will require maintainer re-approval before any future automated attempt.',
+      'the issue will require the `autofix/approved` label to be re-added before any future automated attempt.',
     );
     expect(withdrawClaimStep).toContain(
       "LABEL_ARGS=(--remove-label 'autofix/in-progress')",
