@@ -676,6 +676,7 @@ describe('BridgeClient — artifact ingress', () => {
             toolName: ToolNames.ARTIFACT,
             keep: 'visible',
             artifacts: [
+              'not-an-artifact',
               { title: 'One', url: 'https://example.com/1' },
               { title: 'Two', url: 'https://example.com/2' },
             ],
@@ -699,6 +700,9 @@ describe('BridgeClient — artifact ingress', () => {
         { trustedPublisher: true },
       );
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('reason=malformed');
+      expect(logged).toContain('source=tool');
+      expect(logged).toContain('index=0');
       expect(logged).toContain('artifact batch limit exceeded');
       expect(logged).toContain('dropped=1');
     } finally {

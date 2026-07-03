@@ -1801,28 +1801,19 @@ describe('Server Config (config.ts)', () => {
     });
 
     it('registers only record_artifact for daemon artifact metadata', async () => {
-      const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
-      process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
-      try {
-        const config = new Config({
-          ...baseParams,
-          interactive: false,
-          sdkMode: false,
-        });
-        await config.initialize();
+      const config = new Config({
+        ...baseParams,
+        artifactEnabled: true,
+        interactive: false,
+        sdkMode: false,
+      });
+      await config.initialize();
 
-        const registeredNames = (
-          ToolRegistry.prototype.registerFactory as Mock
-        ).mock.calls.map((call) => call[0]);
-        expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
-        expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
-      } finally {
-        if (originalForceEnable === undefined) {
-          delete process.env['QWEN_CODE_ENABLE_ARTIFACT'];
-        } else {
-          process.env['QWEN_CODE_ENABLE_ARTIFACT'] = originalForceEnable;
-        }
-      }
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
     });
 
     describe('isArtifactEnabled', () => {
@@ -1893,6 +1884,18 @@ describe('Server Config (config.ts)', () => {
 
         const config = new Config({
           ...baseParams,
+          interactive: false,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
+      });
+
+      it('lets daemon sessions record metadata from settings without publishing', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: true,
           interactive: false,
           sdkMode: false,
         });

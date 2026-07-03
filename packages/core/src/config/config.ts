@@ -1396,7 +1396,7 @@ export class Config {
    * the model later calls a tool that no longer exists (see
    * `CoreToolScheduler.getToolNotFoundMessage`). Self-heals: a name is dropped
    * from the set the moment the server reappears in the effective map.
-   */
+  */
   private readonly recentlyRemovedMcpServers = new Set<string>();
   private readonly topTierMcpServers:
     Record<string, MCPServerConfig> | undefined;
@@ -4908,7 +4908,7 @@ export class Config {
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode) return false;
     if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
-    return this.isArtifactEnabled();
+    return this.artifactEnabled;
   }
 
   getArtifactPublisherKind(): 'local' | 'host' | 'oss' {

@@ -111,6 +111,9 @@ function extractCappedArtifactInputs(
   for (let index = 0; index < rawArtifacts.length; index++) {
     const artifact = rawArtifacts[index];
     if (!isRecord(artifact)) {
+      writeStderrLine(
+        `[artifacts] session=${sessionId} action=dropped reason=malformed source=${source} index=${index}`,
+      );
       continue;
     }
     if (artifacts.length >= limit) {
