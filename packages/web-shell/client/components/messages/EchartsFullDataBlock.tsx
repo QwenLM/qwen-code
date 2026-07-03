@@ -253,7 +253,7 @@ function isUnsafeString(value: string): boolean {
     normalized.startsWith('https://') ||
     normalized.startsWith('image://') ||
     normalized.startsWith('javascript:') ||
-    /<\/?[a-z][\s\S]*>/i.test(value)
+    /<\/?[a-z]/i.test(value)
   );
 }
 
@@ -664,9 +664,16 @@ function getPrimaryDataset(
 function getTitle(option: EchartsFullDataOption | undefined): string {
   const title = option?.title;
   if (Array.isArray(title)) {
-    return title.find((entry) => entry.text)?.text ?? 'Dataset chart';
+    return (
+      title.find(
+        (entry): entry is { text: string } =>
+          isObject(entry) && typeof entry.text === 'string' && !!entry.text,
+      )?.text ?? 'Dataset chart'
+    );
   }
-  return title?.text ?? 'Dataset chart';
+  return isObject(title) && typeof title.text === 'string'
+    ? title.text
+    : 'Dataset chart';
 }
 
 function getRows(option: EchartsFullDataOption | undefined): DatasetSource {
@@ -948,9 +955,34 @@ export function EchartsFullDataBlock({
   const [chartReady, setChartReady] = useState(false);
   const rows = useMemo(() => getRows(option), [option]);
   const columns = useMemo(() => getColumns(option), [option]);
+  const { chartOption, chartOptionError } = useMemo(() => {
+    if (!option || parseError) return {};
+    try {
+      return { chartOption: cloneOptionForChart(option, theme) };
+    } catch (error) {
+      return { chartOptionError: error };
+    }
+  }, [option, parseError, theme]);
 
   useEffect(() => {
-    if (mode !== 'chart' || !option || parseError) {
+    if (mode !== 'chart' || parseError || (!chartOption && !chartOptionError)) {
+      setChartReady(false);
+      return;
+    }
+    if (chartOptionError) {
+      setChartReady(false);
+      console.error(
+        '[web-shell] echarts-fulldata render failed:',
+        chartOptionError,
+      );
+      setChartError(
+        chartOptionError instanceof Error
+          ? chartOptionError.message
+          : 'Chart render failed.',
+      );
+      return;
+    }
+    if (!chartOption) {
       setChartReady(false);
       return;
     }
@@ -973,7 +1005,7 @@ export function EchartsFullDataBlock({
         if (disposed || !chartRef.current) return;
         const nextChart = runtime.init(chartRef.current, theme);
         try {
-          nextChart.setOption(cloneOptionForChart(option, theme));
+          nextChart.setOption(chartOption);
         } catch (error) {
           nextChart.dispose();
           throw error;
@@ -1013,7 +1045,7 @@ export function EchartsFullDataBlock({
       removeResize();
       chart?.dispose();
     };
-  }, [loadEcharts, mode, option, parseError, theme]);
+  }, [chartOption, chartOptionError, loadEcharts, mode, parseError, theme]);
 
   const title = getTitle(option);
 

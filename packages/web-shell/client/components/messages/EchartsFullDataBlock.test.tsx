@@ -316,6 +316,56 @@ describe('EchartsFullDataBlock', () => {
     expect(dispose).not.toHaveBeenCalled();
   });
 
+  it('does not recompute chart options when toggling data view', async () => {
+    const plainOption: EchartsFullDataOption = {
+      title: { text: 'Weekly orders' },
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [{ day: 'Mon', orders: 120 }],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+    };
+    let cloneCount = 0;
+    const option = {
+      ...plainOption,
+      toJSON: () => {
+        cloneCount += 1;
+        return plainOption;
+      },
+    } as EchartsFullDataOption & { toJSON: () => EchartsFullDataOption };
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await render(
+      <EchartsFullDataBlock
+        option={option}
+        theme="dark"
+        loadEcharts={() => runtime}
+      />,
+    );
+    await flushChart();
+
+    await act(async () => {
+      container.querySelectorAll('button')[1]?.click();
+    });
+    await act(async () => {
+      container.querySelectorAll('button')[0]?.click();
+    });
+    await flushChart();
+
+    expect(cloneCount).toBe(1);
+    expect(runtime.init).toHaveBeenCalledTimes(2);
+    expect(setOption).toHaveBeenCalledTimes(2);
+  });
+
   it('shows loading while the chart runtime loader is pending', async () => {
     const option: EchartsFullDataOption = {
       dataset: {
@@ -595,6 +645,7 @@ describe('EchartsFullDataBlock', () => {
       series: [
         {
           type: 'line',
+          name: '<a'.repeat(32),
           encode: { x: 'day', y: 'orders' },
           symbol: 'image://https://example.test/marker.png',
         },
@@ -627,7 +678,7 @@ describe('EchartsFullDataBlock', () => {
         renderMode?: string;
         enterable?: boolean;
       };
-      series?: Array<{ symbol?: string }>;
+      series?: Array<{ name?: string; symbol?: string }>;
     };
     expect(renderedOption.graphic).toBeUndefined();
     expect(renderedOption.dataset?.transform).toBeUndefined();
@@ -639,7 +690,42 @@ describe('EchartsFullDataBlock', () => {
         renderMode: 'richText',
       }),
     );
+    expect(renderedOption.series?.[0]?.name).toBeUndefined();
     expect(renderedOption.series?.[0]?.symbol).toBe('circle');
+  });
+
+  it('ignores malformed title array entries', async () => {
+    const option: EchartsFullDataOption = {
+      title: [
+        null,
+        { text: 'Recovered title' },
+      ] as unknown as EchartsFullDataOption['title'],
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [{ day: 'Mon', orders: 120 }],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+    };
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption: vi.fn(),
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await render(
+      <EchartsFullDataBlock
+        option={option}
+        theme="dark"
+        loadEcharts={() => runtime}
+      />,
+    );
+    await flushChart();
+
+    expect(container.textContent).toContain('Recovered title');
   });
 
   it('shows an error when the chart runtime is unavailable', async () => {
