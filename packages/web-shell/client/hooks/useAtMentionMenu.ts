@@ -836,6 +836,26 @@ export function useAtMentionMenu({
         current.selectedProviderId !== undefined;
       if (keepItemsLevel) {
         const providerId = current.selectedProviderId!;
+        const insertedReference = splitInsertedReferenceQuery(
+          parsed.query,
+          lastSelectedProviderIdRef.current,
+          lastSelectedMcpServerNameRef.current,
+        );
+        const preserveInsertedReferencePanel =
+          !options.userEdited &&
+          current.query === '' &&
+          parsed.query !== '' &&
+          (insertedReference?.providerId === providerId ||
+            lastSelectedProviderIdRef.current === providerId);
+        if (preserveInsertedReferencePanel) {
+          setMenu({
+            ...current,
+            from: parsed.from,
+            to: parsed.to,
+            providers: providerViewsRef.current,
+          });
+          return;
+        }
         if (
           providerId === FILE_PROVIDER_ID &&
           (parsed.query !== current.query ||

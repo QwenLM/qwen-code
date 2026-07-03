@@ -166,6 +166,15 @@ describe('useAtMentionMenu', () => {
       query: '',
     });
     expect(latest!.state?.items.map((item) => item.label)).toEqual(['review']);
+
+    act(() => latest!.refreshForView(makeView('@ext:revie')));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'extensions',
+      query: '',
+    });
   });
 
   it('opens MCP resource items without the inserted ref as search text', async () => {
@@ -214,6 +223,19 @@ describe('useAtMentionMenu', () => {
       query: '',
     });
     expect(latest!.state?.items.map((item) => item.label)).toEqual(['Docs']);
+
+    act(() =>
+      latest!.refreshForView(makeView('@docs:https://example.com/doc')),
+    );
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'mcp-resources',
+      itemMode: 'mcpResources',
+      mcpServerName: 'docs',
+      query: '',
+    });
   });
 
   it('opens file items without the inserted ref as search text', async () => {
@@ -250,6 +272,15 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.items.map((item) => item.label)).toContain(
       'README.md',
     );
+
+    act(() => latest!.refreshForView(makeView('@src/foo')));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'files',
+      query: '',
+    });
   });
 
   it('clears a pending provider search when closing from items', async () => {
