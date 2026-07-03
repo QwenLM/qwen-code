@@ -219,7 +219,7 @@ jobs:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
-            github-hosted|self-hosted) ;;
+            github-hosted) ;;
             *)
               echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
               exit 1
@@ -234,17 +234,6 @@ jobs:
           node-version: '22.x'
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
-
-      - name: 'Use pre-installed Node.js (self-hosted)'
-        if: |-
-          ${{ runner.environment == 'self-hosted' }}
-        run: |-
-          if ! command -v node > /dev/null 2>&1; then
-            echo '::error::Node.js is required on the autofix self-hosted runner.'
-            exit 1
-          fi
-          node --version
-          npm --version
 
       - name: 'Install tmux'
         run: |-
@@ -359,7 +348,7 @@ jobs:
           ${{ steps.scan.outputs.has_candidates == 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}'
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
@@ -375,9 +364,7 @@ jobs:
                 "write_file",
                 "run_shell_command(cat)",
                 "run_shell_command(git log)",
-                "run_shell_command(git diff)",
-                "run_shell_command(gh issue view)",
-                "run_shell_command(gh search)"
+                "run_shell_command(git diff)"
               ],
               "tools": {
                 "sandbox": "docker"
@@ -442,6 +429,10 @@ jobs:
         run: |-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.'
+            exit 1
+          fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           rm -f "${WORKDIR}/decision.json"
           qwen --yolo --prompt "${PROMPT}"
@@ -529,7 +520,7 @@ jobs:
           ${{ steps.decision.outputs.go_issue != '' }}
         env:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
-          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}'
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
@@ -614,6 +605,10 @@ jobs:
         run: |-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.'
+            exit 1
+          fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           qwen --yolo --prompt "${PROMPT}"
 
@@ -943,7 +938,7 @@ jobs:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
-            github-hosted|self-hosted) ;;
+            github-hosted) ;;
             *)
               echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
               exit 1
@@ -958,17 +953,6 @@ jobs:
           node-version: '22.x'
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
-
-      - name: 'Use pre-installed Node.js (self-hosted)'
-        if: |-
-          ${{ runner.environment == 'self-hosted' }}
-        run: |-
-          if ! command -v node > /dev/null 2>&1; then
-            echo '::error::Node.js is required on the autofix self-hosted runner.'
-            exit 1
-          fi
-          node --version
-          npm --version
 
       - name: 'Install tmux'
         run: |-
@@ -1022,6 +1006,11 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
           mkdir -p "${WORKDIR}"
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo 'Restoring tracked build output before switching to the PR branch.'
+            git status --short
+            git restore --source=HEAD --staged --worktree .
+          fi
           git checkout -B "${BRANCH}" "origin/${BRANCH}"
 
           # Does the branch conflict with base? merge-tree computes the merge
@@ -1091,7 +1080,7 @@ jobs:
         env:
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
-          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}'
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
@@ -1199,6 +1188,10 @@ jobs:
         run: |-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.'
+            exit 1
+          fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           qwen --yolo --prompt "${PROMPT}"
 

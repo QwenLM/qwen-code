@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { latestSemverTag } from './resolve-sandbox-image.mjs';
+import {
+  latestSemverTag,
+  validateRequestedImage,
+} from './resolve-sandbox-image.mjs';
 
 test('latestSemverTag returns the highest stable semver tag', () => {
   assert.equal(
@@ -20,4 +23,20 @@ test('latestSemverTag returns the highest stable semver tag', () => {
 
 test('latestSemverTag ignores non-stable tags', () => {
   assert.equal(latestSemverTag(['latest', '0.19', 'sha-abc123']), undefined);
+});
+
+test('validateRequestedImage accepts a configured image', () => {
+  assert.equal(
+    validateRequestedImage(' ghcr.io/qwenlm/qwen-code:0.1.0 '),
+    'ghcr.io/qwenlm/qwen-code:0.1.0',
+  );
+});
+
+test('validateRequestedImage rejects missing package config output', () => {
+  for (const value of [undefined, '', ' ', 'undefined', 'null']) {
+    assert.throws(
+      () => validateRequestedImage(value),
+      /package\.json config\.sandboxImageUri/,
+    );
+  }
 });
