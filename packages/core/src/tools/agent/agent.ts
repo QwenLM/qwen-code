@@ -1771,6 +1771,17 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
   ): ToolResult {
     return {
       llmContent,
+      // `error` marks the call failed in the scheduler, so tool-usage stats
+      // record a failure — a blocked spawn must not count as a spawned
+      // sub-agent (the scrollback summary derives its sub-agent count from
+      // the AgentTool's success count). This deliberately routes the denial
+      // through the scheduler's failure path (error-formatted model
+      // response, failure-path hooks): a blocked spawn IS a failed tool call.
+      // The failure path sends ONLY `error.message` to the model and the
+      // scrollback (`llmContent` is discarded there), so the message must be
+      // the full guidance text — the terse `terminateReason` would strip the
+      // "do the task yourself instead" instruction and invite retry loops.
+      error: { message: llmContent },
       returnDisplay: {
         type: 'task_execution' as const,
         subagentName:
@@ -2348,7 +2359,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       const agentIdSuffix = this.callId ?? randomUUID().slice(0, 8);
       const hookOpts = {
         agentId: `${subagentConfig.name}-${agentIdSuffix}`,
-        agentType: this.params.subagent_type || subagentConfig.name,
+        // Resolved config name, not the raw requested type: a fork request
+        // that fell back to the awaitable path (nested / non-interactive)
+        // must report the agent that actually runs — hooks, spans, task
+        // rows, and the meta sidecar all read this field.
+        agentType: subagentConfig.name,
         resolvedMode,
         signal,
         updateOutput,
@@ -2525,6 +2540,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             prompt: this.params.prompt,
             outputFile: jsonlPath,
             metaPath,
+            // Nested-agent lineage (mirrors the meta sidecar); register()
+            // resolves the parent's display name from parentAgentId.
+            parentAgentId: getCurrentAgentId(),
+            depth: childLaunchDepth(),
           });
         } catch (error) {
           const errorMessage =
@@ -3169,6 +3188,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           toolUseId: this.callId,
           outputFile: fgJsonlPath,
           metaPath: fgMetaPath,
+          // Nested-agent lineage (mirrors the meta sidecar); register()
+          // resolves the parent's display name from parentAgentId.
+          parentAgentId: getCurrentAgentId(),
+          depth: childLaunchDepth(),
         });
         writeAgentMeta(fgMetaPath, {
           agentId: hookOpts.agentId,

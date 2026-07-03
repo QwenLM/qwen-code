@@ -765,6 +765,16 @@ describe('AgentTool', () => {
         terminateReason: 'Nesting depth limit reached (max 1)',
       });
       expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      // A blocked spawn must take the scheduler's failure path: `error` keeps
+      // tool-usage stats from counting it as a spawned sub-agent (and fires
+      // failure-path hooks), and the display row reports it as failed. The
+      // scheduler sends only `error.message` to the model (llmContent is
+      // discarded on the failure path), so the message must carry the full
+      // actionable guidance, not just the terse reason label.
+      expect(result.error?.message).toContain('nesting depth limit reached');
+      expect(result.error?.message).toContain('Complete this task directly');
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
     });
 
     it('allows a spawn from the top-level session at maxSubagentDepth=1', async () => {
@@ -851,6 +861,14 @@ describe('AgentTool', () => {
         'Cannot spawn sub-agents from within a fork',
       );
       expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      // Same failure-path contract as the depth guard above: the model-facing
+      // message keeps the actionable instruction.
+      expect(result.error?.message).toContain(
+        'Cannot spawn sub-agents from within a fork',
+      );
+      expect(result.error?.message).toContain('execute tasks directly');
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
     });
 
     it('allows nesting while depth remains under the cap', async () => {
@@ -1779,6 +1797,39 @@ describe('AgentTool', () => {
       await invocation.execute();
 
       // Should fall back to general-purpose
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
+      );
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
+    });
+
+    it('falls back to general-purpose when a nested sub-agent requests a fork', async () => {
+      // v1: fork is a top-level-only capability. A sub-agent — which may
+      // carry the AgentTool via nesting — that requests a fork downgrades to
+      // the awaitable general-purpose subagent instead of opening a nested
+      // fork, even in interactive mode where fork is otherwise enabled.
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'fork task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+      });
+      // One agent frame → the invoker is a level-1 sub-agent, not the
+      // top-level session, so the fork request must take the fallback path.
+      await runWithAgentContext('parent-sub', () => invocation.execute());
+
       expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
         'general-purpose',
       );
