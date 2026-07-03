@@ -567,10 +567,6 @@ jobs:
                 "run_shell_command(git switch)",
                 "run_shell_command(ls)",
                 "run_shell_command(mkdir)",
-                "run_shell_command(node dist/cli.js)",
-                "run_shell_command(npm run build)",
-                "run_shell_command(npm run bundle)",
-                "run_shell_command(npx vitest)",
                 "run_shell_command(pwd)"
               ],
               "sandbox": false
@@ -600,20 +596,17 @@ jobs:
             2. **Baseline first**: demonstrate the current behavior before
                touching code — for bugs, reproduce the failure; for feature
                requests, show the missing capability or current gap. Use
-               headless mode (`node dist/cli.js --approval-mode yolo
-               --output-format json`) or interactive tmux mode per the E2E
-               skill. The CLI under test receives dummy OPENAI_* credentials
-               routed through a local loopback proxy. If you cannot establish
-               the baseline, STOP: write
+               code inspection and focused reasoning. Do not run project code,
+               tests, builds, package scripts, or the CLI yourself; the
+               workflow verification gate runs trusted checks after you exit.
+               If you cannot establish the baseline, STOP: write
                /tmp/autofix/failure.md explaining why and exit without
                committing.
             3. **Implement**: minimal, root-cause change. No drive-by refactors.
             4. **Unit tests**: add or update collocated vitest tests that
-               fail before the fix and pass after. Run them from inside the
-               package directory (e.g. `cd packages/core && npx vitest run
-               src/path/file.test.ts`).
-            5. **Verify**: rebuild (`npm run build && npm run bundle`) and
-               re-run the E2E check to show the requested behavior now works.
+               are expected to fail before the fix and pass after.
+            5. **Verify**: describe the exact focused checks the workflow
+               should run after you exit; do not execute them yourself.
             6. **Self-review**: re-read your full diff as a skeptical
                reviewer; fix anything you'd flag.
             7. **Commit**: a single Conventional Commit on the branch, e.g.
@@ -1155,10 +1148,6 @@ jobs:
                 "run_shell_command(git status)",
                 "run_shell_command(ls)",
                 "run_shell_command(mkdir)",
-                "run_shell_command(node dist/cli.js)",
-                "run_shell_command(npm run build)",
-                "run_shell_command(npm run bundle)",
-                "run_shell_command(npx vitest)",
                 "run_shell_command(pwd)"
               ],
               "sandbox": false
@@ -1220,8 +1209,11 @@ jobs:
 
             Whatever you change (feedback fixes and/or a conflict resolution):
             keep collocated vitest tests green (add/update tests when feedback
-            exposes a gap), rebuild (`npm run build && npm run bundle`), and
-            re-read your full diff as a skeptical reviewer.
+            exposes a gap), describe the focused checks the workflow should run
+            after you exit, and re-read your full diff as a skeptical reviewer.
+            Do not run project code, tests, builds, package scripts, or the CLI
+            yourself; the workflow verification gate runs trusted checks after
+            you exit.
 
             - **Made a change**: commit it as a single Conventional Commit, e.g.
               `fix(core): address review feedback (#${{ matrix.target.issue }})`,

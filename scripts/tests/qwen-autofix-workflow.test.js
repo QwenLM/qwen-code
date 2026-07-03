@@ -244,7 +244,14 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain('Using pre-installed Qwen Code');
       expect(step).not.toContain('npm install -g');
     }
-    expect(workflow).toContain('run_shell_command(npx vitest)');
+    expect(workflow).not.toContain('run_shell_command(node dist/cli.js)');
+    expect(workflow).not.toContain('run_shell_command(npm run build)');
+    expect(workflow).not.toContain('run_shell_command(npm run bundle)');
+    expect(workflow).not.toContain('run_shell_command(npx vitest)');
+    expect(workflow).toContain('Do not run project code,');
+    expect(workflow).toContain(
+      'workflow verification gate runs trusted checks after',
+    );
     expect(workflow).toContain('"sandbox": false');
     expect(workflow).not.toContain('"sandbox": true');
     expect(workflow).not.toContain('QwenLM/qwen-code-action@');
