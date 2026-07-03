@@ -112,11 +112,9 @@ interface ScoredTool {
   score: number;
 }
 
-const toolSearchDescription = `Fetches function declarations for deferred tools and registers them with the active session so subsequent turns can call them.
+const toolSearchDescription = `Fetches function declarations for deferred tools. Returns matched tools' schemas inside a <functions> block.
 
-Deferred tools appear by name in the deferred-tools startup reminder. Until fetched, only the name is known — there is no parameter schema, so the tool cannot be invoked. This tool takes a query, matches it against the deferred tool list, and returns the matched tools' function declarations (name + description + parameter schema) inside a <functions> block.
-
-The returned <functions> block is informational — it shows what the schema looks like. Calling the tool itself happens via the model's normal function-call mechanism on the NEXT turn, after the active session's declaration list has been updated. Tools fetched here remain available for the rest of the session.
+The <functions> block contains the parameter schema needed to invoke the tool via the \`dispatch\` proxy tool. To invoke a discovered tool, call dispatch(tool: "<name>", args: { ...params ... }). The discovered tool is NOT directly callable — it must be invoked through dispatch.
 
 Query forms:
 - "select:ToolA,ToolB" — fetch these exact tools by name
