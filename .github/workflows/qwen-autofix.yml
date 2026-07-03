@@ -1006,11 +1006,9 @@ jobs:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
           mkdir -p "${WORKDIR}"
-          if ! git diff --quiet || ! git diff --cached --quiet; then
-            echo 'Restoring tracked build output before switching to the PR branch.'
-            git status --short
-            git restore --source=HEAD --staged --worktree .
-          fi
+          echo 'Restoring tracked build output before switching to the PR branch.'
+          git status --short
+          git restore --source=HEAD --staged --worktree .
           git checkout -B "${BRANCH}" "origin/${BRANCH}"
 
           # Does the branch conflict with base? merge-tree computes the merge
