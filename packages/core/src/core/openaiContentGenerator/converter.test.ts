@@ -4568,6 +4568,7 @@ describe('OpenAIContentConverter', () => {
 
       expect(result).toHaveLength(2);
       expect(result[0].function.name).toBe('valid_tool');
+      expect(result[0].function.description).toBe('A valid tool');
       expect(result[1].function.name).toBe('missing_description');
       expect(result[1].function.description).toBe('');
     });
