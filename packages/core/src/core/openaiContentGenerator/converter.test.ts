@@ -22,6 +22,19 @@ import {
 import type OpenAI from 'openai';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
 
+function legacyFunctionCallPart(
+  name = 'read_file',
+  args: Record<string, unknown> = { path: 'README.md' },
+) {
+  return {
+    functionCall: {
+      id: expect.any(String),
+      name,
+      args,
+    },
+  };
+}
+
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
   let requestContext: RequestContext;
@@ -2677,6 +2690,13 @@ describe('OpenAIContentConverter', () => {
   });
 
   describe('convertOpenAIResponseToGemini', () => {
+    type LegacyFunctionCallMessage = Omit<
+      Partial<OpenAI.Chat.ChatCompletionMessage>,
+      'function_call'
+    > & {
+      function_call?: { name: string; arguments?: string };
+    };
+
     it('should handle empty choices array without crashing', () => {
       const response = converter.convertOpenAIResponseToGemini(
         {
@@ -2690,6 +2710,105 @@ describe('OpenAIContentConverter', () => {
       );
 
       expect(response.candidates).toEqual([]);
+    });
+
+    function convertLegacyFunctionCall(message: LegacyFunctionCallMessage) {
+      return converter.convertOpenAIResponseToGemini(
+        {
+          object: 'chat.completion',
+          id: 'chatcmpl-legacy-function-call',
+          created: 123,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              message: { role: 'assistant', content: null, ...message },
+              finish_reason: 'function_call',
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletion,
+        requestContext,
+      );
+    }
+
+    it.each([
+      {
+        name: 'legacy function_call responses',
+        message: {
+          function_call: {
+            name: 'read_file',
+            arguments: '{"path":"README.md"}',
+          },
+        },
+        expectedParts: [legacyFunctionCallPart()],
+      },
+      {
+        name: 'legacy function_call when tool_calls is empty',
+        message: {
+          tool_calls: [],
+          function_call: {
+            name: 'read_file',
+            arguments: '{"path":"README.md"}',
+          },
+        },
+        expectedParts: [legacyFunctionCallPart()],
+      },
+      {
+        name: 'modern tool_calls over legacy function_call',
+        message: {
+          tool_calls: [
+            {
+              id: 'call_modern',
+              type: 'function' as const,
+              function: {
+                name: 'read_file',
+                arguments: '{"path":"modern.md"}',
+              },
+            },
+          ],
+          function_call: {
+            name: 'read_file',
+            arguments: '{"path":"legacy.md"}',
+          },
+        },
+        expectedParts: [
+          legacyFunctionCallPart('read_file', { path: 'modern.md' }),
+        ],
+      },
+      {
+        name: 'invalid legacy function_call arguments',
+        message: {
+          function_call: { name: 'read_file', arguments: 'not-json' },
+        },
+        expectedParts: [legacyFunctionCallPart('read_file', {})],
+      },
+      {
+        name: 'legacy function_call without arguments',
+        message: {
+          function_call: { name: 'ping' },
+        },
+        expectedParts: [legacyFunctionCallPart('ping', {})],
+      },
+      {
+        name: 'text content plus legacy function_call',
+        message: {
+          content: 'Let me read that file.',
+          function_call: {
+            name: 'read_file',
+            arguments: '{"path":"README.md"}',
+          },
+        },
+        expectedParts: [
+          { text: 'Let me read that file.' },
+          legacyFunctionCallPart(),
+        ],
+      },
+    ])('should convert $name', ({ message, expectedParts }) => {
+      const response = convertLegacyFunctionCall(message);
+
+      expect(response.candidates?.[0]?.content?.parts).toEqual(expectedParts);
+      expect(response.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
     });
 
     it('keeps the estimated prompt/completion split summing to total tokens', () => {
@@ -5205,6 +5324,143 @@ describe('Truncated tool call detection in streaming', () => {
 
     expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.MAX_TOKENS);
   });
+
+  function feedLegacyFunctionCallChunks({
+    chunks,
+    finishReason = 'function_call',
+    includeEmptyToolCallsOnFirstChunk = false,
+    includeModernToolCallOnFirstChunk = false,
+  }: {
+    chunks: Array<{ name?: string; arguments?: string }>;
+    finishReason?: string;
+    includeEmptyToolCallsOnFirstChunk?: boolean;
+    includeModernToolCallOnFirstChunk?: boolean;
+  }) {
+    const ctx = createStreamingRequestContext();
+
+    for (const [index, functionCall] of chunks.entries()) {
+      converter.convertOpenAIChunkToGemini(
+        {
+          object: 'chat.completion.chunk',
+          id: `legacy-c${index + 1}`,
+          created: 100,
+          model: 'test-model',
+          choices: [
+            {
+              index: 0,
+              delta: {
+                ...(index === 0 && includeEmptyToolCallsOnFirstChunk
+                  ? { tool_calls: [] }
+                  : {}),
+                ...(index === 0 && includeModernToolCallOnFirstChunk
+                  ? {
+                      tool_calls: [
+                        {
+                          index: 0,
+                          id: 'call_modern',
+                          type: 'function' as const,
+                          function: {
+                            name: 'read_file',
+                            arguments: '{"path":"modern.md"}',
+                          },
+                        },
+                      ],
+                    }
+                  : {}),
+                function_call: functionCall,
+              },
+              finish_reason: null,
+              logprobs: null,
+            },
+          ],
+        } as unknown as OpenAI.Chat.ChatCompletionChunk,
+        ctx,
+      );
+    }
+
+    return converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'legacy-final',
+        created: 101,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {},
+            finish_reason: finishReason,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      ctx,
+    );
+  }
+
+  it.each([
+    {
+      name: 'legacy streaming function_call chunks',
+      chunks: [
+        { name: 'read_file', arguments: '{"path"' },
+        { arguments: ':"README.md"}' },
+      ],
+      expectedFinishReason: FinishReason.STOP,
+      expectedParts: [legacyFunctionCallPart()],
+    },
+    {
+      name: 'legacy streaming function_call when tool_calls is empty',
+      chunks: [
+        { name: 'read_file', arguments: '{"path"' },
+        { arguments: ':"README.md"}' },
+      ],
+      includeEmptyToolCallsOnFirstChunk: true,
+      expectedFinishReason: FinishReason.STOP,
+      expectedParts: [legacyFunctionCallPart()],
+    },
+    {
+      name: 'modern streaming tool_calls over legacy function_call',
+      chunks: [{ name: 'read_file', arguments: '{"path":"legacy.md"}' }],
+      includeModernToolCallOnFirstChunk: true,
+      finishReason: 'tool_calls',
+      expectedFinishReason: FinishReason.STOP,
+      expectedParts: [
+        legacyFunctionCallPart('read_file', { path: 'modern.md' }),
+      ],
+    },
+    {
+      name: 'truncated legacy streaming function_call',
+      chunks: [{ name: 'read_file', arguments: '{"path"' }],
+      expectedFinishReason: FinishReason.MAX_TOKENS,
+    },
+    {
+      name: 'legacy streaming function_call without arguments',
+      chunks: [{ name: 'ping' }],
+      expectedFinishReason: FinishReason.STOP,
+      expectedParts: [legacyFunctionCallPart('ping', {})],
+    },
+  ])(
+    'should convert $name',
+    ({
+      chunks,
+      includeEmptyToolCallsOnFirstChunk,
+      includeModernToolCallOnFirstChunk,
+      finishReason,
+      expectedFinishReason,
+      expectedParts,
+    }) => {
+      const result = feedLegacyFunctionCallChunks({
+        chunks,
+        finishReason,
+        includeEmptyToolCallsOnFirstChunk,
+        includeModernToolCallOnFirstChunk,
+      });
+
+      expect(result.candidates?.[0]?.finishReason).toBe(expectedFinishReason);
+      if (expectedParts) {
+        expect(result.candidates?.[0]?.content?.parts).toEqual(expectedParts);
+      }
+    },
+  );
 });
 
 describe('mapGeminiFinishReasonToOpenAI', () => {

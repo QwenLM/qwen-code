@@ -1081,6 +1081,33 @@ function convertOpenAITextToParts(
   return parseTaggedThinkingText(text);
 }
 
+function parseToolCallArgs(argsJson?: string | null): Record<string, unknown> {
+  const parsed = safeJsonParse<unknown>(argsJson ?? '', {});
+  return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+    ? (parsed as Record<string, unknown>)
+    : {};
+}
+
+function createFunctionCallPart(
+  name: string,
+  argsJson?: string | null,
+  id = `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+): Part {
+  return {
+    functionCall: {
+      id,
+      name,
+      args: parseToolCallArgs(argsJson),
+    },
+  };
+}
+
+function getLegacyFunctionCallChunk(
+  functionCall: OpenAI.Chat.ChatCompletionChunk.Choice.Delta.FunctionCall,
+): string {
+  return functionCall.arguments ?? (functionCall.name ? '{}' : '');
+}
+
 /**
  * Convert OpenAI response to Gemini format.
  */
@@ -1115,23 +1142,32 @@ export function convertOpenAIResponseToGemini(
     }
 
     // Handle tool calls
-    if (choice.message.tool_calls) {
+    if (choice.message.tool_calls?.length) {
+      if (choice.message.function_call) {
+        debugLogger.debug(
+          `Ignoring legacy function_call "${choice.message.function_call.name}" because tool_calls is non-empty`,
+        );
+      }
+
       for (const toolCall of choice.message.tool_calls) {
         if (toolCall.function) {
-          let args: Record<string, unknown> = {};
-          if (toolCall.function.arguments) {
-            args = safeJsonParse(toolCall.function.arguments, {});
-          }
-
-          parts.push({
-            functionCall: {
-              id: toolCall.id,
-              name: toolCall.function.name,
-              args,
-            },
-          });
+          parts.push(
+            createFunctionCallPart(
+              toolCall.function.name,
+              toolCall.function.arguments,
+              toolCall.id,
+            ),
+          );
         }
       }
+    } else if (choice.message.function_call) {
+      const functionCall = choice.message.function_call;
+      debugLogger.debug(
+        `Using legacy function_call fallback (non-streaming): ${functionCall.name}`,
+      );
+      parts.push(
+        createFunctionCallPart(functionCall.name, functionCall.arguments),
+      );
     }
 
     response.candidates = [
@@ -1275,7 +1311,13 @@ export function convertOpenAIChunkToGemini(
     }
 
     // Handle tool calls using the stream-local parser
-    if (choice.delta?.tool_calls) {
+    if (choice.delta?.tool_calls?.length) {
+      if (choice.delta.function_call) {
+        debugLogger.debug(
+          `Ignoring legacy function_call "${choice.delta.function_call.name ?? '<pending>'}" because tool_calls is non-empty`,
+        );
+      }
+
       for (const toolCall of choice.delta.tool_calls) {
         const index = toolCall.index ?? 0;
 
@@ -1297,6 +1339,17 @@ export function convertOpenAIChunkToGemini(
           );
         }
       }
+    } else if (choice.delta?.function_call) {
+      const functionCall = choice.delta.function_call;
+      debugLogger.debug(
+        `Using legacy function_call fallback (streaming): ${functionCall.name ?? '<pending>'}`,
+      );
+      toolCallParser.addChunk(
+        0,
+        getLegacyFunctionCallChunk(functionCall),
+        undefined,
+        functionCall.name,
+      );
     }
 
     // Only emit function calls when streaming is complete (finish_reason is present)
