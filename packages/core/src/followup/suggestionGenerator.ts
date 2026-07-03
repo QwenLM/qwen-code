@@ -156,6 +156,7 @@ async function generateViaForkedQuery(
     cacheSafeParams,
     jsonSchema: SUGGESTION_SCHEMA,
     model,
+    preserveTools: true,
   });
 
   if (result.jsonResult) {

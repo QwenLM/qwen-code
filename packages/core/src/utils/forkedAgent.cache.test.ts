@@ -612,6 +612,188 @@ describe('runForkedAgent (cache path)', () => {
     expect(createRuntimeContentGeneratorView).not.toHaveBeenCalled();
   });
 
+  it('does not strip tools when preserveTools is true', async () => {
+    saveCacheSafeParams(
+      {
+        systemInstruction: 'You are helpful',
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'edit', description: 'Edit a file' },
+              { name: 'shell', description: 'Run a command' },
+            ],
+          },
+        ],
+      },
+      [{ role: 'user', parts: [{ text: 'hello' }] }],
+      'test-model',
+    );
+
+    let capturedParams: unknown = null;
+
+    const mockSendMessageStream = vi.fn(
+      (_model: string, params: unknown, _promptId: string) => {
+        capturedParams = params;
+        async function* generate() {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: '{"suggestion":"run tests"}' }],
+                  },
+                },
+              ],
+              usageMetadata: {
+                promptTokenCount: 10,
+                candidatesTokenCount: 5,
+              },
+            },
+          };
+        }
+        return Promise.resolve(generate());
+      },
+    );
+
+    vi.mocked(GeminiChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: mockSendMessageStream,
+        }) as unknown as GeminiChat,
+    );
+
+    await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'suggest something',
+      cacheSafeParams: getCacheSafeParams()!,
+      preserveTools: true,
+    });
+
+    const sendParams = capturedParams as {
+      config?: { tools?: unknown };
+    };
+    expect(sendParams.config!.tools).toBeUndefined();
+  });
+
+  it('strips tools by default when preserveTools is omitted', async () => {
+    saveCacheSafeParams(
+      {
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'edit', description: 'Edit a file' },
+            ],
+          },
+        ],
+      },
+      [],
+      'test-model',
+    );
+
+    let capturedParams: unknown = null;
+
+    const mockSendMessageStream = vi.fn(
+      (_model: string, params: unknown, _promptId: string) => {
+        capturedParams = params;
+        async function* generate() {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: 'ok' }],
+                  },
+                },
+              ],
+            },
+          };
+        }
+        return Promise.resolve(generate());
+      },
+    );
+
+    vi.mocked(GeminiChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: mockSendMessageStream,
+        }) as unknown as GeminiChat,
+    );
+
+    await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'suggest something',
+      cacheSafeParams: getCacheSafeParams()!,
+    });
+
+    const sendParams = capturedParams as {
+      config?: { tools?: unknown };
+    };
+    expect(sendParams.config!.tools).toEqual([]);
+  });
+
+  it('strips tools when preserveTools is explicitly false', async () => {
+    saveCacheSafeParams(
+      {
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'edit', description: 'Edit a file' },
+            ],
+          },
+        ],
+      },
+      [],
+      'test-model',
+    );
+
+    let capturedParams: unknown = null;
+
+    const mockSendMessageStream = vi.fn(
+      (_model: string, params: unknown, _promptId: string) => {
+        capturedParams = params;
+        async function* generate() {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: 'ok' }],
+                  },
+                },
+              ],
+            },
+          };
+        }
+        return Promise.resolve(generate());
+      },
+    );
+
+    vi.mocked(GeminiChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: mockSendMessageStream,
+        }) as unknown as GeminiChat,
+    );
+
+    await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'suggest something',
+      cacheSafeParams: getCacheSafeParams()!,
+      preserveTools: false,
+    });
+
+    const sendParams = capturedParams as {
+      config?: { tools?: unknown };
+    };
+    expect(sendParams.config!.tools).toEqual([]);
+  });
+
   it('throws when CacheSafeParams are not available', async () => {
     const mockConfig = {} as unknown as Config;
 

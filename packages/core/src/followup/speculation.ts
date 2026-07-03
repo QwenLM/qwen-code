@@ -561,6 +561,7 @@ ${SUGGESTION_PROMPT}`;
       jsonSchema: PIPELINED_SCHEMA,
       ...(model !== undefined ? { model } : {}),
       abortSignal,
+      preserveTools: true,
     });
 
     if (abortSignal.aborted) return null;
