@@ -2710,6 +2710,8 @@ export const MessageList = memo(
       if (catchingUp) return;
       const isNewUserMessage = pendingNewUserSmoothScroll.current;
       if (scrollCooldown.current && !isNewUserMessage) return;
+      // Preserve the new-prompt scroll even if a previous disclosure resize is
+      // still settling; it targets the latest virtualizer size from this render.
       if (pendingFollowRecheck.current && !isNewUserMessage) return;
       if (shouldFollow.current || isNewUserMessage) {
         scrollToBottom(isNewUserMessage ? 'smooth' : 'auto');
