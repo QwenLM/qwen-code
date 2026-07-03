@@ -2430,6 +2430,21 @@ export function App({
               );
               return true;
             }
+            if (modelArg === '--vision') {
+              setModelDialogMode('vision');
+              return true;
+            }
+            if (modelArg.startsWith('--vision ')) {
+              const visionModelId = modelArg.replace(/^--vision\s+/, '');
+              setWorkspaceSetting(
+                'workspace',
+                'visionModel',
+                visionModelId,
+              ).catch((error: unknown) =>
+                reportError(error, t('model.setVision')),
+              );
+              return true;
+            }
             if (modelArg) {
               if (!connectionRef.current.sessionId) {
                 setPendingModel(modelArg);
@@ -3298,6 +3313,15 @@ export function App({
     [reportError, setWorkspaceSetting, t],
   );
 
+  const handleVisionModelSelect = useCallback(
+    (modelId: string) => {
+      setWorkspaceSetting('workspace', 'visionModel', modelId).catch(
+        (error: unknown) => reportError(error, t('model.setVision')),
+      );
+    },
+    [reportError, setWorkspaceSetting, t],
+  );
+
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
     return mergeCommands(connection.commands ?? [], getLocalCommands(t))
@@ -3437,7 +3461,9 @@ export function App({
                   ? t('model.setFast')
                   : modelDialogMode === 'voice'
                     ? t('model.setVoice')
-                    : t('model.select')
+                    : modelDialogMode === 'vision'
+                      ? t('model.setVision')
+                      : t('model.select')
               }
               size="lg"
               onClose={() => setModelDialogMode(null)}
@@ -3453,6 +3479,8 @@ export function App({
                     handleFastModelSelect(modelId);
                   } else if (modelDialogMode === 'voice') {
                     handleVoiceModelSelect(modelId);
+                  } else if (modelDialogMode === 'vision') {
+                    handleVisionModelSelect(modelId);
                   } else {
                     handleModelSelect(modelId);
                   }
@@ -3556,6 +3584,7 @@ export function App({
                 onSubDialog={(key) => {
                   setShowSettingsDialog(false);
                   if (key === 'fastModel') setModelDialogMode('fast');
+                  else if (key === 'visionModel') setModelDialogMode('vision');
                   else if (key === 'tools.approvalMode')
                     setShowApprovalModeDialog(true);
                 }}

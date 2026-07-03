@@ -500,6 +500,71 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('getMaxSubagentDepth', () => {
+    it('defaults to 5 when unset', () => {
+      expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);
+    });
+
+    it('respects an explicit value', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 3,
+        }).getMaxSubagentDepth(),
+      ).toBe(3);
+    });
+
+    it('clamps values below 1 up to 1 (never disables sub-agents)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 0,
+        }).getMaxSubagentDepth(),
+      ).toBe(1);
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: -4,
+        }).getMaxSubagentDepth(),
+      ).toBe(1);
+    });
+
+    it('floors fractional values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 3.9,
+        }).getMaxSubagentDepth(),
+      ).toBe(3);
+    });
+
+    it('falls back to the default on non-finite values', () => {
+      // JSON `1e309` parses to Infinity — must not disable the recursion cap.
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: Infinity,
+        }).getMaxSubagentDepth(),
+      ).toBe(5);
+      // NaN comparisons are always false — must not silently block nesting.
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: NaN,
+        }).getMaxSubagentDepth(),
+      ).toBe(5);
+    });
+
+    it('caps absurdly large values at 100', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 5000,
+        }).getMaxSubagentDepth(),
+      ).toBe(100);
+    });
+  });
+
   describe('getTeamMemoryEnabled', () => {
     const prevEnv = process.env['QWEN_CODE_MEMORY_TEAM'];
     afterEach(() => {
@@ -3576,7 +3641,8 @@ describe('Server Config (config.ts)', () => {
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     const options = lastCall?.at(-1) as
-      LoadServerHierarchicalMemoryOptions | undefined;
+      | LoadServerHierarchicalMemoryOptions
+      | undefined;
     expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
 
     await options?.onInstructionsLoaded?.({
@@ -5920,8 +5986,9 @@ describe('Model Switching and Config Updates', () => {
     }
 
     it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = new Config(baseParams);
       const parentGenerator = {
         generateContentStream: vi.fn(),
@@ -5968,8 +6035,9 @@ describe('Model Switching and Config Updates', () => {
     });
 
     it('falls back to the parent model id when the runtime view config has no model', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = new Config(baseParams);
       setInstanceFields(
         config,
