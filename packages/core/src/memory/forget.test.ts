@@ -5,10 +5,16 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { Config } from '../config/config.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
-import { selectManagedAutoMemoryForgetCandidates } from './forget.js';
+import {
+  forgetManagedAutoMemoryMatches,
+  selectManagedAutoMemoryForgetCandidates,
+} from './forget.js';
 
 vi.mock('../utils/sideQuery.js', () => ({
   runSideQuery: vi.fn(),
@@ -64,5 +70,66 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
         model: 'main-model',
       }),
     );
+  });
+
+  it('forwards caller abort signal to the model selector', async () => {
+    const callerController = new AbortController();
+    let capturedSignal: AbortSignal | undefined;
+    vi.mocked(runSideQuery).mockImplementation(async (_config, options) => {
+      capturedSignal = options.abortSignal;
+      return {
+        selectedCandidateIds: [],
+      };
+    });
+
+    await selectManagedAutoMemoryForgetCandidates(
+      '/tmp/project',
+      'forget tabs preference',
+      {
+        config: mockConfig,
+        abortSignal: callerController.signal,
+      },
+    );
+
+    expect(capturedSignal).toBeDefined();
+    expect(capturedSignal!.aborted).toBe(false);
+    callerController.abort();
+
+    await vi.waitFor(() => {
+      expect(capturedSignal!.aborted).toBe(true);
+    });
+  });
+
+  it('does not delete matched files when cancelled before applying matches', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forget-abort-'));
+    try {
+      const projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      const memoryFile = path.join(tempDir, 'memory.md');
+      await fs.writeFile(memoryFile, 'old memory', 'utf-8');
+      const controller = new AbortController();
+      controller.abort(new Error('cancelled'));
+
+      await expect(
+        forgetManagedAutoMemoryMatches(
+          projectRoot,
+          [
+            {
+              topic: 'project',
+              summary: 'old memory',
+              filePath: memoryFile,
+            },
+          ],
+          new Date('2026-07-03T00:00:00.000Z'),
+          { abortSignal: controller.signal },
+        ),
+      ).rejects.toThrow('cancelled');
+
+      await expect(fs.readFile(memoryFile, 'utf-8')).resolves.toBe(
+        'old memory',
+      );
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
   });
 });

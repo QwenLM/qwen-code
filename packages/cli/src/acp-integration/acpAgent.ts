@@ -5507,12 +5507,18 @@ class QwenAgent implements Agent {
           );
         }
 
+        const childSignal = AbortSignal.timeout(
+          WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
+        );
         try {
           const projectRoot = this.config.getProjectRoot();
           const hiddenConfig = createHiddenWorkspaceMemoryConfig(this.config);
           const result = await this.config
             .getMemoryManager()
-            .forget(projectRoot, query.trim(), { config: hiddenConfig });
+            .forget(projectRoot, query.trim(), {
+              config: hiddenConfig,
+              abortSignal: childSignal,
+            });
           return {
             summary:
               result.systemMessage ??
@@ -5525,6 +5531,15 @@ class QwenAgent implements Agent {
         } catch (err) {
           if (err instanceof RequestError) {
             throw err;
+          }
+          if (childSignal.aborted) {
+            throw new RequestError(
+              -32099,
+              'Workspace memory forget timed out',
+              {
+                errorKind: 'remember_timeout',
+              },
+            );
           }
           const code = extractRememberErrorCode(err);
           if (code === 'managed_memory_unavailable') {

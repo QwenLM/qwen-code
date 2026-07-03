@@ -67,11 +67,15 @@ interface ForgetSelectionResponse {
 
 async function listIndexedForgetCandidates(
   projectRoot: string,
+  abortSignal?: AbortSignal,
 ): Promise<IndexedForgetCandidate[]> {
+  abortSignal?.throwIfAborted();
   const docs = await scanAutoMemoryTopicDocuments(projectRoot);
+  abortSignal?.throwIfAborted();
   const candidates: IndexedForgetCandidate[] = [];
 
   for (const doc of docs) {
+    abortSignal?.throwIfAborted();
     const entries = parseAutoMemoryEntries(doc.body);
     for (let i = 0; i < entries.length; i++) {
       const entry = entries[i];
@@ -124,6 +128,7 @@ async function selectByModel(
   query: string,
   config: Config,
   limit: number,
+  callerAbortSignal?: AbortSignal,
 ): Promise<AutoMemoryForgetSelectionResult> {
   const response = await runSideQuery<ForgetSelectionResponse>(config, {
     purpose: 'auto-memory-forget-selection',
@@ -143,7 +148,9 @@ async function selectByModel(
     // the main model rather than the runSideQuery fast-model default — a
     // weaker fast model could pick the wrong entries and silently delete.
     model: config.getModel(),
-    abortSignal: AbortSignal.timeout(8_000),
+    abortSignal: callerAbortSignal
+      ? AbortSignal.any([AbortSignal.timeout(8_000), callerAbortSignal])
+      : AbortSignal.timeout(8_000),
     config: {
       temperature: 0,
     },
@@ -197,22 +204,35 @@ export async function selectManagedAutoMemoryForgetCandidates(
   options: {
     config?: Config;
     limit?: number;
+    abortSignal?: AbortSignal;
   } = {},
 ): Promise<AutoMemoryForgetSelectionResult> {
+  options.abortSignal?.throwIfAborted();
   const limit = options.limit ?? 5;
-  const candidates = await listIndexedForgetCandidates(projectRoot);
+  const candidates = await listIndexedForgetCandidates(
+    projectRoot,
+    options.abortSignal,
+  );
   if (candidates.length === 0) {
     return { matches: [], strategy: 'none' };
   }
 
   if (options.config) {
     try {
-      return await selectByModel(candidates, query, options.config, limit);
-    } catch {
+      return await selectByModel(
+        candidates,
+        query,
+        options.config,
+        limit,
+        options.abortSignal,
+      );
+    } catch (err) {
+      if (options.abortSignal?.aborted) throw err;
       // Fall through to heuristic.
     }
   }
 
+  options.abortSignal?.throwIfAborted();
   return selectByHeuristic(candidates, query, limit);
 }
 
@@ -238,7 +258,9 @@ export async function forgetManagedAutoMemoryMatches(
   projectRoot: string,
   matches: AutoMemoryForgetMatch[],
   now = new Date(),
+  options: { abortSignal?: AbortSignal } = {},
 ): Promise<AutoMemoryForgetResult> {
+  options.abortSignal?.throwIfAborted();
   if (matches.length === 0) {
     return {
       query: '',
@@ -248,6 +270,7 @@ export async function forgetManagedAutoMemoryMatches(
     };
   }
   await ensureAutoMemoryScaffold(projectRoot, now);
+  options.abortSignal?.throwIfAborted();
 
   const removedEntries: AutoMemoryForgetMatch[] = [];
   const touchedTopics = new Set<AutoMemoryType>();
@@ -264,11 +287,14 @@ export async function forgetManagedAutoMemoryMatches(
 
   for (const [filePath, fileMatches] of matchesByFile) {
     try {
+      options.abortSignal?.throwIfAborted();
       const rawContent = await fs.readFile(filePath, 'utf-8');
+      options.abortSignal?.throwIfAborted();
       const fmMatch = rawContent.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
 
       if (!fmMatch) {
         // No frontmatter — delete the whole file.
+        options.abortSignal?.throwIfAborted();
         await fs.unlink(filePath);
         removedEntries.push(...fileMatches);
         for (const m of fileMatches) touchedTopics.add(m.topic);
@@ -285,10 +311,12 @@ export async function forgetManagedAutoMemoryMatches(
       );
 
       if (kept.length === 0) {
+        options.abortSignal?.throwIfAborted();
         await fs.unlink(filePath);
       } else {
         const heading = getAutoMemoryBodyHeading(rawBody);
         const newBody = renderAutoMemoryBody(heading, kept);
+        options.abortSignal?.throwIfAborted();
         await atomicWriteFile(
           filePath,
           `---\n${frontmatter}\n---\n\n${newBody}\n`,
@@ -302,13 +330,16 @@ export async function forgetManagedAutoMemoryMatches(
       for (const m of fileMatches.slice(0, removedCount)) {
         touchedTopics.add(m.topic);
       }
-    } catch {
+    } catch (err) {
+      if (options.abortSignal?.aborted) throw err;
       // File may have already been removed; continue.
     }
   }
 
   if (touchedTopics.size > 0) {
+    options.abortSignal?.throwIfAborted();
     await bumpMetadata(projectRoot, now);
+    options.abortSignal?.throwIfAborted();
     await rebuildManagedAutoMemoryIndex(projectRoot);
   }
 
@@ -326,9 +357,10 @@ export async function forgetManagedAutoMemoryMatches(
 export async function forgetManagedAutoMemoryEntries(
   projectRoot: string,
   query: string,
-  options: { config?: Config } = {},
+  options: { config?: Config; abortSignal?: AbortSignal } = {},
   now = new Date(),
 ): Promise<AutoMemoryForgetResult> {
+  options.abortSignal?.throwIfAborted();
   const trimmedQuery = query.trim();
   if (!trimmedQuery) {
     return { query: trimmedQuery, removedEntries: [], touchedTopics: [] };
@@ -343,6 +375,7 @@ export async function forgetManagedAutoMemoryEntries(
     projectRoot,
     selection.matches,
     now,
+    { abortSignal: options.abortSignal },
   );
   return { ...result, query: trimmedQuery };
 }

@@ -2933,6 +2933,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         getChatRecordingService: expect.any(Function),
         getTranscriptPath: expect.any(Function),
       }),
+      abortSignal: expect.any(AbortSignal),
     });
 
     mockConnectionState.resolve();
