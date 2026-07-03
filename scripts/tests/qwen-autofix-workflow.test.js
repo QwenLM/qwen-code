@@ -42,6 +42,10 @@ const readDecisionStep =
   workflow.match(
     /- name: 'Read decision'[\s\S]*?(?=\n[ ]{6}- name: 'Claim issue')/,
   )?.[0] ?? '';
+const claimIssueStep =
+  workflow.match(
+    /- name: 'Claim issue'[\s\S]*?(?=\n[ ]{6}- name: 'Develop fix')/,
+  )?.[0] ?? '';
 const developFixStep =
   workflow.match(
     /- name: 'Develop fix'[\s\S]*?(?=\n[ ]{6}- name: 'Verification gate')/,
@@ -109,6 +113,9 @@ describe('qwen-autofix workflow', () => {
     );
     expect(workflow).toContain(
       '::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}',
+    );
+    expect(workflow).toContain(
+      '::notice::Issue #${ISSUE_NUMBER:-n/a} needs both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL} before autofix can run.',
     );
     expect(workflow).toContain("${sender_permission}\" == 'write'");
     expect(workflow).toContain("${sender_permission}\" == 'maintain'");
@@ -202,6 +209,10 @@ describe('qwen-autofix workflow', () => {
     expect(readDecisionStep).toContain(
       'gh issue view "${GO}" --repo "${REPO}" --json labels,state',
     );
+    expect(readDecisionStep).toContain('"${DRY_RUN}" != "true"');
+    expect(readDecisionStep).toContain(
+      '::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error',
+    );
     expect(readDecisionStep).toContain(
       '($labels | index($ready)) and ($labels | index($approved))',
     );
@@ -222,12 +233,16 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('fails claim cleanly when label updates fail after commenting', () => {
-    expect(workflow).toContain(
+  it('fails claim cleanly before commenting when label updates fail', () => {
+    expect(claimIssueStep).toContain(
       'if ! gh issue edit "${ISSUE}" --repo "${REPO}"',
     );
-    expect(workflow).toContain(
-      'Failed to update labels on #${ISSUE} after claim comment was posted',
+    expect(claimIssueStep).toContain(
+      'Failed to update labels on #${ISSUE} before claim comment was posted',
+    );
+    expect(claimIssueStep).toContain('exit 1');
+    expect(claimIssueStep.indexOf('gh issue edit "${ISSUE}"')).toBeLessThan(
+      claimIssueStep.indexOf('gh issue comment "${ISSUE}"'),
     );
   });
 

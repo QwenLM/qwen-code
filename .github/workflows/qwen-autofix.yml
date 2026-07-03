@@ -147,6 +147,9 @@ jobs:
                   if [[ "${ISSUE_STATE}" == 'open' && "${issue_is_ready}" == 'true' && "${issue_is_approved}" == 'true' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' ]]; then
                     DO_ISSUE=true
                   else
+                    if [[ "${ISSUE_STATE}" == 'open' && "${label_is_trigger}" == 'true' && "${sender_is_trusted}" == 'true' && "${issue_is_ready}" != "${issue_is_approved}" ]]; then
+                      echo "::notice::Issue #${ISSUE_NUMBER:-n/a} needs both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL} before autofix can run."
+                    fi
                     echo "🧭 issue event ignored: state_open=$([[ "${ISSUE_STATE}" == 'open' ]] && echo true || echo false) bug=${issue_is_bug} ready=${issue_is_ready} approved=${issue_is_approved} trigger_label=${label_is_trigger} sender_permission='${sender_permission:-none}' sender_trusted=${sender_is_trusted} label='${ISSUE_LABEL:-n/a}' issue='#${ISSUE_NUMBER:-n/a}'"
                   fi
                 fi
@@ -479,7 +482,7 @@ jobs:
 
           if [[ -n "${GO}" && "${DRY_RUN}" != "true" && "${EVENT_NAME}" != 'workflow_dispatch' ]]; then
             if ! live_issue_json="$(gh issue view "${GO}" --repo "${REPO}" --json labels,state)"; then
-              echo "❌ Failed to re-validate live labels for issue #${GO}"
+              echo "::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error"
               echo "go_issue=" >> "${GITHUB_OUTPUT}"
               exit 0
             fi
@@ -534,10 +537,6 @@ jobs:
 
           Maintainers: comment or assign someone to stop future automated attempts, or add the \`autofix/skip\` label."
 
-          COMMENT_URL="$(gh issue comment "${ISSUE}" --repo "${REPO}" --body "${BODY}")"
-          COMMENT_ID="${COMMENT_URL##*-}"
-          echo "comment_id=${COMMENT_ID}" >> "${GITHUB_OUTPUT}"
-
           # The label, not the comment, is what future scans key off to
           # avoid double-claiming.
           gh label create 'autofix/in-progress' --repo "${REPO}" \
@@ -549,9 +548,13 @@ jobs:
           if ! gh issue edit "${ISSUE}" --repo "${REPO}" \
             --add-label 'autofix/in-progress' \
             --remove-label "${AUTOFIX_APPROVED_LABEL}"; then
-            echo "::error::Failed to update labels on #${ISSUE} after claim comment was posted"
+            echo "::error::Failed to update labels on #${ISSUE} before claim comment was posted"
             exit 1
           fi
+
+          COMMENT_URL="$(gh issue comment "${ISSUE}" --repo "${REPO}" --body "${BODY}")"
+          COMMENT_ID="${COMMENT_URL##*-}"
+          echo "comment_id=${COMMENT_ID}" >> "${GITHUB_OUTPUT}"
           echo "📌 Claimed #${ISSUE} (comment ${COMMENT_ID})"
 
       - name: 'Develop fix'
