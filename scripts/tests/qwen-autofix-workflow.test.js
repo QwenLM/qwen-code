@@ -4,16 +4,13 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
-import http from 'node:http';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
-const openAiProxyScript = readFileSync(
-  '.github/scripts/openai-proxy.mjs',
+const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+const sandboxImageResolverScript = readFileSync(
+  '.github/scripts/resolve-sandbox-image.mjs',
   'utf8',
 );
 const checkBotCredentialsStep =
@@ -48,6 +45,10 @@ const triageAndAddressStep =
   workflow.match(
     /- name: 'Triage and address'[\s\S]*?(?=\n[ ]{6}- name: 'Verification gate')/,
   )?.[0] ?? '';
+const prepareBranchAndFeedbackStep =
+  workflow.match(
+    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Triage and address')/,
+  )?.[0] ?? '';
 const resetAutofixWorkspaceSteps =
   workflow.match(
     /- name: 'Reset autofix workspace'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
@@ -55,34 +56,14 @@ const resetAutofixWorkspaceSteps =
 const verificationGateSteps =
   workflow.match(/- name: 'Verification gate'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
   [];
-const openAiProxyLaunches =
-  workflow.match(/node \.github\/scripts\/openai-proxy\.mjs/g) ?? [];
-
-function listen(server) {
-  return new Promise((resolve) => {
-    server.listen(0, '127.0.0.1', () => {
-      resolve(server.address().port);
-    });
-  });
-}
-
-async function waitForProxy(infoPath, child) {
-  let stderr = '';
-  child.stderr.on('data', (chunk) => {
-    stderr += chunk.toString();
-  });
-
-  for (let i = 0; i < 50; i += 1) {
-    if (existsSync(infoPath)) {
-      return readFileSync(infoPath, 'utf8');
-    }
-    if (child.exitCode !== null) {
-      throw new Error(`proxy exited early: ${stderr}`);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 50));
-  }
-  throw new Error(`proxy did not become ready: ${stderr}`);
-}
+const resolveSandboxImageSteps =
+  workflow.match(
+    /- name: 'Resolve sandbox image'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
+const installAndBuildSteps =
+  workflow.match(
+    /- name: 'Install dependencies and build'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
 
 describe('qwen-autofix workflow', () => {
   it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
@@ -227,13 +208,18 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('runs heavy autofix jobs on dedicated runners without sandbox images', () => {
-    expect(workflow).toContain('["self-hosted", "linux", "x64", "autofix"]');
-    expect(workflow).toContain('AUTOFIX_ECS_RUNNER_DISABLED');
+  it('runs heavy autofix jobs on hosted runners with sandbox images', () => {
+    expect(workflow).toMatch(/issue-autofix:[\s\S]*?runs-on: 'ubuntu-latest'/);
+    expect(workflow).toMatch(/review-address:[\s\S]*?runs-on: 'ubuntu-latest'/);
+    expect(workflow).not.toContain(
+      '["self-hosted", "linux", "x64", "autofix"]',
+    );
+    expect(workflow).not.toContain("runner.environment == 'self-hosted'");
+    expect(workflow).not.toContain('Use pre-installed Node.js (self-hosted)');
+    expect(workflow).not.toContain('AUTOFIX_ECS_RUNNER_DISABLED');
     expect(workflow).toContain(
       "RUNNER_ENVIRONMENT: '${{ runner.environment }}'",
     );
-    expect(workflow).toContain('Unsupported runner environment');
     expect(prepareQwenCliSteps).toHaveLength(2);
     for (const step of prepareQwenCliSteps) {
       expect(step).toContain(
@@ -255,15 +241,37 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'workflow verification gate runs trusted checks after',
     );
-    expect(workflow).toContain('"sandbox": false');
+    expect(workflow).toContain('"sandbox": "docker"');
+    expect(workflow).not.toContain('"sandbox": false');
     expect(workflow).not.toContain('"sandbox": true');
     expect(workflow).not.toContain('QwenLM/qwen-code-action@');
-    expect(workflow).not.toContain('Select issue sandbox image');
-    expect(workflow).not.toContain('Select review sandbox image');
-    expect(workflow).not.toContain('QWEN_SANDBOX_IMAGE');
-    expect(workflow).not.toContain('ghcr.io/qwenlm/qwen-code');
+    expect(resolveSandboxImageSteps).toHaveLength(2);
+    for (const step of resolveSandboxImageSteps) {
+      expect(step).toContain('node .github/scripts/resolve-sandbox-image.mjs');
+      expect(step).toContain(
+        `"$(node -p "require('./package.json').config.sandboxImageUri")"`,
+      );
+    }
+    expect(sandboxImageResolverScript).toContain('QWEN_SANDBOX_IMAGE');
+    expect(sandboxImageResolverScript).toContain(
+      "const GHCR_REPOSITORY = 'qwenlm/qwen-code';",
+    );
+    expect(sandboxImageResolverScript).toContain('ghcr.io/${GHCR_REPOSITORY}');
     expect(workflow).not.toContain('npm view @qwen-code/qwen-code@latest');
     expect(workflow).not.toContain('KNOWN_BOTS');
+  });
+
+  it('retries dependency installation before building', () => {
+    expect(installAndBuildSteps).toHaveLength(2);
+    for (const step of installAndBuildSteps) {
+      expect(step).toContain('for attempt in 1 2 3; do');
+      expect(step).toContain(
+        'npm ci --prefer-offline --no-audit --progress=false',
+      );
+      expect(step).toContain('sleep $((attempt * 15))');
+      expect(step).toContain('npm run build');
+      expect(step).toContain('npm run bundle');
+    }
   });
 
   it('uses the standard checkout action for autonomous runner jobs', () => {
@@ -277,7 +285,27 @@ describe('qwen-autofix workflow', () => {
     expect(assessCandidatesStep).not.toContain('continue-on-error: true');
   });
 
-  it('clears persistent autofix workdirs before using self-hosted runners', () => {
+  it('clears tracked build output before switching to a review PR branch', () => {
+    expect(prepareBranchAndFeedbackStep.length).toBeGreaterThan(0);
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'Restoring tracked build output before switching to the PR branch.',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'git restore --source=HEAD --staged --worktree .',
+    );
+    expect(
+      prepareBranchAndFeedbackStep.indexOf(
+        'git restore --source=HEAD --staged --worktree .',
+      ),
+    ).toBeLessThan(
+      prepareBranchAndFeedbackStep.indexOf(
+        'git checkout -B "${BRANCH}" "origin/${BRANCH}"',
+      ),
+    );
+    expect(prepareBranchAndFeedbackStep).not.toContain('git clean');
+  });
+
+  it('clears persistent autofix workdirs before agent steps run', () => {
     expect(resetAutofixWorkspaceSteps).toHaveLength(2);
     expect(workflow).toContain("WORKDIR: '/tmp/autofix'");
     expect(workflow).toContain(
@@ -328,7 +356,7 @@ describe('qwen-autofix workflow', () => {
     }
   });
 
-  it('keeps real model credentials out of qwen subprocess environments', () => {
+  it('passes model credentials directly to qwen subprocesses', () => {
     const qwenSteps = [
       assessCandidatesStep,
       developFixStep,
@@ -336,90 +364,66 @@ describe('qwen-autofix workflow', () => {
     ];
     for (const step of qwenSteps) {
       expect(step.length).toBeGreaterThan(0);
-      expect(step).not.toMatch(
-        /^[ ]{10}OPENAI_API_KEY: '\$\{\{ secrets\.OPENAI_API_KEY \}\}'$/m,
-      );
-      expect(step).not.toMatch(
-        /^[ ]{10}OPENAI_BASE_URL: '\$\{\{ secrets\.OPENAI_BASE_URL \}\}'$/m,
+      expect(step).toContain(
+        "OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'",
       );
       expect(step).toContain(
-        "QWEN_UPSTREAM_OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'",
+        'AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.',
       );
       expect(step).toContain(
-        "QWEN_UPSTREAM_OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'",
+        "OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'",
       );
-      expect(step).toContain('start_openai_proxy');
-      expect(step).toContain('node .github/scripts/openai-proxy.mjs');
-      expect(step).toContain('OPENAI_API_KEY=qwen-loopback-proxy');
-      expect(step).toContain('unset QWEN_UPSTREAM_OPENAI_API_KEY');
-      expect(step).toContain('unset QWEN_UPSTREAM_OPENAI_BASE_URL');
+      expect(step).toContain("NO_PROXY: '127.0.0.1,localhost,::1'");
+      expect(step).not.toContain('QWEN_UPSTREAM_OPENAI_API_KEY');
+      expect(step).not.toContain('QWEN_UPSTREAM_OPENAI_BASE_URL');
+      expect(step).not.toContain('start_openai_proxy');
+      expect(step).not.toContain('openai-proxy.mjs');
+      expect(step).not.toContain('qwen-loopback-proxy');
     }
-    expect(openAiProxyLaunches).toHaveLength(3);
+    expect(assessCandidatesStep).not.toContain(
+      'run_shell_command(gh issue view)',
+    );
+    expect(assessCandidatesStep).not.toContain('run_shell_command(gh search)');
+    expect(workflow).not.toContain(
+      "OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}'",
+    );
     expect(workflow).not.toContain('proxy_script="$(mktemp');
     expect(workflow).not.toContain('cat > "${proxy_script}"');
   });
 
-  it('keeps the OpenAI proxy behavior covered by a runnable script', async () => {
-    expect(openAiProxyScript).toContain(
-      "headers.set('authorization', `Bearer ${apiKey}`)",
+  it('keeps sandbox image fallback covered by a reusable script', () => {
+    expect(sandboxImageResolverScript).toContain(
+      'https://ghcr.io/token?service=ghcr.io&scope=repository:${GHCR_REPOSITORY}:pull',
     );
-    expect(openAiProxyScript).toContain(
-      "finishWith(res, 403, 'proxy: only POST /chat/completions is allowed\\n')",
+    expect(sandboxImageResolverScript).toContain(
+      'https://ghcr.io/v2/${GHCR_REPOSITORY}/tags/list?n=1000',
     );
-
-    const requests = [];
-    const upstream = http.createServer((req, res) => {
-      requests.push({
-        method: req.method,
-        url: req.url,
-        authorization: req.headers.authorization,
-      });
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ ok: true }));
-    });
-    const upstreamPort = await listen(upstream);
-    const tempDir = mkdtempSync(join(tmpdir(), 'qwen-openai-proxy-'));
-    const infoPath = join(tempDir, 'proxy-info');
-    const child = spawn('node', ['.github/scripts/openai-proxy.mjs'], {
-      env: {
-        ...process.env,
-        QWEN_UPSTREAM_OPENAI_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
-        QWEN_UPSTREAM_OPENAI_API_KEY: 'real-key',
-        QWEN_OPENAI_PROXY_INFO: infoPath,
-      },
-      stdio: ['ignore', 'ignore', 'pipe'],
-    });
-
-    try {
-      const proxyBase = await waitForProxy(infoPath, child);
-
-      const health = await fetch(proxyBase.replace(/\/v1$/, '') + '/__health');
-      expect(health.status).toBe(204);
-
-      const denied = await fetch(`${proxyBase}/chat/completions`);
-      expect(denied.status).toBe(403);
-
-      const proxied = await fetch(`${proxyBase}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          authorization: 'Bearer fake-key',
-          'content-type': 'application/json',
-        },
-        body: JSON.stringify({ messages: [] }),
-      });
-      expect(proxied.status).toBe(200);
-      expect(await proxied.json()).toEqual({ ok: true });
-      expect(requests).toEqual([
-        {
-          method: 'POST',
-          url: '/v1/chat/completions',
-          authorization: 'Bearer real-key',
-        },
-      ]);
-    } finally {
-      child.kill();
-      upstream.close();
-      rmSync(tempDir, { force: true, recursive: true });
-    }
+    expect(sandboxImageResolverScript).toContain(
+      'signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)',
+    );
+    expect(sandboxImageResolverScript).toContain(
+      'GHCR returned at least 1000 tags',
+    );
+    expect(sandboxImageResolverScript).toContain('latestSemverTag(tags)');
+    expect(sandboxImageResolverScript).toContain(
+      "spawn(command, ['pull', image]",
+    );
+    expect(sandboxImageResolverScript).toContain('Timed out pulling ${image}');
+    expect(sandboxImageResolverScript).toContain(
+      '::error::Timed out pulling ${image}',
+    );
+    expect(sandboxImageResolverScript).toContain(
+      "Failed to start '${command} pull ${image}'",
+    );
+    expect(sandboxImageResolverScript).toContain(
+      "::error::'${command} pull ${image}' exited with code ${code}",
+    );
+    expect(sandboxImageResolverScript).toContain(
+      '::warning::Falling back from ${requestedImage} to latest GHCR semver ${fallbackImage}',
+    );
+    expect(ciWorkflow).toContain(
+      '.github/scripts/resolve-sandbox-image.test.mjs',
+    );
+    expect(workflow).not.toContain('.github/scripts/openai-proxy.mjs');
   });
 });
