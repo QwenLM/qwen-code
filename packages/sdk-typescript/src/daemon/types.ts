@@ -1087,6 +1087,21 @@ export interface DaemonSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /**
+   * `id` of the agent task that spawned this one. Absent for agents
+   * launched by the top-level session. Sub-agents may spawn sub-agents
+   * (bounded by `maxSubagentDepth`); clients render the roster as a tree
+   * by correlating this against sibling `id`s.
+   */
+  parentAgentId?: string;
+  /**
+   * Display name (`subagentType`) of the spawning agent, captured at
+   * registration time so it survives the parent's eviction from the
+   * registry. Display-only.
+   */
+  parentName?: string;
+  /** Launch depth (0-based; 0 = spawned by the top-level session). */
+  depth?: number;
 }
 
 export interface DaemonSessionShellTaskStatus {
