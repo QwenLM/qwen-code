@@ -359,7 +359,7 @@ describe('Markdown custom code block rendering', () => {
       root.render(
         createElement(
           ThemeProvider,
-          { value: 'light' },
+          { value: 'dark' },
           createElement(
             WebShellCustomizationProvider,
             { value: { markdown: { renderCodeBlock } } },
@@ -380,11 +380,9 @@ describe('Markdown custom code block rendering', () => {
       code: 'const option = {};',
       isStreaming: true,
       source: 'assistant',
-      theme: 'light',
+      theme: 'dark',
     });
-    expect(
-      container.querySelector('[data-chart-theme="light"]'),
-    ).not.toBeNull();
+    expect(container.querySelector('[data-chart-theme="dark"]')).not.toBeNull();
     expect(container.textContent).toContain(
       'assistant:true:const option = {};',
     );
@@ -467,6 +465,71 @@ describe('Markdown custom code block rendering', () => {
     );
     expect(container.querySelector('pre code')?.textContent).toContain(
       'const x = 1;',
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('passes c++ aliases to host renderers', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() => undefined);
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content: '```c++\nstd::cout << "hello";\n```',
+            source: 'assistant',
+          }),
+        ),
+      );
+    });
+
+    expect(renderCodeBlock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        language: 'c++',
+        resolvedLanguage: 'cpp',
+      }),
+    );
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      'std::cout << "hello";',
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('does not pass unsafe fence-language characters to host renderers', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() => createElement('div', null, 'custom'));
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content: '```bad<script>\nconst option = {};\n```',
+            source: 'assistant',
+          }),
+        ),
+      );
+    });
+
+    expect(renderCodeBlock).not.toHaveBeenCalled();
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      'const option = {};',
     );
 
     await act(async () => {
@@ -791,6 +854,71 @@ describe('Markdown custom code block rendering', () => {
       );
       expect(
         container.querySelector('[data-custom-code="good"]'),
+      ).not.toBeNull();
+      expect(container.querySelector('pre code')).toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
+  it('retries custom rendered content when streaming settles', async () => {
+    function ThrowingChart(): never {
+      throw new Error('render boom');
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn((info: WebShellCodeBlockRenderInfo) => {
+      if (info.isStreaming) return createElement(ThrowingChart);
+      return createElement('div', { 'data-custom-code': 'settled' }, info.code);
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(
+            WebShellCustomizationProvider,
+            { value: { markdown: { renderCodeBlock } } },
+            createElement(Markdown, {
+              content: '```echarts-fulldata\nfinal\n```',
+              source: 'assistant',
+              isStreaming: true,
+            }),
+          ),
+        );
+      });
+
+      expect(container.querySelector('pre code')?.textContent).toContain(
+        'final',
+      );
+
+      await act(async () => {
+        root.render(
+          createElement(
+            WebShellCustomizationProvider,
+            { value: { markdown: { renderCodeBlock } } },
+            createElement(Markdown, {
+              content: '```echarts-fulldata\nfinal\n```',
+              source: 'assistant',
+              isStreaming: false,
+            }),
+          ),
+        );
+      });
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[web-shell] custom code block component render (lang=echarts-fulldata) failed:',
+        expect.any(Error),
+        expect.any(String),
+      );
+      expect(
+        container.querySelector('[data-custom-code="settled"]'),
       ).not.toBeNull();
       expect(container.querySelector('pre code')).toBeNull();
     } finally {

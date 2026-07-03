@@ -415,7 +415,7 @@ function CodeBlock({
 }
 
 function extractRawFenceLanguage(className: string | undefined): string {
-  return className?.match(/(?:^|\s)language-([^\s]+)/)?.[1] ?? '';
+  return className?.match(/(?:^|\s)language-([\w+.#-]+)(?=\s|$)/)?.[1] ?? '';
 }
 
 function InlineCode({ children }: { children: ReactNode }) {

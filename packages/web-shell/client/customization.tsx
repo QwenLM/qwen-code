@@ -16,7 +16,10 @@ export interface MarkdownRenderContext {
 }
 
 export interface WebShellCodeBlockRenderInfo {
-  /** Raw fenced-code language from the markdown class name. */
+  /**
+   * Raw fenced-code language from the markdown class name, restricted to safe
+   * fence-language characters.
+   */
   language: string;
   /**
    * Canonical Shiki language id after applying built-in aliases, or `text`
