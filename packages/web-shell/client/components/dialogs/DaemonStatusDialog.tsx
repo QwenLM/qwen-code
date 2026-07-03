@@ -30,6 +30,7 @@ function formatUptime(ms: number): string {
 }
 
 function formatDurationMs(ms: number): string {
+  ms = Math.max(0, ms); // clamp clock-skew negatives to a "0ms" contract
   if (ms >= 60_000) return formatUptime(ms);
   if (ms >= 1000) return `${(ms / 1000).toFixed(ms % 1000 === 0 ? 0 : 1)}s`;
   return `${ms}ms`;
@@ -529,11 +530,13 @@ function DaemonStatusDialogInner() {
         </Card>
 
         <Card
-          title={`${t('daemon.capabilities.title')}${
+          title={
             capabilities.features.length
-              ? ` (${capabilities.features.length})`
-              : ''
-          }`}
+              ? t('daemon.capabilities.titleCount', {
+                  count: capabilities.features.length,
+                })
+              : t('daemon.capabilities.title')
+          }
         >
           {capabilities.features.length === 0 ? (
             <span className={styles.empty}>{t('daemon.none')}</span>

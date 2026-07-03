@@ -65,7 +65,11 @@ const summaryReport = {
         pendingClientRequests: 0,
       },
     },
-    rateLimit: { enabled: true, rejectedSinceStart: { normal: 37, strict: 4 } },
+    // Real daemon rate-limit tiers (RateLimitTier = prompt | mutation | read).
+    rateLimit: {
+      enabled: true,
+      rejectedSinceStart: { prompt: 37, mutation: 3, read: 1 },
+    },
     process: {
       rss: 200 * 1024 * 1024,
       heapTotal: 80 * 1024 * 1024,
@@ -268,6 +272,11 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('My session');
     expect(text).toContain('preflight exploded');
     expect(text).toContain('Workspace Diagnostics');
+    // A healthy workspace section renders its name, translated status, and
+    // summary chips.
+    expect(text).toContain('mcp');
+    expect(text).toContain('OK');
+    expect(text).toContain('servers: 2');
   });
 
   it('auto-refresh reloads only the cheap summary, never the full report', async () => {
@@ -684,6 +693,58 @@ describe('DaemonStatusDialog', () => {
     // The default fixture has no runtime.activity — the section must not render.
     mount();
     expect(container!.textContent ?? '').not.toContain('Active prompts');
+  });
+
+  it('falls back to the session id when a session has no display name', () => {
+    fullState = {
+      report: {
+        ...fullReport,
+        full: {
+          ...fullReport.full,
+          sessions: [
+            {
+              sessionId: 'sess-no-name-9',
+              workspaceCwd: '/work/demo',
+              createdAt: '2026-07-03T07:00:00.000Z',
+              clientCount: 1,
+              subscriberCount: 0,
+              attachCount: 0,
+              pendingPromptCount: 0,
+              pendingPermissionCount: 0,
+              hasActivePrompt: false,
+              lastEventId: 1,
+            },
+          ],
+        },
+      },
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    expect(container!.textContent ?? '').toContain('sess-no-name-9');
+  });
+
+  it('formats the channel-worker signal branch', () => {
+    summaryState = {
+      report: {
+        ...summaryReport,
+        runtime: {
+          ...summaryReport.runtime,
+          channel: { live: false },
+          channelWorker: {
+            enabled: true,
+            state: 'exited',
+            channels: [],
+            signal: 'SIGTERM', // no exitCode -> signal branch
+          },
+        },
+      },
+      loading: false,
+      error: undefined,
+    };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    expect(container!.textContent ?? '').toContain('exited (SIGTERM)');
   });
 
   it('suppresses the toolbar banner when the summary is absent but the full fallback provides data', () => {

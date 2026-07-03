@@ -102,6 +102,8 @@ export { useDaemonSkills as useSkills } from './daemon/index.js';
 
 /** Consolidated daemon status report (`GET /daemon/status`). */
 export { useDaemonStatusReport as useStatusReport } from './daemon/index.js';
+/** Options for `useStatusReport` (detail level + resource load flags). */
+export type { DaemonStatusReportOptions as StatusReportOptions } from './daemon/index.js';
 
 /** Registered tools and their configuration. */
 export { useDaemonTools as useTools } from './daemon/index.js';

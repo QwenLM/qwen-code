@@ -367,6 +367,7 @@ const EN: Messages = {
   'daemon.limits.promptDeadline': 'Prompt deadline',
   'daemon.limits.sessionIdle': 'Session idle timeout',
   'daemon.capabilities.title': 'Capabilities',
+  'daemon.capabilities.titleCount': (v) => `Capabilities (${v?.count ?? 0})`,
   'daemon.full.sessions.title': 'Sessions',
   'daemon.full.sessions.empty': 'No active sessions',
   'daemon.full.session.pendingPrompts': (v) =>
@@ -1674,6 +1675,7 @@ const ZH: Messages = {
   'daemon.limits.promptDeadline': 'Prompt 截止时间',
   'daemon.limits.sessionIdle': '会话空闲超时',
   'daemon.capabilities.title': '能力',
+  'daemon.capabilities.titleCount': (v) => `能力 (${v?.count ?? 0})`,
   'daemon.full.sessions.title': '会话',
   'daemon.full.sessions.empty': '无活跃会话',
   'daemon.full.session.pendingPrompts': (v) =>
