@@ -747,8 +747,11 @@ export async function main() {
     // For stream-json mode, defer config.initialize() until after the initialize control request
     // For other modes, initialize normally
     const { initializeApp } = await import('./core/initializer.js');
+    let input = config.getQuestion();
     const deferIdeConnection =
-      config.isInteractive() && !config.getExperimentalZedIntegration();
+      config.isInteractive() &&
+      !config.getExperimentalZedIntegration() &&
+      !input;
     const initializationResult = await initializeApp(config, settings, {
       deferIdeConnection,
     });
@@ -762,7 +765,6 @@ export async function main() {
       process.exit(0);
     }
 
-    let input = config.getQuestion();
     const startupWarnings = [
       ...new Set([
         ...(config.isSafeMode()
