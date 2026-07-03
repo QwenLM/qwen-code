@@ -630,6 +630,34 @@ describe('sendMessage', () => {
     stderrSpy.mockRestore();
   });
 
+  it('logs MESSAGE DROPPED when plain-text fallback is rate-limited (429)', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const writes: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(false, 500))
+      .mockResolvedValueOnce(mockResponse(false, 429));
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(
+      writes.some((w) =>
+        w.includes(
+          'MESSAGE DROPPED: rate-limited (429) on plain-text fallback',
+        ),
+      ),
+    ).toBe(true);
+
+    stderrSpy.mockRestore();
+  });
+
   it('returns early when disposed', async () => {
     const ch = makeChannel({ disposed: true, chatType: 'c2c' });
     await ch.sendMessage('test-chat-id', 'hello');
@@ -1010,6 +1038,17 @@ describe('sendMessage', () => {
 
     saveSpy.mockRestore();
   });
+
+  it('stops silently at 429 when no replyMsgId is set', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+
+    mockSendQQMessage.mockResolvedValueOnce(mockResponse(false, 429));
+
+    await ch.sendMessage('test-chat-id', 'hello');
+
+    // No second call — 429 bails immediately without fallback or rollback
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('setReplyMsgId', () => {
@@ -1081,6 +1120,33 @@ describe('setReplyMsgId', () => {
 
     expect(msgSeqMap.get('existing-seq')).toBe(3);
     expect(replyMsgId.get('new-chat')!.msgId).toBe('msg-new');
+  });
+
+  it('no-ops msgSeqMap.delete when setting the same msgId for same chatId', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+
+    replyMsgId.set('test-chat-id', {
+      msgId: 'same-msg-id',
+      timestamp: Date.now(),
+    });
+    msgSeqMap.set('same-msg-id', 3);
+
+    // Set the same msgId again — the guard should prevent delete
+    (chp['setReplyMsgId'] as (chatId: string, msgId: string) => void)(
+      'test-chat-id',
+      'same-msg-id',
+    );
+
+    // msgSeqMap entry should still exist (was not deleted)
+    expect(msgSeqMap.get('same-msg-id')).toBe(3);
+    expect(replyMsgId.get('test-chat-id')!.msgId).toBe('same-msg-id');
   });
 });
 
@@ -1367,6 +1433,32 @@ describe('restoreQQState validation filters', () => {
     expect(replyMsgId.has('c')).toBe(false);
     expect(replyMsgId.has('d')).toBe(false);
     expect(replyMsgId.has('e')).toBe(false);
+  });
+
+  it('filters replyMsgId entries with far-future timestamps', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    // Use raw JSON to force a timestamp far beyond real-time
+    const farFuture = Date.now() + 1e15;
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        replyMsgId: [
+          ['a', { msgId: 'valid', timestamp: Date.now() }],
+          ['b', { msgId: 'far-future', timestamp: farFuture }],
+        ],
+      }),
+    );
+
+    const ch = makeChannel();
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const replyMsgId = (
+      ch as unknown as {
+        replyMsgId: Map<string, { msgId: string; timestamp: number }>;
+      }
+    ).replyMsgId;
+    expect(replyMsgId.size).toBe(1);
+    expect(replyMsgId.get('a')?.msgId).toBe('valid');
+    expect(replyMsgId.has('b')).toBe(false);
   });
 
   it('filters msgSeqMap to only accept non-negative numbers', () => {

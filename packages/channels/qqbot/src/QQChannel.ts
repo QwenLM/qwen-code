@@ -548,7 +548,8 @@ export class QQChannel extends ChannelBase {
                 typeof entry.msgId === 'string' &&
                 entry.msgId.length <= 128 &&
                 typeof entry.timestamp === 'number' &&
-                Number.isFinite(entry.timestamp)
+                Number.isFinite(entry.timestamp) &&
+                entry.timestamp <= now + QQChannel.REPLY_MSG_ID_TTL_MS
               );
             }),
         ) as Map<string, { msgId: string; timestamp: number }>;
