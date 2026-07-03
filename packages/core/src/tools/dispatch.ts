@@ -52,13 +52,25 @@ class DispatchInvocation extends BaseToolInvocation<
     return `dispatch(tool="${this.params.tool}", args=${JSON.stringify(this.params.args)})`;
   }
 
-  async execute(_signal: AbortSignal): Promise<ToolResult> {
+  async execute(signal: AbortSignal): Promise<ToolResult> {
     const toolName = this.params.tool;
     if (!toolName || typeof toolName !== 'string') {
       return {
         llmContent: 'Error: "tool" must be a non-empty string.',
         returnDisplay: 'Invalid tool name',
         error: { message: '"tool" must be a non-empty string' },
+      };
+    }
+
+    // Guard against recursive self-dispatch — dispatch is registered in the
+    // tool registry, so a call like dispatch({tool: "dispatch", ...}) would
+    // create unbounded recursion and stack overflow.
+    if (toolName === DispatchTool.Name) {
+      return {
+        llmContent:
+          'Error: cannot dispatch "dispatch" — recursive dispatch is not allowed.',
+        returnDisplay: 'Recursive dispatch blocked',
+        error: { message: 'Recursive dispatch blocked' },
       };
     }
 
@@ -69,6 +81,9 @@ class DispatchInvocation extends BaseToolInvocation<
     try {
       tool = await registry.ensureTool(toolName);
     } catch (err) {
+      process.stderr.write(
+        `[dispatch] ensureTool("${toolName}") failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
       return {
         llmContent: `Error: ensureTool("${toolName}") threw: ${err instanceof Error ? err.message : String(err)}`,
         returnDisplay: `ensureTool failed: ${toolName}`,
@@ -79,6 +94,9 @@ class DispatchInvocation extends BaseToolInvocation<
     }
 
     if (!tool) {
+      process.stderr.write(
+        `[dispatch] tool "${toolName}" not found in registry\n`,
+      );
       return {
         llmContent: `Error: no tool named "${toolName}" is registered. Use ToolSearch to discover available tools.`,
         returnDisplay: `Unknown tool: ${toolName}`,
@@ -89,8 +107,11 @@ class DispatchInvocation extends BaseToolInvocation<
     // Execute the target tool with forwarded args.
     try {
       const invocation = tool.build(this.params.args);
-      return await invocation.execute(_signal);
+      return await invocation.execute(signal);
     } catch (err) {
+      process.stderr.write(
+        `[dispatch] tool "${toolName}" execution failed: ${err instanceof Error ? err.message : String(err)}\n`,
+      );
       return {
         llmContent: `Error: tool "${toolName}" execution failed: ${err instanceof Error ? err.message : String(err)}`,
         returnDisplay: `Execution failed: ${toolName}`,

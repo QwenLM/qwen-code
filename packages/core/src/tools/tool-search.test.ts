@@ -868,36 +868,29 @@ describe('ToolSearchTool', () => {
   // <functions> block and the model invokes via dispatch — no API-level
   // tool syncing needed.
 
-  it("rolls back this call's reveals when setTools() throws", async () => {
-    // The reveal happens BEFORE setTools() so that getFunctionDeclarations
-    // includes the tool when setTools rebuilds the chat's declaration
-    // list. If setTools throws, the reveal must be undone — otherwise
-    // the registry says "revealed" while the API has no schema, and
-    // collectCandidates will exclude the tool from future keyword
-    // searches (per its isDeferredToolRevealed filter), making the
-    // tool effectively unreachable until /clear.
+  it('includes dispatch instruction in <functions> output', async () => {
+    // The dispatch instruction is the ONLY signal telling the model how
+    // to invoke discovered tools. If accidentally removed or changed, the
+    // entire proxy-tool flow breaks — hence we assert its presence.
     registry.registerTool(
-      new MockTool({ name: 'cron_create', shouldDefer: true }),
+      new MockTool({
+        name: 'test_tool',
+        description: 'a test tool',
+        searchHint: 'test',
+        shouldDefer: true,
+      }),
     );
-    registry.registerTool(
-      new MockTool({ name: 'cron_list', shouldDefer: true }),
-    );
-    // Pre-reveal cron_list to confirm rollback only undoes THIS call's
-    // reveals, not pre-existing ones.
-    registry.revealDeferredTool('cron_list');
-
-    vi.spyOn(config, 'getGeminiClient').mockReturnValue({
-      setTools: vi.fn().mockRejectedValue(new Error('chat not initialised')),
-    } as never);
 
     const tool = new ToolSearchTool(config);
-    await tool
-      .build({ query: 'select:cron_create,cron_list' })
+    const result = await tool
+      .build({ query: 'select:test_tool' })
       .execute(new AbortController().signal);
 
-    expect(registry.isDeferredToolRevealed('cron_create')).toBe(false);
-    // cron_list was already revealed before this call, so it stays revealed.
-    expect(registry.isDeferredToolRevealed('cron_list')).toBe(true);
+    const content = String(result.llmContent);
+    expect(content).toContain('<functions>');
+    expect(content).toContain('dispatch');
+    expect(content).toContain('To invoke this tool, call the `dispatch` tool');
+    expect(content).toContain('dispatch(tool: "<name>"');
   });
 
   it("doesn't propagate when ensureTool throws mid-batch — reports missing instead", async () => {
