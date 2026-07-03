@@ -166,15 +166,32 @@ export async function applyProviderInstallPlan(
     // hand-built plan could otherwise inject NODE_OPTIONS / LD_PRELOAD /
     // PATH etc. into both settings.json and the live process.env.
     currentStep = 'env';
+    const shadowedEnvKeys: string[] = [];
     for (const [key, value] of Object.entries(plan.env ?? {})) {
       if (DENY_ENV_KEYS.has(key.toUpperCase())) {
         throw new Error(
           `Install plan must not set reserved environment variable: ${key}`,
         );
       }
-      previousEnvValues.set(key, process.env[key]);
+      const previous = process.env[key];
+      // Detect when a shell env var or .env file already has this key with a
+      // different value — on restart, the higher-priority source will shadow
+      // the value we're about to write to settings.env.
+      if (previous !== undefined && previous !== '' && previous !== value) {
+        shadowedEnvKeys.push(key);
+      }
+      previousEnvValues.set(key, previous);
       settings.setValue(`env.${key}`, value);
       process.env[key] = value;
+    }
+
+    if (shadowedEnvKeys.length > 0) {
+      // eslint-disable-next-line no-console -- user-facing warning about config conflict
+      console.error(
+        `[auth] Warning: ${shadowedEnvKeys.join(', ')} ${shadowedEnvKeys.length === 1 ? 'is' : 'are'} also set in your shell environment or .env file. ` +
+          `The shell/file value will take priority on restart. ` +
+          `To ensure your new key is used, update or remove the variable from your shell profile or .env file.`,
+      );
     }
 
     // Apply model providers patches

@@ -395,7 +395,14 @@ export function loadEnvironment(
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) {
         continue;
       }
-      if (!Object.hasOwn(process.env, key) && typeof value === 'string') {
+      // Allow settings.env to fill in when process.env has the key but its
+      // value is empty string — an empty export (e.g. `DASHSCOPE_API_KEY=`
+      // in a Docker env file) is functionally missing yet blocks the normal
+      // no-override check because Object.hasOwn returns true.
+      const existingValue = process.env[key];
+      const isEffectivelyUnset =
+        !Object.hasOwn(process.env, key) || existingValue === '';
+      if (isEffectivelyUnset && typeof value === 'string') {
         process.env[key] = value;
         settingsEnvSourcedKeys.add(key);
       }

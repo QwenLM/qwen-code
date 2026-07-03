@@ -4191,6 +4191,42 @@ describe('Settings Loading and Merging', () => {
         // Workspace-level settings.env should NOT be loaded (filtered by mergeSettings)
         expect(process.env['WORKSPACE_ENV_VAR']).toBeUndefined();
       });
+
+      it('should override empty-string process.env value with settings.env value', () => {
+        // Regression test for #6283: an empty-string env var (e.g. from a
+        // Docker env file or shell profile with `export KEY=`) blocks
+        // settings.env from loading because Object.hasOwn returns true.
+        // The fix treats empty-string as effectively unset so settings.env
+        // can fill the gap.
+        process.env['EMPTY_STR_TEST_VAR'] = '';
+
+        const userSettingsContent: Settings = {
+          env: {
+            EMPTY_STR_TEST_VAR: 'settings_value',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(process.env['EMPTY_STR_TEST_VAR']).toEqual('settings_value');
+        delete process.env['EMPTY_STR_TEST_VAR'];
+      });
     });
 
     describe('QWEN_HOME custom directory', () => {
