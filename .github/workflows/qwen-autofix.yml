@@ -546,9 +546,12 @@ jobs:
           gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${REPO}" \
             --description 'Maintainer explicitly approved this issue for autonomous autofix' \
             --color '0e8a16' 2> /dev/null || true
-          gh issue edit "${ISSUE}" --repo "${REPO}" \
+          if ! gh issue edit "${ISSUE}" --repo "${REPO}" \
             --add-label 'autofix/in-progress' \
-            --remove-label "${AUTOFIX_APPROVED_LABEL}"
+            --remove-label "${AUTOFIX_APPROVED_LABEL}"; then
+            echo "::error::Failed to update labels on #${ISSUE} after claim comment was posted"
+            exit 1
+          fi
           echo "📌 Claimed #${ISSUE} (comment ${COMMENT_ID})"
 
       - name: 'Develop fix'
@@ -793,13 +796,13 @@ jobs:
             DETAIL="$(head -c 1500 "${WORKDIR}/failure.md")"
             LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label 'autofix/skip')
           elif [[ "${PUBLISH_OUTCOME}" == 'failure' ]]; then
-            REASON='the issue will be eligible for a future automated attempt.'
+            REASON='the issue will require maintainer re-approval before any future automated attempt.'
             DETAIL='The agent produced and verified a fix, but publishing the PR failed. Check the Publish PR step logs for the CI_DEV_BOT_PAT actor, git push, PR creation, or PR comment error.'
-            LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label "${AUTOFIX_APPROVED_LABEL}")
+            LABEL_ARGS=(--remove-label 'autofix/in-progress')
           else
-            REASON='the issue will be eligible for a future automated attempt.'
+            REASON='the issue will require maintainer re-approval before any future automated attempt.'
             DETAIL='The run failed before producing a verified fix.'
-            LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label "${AUTOFIX_APPROVED_LABEL}")
+            LABEL_ARGS=(--remove-label 'autofix/in-progress')
           fi
           gh issue edit "${ISSUE}" --repo "${REPO}" "${LABEL_ARGS[@]}" || true
           gh issue comment "${ISSUE}" --repo "${REPO}" --body "🤖 Withdrawing the claim above — the automated fix attempt did not succeed; ${REASON}

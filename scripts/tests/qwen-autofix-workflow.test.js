@@ -210,9 +210,24 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('restores approval when transient autofix failures withdraw a claim', () => {
+  it('requires re-approval when transient autofix failures withdraw a claim', () => {
     expect(withdrawClaimStep).toContain(
-      'LABEL_ARGS=(--remove-label \'autofix/in-progress\' --add-label "${AUTOFIX_APPROVED_LABEL}")',
+      'the issue will require maintainer re-approval before any future automated attempt.',
+    );
+    expect(withdrawClaimStep).toContain(
+      "LABEL_ARGS=(--remove-label 'autofix/in-progress')",
+    );
+    expect(withdrawClaimStep).not.toContain(
+      '--add-label "${AUTOFIX_APPROVED_LABEL}"',
+    );
+  });
+
+  it('fails claim cleanly when label updates fail after commenting', () => {
+    expect(workflow).toContain(
+      'if ! gh issue edit "${ISSUE}" --repo "${REPO}"',
+    );
+    expect(workflow).toContain(
+      'Failed to update labels on #${ISSUE} after claim comment was posted',
     );
   });
 
