@@ -721,13 +721,17 @@ function SlashCommandPanel({
               const section = item.section;
               const showSection =
                 menu.kind === 'command' &&
-                index > 0 &&
                 section !== undefined &&
                 section !== lastSection;
               lastSection = section ?? lastSection;
               return (
                 <div key={`${item.id}:${index}`} className={styles.slashEntry}>
-                  {showSection && <div className={styles.slashSection} />}
+                  {showSection && (
+                    <>
+                      {index > 0 && <div className={styles.slashSection} />}
+                      <div className={styles.slashSectionHeader}>{section}</div>
+                    </>
+                  )}
                   <button
                     ref={(node) => {
                       itemRefs.current[index] = node;
