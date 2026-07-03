@@ -676,13 +676,16 @@ function splitMarkdownChunks(text: string): string[] {
     }
 
     let slice = '';
+    let sliceBytes = 0;
     for (const char of line) {
-      const next = slice + char;
-      if (Buffer.byteLength(next, 'utf8') > MARKDOWN_CHUNK_BYTES) {
+      const charBytes = Buffer.byteLength(char, 'utf8');
+      if (sliceBytes + charBytes > MARKDOWN_CHUNK_BYTES) {
         if (slice) chunks.push(slice);
         slice = char;
+        sliceBytes = charBytes;
       } else {
-        slice = next;
+        slice += char;
+        sliceBytes += charBytes;
       }
     }
     current = slice;
@@ -977,14 +980,12 @@ function getExplicitMention(
   body: Record<string, unknown>,
   botId: string,
 ): boolean | undefined {
-  const explicitBoolean =
-    getBoolean(body, 'isMentioned') ??
-    getBoolean(body, 'isInAtList') ??
-    getBoolean(body, 'is_in_at_list');
-  if (explicitBoolean !== undefined) return explicitBoolean;
+  const botSpecificMention =
+    getBoolean(body, 'isInAtList') ?? getBoolean(body, 'is_in_at_list');
+  if (botSpecificMention !== undefined) return botSpecificMention;
 
   const mentions = collectMentionValues(body);
-  if (!mentions.present) return undefined;
+  if (!mentions.present) return getBoolean(body, 'isMentioned');
 
   return mentions.values.some(
     (mention) => mention === botId || mention === '@all' || mention === 'all',

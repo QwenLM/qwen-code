@@ -25,12 +25,20 @@ const mocks = vi.hoisted(() => {
       return this;
     });
     disconnect = vi.fn();
-    sendMessage = vi.fn(async () => ({ headers: { req_id: 'req-1' } }));
-    uploadMedia = vi.fn(async () => ({ media_id: 'media-1' }));
-    sendMediaMessage = vi.fn(async () => ({
-      headers: { req_id: 'media-req-1' },
+    sendMessage = vi.fn(async (_chatId: string, _message: unknown) => ({
+      headers: { req_id: 'req-1' },
     }));
-    downloadFile = vi.fn(async () => ({
+    uploadMedia = vi.fn(
+      async (_data: Buffer, _options: { type: string; filename: string }) => ({
+        media_id: 'media-1',
+      }),
+    );
+    sendMediaMessage = vi.fn(
+      async (_chatId: string, _mediaType: string, _mediaId: string) => ({
+        headers: { req_id: 'media-req-1' },
+      }),
+    );
+    downloadFile = vi.fn(async (_url: string, _aesKey?: string) => ({
       buffer: Buffer.from('downloaded'),
     }));
 
@@ -106,7 +114,7 @@ class TestWeComChannel extends WeComChannel {
 }
 
 class FailingPreflightWeComChannel extends WeComChannel {
-  readonly preflights = vi.fn(async () => {
+  readonly preflights = vi.fn(async (_envelope: Envelope) => {
     throw new Error('preflight failed');
   });
 
@@ -399,11 +407,22 @@ describe('WeComChannel', () => {
       text: { content: '@bot inspect' },
       mentions: [{ userid: 'bot-id' }],
     });
+    client.emit('message.text', {
+      msgid: 'msg-other-mentioned',
+      msgtype: 'text',
+      chattype: 'group',
+      chatid: 'group-1',
+      from: { userid: 'bob' },
+      text: { content: '@someone else' },
+      isMentioned: true,
+      isInAtList: false,
+    });
 
-    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(2));
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(3));
     expect(channel.envelopes.map((envelope) => envelope.isMentioned)).toEqual([
       false,
       true,
+      false,
     ]);
   });
 
