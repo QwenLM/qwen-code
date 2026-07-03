@@ -148,6 +148,10 @@ export class WeComChannel extends ChannelBase {
     process.stderr.write(`[WeCom:${this.name}] Disconnected.\n`);
   }
 
+  override supportsProactiveSend(): boolean {
+    return true;
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
     const client = this.client;
     if (!client) {
@@ -538,8 +542,10 @@ function readOutboundMedia(
     throw new Error(`Media file too large: ${stat.size} bytes`);
   }
 
+  const channelFilesDir = join(tmpdir(), 'channel-files');
+  mkdirSync(channelFilesDir, { recursive: true });
   const allowedDirs = [
-    safeRealpath(join(tmpdir(), 'channel-files')),
+    safeRealpath(channelFilesDir),
     safeRealpath('/tmp/channel-files'),
   ].filter((dir): dir is string => Boolean(dir));
   if (!allowedDirs.some((dir) => isInsideDir(real, dir))) {

@@ -114,6 +114,12 @@ describe('WeComChannel', () => {
     ).toThrow('requires botId and secret');
   });
 
+  it('supports proactive sends', () => {
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+
+    expect(channel.supportsProactiveSend()).toBe(true);
+  });
+
   it('connects the official SDK with bot credentials', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -447,10 +453,10 @@ describe('WeComChannel', () => {
     await channel.sendMessage('chat-1', 'a'.repeat(3900));
 
     expect(client.sendMessage).toHaveBeenCalledTimes(2);
-    const first = client.sendMessage.mock.calls[0]?.[1] as {
+    const first = client.sendMessage.mock.calls[0]?.[1] as unknown as {
       markdown: { content: string };
     };
-    const second = client.sendMessage.mock.calls[1]?.[1] as {
+    const second = client.sendMessage.mock.calls[1]?.[1] as unknown as {
       markdown: { content: string };
     };
     expect(Buffer.byteLength(first.markdown.content, 'utf8')).toBeLessThan(
