@@ -24,15 +24,20 @@ import {
 
 const debugLogger = createDebugLogger('WORKSPACE_REMEMBER');
 
-export type WorkspaceMemoryRememberTaskStatus =
+export type WorkspaceMemoryTaskStatus =
   | 'queued'
   | 'running'
   | 'completed'
   | 'failed';
 
+/** @deprecated Use WorkspaceMemoryTaskStatus. */
+export type WorkspaceMemoryRememberTaskStatus = WorkspaceMemoryTaskStatus;
+
+export type WorkspaceMemoryTaskKind = 'remember' | 'forget' | 'dream';
+
 interface WorkspaceMemoryTaskBaseSnapshot {
   taskId: string;
-  status: WorkspaceMemoryRememberTaskStatus;
+  status: WorkspaceMemoryTaskStatus;
   createdAt: string;
   updatedAt: string;
   error?: {
@@ -142,9 +147,9 @@ function cloneTask(
   };
 }
 
-function publicErrorMessage(
+export function publicErrorMessage(
   code: string,
-  kind: WorkspaceMemoryTaskRecord['kind'],
+  kind: WorkspaceMemoryTaskKind,
 ): string {
   if (code === 'managed_memory_unavailable') {
     return 'Managed memory is unavailable for this daemon workspace.';
@@ -167,7 +172,7 @@ function publicErrorMessage(
   return `Workspace memory ${kind} failed.`;
 }
 
-function publicErrorStatus(code: string): number {
+export function publicErrorStatus(code: string): number {
   if (code === 'remember_queue_full') return 429;
   if (code === 'managed_memory_unavailable') return 409;
   return 500;
@@ -175,6 +180,7 @@ function publicErrorStatus(code: string): number {
 
 export class WorkspaceRememberTaskLane {
   private static readonly MAX_TASKS = 1000;
+  private static readonly TERMINAL_TASK_TTL_MS = 5 * 60_000;
   private static readonly MAX_PENDING = 16;
   private static readonly MAX_NON_REMEMBER_PENDING = 8;
   private readonly tasks = new Map<string, WorkspaceMemoryTaskRecord>();
@@ -192,7 +198,16 @@ export class WorkspaceRememberTaskLane {
     return count;
   }
 
-  private evictTerminalTasks(): void {
+  private evictTerminalTasks(nowMs = Date.now()): void {
+    const cutoffMs = nowMs - WorkspaceRememberTaskLane.TERMINAL_TASK_TTL_MS;
+    for (const [id, task] of this.tasks) {
+      if (task.status !== 'completed' && task.status !== 'failed') continue;
+      const updatedAtMs = Date.parse(task.updatedAt);
+      if (!Number.isNaN(updatedAtMs) && updatedAtMs <= cutoffMs) {
+        this.tasks.delete(id);
+      }
+    }
+
     if (this.tasks.size <= WorkspaceRememberTaskLane.MAX_TASKS) return;
     for (const [id, task] of this.tasks) {
       if (task.status === 'completed' || task.status === 'failed') {
@@ -208,6 +223,8 @@ export class WorkspaceRememberTaskLane {
         code: 'remember_queue_full',
       });
     }
+    // Keep forget/dream from occupying the whole serial lane so remember stays
+    // available during heavier destructive or compaction bursts.
     if (
       kind !== 'remember' &&
       this.pendingCount('forget') + this.pendingCount('dream') >=
@@ -298,15 +315,17 @@ export class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = extractRememberErrorCode(err);
-        debugLogger.error('Workspace memory remember task failed:', err);
+        debugLogger.error(
+          'Workspace memory remember task failed:',
+          { taskId: task.taskId },
+          err,
+        );
         task.status = 'failed';
         task.error = {
           code,
           message: publicErrorMessage(code, task.kind),
         };
         task.updatedAt = nowIso();
-      } finally {
-        this.evictTerminalTasks();
       }
       if (task.status === 'completed' && task.result) {
         this.publishManagedMemoryChanged({
@@ -318,6 +337,7 @@ export class WorkspaceRememberTaskLane {
             : {}),
         });
       }
+      this.evictTerminalTasks();
     };
 
     return this.queue(task, run) as WorkspaceMemoryRememberTaskSnapshot;
@@ -357,15 +377,17 @@ export class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = extractRememberErrorCode(err, 'forget_failed');
-        debugLogger.error('Workspace memory forget task failed:', err);
+        debugLogger.error(
+          'Workspace memory forget task failed:',
+          { taskId: task.taskId },
+          err,
+        );
         task.status = 'failed';
         task.error = {
           code,
           message: publicErrorMessage(code, task.kind),
         };
         task.updatedAt = nowIso();
-      } finally {
-        this.evictTerminalTasks();
       }
       if (task.status === 'completed' && task.result) {
         this.publishManagedMemoryChanged({
@@ -377,6 +399,7 @@ export class WorkspaceRememberTaskLane {
             : {}),
         });
       }
+      this.evictTerminalTasks();
     };
 
     return this.queue(task, run) as WorkspaceMemoryForgetTaskSnapshot;
@@ -413,15 +436,17 @@ export class WorkspaceRememberTaskLane {
         task.updatedAt = nowIso();
       } catch (err) {
         const code = extractRememberErrorCode(err, 'dream_failed');
-        debugLogger.error('Workspace memory dream task failed:', err);
+        debugLogger.error(
+          'Workspace memory dream task failed:',
+          { taskId: task.taskId },
+          err,
+        );
         task.status = 'failed';
         task.error = {
           code,
           message: publicErrorMessage(code, task.kind),
         };
         task.updatedAt = nowIso();
-      } finally {
-        this.evictTerminalTasks();
       }
       if (task.status === 'completed' && task.result) {
         this.publishManagedMemoryChanged({
@@ -433,6 +458,7 @@ export class WorkspaceRememberTaskLane {
             : {}),
         });
       }
+      this.evictTerminalTasks();
     };
 
     return this.queue(task, run) as WorkspaceMemoryDreamTaskSnapshot;

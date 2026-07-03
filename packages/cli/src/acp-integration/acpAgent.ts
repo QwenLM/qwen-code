@@ -254,10 +254,18 @@ const BTW_CHILD_TIMEOUT_MS = 55_000;
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
 
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
-  const hiddenConfig = Object.create(config) as Config;
-  hiddenConfig.getChatRecordingService = () => undefined;
-  hiddenConfig.getTranscriptPath = () => '';
-  return hiddenConfig;
+  return new Proxy(config, {
+    get(target, prop) {
+      if (prop === 'getChatRecordingService') {
+        return () => undefined;
+      }
+      if (prop === 'getTranscriptPath') {
+        return () => '';
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
 }
 
 function collapseForkDirective(directive: string, maxLength: number): string {
@@ -5557,15 +5565,9 @@ class QwenAgent implements Agent {
               { errorKind: 'managed_memory_unavailable' },
             );
           }
-          throw new RequestError(
-            -32099,
-            err instanceof Error && err.message
-              ? err.message
-              : 'Workspace memory forget failed',
-            {
-              errorKind: code,
-            },
-          );
+          throw new RequestError(-32099, 'Workspace memory forget failed', {
+            errorKind: code,
+          });
         }
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream: {
@@ -5614,15 +5616,9 @@ class QwenAgent implements Agent {
               { errorKind: 'managed_memory_unavailable' },
             );
           }
-          throw new RequestError(
-            -32099,
-            err instanceof Error && err.message
-              ? err.message
-              : 'Workspace memory dream failed',
-            {
-              errorKind: code,
-            },
-          );
+          throw new RequestError(-32099, 'Workspace memory dream failed', {
+            errorKind: code,
+          });
         }
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {

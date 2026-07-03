@@ -205,4 +205,61 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
   });
+
+  it('falls back to summary matching when the selected entry index is stale', async () => {
+    const tempDir = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'forget-stale-index-'),
+    );
+    try {
+      const projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      const memoryFile = path.join(tempDir, 'memory.md');
+      await fs.writeFile(
+        memoryFile,
+        [
+          '---',
+          'title: Project memory',
+          '---',
+          '',
+          '# Project Memory',
+          '',
+          '- Other summary',
+          '  - Why: should stay',
+          '- Target summary',
+          '  - Why: should be removed',
+          '',
+        ].join('\n'),
+        'utf-8',
+      );
+
+      const result = await forgetManagedAutoMemoryMatches(
+        projectRoot,
+        [
+          {
+            topic: 'project',
+            summary: 'Target summary',
+            filePath: memoryFile,
+            entryIndex: 0,
+          },
+        ],
+        new Date('2026-07-03T00:00:00.000Z'),
+      );
+
+      expect(result.removedEntries).toEqual([
+        {
+          topic: 'project',
+          summary: 'Target summary',
+          filePath: memoryFile,
+          entryIndex: 0,
+        },
+      ]);
+      const updated = await fs.readFile(memoryFile, 'utf-8');
+      expect(updated).toContain('Other summary');
+      expect(updated).toContain('should stay');
+      expect(updated).not.toContain('Target summary');
+      expect(updated).not.toContain('should be removed');
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });

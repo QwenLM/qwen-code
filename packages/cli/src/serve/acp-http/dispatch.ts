@@ -9,6 +9,7 @@ import {
   APPROVAL_MODES,
   type ApprovalMode,
   BTW_MAX_INPUT_LENGTH,
+  createDebugLogger,
   SessionService,
   BuiltinAgentRegistry,
   SubagentError,
@@ -66,7 +67,11 @@ import {
 } from '../routes/workspace-setup-github.js';
 import { parseWorkspaceVoiceUpdateParams } from '../routes/workspace-voice.js';
 import { MAX_TRUST_REASON_LENGTH } from '../validation-limits.js';
-import type { WorkspaceRememberTaskLane } from '../workspace-remember.js';
+import {
+  publicErrorMessage,
+  publicErrorStatus,
+  type WorkspaceRememberTaskLane,
+} from '../workspace-remember.js';
 import { extractRememberErrorCode } from '../workspace-remember-errors.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from '../workspace-memory-remember-constants.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
@@ -123,6 +128,8 @@ import {
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
+
+const debugLogger = createDebugLogger('ACP_HTTP_DISPATCH');
 
 type PermissionResponse = Parameters<
   HttpAcpBridge['respondToSessionPermission']
@@ -2456,24 +2463,15 @@ export class AcpDispatcher {
             const code = extractRememberErrorCode(err);
             if (id !== undefined) {
               conn.sendConn(
-                error(
-                  id,
-                  -32099,
-                  code === 'remember_queue_full'
-                    ? 'Workspace memory remember queue is full.'
-                    : code === 'managed_memory_unavailable'
-                      ? 'Managed memory is unavailable for this daemon workspace'
-                      : 'Workspace memory remember failed.',
-                  {
-                    errorKind: code,
-                    httpStatus:
-                      code === 'remember_queue_full'
-                        ? 429
-                        : code === 'managed_memory_unavailable'
-                          ? 409
-                          : 500,
-                  },
-                ),
+                error(id, -32099, publicErrorMessage(code, 'remember'), {
+                  errorKind: code,
+                  httpStatus: publicErrorStatus(code),
+                }),
+              );
+            } else {
+              debugLogger.warn(
+                'workspace memory remember notification failed:',
+                err,
               );
             }
           }
@@ -2565,24 +2563,15 @@ export class AcpDispatcher {
             const code = extractRememberErrorCode(err, 'forget_failed');
             if (id !== undefined) {
               conn.sendConn(
-                error(
-                  id,
-                  -32099,
-                  code === 'remember_queue_full'
-                    ? 'Workspace memory task queue is full.'
-                    : code === 'managed_memory_unavailable'
-                      ? 'Managed memory is unavailable for this daemon workspace'
-                      : 'Workspace memory forget failed.',
-                  {
-                    errorKind: code,
-                    httpStatus:
-                      code === 'remember_queue_full'
-                        ? 429
-                        : code === 'managed_memory_unavailable'
-                          ? 409
-                          : 500,
-                  },
-                ),
+                error(id, -32099, publicErrorMessage(code, 'forget'), {
+                  errorKind: code,
+                  httpStatus: publicErrorStatus(code),
+                }),
+              );
+            } else {
+              debugLogger.warn(
+                'workspace memory forget notification failed:',
+                err,
               );
             }
           }
@@ -2645,24 +2634,15 @@ export class AcpDispatcher {
             const code = extractRememberErrorCode(err, 'dream_failed');
             if (id !== undefined) {
               conn.sendConn(
-                error(
-                  id,
-                  -32099,
-                  code === 'remember_queue_full'
-                    ? 'Workspace memory task queue is full.'
-                    : code === 'managed_memory_unavailable'
-                      ? 'Managed memory is unavailable for this daemon workspace'
-                      : 'Workspace memory dream failed.',
-                  {
-                    errorKind: code,
-                    httpStatus:
-                      code === 'remember_queue_full'
-                        ? 429
-                        : code === 'managed_memory_unavailable'
-                          ? 409
-                          : 500,
-                  },
-                ),
+                error(id, -32099, publicErrorMessage(code, 'dream'), {
+                  errorKind: code,
+                  httpStatus: publicErrorStatus(code),
+                }),
+              );
+            } else {
+              debugLogger.warn(
+                'workspace memory dream notification failed:',
+                err,
               );
             }
           }

@@ -8,6 +8,7 @@ import * as fs from 'node:fs/promises';
 import type { Content } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { atomicWriteFile } from '../utils/atomicFileWrite.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 import { runSideQuery } from '../utils/sideQuery.js';
 import {
   buildAutoMemoryEntrySearchText,
@@ -21,6 +22,8 @@ import { getAutoMemoryMetadataPath } from './paths.js';
 import { scanAutoMemoryTopicDocuments } from './scan.js';
 import { ensureAutoMemoryScaffold } from './store.js';
 import type { AutoMemoryMetadata, AutoMemoryType } from './types.js';
+
+const debugLogger = createDebugLogger('MEMORY_FORGET');
 
 export interface AutoMemoryForgetMatch {
   topic: AutoMemoryType;
@@ -66,6 +69,10 @@ const FORGET_SELECTION_RESPONSE_SCHEMA: Record<string, unknown> = {
 interface ForgetSelectionResponse {
   selectedCandidateIds: string[];
   reasoning?: string;
+}
+
+function normalizeSummary(summary: string): string {
+  return summary.replace(/\s+/g, ' ').trim().toLowerCase();
 }
 
 async function listIndexedForgetCandidates(
@@ -246,7 +253,10 @@ export async function selectManagedAutoMemoryForgetCandidates(
       );
     } catch (err) {
       if (options.abortSignal?.aborted) throw err;
-      // Fall through to heuristic.
+      debugLogger.warn(
+        'Managed auto-memory forget model selection failed; falling back to heuristic:',
+        err,
+      );
     }
   }
 
@@ -326,7 +336,9 @@ export async function forgetManagedAutoMemoryMatches(
         if (
           Number.isInteger(match.entryIndex) &&
           match.entryIndex! >= 0 &&
-          match.entryIndex! < allEntries.length
+          match.entryIndex! < allEntries.length &&
+          normalizeSummary(allEntries[match.entryIndex!].summary) ===
+            normalizeSummary(match.summary)
         ) {
           matchesByIndex.set(match.entryIndex!, match);
         }
@@ -380,7 +392,11 @@ export async function forgetManagedAutoMemoryMatches(
       }
     } catch (err) {
       if (options.abortSignal?.aborted) throw err;
-      // File may have already been removed; continue.
+      debugLogger.warn(
+        'Managed auto-memory forget skipped file after apply error:',
+        { filePath },
+        err,
+      );
     }
   }
 

@@ -3001,6 +3001,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       }),
     ).rejects.toMatchObject({
       code: -32099,
+      message: 'Workspace memory forget failed',
       data: { errorKind: 'forget_failed' },
     });
 
@@ -3088,6 +3089,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream, {}),
     ).rejects.toMatchObject({
       code: -32099,
+      message: 'Workspace memory dream failed',
       data: { errorKind: 'dream_failed' },
     });
 
