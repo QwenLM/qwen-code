@@ -7,9 +7,9 @@
 /**
  * Vision-bridge capability advertisement for ACP initialize responses.
  *
- * Describes BEHAVIOR (boolean flags), not internal constants, so external
- * consumers like sudowork can feature-detect without coupling to thresholds
- * that may change across releases.
+ * Boolean flags describe stable behavior; `maxImagesPerTurn` is an
+ * informational threshold that tracks the internal `VISION_BRIDGE_MAX_IMAGES`
+ * constant.
  *
  * Placed in `agentCapabilities._meta.imageCapability` of the ACP
  * `initialize` response on both stdio and HTTP paths.
