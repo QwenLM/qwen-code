@@ -228,7 +228,6 @@ type DaemonToolLoopState = {
   loopDetected: boolean;
 };
 
-const DAEMON_TURN_TOOL_CALL_CAP = 100;
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
 
 const PERMISSION_CANCEL_SKIP_MESSAGE =
@@ -270,7 +269,12 @@ function recordDaemonToolCalls(
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
   loopState.totalToolCalls += count;
-  if (loopState.totalToolCalls <= DAEMON_TURN_TOOL_CALL_CAP) return false;
+  // Same per-turn cap as the core LoopDetectionService (getMaxToolCallsPerTurn
+  // resolves model.maxToolCallsPerTurn to an effective value, Infinity when
+  // disabled). Unlike core there is no in-session disable check — that flag is
+  // only set by the interactive loop-detection dialog, which has no ACP
+  // equivalent.
+  if (loopState.totalToolCalls <= config.getMaxToolCallsPerTurn()) return false;
   return recordDaemonLoopDetected(
     config,
     promptId,
