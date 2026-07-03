@@ -99,7 +99,6 @@ import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
 import {
   decodeVisionModelForPicker,
-  encodeFastModelForSetting,
   encodeVisionModelForSetting,
   extractBareModelId,
 } from './utils/modelEncoding';
@@ -1670,6 +1669,12 @@ export function App({
     )?.values.effective;
     if (typeof value !== 'string' || !value.trim()) return undefined;
     return decodeVisionModelForPicker(value.trim());
+  })();
+  const currentFastModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'fastModel',
+    )?.values.effective;
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
   const shellOutputMaxLines = resolveShellOutputMaxLines(workspaceSettings);
   const [compactMode, setCompactMode] = useState(false);
@@ -3325,10 +3330,10 @@ export function App({
         blockLocalCommandDuringTurn();
         return;
       }
-      // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
-      // Core's resolveFastModelSelector() expects `authType:modelId`.
-      const encoded = encodeFastModelForSetting(modelId);
-      sendPrompt(`/model --fast ${encoded}`).catch((error: unknown) => {
+      // Model IDs from the picker arrive as bare model IDs (baseModelId), not
+      // ACP format. The model picker strips the (authType) suffix before
+      // calling this handler.
+      sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
     },
@@ -3337,8 +3342,8 @@ export function App({
 
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
-      // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
-      // Voice model resolution expects bare model IDs (not authType:modelId).
+      // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
+      // not ACP format. extractVoiceModels() sets id to the baseModelId.
       const bareModelId = extractBareModelId(modelId);
       setWorkspaceSetting('workspace', 'voiceModel', bareModelId).catch(
         (error: unknown) => reportError(error, t('model.setVoice')),
@@ -3359,20 +3364,12 @@ export function App({
     [reportError, setWorkspaceSetting, t],
   );
 
-  const modelHandlers: Record<ModelDialogMode, (id: string) => void> = useMemo(
-    () => ({
-      main: handleModelSelect,
-      fast: handleFastModelSelect,
-      voice: handleVoiceModelSelect,
-      vision: handleVisionModelSelect,
-    }),
-    [
-      handleModelSelect,
-      handleFastModelSelect,
-      handleVoiceModelSelect,
-      handleVisionModelSelect,
-    ],
-  );
+  const modelHandlers: Record<ModelDialogMode, (id: string) => void> = {
+    main: handleModelSelect,
+    fast: handleFastModelSelect,
+    voice: handleVoiceModelSelect,
+    vision: handleVisionModelSelect,
+  };
 
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
@@ -3520,7 +3517,9 @@ export function App({
                     ? currentVoiceModel
                     : modelDialogMode === 'vision'
                       ? currentVisionModel
-                      : undefined
+                      : modelDialogMode === 'fast'
+                        ? currentFastModel
+                        : undefined
                 }
                 onSelect={(modelId) => {
                   if (modelDialogMode) {

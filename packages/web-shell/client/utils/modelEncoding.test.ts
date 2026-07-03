@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   encodeVisionModelForSetting,
-  encodeFastModelForSetting,
   extractBareModelId,
   decodeVisionModelForPicker,
 } from './modelEncoding';
@@ -60,18 +59,6 @@ describe('encodeVisionModelForSetting', () => {
   });
 });
 
-describe('encodeFastModelForSetting', () => {
-  it('encodes standard ACP format', () => {
-    expect(encodeFastModelForSetting('qwen-max(qwen-oauth)')).toBe(
-      'qwen-oauth:qwen-max',
-    );
-  });
-
-  it('passes through non-ACP format unchanged', () => {
-    expect(encodeFastModelForSetting('plain-model')).toBe('plain-model');
-  });
-});
-
 describe('extractBareModelId', () => {
   it('extracts bare model ID from ACP format', () => {
     expect(extractBareModelId('qwen-max(qwen-oauth)')).toBe('qwen-max');
@@ -118,6 +105,28 @@ describe('decodeVisionModelForPicker', () => {
   it('passes through leading-colon malformed input', () => {
     // colonIdx === 0, which is not > 0, so passthrough
     expect(decodeVisionModelForPicker(':modelId')).toBe(':modelId');
+  });
+
+  it('strips \\0baseUrl suffix before decoding', () => {
+    expect(
+      decodeVisionModelForPicker(
+        'qwen-oauth:qwen-vl-max\0https://api.example.com',
+      ),
+    ).toBe('qwen-vl-max(qwen-oauth)');
+  });
+
+  it('handles colon-bearing ID with \\0baseUrl suffix', () => {
+    expect(
+      decodeVisionModelForPicker(
+        'openai:gpt-4o:online\0https://api.openai.com',
+      ),
+    ).toBe('gpt-4o:online(openai)');
+  });
+
+  it('passes through bare ID with \\0baseUrl suffix but no colon', () => {
+    expect(
+      decodeVisionModelForPicker('plain-model\0https://api.example.com'),
+    ).toBe('plain-model');
   });
 });
 
