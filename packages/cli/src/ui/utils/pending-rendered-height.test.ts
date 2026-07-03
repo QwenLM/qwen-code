@@ -192,20 +192,31 @@ describe('fitPendingSlice', () => {
     expect(keptLines).toBe(6);
   });
 
-  it('charges the taller vertical-format height for multi-column tables', () => {
-    // A 4-column, 6-row table: horizontal ≈ 2*6+5 = 17 rows, but the vertical
-    // (key-value) fallback is 6*4 + 5 + 2 = 31 rows. With budget 20 the
-    // horizontal estimate would keep it; the (correct) vertical estimate must
-    // cut before it so a narrow-terminal vertical render can't overflow.
+  it('charges the taller vertical-format height on a NARROW terminal', () => {
+    // 4 cols → minHorizontalWidth = max(24, 6*4+5) = 29. contentWidth 20 < 29 →
+    // vertical: 6*4 + 5 + 2 = 31 rows. intro(1)+31 > budget 20 → cut before it.
     const lines = [
       'intro',
       '| A | B | C | D |',
       '| - | - | - | - |',
       ...Array.from({ length: 6 }, (_, i) => `| ${i} | ${i} | ${i} | ${i} |`),
     ];
-    const { keptLines, clipped } = fitPendingSlice(lines, 80, 20, CLAMP);
+    const { keptLines, clipped } = fitPendingSlice(lines, 20, 20, CLAMP);
     expect(clipped).toBe(true);
     expect(keptLines).toBe(1); // cut before the table
+  });
+
+  it('uses the shorter horizontal height on a WIDE terminal (no early clip)', () => {
+    // Same table on a wide terminal (80 ≥ 29) → horizontal: 2*6+5 = 17 rows.
+    // intro(1)+17 = 18 ≤ budget 20 → the small table is NOT clipped early.
+    const lines = [
+      'intro',
+      '| A | B | C | D |',
+      '| - | - | - | - |',
+      ...Array.from({ length: 6 }, (_, i) => `| ${i} | ${i} | ${i} | ${i} |`),
+    ];
+    const { clipped } = fitPendingSlice(lines, 80, 20, CLAMP);
+    expect(clipped).toBe(false);
   });
 
   it('accounts for wrapping of non-table lines', () => {
