@@ -166,17 +166,22 @@ jobs:
         env:
           GH_TOKEN: '${{ github.token }}'
           PR_NUMBER: "${{ github.event_name == 'pull_request' && github.event.pull_request.number || '' }}"
+          IS_SAME_REPO_PR: "${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository }}"
         run: |-
           profile=full
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
-            changed_files="${RUNNER_TEMP}/changed-files.jsonl"
-            if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[] | {filename, status, previous_filename}' > "${changed_files}"; then
-              if ! profile="$(node .github/scripts/ci/classify-profile.mjs "${changed_files}")"; then
-                echo "::error::CI profile classifier exited non-zero; running full CI."
-                profile=full
+            if [[ "${IS_SAME_REPO_PR}" == "true" ]]; then
+              changed_files="${RUNNER_TEMP}/changed-files.jsonl"
+              if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[] | {filename, status, previous_filename}' > "${changed_files}"; then
+                if ! profile="$(node .github/scripts/ci/classify-profile.mjs "${changed_files}")"; then
+                  echo "::error::CI profile classifier exited non-zero; running full CI."
+                  profile=full
+                fi
+              else
+                echo "::warning::Unable to list PR changed files; running full CI."
               fi
             else
-              echo "::warning::Unable to list PR changed files; running full CI."
+              echo "Fork PR detected; running full CI."
             fi
           fi
           echo "ci_profile=${profile}" >> "${GITHUB_OUTPUT}"
