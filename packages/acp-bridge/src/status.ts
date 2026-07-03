@@ -402,6 +402,7 @@ export interface ServeWorkspaceSkillStatus extends ServeStatusCell {
   argumentHint?: string;
   model?: string;
   extensionName?: string;
+  disabled?: boolean;
 }
 
 export interface ServeWorkspaceSkillsStatus {

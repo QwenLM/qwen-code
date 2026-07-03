@@ -103,8 +103,12 @@ describe('createWorkspaceSkillsStatusProvider', () => {
       {
         name: 'disabled',
         status: 'disabled',
+        disabled: true,
       },
     ]);
+    expect(status.skills.find((s) => s.name === 'enabled')).not.toHaveProperty(
+      'disabled',
+    );
   });
 
   it('reuses one SkillManager per workspace across calls', async () => {
@@ -119,4 +123,5 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     expect(listSpy).toHaveBeenCalledTimes(2);
     expect(listSpy.mock.instances[0]).toBe(listSpy.mock.instances[1]);
   });
+
 });

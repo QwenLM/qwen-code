@@ -1125,6 +1125,7 @@ export function App({
       .then((status) => {
         setLoadedSkills(
           (status?.skills ?? [])
+            .filter((s) => !s.disabled)
             .map((s) => ({ name: s.name, description: s.description ?? '' }))
             .sort((a, b) => a.name.localeCompare(b.name)),
         );
@@ -2586,6 +2587,7 @@ export function App({
                 .loadSkillsStatus()
                 .then((status) => {
                   const skills = (status?.skills ?? [])
+                    .filter((s) => !s.disabled)
                     .map((s) => ({
                       name: s.name,
                       description: s.description ?? '',

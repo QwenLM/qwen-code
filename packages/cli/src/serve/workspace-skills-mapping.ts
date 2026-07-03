@@ -18,8 +18,8 @@ export function mapSkillConfigToStatus(
   skill: SkillConfig,
   disabledSkillNames: ReadonlySet<string> = new Set(),
 ): ServeWorkspaceSkillStatus {
-  const userDisabled = disabledSkillNames.has(skill.name.toLowerCase());
   const modelInvocable = skill.disableModelInvocation !== true;
+  const userDisabled = disabledSkillNames.has(skill.name.toLowerCase());
   return {
     kind: 'skill',
     status: userDisabled ? 'disabled' : 'ok',
@@ -27,6 +27,7 @@ export function mapSkillConfigToStatus(
     description: skill.description,
     level: skill.level,
     modelInvocable,
+    ...(userDisabled ? { disabled: true } : {}),
     ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
     ...(skill.model ? { model: skill.model } : {}),
     ...(skill.extensionName ? { extensionName: skill.extensionName } : {}),

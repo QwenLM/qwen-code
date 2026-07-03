@@ -453,6 +453,7 @@ export interface DaemonWorkspaceSkillStatus extends DaemonStatusCell {
   argumentHint?: string;
   model?: string;
   extensionName?: string;
+  disabled?: boolean;
 }
 
 export interface DaemonWorkspaceSkillsStatus {

@@ -16,9 +16,10 @@ export function useDaemonSkills(options: DaemonResourceOptions = {}) {
     [workspaceActions],
   );
   const result = useDaemonResource(load, options);
+  const allSkills = result.data?.skills ?? [];
   return {
     ...result,
     status: result.data,
-    skills: result.data?.skills ?? [],
+    skills: allSkills.filter((s) => !s.disabled),
   };
 }
