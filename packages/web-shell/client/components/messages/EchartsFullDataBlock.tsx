@@ -836,7 +836,7 @@ export function createEchartsFullDataRenderer({
   ) {
     if (
       info.source !== 'assistant' ||
-      info.language !== ECHARTS_FULLDATA_LANGUAGE
+      info.language.toLowerCase() !== ECHARTS_FULLDATA_LANGUAGE
     ) {
       return undefined;
     }
@@ -1164,7 +1164,11 @@ export function EchartsFullDataBlock({
   const title = getTitle(option) ?? t('echartsChart.defaultTitle');
 
   return (
-    <section className={styles.card} data-testid="echarts-fulldata-rendered">
+    <section
+      className={styles.card}
+      aria-label={title}
+      data-testid="echarts-fulldata-rendered"
+    >
       <div className={styles.toolbar}>
         <div className={styles.title} title={title}>
           {title}

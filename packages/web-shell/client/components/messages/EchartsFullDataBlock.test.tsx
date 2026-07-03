@@ -58,11 +58,13 @@ async function flushChart(): Promise<void> {
 
 async function renderEchartsMarkdown({
   code,
+  fenceLanguage = 'echarts-fulldata',
   loadEcharts,
   language = 'en',
   source = 'assistant',
 }: {
   code: string;
+  fenceLanguage?: string;
   loadEcharts?: EchartsRuntimeLoader;
   language?: 'en' | 'zh-CN';
   source?: 'assistant' | 'thinking';
@@ -78,7 +80,7 @@ async function renderEchartsMarkdown({
           }}
         >
           <Markdown
-            content={`\`\`\`echarts-fulldata\n${code}\n\`\`\``}
+            content={`\`\`\`${fenceLanguage}\n${code}\n\`\`\``}
             source={source}
           />
         </WebShellCustomizationProvider>
@@ -132,6 +134,31 @@ describe('EchartsFullDataBlock', () => {
       container.querySelector('[data-testid="echarts-fulldata-rendered"]'),
     ).toBeNull();
     expect(container.textContent).toContain('echarts-fulldata');
+  });
+
+  it('renders echarts blocks with case-insensitive fence language matching', async () => {
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption: vi.fn(),
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        dataset: { source: [[1]] },
+        series: [{ type: 'bar' }],
+      }),
+      fenceLanguage: 'ECharts-FullData',
+      loadEcharts: () => runtime,
+    });
+    await flushChart();
+
+    expect(runtime.init).toHaveBeenCalledOnce();
+    expect(
+      container.querySelector('[data-testid="echarts-fulldata-rendered"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('pre code')).toBeNull();
   });
 
   it('renders chart/data icon switching from dataset-backed options', async () => {
@@ -194,6 +221,9 @@ describe('EchartsFullDataBlock', () => {
     ]);
     expect(container.textContent).toContain('Weekly orders');
     expect(container.textContent).not.toContain('echarts-fulldata');
+    expect(
+      container.querySelector('section[aria-label="Weekly orders"]'),
+    ).not.toBeNull();
 
     const buttons = Array.from(container.querySelectorAll('button'));
     expect(buttons.map((button) => button.textContent)).toEqual(['', '']);
