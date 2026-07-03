@@ -584,6 +584,46 @@ describe('MessageList — turn collapse (DOM)', () => {
     });
   });
 
+  it('does not smooth-scroll restored history that ends with a user prompt', async () => {
+    const scrollTo = vi.fn();
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, [], undefined, { loadingTranscript: true });
+    renderInto(root, [userMsg('u1')], undefined, {
+      loadingTranscript: false,
+    });
+    await nextFrame();
+
+    expect(scrollTop).toBe(1200);
+    expect(scrollTo).not.toHaveBeenCalledWith({
+      top: 1200,
+      behavior: 'smooth',
+    });
+  });
+
   it('snaps to bottom without smooth scrolling when catch-up completes', () => {
     const scrollTo = vi.fn();
     let scrollTop = 0;

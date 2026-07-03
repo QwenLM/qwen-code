@@ -154,6 +154,7 @@ describe('createDaemonSessionActions', () => {
 
     void actions.loadSession('session-b').catch(() => undefined);
 
+    expect(existingSession.detach).toHaveBeenCalledOnce();
     expect(sessionRef.current).toBeUndefined();
     expect(getConnection()).toMatchObject({
       status: 'connecting',

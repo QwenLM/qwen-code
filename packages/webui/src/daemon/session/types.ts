@@ -310,8 +310,8 @@ export interface DaemonSessionActions {
   listSessions(options?: {
     pageSize?: number;
   }): Promise<DaemonSessionSummary[]>;
-  loadSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
-  resumeSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
+  loadSession(sessionId: string): Promise<void>;
+  resumeSession(sessionId: string): Promise<void>;
   /**
    * Create a daemon session and update local session state. Callers that need
    * transcript/event streaming must follow with `attachSession()`.
@@ -367,10 +367,6 @@ export interface DaemonSessionActions {
     name?: string,
   ): Promise<{ sessionId: string; displayName: string }>;
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
-}
-
-export interface SessionSwitchOptions {
-  deferTranscriptReset?: boolean;
 }
 
 export interface DaemonSessionContextValue {

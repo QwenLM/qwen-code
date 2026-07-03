@@ -828,59 +828,42 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const currentMode =
             getCurrentMode(context) ?? providerModelStatus.currentMode;
 
-          setConnection((current) => ({
-            status: 'connected',
-            sessionId: activeSession.sessionId,
-            // Surface the bound client id so consumers can recognize their own
-            // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
-            ...(activeSession.clientId
-              ? { clientId: activeSession.clientId }
-              : {}),
-            workspaceCwd: activeSession.workspaceCwd,
-            commands: commands.length > 0 ? commands : current.commands,
-            skills: skills.length > 0 ? skills : current.skills,
-            models: sessionModels.length > 0 ? sessionModels : current.models,
-            currentModel: sessionCurrentModel ?? current.currentModel,
-            currentMode: currentMode ?? current.currentMode,
-            displayName:
-              getSessionDisplayName(activeSession.state) ??
-              (current.sessionId === activeSession.sessionId
-                ? current.displayName
-                : undefined),
-            tokenUsage:
-              // Keep token usage in sync with tokenCount: replay usage
-              // supersedes in-memory state, same-session reconnect keeps it,
-              // and a different session without replay usage starts empty.
-              replayTokenUsage !== undefined
-                ? replayTokenUsage
-                : current.sessionId === activeSession.sessionId
-                  ? current.tokenUsage
-                  : undefined,
-            tokenCount:
-              // A freshly loaded snapshot covers everything up to the SSE
-              // resume point, so its usage supersedes the in-memory count;
-              // without one (or with a usage-less replay) keep the
-              // same-session value and start anything else at 0.
-              replayTokenCount !== undefined
-                ? replayTokenCount
-                : current.sessionId === activeSession.sessionId
-                  ? (current.tokenCount ?? 0)
-                  : 0,
-            contextWindow: sessionContextWindow ?? current.contextWindow,
-            providers: providers ?? current.providers,
-            supportedCommands: supportedCommands ?? current.supportedCommands,
-            context: context ?? current.context,
-            capabilities: capabilities ?? current.capabilities,
-            loadingTranscript: undefined,
-            catchingUp:
-              // Replay already injected above — keep the cleared flag rather
-              // than re-arming it (nothing before SSE would clear it again).
-              replayInjected
-                ? current.catchingUp
-                : isSameSessionReconnect ||
-                  activeSession.lastEventId != null ||
-                  undefined,
-          }));
+          setConnection((current) => {
+            if (current.sessionId !== activeSession.sessionId) return current;
+            return {
+              ...current,
+              status: 'connected',
+              sessionId: activeSession.sessionId,
+              // Surface the bound client id so consumers can recognize their own
+              // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
+              ...(activeSession.clientId
+                ? { clientId: activeSession.clientId }
+                : {}),
+              workspaceCwd: activeSession.workspaceCwd,
+              commands: commands.length > 0 ? commands : current.commands,
+              skills: skills.length > 0 ? skills : current.skills,
+              models: sessionModels.length > 0 ? sessionModels : current.models,
+              currentModel: sessionCurrentModel ?? current.currentModel,
+              currentMode: currentMode ?? current.currentMode,
+              displayName:
+                getSessionDisplayName(activeSession.state) ??
+                current.displayName,
+              contextWindow: sessionContextWindow ?? current.contextWindow,
+              providers: providers ?? current.providers,
+              supportedCommands: supportedCommands ?? current.supportedCommands,
+              context: context ?? current.context,
+              capabilities: capabilities ?? current.capabilities,
+              loadingTranscript: undefined,
+              catchingUp:
+                // Replay already injected above — keep the cleared flag rather
+                // than re-arming it (nothing before SSE would clear it again).
+                replayInjected
+                  ? current.catchingUp
+                  : isSameSessionReconnect ||
+                    activeSession.lastEventId != null ||
+                    undefined,
+            };
+          });
           if (loadWarningTexts.length > 0) {
             store.dispatch(
               loadWarningTexts.map((text) => ({

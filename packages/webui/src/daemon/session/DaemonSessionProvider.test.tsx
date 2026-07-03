@@ -4914,60 +4914,6 @@ describe('DaemonSessionProvider', () => {
     ]);
   });
 
-  it('keeps transcript until replay for deferred session switches', async () => {
-    const nextSession = createDeferred<MockSession>();
-    const currentSession = createMockSession({
-      replaySnapshot: createTextReplaySnapshot('old transcript'),
-    });
-    sdkMocks.sessions.push(currentSession);
-    let actions: DaemonSessionActions | undefined;
-    let blocks: readonly DaemonTranscriptBlock[] = [];
-    let connection: DaemonConnectionState | undefined;
-
-    function Harness() {
-      actions = useDaemonActions();
-      blocks = useDaemonTranscriptBlocks();
-      connection = useDaemonConnection();
-      return null;
-    }
-
-    await renderWithProvider(<Harness />, { autoConnect: true });
-    await act(async () => {
-      await flushPromises();
-    });
-    expect(blocks).toMatchObject([
-      { kind: 'assistant', text: 'old transcript' },
-    ]);
-    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(
-      async () => nextSession.promise,
-    );
-
-    const loadPromise = requireActions(actions)
-      .loadSession('session-b', { deferTranscriptReset: true })
-      .catch(() => undefined);
-    await act(async () => {
-      await flushPromises();
-    });
-
-    expect(connection?.loadingTranscript).toBe(true);
-    expect(blocks).toMatchObject([
-      { kind: 'assistant', text: 'old transcript' },
-    ]);
-    nextSession.resolve(
-      createMockSession({
-        sessionId: 'session-b',
-        replaySnapshot: createTextReplaySnapshot('new transcript'),
-      }),
-    );
-    await act(async () => {
-      await loadPromise;
-      await flushPromises();
-    });
-    expect(blocks).toMatchObject([
-      { kind: 'assistant', text: 'new transcript' },
-    ]);
-  });
-
   it('loads controlled sessionId changes', async () => {
     const nextSession = createDeferred<MockSession>();
     sdkMocks.sessions.push(
@@ -5103,6 +5049,97 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       await flushPromises();
     });
+  });
+
+  it('ignores stale metadata after switching to another session', async () => {
+    const providersA = createDeferred<unknown>();
+    const commandsA =
+      createDeferred<Awaited<ReturnType<MockSession['supportedCommands']>>>();
+    const contextA =
+      createDeferred<Awaited<ReturnType<MockSession['context']>>>();
+    sdkMocks.workspaceProviders.mockReturnValueOnce(providersA.promise);
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-a',
+        replaySnapshot: createTextReplaySnapshot('session a transcript'),
+        supportedCommands: vi.fn(() => commandsA.promise),
+        context: vi.fn(() => contextA.promise),
+      }),
+      createMockSession({
+        sessionId: 'session-b',
+        replaySnapshot: createTextReplaySnapshot('session b transcript'),
+      }),
+    );
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({ sessionId: 'session-a' });
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'session a transcript' },
+    ]);
+
+    act(() => {
+      root?.render(
+        <DaemonSessionProvider
+          baseUrl="http://127.0.0.1:4170"
+          autoConnect={true}
+          sessionId="session-b"
+        >
+          <Harness />
+        </DaemonSessionProvider>,
+      );
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection).toMatchObject({
+      sessionId: 'session-b',
+      loadingTranscript: undefined,
+    });
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'session b transcript' },
+    ]);
+
+    providersA.resolve({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      providers: [],
+    });
+    commandsA.resolve({
+      v: 1,
+      sessionId: 'session-a',
+      availableCommands: [],
+      availableSkills: [],
+    });
+    contextA.resolve({
+      v: 1,
+      sessionId: 'session-a',
+      workspaceCwd: '/mock-workspace',
+      state: { models: { currentModel: 'stale-model' } },
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(connection).toMatchObject({ sessionId: 'session-b' });
+    expect(connection?.currentModel).not.toBe('stale-model');
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'session b transcript' },
+    ]);
   });
 
   it('loads controlled sessionId on mount without creating a session', async () => {

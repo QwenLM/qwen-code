@@ -1812,6 +1812,7 @@ export const MessageList = memo(
     const didTrackLastUserMsgRef = useRef(false);
     const prevLastUserMsgId = useRef<string | null>(null);
     const pendingNewUserSmoothScroll = useRef(false);
+    const prevLoadingTranscript = useRef(loadingTranscript);
     const prevActiveExecutionKey = useRef<string | null>(null);
     const prevCatchingUp: MutableRefObject<boolean | undefined> =
       useRef(catchingUp);
@@ -2486,12 +2487,14 @@ export const MessageList = memo(
     // scrolls into view as it streams in.
     useLayoutEffect(() => {
       const lastId = getLastUserMessageId(messages);
-      if (catchingUp) {
+      if (catchingUp || loadingTranscript || prevLoadingTranscript.current) {
         prevLastUserMsgId.current = lastId;
         didTrackLastUserMsgRef.current = true;
         pendingNewUserSmoothScroll.current = false;
+        prevLoadingTranscript.current = loadingTranscript;
         return;
       }
+      prevLoadingTranscript.current = loadingTranscript;
       if (!didTrackLastUserMsgRef.current) {
         prevLastUserMsgId.current = lastId;
         didTrackLastUserMsgRef.current = true;
@@ -2512,7 +2515,7 @@ export const MessageList = memo(
         pendingNewUserSmoothScroll.current = false;
       }
       prevLastUserMsgId.current = lastId;
-    }, [messages, catchingUp, setShouldFollow]);
+    }, [messages, catchingUp, loadingTranscript, setShouldFollow]);
 
     // Rule 5: session restore — when catchingUp flips from true → falsy,
     // replay just finished. Scroll to bottom once so the user sees the
