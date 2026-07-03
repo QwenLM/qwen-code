@@ -86,9 +86,15 @@ pub fn denormalize_args(tool: &str, args: &mut Value, screenshot_w: u32, screens
                 None => continue, // no screen size cached yet → leave field as-is
             }
         } else if screenshot_w == 0 {
-            // No window basis available. For desktop-scope clicks (no pid), fall
-            // back to screen size so get_desktop_state + click(x,y) works in
-            // normalized mode. If screen size isn't cached yet, skip.
+            // No window basis available — two distinct cases:
+            //  1. Desktop-scope (no pid/window_id): fall back to screen size.
+            //  2. Window-scope but get_window_state not yet called: leave as-is
+            //     to avoid mapping against the wrong basis.
+            let has_window_target = args.get("pid").is_some_and(|v| !v.is_null())
+                || args.get("window_id").is_some_and(|v| !v.is_null());
+            if has_window_target {
+                continue;
+            }
             match screen {
                 Some(s) => s,
                 None => continue,
@@ -608,6 +614,16 @@ mod tests {
         denormalize_args("click", &mut args, 0, 0);
         assert_eq!(args["x"], json!(1280.0)); // 500/1000*2560
         assert_eq!(args["y"], json!(720.0));  // 500/1000*1440
+    }
+
+    #[test]
+    fn denormalize_click_skips_window_scope_without_cache() {
+        put_screen_size(2560, 1440);
+        // pid present but no get_window_state yet → must NOT fall back to screen
+        let mut args = json!({ "pid": 42, "x": 500.0, "y": 500.0 });
+        denormalize_args("click", &mut args, 0, 0);
+        assert_eq!(args["x"], json!(500.0)); // unchanged
+        assert_eq!(args["y"], json!(500.0)); // unchanged
     }
 
     #[test]
