@@ -37,7 +37,7 @@ interface WeComClientOptions {
 }
 
 interface WeComClient {
-  connect(): Promise<void>;
+  connect(): unknown;
   disconnect(): void;
   on(event: string, handler: (payload: unknown) => void): void;
   sendMessage(chatId: string, message: unknown): Promise<unknown>;
@@ -79,6 +79,7 @@ const MESSAGE_EVENTS = [
 const DEDUP_TTL_MS = 5 * 60 * 1000;
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const MARKDOWN_CHUNK_BYTES = 3800;
+const AUTHENTICATION_TIMEOUT_MS = 30_000;
 
 export class WeComChannel extends ChannelBase {
   private readonly wecom: WeComConfig;
@@ -135,13 +136,18 @@ export class WeComChannel extends ChannelBase {
       }
       process.stderr.write(`[WeCom:${this.name}] WebSocket ${reason}.\n`);
     };
-    client.on('close', () => markDisconnected('closed'));
-    client.on('disconnect', () => markDisconnected('disconnected'));
+    client.on('disconnected', (reason) =>
+      markDisconnected(formatDisconnectReason(reason)),
+    );
 
     this.client = client;
+    const authentication = waitForAuthentication(client);
     try {
-      await client.connect();
+      const connected = client.connect();
+      if (isPromiseLike(connected)) await connected;
+      await authentication.promise;
     } catch (err) {
+      authentication.cancel();
       if (this.client === client) this.client = undefined;
       client.disconnect();
       throw err;
@@ -236,11 +242,10 @@ export class WeComChannel extends ChannelBase {
       referencedText: extractQuoteText(body),
     };
 
-    if (!(await this.preflightInbound(envelope))) return;
-
     let attachments: Attachment[] = [];
     try {
-      attachments = await this.downloadAttachments(body);
+      if (!(await this.preflightInbound(envelope))) return;
+      attachments = await this.downloadAttachments(body, attachments);
       if (attachments.length) {
         envelope.attachments = attachments;
       }
@@ -266,12 +271,12 @@ export class WeComChannel extends ChannelBase {
 
   private async downloadAttachments(
     body: Record<string, unknown>,
+    attachments: Attachment[] = [],
   ): Promise<Attachment[]> {
     const client = this.client;
     if (!client) return [];
 
     const refs = collectInboundMediaRefs(body);
-    const attachments: Attachment[] = [];
     for (const ref of refs) {
       if (!(await this.canDownloadAttachment(ref))) continue;
       const downloaded = await client.downloadFile(ref.url, ref.aesKey);
@@ -316,25 +321,32 @@ export class WeComChannel extends ChannelBase {
     }
     try {
       const response = await fetch(ref.url, {
-        method: 'HEAD',
+        method: 'GET',
+        redirect: 'manual',
         signal: AbortSignal.timeout(10_000),
       });
-      const contentLengthHeader = response.headers.get('content-length');
-      const contentLength =
-        contentLengthHeader === null ? Number.NaN : Number(contentLengthHeader);
-      if (
-        !response.ok ||
-        !Number.isFinite(contentLength) ||
-        contentLength < 0
-      ) {
+      if (response.status >= 300 && response.status < 400) {
         process.stderr.write(
-          `[WeCom:${this.name}] skipping ${ref.type} attachment without verified content length.\n`,
+          `[WeCom:${this.name}] skipping ${ref.type} attachment with redirect.\n`,
         );
         return false;
       }
-      if (contentLength > MAX_MEDIA_BYTES) {
+      if (!response.ok) {
+        process.stderr.write(
+          `[WeCom:${this.name}] skipping ${ref.type} attachment after media probe failed.\n`,
+        );
+        return false;
+      }
+      const contentLength = getContentLength(response);
+      if (contentLength !== undefined && contentLength > MAX_MEDIA_BYTES) {
         process.stderr.write(
           `[WeCom:${this.name}] skipping oversized ${ref.type} attachment (${contentLength} bytes).\n`,
+        );
+        return false;
+      }
+      if (!(await responseBodyWithinLimit(response))) {
+        process.stderr.write(
+          `[WeCom:${this.name}] skipping oversized ${ref.type} attachment.\n`,
         );
         return false;
       }
@@ -355,6 +367,69 @@ export class WeComChannel extends ChannelBase {
       }
     }
   }
+}
+
+function waitForAuthentication(client: WeComClient): {
+  promise: Promise<void>;
+  cancel(): void;
+} {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let settled = false;
+  let finish: (err?: Error) => void = () => {};
+
+  const promise = new Promise<void>((resolvePromise, rejectPromise) => {
+    finish = (err?: Error): void => {
+      if (settled) return;
+      settled = true;
+      if (timeout) clearTimeout(timeout);
+      if (err) {
+        rejectPromise(err);
+      } else {
+        resolvePromise();
+      }
+    };
+
+    timeout = setTimeout(() => {
+      finish(new Error('WeCom authentication timed out.'));
+    }, AUTHENTICATION_TIMEOUT_MS);
+    timeout.unref?.();
+
+    client.on('authenticated', () => finish());
+    client.on('error', (err) =>
+      finish(
+        new Error(
+          `WeCom authentication failed: ${sanitizeLogText(String(err), 200)}`,
+        ),
+      ),
+    );
+    client.on('disconnected', (reason) =>
+      finish(
+        new Error(
+          `WeCom disconnected before authentication: ${formatDisconnectReason(
+            reason,
+          )}`,
+        ),
+      ),
+    );
+  });
+  return {
+    promise,
+    cancel: () => finish(),
+  };
+}
+
+function formatDisconnectReason(reason: unknown): string {
+  const text = typeof reason === 'string' && reason ? reason : 'disconnected';
+  return sanitizeLogText(text, 120);
+}
+
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+  return (
+    value !== null &&
+    typeof value === 'object' &&
+    'then' in value &&
+    typeof value.then === 'function'
+  );
 }
 
 function parseWeComConfig(
@@ -634,6 +709,33 @@ function isInsideDir(filePath: string, dir: string): boolean {
   );
 }
 
+function getContentLength(response: Response): number | undefined {
+  const header = response.headers.get('content-length');
+  if (header === null) return undefined;
+  const size = Number(header);
+  return Number.isFinite(size) && size >= 0 ? size : undefined;
+}
+
+async function responseBodyWithinLimit(response: Response): Promise<boolean> {
+  const reader = response.body?.getReader();
+  if (!reader) return true;
+
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return true;
+      total += value.byteLength;
+      if (total > MAX_MEDIA_BYTES) {
+        await reader.cancel().catch(() => {});
+        return false;
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 function isSafeInboundMediaUrl(rawUrl: string): boolean {
   let url: URL;
   try {
@@ -651,18 +753,11 @@ function isSafeInboundMediaUrl(rawUrl: string): boolean {
 
   const ipVersion = isIP(host);
   if (ipVersion === 4) {
-    const parts = host.split('.').map((part) => Number(part));
-    const [a = 0, b = 0] = parts;
-    return !(
-      a === 0 ||
-      a === 10 ||
-      a === 127 ||
-      (a === 169 && b === 254) ||
-      (a === 172 && b >= 16 && b <= 31) ||
-      (a === 192 && b === 168)
-    );
+    return isPublicIpv4(host.split('.').map((part) => Number(part)));
   }
   if (ipVersion === 6) {
+    const mapped = parseMappedIpv4(host);
+    if (mapped) return isPublicIpv4(mapped);
     return !(
       host === '::1' ||
       host.startsWith('fc') ||
@@ -672,6 +767,38 @@ function isSafeInboundMediaUrl(rawUrl: string): boolean {
   }
   if (!host.includes('.')) return false;
   return true;
+}
+
+function parseMappedIpv4(host: string): number[] | undefined {
+  if (!host.startsWith('::ffff:')) return undefined;
+  const suffix = host.slice('::ffff:'.length);
+  if (suffix.includes('.')) {
+    return suffix.split('.').map((part) => Number(part));
+  }
+  const groups = suffix.split(':');
+  if (groups.length !== 2) return undefined;
+  const high = parseHexGroup(groups[0]);
+  const low = parseHexGroup(groups[1]);
+  if (high === undefined || low === undefined) return undefined;
+  return [high >> 8, high & 0xff, low >> 8, low & 0xff];
+}
+
+function parseHexGroup(value: string | undefined): number | undefined {
+  if (!value || !/^[\da-f]{1,4}$/i.test(value)) return undefined;
+  const parsed = Number.parseInt(value, 16);
+  return parsed >= 0 && parsed <= 0xffff ? parsed : undefined;
+}
+
+function isPublicIpv4(parts: number[]): boolean {
+  const [a = 0, b = 0] = parts;
+  return !(
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
 }
 
 function extractMediaId(value: unknown): string | undefined {

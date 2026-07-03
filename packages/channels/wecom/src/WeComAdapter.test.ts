@@ -10,11 +10,19 @@ import type {
 
 const mocks = vi.hoisted(() => {
   const instances: MockWSClient[] = [];
+  const state = {
+    autoAuthenticate: true,
+  };
 
   class MockWSClient {
     readonly options: Record<string, unknown>;
     readonly handlers = new Map<string, Array<(payload: unknown) => void>>();
-    connect = vi.fn(async () => {});
+    connect = vi.fn(() => {
+      if (state.autoAuthenticate) {
+        queueMicrotask(() => this.emit('authenticated', {}));
+      }
+      return this;
+    });
     disconnect = vi.fn();
     sendMessage = vi.fn(async () => ({ headers: { req_id: 'req-1' } }));
     uploadMedia = vi.fn(async () => ({ media_id: 'media-1' }));
@@ -43,7 +51,7 @@ const mocks = vi.hoisted(() => {
     }
   }
 
-  return { MockWSClient, instances };
+  return { MockWSClient, instances, state };
 });
 
 vi.mock('@wecom/aibot-node-sdk', () => ({
@@ -93,6 +101,18 @@ class TestWeComChannel extends WeComChannel {
   }
 }
 
+class FailingPreflightWeComChannel extends WeComChannel {
+  readonly preflights = vi.fn(async () => {
+    throw new Error('preflight failed');
+  });
+
+  protected override async preflightInbound(
+    envelope: Envelope,
+  ): Promise<boolean> {
+    return this.preflights(envelope);
+  }
+}
+
 function lastClient(): MockWSClient {
   const client = mocks.instances.at(-1);
   if (!client) throw new Error('missing mock client');
@@ -102,11 +122,10 @@ function lastClient(): MockWSClient {
 describe('WeComChannel', () => {
   beforeEach(() => {
     mocks.instances.length = 0;
+    mocks.state.autoAuthenticate = true;
     vi.stubGlobal(
       'fetch',
-      vi.fn(
-        async () => new Response(null, { headers: { 'content-length': '10' } }),
-      ),
+      vi.fn(async () => new Response('ok')),
     );
     vi.clearAllMocks();
   });
@@ -167,7 +186,48 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('clears the active SDK client when the websocket closes', async () => {
+  it('waits for SDK authentication before reporting connected', async () => {
+    mocks.state.autoAuthenticate = false;
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+
+    const connecting = channel.connect();
+    const client = lastClient();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(stderr).not.toHaveBeenCalledWith(
+      '[WeCom:bot] Connected via smart bot.\n',
+    );
+
+    client.emit('authenticated', {});
+    await connecting;
+
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] Connected via smart bot.\n',
+    );
+    stderr.mockRestore();
+  });
+
+  it('rejects startup when the SDK disconnects before authentication', async () => {
+    mocks.state.autoAuthenticate = false;
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+
+    const connecting = channel.connect();
+    const client = lastClient();
+    client.emit('disconnected', 'auth failed');
+
+    await expect(connecting).rejects.toThrow(
+      'WeCom disconnected before authentication',
+    );
+    expect(client.disconnect).toHaveBeenCalledTimes(1);
+    stderr.mockRestore();
+  });
+
+  it('clears the active SDK client when the websocket disconnects', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -175,7 +235,7 @@ describe('WeComChannel', () => {
     await channel.connect();
     const client = lastClient();
 
-    client.emit('close', {});
+    client.emit('disconnected', 'closed');
     await channel.sendMessage('chat-1', 'hello');
 
     expect(client.sendMessage).not.toHaveBeenCalled();
@@ -380,6 +440,38 @@ describe('WeComChannel', () => {
     expect(channel.envelopes).toHaveLength(0);
   });
 
+  it('rolls back message dedup when preflight work fails', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new FailingPreflightWeComChannel(
+      'bot',
+      makeConfig(),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+    const payload = {
+      msgid: 'msg-preflight-fails',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: 'hello' },
+    };
+
+    client.emit('message.text', payload);
+    await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('message handling failed'),
+      ),
+    );
+
+    client.emit('message.text', payload);
+    await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(2));
+    stderr.mockRestore();
+  });
+
   it('does not download attachments from unsafe media URLs', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -404,6 +496,72 @@ describe('WeComChannel', () => {
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('blocks IPv4-mapped IPv6 media URLs before probing them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-mapped-ip',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://[::ffff:169.254.169.254]/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(fetch).not.toHaveBeenCalled();
+    expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('does not follow redirects while probing inbound media', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(null, {
+        status: 302,
+        headers: { location: 'http://169.254.169.254/latest/meta-data/' },
+      }),
+    );
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-redirect-image',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://example.invalid/redirect',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(fetch).toHaveBeenCalledWith('https://example.invalid/redirect', {
+      method: 'GET',
+      redirect: 'manual',
+      signal: expect.any(AbortSignal),
+    });
+    expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('attachment with redirect'),
     );
     stderr.mockRestore();
   });
