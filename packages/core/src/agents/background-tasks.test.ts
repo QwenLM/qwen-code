@@ -74,6 +74,50 @@ describe('BackgroundTaskRegistry', () => {
     expect(registry.get('test-1')).toBe(entry);
   });
 
+  it('resolves parentName from the registered parent at registration time', () => {
+    registry.register({
+      agentId: 'parent-1',
+      description: 'parent agent',
+      subagentType: 'researcher',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/parent.jsonl',
+    });
+
+    const child = registry.register({
+      agentId: 'child-1',
+      description: 'child agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: false,
+      outputFile: '/tmp/child.jsonl',
+      parentAgentId: 'parent-1',
+      depth: 1,
+    });
+
+    // Captured eagerly so the UI's orphan annotation survives the
+    // parent's later eviction.
+    expect(child.parentName).toBe('researcher');
+
+    // Unknown parent (e.g. restart-resume of a nested agent whose parent
+    // is gone): parentName stays undefined, no throw.
+    const orphan = registry.register({
+      agentId: 'orphan-1',
+      description: 'orphan agent',
+      status: 'running',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      isBackgrounded: true,
+      outputFile: '/tmp/orphan.jsonl',
+      parentAgentId: 'gone',
+      depth: 2,
+    });
+    expect(orphan.parentName).toBeUndefined();
+  });
+
   it('completes a background agent and sends notification', () => {
     const callback = vi.fn();
     registry.setNotificationCallback(callback);

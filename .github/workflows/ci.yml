@@ -305,6 +305,9 @@ jobs:
           fi
           echo "Settings schema is up-to-date"
 
+      # Keep this Linux-only PR gate explicit. macOS/Windows merge-queue jobs run
+      # npm run test:ci only, so they intentionally do not repeat this
+      # platform-independent bundle closure check.
       - name: 'Check serve fast-path bundle closure'
         if: "${{ needs.classify_pr.outputs.skip_ci != 'true' && steps.ci_profile.outputs.ci_profile == 'full' }}"
         run: 'npm run check:serve-fast-path-bundle'
