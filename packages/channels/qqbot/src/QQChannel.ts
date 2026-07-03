@@ -287,6 +287,7 @@ export class QQChannel extends ChannelBase {
               this.msgSeqMap.set(msgId, nextSeq);
             }
             this.saveQQState();
+            await activeResp.text().catch(() => '');
             return;
           }
           process.stderr.write(
@@ -294,7 +295,7 @@ export class QQChannel extends ChannelBase {
           );
           if (activeResp.status === 429) {
             process.stderr.write(
-              `[QQ:${this.name}] Active retry rate-limited (HTTP 429), giving up\n`,
+              `[QQ:${this.name}] MESSAGE DROPPED: active retry rate-limited (HTTP 429) for ${sanitizeLogText(chatId, 64)}\n`,
             );
             this.saveQQState();
             return;
@@ -334,10 +335,11 @@ export class QQChannel extends ChannelBase {
         process.stderr.write(
           `[QQ:${this.name}] Plain-text fallback succeeded for ${sanitizeLogText(chatId, 64)}\n`,
         );
+        await fallbackRes.text().catch(() => '');
         return;
       }
 
-      // Success — persist msgSeq
+      await resp.text().catch(() => '');
       if (msgId) this.saveQQState();
     } catch (e) {
       // Rollback on failure if we haven't already

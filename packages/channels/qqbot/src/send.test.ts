@@ -610,11 +610,24 @@ describe('sendMessage', () => {
 
   it('logs and returns when plain-text fallback also fails', async () => {
     const ch = makeChannel({ chatType: 'c2c' });
+    const chp = ch as unknown as { saveQQState: () => void };
+    const saveSpy = vi.spyOn(chp, 'saveQQState');
+    const writes: string[] = [];
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk) => {
+        writes.push(String(chunk));
+        return true;
+      });
     mockSendQQMessage
       .mockResolvedValueOnce(mockResponse(false, 500))
       .mockResolvedValueOnce(mockResponse(false, 500));
     await ch.sendMessage('test-chat-id', 'hello');
     expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(writes.some((w) => w.includes('MESSAGE DROPPED'))).toBe(true);
+    expect(saveSpy).not.toHaveBeenCalled();
+    saveSpy.mockRestore();
+    stderrSpy.mockRestore();
   });
 
   it('returns early when disposed', async () => {
@@ -752,6 +765,8 @@ describe('sendMessage', () => {
 
   it('includes msg_id and msg_seq when replyMsgId is set', async () => {
     const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-456' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const saveSpy = vi.spyOn(chp as { saveQQState: () => void }, 'saveQQState');
     await ch.sendMessage('test-chat-id', 'hello');
 
     expect(mockSendQQMessage).toHaveBeenCalledWith(
@@ -765,6 +780,9 @@ describe('sendMessage', () => {
         msg_seq: 1,
       },
     );
+    expect(saveSpy).toHaveBeenCalled();
+    expect((chp['msgSeqMap'] as Map<string, number>).get('msg-456')).toBe(1);
+    saveSpy.mockRestore();
   });
 
   it('sends single request even for long text (no splitting)', async () => {
