@@ -437,7 +437,7 @@ export class QQChannel extends ChannelBase {
     try {
       if (!existsSync(this.qqStatePath)) return false;
       const raw = JSON.parse(readFileSync(this.qqStatePath, 'utf-8'));
-      if (raw.chatTypeMap) {
+      if (raw.chatTypeMap && Array.isArray(raw.chatTypeMap)) {
         const rawCT = raw.chatTypeMap as Array<[string, unknown]>;
         // Validate: only accept 'c2c' | 'group' values
         this.chatTypeMap = new Map(
@@ -449,15 +449,19 @@ export class QQChannel extends ChannelBase {
             `[QQ:${this.name}] Dropped ${dropped} invalid chatTypeMap entries during restore\n`,
           );
       }
-      if (raw.replyMsgId) {
+      if (raw.replyMsgId && Array.isArray(raw.replyMsgId)) {
+        const rawRM = raw.replyMsgId as Array<[string, unknown]>;
         // Validate: entries must be strings ≤ 128 chars
         this.replyMsgId = new Map(
-          (raw.replyMsgId as Array<[string, unknown]>).filter(
-            ([, v]) => typeof v === 'string' && v.length <= 128,
-          ),
+          rawRM.filter(([, v]) => typeof v === 'string' && v.length <= 128),
         ) as Map<string, string>;
+        const dropped = rawRM.length - this.replyMsgId.size;
+        if (dropped > 0)
+          process.stderr.write(
+            `[QQ:${this.name}] Dropped ${dropped} invalid replyMsgId entries during restore\n`,
+          );
       }
-      if (raw.msgSeqMap) {
+      if (raw.msgSeqMap && Array.isArray(raw.msgSeqMap)) {
         const rawMS = raw.msgSeqMap as Array<[string, unknown]>;
         // Validate: entries must be non-negative safe integers
         this.msgSeqMap = new Map(
