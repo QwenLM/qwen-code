@@ -973,6 +973,25 @@ describe('CronScheduler', () => {
       );
     }
 
+    it('survives a tasks file with a non-finite createdAt', async () => {
+      // JSON -1e999 parses to -Infinity. With a finite lastFiredAt the
+      // entry reads as an overdue, already-aged recurring task — the path
+      // that formats createdAt into the retroactive-expiry warning. The
+      // read layer must reject it (fix-or-delete contract) so enableDurable
+      // completes instead of throwing RangeError mid-load, and the file
+      // must be left on disk for the user to repair.
+      const raw =
+        `[{"id":"poison","cron":"* * * * *","prompt":"p","recurring":true,` +
+        `"createdAt":-1e999,"lastFiredAt":${Date.now() - 120_000}}]`;
+      const filePath = getCronFilePath(tmpDir);
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, raw);
+
+      await expect(scheduler.enableDurable('session-1')).resolves.not.toThrow();
+      expect(scheduler.list()).toHaveLength(0);
+      expect(await fs.readFile(filePath, 'utf-8')).toBe(raw);
+    });
+
     it('applies a configured max age to durable tasks restored from disk', async () => {
       // The reload path is the one that matters for configurability: a
       // regression that ignores the passed max age here would silently
