@@ -299,22 +299,16 @@ export function createWorkspaceFileSystemFactory(
           : {}),
         ignoreDirs: [],
       });
+    // Freeze each per-root `Ignore` instance so it cannot be mutated
+    // after the factory builds it. The `Ignore` class exposes a public
+    // `add(patterns): this` method that mutates state in-place; every
+    // `forRequest()` returns a `WorkspaceFileSystemImpl` sharing these
+    // same instances, so a future "ignore this pattern for this
+    // session" feature calling `.add()` would silently corrupt
+    // concurrent requests for that root.
     Object.freeze(ignore);
     return { path: workspace, ignore };
   });
-  // Freeze the `Ignore` instance so it cannot be mutated after
-  // the factory builds it. The `Ignore` class exposes a public
-  // `add(patterns): this` method that mutates state in-place;
-  // every `forRequest()` returns a `WorkspaceFileSystemImpl`
-  // sharing this same instance, so a future "ignore this
-  // pattern for this session" feature calling `.add()` would
-  // silently corrupt all concurrent requests. `Object.freeze`
-  // turns the mutation into a `TypeError` instead of a silent
-  // cross-request leak — surfacing the architectural mistake
-  // before it ships. Read paths (`getFileFilter` /
-  // `getDirectoryFilter`) are unaffected. Operators wanting
-  // per-session ignore rules should pass a different `Ignore`
-  // instance via `deps.ignore` to a separate factory.
   const audit: AuditPublisher = createAuditPublisher({
     emit: deps.emit,
     boundWorkspace: primaryWorkspace,
@@ -722,13 +716,24 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       let transientErrorCount = 0;
       for (const searchRoot of searchRoots) {
         if (out.length >= max) break;
-        const matches = await globAsync(pattern, {
-          cwd: searchRoot.cwd,
-          nodir: false,
-          absolute: true,
-          dot: true,
-          ignore: ['**/node_modules/**', '**/.git/**'],
-        });
+        let matches: string[];
+        try {
+          matches = await globAsync(pattern, {
+            cwd: searchRoot.cwd,
+            nodir: false,
+            absolute: true,
+            dot: true,
+            ignore: ['**/node_modules/**', '**/.git/**'],
+          });
+        } catch (err) {
+          const code = (err as NodeJS.ErrnoException)?.code;
+          if (code === 'EACCES' || code === 'EPERM') {
+            permissionErrorCount += 1;
+          } else {
+            transientErrorCount += 1;
+          }
+          continue;
+        }
         for (const hit of matches) {
           if (out.length >= max) break;
           const absolute = path.resolve(hit);
@@ -765,8 +770,10 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             }
             continue;
           }
-          const rel = path.relative(searchRoot.workspace.path, canonical);
-          if (rel.startsWith('..') || path.isAbsolute(rel)) {
+          const inAnyWorkspace = this.deps.workspaces.some((workspace) =>
+            isWithinRoot(canonical, workspace.path),
+          );
+          if (!inAnyWorkspace) {
             escapedCount += 1;
             continue;
           }

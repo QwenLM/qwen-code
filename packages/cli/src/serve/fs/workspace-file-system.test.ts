@@ -57,9 +57,11 @@ async function makeHarness(opts?: {
   return { factory, fs, events, workspace, scratch };
 }
 
-async function makeMultiRootHarness(): Promise<Harness & {
-  secondWorkspace: string;
-}> {
+async function makeMultiRootHarness(): Promise<
+  Harness & {
+    secondWorkspace: string;
+  }
+> {
   const scratch = await fsp.mkdtemp(
     path.join(os.tmpdir(), `qwen-wfs-${randomBytes(4).toString('hex')}-`),
   );
@@ -1343,6 +1345,16 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     const hits = await h.fs.glob('*.ts', { cwd });
 
     expect(hits).toEqual([path.join(h.secondWorkspace, 'secondary.ts')]);
+  });
+
+  it('glob accepts symlink hits that resolve into another workspace root', async () => {
+    const target = path.join(h.secondWorkspace, 'shared.ts');
+    await fsp.writeFile(target, '');
+    await fsp.symlink(target, path.join(h.workspace, 'linked.ts'), 'file');
+
+    const hits = await h.fs.glob('linked.ts');
+
+    expect(hits).toEqual([target]);
   });
 
   it('rejects nested workspace roots at factory construction', async () => {
