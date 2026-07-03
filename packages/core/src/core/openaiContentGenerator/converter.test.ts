@@ -5433,6 +5433,7 @@ describe('Truncated tool call detection in streaming', () => {
       name: 'truncated legacy streaming function_call',
       chunks: [{ name: 'read_file', arguments: '{"path"' }],
       expectedFinishReason: FinishReason.MAX_TOKENS,
+      expectedParts: [],
     },
     {
       name: 'legacy streaming function_call without arguments',
@@ -5463,6 +5464,40 @@ describe('Truncated tool call detection in streaming', () => {
       }
     },
   );
+
+  it('should convert legacy streaming content plus function_call in the same chunk', () => {
+    const ctx = createStreamingRequestContext();
+
+    const result = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'legacy-content-and-function-call',
+        created: 102,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              content: 'Let me read that file.',
+              function_call: {
+                name: 'read_file',
+                arguments: '{"path":"README.md"}',
+              },
+            },
+            finish_reason: 'function_call',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      ctx,
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+    expect(result.candidates?.[0]?.content?.parts).toEqual([
+      { text: 'Let me read that file.' },
+      legacyFunctionCallPart(),
+    ]);
+  });
 });
 
 describe('mapGeminiFinishReasonToOpenAI', () => {
