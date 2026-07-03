@@ -146,7 +146,7 @@ let fullState: HookState = {
 const seenDetails: Array<string | undefined> = [];
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
-  useDaemonStatus: (options: { detail?: string } = {}) => {
+  useStatusReport: (options: { detail?: string } = {}) => {
     seenDetails.push(options.detail);
     if (options.detail === 'full') {
       return { ...fullState, data: fullState.report, reload: fullReload };
@@ -464,5 +464,98 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('512.0 MB'); // formatBytes MB branch
     expect(text).toContain('1.5s'); // formatDurationMs fractional-second branch
     expect(text).toContain('500ms'); // formatDurationMs sub-second branch
+  });
+
+  it('surfaces runtime startup state and channel-worker diagnostics', () => {
+    const degraded = {
+      ...summaryReport,
+      runtime: {
+        ...summaryReport.runtime,
+        loading: true,
+        channel: { live: false },
+        channelWorker: {
+          enabled: true,
+          state: 'exited',
+          channels: ['alpha'],
+          error: 'worker crashed on boot',
+          restartCount: 3,
+          exitCode: 1,
+        },
+      },
+    };
+    summaryState = { report: degraded, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('Runtime is starting'); // runtime.loading cue
+    expect(text).toContain('down'); // channel.live === false
+    expect(text).toContain('exited (exit 1)'); // channelWorkerState()
+    expect(text).toContain('worker crashed on boot'); // channelWorker.error
+    expect(text).toContain('Worker restarts'); // restartCount > 0
+    expect(text).toContain('3');
+  });
+
+  it('shows the runtime start-failure message', () => {
+    const failed = {
+      ...summaryReport,
+      runtime: { ...summaryReport.runtime, error: 'bind EADDRINUSE :4170' },
+    };
+    summaryState = { report: failed, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('Runtime failed to start');
+    expect(text).toContain('bind EADDRINUSE :4170');
+  });
+
+  it('renders empty/disabled placeholders (sessions, rate limit, capabilities, ACP)', () => {
+    const sparseSummary = {
+      ...summaryReport,
+      capabilities: { protocolVersions: { serve: 1 }, features: [] },
+      runtime: {
+        ...summaryReport.runtime,
+        rateLimit: { enabled: false, rejectedSinceStart: {} },
+        transport: {
+          ...summaryReport.runtime.transport,
+          acp: { ...summaryReport.runtime.transport.acp, enabled: false },
+        },
+      },
+    };
+    summaryState = { report: sparseSummary, loading: false, error: undefined };
+    fullState = {
+      report: { ...fullReport, full: { ...fullReport.full, sessions: [] } },
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('No active sessions'); // empty sessions placeholder
+    expect(text).toContain('ACP transport disabled'); // acp.enabled === false
+    // rate-limit disabled and empty capabilities both render "disabled"/"none".
+    expect(text).toContain('disabled');
+    expect(text).toContain('none');
+  });
+
+  it('shows the toolbar failure banner when a poll fails but data is present', () => {
+    // Distinct from the no-data early return: the summary has stale data plus
+    // an error, so the cards render and the toolbar banner appears.
+    summaryState = {
+      report: summaryReport,
+      loading: false,
+      error: new Error('poll failed'),
+    };
+    mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('4242'); // stale cards still render
+    expect(text).toContain('Failed to load daemon status'); // toolbar banner
+  });
+
+  it('shows the pure loading state before any report arrives', () => {
+    summaryState = { report: undefined, loading: true, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('Loading daemon status');
+    expect(text).not.toContain('Failed to load daemon status');
   });
 });

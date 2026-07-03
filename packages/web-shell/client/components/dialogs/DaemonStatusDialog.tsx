@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import {
-  useDaemonStatus,
+  useStatusReport,
   type DaemonStatusReport,
   type DaemonStatusReportLevel,
   type DaemonStatusReportSection,
@@ -37,6 +37,16 @@ function formatDurationMs(ms: number): string {
 function formatBytes(bytes: number): string {
   const mb = bytes / (1024 * 1024);
   return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+}
+
+function channelWorkerState(
+  worker: DaemonStatusReport['runtime']['channelWorker'],
+): string {
+  if (worker.exitCode != null) {
+    return `${worker.state} (exit ${worker.exitCode})`;
+  }
+  if (worker.signal) return `${worker.state} (${worker.signal})`;
+  return worker.state;
 }
 
 function levelClass(
@@ -99,7 +109,7 @@ function WorkspaceSectionRow({
         <div className={styles.workspaceSummary}>
           {summaryEntries.map(([key, value]) => (
             <span key={key} className={styles.summaryChip}>
-              {key}: {String(value)}
+              {key}: {value === null ? 'N/A' : String(value)}
             </span>
           ))}
         </div>
@@ -181,8 +191,8 @@ export function DaemonStatusDialog() {
   // Two independent fetches: the summary drives the always-live top cards and
   // rides the auto-refresh interval; the full report backs the detail sections
   // and is only pulled on open (autoLoad) and on manual refresh.
-  const summary = useDaemonStatus({ autoLoad: true, detail: 'summary' });
-  const full = useDaemonStatus({ autoLoad: true, detail: 'full' });
+  const summary = useStatusReport({ autoLoad: true, detail: 'summary' });
+  const full = useStatusReport({ autoLoad: true, detail: 'full' });
   // `reload` is a stable callback; depend on it (not the hook object, which is
   // a fresh spread each render) so the poll interval is installed once rather
   // than torn down and reinstalled on every data update.
@@ -248,7 +258,13 @@ export function DaemonStatusDialog() {
   return (
     <div className={styles.dialog}>
       <div className={styles.toolbar}>
-        <span className={`${styles.badge} ${levelClass(rollupReport.status)}`}>
+        <span
+          role="status"
+          aria-label={`${t('daemon.title')}: ${t(
+            `daemon.level.${rollupReport.status}`,
+          )}`}
+          className={`${styles.badge} ${levelClass(rollupReport.status)}`}
+        >
           {t(`daemon.level.${rollupReport.status}`)}
         </span>
         <span className={styles.updatedAt}>
@@ -330,6 +346,16 @@ export function DaemonStatusDialog() {
         </Card>
 
         <Card title={t('daemon.runtime.title')}>
+          {/* The counters below read as plausible zeros while the daemon
+              runtime is still coming up or has failed; call that out so they
+              are not mistaken for a healthy idle daemon. */}
+          {runtime.error ? (
+            <div className={styles.workspaceError}>
+              {t('daemon.runtime.startFailed')}: {runtime.error}
+            </div>
+          ) : runtime.loading ? (
+            <div className={styles.empty}>{t('daemon.runtime.startingUp')}</div>
+          ) : null}
           <Row
             label={t('daemon.runtime.activeSessions')}
             value={runtime.sessions.active}
@@ -350,6 +376,27 @@ export function DaemonStatusDialog() {
                 : t('daemon.runtime.channelDown')
             }
           />
+          {/* Surface why a channel worker is unhealthy instead of leaving the
+              operator with a bare "down" — these fields are already fetched. */}
+          {runtime.channelWorker.enabled && (
+            <>
+              <Row
+                label={t('daemon.runtime.channelWorker')}
+                value={channelWorkerState(runtime.channelWorker)}
+              />
+              {runtime.channelWorker.error && (
+                <div className={styles.workspaceError}>
+                  {runtime.channelWorker.error}
+                </div>
+              )}
+              {(runtime.channelWorker.restartCount ?? 0) > 0 && (
+                <Row
+                  label={t('daemon.runtime.channelWorkerRestarts')}
+                  value={runtime.channelWorker.restartCount}
+                />
+              )}
+            </>
+          )}
           <Row
             label={t('daemon.runtime.memory')}
             value={`${formatBytes(runtime.process.rss)} / ${formatBytes(
@@ -481,7 +528,9 @@ export function DaemonStatusDialog() {
       {fullReport?.full ? (
         <FullDetail report={fullReport} />
       ) : full.error ? (
-        <div className={styles.empty}>{t('daemon.details.failed')}</div>
+        <div className={styles.empty}>
+          {t('daemon.details.failed')}: {full.error.message}
+        </div>
       ) : (
         <div className={styles.empty}>{t('daemon.details.loading')}</div>
       )}

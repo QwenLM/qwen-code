@@ -101,7 +101,7 @@ export { useDaemonSessions as useSessions } from './daemon/index.js';
 export { useDaemonSkills as useSkills } from './daemon/index.js';
 
 /** Consolidated daemon status report (`GET /daemon/status`). */
-export { useDaemonStatusReport as useDaemonStatus } from './daemon/index.js';
+export { useDaemonStatusReport as useStatusReport } from './daemon/index.js';
 
 /** Registered tools and their configuration. */
 export { useDaemonTools as useTools } from './daemon/index.js';
