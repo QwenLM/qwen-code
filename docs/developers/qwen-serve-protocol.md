@@ -319,10 +319,21 @@ Response shape:
         "wsStreams": 0,
         "pendingClientRequests": 0
       }
+    },
+    "perf": {
+      "eventLoop": { "meanMs": 0, "p50Ms": 0, "p99Ms": 0, "maxMs": 0 },
+      "pipe": {
+        "inbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 },
+        "outbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 }
+      }
     }
   }
 }
 ```
+
+`runtime.perf` is optional. When present, it reports daemon-process event loop
+lag and daemon-child pipe byte counters only; ACP child event loop lag is not
+included in `/daemon/status`.
 
 `status` is `error` if any issue has error severity, `warning` if any issue has
 warning severity, otherwise `ok`. Issue codes are stable and include

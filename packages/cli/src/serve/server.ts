@@ -7,7 +7,10 @@
 import express from 'express';
 import type { Application } from 'express';
 import type { DaemonLogger } from './daemon-logger.js';
-import type { DaemonStartupSnapshot } from './daemon-status.js';
+import type {
+  DaemonPerfSnapshot,
+  DaemonStartupSnapshot,
+} from './daemon-status.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import {
   allowOriginCors,
@@ -211,6 +214,7 @@ export interface ServeAppDeps {
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getPerfSnapshot?: () => DaemonPerfSnapshot;
   workspace?: DaemonWorkspaceService;
   statusProvider?: DaemonStatusProvider;
   persistDisabledTools?: (
@@ -564,6 +568,7 @@ export function createServeApp(
     deviceFlowRegistry,
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
+    getPerfSnapshot: deps.getPerfSnapshot,
   });
 
   registerCapabilitiesRoutes(app, {
