@@ -578,6 +578,16 @@
   flex: 0 0 auto;
 }
 
+.version {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: text;
+}
+
 .collapsed .newChatButton,
 .collapsed .footerButton,
 .collapsed .projectRow {
