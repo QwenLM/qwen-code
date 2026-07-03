@@ -1,4 +1,4 @@
-import { mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
@@ -340,15 +340,13 @@ describe('WeComChannel', () => {
   });
 
   it('sends markdown text and local media through the SDK', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'wecom-test-'));
+    const parent = join(tmpdir(), 'channel-files');
+    mkdirSync(parent, { recursive: true });
+    const dir = mkdtempSync(join(parent, 'wecom-test-'));
     const imagePath = join(dir, 'out.png');
     writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
 
-    const channel = new WeComChannel(
-      'bot',
-      makeConfig({ cwd: dir }),
-      makeBridge(),
-    );
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
     const client = lastClient();
 
@@ -395,6 +393,24 @@ describe('WeComChannel', () => {
       expect.stringContaining('skipping unsupported outbound media marker'),
     );
     stderr.mockRestore();
+  });
+
+  it('rejects model-emitted image paths outside the channel file directory', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'wecom-cwd-'));
+    const secretPath = join(dir, '.env');
+    writeFileSync(secretPath, 'OPENAI_API_KEY=sk-secret');
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ cwd: dir }),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    await expect(
+      channel.sendMessage('chat-1', `[IMAGE: ${secretPath}]`),
+    ).rejects.toThrow('outside allowed outbound directory');
+    expect(client.uploadMedia).not.toHaveBeenCalled();
   });
 
   it('ignores missing optional media allowlist directories', () => {

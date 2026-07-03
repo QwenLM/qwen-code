@@ -164,7 +164,7 @@ export class WeComChannel extends ChannelBase {
         );
         continue;
       }
-      const file = readOutboundMedia(item.path, this.config.cwd);
+      const file = readOutboundMedia(item.path);
       const upload = await this.client.uploadMedia(file.data, {
         type: item.type,
         filename: file.fileName,
@@ -472,10 +472,10 @@ function isWeComMediaType(value: string | undefined): value is WeComMediaType {
   );
 }
 
-function readOutboundMedia(
-  rawPath: string,
-  cwd: string,
-): { data: Buffer; fileName: string } {
+function readOutboundMedia(rawPath: string): {
+  data: Buffer;
+  fileName: string;
+} {
   const resolved = resolve(rawPath);
   const real = realpathSync(resolved);
   const stat = statSync(real);
@@ -485,12 +485,11 @@ function readOutboundMedia(
   }
 
   const allowedDirs = [
-    safeRealpath(tmpdir()),
-    safeRealpath(resolve(cwd)),
-    safeRealpath('/tmp/'),
+    safeRealpath(join(tmpdir(), 'channel-files')),
+    safeRealpath('/tmp/channel-files'),
   ].filter((dir): dir is string => Boolean(dir));
   if (!allowedDirs.some((dir) => isInsideDir(real, dir))) {
-    throw new Error(`Media path outside allowed directories: ${real}`);
+    throw new Error(`Media path outside allowed outbound directory: ${real}`);
   }
   return { data: readFileSync(real), fileName: basename(real) };
 }

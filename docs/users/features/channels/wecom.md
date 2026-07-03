@@ -90,7 +90,7 @@ Assistant responses are sent as WeCom markdown. To send a local image generated 
 [IMAGE: /absolute/path/to/image.png]
 ```
 
-For safety, local image paths must be inside the channel `cwd` or the system temporary directory. Generic file, video, and voice upload markers are ignored because model-produced file paths could otherwise upload arbitrary workspace files.
+For safety, local image paths must be inside the channel file directory under the system temporary directory, such as `/tmp/channel-files/...`. Generic file, video, and voice upload markers are ignored because model-produced file paths could otherwise upload arbitrary workspace files.
 
 ## Troubleshooting
 
