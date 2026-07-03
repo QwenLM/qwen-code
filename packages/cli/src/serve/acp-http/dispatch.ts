@@ -41,6 +41,7 @@ import {
   SessionShellDisabledError,
   WorkspaceMismatchError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
@@ -127,6 +128,9 @@ function errMsg(err: unknown): string {
 type PermissionResponse = Parameters<
   HttpAcpBridge['respondToSessionPermission']
 >[2];
+type AddSessionArtifactInput = Parameters<
+  HttpAcpBridge['addSessionArtifact']
+>[1];
 
 const SESSION_SHELL_METHOD = `${QWEN_METHOD_NS}session/shell`;
 const INVALID_PERMISSION_OUTCOME_ERROR =
@@ -160,6 +164,9 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
   `${QWEN_METHOD_NS}session/lsp`,
+  `${QWEN_METHOD_NS}session/artifacts`,
+  `${QWEN_METHOD_NS}session/artifacts/add`,
+  `${QWEN_METHOD_NS}session/artifacts/remove`,
   // Wave 1: memory
   `${QWEN_METHOD_NS}workspace/memory`,
   `${QWEN_METHOD_NS}workspace/memory/write`,
@@ -369,6 +376,36 @@ function parsePermissionResponse(
   return response as PermissionResponse;
 }
 
+function pickSessionArtifactInput(
+  params: Record<string, unknown>,
+): AddSessionArtifactInput {
+  const {
+    title,
+    kind,
+    storage,
+    description,
+    workspacePath,
+    managedId,
+    url,
+    mimeType,
+    sizeBytes,
+    metadata,
+  } = params;
+
+  return {
+    title,
+    kind,
+    storage,
+    description,
+    workspacePath,
+    managedId,
+    url,
+    mimeType,
+    sizeBytes,
+    metadata,
+  } as AddSessionArtifactInput;
+}
+
 /**
  * Map a thrown error to a JSON-RPC error code + a client-safe message.
  * Param-validation errors are echoed (they describe the client's own bad
@@ -462,6 +499,16 @@ function toRpcError(err: unknown): {
       code: RPC.INVALID_PARAMS,
       message: errMsg(err),
       data: { errorKind: 'client_id_required' },
+    };
+  }
+  if (err instanceof SessionArtifactValidationError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: {
+        errorKind: 'artifact_validation_failed',
+        ...(err.field ? { field: err.field } : {}),
+      },
     };
   }
   const name = err instanceof Error ? err.name : '';
@@ -2285,6 +2332,49 @@ export class AcpDispatcher {
           if (!this.requireOwned(conn, sessionId, id)) return;
           const result = await this.bridge.getSessionLspStatus(sessionId);
           this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/artifacts`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const result = await this.bridge.getSessionArtifacts(sessionId);
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/artifacts/add`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const result = await this.bridge.addSessionArtifact(
+              sessionId,
+              pickSessionArtifactInput(params),
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/artifacts/remove`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const artifactId = String(params['artifactId'] ?? '');
+            if (!artifactId) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, '`artifactId` is required'),
+                );
+              }
+              return;
+            }
+            const result = await this.bridge.removeSessionArtifact(
+              sessionId,
+              artifactId,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
           return;
         }
 
