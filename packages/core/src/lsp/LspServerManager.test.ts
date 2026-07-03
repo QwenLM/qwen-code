@@ -749,6 +749,132 @@ describe('LspServerManager', () => {
     expect(manager.getHandles().size).toBe(0);
   });
 
+  it('does not restart a crashed stale handle', async () => {
+    const manager = createTrustedManager();
+    let exitHandler: ((code: number | null) => void) | undefined;
+    const process = createMockProcess();
+    process.once = vi.fn(
+      (event: string, handler: (code: number | null) => void) => {
+        if (event === 'exit') {
+          exitHandler = handler;
+        }
+        return process;
+      },
+    );
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    ).mockResolvedValue(true);
+    const createLspConnection = vi
+      .spyOn(
+        manager as unknown as {
+          createLspConnection: (
+            config: LspServerConfig,
+          ) => Promise<LspConnectionResult>;
+        },
+        'createLspConnection',
+      )
+      .mockResolvedValue({
+        connection: createMockConnection(),
+        process: process as unknown as ChildProcess,
+      } as unknown as LspConnectionResult);
+    vi.spyOn(
+      manager as unknown as {
+        initializeLspServer: () => Promise<void>;
+      },
+      'initializeLspServer',
+    ).mockResolvedValue(undefined);
+    const config = { ...serverConfig, restartOnCrash: true };
+
+    manager.setServerConfigs([config]);
+    await manager.startAll();
+    expect(exitHandler).toBeDefined();
+
+    exitHandler?.(1);
+    manager.clearServerHandles();
+    await Promise.resolve();
+
+    expect(createLspConnection).toHaveBeenCalledOnce();
+  });
+
+  it('does not restart a crashed handle already being stopped', async () => {
+    const manager = createTrustedManager();
+    let exitHandler: ((code: number | null) => void) | undefined;
+    const process = createMockProcess();
+    process.once = vi.fn(
+      (event: string, handler: (code: number | null) => void) => {
+        if (event === 'exit') {
+          exitHandler = handler;
+        }
+        return process;
+      },
+    );
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    ).mockResolvedValue(true);
+    const createLspConnection = vi
+      .spyOn(
+        manager as unknown as {
+          createLspConnection: (
+            config: LspServerConfig,
+          ) => Promise<LspConnectionResult>;
+        },
+        'createLspConnection',
+      )
+      .mockResolvedValue({
+        connection: createMockConnection(),
+        process: process as unknown as ChildProcess,
+      } as unknown as LspConnectionResult);
+    vi.spyOn(
+      manager as unknown as {
+        initializeLspServer: () => Promise<void>;
+      },
+      'initializeLspServer',
+    ).mockResolvedValue(undefined);
+    const config = { ...serverConfig, restartOnCrash: true };
+
+    manager.setServerConfigs([config]);
+    await manager.startAll();
+    const handle = manager.getHandles().get('clangd');
+    expect(exitHandler).toBeDefined();
+    expect(handle).toBeDefined();
+
+    exitHandler?.(1);
+    handle!.stopRequested = true;
+    await Promise.resolve();
+
+    expect(createLspConnection).toHaveBeenCalledOnce();
+  });
+
   it('retries the same config after a crash without restartOnCrash', async () => {
     const manager = createTrustedManager();
     let exitHandler: ((code: number | null) => void) | undefined;
@@ -1037,6 +1163,29 @@ describe('LspServerManager', () => {
 
     expect(connection.shutdown).toHaveBeenCalledOnce();
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it('unrefs the shutdown timeout', async () => {
+    const originalSetTimeout = globalThis.setTimeout;
+    let shutdownTimer: ReturnType<typeof setTimeout> | undefined;
+    vi.spyOn(globalThis, 'setTimeout').mockImplementation(
+      (handler, timeout, ...args) => {
+        shutdownTimer = originalSetTimeout(handler, timeout, ...args);
+        return shutdownTimer;
+      },
+    );
+    const manager = createTrustedManager();
+    const connection = createMockConnection();
+    manager.setServerConfigs([{ ...serverConfig, shutdownTimeout: 30_000 }]);
+    const handle = manager.getHandles().get('clangd');
+    expect(handle).toBeDefined();
+    handle!.connection = connection;
+    handle!.status = 'READY';
+
+    await manager.stopAll();
+
+    expect(shutdownTimer).toBeDefined();
+    expect(shutdownTimer?.hasRef()).toBe(false);
   });
 
   it('ends the connection when shutdown timeout fires', async () => {

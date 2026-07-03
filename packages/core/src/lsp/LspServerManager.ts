@@ -556,6 +556,13 @@ export class LspServerManager {
           shutdownPromise,
           new Promise<void>((resolve) => {
             timerId = setTimeout(resolve, timeout);
+            if (
+              typeof timerId === 'object' &&
+              timerId !== null &&
+              'unref' in timerId
+            ) {
+              timerId.unref();
+            }
           }),
         ]);
       } finally {

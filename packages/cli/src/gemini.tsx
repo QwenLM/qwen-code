@@ -1134,8 +1134,8 @@ export function registerLspHotReload(
       if (!errorReported) {
         const message =
           error instanceof Error
-            ? `Failed to reload LSP server settings: ${error.message}. Existing LSP state is unchanged. Run with --debug for details.`
-            : 'Failed to reload LSP server settings; existing LSP state is unchanged. Run with --debug for details.';
+            ? `Failed to reload LSP server settings: ${error.message}. Some LSP servers may have been partially updated. Run with --debug for details.`
+            : 'Failed to reload LSP server settings; some LSP servers may have been partially updated. Run with --debug for details.';
         appEvents.emit(AppEvent.LogError, message);
       }
       throw error;

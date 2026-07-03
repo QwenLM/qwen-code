@@ -89,6 +89,7 @@ export class NativeLspService {
   private normalizer: LspResponseNormalizer;
   private openedDocuments = new Map<string, Set<string>>();
   private lastConnections = new Map<string, LspConnectionInterface>();
+  private reinitializeQueue: Promise<unknown> = Promise.resolve();
 
   constructor(
     config: CoreConfig,
@@ -157,6 +158,13 @@ export class NativeLspService {
   }
 
   async reinitialize(): Promise<LspServiceReinitializeResult> {
+    const run = async () => this.doReinitialize();
+    const next = this.reinitializeQueue.then(run, run);
+    this.reinitializeQueue = next.catch(() => undefined);
+    return next;
+  }
+
+  private async doReinitialize(): Promise<LspServiceReinitializeResult> {
     const workspaceTrusted = this.config.isTrustedFolder();
     debugLogger.info(
       `Reinitializing LSP servers: workspaceRoot=${this.workspaceRoot}, trusted=${workspaceTrusted}`,
@@ -207,7 +215,6 @@ export class NativeLspService {
     this.clearDocumentTrackingForServers([
       ...reconcile.removed,
       ...reconcile.restarted,
-      ...reconcile.failed,
     ]);
     await this.replayOpenDocuments(reconcile.restarted, restartedOpenDocuments);
     debugLogger.info(

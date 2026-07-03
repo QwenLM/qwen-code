@@ -474,6 +474,180 @@ describe('NativeLspService', () => {
     }
   });
 
+  test('reinitialize preserves open documents for failed servers until a later restart succeeds', async () => {
+    vi.useFakeTimers();
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-failed-'));
+    try {
+      const filePath = path.join(tempDir, 'index.ts');
+      const uri = pathToFileURL(filePath).toString();
+      fs.writeFileSync(filePath, 'const value = 1;\n', 'utf-8');
+      fs.writeFileSync(
+        path.join(tempDir, '.lsp.json'),
+        JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+          },
+        }),
+      );
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      const service = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+        { workspaceRoot: tempDir },
+      );
+      const connection = {
+        listen: vi.fn(),
+        send: vi.fn(),
+        onNotification: vi.fn(),
+        onRequest: vi.fn(),
+        request: vi.fn(),
+        initialize: vi.fn(),
+        shutdown: vi.fn(),
+        end: vi.fn(),
+      };
+      const handle = {
+        config: {
+          name: 'typescript-language-server',
+          languages: ['typescript'],
+          command: 'typescript-language-server',
+          args: [],
+          transport: 'stdio',
+        },
+        status: 'READY',
+        connection,
+      };
+      const reconcileServerConfigs = vi
+        .fn()
+        .mockResolvedValueOnce({
+          added: [],
+          removed: [],
+          restarted: [],
+          unchanged: [],
+          failed: ['typescript-language-server'],
+        })
+        .mockResolvedValueOnce({
+          added: [],
+          removed: [],
+          restarted: ['typescript-language-server'],
+          unchanged: [],
+          failed: [],
+        });
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        reconcileServerConfigs,
+        getHandles: () => new Map([['typescript-language-server', handle]]),
+      };
+      const internals = service as unknown as {
+        openedDocuments: Map<string, Set<string>>;
+      };
+      internals.openedDocuments.set(
+        'typescript-language-server',
+        new Set([uri]),
+      );
+
+      await service.reinitialize();
+      expect(
+        internals.openedDocuments.get('typescript-language-server'),
+      ).toEqual(new Set([uri]));
+
+      const reinitialize = service.reinitialize();
+      await vi.runAllTimersAsync();
+      await reinitialize;
+
+      expect(connection.send).toHaveBeenCalledWith(
+        expect.objectContaining({
+          method: 'textDocument/didOpen',
+          params: {
+            textDocument: expect.objectContaining({
+              uri,
+              languageId: 'typescript',
+              text: 'const value = 1;\n',
+            }),
+          },
+        }),
+      );
+    } finally {
+      vi.useRealTimers();
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('reinitialize serializes the full snapshot reconcile and replay flow', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-queue-'));
+    try {
+      fs.writeFileSync(
+        path.join(tempDir, '.lsp.json'),
+        JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+          },
+        }),
+      );
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      const service = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+        { workspaceRoot: tempDir },
+      );
+      let resolveFirstReconcile: (
+        value: Awaited<ReturnType<typeof reconcileServerConfigs>>,
+      ) => void;
+      const firstReconcile = new Promise<{
+        added: string[];
+        removed: string[];
+        restarted: string[];
+        unchanged: string[];
+        failed: string[];
+      }>((resolve) => {
+        resolveFirstReconcile = resolve;
+      });
+      const reconcileServerConfigs = vi
+        .fn()
+        .mockReturnValueOnce(firstReconcile)
+        .mockResolvedValueOnce({
+          added: [],
+          removed: [],
+          restarted: [],
+          unchanged: ['typescript-language-server'],
+          failed: [],
+        });
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        reconcileServerConfigs,
+      };
+
+      const first = service.reinitialize();
+      await vi.waitFor(() => {
+        expect(reconcileServerConfigs).toHaveBeenCalledOnce();
+      });
+      const second = service.reinitialize();
+      await Promise.resolve();
+
+      expect(reconcileServerConfigs).toHaveBeenCalledOnce();
+
+      resolveFirstReconcile!({
+        added: ['typescript-language-server'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: [],
+      });
+      await first;
+      await vi.waitFor(() => {
+        expect(reconcileServerConfigs).toHaveBeenCalledTimes(2);
+      });
+      await second;
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test('reinitialize stops all servers when trusted workspace is required but unavailable', async () => {
     const tempConfig = new MockConfig();
     vi.spyOn(tempConfig, 'isTrustedFolder').mockReturnValue(false);

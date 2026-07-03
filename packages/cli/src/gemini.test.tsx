@@ -544,7 +544,7 @@ describe('gemini.tsx main function', () => {
 
       expect(appEvents.emit).toHaveBeenCalledWith(
         AppEvent.LogError,
-        'Failed to reload LSP server settings: invalid lsp json. Existing LSP state is unchanged. Run with --debug for details.',
+        'Failed to reload LSP server settings: invalid lsp json. Some LSP servers may have been partially updated. Run with --debug for details.',
       );
     });
 
