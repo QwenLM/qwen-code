@@ -32,6 +32,7 @@ import {
   existsSync,
   mkdirSync,
   renameSync,
+  unlinkSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { OpCode, Intent } from './types.js';
@@ -381,8 +382,8 @@ export class QQChannel extends ChannelBase {
     if (this.disposed) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
+      const tmpPath = this.qqStatePath + '.tmp';
       try {
-        const tmpPath = this.qqStatePath + '.tmp';
         writeFileSync(
           tmpPath,
           JSON.stringify({
@@ -394,6 +395,11 @@ export class QQChannel extends ChannelBase {
         );
         renameSync(tmpPath, this.qqStatePath);
       } catch (e) {
+        try {
+          unlinkSync(tmpPath);
+        } catch {
+          /* best-effort */
+        }
         process.stderr.write(
           `[QQ:${this.name}] saveQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
         );
@@ -408,8 +414,8 @@ export class QQChannel extends ChannelBase {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
+    const tmpPath = this.qqStatePath + '.tmp';
     try {
-      const tmpPath = this.qqStatePath + '.tmp';
       writeFileSync(
         tmpPath,
         JSON.stringify({
@@ -421,6 +427,11 @@ export class QQChannel extends ChannelBase {
       );
       renameSync(tmpPath, this.qqStatePath);
     } catch (e) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        /* best-effort */
+      }
       process.stderr.write(
         `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
       );

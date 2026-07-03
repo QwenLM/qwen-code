@@ -35,6 +35,7 @@ export async function fetchAccessToken(
   });
 
   if (!resp.ok) {
+    await resp.body?.cancel().catch(() => {});
     process.stderr.write(`[QQ] Token request failed (HTTP ${resp.status})\n`);
     throw new Error(`QQ Bot token request failed (HTTP ${resp.status})`);
   }
@@ -83,7 +84,7 @@ export function validateGatewayUrl(url: string): string {
     return clean.href;
   } catch (e) {
     if (e instanceof TypeError) {
-      throw new Error(`QQ Bot gateway URL is not a valid URL: ${url}`);
+      throw new Error('QQ Bot gateway URL is not a valid URL');
     }
     throw e;
   }
