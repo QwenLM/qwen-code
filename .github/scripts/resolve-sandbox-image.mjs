@@ -86,7 +86,7 @@ function pullImage(command, image) {
     };
     timer = setTimeout(() => {
       console.error(
-        `Timed out pulling ${image} after ${PULL_TIMEOUT_MS / 1000}s.`,
+        `::error::Timed out pulling ${image} after ${PULL_TIMEOUT_MS / 1000}s.`,
       );
       child.kill('SIGKILL');
       finish(false);
@@ -94,13 +94,15 @@ function pullImage(command, image) {
 
     child.on('error', (error) => {
       console.error(
-        `Failed to start '${command} pull ${image}': ${error.message}`,
+        `::error::Failed to start '${command} pull ${image}': ${error.message}`,
       );
       finish(false);
     });
     child.on('close', (code) => {
       if (code !== 0) {
-        console.error(`'${command} pull ${image}' exited with code ${code}.`);
+        console.error(
+          `::error::'${command} pull ${image}' exited with code ${code}.`,
+        );
       }
       finish(code === 0);
     });

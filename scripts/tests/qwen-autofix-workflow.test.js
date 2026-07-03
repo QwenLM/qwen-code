@@ -60,6 +60,10 @@ const resolveSandboxImageSteps =
   workflow.match(
     /- name: 'Resolve sandbox image'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
   ) ?? [];
+const installAndBuildSteps =
+  workflow.match(
+    /- name: 'Install dependencies and build'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
+  ) ?? [];
 
 describe('qwen-autofix workflow', () => {
   it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
@@ -207,6 +211,8 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain(
       '["self-hosted", "linux", "x64", "autofix"]',
     );
+    expect(workflow).not.toContain("runner.environment == 'self-hosted'");
+    expect(workflow).not.toContain('Use pre-installed Node.js (self-hosted)');
     expect(workflow).not.toContain('AUTOFIX_ECS_RUNNER_DISABLED');
     expect(workflow).toContain(
       "RUNNER_ENVIRONMENT: '${{ runner.environment }}'",
@@ -250,6 +256,19 @@ describe('qwen-autofix workflow', () => {
     expect(sandboxImageResolverScript).toContain('ghcr.io/${GHCR_REPOSITORY}');
     expect(workflow).not.toContain('npm view @qwen-code/qwen-code@latest');
     expect(workflow).not.toContain('KNOWN_BOTS');
+  });
+
+  it('retries dependency installation before building', () => {
+    expect(installAndBuildSteps).toHaveLength(2);
+    for (const step of installAndBuildSteps) {
+      expect(step).toContain('for attempt in 1 2 3; do');
+      expect(step).toContain(
+        'npm ci --prefer-offline --no-audit --progress=false',
+      );
+      expect(step).toContain('sleep $((attempt * 15))');
+      expect(step).toContain('npm run build');
+      expect(step).toContain('npm run bundle');
+    }
   });
 
   it('uses the standard checkout action for autonomous runner jobs', () => {
@@ -388,7 +407,13 @@ describe('qwen-autofix workflow', () => {
     );
     expect(sandboxImageResolverScript).toContain('Timed out pulling ${image}');
     expect(sandboxImageResolverScript).toContain(
+      '::error::Timed out pulling ${image}',
+    );
+    expect(sandboxImageResolverScript).toContain(
       "Failed to start '${command} pull ${image}'",
+    );
+    expect(sandboxImageResolverScript).toContain(
+      "::error::'${command} pull ${image}' exited with code ${code}",
     );
     expect(sandboxImageResolverScript).toContain(
       '::warning::Falling back from ${requestedImage} to latest GHCR semver ${fallbackImage}',

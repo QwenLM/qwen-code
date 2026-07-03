@@ -219,7 +219,7 @@ jobs:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
-            github-hosted|self-hosted) ;;
+            github-hosted) ;;
             *)
               echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
               exit 1
@@ -234,17 +234,6 @@ jobs:
           node-version: '22.x'
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
-
-      - name: 'Use pre-installed Node.js (self-hosted)'
-        if: |-
-          ${{ runner.environment == 'self-hosted' }}
-        run: |-
-          if ! command -v node > /dev/null 2>&1; then
-            echo '::error::Node.js is required on the autofix self-hosted runner.'
-            exit 1
-          fi
-          node --version
-          npm --version
 
       - name: 'Install tmux'
         run: |-
@@ -949,7 +938,7 @@ jobs:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
-            github-hosted|self-hosted) ;;
+            github-hosted) ;;
             *)
               echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
               exit 1
@@ -964,17 +953,6 @@ jobs:
           node-version: '22.x'
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
-
-      - name: 'Use pre-installed Node.js (self-hosted)'
-        if: |-
-          ${{ runner.environment == 'self-hosted' }}
-        run: |-
-          if ! command -v node > /dev/null 2>&1; then
-            echo '::error::Node.js is required on the autofix self-hosted runner.'
-            exit 1
-          fi
-          node --version
-          npm --version
 
       - name: 'Install tmux'
         run: |-
