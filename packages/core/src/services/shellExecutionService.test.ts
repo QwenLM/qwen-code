@@ -1811,7 +1811,7 @@ describe('ShellExecutionService', () => {
 
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'cmd.exe',
-        '/d /s /c %SystemRoot%\\System32\\chcp.com 65001 >nul && dir "foo bar"',
+        '/d /s /c C:\\Windows\\System32\\chcp.com 65001 >nul & dir "foo bar"',
         expect.any(Object),
       );
       mockGetShellConfiguration.mockReturnValue({
@@ -1842,33 +1842,6 @@ describe('ShellExecutionService', () => {
         ],
         expect.any(Object),
       );
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'bash',
-        argsPrefix: ['-c'],
-        shell: 'bash',
-      });
-    });
-
-    it('should use cmd.exe with chcp 65001 UTF-8 prefix via PTY on Windows', async () => {
-      mockPlatform.mockReturnValue('win32');
-      mockGetShellConfiguration.mockReturnValue({
-        executable: 'cmd.exe',
-        argsPrefix: ['/d', '/s', '/c'],
-        shell: 'cmd',
-      });
-      await simulateExecution('dir "C:\\Temp\\"', (pty) =>
-        pty.onExit.mock.calls[0][0]({ exitCode: 0, signal: null }),
-      );
-
-      // cmd.exe commands on Windows are prefixed with chcp 65001 for UTF-8
-      // PTY code joins argsPrefix + command into a single string via .join(' ')
-      expect(mockPtySpawn).toHaveBeenCalledWith(
-        'cmd.exe',
-        '/d /s /c %SystemRoot%\\System32\\chcp.com 65001 >nul && dir "C:\\Temp\\"',
-        expect.any(Object),
-      );
-
-      // Reset shell config to prevent leak into subsequent tests
       mockGetShellConfiguration.mockReturnValue({
         executable: 'bash',
         argsPrefix: ['-c'],

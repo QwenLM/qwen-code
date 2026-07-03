@@ -115,7 +115,9 @@ function applyUtf8Prefix(command: string, shell: string): string {
       );
     }
     if (shell === 'cmd') {
-      return `%SystemRoot%\\System32\\chcp.com 65001 >nul && ${command}`;
+      // Resolve in JS with fallback (defense-in-depth, matches WINDOWS_TASKKILL pattern, see #5873)
+      const systemRoot = process.env['SystemRoot'] || 'C:\\Windows';
+      return `${systemRoot}\\System32\\chcp.com 65001 >nul & ${command}`;
     }
   }
   return command;
