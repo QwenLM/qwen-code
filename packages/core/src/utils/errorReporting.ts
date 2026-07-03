@@ -75,30 +75,7 @@ export async function reportError(
   }
 
   const reportLabel = `${baseMessage} [${type}]`;
-  let stringifiedReportContent: string;
-  try {
-    stringifiedReportContent = JSON.stringify(reportContent, null, 2);
-  } catch (stringifyError) {
-    // This can happen if context contains something like BigInt
-    debugLogger.error(
-      `${reportLabel} Could not stringify report content (likely due to context):`,
-      stringifyError,
-      error,
-    );
-    // Fallback: try to report only the error if context was the issue
-    try {
-      const minimalReportContent = { error: errorToReport };
-      stringifiedReportContent = JSON.stringify(minimalReportContent, null, 2);
-      debugLogger.error(reportLabel, stringifiedReportContent);
-    } catch (minimalStringifyError) {
-      debugLogger.error(
-        `${reportLabel} Failed to stringify minimal error report:`,
-        minimalStringifyError,
-        error,
-      );
-    }
-    return;
-  }
+  const stringifiedReportContent = JSON.stringify(reportContent, null, 2);
 
   // Write to debug log instead of separate file
   debugLogger.error(reportLabel, stringifiedReportContent);
