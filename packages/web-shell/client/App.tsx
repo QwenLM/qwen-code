@@ -2042,14 +2042,11 @@ export function App({
   const loadSidebarSession = useCallback(
     async (sessionId: string) => {
       setSidebarSwitchingSessionId(sessionId);
-      // Close the drawer before awaiting the load so it doesn't linger over the
-      // old transcript while the new session streams in, matching the other
-      // session-switch paths (/resume, ResumeDialog).
+      // Close the drawer before awaiting the load; the transcript clears
+      // immediately and shows its loading skeleton for the selected session.
       closeMobileDrawer();
       try {
-        await sessionActions.loadSession(sessionId, {
-          deferTranscriptReset: true,
-        });
+        await sessionActions.loadSession(sessionId);
       } catch (error) {
         setSidebarSwitchingSessionId((current) =>
           current === sessionId ? null : current,
@@ -2064,11 +2061,17 @@ export function App({
     if (
       sidebarSwitchingSessionId !== null &&
       connection.sessionId === sidebarSwitchingSessionId &&
+      !connection.loadingTranscript &&
       !connection.catchingUp
     ) {
       setSidebarSwitchingSessionId(null);
     }
-  }, [connection.catchingUp, connection.sessionId, sidebarSwitchingSessionId]);
+  }, [
+    connection.catchingUp,
+    connection.loadingTranscript,
+    connection.sessionId,
+    sidebarSwitchingSessionId,
+  ]);
 
   const openTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
@@ -2214,6 +2217,10 @@ export function App({
 
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
+      if (connectionRef.current.loadingTranscript) {
+        pushToast('warning', t('editor.sessionLoading'));
+        return false;
+      }
       if (
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
@@ -3815,6 +3822,7 @@ export function App({
                         messages={displayMessages}
                         pendingApproval={pendingToolApproval}
                         onShowContextDetail={handleShowContextDetail}
+                        loadingTranscript={connection.loadingTranscript}
                         catchingUp={connection.catchingUp}
                         isResponding={streamingState !== 'idle'}
                         activeTurnStartedAt={activeTurnStartedAt}
