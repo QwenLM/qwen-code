@@ -569,13 +569,13 @@ export class SessionArtifactStore {
       writeStderrLine(
         `[artifacts] session=${this.sessionId} action=dropped reason="max artifacts exceeded" artifactId=${artifact.id}`,
       );
-      const index = changes.findIndex(
-        (change) =>
-          change.action === 'created' && change.artifactId === artifact.id,
-      );
-      if (index >= 0) {
-        changes.splice(index, 1);
-      }
+      removePriorChange(changes, artifact.id);
+      removed.push({
+        action: 'removed',
+        artifactId: artifact.id,
+        artifact: toPublicArtifact(artifact),
+        reason: 'eviction',
+      });
     }
 
     return removed;
@@ -1107,16 +1107,23 @@ function normalizeString(
       field,
     );
   }
-  if (
-    (field === 'title' || field === 'description' || field === 'mimeType') &&
-    hasUnsafeDisplayPayload(trimmed)
-  ) {
+  if (isDisplayField(field) && hasUnsafeDisplayPayload(trimmed)) {
     throw new SessionArtifactValidationError(
       `${field} contains unsafe markup`,
       field,
     );
   }
   return trimmed;
+}
+
+function isDisplayField(field: string): boolean {
+  return (
+    field === 'title' ||
+    field === 'description' ||
+    field === 'mimeType' ||
+    field === 'workspacePath' ||
+    field === 'managedId'
+  );
 }
 
 function hasControlCharacter(

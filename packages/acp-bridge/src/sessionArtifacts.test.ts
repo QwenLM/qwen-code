@@ -502,9 +502,14 @@ describe('SessionArtifactStore', () => {
         { title: 'Second link', url: 'https://example.com/second' },
       ]);
 
-      expect(overflow.changes).toHaveLength(1);
+      expect(overflow.changes).toHaveLength(2);
       expect(overflow.changes[0]?.artifact).toMatchObject({
         title: 'First link',
+      });
+      expect(overflow.changes[1]).toMatchObject({
+        action: 'removed',
+        artifact: expect.objectContaining({ title: 'Second link' }),
+        reason: 'eviction',
       });
       await expect(store.list()).resolves.toMatchObject({
         artifacts: [{ title: 'First link' }],
@@ -836,6 +841,30 @@ describe('SessionArtifactStore', () => {
         { strict: true },
       ),
     ).rejects.toMatchObject({ field: 'title' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Workspace payload',
+            workspacePath: '<img src=x onerror=alert(1)>.html',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'workspacePath' });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Managed payload',
+            managedId: '<script>alert(1)</script>',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'managedId' });
 
     await expect(
       store.upsertMany(

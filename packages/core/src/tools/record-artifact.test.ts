@@ -208,6 +208,20 @@ describe('RecordArtifactTool', () => {
 
     expect(() =>
       tool.build({
+        title: 'Workspace payload',
+        workspacePath: '<img src=x onerror=alert(1)>.html',
+      }),
+    ).toThrow(/unsafe markup/);
+
+    expect(() =>
+      tool.build({
+        title: 'Managed payload',
+        managedId: '<script>alert(1)</script>',
+      }),
+    ).toThrow(/unsafe markup/);
+
+    expect(() =>
+      tool.build({
         title: 'Metadata key',
         url: 'https://example.com/resource',
         metadata: { '<script>': 'unsafe key' },

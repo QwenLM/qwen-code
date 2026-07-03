@@ -289,13 +289,20 @@ function validateString(
   if (hasControlCharacter(trimmed, field === 'description')) {
     return `"${field}" contains control characters`;
   }
-  if (
-    (field === 'title' || field === 'description' || field === 'mimeType') &&
-    hasUnsafeDisplayPayload(trimmed)
-  ) {
+  if (isDisplayField(field) && hasUnsafeDisplayPayload(trimmed)) {
     return `"${field}" contains unsafe markup`;
   }
   return null;
+}
+
+function isDisplayField(field: string): boolean {
+  return (
+    field === 'title' ||
+    field === 'description' ||
+    field === 'mimeType' ||
+    field === 'workspacePath' ||
+    field === 'managedId'
+  );
 }
 
 function hasControlCharacter(
