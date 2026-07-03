@@ -370,6 +370,35 @@ describe('buildDaemonStatusResponse', () => {
       },
     });
   });
+
+  it('includes additive daemon performance data when provided', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        perfSnapshot: {
+          eventLoop: { meanMs: 1, p50Ms: 2, p99Ms: 3, maxMs: 4 },
+          pipe: {
+            inbound: { count: 5, totalBytes: 600, maxBytes: 300 },
+            outbound: { count: 7, totalBytes: 800, maxBytes: 400 },
+          },
+        },
+      }),
+    );
+
+    expect(response.runtime.perf).toEqual({
+      eventLoop: { meanMs: 1, p50Ms: 2, p99Ms: 3, maxMs: 4 },
+      pipe: {
+        inbound: { count: 5, totalBytes: 600, maxBytes: 300 },
+        outbound: { count: 7, totalBytes: 800, maxBytes: 400 },
+      },
+    });
+  });
+
+  it('omits daemon performance data when no provider is injected', async () => {
+    const response = await buildDaemonStatusResponse('summary', makeOptions());
+
+    expect(response.runtime).not.toHaveProperty('perf');
+  });
 });
 
 interface MakeOptionsInput {
@@ -382,6 +411,13 @@ interface MakeOptionsInput {
   hooksStatus?: unknown;
   extensionsStatus?: unknown;
   channelWorkerSnapshot?: ChannelWorkerSnapshot;
+  perfSnapshot?: {
+    eventLoop: { meanMs: number; p50Ms: number; p99Ms: number; maxMs: number };
+    pipe: {
+      inbound: { count: number; totalBytes: number; maxBytes: number };
+      outbound: { count: number; totalBytes: number; maxBytes: number };
+    };
+  };
 }
 
 function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
@@ -438,6 +474,9 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     sessionShellCommandEnabled: false,
     ...(input.channelWorkerSnapshot
       ? { getChannelWorkerSnapshot: () => input.channelWorkerSnapshot! }
+      : {}),
+    ...(input.perfSnapshot
+      ? { getPerfSnapshot: () => input.perfSnapshot! }
       : {}),
   };
 }
