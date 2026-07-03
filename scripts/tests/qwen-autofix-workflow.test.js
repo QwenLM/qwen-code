@@ -58,6 +58,9 @@ const resetAutofixWorkspaceSteps =
   workflow.match(
     /- name: 'Reset autofix workspace'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
   ) ?? [];
+const verificationGateSteps =
+  workflow.match(/- name: 'Verification gate'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
+  [];
 
 function scriptFromRunStep(step) {
   const runBlock = step.match(/run: \|-\n([\s\S]*)/)?.[1] ?? '';
@@ -269,11 +272,12 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain(
         'qwen_version="$(node -p "require(\'./package.json\').version")"',
       );
-      expect(step).toContain('current_version="$(qwen --version');
       expect(step).toContain(
         'exec node "${GITHUB_WORKSPACE}/dist/cli.js" "$@"',
       );
       expect(step).toContain('qwen-bin');
+      expect(step).not.toContain('current_version="$(qwen --version');
+      expect(step).not.toContain('Using pre-installed Qwen Code');
       expect(step).not.toContain('npm install -g');
     }
     expect(workflow).toContain('run_shell_command(npx vitest)');
@@ -321,6 +325,11 @@ describe('qwen-autofix workflow', () => {
 
   it('clears persistent autofix workdirs before using self-hosted runners', () => {
     expect(resetAutofixWorkspaceSteps).toHaveLength(2);
+    expect(workflow).toContain("WORKDIR: '/tmp/autofix'");
+    expect(workflow).toContain(
+      "WORKDIR: '/tmp/autofix-review-${{ matrix.target.pr }}'",
+    );
+    expect(workflow).not.toContain("WORKDIR: '/tmp/autofix-review'");
     for (const step of resetAutofixWorkspaceSteps) {
       expect(step).toContain('rm -rf "${WORKDIR}"');
       expect(step).toContain('mkdir -p "${WORKDIR}"');
@@ -361,6 +370,20 @@ describe('qwen-autofix workflow', () => {
     expect(triageAndAddressStep).toContain(
       'git diff --quiet "origin/${BRANCH}...${BRANCH}"',
     );
+  });
+
+  it('allows non-package fixes after deterministic verification', () => {
+    expect(verificationGateSteps).toHaveLength(2);
+    for (const step of verificationGateSteps) {
+      expect(step).toContain('npm run build');
+      expect(step).toContain('npm run typecheck');
+      expect(step).toContain('npm run lint');
+      expect(step).toContain(
+        'No package changes detected; skipping package tests.',
+      );
+      expect(step).not.toContain('Fix does not touch any package');
+      expect(step).not.toContain('PR does not touch any package');
+    }
   });
 
   it('keeps real model credentials out of qwen subprocess environments', () => {
