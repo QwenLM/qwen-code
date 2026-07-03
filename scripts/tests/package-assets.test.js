@@ -31,6 +31,11 @@ describe('package asset scripts', () => {
 
   it('copies extension examples into the bundled runtime dist', () => {
     const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/extensions/examples/mcp-server/keep.test.js',
+      'console.log("example test fixture");\n',
+    );
     stubConsole();
 
     copyBundleAssets({ root: rootDir });
@@ -45,6 +50,156 @@ describe('package asset scripts', () => {
     expect(
       existsSync(
         path.join(rootDir, 'dist', 'examples', 'mcp-server', 'package.json'),
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        path.join(rootDir, 'dist', 'examples', 'mcp-server', 'keep.test.js'),
+      ),
+    ).toBe(true);
+  });
+
+  it('copies bundled skill scripts and references into the runtime dist', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/SKILL.md',
+      '---\nname: dataviz\ndescription: Chart guidance\n---\nBody\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.js',
+      'console.log("ok");\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.test.js',
+      'import { it } from "vitest";\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.test.d.ts',
+      'export {};\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.test.js.map',
+      '{}\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/chart.spec.tsx',
+      'export {};\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/font-test-regular.woff2',
+      'font\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/references/palette.md',
+      '# Palette\n',
+    );
+    writeFile(rootDir, 'dist/bundled/dataviz/scripts/stale.test.js', 'stale\n');
+    stubConsole();
+
+    copyBundleAssets({ root: rootDir });
+
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'validate_palette.js',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'validate_palette.test.js',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'validate_palette.test.d.ts',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'validate_palette.test.js.map',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'chart.spec.tsx',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'stale.test.js',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'font-test-regular.woff2',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'references',
+          'palette.md',
+        ),
       ),
     ).toBe(true);
   });
@@ -171,6 +326,40 @@ describe('package asset scripts', () => {
         path.join(rootDir, 'dist', 'examples', 'mcp-server', 'package.json'),
       ),
     ).toBe(true);
+  });
+
+  it('omits browser MCP install hooks and deps from the prepared dist package', () => {
+    const rootDir = createFixtureRoot();
+    createBundleArtifacts(rootDir);
+    stubConsole();
+    const browserMcpPackageName = ['chrome', 'devtools', 'mcp'].join('-');
+    const browserAutomationPackageName = ['puppeteer', 'core'].join('-');
+    const installScriptFile = ['postinstall', 'js'].join('.');
+    const browserMcpPatchFile = `${browserMcpPackageName}+1.4.0.patch`;
+
+    preparePackage({ rootDir, requireNativeAudioCapture: false });
+
+    const distDir = path.join(rootDir, 'dist');
+    const distPackageJson = JSON.parse(
+      readFileSync(path.join(distDir, 'package.json'), 'utf8'),
+    );
+
+    expect(distPackageJson.files).not.toEqual(
+      expect.arrayContaining(['patches', installScriptFile]),
+    );
+    expect(distPackageJson.scripts).toBeUndefined();
+    expect(distPackageJson.dependencies).toEqual({});
+    expect(distPackageJson.optionalDependencies).not.toHaveProperty(
+      browserMcpPackageName,
+    );
+    expect(distPackageJson.optionalDependencies).not.toHaveProperty(
+      browserAutomationPackageName,
+    );
+    expect(existsSync(path.join(distDir, installScriptFile))).toBe(false);
+    expect(existsSync(path.join(distDir, 'patches'))).toBe(false);
+    expect(existsSync(path.join(distDir, 'patches', browserMcpPatchFile))).toBe(
+      false,
+    );
   });
 
   it('omits bundledDependencies when audio-capture artifacts are missing', () => {
@@ -385,6 +574,9 @@ describe('package asset scripts', () => {
           config: {},
           engines: {
             node: '>=22.0.0',
+          },
+          devDependencies: {
+            'patch-package': '^8.0.1',
           },
         },
         null,

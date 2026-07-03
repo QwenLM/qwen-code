@@ -43,6 +43,14 @@ The classifier uses your configured fast model
 (`/model --fast`). If no fast model is configured, the main session
 model is used instead.
 
+> [!tip]
+>
+> Shell commands that the permission system detects as read-only (e.g.
+> `ls`, `cat`, `git log`) are auto-approved before reaching the
+> classifier. Set `permissions.autoMode.classifyAllShell: true` to
+> override this and route all shell commands through the classifier —
+> see [Classify all shell commands](#classify-all-shell-commands) below.
+
 ## Hard rules still win
 
 Auto Mode does **not** replace hard permission rules. Before the classifier
@@ -144,6 +152,38 @@ To keep the classifier system prompt small:
 `autoMode` is merged across system / user / workspace settings the same
 way other permission settings are: arrays are concatenated and
 de-duplicated.
+
+### Classify all shell commands
+
+By default, read-only shell commands (`ls`, `cat`, `git status`, …) are
+auto-approved without invoking the classifier — the permission system
+detects them as safe at layer 3 and skips the classifier entirely. Set
+`classifyAllShell` to `true` to force **every** shell command through
+the classifier, including read-only ones:
+
+```json
+{
+  "permissions": {
+    "autoMode": {
+      "classifyAllShell": true
+    }
+  }
+}
+```
+
+This is useful for production or high-security environments where you
+want defense-in-depth: even seemingly harmless commands are reviewed by
+the classifier before execution. The trade-off is added latency (~300ms
+per read-only shell call) and reliance on classifier availability — if
+the classifier API is unreachable, read-only shell commands will also be
+blocked (fail-closed).
+
+> [!note]
+>
+> `classifyAllShell` only affects shell commands (`run_shell_command` and
+> `monitor`). Built-in read-only tools (`read_file`, `grep_search`,
+> `glob`, `list_directory`, etc.) are unaffected and still use the
+> fast-path allowlist.
 
 ## Reading the decision
 

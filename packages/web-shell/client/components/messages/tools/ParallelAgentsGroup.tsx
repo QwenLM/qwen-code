@@ -53,9 +53,9 @@ function getAgentStats(agent: ACPToolCall, now: number): string {
     taskExec['tokenCount'] > 0
       ? (taskExec['tokenCount'] as number)
       : stats &&
-          typeof stats['totalTokens'] === 'number' &&
-          stats['totalTokens'] > 0
-        ? (stats['totalTokens'] as number)
+          typeof stats['outputTokens'] === 'number' &&
+          stats['outputTokens'] > 0
+        ? (stats['outputTokens'] as number)
         : 0;
   if (tokens > 0) {
     parts.push(formatTokenCount(tokens));
@@ -138,13 +138,15 @@ export function ParallelAgentsGroup({
         aria-expanded={showGroup}
         title={showGroup ? t('tool.collapseHint') : t('tool.expand')}
       >
-        <span className={styles.summaryIcon} aria-hidden="true">
-          {summaryStatus === 'failed' ? (
+        {summaryStatus === 'failed' ? (
+          <span className={styles.summaryStatus}>
             <StatusIcon status={summaryStatus} />
-          ) : (
+          </span>
+        ) : (
+          <span className={styles.summaryIcon} aria-hidden="true">
             <ToolGroupIcon />
-          )}
-        </span>
+          </span>
+        )}
         <span
           className={
             hasRunning

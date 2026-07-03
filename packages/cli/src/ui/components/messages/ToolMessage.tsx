@@ -206,7 +206,7 @@ const useResultDisplayRenderer = (
       const totalStr = progress.total != null ? `/${progress.total}` : '';
       return {
         type: 'string',
-        data: `⏳ [${progress.progress}${totalStr}] ${msg}`,
+        data: `◌ [${progress.progress}${totalStr}] ${msg}`,
       };
     }
 
@@ -341,7 +341,7 @@ const SubagentExecutionRenderer: React.FC<{
     return (
       <Box paddingLeft={1}>
         <Text color={theme.text.secondary} dimColor>
-          ⏳ Queued approval:{' '}
+          ◌ Queued approval:{' '}
         </Text>
         <Text dimColor>{agentLabel}</Text>
       </Box>
@@ -401,8 +401,8 @@ const SubagentScrollbackSummary: React.FC<{
       formatDuration(stats.totalDurationMs, { hideTrailingZeros: true }),
     );
   }
-  if (stats?.totalTokens && stats.totalTokens > 0) {
-    parts.push(`${formatTokenCount(stats.totalTokens)} tokens`);
+  if (stats?.outputTokens && stats.outputTokens > 0) {
+    parts.push(`${formatTokenCount(stats.outputTokens)} tokens`);
   }
   // Sanitize every user/LLM-controlled string before it reaches Ink.
   // `subagentName` is subagent config (user-authored or model-chosen),

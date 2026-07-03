@@ -13,6 +13,8 @@ import {
   ModelSlashCommandEvent,
   logModelSlashCommand,
   MAINLINE_CODER_MODEL,
+  isImageCapable,
+  parseVisionModelSetting,
   resolveModelId,
   type AvailableModel as CoreAvailableModel,
   type ContentGeneratorConfig,
@@ -81,10 +83,38 @@ function parseModelSelectionKey(key: string): {
   return { authType, modelId: rest };
 }
 
+/**
+ * Encode a dialog selection key into the `authType:modelId` form persisted for
+ * the fast/vision auxiliary models (baseUrl discarded), so duplicate model ids
+ * across providers stay unambiguous. Handles the three selection-key shapes:
+ * `authType::modelId[\0baseUrl]`, `$runtime|authType|modelId`, and a bare id.
+ */
+export function encodeAuxModelSelector(selected: string): string {
+  if (selected.includes('::')) {
+    const parsed = parseModelSelectionKey(selected);
+    return `${parsed.authType}:${parsed.modelId}`;
+  }
+  if (selected.startsWith('$runtime|')) {
+    const parts = selected.split('|');
+    return parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
+  }
+  return selected;
+}
+
+function encodeVisionModelSelector(selected: string): string {
+  if (!selected.includes('::')) {
+    return encodeAuxModelSelector(selected);
+  }
+  const parsed = parseModelSelectionKey(selected);
+  const selector = `${parsed.authType}:${parsed.modelId}`;
+  return parsed.baseUrl ? `${selector}\0${parsed.baseUrl}` : selector;
+}
+
 interface ModelDialogProps {
   onClose: () => void;
   isFastModelMode?: boolean;
   isVoiceModelMode?: boolean;
+  isVisionModelMode?: boolean;
 }
 
 function maskApiKey(apiKey: string | undefined): string {
@@ -208,6 +238,7 @@ export function ModelDialog({
   onClose,
   isFastModelMode,
   isVoiceModelMode,
+  isVisionModelMode,
 }: ModelDialogProps): React.JSX.Element {
   const config = useContext(ConfigContext);
   const uiState = useContext(UIStateContext);
@@ -352,6 +383,9 @@ export function ModelDialog({
   // In fast model mode, default to the currently configured fast model
   const fastModelSetting = settings?.merged?.fastModel as string | undefined;
   const voiceModelSetting = settings?.merged?.voiceModel as string | undefined;
+  const visionModelSetting = settings?.merged?.visionModel as
+    string | undefined;
+  const parsedVisionModelValue = parseVisionModelSetting(visionModelSetting);
   const parsedFastModelSetting = useMemo(() => {
     if (!isFastModelMode) return undefined;
     try {
@@ -360,15 +394,25 @@ export function ModelDialog({
       return undefined;
     }
   }, [fastModelSetting, isFastModelMode]);
+  const parsedVisionModelSetting = useMemo(() => {
+    if (!isVisionModelMode) return undefined;
+    try {
+      return resolveModelId(parsedVisionModelValue?.selector);
+    } catch {
+      return undefined;
+    }
+  }, [parsedVisionModelValue?.selector, isVisionModelMode]);
   const preferredModelId =
     isFastModelMode && parsedFastModelSetting
       ? parsedFastModelSetting.modelId
-      : config?.getModel() || MAINLINE_CODER_MODEL;
+      : isVisionModelMode && parsedVisionModelSetting
+        ? parsedVisionModelSetting.modelId
+        : config?.getModel() || MAINLINE_CODER_MODEL;
   // Check if current model is a runtime model
   // Runtime snapshot ID is already in $runtime|${authType}|${modelId} format
   const activeRuntimeSnapshot =
-    isFastModelMode || isVoiceModelMode
-      ? undefined // fast and voice models are never runtime model selections
+    isFastModelMode || isVoiceModelMode || isVisionModelMode
+      ? undefined // fast/voice/vision models are never runtime model selections
       : config?.getActiveRuntimeModelSnapshot?.();
   const currentBaseUrl = config
     ?.getModelsConfig()
@@ -397,6 +441,26 @@ export function ModelDialog({
           ({ model }) => model.id === voiceModelSetting,
         )
       : undefined;
+  // Like fast mode, the vision setting may persist as a bare id (cross-provider)
+  // or an authType:modelId selector — highlight whichever row owns it.
+  const matchesVisionModelBaseUrl = (model: CoreAvailableModel): boolean =>
+    !parsedVisionModelValue?.baseUrl ||
+    model.baseUrl === parsedVisionModelValue.baseUrl;
+  const preferredVisionModelEntry =
+    isVisionModelMode && parsedVisionModelSetting
+      ? parsedVisionModelSetting.authType
+        ? availableModelEntries.find(
+            ({ authType: t2, model }) =>
+              t2 === parsedVisionModelSetting.authType &&
+              model.id === parsedVisionModelSetting.modelId &&
+              matchesVisionModelBaseUrl(model),
+          )
+        : availableModelEntries.find(
+            ({ model }) =>
+              model.id === parsedVisionModelSetting.modelId &&
+              matchesVisionModelBaseUrl(model),
+          )
+      : undefined;
   const preferredKey = activeRuntimeSnapshot
     ? activeRuntimeSnapshot.id
     : preferredVoiceModelEntry
@@ -405,21 +469,28 @@ export function ModelDialog({
           preferredVoiceModelEntry.model.id,
           preferredVoiceModelEntry.model.baseUrl,
         )
-      : preferredFastModelEntry
+      : preferredVisionModelEntry
         ? buildModelSelectionKey(
-            preferredFastModelEntry.authType,
-            preferredFastModelEntry.model.id,
-            preferredFastModelEntry.model.baseUrl,
+            preferredVisionModelEntry.authType,
+            preferredVisionModelEntry.model.id,
+            preferredVisionModelEntry.model.baseUrl,
           )
-        : authType
-          ? buildModelSelectionKey(authType, preferredModelId, currentBaseUrl)
-          : '';
+        : preferredFastModelEntry
+          ? buildModelSelectionKey(
+              preferredFastModelEntry.authType,
+              preferredFastModelEntry.model.id,
+              preferredFastModelEntry.model.baseUrl,
+            )
+          : authType
+            ? buildModelSelectionKey(authType, preferredModelId, currentBaseUrl)
+            : '';
 
   useKeypress(
     (key) => {
       if (
         key.name === 'escape' ||
-        (key.name === 'left' && (isFastModelMode || isVoiceModelMode))
+        (key.name === 'left' &&
+          (isFastModelMode || isVoiceModelMode || isVisionModelMode))
       ) {
         onClose();
       }
@@ -507,17 +578,7 @@ export function ModelDialog({
       // Fast model mode: save authType:modelId so duplicate model ids across
       // providers remain unambiguous. baseUrl is intentionally discarded.
       if (isFastModelMode) {
-        let fastModel: string;
-        if (selected.includes('::')) {
-          const parsed = parseModelSelectionKey(selected);
-          fastModel = `${parsed.authType}:${parsed.modelId}`;
-        } else if (selected.startsWith('$runtime|')) {
-          const parts = selected.split('|');
-          fastModel =
-            parts[1] && parts[2] ? `${parts[1]}:${parts[2]}` : selected;
-        } else {
-          fastModel = selected;
-        }
+        const fastModel = encodeAuxModelSelector(selected);
         const scope = getPersistScopeForModelSelection(settings);
         settings.setValue(scope, 'fastModel', fastModel);
         // Sync the runtime Config so forked agents pick up the change immediately.
@@ -526,6 +587,47 @@ export function ModelDialog({
           {
             type: 'success',
             text: `${t('Fast Model')}: ${fastModel}`,
+          },
+          Date.now(),
+        );
+        onClose();
+        return;
+      }
+
+      // Vision model mode: keep the selected row's baseUrl when present so
+      // same-provider OpenAI-compatible endpoints with the same id stay distinct.
+      if (isVisionModelMode) {
+        const visionModel = encodeVisionModelSelector(selected);
+        const visionModelDisplay =
+          parseVisionModelSetting(visionModel)?.selector ?? visionModel;
+        // Pinning the primary itself is ignored by the bridge at runtime, so
+        // reject it here instead of persisting a dead pin and reporting success.
+        if (
+          selectedEntry &&
+          config?.isCurrentPrimaryModel(selectedEntry.model)
+        ) {
+          setErrorMessage(
+            t(
+              "'{{model}}' is the current primary model and cannot be used as the vision bridge.",
+              { model: visionModelDisplay },
+            ),
+          );
+          return;
+        }
+        const scope = getPersistScopeForModelSelection(settings);
+        settings.setValue(scope, 'visionModel', visionModel);
+        // Sync runtime Config so the vision bridge picks it up without a restart.
+        config?.setVisionModel(visionModel);
+        // Honor the pin even if the model isn't image-capable, but warn — the
+        // bridge will send images to it.
+        const visionWarning =
+          selectedEntry && !isImageCapable(selectedEntry.model)
+            ? `\n${t("⚠ '{{model}}' is not a known image-capable model; the vision bridge may fail on images.", { model: visionModelDisplay })}`
+            : '';
+        uiState?.historyManager.addItem(
+          {
+            type: 'success',
+            text: `${t('Vision Model')}: ${visionModelDisplay}${visionWarning}`,
           },
           Date.now(),
         );
@@ -602,8 +704,7 @@ export function ModelDialog({
         }
 
         after = config.getContentGeneratorConfig?.() as
-          | ContentGeneratorConfig
-          | undefined;
+          ContentGeneratorConfig | undefined;
         effectiveAuthType = after?.authType ?? selectedAuthType ?? authType;
         effectiveModelId = after?.model ?? modelId;
       } catch (e) {
@@ -648,6 +749,7 @@ export function ModelDialog({
       setErrorMessage,
       isFastModelMode,
       isVoiceModelMode,
+      isVisionModelMode,
       availableModelEntries,
     ],
   );
@@ -665,9 +767,11 @@ export function ModelDialog({
       <Text bold>
         {isVoiceModelMode
           ? t('Select Voice Model')
-          : isFastModelMode
-            ? t('Select Fast Model')
-            : t('Select Model')}
+          : isVisionModelMode
+            ? t('Select Vision Model')
+            : isFastModelMode
+              ? t('Select Fast Model')
+              : t('Select Model')}
       </Text>
 
       {!hasModels ? (

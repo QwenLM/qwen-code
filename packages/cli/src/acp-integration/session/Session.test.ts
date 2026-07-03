@@ -12,10 +12,16 @@ import * as path from 'node:path';
 import {
   computeInitialTurnFromHistory,
   fireSessionPermissionDeniedForAutoMode,
+  resolveHomeLoopResolverRoots,
   Session,
 } from './Session.js';
 import type { Content, FunctionCall, Part } from '@google/genai';
-import type { ChatRecord, Config, GeminiChat } from '@qwen-code/qwen-code-core';
+import type {
+  ChatRecord,
+  Config,
+  Extension,
+  GeminiChat,
+} from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
   AuthType,
@@ -35,6 +41,11 @@ import { CommandKind } from '../../ui/commands/types.js';
 import { MessageType } from '../../ui/types.js';
 
 const debugLoggerWarnSpy = vi.hoisted(() => vi.fn());
+const debugLoggerDebugSpy = vi.hoisted(() => vi.fn());
+const runVisionBridgeSpy = vi.hoisted(() => vi.fn());
+// Records every LoopTickResolver construction's deps so a test can assert what
+// Session computed (e.g. the home confinement root) without a private-field peek.
+const loopTickResolverDepsSpy = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   const actual =
@@ -42,13 +53,24 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   return {
     ...actual,
     createDebugLogger: () => ({
-      debug: vi.fn(),
+      debug: debugLoggerDebugSpy,
       info: vi.fn(),
       warn: debugLoggerWarnSpy,
       error: vi.fn(),
     }),
     generatePromptSuggestion: vi.fn(),
     logPromptSuggestion: vi.fn(),
+    runVisionBridge: runVisionBridgeSpy,
+    // Transparent recording wrapper: records the constructor deps, then behaves
+    // exactly like the real resolver (subclass → instanceof + methods preserved).
+    LoopTickResolver: class extends actual.LoopTickResolver {
+      constructor(
+        ...args: ConstructorParameters<typeof actual.LoopTickResolver>
+      ) {
+        loopTickResolverDepsSpy(args[0]);
+        super(...args);
+      }
+    },
   };
 });
 
@@ -158,6 +180,33 @@ function createEmptyStream() {
   return (async function* () {})();
 }
 
+/**
+ * Points os.homedir() at `home` for a test by overriding the env vars libuv
+ * reads — the module export itself can't be spied under ESM. Returns a restore
+ * function.
+ */
+function setFakeHome(home: string): () => void {
+  const keys = [
+    'HOME',
+    'USERPROFILE',
+    'HOMEDRIVE',
+    'HOMEPATH',
+    'HOMESHARE',
+  ] as const;
+  const prev = Object.fromEntries(
+    keys.map((key) => [key, process.env[key]]),
+  ) as Record<(typeof keys)[number], string | undefined>;
+  for (const key of keys) {
+    process.env[key] = home;
+  }
+  return () => {
+    for (const key of keys) {
+      if (prev[key] === undefined) delete process.env[key];
+      else process.env[key] = prev[key];
+    }
+  };
+}
+
 // Helper to create async generator with chunks (avoids memory leak)
 function createStreamWithChunks(
   chunks: Array<{ type: unknown; value: unknown }>,
@@ -212,6 +261,7 @@ describe('Session', () => {
   };
   let mockGeminiClient: {
     getChat: ReturnType<typeof vi.fn>;
+    isInitialized: ReturnType<typeof vi.fn>;
     tryCompressChat: ReturnType<typeof vi.fn>;
   };
   let mockBackgroundTaskRegistry: {
@@ -261,7 +311,50 @@ describe('Session', () => {
     };
   }
 
+  function makeExtension(overrides: Partial<Extension> = {}): Extension {
+    return {
+      id: 'browser',
+      name: 'browser',
+      displayName: 'Browser',
+      version: '1.0.0',
+      isActive: true,
+      path: process.cwd(),
+      config: {
+        name: 'browser',
+        version: '1.0.0',
+        description: 'Browser automation',
+      },
+      mcpServers: {
+        'browser-mcp': {
+          command: 'node',
+        },
+      },
+      contextFiles: [],
+      skills: [
+        {
+          name: 'browser-skill',
+          description: 'Use browser tools',
+          path: 'skills/browser/SKILL.md',
+        },
+      ],
+      ...overrides,
+    } as Extension;
+  }
+
+  function firstSentMessage(): Part[] {
+    const call = vi.mocked(mockChat.sendMessageStream).mock.calls[0];
+    const request = call?.[1] as { message?: Part[] } | undefined;
+    return request?.message ?? [];
+  }
+
+  function textParts(parts: Part[]): string[] {
+    return parts.flatMap((part) =>
+      typeof part.text === 'string' ? [part.text] : [],
+    );
+  }
+
   beforeEach(() => {
+    runVisionBridgeSpy.mockReset();
     currentModel = 'qwen3-code-plus';
     currentAuthType = AuthType.USE_OPENAI;
     switchModelSpy = vi
@@ -271,19 +364,26 @@ describe('Session', () => {
         currentModel = modelId;
       });
 
+    const getHistoryMock = vi.fn().mockReturnValue([]);
     mockChat = {
       sendMessageStream: vi.fn(),
       addHistory: vi.fn(),
-      getHistory: vi.fn().mockReturnValue([]),
+      getHistory: getHistoryMock,
+      // continueLastTurn classifies from a bounded tail; delegate to getHistory
+      // so tests that set getHistory drive detection (fixtures are small).
+      getHistoryTail: vi.fn(() => getHistoryMock()),
+      getHistoryTailShallow: vi.fn(() => getHistoryMock()),
       getHistoryShallow: vi.fn().mockReturnValue([]),
       getHistoryFunctionResponseIds: vi.fn().mockReturnValue(new Set<string>()),
       getLastModelMessageText: vi.fn().mockReturnValue(''),
       setHistory: vi.fn(),
       truncateHistory: vi.fn(),
       stripThoughtsFromHistory: vi.fn(),
+      stripOrphanedUserEntriesFromHistory: vi.fn().mockReturnValue([]),
     } as unknown as GeminiChat;
     mockGeminiClient = {
       getChat: vi.fn().mockReturnValue(mockChat),
+      isInitialized: vi.fn().mockReturnValue(true),
       tryCompressChat: vi.fn().mockResolvedValue({
         originalTokenCount: 0,
         newTokenCount: 0,
@@ -335,6 +435,9 @@ describe('Session', () => {
       getModel: vi.fn().mockImplementation(() => currentModel),
       getSessionId: vi.fn().mockReturnValue('test-session-id'),
       getWorkingDir: vi.fn().mockReturnValue(process.cwd()),
+      // Folder trust gates the project `.qwen/loop.md`; default trusted (the
+      // production default). Untrusted-folder tests override to false.
+      isTrustedFolder: vi.fn().mockReturnValue(true),
       getTelemetryLogPromptsEnabled: vi.fn().mockReturnValue(false),
       getUsageStatisticsEnabled: vi.fn().mockReturnValue(false),
       getContentGeneratorConfig: vi.fn().mockReturnValue(undefined),
@@ -404,6 +507,176 @@ describe('Session', () => {
     mockToolRegistry = undefined as unknown as typeof mockToolRegistry;
     vi.restoreAllMocks();
     vi.clearAllTimers();
+  });
+
+  describe('continueLastTurn', () => {
+    it('returns none and starts no continuation when the last turn ended cleanly', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'hi' }] },
+        { role: 'model', parts: [{ text: 'all done' }] },
+      ]);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({ accepted: false, interruption: 'none' });
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('accepts an interrupted prompt as the classification only, without firing the turn itself', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered question' }] },
+      ]);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({
+        accepted: true,
+        interruption: 'interrupted_prompt',
+      });
+      // continueLastTurn is now a pure accept/reject pre-check — the daemon
+      // bridge drives the actual turn through sendPrompt, so the agent must NOT
+      // fire its own internal prompt() here.
+      await Promise.resolve();
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('classifies a turn with dangling tool calls as interrupted_turn', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'read it' }] },
+        {
+          role: 'model',
+          parts: [
+            { functionCall: { id: 'call-1', name: 'read_file', args: {} } },
+          ],
+        },
+      ]);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({
+        accepted: true,
+        interruption: 'interrupted_turn',
+      });
+      // continueLastTurn is decision-only for interrupted_turn too — the bridge
+      // drives the turn, so the agent must not fire its own prompt() here.
+      await Promise.resolve();
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the gemini client is not initialized', async () => {
+      vi.mocked(mockGeminiClient.isInitialized).mockReturnValue(false);
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({ accepted: false, interruption: 'none' });
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
+
+    it('preserves the orphaned turn when a continuation send fails (no data loss)', async () => {
+      // An interrupted prompt: an orphaned user turn the model never answered.
+      mockChat.getHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      // Force the continuation send to fail NON-cancelled (session token limit)
+      // so it hits the `!responseStream` branch — the data-loss window.
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(100);
+      mockGeminiClient.tryCompressChat.mockResolvedValue({
+        originalTokenCount: 999,
+        newTokenCount: 999,
+        compressionStatus: core.CompressionStatus.NOOP,
+      });
+
+      const continueRequest = {
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as Parameters<typeof session.prompt>[0];
+      const result = await session.prompt(continueRequest);
+
+      expect(result).toEqual({ stopReason: 'max_tokens' });
+      // The orphan was stripped before the send; on a non-cancelled failure the
+      // full message must be preserved back into history, not dropped.
+      expect(mockChat.stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({ text: 'unanswered' }),
+          ]),
+        }),
+      );
+    });
+
+    it('restores the orphaned turn when a continuation send throws (no data loss)', async () => {
+      // Same data-loss window as above, but the send THROWS instead of
+      // returning a graceful null stream — the path #preserveUnsentMessageHistory
+      // misses. The catch must restore the stripped orphan.
+      mockChat.getHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      mockChat.stripOrphanedUserEntriesFromHistory = vi
+        .fn()
+        .mockReturnValue([{ role: 'user', parts: [{ text: 'unanswered' }] }]);
+      // No token limit, so we reach the send; the send then throws.
+      mockConfig.getSessionTokenLimit = vi.fn().mockReturnValue(0);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockRejectedValue(new Error('send blew up'));
+
+      const continueRequest = {
+        prompt: [],
+        sessionId: 'test-session-id',
+        _meta: { 'qwen.daemon.continueLastTurn': true },
+      } as unknown as Parameters<typeof session.prompt>[0];
+
+      await expect(session.prompt(continueRequest)).rejects.toThrow(
+        'send blew up',
+      );
+
+      expect(mockChat.stripOrphanedUserEntriesFromHistory).toHaveBeenCalled();
+      expect(mockChat.addHistory).toHaveBeenCalledWith(
+        expect.objectContaining({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({ text: 'unanswered' }),
+          ]),
+        }),
+      );
+    });
+
+    it('rejects (accepted:false) when a prompt is already in flight', async () => {
+      vi.mocked(mockChat.getHistory).mockReturnValue([
+        { role: 'user', parts: [{ text: 'unanswered' }] },
+      ]);
+      // Simulate an active prompt so the re-entrancy guard trips: there is no
+      // settled turn to continue while one is running.
+      (
+        session as unknown as { pendingPrompt: AbortController | null }
+      ).pendingPrompt = new AbortController();
+      const promptSpy = vi
+        .spyOn(session, 'prompt')
+        .mockResolvedValue({ stopReason: 'end_turn' });
+
+      const result = await session.continueLastTurn();
+
+      expect(result).toEqual({
+        accepted: false,
+        interruption: 'interrupted_prompt',
+      });
+      expect(promptSpy).not.toHaveBeenCalled();
+    });
   });
 
   describe('setMode', () => {
@@ -967,6 +1240,54 @@ describe('Session', () => {
           ],
         },
       });
+    });
+
+    it('forwards command aliases as _meta.altNames (and omits the key when there are none)', async () => {
+      // A channel consumer only sees this wire snapshot, not the command registry,
+      // so aliases must travel in _meta (ACP's extension point) for it to recognize
+      // an aliased command. Omitted when absent so non-aliased entries stay
+      // byte-identical.
+      getAvailableCommandsSpy.mockResolvedValueOnce([
+        {
+          name: 'compress',
+          description: 'Compress context',
+          altNames: ['summarize'],
+          kind: CommandKind.BUILT_IN,
+        },
+        {
+          name: 'help',
+          description: 'Show help',
+          kind: CommandKind.BUILT_IN,
+        },
+      ]);
+
+      await session.sendAvailableCommandsUpdate();
+
+      expect(mockClient.sessionUpdate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          update: expect.objectContaining({
+            sessionUpdate: 'available_commands_update',
+            availableCommands: [
+              expect.objectContaining({
+                name: 'compress',
+                _meta: expect.objectContaining({ altNames: ['summarize'] }),
+              }),
+              expect.objectContaining({ name: 'help' }),
+            ],
+          }),
+        }),
+      );
+      // The alias-free command carries no altNames key.
+      const call = (
+        mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+      ).mock.calls.at(-1)![0] as {
+        update: {
+          availableCommands: Array<{ _meta?: Record<string, unknown> }>;
+        };
+      };
+      expect(call.update.availableCommands[1]._meta).not.toHaveProperty(
+        'altNames',
+      );
     });
 
     it('sets input for built-in commands with subCommands', async () => {
@@ -1902,6 +2223,281 @@ describe('Session', () => {
       }
     });
 
+    it('routes ACP image prompts through the vision bridge for text-only primary models', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: 'look at this' }, { text: '[transcribed image]' }],
+        transcript: '[transcribed image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      expect(runVisionBridgeSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          config: mockConfig,
+          signal: expect.any(AbortSignal),
+        }),
+      );
+      const sent = firstSentMessage();
+      expect(textParts(sent)).toContain('[transcribed image]');
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+    });
+
+    it('strips image parts when the vision bridge is cancelled before applying', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: false,
+        status: 'skipped',
+        convertedCount: 0,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+        egressOccurred: true,
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(
+        textParts(sent).some((t: string) => t.includes('look at this')),
+      ).toBe(true);
+    });
+
+    it('preserves oversized inline images for the vision bridge', async () => {
+      const ENV_KEY = 'QWEN_CODE_MAX_INLINE_MEDIA_BYTES';
+      const original = process.env[ENV_KEY];
+      process.env[ENV_KEY] = '8';
+      try {
+        mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+        mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+          id: 'qwen3.7-plus',
+        });
+        runVisionBridgeSpy.mockResolvedValue({
+          applied: true,
+          status: 'ok',
+          parts: [{ text: 'look at this' }, { text: '[large image]' }],
+          transcript: '[large image]',
+          convertedCount: 1,
+          omittedCount: 0,
+          modelId: 'qwen3.7-plus',
+        });
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'image',
+              mimeType: 'image/png',
+              data: 'QUJDREVGR0hJSktMTU5PUFFSU1Q=',
+            },
+          ],
+        });
+
+        const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
+          ?.parts as Part[];
+        expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
+        expect(textParts(firstSentMessage())).toContain('[large image]');
+      } finally {
+        if (original === undefined) delete process.env[ENV_KEY];
+        else process.env[ENV_KEY] = original;
+      }
+    });
+
+    it('falls back to text-only parts when the vision bridge throws', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockRejectedValue(new Error('provider unavailable'));
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      const sent = firstSentMessage();
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(
+        textParts(sent).some((t: string) => t.includes('look at this')),
+      ).toBe(true);
+      expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('provider unavailable'),
+      );
+    });
+
+    it('forwards failed bridge replacement parts to the primary model', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'failed',
+        parts: [{ text: 'look at this' }, { text: '[bridge failed]' }],
+        convertedCount: 0,
+        omittedCount: 1,
+        modelId: 'qwen3.7-plus',
+        egressOccurred: true,
+        error: 'quota exceeded',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      const sent = firstSentMessage();
+      expect(textParts(sent)).toContain('[bridge failed]');
+      expect(sent.some((part) => 'inlineData' in part)).toBe(false);
+      expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+        expect.stringContaining('error=quota exceeded'),
+      );
+    });
+
+    it('does not run the vision bridge when the primary model supports images', async () => {
+      mockConfig.getEffectiveInputModalities = vi
+        .fn()
+        .mockReturnValue({ image: true });
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          { type: 'text', text: 'look at this' },
+          {
+            type: 'image',
+            mimeType: 'image/png',
+            data: 'iVBORw0KGgo=',
+          },
+        ],
+      });
+
+      expect(runVisionBridgeSpy).not.toHaveBeenCalled();
+      expect(firstSentMessage().some((part) => 'inlineData' in part)).toBe(
+        true,
+      );
+    });
+
+    it('preserves unsupported image @ files for the vision bridge', async () => {
+      mockConfig.getEffectiveInputModalities = vi.fn().mockReturnValue({});
+      mockConfig.getDefaultVisionBridgeModel = vi.fn().mockReturnValue({
+        id: 'qwen3.7-plus',
+      });
+      const readManyFilesSpy = vi
+        .spyOn(core, 'readManyFiles')
+        .mockResolvedValue({
+          contentParts: {
+            inlineData: { mimeType: 'image/png', data: 'iVBORw0KGgo=' },
+          },
+        } as Awaited<ReturnType<typeof core.readManyFiles>>);
+      runVisionBridgeSpy.mockResolvedValue({
+        applied: true,
+        status: 'ok',
+        parts: [{ text: 'look at this' }, { text: '[file image]' }],
+        transcript: '[file image]',
+        convertedCount: 1,
+        omittedCount: 0,
+        modelId: 'qwen3.7-plus',
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      try {
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [
+            { type: 'text', text: 'look at this' },
+            {
+              type: 'resource_link',
+              uri: 'file:///tmp/image.png',
+              mimeType: 'image/png',
+              name: 'image.png',
+            },
+          ],
+        });
+
+        expect(readManyFilesSpy).toHaveBeenCalledWith(
+          mockConfig,
+          expect.objectContaining({
+            preserveUnsupportedImageForBridge: true,
+          }),
+        );
+        const bridgeParts = runVisionBridgeSpy.mock.calls[0]?.[0]
+          ?.parts as Part[];
+        expect(bridgeParts.some((part) => 'inlineData' in part)).toBe(true);
+        expect(textParts(firstSentMessage())).toContain('[file image]');
+      } finally {
+        readManyFilesSpy.mockRestore();
+      }
+    });
+
     describe('conversation_finished telemetry (#4602 review)', () => {
       it('emits conversation_finished once when a turn completes normally', async () => {
         const finishedSpy = vi
@@ -2035,6 +2631,462 @@ describe('Session', () => {
         expect(
           duplicateFollowUp.message[0].functionResponse?.response?.['error'],
         ).toContain('Duplicate provider tool call id "shell_1"');
+      });
+
+      it('stops an ACP prompt after repeated invalid tool parameters with fresh ids', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const messageBus = {
+          request: vi.fn().mockResolvedValue({
+            success: true,
+            output: {
+              decision: 'block',
+              reason: 'Continue after Stop hook',
+            },
+          }),
+        };
+        mockConfig.getMessageBus = vi.fn().mockReturnValue(messageBus);
+        mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(false);
+        mockConfig.hasHooksForEvent = vi
+          .fn()
+          .mockImplementation((eventName: string) => eventName === 'Stop');
+        mockChat.getHistory = vi
+          .fn()
+          .mockReturnValue([{ role: 'model', parts: [{ text: 'response' }] }]);
+        mockChat.getLastModelMessageText = vi.fn().mockReturnValue('response');
+        const build = vi
+          .fn()
+          .mockImplementationOnce(() => {
+            throw new Error('Parameter "questions" must be an array: value 1.');
+          })
+          .mockImplementationOnce(() => {
+            throw new Error('Parameter "questions" must be an array: value 2.');
+          })
+          .mockImplementationOnce(() => {
+            throw new Error('Parameter "questions" must be an array: value 3.');
+          });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'ask_user_question',
+          kind: core.Kind.Other,
+          displayName: 'Ask User Question',
+          description: 'Ask user question',
+          build,
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'ask_1',
+                      name: 'ask_user_question',
+                      args: { questions: '[{"question":"Continue?"}]' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'ask_2',
+                      name: 'ask_user_question',
+                      args: { questions: '[{"question":"Continue?"}]' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(
+            createStreamWithChunks([
+              {
+                type: core.StreamEventType.CHUNK,
+                value: {
+                  functionCalls: [
+                    {
+                      id: 'ask_3',
+                      name: 'ask_user_question',
+                      args: { questions: '[{"question":"Continue?"}]' },
+                    },
+                  ],
+                },
+              },
+            ]),
+          )
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'ask me before continuing' }],
+        });
+
+        expect(build).toHaveBeenCalledTimes(3);
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(3);
+        const stopHookCalls = messageBus.request.mock.calls.filter(
+          ([request]) =>
+            typeof request === 'object' &&
+            request !== null &&
+            'eventName' in request &&
+            request.eventName === 'Stop',
+        );
+        expect(stopHookCalls).toHaveLength(0);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after repeated tool parameter errors',
+          ),
+        );
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: [
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'ask_3',
+                name: 'ask_user_question',
+                response: expect.objectContaining({
+                  error: expect.stringContaining(
+                    'Parameter "questions" must be an array',
+                  ),
+                }),
+              }),
+            }),
+            expect.objectContaining({
+              text: expect.stringContaining(
+                'terminated because the model exceeded tool-call safety limits',
+              ),
+            }),
+          ],
+        });
+      });
+
+      it('does not stop disabled tools as repeated invalid parameter calls', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockConfig.getPermissionManager = vi.fn().mockReturnValue({
+          isToolEnabled: vi.fn().mockResolvedValue(false),
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: 'write_file',
+          kind: core.Kind.Edit,
+          build: vi.fn(),
+        });
+        const functionCalls: FunctionCall[] = [
+          { id: 'write_1', name: 'write_file', args: {} },
+          { id: 'write_2', name: 'write_file', args: {} },
+          { id: 'write_3', name: 'write_file', args: {} },
+        ];
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-disabled-tool',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).not.toBe(true);
+        expect(toolLoopState.invalidToolParamErrors.size).toBe(0);
+        expect(result.parts).toHaveLength(3);
+      });
+
+      it('stops early tool lookup errors after repeated invalid tool calls', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        mockToolRegistry.getTool.mockReturnValue(undefined);
+        const functionCalls: FunctionCall[] = [
+          {
+            id: 'missing_1',
+            name: 'missing_tool',
+            args: { value: 'one' },
+          },
+          {
+            id: 'missing_2',
+            name: 'missing_tool',
+            args: { value: 'two' },
+          },
+          {
+            id: 'missing_3',
+            name: 'missing_tool',
+            args: { value: 'three' },
+          },
+          {
+            id: 'missing_4',
+            name: 'missing_tool',
+            args: { value: 'four' },
+          },
+          {
+            id: 'read_after_loop',
+            name: 'read_file',
+            args: { file_path: 'after-loop.ts' },
+          },
+        ];
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-missing-tool-loop',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'missing_1',
+          'missing_2',
+          'missing_3',
+          'missing_4',
+          'read_after_loop',
+        ]);
+        expect(result.parts[4].functionResponse?.response?.['error']).toEqual(
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
+        );
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after repeated tool parameter errors from missing_tool',
+          ),
+        );
+      });
+
+      it('stops an ACP prompt after exceeding the daemon tool-call cap', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const functionCalls = Array.from({ length: 102 }, (_, index) => ({
+          id: `read_${index}`,
+          name: 'read_file',
+          args: { file_path: `file_${index}.ts` },
+        }));
+        functionCalls[101].id = 'read_0';
+        mockChat.sendMessageStream = vi.fn().mockResolvedValueOnce(
+          createStreamWithChunks([
+            {
+              type: core.StreamEventType.CHUNK,
+              value: { functionCalls },
+            },
+          ]),
+        );
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'read many files' }],
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledTimes(1);
+        expect(mockToolRegistry.getTool).not.toHaveBeenCalled();
+        expect(mockChat.addHistory).toHaveBeenCalledWith({
+          role: 'user',
+          parts: expect.arrayContaining([
+            expect.objectContaining({
+              functionResponse: expect.objectContaining({
+                id: 'read_0',
+                name: 'read_file',
+                response: {
+                  error: expect.stringContaining('loop detection'),
+                },
+              }),
+            }),
+            expect.objectContaining({
+              text: expect.stringContaining(
+                'terminated because the model exceeded tool-call safety limits',
+              ),
+            }),
+          ]),
+        });
+        const preservedResponses = vi
+          .mocked(mockChat.addHistory)
+          .mock.calls.flatMap(([content]) => content.parts ?? [])
+          .filter((part) => part.functionResponse)
+          .map((part) => part.functionResponse?.id);
+        expect(preservedResponses).toHaveLength(101);
+        expect(new Set(preservedResponses).size).toBe(101);
+        expect(
+          mockChatRecordingService.recordToolResult.mock.calls.map(
+            ([parts]) => parts[0]?.functionResponse?.id,
+          ),
+        ).toEqual(preservedResponses);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after 101 tool calls in one turn.',
+          ),
+        );
+      });
+
+      it('does not start unstarted concurrent Agent calls after invalid parameter loop detection', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const build = vi.fn().mockImplementation(() => {
+          throw new Error('Invalid subagent_type: bad');
+        });
+        mockToolRegistry.getTool.mockImplementation((name: string) =>
+          name === core.ToolNames.AGENT
+            ? {
+                name: core.ToolNames.AGENT,
+                kind: core.Kind.Think,
+                displayName: 'Agent',
+                description: 'Agent',
+                build,
+                canUpdateOutput: false,
+                isOutputMarkdown: true,
+              }
+            : undefined,
+        );
+        const functionCalls: FunctionCall[] = Array.from(
+          { length: 5 },
+          (_, index) => ({
+            id: `agent_${index}`,
+            name: core.ToolNames.AGENT,
+            args: { subagent_type: `bad_${index}` },
+          }),
+        );
+        functionCalls.push({
+          id: 'read_after_loop',
+          name: 'read_file',
+          args: { file_path: 'after-loop.ts' },
+        });
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-agent-invalid-loop',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(
+          result.parts
+            .slice(3)
+            .map((part) => part.functionResponse?.response?.['error']),
+        ).toEqual([
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
+          'Skipped because loop detection stopped the current turn before this tool call could run.',
+        ]);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'agent_0',
+          'agent_1',
+          'agent_2',
+          'agent_3',
+          'agent_4',
+          'read_after_loop',
+        ]);
+        expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+          expect.stringContaining(
+            'Stopping ACP turn after repeated tool parameter errors',
+          ),
+        );
+      });
+
+      it('stops concurrent Agent batches after Promise.race observes loop detection', async () => {
+        mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        const build = vi.fn().mockImplementation(() => {
+          throw new Error('Invalid subagent_type: bad');
+        });
+        mockToolRegistry.getTool.mockReturnValue({
+          name: core.ToolNames.AGENT,
+          kind: core.Kind.Think,
+          displayName: 'Agent',
+          description: 'Agent',
+          build,
+          canUpdateOutput: false,
+          isOutputMarkdown: true,
+        });
+        const functionCalls: FunctionCall[] = Array.from(
+          { length: 3 },
+          (_, index) => ({
+            id: `agent_${index}`,
+            name: core.ToolNames.AGENT,
+            args: { subagent_type: `bad_${index}` },
+          }),
+        );
+        const toolLoopState = {
+          totalToolCalls: 0,
+          invalidToolParamErrors: new Map<string, number>(),
+          loopDetected: false,
+        };
+
+        const result = await (
+          session as unknown as {
+            runToolCalls: (
+              abortSignal: AbortSignal,
+              promptId: string,
+              calls: FunctionCall[],
+              loopState: typeof toolLoopState,
+            ) => Promise<{
+              parts: Part[];
+              stopAfterPermissionCancel: boolean;
+              loopDetected?: boolean;
+            }>;
+          }
+        ).runToolCalls(
+          new AbortController().signal,
+          'prompt-agent-race-loop',
+          functionCalls,
+          toolLoopState,
+        );
+
+        expect(result.loopDetected).toBe(true);
+        expect(build).toHaveBeenCalledTimes(3);
+        expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+          'agent_0',
+          'agent_1',
+          'agent_2',
+        ]);
       });
 
       it('clears duplicate provider id tracking between ACP prompts', async () => {
@@ -4420,6 +5472,1674 @@ describe('Session', () => {
         });
       });
 
+      it('expands a loop.md sentinel into the task block and echoes a clean label', async () => {
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-session-'),
+        );
+        const loopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+        await fs.mkdir(path.dirname(loopMdPath), { recursive: true });
+        await fs.writeFile(loopMdPath, '- finish the migration');
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({
+                prompt: '<<loop.md-dynamic>>',
+                cronExpr: '@wakeup',
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The client sees a stable RELATIVE label, never the raw sentinel or
+          // the absolute path (which would leak the OS username / dir layout).
+          await vi.waitFor(() => {
+            expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+              sessionId: 'test-session-id',
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'text',
+                  text: 'Loop tick — tasks from project loop.md',
+                },
+                _meta: { source: 'loop' },
+              },
+            });
+          });
+          // The absolute loop.md path must not appear in any client echo.
+          const echoedTexts = (
+            mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+          ).mock.calls
+            .map((call) => call[0]?.update?.content?.text)
+            .filter((text): text is string => typeof text === 'string');
+          for (const text of echoedTexts) {
+            expect(text).not.toContain(loopMdPath);
+          }
+
+          // The model receives the expanded full task block, not the sentinel.
+          let block = '';
+          await vi.waitFor(() => {
+            const cronCall = (
+              mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+            ).mock.calls.find(
+              (c) =>
+                Array.isArray(c[1]?.message) &&
+                c[1].message.some((p: { text?: string }) =>
+                  p.text?.includes('finish the migration'),
+                ),
+            );
+            expect(cronCall).toBeDefined();
+            block = (cronCall![1].message as Array<{ text?: string }>)
+              .map((p) => p.text ?? '')
+              .join('');
+          });
+          expect(block).toContain('# /loop tick — loop.md tasks from');
+          expect(block).toContain('- finish the migration');
+        } finally {
+          await fs.rm(tmpDir, { recursive: true, force: true });
+        }
+      });
+
+      it('delivers the full block then a SHORT REMINDER on an unchanged second tick', async () => {
+        // Two ticks of the same sentinel over unchanged loop.md: tick1 delivers
+        // the FULL block (INTRO + task body) and commits it; tick2 sees the
+        // unchanged content and delivers the one-line SHORT REMINDER (full:false)
+        // — a pure pointer with neither the INTRO nor the body. The client echo
+        // still names the source on the reminder (sourceLabel set), so this pins
+        // the full:false/labelled-reminder path through BOTH the echo and the
+        // model-message paths.
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-reminder-'),
+        );
+        const loopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+        await fs.mkdir(path.dirname(loopMdPath), { recursive: true });
+        await fs.writeFile(loopMdPath, '- finish the migration');
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              // Drained serially against the one persistent resolver, so tick2
+              // sees tick1's committed content as unchanged.
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const cronModelTexts = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .filter((c) => Array.isArray(c[1]?.message))
+              .map((c) =>
+                (c[1].message as Array<{ text?: string }>)
+                  .map((p) => p.text ?? '')
+                  .join(''),
+              );
+
+          await vi.waitFor(() => {
+            const texts = cronModelTexts();
+            // Exactly one FULL delivery (INTRO) and one SHORT REMINDER (preamble).
+            const full = texts.filter((t) =>
+              t.includes('The user configured a loop-tasks file.'),
+            );
+            const reminder = texts.filter((t) =>
+              t.includes(
+                'Work the tasks from the loop.md contents established earlier',
+              ),
+            );
+            expect(full).toHaveLength(1);
+            expect(reminder).toHaveLength(1);
+            // The reminder is a pointer only: no INTRO and no task body (which
+            // the full block already paid into the cached prefix).
+            expect(reminder[0]).not.toContain(
+              'The user configured a loop-tasks file.',
+            );
+            expect(reminder[0]).not.toContain('- finish the migration');
+          });
+
+          // full:false reminder still resolves a sourceLabel, so its client echo
+          // names the source — identical to the full tick's echo (both ticks).
+          const labelledEchoes = (
+            mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+          ).mock.calls.filter(
+            (c) =>
+              c[0]?.update?.sessionUpdate === 'user_message_chunk' &&
+              c[0]?.update?.content?.text ===
+                'Loop tick — tasks from project loop.md',
+          ).length;
+          expect(labelledEchoes).toBe(2);
+        } finally {
+          await fs.rm(tmpDir, { recursive: true, force: true });
+        }
+      });
+
+      it('rebuilds the loop.md resolver when the working dir changes between ticks', async () => {
+        // /cd mid-session: the resolver is cached per project root, so a working-
+        // dir change must rebuild it for the NEW root. Two ticks of the same
+        // sentinel — the first resolves the OLD root's loop.md; getWorkingDir then
+        // flips and the second must resolve the NEW root's loop.md (a fresh
+        // resolver → full delivery), never re-serving the OLD root's content.
+        // Mutation check: drop the `loopTickResolverRoot !== root` rebuild guard
+        // and tick2 reuses the OLD resolver — the NEW content never reaches the
+        // model (the unchanged OLD content is re-served as a short reminder).
+        const oldDir = await fs.mkdtemp(path.join(os.tmpdir(), 'loop-md-old-'));
+        const newDir = await fs.mkdtemp(path.join(os.tmpdir(), 'loop-md-new-'));
+        await fs.mkdir(path.join(oldDir, '.qwen'), { recursive: true });
+        await fs.mkdir(path.join(newDir, '.qwen'), { recursive: true });
+        await fs.writeFile(
+          path.join(oldDir, '.qwen', 'loop.md'),
+          '- task from OLD root',
+        );
+        await fs.writeFile(
+          path.join(newDir, '.qwen', 'loop.md'),
+          '- task from NEW root',
+        );
+
+        let currentRoot = oldDir;
+        mockConfig.getWorkingDir = vi.fn(() => currentRoot);
+
+        let fire:
+          | ((job: { prompt: string; cronExpr?: string }) => void)
+          | undefined;
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          enableDurable: vi.fn().mockResolvedValue(undefined),
+          // Capture the fire callback so the test can drive ticks one at a time,
+          // flipping the working dir in between.
+          start: vi.fn(
+            (cb: (job: { prompt: string; cronExpr?: string }) => void) => {
+              fire = cb;
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          // Bootstraps the scheduler and captures `fire`; no tick fires yet.
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+          await vi.waitFor(() => expect(fire).toBeDefined());
+
+          const cronModelTexts = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .filter((c) => Array.isArray(c[1]?.message))
+              .map((c) =>
+                (c[1].message as Array<{ text?: string }>)
+                  .map((p) => p.text ?? '')
+                  .join(''),
+              );
+
+          // Tick 1 resolves against the OLD root. Waiting for its content in the
+          // model proves the resolve consumed oldDir before we flip (race-free:
+          // the model send is downstream of the resolve).
+          fire!({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+          await vi.waitFor(() => {
+            expect(
+              cronModelTexts().some((t) => t.includes('task from OLD root')),
+            ).toBe(true);
+          });
+
+          // /cd: the resolver must rebuild for the new root on the next tick.
+          currentRoot = newDir;
+
+          // Tick 2 must resolve the NEW root's loop.md (fresh resolver → full).
+          fire!({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+          await vi.waitFor(() => {
+            expect(
+              cronModelTexts().some((t) => t.includes('task from NEW root')),
+            ).toBe(true);
+          });
+
+          // The NEW-root tick carries ONLY the new root's tasks — the old root's
+          // content is not re-resolved after the dir change.
+          const newMsg = cronModelTexts().find((t) =>
+            t.includes('task from NEW root'),
+          )!;
+          expect(newMsg).not.toContain('task from OLD root');
+        } finally {
+          await fs.rm(oldDir, { recursive: true, force: true });
+          await fs.rm(newDir, { recursive: true, force: true });
+        }
+      });
+
+      it('does not expand the project loop.md sentinel in an untrusted folder', async () => {
+        // An untrusted folder's repo-controlled .qwen/loop.md must not be read
+        // and fed to the model. With no user-owned ~/.qwen/loop.md the tick is
+        // absent, which converges on the autonomous preamble — and the repo task
+        // block still never reaches the model.
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-untrusted-'),
+        );
+        const fakeHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-home-'),
+        );
+        const loopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+        await fs.mkdir(path.dirname(loopMdPath), { recursive: true });
+        await fs.writeFile(loopMdPath, '- finish the migration');
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+        mockConfig.isTrustedFolder = vi.fn().mockReturnValue(false);
+        // Point os.homedir() at an empty fake home (libuv reads HOME/USERPROFILE)
+        // so there is no user-owned loop.md and the tick is deterministically
+        // absent — the module export can't be spied under ESM.
+        const restoreHome = setFakeHome(fakeHome);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({
+                prompt: '<<loop.md-dynamic>>',
+                cronExpr: '@wakeup',
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The client sees the autonomous label, never the repo file's path.
+          await vi.waitFor(() => {
+            expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+              sessionId: 'test-session-id',
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'text',
+                  text: 'Autonomous loop tick',
+                },
+                _meta: { source: 'loop' },
+              },
+            });
+          });
+
+          const sentToModel = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .flatMap((c) =>
+                Array.isArray(c[1]?.message) ? c[1].message : [],
+              )
+              .map((p: { text?: string }) => p.text ?? '')
+              .join('');
+          await vi.waitFor(() => {
+            expect(sentToModel()).toContain('# /loop tick — loop.md absent');
+          });
+          // Absent converged on the autonomous preamble; the repo-controlled task
+          // block still never reaches the model.
+          expect(sentToModel()).toContain('# Autonomous loop check');
+          expect(sentToModel()).not.toContain('finish the migration');
+        } finally {
+          restoreHome();
+          await fs.rm(tmpDir, { recursive: true, force: true });
+          await fs.rm(fakeHome, { recursive: true, force: true });
+        }
+      });
+
+      it('expands a bare-/loop autonomous sentinel into the preamble with an Autonomous loop tick echo', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({
+                prompt: '<<autonomous-loop-dynamic>>',
+                cronExpr: '@wakeup',
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        // The client sees a stable autonomous label, never the raw sentinel.
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: 'Autonomous loop tick' },
+              _meta: { source: 'loop' },
+            },
+          });
+        });
+
+        // The model receives the full autonomous preamble + the dynamic tick.
+        const sentToModel = () =>
+          (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+            .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+            .map((p: { text?: string }) => p.text ?? '')
+            .join('');
+        await vi.waitFor(() => {
+          expect(sentToModel()).toContain('# Autonomous loop check');
+        });
+        expect(sentToModel()).toContain(
+          '# Autonomous loop tick (dynamic pacing)',
+        );
+      });
+
+      it('skips missed bare-/loop autonomous sentinels', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: {
+                prompt: string;
+                cronExpr?: string;
+                missed?: boolean;
+              }) => void,
+            ) => {
+              callback({
+                prompt: '<<autonomous-loop-dynamic>>',
+                cronExpr: '@wakeup',
+                missed: true,
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        expect(mockChat.sendMessageStream).toHaveBeenCalledOnce();
+        const sentToModel = (
+          mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+        ).mock.calls
+          .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+          .map((p: { text?: string }) => p.text ?? '')
+          .join('');
+        expect(sentToModel).not.toContain('# Autonomous loop check');
+        expect(mockClient.sessionUpdate).not.toHaveBeenCalledWith({
+          sessionId: 'test-session-id',
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'Autonomous loop tick' },
+            _meta: { source: 'loop' },
+          },
+        });
+      });
+
+      it('keeps the home confinement root non-empty when os.homedir() is empty (no QWEN_HOME)', () => {
+        // Minimal containers with no HOME make os.homedir() === ''. With QWEN_HOME
+        // unset the home confinement root must NOT collapse to '': isWithin('',
+        // anyPath) is trivially true, so an empty root lets a home
+        // `~/.qwen/loop.md` symlink resolve anywhere and bypass the confinement.
+        // The guard falls back to the parent of the global qwen dir
+        // (Storage.getGlobalQwenDir(), itself empty-home-safe), which is the
+        // homeQwenDir Session passes to the resolver.
+        const homeQwenDir = path.join(os.tmpdir(), '.qwen');
+
+        const roots = resolveHomeLoopResolverRoots({
+          homeDir: '',
+          homeQwenDir,
+          qwenHome: '',
+        });
+
+        // Without the `|| path.dirname(homeQwenDir)` guard this would be ''
+        // (os.homedir()); the guard makes it the non-empty parent of the
+        // empty-home-safe global qwen dir.
+        expect(roots.homeConfineRoot).not.toBe('');
+        expect(roots.homeConfineRoot).toBe(path.dirname(homeQwenDir));
+        expect(roots.homeQwenDir).toBe(homeQwenDir);
+      });
+
+      it('confines the home loop resolver within QWEN_HOME when set', () => {
+        const homeQwenDir = path.join(os.tmpdir(), '.qwen-home');
+
+        const roots = resolveHomeLoopResolverRoots({
+          homeDir: path.join(os.tmpdir(), 'real-home'),
+          homeQwenDir,
+          qwenHome: homeQwenDir,
+        });
+
+        expect(roots.homeConfineRoot).toBe(homeQwenDir);
+        expect(roots.homeQwenDir).toBe(homeQwenDir);
+      });
+
+      it('reads the home loop.md from QWEN_HOME, not the real ~/.qwen', async () => {
+        // The home/global candidate must honor QWEN_HOME (the relocated global
+        // dir) instead of always reading the real OS home. Point QWEN_HOME at a
+        // dir holding loop.md, leave the project dir and fake $HOME empty, and
+        // confirm the relocated file's block reaches the model.
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-qwenhome-proj-'),
+        );
+        const fakeHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-qwenhome-home-'),
+        );
+        const qwenHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-qwenhome-dir-'),
+        );
+        await fs.writeFile(
+          path.join(qwenHome, 'loop.md'),
+          '- relocated home task',
+        );
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+        const restoreHome = setFakeHome(fakeHome);
+        const prevQwenHome = process.env['QWEN_HOME'];
+        process.env['QWEN_HOME'] = qwenHome;
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // Echo names the home source (sourceLabel='home loop.md'), proving the
+          // home candidate resolved from QWEN_HOME rather than the empty $HOME.
+          await vi.waitFor(() => {
+            expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+              sessionId: 'test-session-id',
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'text',
+                  text: 'Loop tick — tasks from home loop.md',
+                },
+                // `*/5 * * * *` is a recurring cron (not an @wakeup), so the
+                // echo carries source 'cron' (see job.cronExpr mapping).
+                _meta: { source: 'cron' },
+              },
+            });
+          });
+
+          const sentToModel = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .flatMap((c) =>
+                Array.isArray(c[1]?.message) ? c[1].message : [],
+              )
+              .map((p: { text?: string }) => p.text ?? '')
+              .join('');
+          await vi.waitFor(() => {
+            expect(sentToModel()).toContain('- relocated home task');
+          });
+        } finally {
+          restoreHome();
+          if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+          else process.env['QWEN_HOME'] = prevQwenHome;
+          await fs.rm(tmpDir, { recursive: true, force: true });
+          await fs.rm(fakeHome, { recursive: true, force: true });
+          await fs.rm(qwenHome, { recursive: true, force: true });
+        }
+      });
+
+      it('propagates a sentinel resolve() error (EACCES) without leaking the absolute path to the client', async () => {
+        // #executeCronPrompt: when resolve() throws (e.g. EACCES on
+        // .qwen/loop.md) it logs a loop.md-specific warn and RE-THROWS into the
+        // cron catch. Regression guard: the failure must PROPAGATE (surface as a
+        // cron error, never degrade to a default/normal tick sent to the model)
+        // and the loop.md-tagged warn must fire so a resolution failure stays
+        // distinguishable from a model-call failure in logs.
+        //
+        // Security guard: the raw fs error message embeds the ABSOLUTE loop.md
+        // path (OS username + dir layout). The cron catch forwards error.message
+        // verbatim to the client via emitAgentMessage, so the re-thrown error's
+        // message must be SANITIZED — relative label + errno code only, never the
+        // absolute path. The full detail stays in the LOCAL debug warn.
+        debugLoggerWarnSpy.mockClear();
+        const absoluteLoopMdPath = '/home/alice/project/.qwen/loop.md';
+        const eacces = Object.assign(
+          new Error(`EACCES: permission denied, open '${absoluteLoopMdPath}'`),
+          { code: 'EACCES' },
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eacces);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The loop.md-specific warn fired, tagged with the sentinel mode and
+          // the EACCES code (proving the failure was logged as a resolution
+          // failure, not a generic model error). The raw error — whose message
+          // carries the absolute path — is passed as the second arg so the full
+          // detail is kept in this LOCAL log (debug logs are never sent to the
+          // client).
+          await vi.waitFor(() => {
+            expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+              'loop.md sentinel resolution failed (mode=cron, code=EACCES) — check .qwen/loop.md permissions/IO',
+              eacces,
+            );
+          });
+
+          // The error PROPAGATED to the cron catch and surfaced to the client,
+          // but SANITIZED: the emitted message names the relative candidate
+          // labels + errno code and NEVER the raw absolute loop.md path.
+          const sessionUpdateMock = mockClient.sessionUpdate as ReturnType<
+            typeof vi.fn
+          >;
+          const cronErrorTexts = () =>
+            sessionUpdateMock.mock.calls
+              .map(
+                (call) =>
+                  (
+                    call[0] as {
+                      update?: {
+                        sessionUpdate?: string;
+                        content?: { text?: string };
+                      };
+                    }
+                  ).update,
+              )
+              .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+              .map((u) => u?.content?.text ?? '')
+              .filter((text) => text.includes('[cron error]'));
+          await vi.waitFor(() =>
+            expect(cronErrorTexts().length).toBeGreaterThan(0),
+          );
+          for (const text of cronErrorTexts()) {
+            // Relative label + errno code present...
+            expect(text).toContain('EACCES');
+            expect(text).toContain('.qwen/loop.md (project)');
+            // ...and NO absolute path leaked to the client/API.
+            expect(text).not.toContain(absoluteLoopMdPath);
+            expect(text).not.toContain('/home/alice');
+          }
+
+          // It was NOT swallowed into a normal tick: resolve() threw before any
+          // model send, so neither an expanded `# /loop tick` block nor the raw
+          // sentinel ever reached the model (the model is only sent the user
+          // prompt, never a degraded default tick).
+          const sentToModel = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .flatMap((c) =>
+                Array.isArray(c[1]?.message) ? c[1].message : [],
+              )
+              .map((p: { text?: string }) => p.text ?? '')
+              .join('');
+          expect(sentToModel()).not.toContain('# /loop tick');
+          expect(sentToModel()).not.toContain('<<loop.md>>');
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
+      it('names the QWEN_HOME-aware home path in the sanitized resolve error, not a hardcoded ~/.qwen', async () => {
+        // Regression: the sanitized resolve-error hardcoded `~/.qwen/loop.md
+        // (home)`, but the resolver's home candidate is QWEN_HOME-aware. With
+        // QWEN_HOME relocated OUTSIDE $HOME, the error reuses homeLoopLabel(),
+        // which names it via the literal `$QWEN_HOME/loop.md` — leak-safe (never
+        // the resolved absolute global dir, nor the absolute project path).
+        debugLoggerWarnSpy.mockClear();
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-err-proj-'),
+        );
+        const fakeHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-err-home-'),
+        );
+        const qwenHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-err-qwenhome-'),
+        );
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+        const restoreHome = setFakeHome(fakeHome);
+        const prevQwenHome = process.env['QWEN_HOME'];
+        process.env['QWEN_HOME'] = qwenHome;
+        // qwenHome is under os.tmpdir() (not the OS home), so tildeifyPath is a
+        // no-op there. The label is MODEL/client-facing, so it must read as the
+        // literal `$QWEN_HOME/loop.md`, never the resolved absolute path.
+        const expectedHomeLabel = `$QWEN_HOME/loop.md (home)`;
+
+        const eacces = Object.assign(
+          new Error(
+            `EACCES: permission denied, open '${path.join(tmpDir, '.qwen', 'loop.md')}'`,
+          ),
+          { code: 'EACCES' },
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eacces);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const sessionUpdateMock = mockClient.sessionUpdate as ReturnType<
+            typeof vi.fn
+          >;
+          const cronErrorTexts = () =>
+            sessionUpdateMock.mock.calls
+              .map(
+                (call) =>
+                  (
+                    call[0] as {
+                      update?: {
+                        sessionUpdate?: string;
+                        content?: { text?: string };
+                      };
+                    }
+                  ).update,
+              )
+              .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+              .map((u) => u?.content?.text ?? '')
+              .filter((text) => text.includes('[cron error]'));
+          await vi.waitFor(() =>
+            expect(cronErrorTexts().length).toBeGreaterThan(0),
+          );
+          for (const text of cronErrorTexts()) {
+            // The QWEN_HOME-aware home path is named...
+            expect(text).toContain(expectedHomeLabel);
+            expect(text).toContain('.qwen/loop.md (project)');
+            // ...and the old hardcoded label is gone.
+            expect(text).not.toContain('~/.qwen/loop.md');
+            // Still leak-safe: neither the absolute project path nor the
+            // resolved $QWEN_HOME global dir reaches the client/API.
+            expect(text).not.toContain(path.join(tmpDir, '.qwen', 'loop.md'));
+            expect(text).not.toContain(path.join(qwenHome, 'loop.md'));
+          }
+        } finally {
+          resolveSpy.mockRestore();
+          restoreHome();
+          if (prevQwenHome === undefined) delete process.env['QWEN_HOME'];
+          else process.env['QWEN_HOME'] = prevQwenHome;
+          await fs.rm(tmpDir, { recursive: true, force: true });
+          await fs.rm(fakeHome, { recursive: true, force: true });
+          await fs.rm(qwenHome, { recursive: true, force: true });
+        }
+      });
+
+      it('omits the project candidate from the sanitized resolve error in an untrusted folder', async () => {
+        // An untrusted folder never reads `.qwen/loop.md` (the resolver gets
+        // allowProjectFile=false), so the sanitized error must NOT claim the
+        // project candidate was checked — it would be a lie. It still names the
+        // QWEN_HOME-aware home candidate (the only one actually probed) and the
+        // errno code, and stays leak-safe. Mutation guard: hardcoding
+        // `.qwen/loop.md (project)` back into the throw re-introduces the false
+        // claim and fails this test.
+        debugLoggerWarnSpy.mockClear();
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-untrusted-err-'),
+        );
+        const fakeHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-untrusted-home-'),
+        );
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+        mockConfig.isTrustedFolder = vi.fn().mockReturnValue(false);
+        const restoreHome = setFakeHome(fakeHome);
+
+        const absoluteLoopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+        const eacces = Object.assign(
+          new Error(`EACCES: permission denied, open '${absoluteLoopMdPath}'`),
+          { code: 'EACCES' },
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eacces);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const sessionUpdateMock = mockClient.sessionUpdate as ReturnType<
+            typeof vi.fn
+          >;
+          const cronErrorTexts = () =>
+            sessionUpdateMock.mock.calls
+              .map(
+                (call) =>
+                  (
+                    call[0] as {
+                      update?: {
+                        sessionUpdate?: string;
+                        content?: { text?: string };
+                      };
+                    }
+                  ).update,
+              )
+              .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+              .map((u) => u?.content?.text ?? '')
+              .filter((text) => text.includes('[cron error]'));
+          await vi.waitFor(() =>
+            expect(cronErrorTexts().length).toBeGreaterThan(0),
+          );
+          for (const text of cronErrorTexts()) {
+            // The home candidate and errno code are named...
+            expect(text).toContain('EACCES');
+            expect(text).toContain('(home)');
+            // ...but the never-read project candidate is omitted entirely.
+            expect(text).not.toContain('(project)');
+            // ...and the absolute path is still never leaked to the client/API.
+            expect(text).not.toContain(absoluteLoopMdPath);
+          }
+        } finally {
+          resolveSpy.mockRestore();
+          restoreHome();
+          await fs.rm(tmpDir, { recursive: true, force: true });
+          await fs.rm(fakeHome, { recursive: true, force: true });
+        }
+      });
+
+      it('threads one captured folder-trust into both the resolve probe and the sanitized error', async () => {
+        // FIX 3: isTrustedFolder() can flip mid-tick (IDE workspace-trust
+        // update). Capturing it ONCE and threading it to BOTH resolve() and the
+        // error's absentLocations() keeps the sanitized error naming the SAME
+        // candidate set that was probed. Assert the trust handed to resolve() is
+        // identical to the one handed to absentLocations(). Mutation guard:
+        // reverting to two separate isTrustedFolder() reads drops the resolve()
+        // trust arg (undefined), so the two no longer match.
+        debugLoggerWarnSpy.mockClear();
+        const eacces = Object.assign(
+          new Error("EACCES: permission denied, open '/home/x/.qwen/loop.md'"),
+          { code: 'EACCES' },
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eacces);
+        const absentSpy = vi.spyOn(
+          core.LoopTickResolver.prototype,
+          'absentLocations',
+        );
+        mockConfig.isTrustedFolder = vi.fn().mockReturnValue(true);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          await vi.waitFor(() => expect(resolveSpy).toHaveBeenCalled());
+          await vi.waitFor(() => expect(absentSpy).toHaveBeenCalled());
+          // resolve() was probed with the captured trust as its 2nd arg, and the
+          // error's absentLocations() got the SAME value — one capture, both
+          // paths agree.
+          const probedTrust = resolveSpy.mock.calls[0][1];
+          const erroredTrust = absentSpy.mock.calls[0][0];
+          expect(probedTrust).toBe(true);
+          expect(erroredTrust).toBe(true);
+          expect(probedTrust).toBe(erroredTrust);
+        } finally {
+          resolveSpy.mockRestore();
+          absentSpy.mockRestore();
+        }
+      });
+
+      it('keeps a dynamic loop alive on a transient resolve error (no throw, re-arm tick)', async () => {
+        // FIX 4: a `dynamic` loop is re-armed only by the model at end-of-turn,
+        // and the firing wakeup was already consumed. A transient, non-whitelisted
+        // resolve error (EIO) must NOT throw (no turn → no re-arm → silent death)
+        // — it degrades to a no-op tick that mirrors the absent path AND carries
+        // the dynamic re-arm instruction, so the model re-arms and the loop
+        // survives. Mutation guard: drop the `dynamic` branch (always throw) and a
+        // `[loop error]` surfaces while no tick reaches the model.
+        debugLoggerDebugSpy.mockClear();
+        debugLoggerWarnSpy.mockClear();
+        const eio = Object.assign(new Error('EIO: i/o error, read'), {
+          code: 'EIO',
+        });
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eio);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        const sentToModel = () =>
+          (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+            .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+            .map((p: { text?: string }) => p.text ?? '')
+            .join('');
+        const errorEchoes = () =>
+          (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+            .map((call) => call[0]?.update)
+            .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+            .map((u) => u?.content?.text ?? '')
+            .filter((text: string) => text.includes('error]'));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The degraded no-op tick reached the model (the turn ran → no throw).
+          await vi.waitFor(() => {
+            expect(sentToModel()).toContain(
+              '# /loop tick — loop.md unavailable (dynamic pacing)',
+            );
+          });
+          // It carries the dynamic re-arm instruction (the literal sentinel) and
+          // the errno note, so the loop continues.
+          expect(sentToModel()).toContain('<<loop.md-dynamic>>');
+          expect(sentToModel()).toContain('could not be read this tick (EIO)');
+          // The CLIENT echo distinguishes a transient read failure (file present,
+          // unreadable this tick) from a genuinely-absent file: it must say
+          // "temporarily unavailable", never the misleading "not present".
+          // Mutation guard: drop the transientError flag/echo branch and the echo
+          // regresses to "not present", failing both assertions below.
+          const loopEchoes = (
+            mockClient.sessionUpdate as ReturnType<typeof vi.fn>
+          ).mock.calls
+            .map((call) => call[0]?.update)
+            .filter((u) => u?.sessionUpdate === 'user_message_chunk')
+            .map((u) => u?.content?.text ?? '');
+          expect(loopEchoes).toContain(
+            'Loop tick — loop.md temporarily unavailable',
+          );
+          expect(loopEchoes).not.toContain('Loop tick — loop.md not present');
+          // It did NOT surface as a loop/cron error (the loop did not die).
+          expect(errorEchoes()).toHaveLength(0);
+          // The real errno is still recorded in the LOCAL debug warn.
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'loop.md sentinel resolution failed (mode=dynamic, code=EIO) — check .qwen/loop.md permissions/IO',
+            eio,
+          );
+          expect(debugLoggerDebugSpy).toHaveBeenCalledWith(
+            expect.stringContaining('delivery=transient-error'),
+          );
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
+      it('still throws on a transient resolve error for a cron loop (no degraded tick)', async () => {
+        // The cron counterpart to the dynamic-survival path: cron re-fires on its
+        // own next interval, so a transient resolve error STILL propagates
+        // (sanitized) rather than degrading to a model tick. Mutation guard:
+        // widening the dynamic no-throw branch to cron would send a `# /loop tick`
+        // block instead of surfacing the error.
+        debugLoggerWarnSpy.mockClear();
+        const eio = Object.assign(new Error('EIO: i/o error, read'), {
+          code: 'EIO',
+        });
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eio);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const cronErrorTexts = () =>
+            (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+              .map((call) => call[0]?.update)
+              .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+              .map((u) => u?.content?.text ?? '')
+              .filter((text: string) => text.includes('[cron error]'));
+          await vi.waitFor(() =>
+            expect(cronErrorTexts().length).toBeGreaterThan(0),
+          );
+          // Sanitized error carries the errno; no degraded loop tick was sent.
+          for (const text of cronErrorTexts()) {
+            expect(text).toContain('EIO');
+          }
+          const sentToModel = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .flatMap((c) =>
+                Array.isArray(c[1]?.message) ? c[1].message : [],
+              )
+              .map((p: { text?: string }) => p.text ?? '')
+              .join('');
+          expect(sentToModel()).not.toContain('# /loop tick');
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
+      it('keeps a dynamic loop alive on a transient EACCES resolve error', async () => {
+        // EACCES is in TRANSIENT_FS_CODES, so a `dynamic` loop degrades to a
+        // no-op re-arm tick (same survival as the EIO case) rather than dying.
+        debugLoggerWarnSpy.mockClear();
+        const eacces = Object.assign(new Error('EACCES: permission denied'), {
+          code: 'EACCES',
+        });
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eacces);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        const sentToModel = () =>
+          (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+            .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+            .map((p: { text?: string }) => p.text ?? '')
+            .join('');
+        const errorEchoes = () =>
+          (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+            .map((call) => call[0]?.update)
+            .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+            .map((u) => u?.content?.text ?? '')
+            .filter((text: string) => text.includes('error]'));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The degraded no-op tick reached the model (the turn ran → no throw),
+          // carrying the dynamic re-arm sentinel and the EACCES errno note.
+          await vi.waitFor(() => {
+            expect(sentToModel()).toContain(
+              '# /loop tick — loop.md unavailable (dynamic pacing)',
+            );
+          });
+          expect(sentToModel()).toContain('<<loop.md-dynamic>>');
+          expect(sentToModel()).toContain(
+            'could not be read this tick (EACCES)',
+          );
+          // The loop did NOT surface an error (it survived).
+          expect(errorEchoes()).toHaveLength(0);
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'loop.md sentinel resolution failed (mode=dynamic, code=EACCES) — check .qwen/loop.md permissions/IO',
+            eacces,
+          );
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
+      it('keeps a dynamic loop alive on a transient EISDIR resolve error', async () => {
+        // EISDIR is in TRANSIENT_FS_CODES (the lstat→open TOCTOU race: the path is
+        // swapped to a directory between the pre-open lstat and fs.open). A
+        // `dynamic` loop must degrade to a no-op re-arm tick — same survival as the
+        // EACCES/EIO cases — instead of dying. Mutation guard: drop EISDIR from the
+        // set and this throw falls through to the sanitized `[loop error]` re-throw.
+        debugLoggerWarnSpy.mockClear();
+        const eisdir = Object.assign(
+          new Error('EISDIR: illegal operation on a directory, read'),
+          { code: 'EISDIR' },
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eisdir);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        const sentToModel = () =>
+          (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+            .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+            .map((p: { text?: string }) => p.text ?? '')
+            .join('');
+        const errorEchoes = () =>
+          (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+            .map((call) => call[0]?.update)
+            .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+            .map((u) => u?.content?.text ?? '')
+            .filter((text: string) => text.includes('error]'));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The degraded no-op tick reached the model (the turn ran → no throw),
+          // carrying the dynamic re-arm sentinel and the EISDIR errno note.
+          await vi.waitFor(() => {
+            expect(sentToModel()).toContain(
+              '# /loop tick — loop.md unavailable (dynamic pacing)',
+            );
+          });
+          expect(sentToModel()).toContain('<<loop.md-dynamic>>');
+          expect(sentToModel()).toContain(
+            'could not be read this tick (EISDIR)',
+          );
+          // The loop did NOT surface an error (it survived).
+          expect(errorEchoes()).toHaveLength(0);
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'loop.md sentinel resolution failed (mode=dynamic, code=EISDIR) — check .qwen/loop.md permissions/IO',
+            eisdir,
+          );
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
+      it('keeps a dynamic loop alive on a transient ENOTDIR resolve error', async () => {
+        // ENOTDIR is the sibling TOCTOU code (a path component swapped to a
+        // non-directory between the lstat and fs.open). Like EISDIR it must degrade
+        // a `dynamic` loop to a no-op re-arm tick rather than killing it.
+        debugLoggerWarnSpy.mockClear();
+        const enotdir = Object.assign(
+          new Error('ENOTDIR: not a directory, open'),
+          { code: 'ENOTDIR' },
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(enotdir);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        const sentToModel = () =>
+          (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+            .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+            .map((p: { text?: string }) => p.text ?? '')
+            .join('');
+        const errorEchoes = () =>
+          (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+            .map((call) => call[0]?.update)
+            .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+            .map((u) => u?.content?.text ?? '')
+            .filter((text: string) => text.includes('error]'));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          await vi.waitFor(() => {
+            expect(sentToModel()).toContain(
+              '# /loop tick — loop.md unavailable (dynamic pacing)',
+            );
+          });
+          expect(sentToModel()).toContain('<<loop.md-dynamic>>');
+          expect(sentToModel()).toContain(
+            'could not be read this tick (ENOTDIR)',
+          );
+          expect(errorEchoes()).toHaveLength(0);
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'loop.md sentinel resolution failed (mode=dynamic, code=ENOTDIR) — check .qwen/loop.md permissions/IO',
+            enotdir,
+          );
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
+      it('re-throws (does NOT degrade) a dynamic loop on a NON-fs resolve error', async () => {
+        // The gate's reason for existing: a non-transient error (a TypeError /
+        // programming bug → code 'unknown') is NOT in TRANSIENT_FS_CODES, so the
+        // `dynamic` branch must NOT degrade to an infinite silent no-op cycle. It
+        // falls through to the sanitized throw so the real bug surfaces.
+        // Mutation guard: drop the `&& TRANSIENT_FS_CODES.includes(code)` gate and
+        // 'unknown' degrades — a `# /loop tick` reaches the model and no
+        // `[loop error]` surfaces, failing both assertions below.
+        debugLoggerWarnSpy.mockClear();
+        const bug = new TypeError(
+          "Cannot read properties of undefined (reading 'x')",
+        );
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(bug);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md-dynamic>>', cronExpr: '@wakeup' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        const loopErrorTexts = () =>
+          (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+            .map((call) => call[0]?.update)
+            .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+            .map((u) => u?.content?.text ?? '')
+            .filter((text: string) => text.includes('[loop error]'));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          // The unexpected error surfaced (the loop did NOT silently degrade).
+          await vi.waitFor(() =>
+            expect(loopErrorTexts().length).toBeGreaterThan(0),
+          );
+          for (const text of loopErrorTexts()) {
+            // Sanitized: carries the 'unknown' errno, not the raw TypeError text.
+            expect(text).toContain('loop.md resolution failed (unknown)');
+            expect(text).not.toContain('Cannot read properties');
+          }
+          // No degraded tick was ever sent to the model.
+          const sentToModel = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .flatMap((c) =>
+                Array.isArray(c[1]?.message) ? c[1].message : [],
+              )
+              .map((p: { text?: string }) => p.text ?? '')
+              .join('');
+          expect(sentToModel()).not.toContain('# /loop tick');
+          // The real (unsanitized) bug is still recorded in the LOCAL debug warn.
+          expect(debugLoggerWarnSpy).toHaveBeenCalledWith(
+            'loop.md sentinel resolution failed (mode=dynamic, code=unknown) — check .qwen/loop.md permissions/IO',
+            bug,
+          );
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
+      it('still throws on a transient EACCES resolve error for a cron loop', async () => {
+        // The cron counterpart: cron re-fires on its own next interval, so even a
+        // known-transient EACCES STILL propagates (sanitized) rather than degrading.
+        debugLoggerWarnSpy.mockClear();
+        const eacces = Object.assign(new Error('EACCES: permission denied'), {
+          code: 'EACCES',
+        });
+        const resolveSpy = vi
+          .spyOn(core.LoopTickResolver.prototype, 'resolve')
+          .mockRejectedValue(eacces);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const cronErrorTexts = () =>
+            (mockClient.sessionUpdate as ReturnType<typeof vi.fn>).mock.calls
+              .map((call) => call[0]?.update)
+              .filter((u) => u?.sessionUpdate === 'agent_message_chunk')
+              .map((u) => u?.content?.text ?? '')
+              .filter((text: string) => text.includes('[cron error]'));
+          await vi.waitFor(() =>
+            expect(cronErrorTexts().length).toBeGreaterThan(0),
+          );
+          for (const text of cronErrorTexts()) {
+            expect(text).toContain('EACCES');
+          }
+          const sentToModel = () =>
+            (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+              .flatMap((c) =>
+                Array.isArray(c[1]?.message) ? c[1].message : [],
+              )
+              .map((p: { text?: string }) => p.text ?? '')
+              .join('');
+          expect(sentToModel()).not.toContain('# /loop tick');
+        } finally {
+          resolveSpy.mockRestore();
+        }
+      });
+
+      it('echoes the autonomous label when a sentinel fires with no loop.md present', async () => {
+        // A sentinel fires but no project or home loop.md exists, so the absent
+        // tick converges on the autonomous preamble with an autonomous echo.
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-absent-'),
+        );
+        const fakeHome = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-home-'),
+        );
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+        const restoreHome = setFakeHome(fakeHome);
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          await vi.waitFor(() => {
+            expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+              sessionId: 'test-session-id',
+              update: {
+                sessionUpdate: 'user_message_chunk',
+                content: {
+                  type: 'text',
+                  text: 'Autonomous loop tick',
+                },
+                _meta: { source: 'cron' },
+              },
+            });
+          });
+        } finally {
+          restoreHome();
+          await fs.rm(tmpDir, { recursive: true, force: true });
+          await fs.rm(fakeHome, { recursive: true, force: true });
+        }
+      });
+
+      it('leaves a non-sentinel cron prompt untouched (no loop.md expansion)', async () => {
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              callback({
+                prompt: 'do the normal cron thing',
+                cronExpr: '0 * * * *',
+              });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValueOnce(createEmptyStream())
+          .mockResolvedValueOnce(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'hello' }],
+        });
+
+        await vi.waitFor(() => {
+          expect(mockClient.sessionUpdate).toHaveBeenCalledWith({
+            sessionId: 'test-session-id',
+            update: {
+              sessionUpdate: 'user_message_chunk',
+              content: { type: 'text', text: 'do the normal cron thing' },
+              _meta: { source: 'cron' },
+            },
+          });
+        });
+
+        const sentToModel = () =>
+          (mockChat.sendMessageStream as ReturnType<typeof vi.fn>).mock.calls
+            .flatMap((c) => (Array.isArray(c[1]?.message) ? c[1].message : []))
+            .map((p: { text?: string }) => p.text ?? '')
+            .join('');
+        await vi.waitFor(() => {
+          expect(sentToModel()).toContain('do the normal cron thing');
+        });
+        expect(sentToModel()).not.toContain('# /loop tick');
+      });
+
+      it('re-expands the full loop.md block after an auto-compaction resets the resolver cache', async () => {
+        // LoopTickResolver.resetCache() is unit-tested in isolation; this pins
+        // the Session-level wiring: an auto-compaction in the send path
+        // (#sendMessageStreamWithAutoCompression) must reset the resolver so the
+        // next unchanged tick re-delivers the FULL block (a short reminder would
+        // point back to a task block compaction just evicted from context).
+        //
+        // Three unchanged ticks: tick1 full (committed), tick2 would normally be
+        // a short reminder but COMPACTS mid-send, tick3 re-expands FULL purely
+        // because tick2's compaction reset the cache. The INTRO line therefore
+        // appears in exactly the two full deliveries (tick1 + tick3); without
+        // the reset it would appear only once.
+        const tmpDir = await fs.mkdtemp(
+          path.join(os.tmpdir(), 'loop-md-compact-'),
+        );
+        const loopMdPath = path.join(tmpDir, '.qwen', 'loop.md');
+        await fs.mkdir(path.dirname(loopMdPath), { recursive: true });
+        await fs.writeFile(loopMdPath, '- stable task list');
+        mockConfig.getWorkingDir = vi.fn().mockReturnValue(tmpDir);
+
+        // Compress on the SECOND cron tick only — keyed on the cron promptId so
+        // the user 'hello' prompt's compression check stays a no-op.
+        let cronCompressions = 0;
+        mockGeminiClient.tryCompressChat = vi
+          .fn()
+          .mockImplementation(async (promptId: string) => {
+            const isCron = String(promptId).includes('cron');
+            if (isCron) cronCompressions++;
+            const compressed = isCron && cronCompressions === 2;
+            return {
+              originalTokenCount: 100,
+              newTokenCount: 50,
+              compressionStatus: compressed
+                ? core.CompressionStatus.COMPRESSED
+                : core.CompressionStatus.NOOP,
+            };
+          });
+
+        const scheduler = {
+          size: 1,
+          hasPendingWork: true,
+          start: vi.fn(
+            (
+              callback: (job: { prompt: string; cronExpr?: string }) => void,
+            ) => {
+              // Three ticks of the same sentinel; the cron queue drains them
+              // serially against the one persistent resolver.
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+              callback({ prompt: '<<loop.md>>', cronExpr: '*/5 * * * *' });
+            },
+          ),
+          stop: vi.fn(),
+          getExitSummary: vi.fn().mockReturnValue(undefined),
+        };
+        mockConfig.isCronEnabled = vi.fn().mockReturnValue(true);
+        mockConfig.getCronScheduler = vi.fn().mockReturnValue(scheduler);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockImplementation(() => Promise.resolve(createEmptyStream()));
+
+        try {
+          await session.prompt({
+            sessionId: 'test-session-id',
+            prompt: [{ type: 'text', text: 'hello' }],
+          });
+
+          const fullDeliveries = () =>
+            (
+              mockChat.sendMessageStream as ReturnType<typeof vi.fn>
+            ).mock.calls.filter((c) =>
+              (Array.isArray(c[1]?.message) ? c[1].message : [])
+                .map((p: { text?: string }) => p.text ?? '')
+                .join('')
+                .includes('The user configured a loop-tasks file.'),
+            ).length;
+
+          // tick1 + tick3 re-expand; tick2 is the (compacting) short reminder.
+          await vi.waitFor(() => {
+            expect(fullDeliveries()).toBe(2);
+          });
+          // The compaction actually fired on a cron tick (sanity-check the setup).
+          expect(cronCompressions).toBeGreaterThanOrEqual(2);
+        } finally {
+          await fs.rm(tmpDir, { recursive: true, force: true });
+        }
+      });
+
       it('stops cron-fired ACP prompt before sending when the session token limit is exceeded', async () => {
         let cronCallback: ((job: { prompt: string }) => void) | undefined;
         const scheduler = {
@@ -4639,6 +7359,101 @@ describe('Session', () => {
       } finally {
         readManyFilesSpy.mockRestore();
         await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('injects active extension context for @ext mentions', async () => {
+      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-acp-ext-'));
+      const contextFile = path.join(tempDir, 'context.md');
+
+      try {
+        await fs.writeFile(contextFile, 'extension context file', 'utf8');
+        const extension = makeExtension({
+          path: tempDir,
+          contextFiles: [contextFile],
+        });
+        mockConfig.getActiveExtensions = vi.fn().mockReturnValue([extension]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: 'Use @ext:browser now' }],
+        });
+
+        const message = firstSentMessage();
+        expect(message[0]).toEqual({ text: 'Use @ext:browser now' });
+        const sentText = textParts(message).join('\n');
+        expect(sentText).toContain(
+          '--- Extension: Browser (untrusted third-party content) ---',
+        );
+        expect(sentText).toContain('Browser automation');
+        expect(sentText).toContain(
+          '- Skills: browser-skill (invoke via /<skill-name>)',
+        );
+        expect(sentText).toContain('- MCP Servers: browser-mcp');
+        expect(sentText).toContain('extension context file');
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
+    it('dedupes repeated extension mentions and skips unknown mentions', async () => {
+      const extension = makeExtension();
+      mockConfig.getActiveExtensions = vi.fn().mockReturnValue([extension]);
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [
+          {
+            type: 'text',
+            text: 'Use @ext:browser and @ext:browser and @ext:missing',
+          },
+        ],
+      });
+
+      const sentText = textParts(firstSentMessage()).join('\n');
+      expect(sentText.match(/--- Extension: Browser/g)).toHaveLength(1);
+      expect(sentText).not.toContain('Extension: missing');
+    });
+
+    it('caps extension context files and skips files outside the extension', async () => {
+      const tempDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-ext-cap-'),
+      );
+      const outsideDir = await fs.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-acp-ext-outside-'),
+      );
+      const bigFile = path.join(tempDir, 'big.md');
+      const outsideFile = path.join(outsideDir, 'secret.md');
+
+      try {
+        await fs.writeFile(bigFile, 'x'.repeat(60_000), 'utf8');
+        await fs.writeFile(outsideFile, 'do not inject this secret', 'utf8');
+        const extension = makeExtension({
+          path: tempDir,
+          contextFiles: [bigFile, outsideFile],
+        });
+        mockConfig.getActiveExtensions = vi.fn().mockReturnValue([extension]);
+        mockChat.sendMessageStream = vi
+          .fn()
+          .mockResolvedValue(createEmptyStream());
+
+        await session.prompt({
+          sessionId: 'test-session-id',
+          prompt: [{ type: 'text', text: '@ext:browser' }],
+        });
+
+        const sentText = textParts(firstSentMessage()).join('\n');
+        expect(sentText).toContain('... (truncated)');
+        expect(sentText).not.toContain('do not inject this secret');
+      } finally {
+        await fs.rm(tempDir, { recursive: true, force: true });
+        await fs.rm(outsideDir, { recursive: true, force: true });
       }
     });
 
@@ -5361,6 +8176,7 @@ describe('Session', () => {
       mockConfig.getPermissionManager = vi.fn().mockReturnValue(null);
       mockConfig.getDisableAllHooks = vi.fn().mockReturnValue(true);
       mockConfig.getMessageBus = vi.fn().mockReturnValue(undefined);
+      mockConfig.getAutoModeSettings = vi.fn().mockReturnValue({});
       mockConfig.getAutoModeDenialState = vi.fn().mockReturnValue({
         consecutiveBlock: 0,
         consecutiveUnavailable: 0,
@@ -6750,9 +9566,15 @@ describe('Session', () => {
         abortSignal: AbortSignal,
         promptId: string,
         functionCalls: FunctionCall[],
+        toolLoopState?: {
+          totalToolCalls: number;
+          invalidToolParamErrors: Map<string, number>;
+          loopDetected: boolean;
+        },
       ) => Promise<{
         parts: Part[];
         stopAfterPermissionCancel: boolean;
+        loopDetected?: boolean;
         repeatedDuplicateProviderToolCall?: boolean;
       }>;
     };
@@ -7082,6 +9904,83 @@ describe('Session', () => {
         error:
           'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
       });
+      expect(cancelledExecute).not.toHaveBeenCalled();
+      expect(laterExecute).not.toHaveBeenCalled();
+    });
+
+    it('skips later pre-loop tools after non-question permission cancellation', async () => {
+      const cancelledExecute = vi.fn();
+      const laterExecute = vi.fn().mockResolvedValue({
+        llmContent: 'should not execute',
+        returnDisplay: 'should not execute',
+      });
+      mockToolRegistry.getTool.mockImplementation((name: string) =>
+        name === core.ToolNames.SHELL
+          ? mockConfirmingTool(name, cancelledExecute, 'exec')
+          : mockAllowedTool(name, laterExecute),
+      );
+      vi.mocked(mockClient.requestPermission).mockResolvedValueOnce({
+        outcome: { outcome: 'cancelled' },
+      });
+      const toolLoopState = {
+        totalToolCalls: 0,
+        invalidToolParamErrors: new Map<string, number>(),
+        loopDetected: false,
+      };
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-pre-loop-shell-cancel',
+        [
+          {
+            id: 'shell_call',
+            name: core.ToolNames.SHELL,
+            args: { command: 'echo denied' },
+          },
+          {
+            id: 'read_1',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/tmp/one' },
+          },
+          {
+            id: 'read_2',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/tmp/two' },
+          },
+          {
+            id: 'read_3',
+            name: core.ToolNames.READ_FILE,
+            args: { file_path: '/tmp/three' },
+          },
+        ],
+        toolLoopState,
+      );
+
+      expect(result.stopAfterPermissionCancel).toBe(true);
+      expect(result.parts.map((part) => part.functionResponse?.id)).toEqual([
+        'shell_call',
+        'read_1',
+        'read_2',
+        'read_3',
+      ]);
+      expect(
+        result.parts.slice(1).map((part) => part.functionResponse?.response),
+      ).toEqual([
+        {
+          error:
+            'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+        },
+        {
+          error:
+            'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+        },
+        {
+          error:
+            'Skipped because a permission request was cancelled before the user answered; user input is required before continuing.',
+        },
+      ]);
       expect(cancelledExecute).not.toHaveBeenCalled();
       expect(laterExecute).not.toHaveBeenCalled();
     });
@@ -7566,6 +10465,91 @@ describe('Session', () => {
       expect(questionExecute).toHaveBeenCalledOnce();
       expect(siblingExecute).toHaveBeenCalledOnce();
       expect(siblingSignal?.aborted).toBe(true);
+    });
+
+    it('aborts sibling Agent calls in the same batch after loop detection', async () => {
+      let firstSiblingSignal: AbortSignal | undefined;
+      let secondSiblingSignal: AbortSignal | undefined;
+      const firstSiblingExecute = vi
+        .fn()
+        .mockImplementation(async (signal: AbortSignal) => {
+          firstSiblingSignal = signal;
+          await waitForAbortOrTick(signal);
+          return {
+            llmContent: 'first sibling stopped',
+            returnDisplay: 'first sibling stopped',
+          };
+        });
+      const secondSiblingExecute = vi
+        .fn()
+        .mockImplementation(async (signal: AbortSignal) => {
+          secondSiblingSignal = signal;
+          await waitForAbortOrTick(signal);
+          return {
+            llmContent: 'second sibling stopped',
+            returnDisplay: 'second sibling stopped',
+          };
+        });
+      mockToolRegistry.getTool.mockReturnValue({
+        name: core.ToolNames.AGENT,
+        kind: core.Kind.Think,
+        displayName: 'Agent',
+        description: 'Agent',
+        build: vi.fn().mockImplementation((args: Record<string, unknown>) => {
+          if (args['_test_id'] === 'invalid') {
+            throw new Error('Invalid subagent_type: bad');
+          }
+          const isFirstSibling = args['_test_id'] === 'sibling_1';
+          return {
+            params: { subagent_type: 'explore', ...args },
+            eventEmitter: new EventEmitter(),
+            execute: isFirstSibling
+              ? firstSiblingExecute
+              : secondSiblingExecute,
+            getDefaultPermission: vi.fn().mockResolvedValue('allow'),
+            getDescription: vi.fn().mockReturnValue('Agent'),
+            toolLocations: vi.fn().mockReturnValue([]),
+          };
+        }),
+        canUpdateOutput: false,
+        isOutputMarkdown: true,
+      });
+      const toolLoopState = {
+        totalToolCalls: 0,
+        invalidToolParamErrors: new Map([[core.ToolNames.AGENT, 2]]),
+        loopDetected: false,
+      };
+
+      const result = await (
+        session as unknown as ToolCallInternals
+      ).runToolCalls(
+        new AbortController().signal,
+        'prompt-agent-loop-abort',
+        [
+          {
+            id: 'agent_invalid',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'invalid', subagent_type: 'bad' },
+          },
+          {
+            id: 'agent_sibling_1',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'sibling_1', subagent_type: 'explore' },
+          },
+          {
+            id: 'agent_sibling_2',
+            name: core.ToolNames.AGENT,
+            args: { _test_id: 'sibling_2', subagent_type: 'explore' },
+          },
+        ],
+        toolLoopState,
+      );
+
+      expect(result.loopDetected).toBe(true);
+      expect(firstSiblingExecute).toHaveBeenCalledOnce();
+      expect(secondSiblingExecute).toHaveBeenCalledOnce();
+      expect(firstSiblingSignal?.aborted).toBe(true);
+      expect(secondSiblingSignal?.aborted).toBe(true);
     });
 
     it('passes an already-aborted parent signal to Agent batches', async () => {

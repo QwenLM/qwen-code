@@ -36,6 +36,23 @@ describe('useModelCommand', () => {
     expect(result.current.isFastModelMode).toBe(false);
   });
 
+  it('should open the model dialog in vision model mode and suppress fast mode', () => {
+    const { result } = renderHook(() => useModelCommand());
+
+    act(() => {
+      // fast is requested too, but vision must win — modes are exclusive.
+      result.current.openModelDialog({
+        visionModelMode: true,
+        fastModelMode: true,
+      });
+    });
+
+    expect(result.current.isModelDialogOpen).toBe(true);
+    expect(result.current.isVisionModelMode).toBe(true);
+    expect(result.current.isFastModelMode).toBe(false);
+    expect(result.current.isVoiceModelMode).toBe(false);
+  });
+
   it('should close the model dialog when closeModelDialog is called', () => {
     const { result } = renderHook(() => useModelCommand());
 
@@ -52,5 +69,20 @@ describe('useModelCommand', () => {
     });
     expect(result.current.isModelDialogOpen).toBe(false);
     expect(result.current.isVoiceModelMode).toBe(false);
+  });
+
+  it('should reset isVisionModelMode on close', () => {
+    const { result } = renderHook(() => useModelCommand());
+
+    act(() => {
+      result.current.openModelDialog({ visionModelMode: true });
+    });
+    expect(result.current.isVisionModelMode).toBe(true);
+
+    act(() => {
+      result.current.closeModelDialog();
+    });
+    expect(result.current.isModelDialogOpen).toBe(false);
+    expect(result.current.isVisionModelMode).toBe(false);
   });
 });

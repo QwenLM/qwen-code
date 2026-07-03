@@ -24,6 +24,7 @@ import {
 import { useI18n } from '../../i18n';
 import {
   useWebShellCustomization,
+  type MarkdownTableMode,
   type MarkdownContentSource,
 } from '../../customization';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
@@ -38,7 +39,7 @@ interface MarkdownProps {
    * the content settles, avoiding flicker and wasted re-tokenization.
    */
   isStreaming?: boolean;
-  enhanceTables?: boolean;
+  tableMode?: MarkdownTableMode;
 }
 
 const SUPPORTED_LANGUAGES = new Set([
@@ -513,11 +514,11 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
 }
 
 // `code`/`pre`/`a`/`img` are stable references; only `table` is created per
-// call (it closes over enhanceTables/tableResetKey). Recreating the components
+// call (it closes over tableMode/tableResetKey). Recreating the components
 // object for a table reset therefore never changes the `code` element type, so
 // code blocks are not remounted.
 function createComponents(
-  enhanceTables?: boolean,
+  tableMode: MarkdownTableMode = 'basic',
   tableResetKey = '',
 ): Components {
   return {
@@ -526,8 +527,8 @@ function createComponents(
     a: MarkdownLink,
     img: MarkdownImage,
     table({ children }: { children?: ReactNode }) {
-      const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
-      if (enhanceTables) {
+      if (tableMode === 'advanced') {
+        const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
         return (
           <EnhancedMarkdownTableBoundary
             fallback={fallback}
@@ -539,7 +540,7 @@ function createComponents(
           </EnhancedMarkdownTableBoundary>
         );
       }
-      return fallback;
+      return <PlainMarkdownTable>{children}</PlainMarkdownTable>;
     },
   };
 }
@@ -550,29 +551,32 @@ export const Markdown = memo(function Markdown({
   content,
   source,
   isStreaming,
-  enhanceTables,
+  tableMode,
 }: MarkdownProps) {
-  const { markdown } = useWebShellCustomization();
+  const { markdown, markdownTableMode } = useWebShellCustomization();
   const sourceMarkdown = source ? markdown : undefined;
   const renderedContent =
     content && source && sourceMarkdown?.transformMarkdown
       ? sourceMarkdown.transformMarkdown(content, { source })
       : content;
+  const effectiveTableMode = isStreaming
+    ? 'basic'
+    : (tableMode ?? markdownTableMode ?? 'basic');
   const components = useMemo(() => {
-    if (enhanceTables) {
-      return createComponents(true, renderedContent);
+    if (effectiveTableMode === 'advanced') {
+      return createComponents('advanced', renderedContent);
     }
     return COMPONENTS_DEFAULT;
-  }, [enhanceTables, renderedContent]);
+  }, [effectiveTableMode, renderedContent]);
   const sourceComponents = sourceMarkdown?.components;
   const renderedComponents = useMemo(() => {
     if (!sourceComponents) return components;
     return {
       ...components,
       ...sourceComponents,
-      ...(enhanceTables ? { table: components.table } : {}),
+      ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
     };
-  }, [components, enhanceTables, sourceComponents]);
+  }, [components, effectiveTableMode, sourceComponents]);
 
   if (!content) return null;
   const remarkPlugins = sourceMarkdown?.remarkPlugins

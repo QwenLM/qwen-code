@@ -39,7 +39,7 @@ on:
       timeout_minutes:
         description: 'Review timeout in minutes'
         required: false
-        default: '90'
+        default: '120'
         type: 'number'
       dry_run:
         description: 'Run /resolve without pushing'
@@ -57,6 +57,20 @@ concurrency:
   cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}"
 
 jobs:
+  precheck-pr:
+    if: |-
+      github.event_name == 'pull_request_target' &&
+      github.event.pull_request.head.repo.full_name != github.repository &&
+      (github.event.action != 'review_requested' ||
+       github.event.requested_reviewer.login == 'qwen-code-ci-bot')
+    permissions:
+      contents: 'read'
+      pull-requests: 'read'
+      issues: 'write'
+    uses: './.github/workflows/qwen-pr-safety-precheck.yml'
+    secrets:
+      CI_BOT_PAT: '${{ secrets.CI_BOT_PAT }}'
+
   ack-review-request:
     # KEEP IN SYNC with review-pr.if (explicit-trigger branches).
     # Authorization is delegated to the `authorize` job (write+ permission);
@@ -83,7 +97,7 @@ jobs:
     concurrency:
       group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
       cancel-in-progress: false
-    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     timeout-minutes: 5
     permissions:
       pull-requests: 'write'
@@ -103,7 +117,9 @@ jobs:
           fi
           ACK_BODY="<!-- qwen-review-ack -->_Qwen Code review request accepted. Review is queued in [workflow run](${RUN_URL})._"
           EXISTING_ACK_ID="$(
+            # -F would otherwise make gh api default to POST.
             gh api "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+              --method GET \
               --paginate \
               -F per_page=100 \
               | jq -sr '[.[][] | select(.body | contains("<!-- qwen-review-ack -->")) | select(.user.login == "github-actions[bot]")] | last | .id // empty'
@@ -125,7 +141,7 @@ jobs:
     if: |-
       github.event_name == 'pull_request_target' &&
       github.event.action == 'review_requested'
-    runs-on: "${{ vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     permissions: {}
     outputs:
       bot_login: '${{ steps.values.outputs.bot_login }}'
@@ -144,9 +160,9 @@ jobs:
       github.event.pull_request.state == 'open' &&
       !github.event.pull_request.draft &&
       needs.authorize.outputs.should_review == 'true'
-    # Stays on hosted: the 30-minute environment wait timer would otherwise idle a self-hosted ECS slot for the whole wait (GitHub allocates the runner before evaluating the environment timer).
+    # Stays on hosted: the environment wait timer would otherwise idle a self-hosted ECS slot for the whole wait (GitHub allocates the runner before evaluating the environment timer).
     runs-on: 'ubuntu-latest'
-    # Configured in repo settings with a 30-minute wait timer.
+    # Wait timer is configured in repo settings (Settings → Environments → qwen-pr-review-delay), currently 10 minutes.
     environment:
       name: 'qwen-pr-review-delay'
       deployment: false
@@ -179,18 +195,19 @@ jobs:
           echo "should_review=true" >> "$GITHUB_OUTPUT"
 
   authorize:
+    needs: ['precheck-pr']
     # Single source of truth for "may this trigger spend Qwen command compute".
-    # The principal whose permission decides eligibility is the PR author
-    # (automatic PR events), the commenter (comment command events), or
-    # the requester (review_requested). They must have write+ permission.
-    # This replaces the per-path author_association checks, which are
-    # unreliable for fork PRs (a write user pushing from a fork is reported as
-    # CONTRIBUTOR, not MEMBER), so fork PRs by trusted authors now qualify.
+    # Automatic PR events are allowed after the fork PR precheck above (or for
+    # same-repo PRs). Manual command events and review_requested are still
+    # gated on the actor/requester having write+ permission.
     # Only run for PR-target events and supported command comments — not every
     # unrelated comment — to avoid spawning a job per comment. The downstream
     # `if`s still do the exact command body match; this prefix is just a filter.
     if: |-
-      github.repository == 'QwenLM/qwen-code' &&
+      always() &&
+      (github.event_name != 'pull_request_target' ||
+       github.event.pull_request.head.repo.full_name == github.repository ||
+       needs.precheck-pr.outputs.decision == 'allow_triage') &&
       (github.event_name == 'pull_request_target' ||
        (github.event_name == 'workflow_dispatch' &&
         github.event.inputs.command == 'resolve') ||
@@ -202,8 +219,10 @@ jobs:
         startsWith(github.event.comment.body, '@qwen-code /review')) ||
        (github.event_name == 'pull_request_review' &&
         startsWith(github.event.review.body, '@qwen-code /review')))
-    # Same-repo guard: this job loads CI_BOT_PAT, so fork-triggered runs stay on hosted (ephemeral); only in-repo PR events use the persistent ECS runner.
-    runs-on: "${{ (vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
+    # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
+    # use the persistent ECS runner.
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -221,10 +240,10 @@ jobs:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
           EVENT_NAME: '${{ github.event_name }}'
           PR_ACTION: '${{ github.event.action }}'
-          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
           COMMENT_USER: '${{ github.event.comment.user.login }}'
           REVIEW_USER: '${{ github.event.review.user.login }}'
           SENDER: '${{ github.event.sender.login }}'
+          PR_NUMBER: '${{ github.event.pull_request.number }}'
         run: |-
           set -euo pipefail
           # Select the principal whose permission gates this trigger.
@@ -233,7 +252,9 @@ jobs:
               if [ "$PR_ACTION" = "review_requested" ]; then
                 principal="$SENDER"
               else
-                principal="$PR_AUTHOR"
+                echo "Automatic PR review allowed for PR #${PR_NUMBER} after same-repo/precheck gate." >> "$GITHUB_STEP_SUMMARY"
+                echo "should_review=true" >> "$GITHUB_OUTPUT"
+                exit 0
               fi
               ;;
             issue_comment|pull_request_review_comment)
@@ -280,9 +301,9 @@ jobs:
 
   review-pr:
     needs: ['review-config', 'delay-automatic-review', 'authorize']
-    # pull_request_target routing (every path additionally gated by the
-    # `authorize` job = the principal has write+ permission):
-    # - review_requested checks the requester and skips delay
+    # pull_request_target routing (all paths additionally pass through
+    # `authorize`; automatic PR events are precheck-gated, while explicit
+    # review_requested events check the requester and skip delay):
     # - opened/synchronize uses delay-automatic-review
     # - reopened/ready_for_review runs immediately
     # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
@@ -319,8 +340,8 @@ jobs:
          startsWith(github.event.review.body, '@qwen-code /review ') ||
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
         needs.authorize.outputs.should_review == 'true'))
-    timeout-minutes: 90
-    runs-on: ['self-hosted', 'linux', 'x64', 'ecs-qwen']
+    timeout-minutes: 200
+    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -370,11 +391,14 @@ jobs:
           TRIGGER_BODY: "${{ github.event.comment.body || github.event.review.body || '' }}"
         run: |-
           set -euo pipefail
+          DEFAULT_TIMEOUT_MINUTES=120
+          TIMEOUT_MINUTES="$DEFAULT_TIMEOUT_MINUTES"
           TRIGGER_COMMAND="${TRIGGER_BODY%%$'\n'*}"
 
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             PR_NUMBER="${{ github.event.inputs.pr_number }}"
             REVIEW_MODE="${{ github.event.inputs.review_mode }}"
+            TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '120' }}"
           elif [ "${{ github.event_name }}" = "issue_comment" ]; then
             if ! printf '%s\n' "$TRIGGER_COMMAND" | grep -Eq '^@qwen-code[[:space:]]+/review([[:space:]]|$)'; then
               echo "should_run=false" >> "$GITHUB_OUTPUT"
@@ -397,7 +421,20 @@ jobs:
             exit 1
           fi
 
-          TIMEOUT_MINUTES="${{ github.event.inputs.timeout_minutes || '90' }}"
+          if [ -n "$TRIGGER_COMMAND" ]; then
+            set -f
+            for token in $TRIGGER_COMMAND; do
+              case "$token" in
+                --timeout=*)
+                  TIMEOUT_MINUTES="${token#--timeout=}"
+                  ;;
+                timeout=*)
+                  TIMEOUT_MINUTES="${token#timeout=}"
+                  ;;
+              esac
+            done
+            set +f
+          fi
 
           {
             echo "should_run=true"
@@ -405,6 +442,23 @@ jobs:
             echo "review_mode=$REVIEW_MODE"
             echo "timeout_minutes=$TIMEOUT_MINUTES"
           } >> "$GITHUB_OUTPUT"
+
+      - name: 'Setup Node.js for hosted review'
+        if: "steps.context.outputs.should_run == 'true' && (github.repository != 'QwenLM/qwen-code' || vars.MAINTAINER_ECS_RUNNER_DISABLED == 'true')"
+        uses: 'actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e' # v6.4.0
+        with:
+          node-version: '22.x'
+
+      - name: 'Install Qwen CLI if missing'
+        if: "steps.context.outputs.should_run == 'true'"
+        run: |-
+          set -euo pipefail
+          if command -v qwen >/dev/null 2>&1; then
+            qwen --version
+            exit 0
+          fi
+          npm install -g --registry=https://registry.npmjs.org '@qwen-code/qwen-code@latest'
+          qwen --version
 
       - name: 'Run review'
         id: 'review'
@@ -426,8 +480,12 @@ jobs:
           fail() {
             local message="$1"
             local code="${2:-1}"
+            local kind="${3:-}"
             echo "$message" >&2
             echo "failure_reason=$message" >> "$GITHUB_OUTPUT"
+            if [ -n "$kind" ]; then
+              echo "failure_kind=$kind" >> "$GITHUB_OUTPUT"
+            fi
             echo "$message" >> "$GITHUB_STEP_SUMMARY"
             exit "$code"
           }
@@ -524,11 +582,14 @@ jobs:
               fail "Invalid timeout_minutes: ${TIMEOUT_MINUTES}"
               ;;
           esac
+          if [ "${#TIMEOUT_MINUTES}" -gt 3 ]; then
+            fail "Invalid timeout_minutes: ${TIMEOUT_MINUTES}"
+          fi
           if [ "$TIMEOUT_MINUTES" -le 5 ]; then
             fail "timeout_minutes must be greater than 5"
           fi
-          if [ "$TIMEOUT_MINUTES" -gt 90 ]; then
-            fail "timeout_minutes must not exceed the 90 minute job timeout"
+          if [ "$TIMEOUT_MINUTES" -gt 180 ]; then
+            fail "timeout_minutes must not exceed 180 minutes"
           fi
 
           if ! PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state --jq '.state')"; then
@@ -549,7 +610,7 @@ jobs:
             MODEL_ARGS=(--model "$OPENAI_MODEL")
           fi
 
-          QWEN_TIMEOUT=$((TIMEOUT_MINUTES - 5))
+          QWEN_TIMEOUT="$TIMEOUT_MINUTES"
           set +e
           # GNU timeout times out command children unless --foreground is used.
           timeout --kill-after=10s "${QWEN_TIMEOUT}m" qwen \
@@ -567,8 +628,9 @@ jobs:
           if [ "$tee_status" -ne 0 ]; then
             fail "Failed to write qwen review log."
           fi
-          if [ "$qwen_status" -eq 124 ]; then
-            fail "Qwen review timed out after ${QWEN_TIMEOUT} minutes."
+          # GNU timeout may report 137 if --kill-after escalates to SIGKILL.
+          if [ "$qwen_status" -eq 124 ] || [ "$qwen_status" -eq 137 ]; then
+            fail "Qwen review timed out after ${QWEN_TIMEOUT} minutes." 1 "timeout"
           fi
           if [ "$qwen_status" -ne 0 ]; then
             fail "Qwen review exited with status ${qwen_status}."
@@ -609,13 +671,24 @@ jobs:
           steps.context.outputs.pr_number != ''
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          FAILURE_KIND: "${{ steps.review.outputs.failure_kind || '' }}"
           FAILURE_REASON: "${{ steps.review.outputs.failure_reason || 'Run review failed. See workflow logs for details.' }}"
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+          TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
         run: |-
+          if [ "$FAILURE_KIND" = "timeout" ]; then
+            if [ "$TIMEOUT_MINUTES" -lt 180 ]; then
+              body="**Qwen Code review timed out.** ${FAILURE_REASON} For large PRs, retry with a longer timeout by commenting: \`@qwen-code /review --timeout=180\`. See [workflow logs](${RUN_URL})."
+            else
+              body="**Qwen Code review timed out.** ${FAILURE_REASON} This run already used the maximum 180 minute timeout. See [workflow logs](${RUN_URL})."
+            fi
+          else
+            body="**Qwen Code review did not complete successfully.** ${FAILURE_REASON} See [workflow logs](${RUN_URL})."
+          fi
           gh pr comment "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
-            --body "_Qwen Code review did not complete successfully: ${FAILURE_REASON} See [workflow logs](${RUN_URL})._"
+            --body "$body"
 
   resolve-pr:
     needs: ['authorize']
@@ -640,7 +713,7 @@ jobs:
     # determine command for sandbox"). Hosted runners ship docker and are
     # ephemeral, which suits the sandboxed conflict-resolution job.
     runs-on: 'ubuntu-latest'
-    timeout-minutes: 90
+    timeout-minutes: 120
     concurrency:
       group: 'qwen-resolve-${{ github.event.issue.number || github.event.inputs.pr_number }}'
       cancel-in-progress: false

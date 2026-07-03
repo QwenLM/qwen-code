@@ -100,7 +100,8 @@
         "sessionRecapAwayThresholdMinutes": {
           "description": "How many minutes the terminal must be blurred before an auto-recap fires on the next focus-in. Matches Claude Code's default of 5 minutes; raise if you briefly alt-tab and do not want recaps to pile up.",
           "type": "number",
-          "default": 5
+          "default": 5,
+          "minimum": 1
         },
         "cleanupPeriodDays": {
           "description": "Number of days to retain ~/.qwen/file-history/ session backups used by /rewind and background subagent transcripts under <projectDir>/subagents/. Data older than this is removed by a background housekeeping pass that runs at most once per day. Set to 0 for minimum retention (~1 hour) — protects sessions touched in the last hour, plus the currently active session.",
@@ -281,6 +282,11 @@
               "description": "Whether to collapse history by default when resuming a session.",
               "type": "boolean",
               "default": false
+            },
+            "collapsePreviewCount": {
+              "description": "Number of most recent user turns to keep visible when collapsing history on resume. 0 collapses all restored history by default; -1 shows all restored history.",
+              "type": "number",
+              "default": 0
             }
           }
         },
@@ -370,7 +376,7 @@
           "default": false
         },
         "useTerminalBuffer": {
-          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.",
+          "description": "Render conversation history in an in-app scrollable viewport instead of the terminal scrollback buffer. Recommended if you see flicker, scroll-storm, or interface freeze on long sessions, after Ctrl+O, after Ctrl+E / Ctrl+F (expand), after window resize, or when alt-tabbing back. Scroll with Shift+↑/↓ (line), PgUp/PgDn (page), Ctrl+Home/End (top/bottom), or the mouse wheel. Also enables mouse interactions: click an option in a menu/dialog to select it, hover to highlight it, and click in the prompt to position the cursor. Does NOT use the host terminal scrollback while enabled; for native text selection, hold Shift (or Option on macOS) while dragging.",
           "type": "boolean",
           "default": false
         },
@@ -543,6 +549,11 @@
       "type": "string",
       "default": ""
     },
+    "visionModel": {
+      "description": "Image-capable model used as the vision bridge: when a text-only main model receives an image, it is transcribed by this model first. Set with /model --vision. Leave empty to auto-pick a same-provider vision model.",
+      "type": "string",
+      "default": ""
+    },
     "voiceModel": {
       "description": "Model used for voice transcription. Set with /model --voice. Leave empty to keep voice dictation disabled until a voice model is selected.",
       "type": "string",
@@ -559,6 +570,16 @@
         "baseUrl": {
           "description": "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
           "type": "string"
+        },
+        "reasoningEffort": {
+          "description": "How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at \"high\"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default. Options: low, medium, high, xhigh, max",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
         },
         "maxSessionTurns": {
           "description": "Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.",
@@ -758,6 +779,12 @@
               "default": true
             }
           }
+        },
+        "autoCompactThreshold": {
+          "type": "number",
+          "minimum": 0.01,
+          "maximum": 1,
+          "description": "Fraction of context window at which auto-compaction triggers (greater than 0, up to 1). Default is 0.7 (70%)."
         }
       }
     },
@@ -784,6 +811,16 @@
           "description": "Ask for confirmation before auto-generated skills are added to the skill library. When off, auto-skills are saved immediately.",
           "type": "boolean",
           "default": true
+        },
+        "enableTeamMemory": {
+          "description": "Enable a project memory tier shared with collaborators via the git-tracked `.qwen/team-memory/` directory. Off by default; writes to it are secret-scanned and reviewable in the git diff.",
+          "type": "boolean",
+          "default": false
+        },
+        "enableTeamMemorySync": {
+          "description": "When team memory is enabled, automatically commit, fast-forward-pull, and push the `.qwen/team-memory/` directory at session start so collaborators stay in sync. Off by default; requires a configured git upstream.",
+          "type": "boolean",
+          "default": false
         }
       }
     },
@@ -913,6 +950,11 @@
               "items": {
                 "type": "string"
               }
+            },
+            "classifyAllShell": {
+              "description": "Route ALL shell commands through the auto-mode classifier, including read-only commands that would otherwise be auto-approved. Provides defense-in-depth for production environments.",
+              "type": "boolean",
+              "default": false
             }
           }
         }
@@ -1051,9 +1093,16 @@
           "type": "object",
           "properties": {
             "enabled": {
-              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins.",
+              "description": "When enabled (default), the cua-driver computer_use__* tools are registered as deferred built-ins. Set to false to prevent the driver from being downloaded or spawned.",
               "type": "boolean",
               "default": true
+            },
+            "idleTimeoutMs": {
+              "description": "Milliseconds to keep the cua-driver process alive after the last computer_use__* call. The default is 300000 (5 minutes). Set to 0 to keep it running until qwen-code exits.",
+              "type": "number",
+              "default": 300000,
+              "minimum": 0,
+              "maximum": 2147483647
             },
             "maxImageDimension": {
               "description": "Longest-edge pixel cap applied to cua-driver screenshots (via set_config's max_image_dimension). -1 (default) keeps cua-driver's built-in default (1568); 0 disables resizing (full resolution); a positive value caps the longest edge. Lower caps cut vision-token cost at the expense of fine detail. Overridable via the QWEN_COMPUTER_USE_MAX_IMAGE_DIMENSION env var.",
@@ -1094,18 +1143,25 @@
           "type": "string"
         },
         "allowed": {
-          "description": "A list of MCP servers to allow.",
+          "description": "A list of MCP servers to allow. Supports glob patterns (e.g. \"*puppeteer*\").",
           "type": "array",
           "items": {
             "type": "string"
           }
         },
         "excluded": {
-          "description": "A list of MCP servers to exclude.",
+          "description": "A list of MCP servers to exclude. Supports glob patterns (e.g. \"*puppeteer*\"). Takes precedence over mcp.allowed.",
           "type": "array",
           "items": {
             "type": "string"
           }
+        },
+        "toolIdleTimeoutMs": {
+          "description": "Idle timeout in milliseconds for MCP tool calls. If the MCP server does not produce any response or progress update within this time, the call is aborted. Default: 300000 (5 minutes). Can be overridden via QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.",
+          "type": "number",
+          "default": 300000,
+          "minimum": 10000,
+          "maximum": 3600000
         }
       }
     },

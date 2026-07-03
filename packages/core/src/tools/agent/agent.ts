@@ -18,7 +18,6 @@ import type {
   ToolCallConfirmationDetails,
   ToolConfirmationPayload,
 } from '../tools.js';
-import type { Config } from '../../config/config.js';
 import type { PermissionDecision } from '../../permissions/types.js';
 import type { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
@@ -89,8 +88,11 @@ import {
   appendStopHookBlockingCapWarning,
   formatStopHookBlockingCapWarning,
 } from '../../hooks/stopHookCap.js';
-import { ApprovalMode } from '../../config/config.js';
+import { toModelVisibleSubagentResult } from '../../agents/subagent-result.js';
+import { ApprovalMode, Config } from '../../config/config.js';
+import { createDenialState } from '../../permissions/denialTracking.js';
 import { isTeammate } from '../../agents/team/identity.js';
+import { isSubagentLikeExecutionContext } from '../../agents/runtime/subagent-plan-tool-policy.js';
 import {
   getAgentJsonlPath,
   getAgentMetaPath,
@@ -191,6 +193,8 @@ export interface AgentParams {
   run_in_background?: boolean;
   /** When set, spawn as a named teammate via TeamManager instead of a one-shot subagent. */
   name?: string;
+  /** Start a named teammate in plan mode and require leader approval. */
+  plan_mode_required?: boolean;
   /**
    * When set to `'worktree'`, spins up a temporary git worktree under
    * `<projectRoot>/.qwen/worktrees/agent-<7hex>` and instructs the agent to
@@ -209,6 +213,14 @@ const TEAM_AGENT_NAME_PROPERTY = {
   description:
     'When provided, spawn as a named teammate via the active team ' +
     'instead of a one-shot subagent. Requires an active team context.',
+};
+
+const TEAM_AGENT_PLAN_REQUIRED_PROPERTY = {
+  type: 'boolean',
+  description:
+    'When true, the named teammate starts in plan mode and must call ' +
+    'exit_plan_mode to request leader approval before executing. Only valid ' +
+    'with a named teammate in an active team.',
 };
 
 /**
@@ -406,6 +418,9 @@ function applyPersistedCliFlagOverrides(
   if (flags.bare !== undefined) {
     ov.getBareMode = () => flags.bare;
   }
+  if (flags.safeMode !== undefined) {
+    ov.isSafeMode = () => flags.safeMode;
+  }
   if (hasOwn(flags, 'sandbox')) {
     const sandbox = flags.sandbox ?? undefined;
     ov.getSandbox = () => sandbox;
@@ -431,6 +446,7 @@ function capturePersistedCliFlags(
   return {
     approvalMode: resolvedApprovalMode,
     bare: config.getBareMode(),
+    safeMode: config.isSafeMode(),
     sandbox: config.getSandbox() ?? null,
     screenReader: config.getScreenReader(),
     model: config.getModel(),
@@ -456,17 +472,17 @@ function capturePersistedCliFlags(
  * boundary (see strip lifecycle below).
  *
  * Strip lifecycle for AUTO overrides:
- *   - parent not in AUTO, override in AUTO: this function strips the
- *     PARENT's PM (shared via prototype chain — the override cannot
- *     have its own PM without a much bigger refactor). `cleanup`
- *     restores the strip when the sub-agent finishes, but ONLY if the
- *     parent hasn't itself entered AUTO in the meantime (in which
- *     case restoring would undo the parent's own strip).
- *   - parent already in AUTO, override in AUTO: parent's
- *     `setApprovalMode` already stripped on its own entry. We don't
- *     strip again (would be a no-op anyway via sentinel) and don't
- *     restore on cleanup (lifecycle is parent-owned).
- *   - override not in AUTO: no strip, no restore.
+ *   - parent not in AUTO, override starts in AUTO: this function strips
+ *     the PARENT's PM (shared via prototype chain — the override cannot
+ *     have its own PM without a much bigger refactor).
+ *   - parent already in AUTO, override starts in AUTO: parent's
+ *     `setApprovalMode` already stripped on its own entry, so this
+ *     function does not strip again.
+ *   - override enters/leaves AUTO later: `setApprovalMode` reuses Config's
+ *     normal state transition, but suppresses AUTO strip/restore while the
+ *     parent is already in AUTO because the parent owns that strip lifecycle.
+ *     `cleanup` only restores if the child finishes still in AUTO while the
+ *     parent is not in AUTO.
  */
 export async function createApprovalModeOverride(
   base: Config,
@@ -475,31 +491,82 @@ export async function createApprovalModeOverride(
 ): Promise<ApprovalModeOverrideHandle> {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const override = Object.create(base) as any;
-  override.getApprovalMode = (): ApprovalMode => mode;
+  const baseApprovalMode = base.getApprovalMode();
+  // These own properties intentionally mirror Config's TS-private field names.
+  // Config prototype methods read/write them at runtime on this override object.
+  override.approvalMode = mode;
+  override.getApprovalMode = Config.prototype.getApprovalMode;
+  override.prePlanMode =
+    mode === ApprovalMode.PLAN
+      ? baseApprovalMode === ApprovalMode.PLAN
+        ? base.getPrePlanMode()
+        : baseApprovalMode
+      : undefined;
+  const basePlanGateState =
+    mode === ApprovalMode.PLAN ? base.getPlanGateState() : undefined;
+  override.planGateState = basePlanGateState
+    ? {
+        ...basePlanGateState,
+        lastFindings: [...basePlanGateState.lastFindings],
+      }
+    : undefined;
+  override.planGateEntryCounter = override.planGateState?.entryId ?? 0;
+  override.autoModeDenialState = createDenialState();
+  override.setApprovalMode = (
+    nextMode: ApprovalMode,
+    setOptions?: Parameters<Config['setApprovalMode']>[1],
+  ): void => {
+    if (base.getApprovalMode() !== ApprovalMode.AUTO) {
+      Config.prototype.setApprovalMode.call(
+        override as Config,
+        nextMode,
+        setOptions,
+      );
+      return;
+    }
+
+    const hadOwnPermissionManager = Object.prototype.hasOwnProperty.call(
+      override,
+      'permissionManager',
+    );
+    const ownPermissionManager = override.permissionManager;
+    override.permissionManager = null;
+    try {
+      Config.prototype.setApprovalMode.call(
+        override as Config,
+        nextMode,
+        setOptions,
+      );
+    } finally {
+      if (hadOwnPermissionManager) {
+        override.permissionManager = ownPermissionManager;
+      } else {
+        delete override.permissionManager;
+      }
+    }
+  };
   applyPersistedCliFlagOverrides(override as Config, options.persistedCliFlags);
   await rebuildToolRegistryOnOverride(override as Config, base);
 
-  let cleanup: () => void = () => {};
+  const cleanup = () => {
+    if (
+      (override as Config).getApprovalMode() === ApprovalMode.AUTO &&
+      base.getApprovalMode() !== ApprovalMode.AUTO
+    ) {
+      base.getPermissionManager?.()?.restoreDangerousRules();
+    }
+  };
 
   if (mode === ApprovalMode.AUTO) {
     const baseWasAuto = base.getApprovalMode() === ApprovalMode.AUTO;
     if (!baseWasAuto) {
       // This override is bringing AUTO into a non-AUTO parent. Strip
       // dangerous allow rules so the sub-agent's classifier actually
-      // gates them, then arrange to restore on cleanup.
+      // gates them. Cleanup handles restore if the child finishes in AUTO.
       base.getPermissionManager?.()?.stripDangerousRulesForAutoMode();
-      cleanup = () => {
-        // Defensive: parent could have toggled to AUTO during the sub-
-        // agent's run. In that case parent now owns the strip lifecycle
-        // (its own `setApprovalMode(AUTO)` hook was responsible) and we
-        // must NOT restore — that would un-strip the parent's intent.
-        if (base.getApprovalMode() !== ApprovalMode.AUTO) {
-          base.getPermissionManager?.()?.restoreDangerousRules();
-        }
-      };
     }
     // baseWasAuto: parent's setApprovalMode already stripped; cleanup
-    // stays no-op since lifecycle is parent-owned.
+    // will not restore while the parent remains in AUTO.
   }
 
   return { config: override as Config, cleanup };
@@ -549,7 +616,10 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
             'Set to true to run this agent in the background. You will be notified when it completes.',
         },
         ...(config.isAgentTeamEnabled()
-          ? { name: TEAM_AGENT_NAME_PROPERTY }
+          ? {
+              name: TEAM_AGENT_NAME_PROPERTY,
+              plan_mode_required: TEAM_AGENT_PLAN_REQUIRED_PROPERTY,
+            }
           : {}),
         isolation: {
           type: 'string',
@@ -731,6 +801,7 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
           enum?: string[];
         };
         name?: typeof TEAM_AGENT_NAME_PROPERTY;
+        plan_mode_required?: typeof TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
       };
     };
     if (schema.properties && schema.properties.subagent_type) {
@@ -749,8 +820,11 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
     if (schema.properties) {
       if (this.config.isAgentTeamEnabled()) {
         schema.properties.name = TEAM_AGENT_NAME_PROPERTY;
+        schema.properties.plan_mode_required =
+          TEAM_AGENT_PLAN_REQUIRED_PROPERTY;
       } else {
         delete schema.properties.name;
+        delete schema.properties.plan_mode_required;
       }
     }
   }
@@ -810,6 +884,24 @@ assistant: Uses the ${ToolNames.AGENT} tool to launch the test-runner agent
         params.subagent_type.toLowerCase() === FORK_SUBAGENT_TYPE
       ) {
         return 'Parameter "isolation" requires an explicit subagent_type (and cannot be "fork").';
+      }
+    }
+
+    if (params.plan_mode_required !== undefined) {
+      if (typeof params.plan_mode_required !== 'boolean') {
+        return 'Parameter "plan_mode_required" must be a boolean when set.';
+      }
+      if (params.plan_mode_required) {
+        if (
+          !params.name ||
+          typeof params.name !== 'string' ||
+          params.name.trim() === ''
+        ) {
+          return 'Parameter "plan_mode_required" requires a named teammate via "name".';
+        }
+        if (!this.config.getTeamManager()) {
+          return 'Parameter "plan_mode_required" requires an active team.';
+        }
       }
     }
 
@@ -1365,6 +1457,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           'task_prompt',
           typedStopOutput.getEffectiveReason(),
         );
+        continueContext.set('hook_context', '');
         await subagent.execute(continueContext, signal);
 
         if (signal?.aborted) return undefined;
@@ -1551,6 +1644,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     const { agentId, agentType, resolvedMode, signal, updateOutput } = opts;
     const hookSystem = this.config.getHookSystem();
 
+    // Always set hook_context so ${hook_context} in systemPrompt does not
+    // throw when no hook is configured or the hook returns no additional context.
+    contextState.set('hook_context', '');
+
     try {
       if (hookSystem) {
         try {
@@ -1588,11 +1685,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       // Get the results
       const subagentRawText = subagent.getFinalText();
+      const terminateMode = subagent.getTerminateMode();
       const finalText = appendStopHookBlockingCapWarning(
-        subagentRawText,
+        toModelVisibleSubagentResult(subagentRawText, terminateMode),
         stopHookWarning,
       );
-      const terminateMode = subagent.getTerminateMode();
       const success = terminateMode === AgentTerminateMode.GOAL;
       const executionSummary = subagent.getExecutionSummary();
 
@@ -1662,6 +1759,31 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
     signal?: AbortSignal,
     updateOutput?: (output: ToolResultDisplay) => void,
   ): Promise<ToolResult> {
+    if (this.params.plan_mode_required === true) {
+      if (
+        !this.params.name ||
+        this.params.name.trim() === '' ||
+        isSubagentLikeExecutionContext()
+      ) {
+        const msg =
+          'plan_mode_required can only be used when spawning a named teammate from the team leader.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+      if (!this.config.getTeamManager()) {
+        const msg =
+          'plan_mode_required requires an active team. Use TeamCreate first.';
+        return {
+          llmContent: msg,
+          returnDisplay: msg,
+          error: { message: msg },
+        };
+      }
+    }
+
     // ─── Team routing ────────────────────────────────────
     // A name only means "spawn a teammate" while a team is active. Older
     // prompts may still pass it without a team; treat that as a normal
@@ -2183,6 +2305,9 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
 
       const contextState = new ContextState();
       contextState.set('task_prompt', taskPrompt);
+      // Always set hook_context so ${hook_context} in systemPrompt does not
+      // throw when no hook is configured or the hook returns no additional context.
+      contextState.set('hook_context', '');
 
       // ── Background (async) execution path ──────────────────────
       if (shouldRunInBackground) {
@@ -2422,6 +2547,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const summary = bgSubagent.getExecutionSummary();
           entry.stats = {
             totalTokens: summary.totalTokens,
+            outputTokens: summary.outputTokens,
             toolUses: liveToolCallCount,
             durationMs: summary.totalDurationMs,
           };
@@ -2473,6 +2599,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
           const summary = bgSubagent.getExecutionSummary();
           return {
             totalTokens: summary.totalTokens,
+            outputTokens: summary.outputTokens,
             toolUses: liveToolCallCount,
             durationMs: summary.totalDurationMs,
           };
@@ -2524,9 +2651,16 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             const wtSuffix = formatWorktreeSuffix(
               await cleanupWorktreeIsolation(),
             );
+            const modelVisibleText = toModelVisibleSubagentResult(
+              subagentRawText,
+              terminateMode,
+            );
             const finalText =
               appendStopHookBlockingCapWarning(
-                subagentRawText,
+                terminateMode === AgentTerminateMode.GOAL
+                  ? modelVisibleText ||
+                      '(subagent produced no model-visible output)'
+                  : modelVisibleText,
                 stopHookWarning,
               ) + wtSuffix;
             const completionStats = getCompletionStats();
@@ -2879,6 +3013,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         const summary = subagent.getExecutionSummary();
         entry.stats = {
           totalTokens: summary.totalTokens,
+          outputTokens: summary.outputTokens,
           toolUses: fgLiveToolCallCount,
           durationMs: summary.totalDurationMs,
         };
@@ -2956,11 +3091,11 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         });
 
         const stopHookWarning = await runFramed();
+        const terminateMode = subagent.getTerminateMode();
         const finalText = appendStopHookBlockingCapWarning(
-          subagent.getFinalText(),
+          toModelVisibleSubagentResult(subagent.getFinalText(), terminateMode),
           stopHookWarning,
         );
-        const terminateMode = subagent.getTerminateMode();
         const wtSuffix = formatWorktreeSuffix(await cleanupWorktreeIsolation());
         if (terminateMode === AgentTerminateMode.ERROR) {
           return {
@@ -2988,8 +3123,10 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
             returnDisplay: this.currentDisplay!,
           };
         }
+        const visibleFinalText =
+          finalText || '(subagent produced no model-visible output)';
         return {
-          llmContent: [{ text: finalText + wtSuffix }],
+          llmContent: [{ text: visibleFinalText + wtSuffix }],
           returnDisplay: this.currentDisplay!,
         };
       } finally {
@@ -3163,6 +3300,7 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
         prompt: this.params.prompt,
         agentType: this.params.subagent_type,
         cwd: this.config.getCwd(),
+        planModeRequired: this.params.plan_mode_required === true,
       });
 
       // Return immediately — teammate runs concurrently.

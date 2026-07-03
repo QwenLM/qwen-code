@@ -388,10 +388,13 @@ export interface DaemonUiSessionBranchedEvent extends DaemonUiEventBase {
 
 export interface DaemonUiWorkspaceMemoryChangedEvent extends DaemonUiEventBase {
   type: 'workspace.memory.changed';
-  scope: 'workspace' | 'global';
-  filePath: string;
-  mode: 'append' | 'replace';
-  bytesWritten: number;
+  scope: 'workspace' | 'global' | 'managed';
+  filePath?: string;
+  mode?: 'append' | 'replace';
+  bytesWritten?: number;
+  source?: string;
+  taskId?: string;
+  touchedScopes?: Array<'user' | 'project'>;
 }
 
 export interface DaemonUiWorkspaceAgentChangedEvent extends DaemonUiEventBase {

@@ -21,6 +21,7 @@ import type {
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
+  DaemonArchiveSessionsResult,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
@@ -32,6 +33,7 @@ import type {
   DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonSessionArchiveState,
   DaemonSessionLspStatus,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
@@ -58,6 +60,8 @@ import type {
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
+  DaemonWorkspaceMemoryRememberOptions,
+  DaemonWorkspaceMemoryRememberTask,
   HeartbeatResult,
   PermissionResponse,
   PromptContentBlock,
@@ -76,6 +80,8 @@ import type {
   DaemonMcpManageResult,
   DaemonSessionBtwResult,
   DaemonMidTurnMessageResult,
+  DaemonPendingPromptsResult,
+  DaemonRemovePendingPromptResult,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonRuntimeMcpAddRequest,
@@ -108,7 +114,10 @@ import type {
   DaemonWorkspaceTrustChangeRequest,
   DaemonWorkspaceTrustChangeResult,
   DaemonWorkspaceTrustStatus,
+  DaemonUnarchiveSessionsResult,
 } from './types.js';
+
+const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
 
 /**
  * SDK-side HTTP client for the `qwen serve` daemon. Sibling to
@@ -164,6 +173,8 @@ export interface DaemonClientOptions {
    */
   transport?: DaemonTransport;
 }
+
+const DEFAULT_SESSION_LIST_PAGE_SIZE = 20;
 
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
 const VOICE_TRANSCRIPTION_DEFAULT_TIMEOUT_MS = 65_000;
@@ -1024,6 +1035,40 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Queue a hidden managed-memory remember task for the daemon's bound
+   * workspace. This does not require an existing session; callers should
+   * poll `getWorkspaceMemoryRememberTask()` until the task is terminal.
+   */
+  async rememberWorkspaceMemory(
+    content: string,
+    opts: DaemonWorkspaceMemoryRememberOptions = {},
+  ): Promise<DaemonWorkspaceMemoryRememberTask> {
+    return await this.jsonRequest<DaemonWorkspaceMemoryRememberTask>(
+      WORKSPACE_MEMORY_REMEMBER_PATH,
+      `POST ${WORKSPACE_MEMORY_REMEMBER_PATH}`,
+      {
+        method: 'POST',
+        body: {
+          content,
+          contextMode: opts.contextMode ?? 'workspace',
+        },
+        clientId: opts.clientId,
+      },
+    );
+  }
+
+  async getWorkspaceMemoryRememberTask(
+    taskId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspaceMemoryRememberTask> {
+    return await this.jsonRequest(
+      `${WORKSPACE_MEMORY_REMEMBER_PATH}/${encodeURIComponent(taskId)}`,
+      `GET ${WORKSPACE_MEMORY_REMEMBER_PATH}/:taskId`,
+      { clientId: opts?.clientId },
+    );
+  }
+
   // -- Workspace agents (workspace memory/agents) ------------------------------
 
   async listWorkspaceAgents(): Promise<DaemonWorkspaceAgentsStatus> {
@@ -1280,20 +1325,35 @@ export class DaemonClient {
    */
   async listWorkspaceSessions(
     workspaceCwd: string,
+    options?: {
+      pageSize?: number;
+      archiveState?: DaemonSessionArchiveState;
+    },
   ): Promise<DaemonSessionSummary[]> {
-    return await this.fetchWithTimeout(
-      `${this.baseUrl}/workspace/${encodeURIComponent(workspaceCwd)}/sessions`,
-      { headers: this.headers() },
-      async (res) => {
-        if (!res.ok) {
-          throw await this.failOnError(res, 'GET /workspace/:id/sessions');
-        }
-        const body = (await res.json()) as {
-          sessions: DaemonSessionSummary[];
-        };
-        return body.sessions;
-      },
+    const requestedPageSize =
+      options?.pageSize ?? DEFAULT_SESSION_LIST_PAGE_SIZE;
+    const pageSize = Math.max(
+      1,
+      Math.min(
+        1000,
+        Math.round(
+          Number.isFinite(requestedPageSize)
+            ? requestedPageSize
+            : DEFAULT_SESSION_LIST_PAGE_SIZE,
+        ),
+      ),
     );
+    const query = new URLSearchParams({ size: String(pageSize) });
+    if (options?.archiveState !== undefined) {
+      query.set('archiveState', options.archiveState);
+    }
+    const body = await this.jsonRequest<{
+      sessions: DaemonSessionSummary[];
+    }>(
+      `/workspace/${encodeURIComponent(workspaceCwd)}/sessions?${query.toString()}`,
+      'GET /workspace/sessions',
+    );
+    return body.sessions;
   }
 
   async loadSession(
@@ -1723,6 +1783,60 @@ export class DaemonClient {
           );
         }
         return (await res.json()) as DaemonMidTurnMessageResult;
+      },
+    );
+  }
+
+  /**
+   * List prompts in the daemon's per-session pending queue. Includes the
+   * currently running prompt (`state: 'running'`) and any FIFO-waiting
+   * prompts (`state: 'queued'`). Returns an empty array when no prompts
+   * are pending.
+   */
+  async getPendingPrompts(
+    sessionId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonPendingPromptsResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/pending-prompts`,
+      {
+        method: 'GET',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/pending-prompts');
+        }
+        return (await res.json()) as DaemonPendingPromptsResult;
+      },
+    );
+  }
+
+  /**
+   * Remove a specific prompt from the daemon's pending queue. For queued
+   * prompts this aborts them so the FIFO skips dispatch; for the running
+   * prompt this triggers a cancel. Returns `{ removed: false }` when the
+   * promptId is not found.
+   */
+  async removePendingPrompt(
+    sessionId: string,
+    promptId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonRemovePendingPromptResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/pending-prompts/${encodeURIComponent(promptId)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers({}, opts?.clientId),
+      },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(
+            res,
+            'DELETE /session/:id/pending-prompts/:promptId',
+          );
+        }
+        return (await res.json()) as DaemonRemovePendingPromptResult;
       },
     );
   }
@@ -2603,6 +2717,28 @@ export class DaemonClient {
     );
   }
 
+  async detachSession(sessionId: string, clientId?: string): Promise<void> {
+    if (!clientId) return;
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/detach`,
+      {
+        method: 'POST',
+        headers: this.headers({}, clientId),
+      },
+      async (res) => {
+        if (res.status === 204 || res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return;
+        }
+        throw await this.failOnError(res, 'POST /session/:id/detach');
+      },
+    );
+  }
+
   async deleteSessionsData(
     sessionIds: string[],
     clientId?: string,
@@ -2627,6 +2763,46 @@ export class DaemonClient {
           };
         }
         throw await this.failOnError(res, 'POST /sessions/delete');
+      },
+    );
+  }
+
+  async archiveSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+  ): Promise<DaemonArchiveSessionsResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/sessions/archive`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ sessionIds }),
+      },
+      async (res) => {
+        if (res.ok) {
+          return (await res.json()) as DaemonArchiveSessionsResult;
+        }
+        throw await this.failOnError(res, 'POST /sessions/archive');
+      },
+    );
+  }
+
+  async unarchiveSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+  ): Promise<DaemonUnarchiveSessionsResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/sessions/unarchive`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ sessionIds }),
+      },
+      async (res) => {
+        if (res.ok) {
+          return (await res.json()) as DaemonUnarchiveSessionsResult;
+        }
+        throw await this.failOnError(res, 'POST /sessions/unarchive');
       },
     );
   }
