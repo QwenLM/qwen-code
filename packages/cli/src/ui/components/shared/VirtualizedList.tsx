@@ -357,13 +357,16 @@ function VirtualizedList<T>(
       prevTotalHeight.current - prevContainerHeight.current - 1;
     const wasAtBottom = contentPreviouslyFit || wasScrolledToBottomPixels;
 
+    // Capture + clear the guard into a local so all downstream checks share
+    // one value.  This is refactor-safe: extracting the clear to the top of
+    // the effect or reordering branches can't silently break the guard.
+    const justScrolled = userJustScrolledRef.current;
+    userJustScrolledRef.current = false;
+
     // Suppress all auto-follow (wasAtBottom + anchor update) when the user
-    // just manually scrolled up. Placed BEFORE the wasAtBottom check so that
-    // `setIsStickingToBottom(true)` is also skipped — otherwise the guard
-    // only prevents the anchor update but leaves isStickingToBottom set,
-    // which causes a re-stick on the next streaming tick (#5941).
-    if (userJustScrolledRef.current) {
-      userJustScrolledRef.current = false;
+    // just manually scrolled up.
+    if (justScrolled) {
+      // skip wasAtBottom re-stick and setIsStickingToBottom
     } else if (wasAtBottom && actualScrollTop >= prevScrollTop.current) {
       if (!isStickingToBottom) {
         setIsStickingToBottom(true);
@@ -378,7 +381,7 @@ function VirtualizedList<T>(
 
     if (
       shouldAutoScroll &&
-      !userJustScrolledRef.current &&
+      !justScrolled &&
       ((listGrew && (isStickingToBottom || wasAtBottom)) ||
         (isStickingToBottom && containerChanged))
     ) {

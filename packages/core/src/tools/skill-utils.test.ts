@@ -173,6 +173,27 @@ describe('collectAvailableSkillEntries cache', () => {
     expect(sm.listSkills).toHaveBeenCalledTimes(1);
   });
 
+  it('concurrent callers share a single compute (inflight promise dedup)', async () => {
+    // Invalidate so we start with a cold cache.
+    invalidateCollectedSkillEntriesCache();
+    const sm = createMockSkillManager();
+    const cfg = createMockConfig();
+
+    // Fire 3 concurrent calls — all should share the same in-flight promise
+    // so listSkills() is invoked exactly once, not three times.
+    const [r1, r2, r3] = await Promise.all([
+      collectAvailableSkillEntries(sm, cfg),
+      collectAvailableSkillEntries(sm, cfg),
+      collectAvailableSkillEntries(sm, cfg),
+    ]);
+
+    // All three resolve to the same object reference.
+    expect(r1).toBe(r2);
+    expect(r2).toBe(r3);
+    // listSkills was called exactly once despite 3 concurrent callers.
+    expect(sm.listSkills).toHaveBeenCalledTimes(1);
+  });
+
   it('cache reflects actual skill data and updates after invalidation', async () => {
     // Set up a mock skill manager that returns non-empty skill data.
     const skill1 = {
