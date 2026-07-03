@@ -88,6 +88,9 @@ import type {
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
+  DaemonSessionArtifactsEnvelope,
   DaemonRewindSnapshotInfo,
   DaemonRewindResult,
   ForkSessionRequest,
@@ -2956,6 +2959,50 @@ export class DaemonClient {
    */
   dispose(): void {
     this.transport.dispose();
+  }
+
+  // -- Session artifacts ---------------------------------------------------
+
+  async listSessionArtifacts(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactsEnvelope> {
+    return await this.jsonRequest<DaemonSessionArtifactsEnvelope>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts`,
+      'GET /session/:id/artifacts',
+      { clientId },
+    );
+  }
+
+  async addSessionArtifact(
+    sessionId: string,
+    artifact: DaemonSessionArtifactInput,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts`,
+      'POST /session/:id/artifacts',
+      {
+        method: 'POST',
+        body: artifact,
+        clientId,
+      },
+    );
+  }
+
+  async removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`,
+      'DELETE /session/:id/artifacts/:artifactId',
+      {
+        method: 'DELETE',
+        clientId,
+      },
+    );
   }
 
   // -- Session metadata ----------------------------------------------------
