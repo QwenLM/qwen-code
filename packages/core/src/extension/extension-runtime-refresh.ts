@@ -22,6 +22,15 @@ export async function refreshExtensionRuntime(
 ): Promise<void> {
   if (!config) return;
 
+  // Error-handling contract:
+  //   Tier 1 (fatal)   — restartMcpServers failure propagates. MCP is a
+  //                       prerequisite for tool discovery; callers must know
+  //                       if it failed so they can surface the error.
+  //   Tier 2 (swallow)  — refreshCache failures (skills, subagents) are
+  //                       logged via warn but swallowed by allSettled.
+  //   Tier 3 (swallow)  — refreshHierarchicalMemory failure is logged via
+  //                       error but swallowed by try/catch.
+  // When adding new refresh steps, decide explicitly which tier applies.
   await config.getToolRegistry().restartMcpServers();
 
   // Refresh skills + subagents in parallel. Both `refreshCache` calls now
