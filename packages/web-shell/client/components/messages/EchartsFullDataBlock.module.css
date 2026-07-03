@@ -83,12 +83,25 @@
   stroke-width: 1.4;
 }
 
+.chartFrame {
+  position: relative;
+  min-height: 370px;
+}
+
 .chartSurface {
   height: 370px;
   min-height: 260px;
   width: calc(100% - 20px);
   margin: 0 10px 8px;
   background: var(--background);
+}
+
+.chartOverlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--background) 88%, transparent);
 }
 
 .state {
