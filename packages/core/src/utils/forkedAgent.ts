@@ -48,11 +48,14 @@ import {
   type RunConfig,
   type ToolConfig,
 } from '../agents/index.js';
+import { toModelVisibleSubagentResult } from '../agents/subagent-result.js';
 import {
   buildModelIdContext,
   resolveModelId,
   type ResolvedModelId,
 } from './modelId.js';
+import { ToolNames } from '../tools/tool-names.js';
+import { runWithChatRecordingSuppressed } from './chat-recording-suppression-context.js';
 
 // ---------------------------------------------------------------------------
 // CacheSafeParams — shared prompt-cache slot
@@ -66,7 +69,10 @@ import {
 export interface CacheSafeParams {
   /** Full generation config including systemInstruction and tools */
   generationConfig: GenerateContentConfig;
-  /** Curated conversation history (shallow copy; consumers must not mutate) */
+  /**
+   * Curated conversation history with copied Content and parts containers.
+   * Part objects are shared by reference; consumers must not mutate them.
+   */
   history: Content[];
   /** Model identifier */
   model: string;
@@ -77,6 +83,13 @@ export interface CacheSafeParams {
 // Module-level slot written after each successful main turn.
 let currentCacheSafeParams: CacheSafeParams | null = null;
 let currentVersion = 0;
+
+function copyHistoryContainers(history: Content[]): Content[] {
+  return history.map((content) => ({
+    ...content,
+    ...(content.parts ? { parts: [...content.parts] } : {}),
+  }));
+}
 
 /**
  * Save cache-safe params after a successful main conversation turn.
@@ -102,7 +115,7 @@ export function saveCacheSafeParams(
 
   currentCacheSafeParams = {
     generationConfig: structuredClone(generationConfig),
-    history,
+    history: copyHistoryContainers(history),
     model,
     version: currentVersion,
   };
@@ -112,9 +125,13 @@ export function saveCacheSafeParams(
  * Get the current cache-safe params, or null if not yet captured.
  */
 export function getCacheSafeParams(): CacheSafeParams | null {
-  return currentCacheSafeParams
-    ? structuredClone(currentCacheSafeParams)
-    : null;
+  if (!currentCacheSafeParams) return null;
+  return {
+    generationConfig: structuredClone(currentCacheSafeParams.generationConfig),
+    history: copyHistoryContainers(currentCacheSafeParams.history),
+    model: currentCacheSafeParams.model,
+    version: currentCacheSafeParams.version,
+  };
 }
 
 /**
@@ -332,8 +349,17 @@ export interface AgentPathParams {
    * Must end with a `model` role entry; call buildAgentHistory() to enforce this.
    */
   extraHistory?: Content[];
+  /**
+   * Preserve an explicit empty `extraHistory` as caller-owned history.
+   * Most callers use [] to mean "no prior history"; keep that as undefined so
+   * AgentCore still bootstraps workspace env context. Clean remember sets this
+   * to intentionally suppress that bootstrap.
+   */
+  preserveEmptyExtraHistory?: boolean;
   /** External cancellation signal. */
   abortSignal?: AbortSignal;
+  /** Suppress chat-recording UI telemetry for hidden internal agents. */
+  suppressChatRecording?: boolean;
 }
 
 export interface ForkedAgentResult {
@@ -342,8 +368,10 @@ export interface ForkedAgentResult {
   finalText?: string;
   /** AgentTerminateMode string explaining why the agent stopped. */
   terminateReason?: string;
-  /** File paths observed in Write/Edit tool calls during execution. */
+  /** File paths observed in path-like tool call arguments during execution. */
   filesTouched: string[];
+  /** File paths from successful mutating tool results. */
+  filesWritten?: string[];
 }
 
 /**
@@ -378,6 +406,10 @@ function extractFilePathsFromArgs(args: Record<string, unknown>): string[] {
 
   visit(args);
   return [...matches];
+}
+
+function isMutatingFileTool(toolName: string): boolean {
+  return toolName === ToolNames.WRITE_FILE || toolName === ToolNames.EDIT;
 }
 
 /**
@@ -483,17 +515,39 @@ export async function runForkedAgent(
   // this function ever switches away from YOLO the lifecycle stays
   // correct without further refactor.
   const filesTouched = new Set<string>();
+  const pendingMutatingPaths = new Map<string, string[]>();
+  const filesWritten = new Set<string>();
 
   const emitter = new AgentEventEmitter();
   emitter.on(AgentEventType.TOOL_CALL, (event) => {
-    for (const filePath of extractFilePathsFromArgs(event.args)) {
+    const filePaths = extractFilePathsFromArgs(event.args);
+    for (const filePath of filePaths) {
       filesTouched.add(filePath);
+    }
+    if (isMutatingFileTool(event.name)) {
+      pendingMutatingPaths.set(event.callId, filePaths);
+    }
+  });
+  emitter.on(AgentEventType.TOOL_RESULT, (event) => {
+    if (!event.success) {
+      pendingMutatingPaths.delete(event.callId);
+      return;
+    }
+    const filePaths = pendingMutatingPaths.get(event.callId) ?? [];
+    pendingMutatingPaths.delete(event.callId);
+    for (const filePath of filePaths) {
+      filesWritten.add(filePath);
     }
   });
 
+  const initialMessages =
+    params.extraHistory &&
+    (params.extraHistory.length > 0 || params.preserveEmptyExtraHistory)
+      ? params.extraHistory
+      : undefined;
   const promptConfig: PromptConfig = {
     systemPrompt: params.systemPrompt,
-    initialMessages: params.extraHistory,
+    initialMessages,
   };
   const modelSelector =
     params.model ?? params.config.getFastModel?.() ?? params.config.getModel();
@@ -527,13 +581,24 @@ export async function runForkedAgent(
 
     const context = new ContextState();
     context.set('task_prompt', params.taskPrompt);
-    await runWithForkedModelRuntime(modelRuntime, async () => {
-      await headless.execute(context, params.abortSignal);
-    });
+    context.set('hook_context', '');
+    const execute = () =>
+      runWithForkedModelRuntime(modelRuntime, async () => {
+        await headless.execute(context, params.abortSignal);
+      });
+
+    if (params.suppressChatRecording) {
+      await runWithChatRecordingSuppressed(execute);
+    } else {
+      await execute();
+    }
 
     const terminateReason = headless.getTerminateMode();
-    const finalText = headless.getFinalText() || undefined;
+    const finalText =
+      toModelVisibleSubagentResult(headless.getFinalText(), terminateReason) ||
+      undefined;
     const touched = [...filesTouched];
+    const written = [...filesWritten];
 
     if (terminateReason === AgentTerminateMode.CANCELLED) {
       return {
@@ -541,17 +606,16 @@ export async function runForkedAgent(
         terminateReason,
         finalText,
         filesTouched: touched,
+        filesWritten: written,
       };
     }
-    if (
-      terminateReason === AgentTerminateMode.ERROR ||
-      terminateReason === AgentTerminateMode.TIMEOUT
-    ) {
+    if (terminateReason !== AgentTerminateMode.GOAL) {
       return {
         status: 'failed',
         terminateReason,
         finalText,
         filesTouched: touched,
+        filesWritten: written,
       };
     }
     return {
@@ -559,6 +623,7 @@ export async function runForkedAgent(
       terminateReason,
       finalText,
       filesTouched: touched,
+      filesWritten: written,
     };
   } finally {
     // Release the per-fork ToolRegistry so AgentTool / SkillTool

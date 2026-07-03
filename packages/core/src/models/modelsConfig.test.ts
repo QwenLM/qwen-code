@@ -1552,6 +1552,31 @@ describe('ModelsConfig', () => {
     });
   });
 
+  it('refreshes model-derived modalities when hot-switching to the default qwen-oauth model', async () => {
+    // Start on qwen-oauth with a text-only model so modalities are empty.
+    const modelsConfig = new ModelsConfig({
+      initialAuthType: AuthType.QWEN_OAUTH,
+      generationConfig: {
+        model: 'qwen3-coder-flash',
+        modalities: {},
+      },
+      generationConfigSources: {
+        modalities: { kind: 'computed', detail: 'auto-detected from model' },
+      },
+    });
+
+    // Hot-update to coder-model (DEFAULT_QWEN_MODEL), which accepts images.
+    // Without refreshing model-derived defaults the previous model's empty
+    // modalities would linger and the vision-bridge gate would misfire.
+    await modelsConfig.setModel('coder-model');
+
+    expect(modelsConfig.getModel()).toBe('coder-model');
+    expect(modelsConfig.getGenerationConfig().modalities).toEqual({
+      image: true,
+      video: true,
+    });
+  });
+
   it('rolls back raw model state when owner refresh fails', async () => {
     const modelsConfig = new ModelsConfig({
       initialAuthType: AuthType.USE_OPENAI,

@@ -268,6 +268,44 @@ describe('ContentGenerationPipeline', () => {
       );
     });
 
+    it('should request provider parsing options for the effective request model', async () => {
+      const request: GenerateContentParameters = {
+        model: 'glm-5.2',
+        contents: [{ parts: [{ text: 'Hello' }], role: 'user' }],
+      };
+      const mockOpenAIResponse = {
+        id: 'response-id',
+        choices: [{ message: { content: 'response' }, finish_reason: 'stop' }],
+        created: Date.now(),
+        model: 'glm-5.2',
+      } as OpenAI.Chat.ChatCompletion;
+      const mockGeminiResponse = new GenerateContentResponse();
+
+      mockProvider.getResponseParsingOptions = vi.fn().mockReturnValue({
+        taggedThinkingTags: true,
+      });
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        mockGeminiResponse,
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        mockOpenAIResponse,
+      );
+
+      await pipeline.execute(request, 'prompt-id');
+
+      expect(mockProvider.getResponseParsingOptions).toHaveBeenCalledWith(
+        'glm-5.2',
+      );
+      expect(mockConverter.convertOpenAIResponseToGemini).toHaveBeenCalledWith(
+        mockOpenAIResponse,
+        expect.objectContaining({
+          model: 'glm-5.2',
+          responseParsingOptions: { taggedThinkingTags: true },
+        }),
+      );
+    });
+
     it('should let provider request context overrides take precedence over content generator config', async () => {
       const request: GenerateContentParameters = {
         model: 'test-model',
@@ -3110,13 +3148,38 @@ describe('ContentGenerationPipeline', () => {
       const err = await captured;
       expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
       expect((err as Error).message).toBe(
-        'No stream activity for 1000ms after 0 chunks (stream lifetime: 1000ms)',
+        'No stream activity for 1000ms after 0 chunks ' +
+          '(stream lifetime: 1000ms). Set QWEN_STREAM_IDLE_TIMEOUT_MS ' +
+          'to increase this window (or 0 to disable it).',
       );
       expect(err).toMatchObject({ code: 'ETIMEDOUT' });
       expect((err as StreamInactivityTimeoutError).chunksReceived).toBe(0);
       expect((err as StreamInactivityTimeoutError).streamLifetimeMs).toBe(1000);
       expect(gated.wasReturned()).toBe(true);
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('includes the idle detail and env override hint in timeout errors', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const captured = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      const message = (err as Error).message;
+      expect(message).toContain('No stream activity for 1000ms after 0 chunks');
+      expect(message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
     });
 
     it('uses the default stream idle timeout when no override is configured', async () => {
@@ -3486,7 +3549,7 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
       );
-      const p = buildPipeline(); // no config; invalid env → default (120000ms)
+      const p = buildPipeline(); // no config; invalid env → default
       const gen = await p.executeStream(
         streamingRequest(new AbortController().signal),
         'id',
@@ -3519,7 +3582,7 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
       );
-      const p = buildPipeline(); // no config; oversized env → default (120000ms)
+      const p = buildPipeline(); // no config; oversized env → default
       const gen = await p.executeStream(
         streamingRequest(new AbortController().signal),
         'id',
@@ -3619,7 +3682,7 @@ describe('ContentGenerationPipeline', () => {
       (mockClient.chat.completions.create as Mock).mockResolvedValue(
         gated.stream,
       );
-      // Config is oversized → rejected; env = 4000 → used (not default 120000).
+      // Config is oversized → rejected; env = 4000 → used (not default).
       const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1);
       const gen = await p.executeStream(
         streamingRequest(new AbortController().signal),
@@ -3635,7 +3698,7 @@ describe('ContentGenerationPipeline', () => {
       expect(settled).toBe(false); // not yet at the env value
       await vi.advanceTimersByTimeAsync(1);
       await consume;
-      expect(settled).toBe(true); // trips at 4000ms from the env (not 120000 default)
+      expect(settled).toBe(true); // trips at 4000ms from the env (not default)
     });
 
     it('disables the watchdog when QWEN_STREAM_IDLE_TIMEOUT_MS=0', async () => {

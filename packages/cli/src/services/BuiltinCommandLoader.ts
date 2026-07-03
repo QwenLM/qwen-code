@@ -19,6 +19,7 @@ import { btwCommand } from '../ui/commands/btwCommand.js';
 import { bugCommand } from '../ui/commands/bugCommand.js';
 import { cdCommand } from '../ui/commands/cdCommand.js';
 import { clearCommand } from '../ui/commands/clearCommand.js';
+import { configCommand } from '../ui/commands/config-command.js';
 import { deleteCommand } from '../ui/commands/deleteCommand.js';
 import { compressCommand } from '../ui/commands/compressCommand.js';
 import { compressFastCommand } from '../ui/commands/compressFastCommand.js';
@@ -29,6 +30,7 @@ import { doctorCommand } from '../ui/commands/doctorCommand.js';
 import { diffCommand } from '../ui/commands/diffCommand.js';
 import { directoryCommand } from '../ui/commands/directoryCommand.js';
 import { editorCommand } from '../ui/commands/editorCommand.js';
+import { effortCommand } from '../ui/commands/effort-command.js';
 import { exportCommand } from '../ui/commands/exportCommand.js';
 import { forkCommand } from '../ui/commands/forkCommand.js';
 import { extensionsCommand } from '../ui/commands/extensionsCommand.js';
@@ -122,6 +124,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       clearCommand,
       compressCommand,
       compressFastCommand,
+      configCommand,
       contextCommand,
       copyCommand,
       diffCommand,
@@ -130,6 +133,7 @@ export class BuiltinCommandLoader implements ICommandLoader {
       doctorCommand,
       directoryCommand,
       editorCommand,
+      effortCommand,
       exportCommand,
       extensionsCommand,
       helpCommand,

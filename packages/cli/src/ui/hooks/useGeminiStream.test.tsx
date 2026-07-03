@@ -26,6 +26,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
+  AUTONOMOUS_SENTINEL_DYNAMIC,
   AuthType,
   GeminiEventType as ServerGeminiEventType,
   SendMessageType,
@@ -453,83 +454,31 @@ describe('useGeminiStream', () => {
       expect(sent).not.toContain('inlineData');
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: MessageType.INFO,
+          type: MessageType.VISION_NOTICE,
           text: expect.stringContaining('Converted 1 image(s) to text via vm'),
         }),
         expect.any(Number),
       );
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: MessageType.INFO,
+          type: MessageType.VISION_NOTICE,
           text: expect.stringContaining(
             'Your image and prompt/context were sent',
           ),
         }),
         expect.any(Number),
       );
-    });
-
-    it('caps very long bridge transcripts in the user-facing notice', async () => {
-      enableBridge();
-      mockRunVisionBridge.mockResolvedValue({
-        applied: true,
-        status: 'ok',
-        parts: [{ text: '[transcribed image]' }],
-        transcript: `${'a'.repeat(5000)}TAIL_SHOULD_BE_TRUNCATED`,
-        convertedCount: 1,
-        omittedCount: 0,
-        modelId: 'vm',
-      });
-      const { result } = renderTestHook();
-
-      await act(async () => {
-        await result.current.submitQuery('@img.png describe');
-      });
-
-      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
-      expect(mockAddItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.INFO,
-          text: expect.not.stringContaining('TAIL_SHOULD_BE_TRUNCATED'),
-        }),
-        expect.any(Number),
-      );
-      expect(mockAddItem).toHaveBeenCalledWith(
-        expect.objectContaining({
-          type: MessageType.INFO,
-          text: expect.stringContaining('Transcript truncated'),
-        }),
-        expect.any(Number),
-      );
-    });
-
-    it('strips terminal control/escape characters from the transcript notice', async () => {
-      enableBridge();
-      mockRunVisionBridge.mockResolvedValue({
-        applied: true,
-        status: 'ok',
-        parts: [{ text: '[transcribed image]' }],
-        // Untrusted image transcript with an ANSI (C0 ESC) and a C1 CSI control.
-        transcript: 'clean\u001b[31mRED\u009b2Ktext',
-        convertedCount: 1,
-        omittedCount: 0,
-        modelId: 'vm',
-      });
-      const { result } = renderTestHook();
-      await act(async () => {
-        await result.current.submitQuery('@img.png describe');
-      });
-      await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
-      const notice = mockAddItem.mock.calls.find(
+      // The transcription is fed to the model (asserted above via `sent`) but
+      // must NOT be echoed in the notice — showing it there duplicated the
+      // description that the model already surfaces in its answer.
+      const visionNotice = mockAddItem.mock.calls.find(
         (c) =>
-          c[0]?.type === MessageType.INFO &&
+          c[0]?.type === MessageType.VISION_NOTICE &&
           String(c[0]?.text).includes('Converted'),
       );
-      const text = String(notice?.[0]?.text ?? '');
-      expect(text).toContain('clean'); // clean text preserved
-      expect(text).toContain('RED');
-      expect(text).not.toContain('\u001b'); // ESC stripped
-      expect(text).not.toContain('\u009b'); // C1 CSI stripped
+      expect(String(visionNotice?.[0]?.text)).not.toContain(
+        '[transcribed image]',
+      );
     });
 
     it('does not query bridge config for text-only messages', async () => {
@@ -660,7 +609,7 @@ describe('useGeminiStream', () => {
       await waitFor(() => expect(mockRunVisionBridge).toHaveBeenCalledTimes(1));
       expect(mockAddItem).toHaveBeenCalledWith(
         expect.objectContaining({
-          type: MessageType.INFO,
+          type: MessageType.VISION_NOTICE,
           text: expect.stringContaining(
             'Your image and prompt/context were sent to vm (vision.example.com).',
           ),
@@ -789,6 +738,108 @@ describe('useGeminiStream', () => {
         expect.any(Number),
       );
     });
+  });
+
+  it('expands autonomous loop wakeup sentinels before queuing them', async () => {
+    let schedulerCallback:
+      | ((job: { prompt: string; cronExpr?: string; missed?: boolean }) => void)
+      | null = null;
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            prompt: string;
+            cronExpr?: string;
+            missed?: boolean;
+          }) => void,
+        ) => {
+          schedulerCallback = callback;
+          callback({
+            prompt: AUTONOMOUS_SENTINEL_DYNAMIC,
+            cronExpr: '@wakeup',
+          });
+        },
+      ),
+      stop: vi.fn(),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+    (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(scheduler);
+
+    renderTestHook();
+
+    await waitFor(() => {
+      expect(mockAddItem).toHaveBeenCalledWith(
+        { type: 'notification', text: 'Loop: Autonomous loop tick' },
+        expect.any(Number),
+      );
+    });
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
+    });
+    const sent = String(mockSendMessageStream.mock.calls[0][0]);
+    expect(sent).toContain('# Autonomous loop check');
+    expect(sent).toContain('# Autonomous loop tick (dynamic pacing)');
+    expect(sent).not.toBe(AUTONOMOUS_SENTINEL_DYNAMIC);
+    expect(sent).toContain(
+      `prompt set to the literal sentinel \`${AUTONOMOUS_SENTINEL_DYNAMIC}\``,
+    );
+
+    await waitFor(() => {
+      expect(schedulerCallback).not.toBeNull();
+    });
+    await act(async () => {
+      schedulerCallback?.({
+        prompt: AUTONOMOUS_SENTINEL_DYNAMIC,
+        cronExpr: '@wakeup',
+      });
+    });
+
+    await waitFor(() => {
+      expect(mockSendMessageStream).toHaveBeenCalledTimes(2);
+    });
+    const secondSent = String(mockSendMessageStream.mock.calls[1][0]);
+    expect(secondSent).not.toContain('# Autonomous loop check');
+    expect(secondSent).toContain('# Autonomous loop tick (dynamic pacing)');
+  });
+
+  it('skips missed autonomous loop wakeup sentinels', async () => {
+    const scheduler = {
+      hasPendingWork: true,
+      enableDurable: vi.fn().mockResolvedValue(undefined),
+      start: vi.fn(
+        (
+          callback: (job: {
+            prompt: string;
+            cronExpr?: string;
+            missed?: boolean;
+          }) => void,
+        ) => {
+          callback({
+            prompt: AUTONOMOUS_SENTINEL_DYNAMIC,
+            cronExpr: '@wakeup',
+            missed: true,
+          });
+        },
+      ),
+      stop: vi.fn(),
+      getExitSummary: vi.fn().mockReturnValue(undefined),
+    };
+    (mockConfig.isCronEnabled as unknown as Mock).mockReturnValue(true);
+    (mockConfig.getCronScheduler as unknown as Mock).mockReturnValue(scheduler);
+
+    renderTestHook();
+
+    await waitFor(() => {
+      expect(scheduler.start).toHaveBeenCalled();
+    });
+    expect(mockAddItem).not.toHaveBeenCalledWith(
+      { type: 'notification', text: 'Missed: Autonomous loop tick' },
+      expect.any(Number),
+    );
+    expect(mockSendMessageStream).not.toHaveBeenCalled();
   });
 
   it('renders teammate reports as a compact notification, not a raw envelope bubble', async () => {
@@ -1263,10 +1314,19 @@ describe('useGeminiStream', () => {
     });
     expect(mockAddItem).toHaveBeenCalledWith(
       expect.objectContaining({
-        type: MessageType.INFO,
-        text: expect.stringContaining('[mid-turn image transcript]'),
+        type: MessageType.VISION_NOTICE,
+        text: expect.stringContaining('to text via'),
       }),
       expect.any(Number),
+    );
+    // Notice is header-only; the transcript reaches the model, not the notice.
+    const midTurnNotice = mockAddItem.mock.calls.find(
+      (c) =>
+        c[0]?.type === MessageType.VISION_NOTICE &&
+        String(c[0]?.text).includes('to text via'),
+    );
+    expect(String(midTurnNotice?.[0]?.text)).not.toContain(
+      '[mid-turn image transcript]',
     );
     const sent = JSON.stringify(mockSendMessageStream.mock.calls[0][0]);
     expect(sent).toContain('[mid-turn image transcript]');
@@ -3371,8 +3431,11 @@ describe('useGeminiStream', () => {
       await submitPromise;
     });
 
+    const staleCompletedOnComplete = staleOnComplete as
+      | ((completedTools: TrackedCompletedToolCall[]) => Promise<void>)
+      | null;
     await act(async () => {
-      await staleOnComplete?.([fastToolAfterCancel]);
+      await staleCompletedOnComplete?.([fastToolAfterCancel]);
     });
 
     expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -4078,6 +4141,9 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        // so that sendMessageStream is actually invoked.
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -4206,6 +4272,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -4266,6 +4334,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       await act(async () => {
@@ -4404,6 +4474,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       expect(mockSendMessageStream).toHaveBeenCalledTimes(1);
@@ -4754,6 +4826,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       // Cancel without advancing the throttle timer; the cancel-time
@@ -4871,6 +4945,8 @@ describe('useGeminiStream', () => {
       await act(async () => {
         await Promise.resolve();
         await Promise.resolve();
+        // Flush the macrotask yield (setImmediate) added after addItem()
+        await vi.advanceTimersByTimeAsync(0);
       });
 
       // Sanity: the throttle has not fired yet.
@@ -5317,6 +5393,166 @@ describe('useGeminiStream', () => {
           expect.any(AbortSignal),
           expect.any(String),
           { type: SendMessageType.UserQuery },
+        );
+      });
+    });
+
+    describe('inline model override', () => {
+      // Make the active provider expose `inline-model` so the consumer-side
+      // provider-identity validation accepts the override.
+      const allowInlineModel = (modelId = 'inline-model') => {
+        mockConfig.getModel = vi.fn(() => 'session-model');
+        mockConfig.getContentGeneratorConfig = vi.fn(
+          () => ({ authType: AuthType.QWEN_OAUTH }) as never,
+        );
+        mockConfig.getAvailableModelsForAuthType = vi.fn(
+          () => [{ id: modelId, authType: AuthType.QWEN_OAUTH }] as never,
+        );
+      };
+
+      it('does not let a skill tool with modelOverride: undefined clobber an active inline override', async () => {
+        allowInlineModel();
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'do the thing',
+          modelOverride: 'inline-model',
+        });
+
+        let capturedOnComplete:
+          | ((completedTools: TrackedToolCall[]) => Promise<void>)
+          | null = null;
+        mockUseReactToolScheduler.mockImplementation((onComplete) => {
+          capturedOnComplete = onComplete;
+          return [
+            [],
+            mockScheduleToolCalls,
+            mockCancelAllToolCalls,
+            mockMarkToolsAsSubmitted,
+          ];
+        });
+
+        const { result } = renderHook(() =>
+          useGeminiStream(
+            new MockedGeminiClientClass(mockConfig),
+            [],
+            mockAddItem,
+            mockConfig,
+            true,
+            mockLoadedSettings,
+            mockOnDebugMessage,
+            mockHandleSlashCommand,
+            false,
+            () => 'vscode' as EditorType,
+            () => {},
+            () => Promise.resolve(),
+            false,
+            () => {},
+            () => {},
+            () => {},
+            () => {},
+            80,
+            24,
+          ),
+        );
+
+        // Turn 1: the inline override is set and used for the first call.
+        await act(async () => {
+          await result.current.submitQuery('/model inline-model do the thing');
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          modelOverride: 'inline-model',
+        });
+
+        mockSendMessageStream.mockClear();
+
+        // A skill tool completes with `modelOverride: undefined` (an
+        // inherit/no-model skill). The undefined-clears write must be skipped
+        // while the inline override is active, so the continuation still runs
+        // on the inline model rather than reverting to the session model.
+        const completedToolCalls: TrackedToolCall[] = [
+          {
+            request: {
+              callId: 'skill-call',
+              name: 'pdf-skill',
+              args: {},
+              isClientInitiated: false,
+              prompt_id: 'prompt-id-skill',
+            },
+            status: 'success',
+            responseSubmittedToGemini: false,
+            response: {
+              callId: 'skill-call',
+              responseParts: [{ text: 'skill loaded' }],
+              errorType: undefined,
+              modelOverride: undefined,
+            },
+            tool: {
+              name: 'pdf-skill',
+              displayName: 'pdf-skill',
+              description: 'd',
+              build: vi.fn(),
+            } as never,
+            invocation: {
+              getDescription: () => 'desc',
+            } as unknown as AnyToolInvocation,
+            startTime: Date.now(),
+            endTime: Date.now(),
+          } as TrackedCompletedToolCall,
+        ];
+
+        await act(async () => {
+          await capturedOnComplete?.(completedToolCalls);
+        });
+
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          type: SendMessageType.ToolResult,
+          modelOverride: 'inline-model',
+        });
+      });
+
+      it('clears the inline override on retry and reverts to the session model', async () => {
+        allowInlineModel();
+        mockHandleSlashCommand.mockResolvedValue({
+          type: 'submit_prompt',
+          content: 'do the thing',
+          modelOverride: 'inline-model',
+        });
+
+        const { result } = renderTestHook();
+
+        // Turn 1: inline override applied.
+        await act(async () => {
+          await result.current.submitQuery('/model inline-model do the thing');
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(mockSendMessageStream.mock.calls[0][3]).toMatchObject({
+          modelOverride: 'inline-model',
+        });
+
+        mockSendMessageStream.mockClear();
+        mockAddItem.mockClear();
+
+        // Retry re-sends the same prompt; the one-shot override is dropped and
+        // the turn reverts to the session model, with an info item explaining
+        // the switch.
+        await act(async () => {
+          await result.current.submitQuery(
+            'do the thing',
+            SendMessageType.Retry,
+          );
+        });
+        await waitFor(() => expect(mockSendMessageStream).toHaveBeenCalled());
+        expect(
+          mockSendMessageStream.mock.calls[0][3].modelOverride,
+        ).toBeUndefined();
+        expect(mockAddItem).toHaveBeenCalledWith(
+          expect.objectContaining({
+            type: 'info',
+            text: expect.stringContaining('session model'),
+          }),
+          expect.any(Number),
         );
       });
     });
@@ -5949,7 +6185,7 @@ describe('useGeminiStream', () => {
         expect(mockAddItem).toHaveBeenCalledWith(
           {
             type: 'info',
-            text: '⚠️  Response truncated due to token limits.',
+            text: '⚠  Response truncated due to token limits.',
           },
           expect.any(Number),
         );
@@ -6071,57 +6307,57 @@ describe('useGeminiStream', () => {
       const testCases = [
         {
           reason: 'SAFETY',
-          message: '⚠️  Response stopped due to safety reasons.',
+          message: '⚠  Response stopped due to safety reasons.',
         },
         {
           reason: 'RECITATION',
-          message: '⚠️  Response stopped due to recitation policy.',
+          message: '⚠  Response stopped due to recitation policy.',
         },
         {
           reason: 'LANGUAGE',
-          message: '⚠️  Response stopped due to unsupported language.',
+          message: '⚠  Response stopped due to unsupported language.',
         },
         {
           reason: 'BLOCKLIST',
-          message: '⚠️  Response stopped due to forbidden terms.',
+          message: '⚠  Response stopped due to forbidden terms.',
         },
         {
           reason: 'PROHIBITED_CONTENT',
-          message: '⚠️  Response stopped due to prohibited content.',
+          message: '⚠  Response stopped due to prohibited content.',
         },
         {
           reason: 'SPII',
           message:
-            '⚠️  Response stopped due to sensitive personally identifiable information.',
+            '⚠  Response stopped due to sensitive personally identifiable information.',
         },
-        { reason: 'OTHER', message: '⚠️  Response stopped for other reasons.' },
+        { reason: 'OTHER', message: '⚠  Response stopped for other reasons.' },
         {
           reason: 'MALFORMED_FUNCTION_CALL',
-          message: '⚠️  Response stopped due to malformed function call.',
+          message: '⚠  Response stopped due to malformed function call.',
         },
         {
           reason: 'IMAGE_SAFETY',
-          message: '⚠️  Response stopped due to image safety violations.',
+          message: '⚠  Response stopped due to image safety violations.',
         },
         {
           reason: 'IMAGE_PROHIBITED_CONTENT',
-          message: '⚠️  Response stopped due to image prohibited content.',
+          message: '⚠  Response stopped due to image prohibited content.',
         },
         {
           reason: 'NO_IMAGE',
-          message: '⚠️  Response stopped due to no image.',
+          message: '⚠  Response stopped due to no image.',
         },
         {
           reason: 'IMAGE_RECITATION',
-          message: '⚠️  Response stopped due to image recitation policy.',
+          message: '⚠  Response stopped due to image recitation policy.',
         },
         {
           reason: 'IMAGE_OTHER',
-          message: '⚠️  Response stopped due to other image-related reasons.',
+          message: '⚠  Response stopped due to other image-related reasons.',
         },
         {
           reason: 'UNEXPECTED_TOOL_CALL',
-          message: '⚠️  Response stopped due to unexpected tool call.',
+          message: '⚠  Response stopped due to unexpected tool call.',
         },
       ];
 
@@ -6786,6 +7022,8 @@ describe('useGeminiStream', () => {
           void result.current.submitQuery('think then retry');
           await Promise.resolve();
           await Promise.resolve();
+          // Flush the macrotask yield (setImmediate) added after addItem()
+          await vi.advanceTimersByTimeAsync(0);
         });
 
         // Advance past STREAM_UPDATE_THROTTLE_MS (60ms) so the thought
@@ -6883,6 +7121,8 @@ describe('useGeminiStream', () => {
 
         await act(async () => {
           await Promise.resolve();
+          // Flush the macrotask yield (setImmediate) added after addItem()
+          await vi.advanceTimersByTimeAsync(0);
         });
 
         const findErrorItem = () =>
@@ -6996,6 +7236,12 @@ describe('useGeminiStream', () => {
 
         act(() => {
           void result.current.submitQuery('Trigger retry after countdown');
+        });
+
+        await act(async () => {
+          await Promise.resolve();
+          // Flush the macrotask yield (setImmediate) added after addItem()
+          await vi.advanceTimersByTimeAsync(0);
         });
 
         let errorItem = result.current.pendingHistoryItems.find(
@@ -8308,7 +8554,7 @@ describe('useGeminiStream', () => {
         (async function* () {
           yield {
             type: ServerGeminiEventType.HookSystemMessage,
-            value: '🔄 Ralph iteration 3 | No completion promise set',
+            value: '◐ Ralph iteration 3 | No completion promise set',
           };
         })(),
       );
@@ -8323,7 +8569,7 @@ describe('useGeminiStream', () => {
         expect(mockAddItem).toHaveBeenCalledWith(
           expect.objectContaining({
             type: 'stop_hook_system_message',
-            message: '🔄 Ralph iteration 3 | No completion promise set',
+            message: '◐ Ralph iteration 3 | No completion promise set',
           }),
           expect.any(Number),
         );

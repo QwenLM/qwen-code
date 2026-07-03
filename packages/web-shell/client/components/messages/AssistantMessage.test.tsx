@@ -2,6 +2,7 @@
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { WebShellCustomizationProvider } from '../../customization';
 import { I18nProvider } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -13,8 +14,12 @@ vi.mock('../../App', async () => {
   };
 });
 
-const { AssistantMessage, formatThinkingDuration, getThinkingSummaryKey } =
-  await import('./AssistantMessage');
+const {
+  AssistantMessage,
+  ThinkingMessage,
+  formatThinkingDuration,
+  getThinkingSummaryKey,
+} = await import('./AssistantMessage');
 
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
@@ -57,6 +62,29 @@ describe('AssistantMessage thinking logic', () => {
     expect(formatThinkingDuration(65_000)).toBe('1m 5s');
     expect(formatThinkingDuration(120_000)).toBe('2m');
   });
+
+  it('omits the duration after thinking finishes', () => {
+    const container = render(
+      <ThinkingMessage content="private chain of thought" timestamp={0} />,
+    );
+
+    expect(container.textContent).toContain('Done thinking');
+    expect(container.textContent).not.toContain('Thought for');
+  });
+
+  it('keeps the duration while thinking is running', () => {
+    vi.setSystemTime(2_000);
+
+    const container = render(
+      <ThinkingMessage
+        content="private chain of thought"
+        isStreaming
+        timestamp={0}
+      />,
+    );
+
+    expect(container.textContent).toContain('Thinking 2s');
+  });
 });
 
 describe('AssistantMessage markdown tables', () => {
@@ -66,11 +94,16 @@ describe('AssistantMessage markdown tables', () => {
     '| Alpha | 10 |',
   ].join('\n');
 
-  it('enhances completed assistant tables', () => {
-    const container = render(<AssistantMessage content={tableMarkdown} />);
+  it('uses advanced tables when configured', () => {
+    const container = render(
+      <WebShellCustomizationProvider value={{ markdownTableMode: 'advanced' }}>
+        <AssistantMessage content={tableMarkdown} />
+      </WebShellCustomizationProvider>,
+    );
 
     expect(container.textContent).toContain('Quick copy');
     expect(container.textContent).toContain('Details');
+    expect(container.querySelector('button[aria-label*="table"]')).toBeNull();
   });
 
   it('keeps streaming assistant tables plain', () => {

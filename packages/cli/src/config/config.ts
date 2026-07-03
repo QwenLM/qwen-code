@@ -30,10 +30,13 @@ import {
   createDebugLogger,
   NativeLspService,
   isBareMode,
+  isSafeModeEnv,
   isToolEnabled,
+  isTlsVerificationDisabled,
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  MAX_SUBAGENT_DEPTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -146,6 +149,7 @@ export interface CliArgs {
   appendSystemPrompt: string | undefined;
   yolo: boolean | undefined;
   bare: boolean | undefined;
+  safeMode?: boolean | undefined;
   approvalMode: string | undefined;
   telemetry: boolean | undefined;
   telemetryTarget: string | undefined;
@@ -166,6 +170,7 @@ export interface CliArgs {
   openaiBaseUrl: string | undefined;
   openaiLoggingDir: string | undefined;
   proxy: string | undefined;
+  insecure?: boolean | undefined;
   includeDirectories: string[] | undefined;
   screenReader: boolean | undefined;
   inputFormat?: string | undefined;
@@ -203,6 +208,7 @@ export interface CliArgs {
   maxSessionTurns: number | undefined;
   maxWallTime: string | undefined;
   maxToolCalls: number | undefined;
+  maxSubagentDepth: number | undefined;
   coreTools: string[] | undefined;
   excludeTools: string[] | undefined;
   disabledSlashCommands: string[] | undefined;
@@ -613,6 +619,11 @@ export async function parseArguments(): Promise<CliArgs> {
         'Minimal mode: skip implicit startup auto-discovery and only honor explicitly provided CLI inputs.',
       default: false,
     })
+    .option('safe-mode', {
+      type: 'boolean',
+      description:
+        'Disable all customizations (context files, hooks, extensions, skills, MCP servers) for troubleshooting.',
+    })
     .option('proxy', {
       type: 'string',
       description: 'Proxy for Qwen Code, like schema://user:password@host:port',
@@ -621,6 +632,12 @@ export async function parseArguments(): Promise<CliArgs> {
       'proxy',
       'Use the "proxy" setting in settings.json instead. This flag will be removed in a future version.',
     )
+    .option('insecure', {
+      type: 'boolean',
+      description:
+        'Skip TLS certificate verification for API connections (for self-signed certs in trusted/lab environments). Equivalent to setting QWEN_TLS_INSECURE=1. WARNING: removes protection against man-in-the-middle attacks.',
+      default: false,
+    })
     .option('chat-recording', {
       type: 'boolean',
       description:
@@ -872,6 +889,11 @@ export async function parseArguments(): Promise<CliArgs> {
           type: 'number',
           description:
             'Maximum cumulative tool calls executed during the run (success or failure; `structured_output` under --json-schema is exempt). Aborts with exit code 55 when exceeded. -1 / unset means no limit; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos.',
+        })
+        .option('max-subagent-depth', {
+          type: 'number',
+          description:
+            'Maximum sub-agent nesting depth (1-based levels). 1 keeps sub-agents available but disables nesting; capped at 100. Overrides model.maxSubagentDepth from settings. Defaults to 5.',
         })
         .option('core-tools', {
           type: 'array',
@@ -1224,6 +1246,36 @@ function resolveMaxToolCalls(argv: CliArgs, settings: Settings): number {
   return -1;
 }
 
+/**
+ * Resolves the sub-agent nesting cap. Order of precedence:
+ * `--max-subagent-depth` flag, then `model.maxSubagentDepth` from settings,
+ * else undefined (Config applies the default of 5).
+ *
+ * Yargs accepts `NaN` from non-numeric flag values, and Config's clamp
+ * would silently fall back to the default — validate up front so a typo
+ * fails loudly. Settings values stay lenient (Config clamps them) so a bad
+ * settings.json cannot break startup.
+ */
+function resolveMaxSubagentDepth(
+  argv: CliArgs,
+  settings: Settings,
+): number | undefined {
+  const value = argv.maxSubagentDepth;
+  if (value !== undefined && value !== null) {
+    if (
+      !Number.isInteger(value) ||
+      value < 1 ||
+      value > MAX_SUBAGENT_DEPTH_LIMIT
+    ) {
+      throw new Error(
+        `--max-subagent-depth must be an integer between 1 and ${MAX_SUBAGENT_DEPTH_LIMIT}; got ${value}.`,
+      );
+    }
+    return value;
+  }
+  return settings.model?.maxSubagentDepth;
+}
+
 export function isDebugMode(argv: CliArgs): boolean {
   if (argv.debug) return true;
   const debugVal = process.env['DEBUG'];
@@ -1400,6 +1452,37 @@ export async function loadCliConfig(
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
   const bareMode = isBareMode(argv.bare);
+  const safeMode =
+    argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();
+
+  // Surface `--insecure` as an env var so it reaches the undici dispatcher
+  // layer (which controls TLS verification) without threading a flag through
+  // every content generator and the preconnect path. Resolution there ORs this
+  // with QWEN_TLS_INSECURE / NODE_TLS_REJECT_UNAUTHORIZED=0.
+  if (argv.insecure) {
+    process.env['QWEN_TLS_INSECURE'] = '1';
+  }
+  // When opting out of TLS verification, also set NODE_TLS_REJECT_UNAUTHORIZED
+  // process-wide. The custom undici dispatcher handles the Node path, but this
+  // makes the opt-out effective on runtimes/paths it does not cover (the Bun
+  // runtime, and the proxy-creation fallback that uses the built-in fetch), and
+  // surfaces a single explicit warning. Skipped when the user already set it,
+  // since Node emits its own warning in that case.
+  if (
+    isTlsVerificationDisabled() &&
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] !== '0'
+  ) {
+    process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+    // The setting is process-wide, so the blast radius is every outbound HTTPS
+    // connection (model API, OAuth, MCP servers, and child processes that
+    // inherit the env), not just model calls. Log to the debug file too, so the
+    // state is discoverable after the terminal scrollback is gone.
+    const tlsWarning =
+      'TLS certificate verification is disabled (--insecure / QWEN_TLS_INSECURE). All HTTPS connections in this process (API calls, OAuth, MCP servers, child processes) are vulnerable to man-in-the-middle attacks.';
+    debugLogger.warn(tlsWarning);
+    // eslint-disable-next-line no-console
+    console.error(`WARNING: ${tlsWarning}`);
+  }
 
   // Set runtime output directory from settings (env var QWEN_RUNTIME_DIR
   // is auto-detected inside getRuntimeBaseDir() at each call site).
@@ -1434,7 +1517,7 @@ export async function loadCliConfig(
   );
 
   let outputLanguageFilePath: string | undefined;
-  if (!bareMode) {
+  if (!bareMode && !safeMode) {
     if (fs.existsSync(projectOutputLanguagePath)) {
       outputLanguageFilePath = projectOutputLanguagePath;
     } else if (fs.existsSync(globalOutputLanguagePath)) {
@@ -1448,7 +1531,7 @@ export async function loadCliConfig(
   );
 
   const includeDirectories = (
-    bareMode ? [] : (settings.context?.includeDirectories ?? [])
+    bareMode || safeMode ? [] : (settings.context?.includeDirectories ?? [])
   )
     .map(resolvePath)
     .concat((argv.includeDirectories || []).map(resolvePath));
@@ -1480,7 +1563,7 @@ export async function loadCliConfig(
     approvalMode = parseApprovalModeValue(argv.approvalMode);
   } else if (argv.yolo) {
     approvalMode = ApprovalMode.YOLO;
-  } else if (!bareMode && settings.tools?.approvalMode) {
+  } else if (!bareMode && !safeMode && settings.tools?.approvalMode) {
     approvalMode = parseApprovalModeValue(settings.tools.approvalMode);
   } else {
     approvalMode = ApprovalMode.DEFAULT;
@@ -1557,20 +1640,25 @@ export async function loadCliConfig(
   // mergedAllow — they have whitelist semantics (only listed tools are registered),
   // not auto-approve semantics. They are passed via the `coreTools` Config param
   // and handled by PermissionManager.coreToolsAllowList.
+  if (safeMode && argv.coreTools && argv.coreTools.length > 0) {
+    writeStderrLine(
+      '⚠ Safe mode: --core-tools flag is ignored (settings-sourced core tools are also disabled).\n',
+    );
+  }
   const resolvedCoreTools: string[] = [
-    ...(bareMode ? [] : (argv.coreTools ?? [])),
-    ...(bareMode ? [] : (settings.tools?.core ?? [])),
+    ...(bareMode || safeMode ? [] : (argv.coreTools ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.tools?.core ?? [])),
   ];
   const mergedAllow: string[] = [
-    ...(bareMode ? [] : (settings.permissions?.allow ?? [])),
-    ...(bareMode ? [] : (settings.tools?.allowed ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.permissions?.allow ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.tools?.allowed ?? [])),
   ];
   const mergedAsk: string[] = [
-    ...(bareMode ? [] : (settings.permissions?.ask ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.permissions?.ask ?? [])),
   ];
   const mergedDeny: string[] = [
-    ...(bareMode ? [] : (settings.permissions?.deny ?? [])),
-    ...(bareMode ? [] : (settings.tools?.exclude ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.permissions?.deny ?? [])),
+    ...(bareMode || safeMode ? [] : (settings.tools?.exclude ?? [])),
   ];
 
   // argv.allowedTools adds allow rules (auto-approve).
@@ -1598,7 +1686,10 @@ export async function loadCliConfig(
       disabledSlashCommands.push(trimmed);
     }
   };
-  for (const name of settings.slashCommands?.disabled ?? []) addDisabled(name);
+  if (!bareMode && !safeMode) {
+    for (const name of settings.slashCommands?.disabled ?? [])
+      addDisabled(name);
+  }
   for (const name of argv.disabledSlashCommands ?? []) addDisabled(name);
   for (const name of (process.env['QWEN_DISABLED_SLASH_COMMANDS'] ?? '').split(
     ',',
@@ -1609,7 +1700,10 @@ export async function loadCliConfig(
   // Resolve the per-workspace tool denylist. De-duplicate while preserving
   // original casing; shared helper since the MCP restart refresh path
   // must agree byte-for-byte with this.
-  const disabledTools = normalizeDisabledToolList(settings.tools?.disabled);
+  const disabledTools =
+    bareMode || safeMode
+      ? []
+      : normalizeDisabledToolList(settings.tools?.disabled);
 
   // Helper: check if a tool is explicitly covered by an allow rule OR by the
   // coreTools whitelist. Uses alias matching for coreTools (via isToolEnabled)
@@ -1737,7 +1831,7 @@ export async function loadCliConfig(
   }
 
   const sandboxConfig = await loadSandboxConfig(
-    bareMode ? ({} as Settings) : settings,
+    bareMode || safeMode ? ({} as Settings) : settings,
     argv,
   );
   const screenReader =
@@ -1803,9 +1897,11 @@ export async function loadCliConfig(
     // Use provided session ID without session resumption
     // Check if session ID is already in use
     const sessionService = new SessionService(cwd);
-    const exists = await sessionService.sessionExists(argv['sessionId']);
+    const exists = await sessionService.sessionExistsInAnyState(
+      argv['sessionId'],
+    );
     if (exists) {
-      const message = `Error: Session Id ${argv['sessionId']} is already in use.`;
+      const message = `Error: Session Id ${argv['sessionId']} already exists (active or archived). Delete or unarchive it first.`;
       writeStderrLine(message);
       process.exit(1);
     }
@@ -1828,12 +1924,14 @@ export async function loadCliConfig(
     sessionMcpServers || cliMcpServers
       ? { ...sessionMcpServers, ...(cliMcpServers ?? {}) }
       : undefined;
-  const mcpServers = bareMode
-    ? {}
-    : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
-  const pendingMcpServers = bareMode
-    ? undefined
-    : getPendingGatedMcpServers(mcpServers, cwd);
+  const mcpServers =
+    bareMode || safeMode
+      ? {}
+      : assembleMcpServers(settings.mcpServers, cwd, topTierMcpServers);
+  const pendingMcpServers =
+    bareMode || safeMode || approvalMode === ApprovalMode.YOLO
+      ? undefined
+      : getPendingGatedMcpServers(mcpServers, cwd);
 
   const configParams: ConfigParameters = {
     sessionId,
@@ -1842,32 +1940,37 @@ export async function loadCliConfig(
     sandbox: sandboxConfig,
     targetDir: cwd,
     includeDirectories,
-    loadMemoryFromIncludeDirectories: bareMode
-      ? includeDirectories.length > 0
-      : (settings.context?.loadFromIncludeDirectories ?? false),
+    loadMemoryFromIncludeDirectories:
+      bareMode || safeMode
+        ? includeDirectories.length > 0
+        : (settings.context?.loadFromIncludeDirectories ?? false),
     importFormat: settings.context?.importFormat || 'tree',
     debugMode,
     question,
     systemPrompt: argv.systemPrompt,
     appendSystemPrompt: argv.appendSystemPrompt,
     // Legacy fields – kept for backward compatibility with getCoreTools() etc.
-    coreTools: bareMode
-      ? undefined
-      : argv.coreTools || settings.tools?.core || undefined,
-    allowedTools: bareMode
-      ? argv.allowedTools || undefined
-      : argv.allowedTools || settings.tools?.allowed || undefined,
+    coreTools:
+      bareMode || safeMode
+        ? undefined
+        : argv.coreTools || settings.tools?.core || undefined,
+    allowedTools:
+      bareMode || safeMode
+        ? argv.allowedTools || undefined
+        : argv.allowedTools || settings.tools?.allowed || undefined,
     excludeTools: mergedDeny,
     disabledSlashCommands:
       disabledSlashCommands.length > 0 ? disabledSlashCommands : undefined,
-    disabledSkillNamesProvider,
+    disabledSkillNamesProvider:
+      bareMode || safeMode ? undefined : disabledSkillNamesProvider,
     disabledTools: disabledTools.length > 0 ? disabledTools : undefined,
     // New unified permissions (PermissionManager source of truth).
     permissions: {
       allow: mergedAllow.length > 0 ? mergedAllow : undefined,
       ask: mergedAsk.length > 0 ? mergedAsk : undefined,
       deny: mergedDeny.length > 0 ? mergedDeny : undefined,
-      autoMode: settings.permissions?.autoMode,
+      autoMode:
+        bareMode || safeMode ? undefined : settings.permissions?.autoMode,
     },
     // Permission rule persistence callback (writes to settings files).
     onPersistPermissionRule: async (scope, ruleType, rule) => {
@@ -1883,11 +1986,13 @@ export async function loadCliConfig(
         currentSettings.setValue(settingScope, key, [...currentRules, rule]);
       }
     },
-    toolDiscoveryCommand: bareMode
-      ? undefined
-      : settings.tools?.discoveryCommand,
-    toolCallCommand: bareMode ? undefined : settings.tools?.callCommand,
-    mcpServerCommand: bareMode ? undefined : settings.mcp?.serverCommand,
+    toolDiscoveryCommand:
+      bareMode || safeMode ? undefined : settings.tools?.discoveryCommand,
+    toolCallCommand:
+      bareMode || safeMode ? undefined : settings.tools?.callCommand,
+    mcpServerCommand:
+      bareMode || safeMode ? undefined : settings.mcp?.serverCommand,
+    mcpToolIdleTimeoutMs: settings.mcp?.toolIdleTimeoutMs,
     mcpServers,
     topTierMcpServers,
     pendingMcpServers,
@@ -1932,8 +2037,11 @@ export async function loadCliConfig(
       argv.maxSessionTurns ?? settings.model?.maxSessionTurns ?? -1,
     maxWallTimeSeconds: resolveMaxWallTimeSeconds(argv, settings),
     maxToolCalls: resolveMaxToolCalls(argv, settings),
+    // Undefined flows through to Config's default (5) and clamp logic.
+    maxSubagentDepth: resolveMaxSubagentDepth(argv, settings),
     experimentalZedIntegration: argv.acp || argv.experimentalAcp || false,
     cronEnabled: settings.experimental?.cron ?? true,
+    cronRecurringMaxAgeDays: settings.experimental?.cronRecurringMaxAgeDays,
     agentTeamEnabled: settings.experimental?.agentTeam ?? false,
     artifactEnabled: settings.experimental?.artifact ?? false,
     artifactAutoOpen: settings.artifact?.autoOpen ?? true,
@@ -1954,9 +2062,25 @@ export async function loadCliConfig(
           publicBaseUrl: settings.artifact?.oss?.publicBaseUrl,
         }
       : undefined,
-    computerUseEnabled: settings.tools?.computerUse?.enabled ?? true,
+    // CDP tunnel (Plan C, #5626): with the tunnel on, browser automation goes
+    // through the CDP tunnel (far lighter than the OS-level computer-use
+    // driver), so disable computer-use to keep the agent off that heavy path.
+    computerUseEnabled: (() => {
+      const tunnelOn = process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] === '1';
+      // Surface the override when it contradicts an explicit opt-in, so the
+      // effective config isn't a silent surprise during debugging.
+      if (tunnelOn && settings.tools?.computerUse?.enabled === true) {
+        writeStderrLine(
+          'qwen serve: ignoring tools.computerUse.enabled=true — the CDP ' +
+            'tunnel (QWEN_SERVE_CDP_TUNNEL_OVER_WS) routes browser automation ' +
+            'through the CDP tunnel, so computer-use stays disabled.',
+        );
+      }
+      return tunnelOn ? false : (settings.tools?.computerUse?.enabled ?? true);
+    })(),
     computerUseMaxImageDimension:
       settings.tools?.computerUse?.maxImageDimension,
+    computerUseIdleTimeoutMs: settings.tools?.computerUse?.idleTimeoutMs,
     emitToolUseSummaries: settings.experimental?.emitToolUseSummaries ?? true,
     listExtensions: argv.listExtensions || false,
     locale: resolveLocaleForExtensions(settings),
@@ -1972,12 +2096,15 @@ export async function loadCliConfig(
     generationConfig: resolvedCliConfig.generationConfig,
     warnings: resolvedCliConfig.warnings,
     bareMode,
-    allowedHttpHookUrls: bareMode
-      ? []
-      : (settings.security?.allowedHttpHookUrls ?? []),
+    safeMode,
+    allowedHttpHookUrls:
+      bareMode || safeMode
+        ? []
+        : (settings.security?.allowedHttpHookUrls ?? []),
     cliVersion: await getCliVersion(),
     ideMode,
     chatCompression: settings.model?.chatCompression,
+    autoCompactThreshold: settings.context?.autoCompactThreshold,
     folderTrust,
     interactive,
     trustedFolder,
@@ -1997,27 +2124,41 @@ export async function loadCliConfig(
     output: {
       format: outputSettingsFormat,
     },
-    enableManagedAutoMemory: bareMode
-      ? false
-      : (settings.memory?.enableManagedAutoMemory ?? true),
-    enableManagedAutoDream: bareMode
-      ? false
-      : (settings.memory?.enableManagedAutoDream ?? true),
-    enableAutoSkill: bareMode
-      ? false
-      : (settings.memory?.enableAutoSkill ?? true),
-    autoSkillConfirm: bareMode
-      ? false
-      : (settings.memory?.autoSkillConfirm ?? true),
+    enableManagedAutoMemory:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableManagedAutoMemory ?? true),
+    enableManagedAutoDream:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableManagedAutoDream ?? true),
+    enableTeamMemory:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableTeamMemory ?? false),
+    enableTeamMemorySync:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.enableTeamMemorySync ?? false),
+    enableAutoSkill:
+      bareMode || safeMode ? false : (settings.memory?.enableAutoSkill ?? true),
+    autoSkillConfirm:
+      bareMode || safeMode
+        ? false
+        : (settings.memory?.autoSkillConfirm ?? true),
     fastModel: settings.fastModel || undefined,
+    visionModel: settings.visionModel || undefined,
     // Use separated hooks if provided, otherwise fall back to merged hooks
-    userHooks: bareMode
-      ? undefined
-      : (hooksConfig?.userHooks ?? settings.hooks),
-    projectHooks: bareMode ? undefined : hooksConfig?.projectHooks,
-    hooks: bareMode ? undefined : settings.hooks, // Keep for backward compatibility
-    disableAllHooks: bareMode ? true : (settings.disableAllHooks ?? false),
-    stopHookBlockingCap: bareMode ? undefined : settings.stopHookBlockingCap,
+    userHooks:
+      bareMode || safeMode
+        ? undefined
+        : (hooksConfig?.userHooks ?? settings.hooks),
+    projectHooks: bareMode || safeMode ? undefined : hooksConfig?.projectHooks,
+    hooks: bareMode || safeMode ? undefined : settings.hooks,
+    disableAllHooks:
+      bareMode || safeMode ? true : (settings.disableAllHooks ?? false),
+    stopHookBlockingCap:
+      bareMode || safeMode ? undefined : settings.stopHookBlockingCap,
     channel: argv.channel,
     // CLI flag wins over settings.json. `--json-fd` is fd-only (no settings
     // equivalent — fd passing is a spawn-time concern). `--json-file` and

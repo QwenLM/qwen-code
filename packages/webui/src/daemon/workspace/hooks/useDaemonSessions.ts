@@ -10,17 +10,22 @@ import { useDaemonWorkspace } from '../DaemonWorkspaceProvider.js';
 import type { DaemonResourceOptions } from '../types.js';
 import { useDaemonResource } from './useDaemonResource.js';
 
-export function useDaemonSessions(options: DaemonResourceOptions = {}) {
+export interface DaemonSessionsOptions extends DaemonResourceOptions {
+  pageSize?: number;
+}
+
+export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
+  const { pageSize, ...resourceOptions } = options;
   const workspace = useDaemonWorkspace();
   const sessionActions = useOptionalDaemonActions();
   const load = useCallback(
-    () => workspace.actions.listSessions(),
-    [workspace.actions],
+    () => workspace.actions.listSessions({ pageSize }),
+    [pageSize, workspace.actions],
   );
   const workspaceReady = !!workspace.workspaceCwd;
   const result = useDaemonResource(load, {
-    ...options,
-    enabled: (options.enabled ?? true) && workspaceReady,
+    ...resourceOptions,
+    enabled: (resourceOptions.enabled ?? true) && workspaceReady,
   });
   const { reload } = result;
   const deleteSession = useCallback(

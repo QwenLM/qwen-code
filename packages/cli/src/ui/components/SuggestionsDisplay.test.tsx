@@ -143,6 +143,32 @@ describe('SuggestionsDisplay', () => {
     expect(output).toContain('First line of the skill description.');
     expect(output).toContain('- bullet one - bullet two');
   });
+
+  it('renders a visible marker for the active suggestion', () => {
+    const { lastFrame } = render(
+      <SuggestionsDisplay
+        suggestions={[
+          { label: 'pr', value: 'pr', description: 'Pull request helper' },
+          {
+            label: 'issue-to-pr',
+            value: 'issue-to-pr',
+            description: 'Issue helper',
+          },
+        ]}
+        activeIndex={1}
+        isLoading={false}
+        width={80}
+        scrollOffset={0}
+        userInput="/pr"
+        mode="slash"
+      />,
+    );
+
+    const lines = (lastFrame() ?? '').split('\n');
+
+    expect(lines[0]).toMatch(/^ {2}pr/);
+    expect(lines[1]).toMatch(/^> issue-to-pr/);
+  });
 });
 
 describe('normalizeDescription', () => {

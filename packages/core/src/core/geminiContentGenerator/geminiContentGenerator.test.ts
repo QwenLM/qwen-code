@@ -258,6 +258,54 @@ describe('GeminiContentGenerator', () => {
     );
   });
 
+  it("maps reasoning effort 'medium' to MEDIUM", async () => {
+    const generatorWithMedium = new GeminiContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-2.5-pro',
+      reasoning: { effort: 'medium' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await generatorWithMedium.generateContent(
+      { model: 'gemini-2.5-pro', contents: [] },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: {
+            includeThoughts: true,
+            thinkingLevel: 'MEDIUM',
+          },
+        }),
+      }),
+    );
+  });
+
+  it("clamps reasoning effort 'xhigh' to HIGH (Gemini has no xhigh tier)", async () => {
+    const generatorWithXhigh = new GeminiContentGenerator({ apiKey: 'test' }, {
+      model: 'gemini-2.5-pro',
+      reasoning: { effort: 'xhigh' },
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    } as any);
+
+    await generatorWithXhigh.generateContent(
+      { model: 'gemini-2.5-pro', contents: [] },
+      'prompt-id',
+    );
+
+    expect(mockGoogleGenAI.models.generateContent).toHaveBeenCalledWith(
+      expect.objectContaining({
+        config: expect.objectContaining({
+          thinkingConfig: {
+            includeThoughts: true,
+            thinkingLevel: 'HIGH',
+          },
+        }),
+      }),
+    );
+  });
+
   it('should strip displayName from inlineData and fileData before sending to API', async () => {
     const request = {
       model: 'gemini-1.5-flash',

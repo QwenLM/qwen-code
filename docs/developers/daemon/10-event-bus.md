@@ -35,8 +35,9 @@
 interface BridgeEvent {
   id?: number; // monotonic per session; absent on synthetic terminal frames
   v: 1; // EVENT_SCHEMA_VERSION
-  type: string; // one of the 43 known types or future-extensible
+  type: string; // one of the 47 known types or future-extensible
   data: unknown; // payload (typed per-type by the SDK; see 09-event-schema.md)
+  _meta?: { serverTimestamp?: number; [key: string]: unknown }; // stamped by EventBus.publish
   originatorClientId?: string; // set when the event derives from a clientId-stamped request
 }
 ```
@@ -182,8 +183,8 @@ Already-aborted signals at subscribe time call `onAbort()` synchronously before 
 ## Dependencies
 
 - Consumed by `packages/acp-bridge/src/bridge.ts` (`BridgeClient.sessionUpdate` / `BridgeClient.extNotification` → `events.publish(...)`).
-- Consumed by `packages/cli/src/serve/server.ts` (SSE route handler → `events.subscribe(...)` then formats `BridgeEvent` to SSE wire frames).
-- Re-export shim: `packages/cli/src/serve/event-bus.ts` → `@qwen-code/acp-bridge/eventBus`.
+- Consumed by `packages/cli/src/serve/routes/sse-events.ts` (SSE route handler → `events.subscribe(...)` then formats `BridgeEvent` to SSE wire frames).
+- CLI consumers import the event bus directly from `@qwen-code/acp-bridge/eventBus`.
 - SDK consumer: `packages/sdk-typescript/src/daemon/sse.ts` (`parseSseStream`), then `asKnownDaemonEvent` (see [`09-event-schema.md`](./09-event-schema.md), [`13-sdk-daemon-client.md`](./13-sdk-daemon-client.md)).
 
 ## Configuration
@@ -192,6 +193,72 @@ Already-aborted signals at subscribe time call `onAbort()` synchronously before 
 - Subscriber `?maxQueued=N` query parameter on `GET /session/:id/events`, range `[16, 2048]`. SDK clients pre-flight `caps.features.slow_client_warning` before opting in.
 - `BridgeOptions.eventRingSize` (overrides daemon default for embedded usage).
 - Capability tags: `session_events`, `slow_client_warning`, `typed_event_schema`.
+
+## Client Integration: `Last-Event-ID` Reconnect
+
+### Wire Format
+
+Every id-bearing SSE frame emitted by `GET /session/:id/events` includes an `id:` line:
+
+```
+id: 42
+event: session_update
+data: {"id":42,"v":1,"type":"session_update","data":{...},"_meta":{"serverTimestamp":1719000000000}}
+
+```
+
+Synthetic/terminal frames (`state_resync_required`, `replay_complete`, `client_evicted`, `slow_client_warning`, `stream_error`) are emitted **without** an `id:` line — they do not advance the per-session monotonic sequence.
+
+### Reconnect Protocol
+
+When a client reconnects after a disconnect, it sends the last successfully received event id as the `Last-Event-ID` HTTP header:
+
+```
+GET /session/:id/events HTTP/1.1
+Last-Event-ID: 42
+Accept: text/event-stream
+```
+
+The daemon's `EventBus` replays all events from the ring buffer whose `id > Last-Event-ID`, then transitions to live delivery. A `replay_complete` synthetic frame marks the boundary between replay and live:
+
+```jsonc
+// no id: line — synthetic
+{
+  "v": 1,
+  "type": "replay_complete",
+  "data": { "replayedCount": 7, "lastReplayedEventId": 49 },
+}
+```
+
+### Replay Behavior
+
+| Scenario                                     | Behavior                                                                                                                                                        |
+| -------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Last-Event-ID` absent                       | Live-only stream; no replay. Backward-compatible with pre-resume clients.                                                                                       |
+| `Last-Event-ID: 0`                           | Replay entire ring buffer from the beginning (bounded by `--event-ring-size`, default 8000).                                                                    |
+| `Last-Event-ID: N` where `ring[0].id <= N+1` | Contiguous replay of events `id > N`, then live.                                                                                                                |
+| `Last-Event-ID: N` where `ring[0].id > N+1`  | Gap detected — `state_resync_required` (`reason: 'ring_evicted'`) emitted before replay of surviving suffix. SDK must call `loadSession` to recover full state. |
+| `Last-Event-ID: N` where `N >= nextId`       | Epoch reset (daemon restart) — `state_resync_required` (`reason: 'epoch_reset'`) emitted, then full ring replay.                                                |
+
+### Validation Rules
+
+The daemon parses `Last-Event-ID` strictly:
+
+- Only pure decimal digit strings are accepted (e.g. `"42"`).
+- Non-numeric, negative, fractional, or overflow values (beyond `Number.MAX_SAFE_INTEGER`) are silently rejected — the stream starts live-only and the daemon logs a breadcrumb.
+- The `retry: 3000` directive tells conformant `EventSource` implementations to wait 3 seconds before reconnecting.
+
+### Backward Compatibility
+
+The `Last-Event-ID` mechanism is fully opt-in:
+
+- Clients that never send the header receive a live-only stream identical to pre-resume behavior.
+- Older SDK versions that do not track event ids continue to work.
+- The `replay_complete` frame is synthetic (no `id:`), so it does not confuse id-unaware consumers.
+
+### Browser `EventSource` Limitation
+
+The native browser `EventSource` API automatically tracks the last `id:` field and sends it on reconnect. However, it **cannot** set custom headers (e.g. `Authorization: Bearer`). Clients that require authentication must use raw `fetch()` + manual SSE parsing (as the TypeScript SDK does via `parseSseStream`) rather than `EventSource`. The SDK's `RestSseTransport` demonstrates this pattern — it sets `Last-Event-ID` as an explicit HTTP header on the `fetch()` call.
 
 ## Caveats & Known Limits
 
@@ -204,6 +271,6 @@ Already-aborted signals at subscribe time call `onAbort()` synchronously before 
 
 - `packages/acp-bridge/src/eventBus.ts` (entire file)
 - `packages/acp-bridge/src/bridge.ts` (publish sites, esp. `BridgeClient.sessionUpdate` and the F3 permission events)
-- `packages/cli/src/serve/server.ts` (SSE route handler — formats `BridgeEvent` to wire SSE)
+- `packages/cli/src/serve/routes/sse-events.ts` (SSE route handler — formats `BridgeEvent` to wire SSE)
 - `packages/sdk-typescript/src/daemon/sse.ts` (SSE wire parser on the client side)
 - Wire reference: [`../qwen-serve-protocol.md`](../qwen-serve-protocol.md) (the `Last-Event-ID` reconnect contract).

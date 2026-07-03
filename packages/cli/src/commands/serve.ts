@@ -5,13 +5,15 @@
  */
 
 import type { Argv, CommandModule } from 'yargs';
+import type { ServeChannelSelection } from '../serve/types.js';
+import { normalizeServeChannelSelection } from '../serve/channel-selection.js';
 // Type-only imports — no runtime cost. The serve module pulls in express +
 // body-parser + qs + the daemon transport stack; static-importing it from
 // here would tax every `qwen` invocation (interactive, mcp, channel, etc.)
 // with ~50ms of cold ESM resolution. The runtime import is deferred to the
 // handler below so it only loads when the user actually runs `qwen serve`.
 import { writeStderrLine } from '../utils/stdioHelpers.js';
-import { DEFAULT_RING_SIZE } from '../serve/event-bus.js';
+import { DEFAULT_RING_SIZE } from '@qwen-code/acp-bridge/eventBus';
 import {
   ApprovalMode,
   MCP_BUDGET_WARN_FRACTION,
@@ -100,6 +102,8 @@ interface ServeArgs {
   workspace?: string;
   'require-auth': boolean;
   'enable-session-shell': boolean;
+  'tls-cert'?: string;
+  'tls-key'?: string;
   web: boolean;
   open: boolean;
   // Read from the kebab-case key only — the camelCase mirror that yargs
@@ -122,6 +126,7 @@ interface ServeArgs {
   'rate-limit-read'?: number;
   'rate-limit-window-ms'?: number;
   experimentalLsp?: boolean;
+  channel?: string[];
 }
 
 export const serveCommand: CommandModule<unknown, ServeArgs> = {
@@ -195,11 +200,30 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         description:
           'Enable direct POST /session/:id/shell execution. Requires a bearer token and a session-bound client id on each call.',
       })
+      .option('tls-cert', {
+        type: 'string',
+        description:
+          'Path to a PEM certificate file. Serve over HTTPS instead of HTTP. ' +
+          'Required for secure-context browser APIs (voice input/getUserMedia, ' +
+          'WebRTC) when accessed over a LAN IP. Must be used together with ' +
+          '--tls-key. Generate a local cert with mkcert.',
+      })
+      .option('tls-key', {
+        type: 'string',
+        description:
+          'Path to a PEM private key file. Must be used together with --tls-cert.',
+      })
       .option('experimental-lsp', {
         type: 'boolean',
         default: false,
         description:
           'Forward the experimental LSP opt-in to spawned agent sessions.',
+      })
+      .option('channel', {
+        type: 'string',
+        array: true,
+        description:
+          'Experimental: start a daemon-managed channel worker for the named channel. Repeat to select multiple channels, or use --channel all.',
       })
       .option('web', {
         type: 'boolean',
@@ -354,6 +378,15 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
           'deployment.',
       );
     }
+    let channelSelection: ServeChannelSelection | undefined;
+    try {
+      channelSelection = normalizeServeChannelSelection(argv.channel);
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      process.exit(1);
+    }
     // Validate budget + mode combination at boot, before we
     // lazy-load the serve module. Yargs already constrains `choices`
     // for mcp-budget-mode, so we only have to police the budget value
@@ -506,6 +539,10 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         requireAuth: argv['require-auth'],
         enableSessionShell: argv['enable-session-shell'],
         serveWebShell: argv.web,
+        ...(argv['tls-cert'] !== undefined
+          ? { tlsCert: argv['tls-cert'] }
+          : {}),
+        ...(argv['tls-key'] !== undefined ? { tlsKey: argv['tls-key'] } : {}),
         allowPrivateAuthBaseUrl: argv['allow-private-auth-base-url'],
         mcpClientBudget,
         mcpBudgetMode: resolvedMcpMode,
@@ -539,6 +576,7 @@ export const serveCommand: CommandModule<unknown, ServeArgs> = {
         ...(rateLimitRead !== undefined ? { rateLimitRead } : {}),
         ...(rateLimitWindowMs !== undefined ? { rateLimitWindowMs } : {}),
         ...(argv.experimentalLsp === true ? { experimentalLsp: true } : {}),
+        ...(channelSelection !== undefined ? { channelSelection } : {}),
       });
       // Open the Web Shell in a browser once the listener is up (best-effort;
       // never throws — see maybeOpenWebShellBrowser).

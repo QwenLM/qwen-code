@@ -1,0 +1,44 @@
+import { describe, expect, it, vi } from 'vitest';
+import { parseConfiguredChannels } from './runtime.js';
+
+vi.mock('./channel-registry.js', () => ({
+  getPlugin: async (type: string) =>
+    type === 'telegram'
+      ? { channelType: 'telegram', requiredConfigFields: ['token'] }
+      : undefined,
+  supportedTypes: async () => ['telegram'],
+}));
+
+describe('parseConfiguredChannels', () => {
+  it('throws a clear error when a selected channel is missing config', async () => {
+    await expect(
+      parseConfiguredChannels({}, ['telegram'], { defaultCwd: '/workspace' }),
+    ).rejects.toThrow(
+      'Error in channel "telegram": channel is not configured. Add a "telegram" entry under "channels" in settings.json.',
+    );
+  });
+
+  it('parses configured channels', async () => {
+    const parsed = await parseConfiguredChannels(
+      {
+        telegram: {
+          type: 'telegram',
+          token: 'secret',
+        },
+      },
+      ['telegram'],
+      { defaultCwd: '/workspace' },
+    );
+
+    expect(parsed).toEqual([
+      expect.objectContaining({
+        name: 'telegram',
+        config: expect.objectContaining({
+          type: 'telegram',
+          token: 'secret',
+          cwd: '/workspace',
+        }),
+      }),
+    ]);
+  });
+});

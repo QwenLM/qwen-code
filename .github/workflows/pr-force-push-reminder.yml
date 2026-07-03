@@ -1,0 +1,161 @@
+name: 'PR Force-Push Reminder'
+
+on:
+  pull_request_target:
+    types:
+      - 'synchronize'
+
+permissions:
+  contents: 'read'
+  issues: 'write'
+  pull-requests: 'write'
+
+# No concurrency group on purpose. GitHub keeps at most one pending run per
+# group, so a burst of pushes can cancel a still-pending run that was about to
+# post — dropping the very reminder this workflow exists to deliver. Letting
+# every synchronize event run independently guarantees each force-push is
+# evaluated; idempotency comes from the once-per-PR marker checked in the script
+# (not from serializing runs). A rare double-post on two near-simultaneous
+# first force-pushes is the acceptable cost of never silently missing one.
+
+jobs:
+  remind-on-force-push:
+    name: 'Remind on force-push'
+    timeout-minutes: 5
+    if: |-
+      ${{ github.repository == 'QwenLM/qwen-code' }}
+    runs-on: 'ubuntu-latest'
+    steps:
+      - name: 'Detect force-push and post reminder'
+        uses: 'actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3' # v9.0.0
+        with:
+          github-token: '${{ secrets.GITHUB_TOKEN }}'
+          script: |
+            const pr = context.payload.pull_request;
+            const before = context.payload.before;
+            const after = context.payload.after;
+
+            // A `synchronize` event should always carry both SHAs; bail out if
+            // either is missing or `before` is the all-zero (no parent) SHA.
+            if (!before || !after || /^0+$/.test(before)) {
+              console.log('No usable before/after SHA; nothing to do.');
+              return;
+            }
+
+            // Skip automation-driven updates. A GitHub App push has
+            // sender.type === 'Bot', but the repo's own autofix bot pushes
+            // (including force-pushes) via a PAT as the user account
+            // qwen-code-dev-bot, which arrives with sender.type === 'User' — so
+            // also skip known automation logins. Only human contributors should
+            // be reminded.
+            const sender = context.payload.sender;
+            const KNOWN_AUTOMATION = new Set([
+              'qwen-code-ci-bot',
+              'qwen-code-dev-bot',
+              'github-actions',
+              'github-actions[bot]',
+              'gemini-cli-robot',
+            ]);
+            if (sender?.type === 'Bot' || KNOWN_AUTOMATION.has(sender?.login)) {
+              console.log(`Push made by automation "${sender?.login}" (${sender?.type}); skipping.`);
+              return;
+            }
+
+            // Compare the old tip (`before`) with the new tip (`after`):
+            //   ahead     -> new commits added on top of the old tip (normal push)
+            //   identical -> no change
+            //   behind    -> reset to an older commit (force-push)
+            //   diverged  -> history rewritten, e.g. rebase/amend (force-push)
+            let status;
+            try {
+              const cmp = await github.rest.repos.compareCommitsWithBasehead({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                basehead: `${before}...${after}`,
+              });
+              status = cmp.data.status;
+            } catch (err) {
+              // A 404 means the old tip (`before`) is no longer reachable — it
+              // was orphaned by the force-push and already GC'd. Skip
+              // conservatively rather than risk a false accusation. Any other
+              // error (403/429/5xx) is a real failure: rethrow so the run goes
+              // red and the outage is visible instead of a silent no-op.
+              if (err.status === 404) {
+                console.log(`Old tip ${before} no longer reachable (404); skipping.`);
+                return;
+              }
+              throw err;
+            }
+
+            console.log(`Compare ${before.slice(0, 7)}...${after.slice(0, 7)} => ${status}`);
+            if (status === 'ahead' || status === 'identical') {
+              console.log('Fast-forward push (not a force-push); nothing to do.');
+              return;
+            }
+
+            // Force-push confirmed. Post the reminder at most once per PR; the
+            // hidden marker lets us detect a reminder we already left.
+            const MARKER = '<!-- pr-force-push-reminder -->';
+            let comments;
+            try {
+              comments = await github.paginate(github.rest.issues.listComments, {
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                per_page: 100,
+              });
+            } catch (err) {
+              core.error(`Failed to list comments on PR #${pr.number}: ${err.status} ${err.message}`);
+              throw err;
+            }
+            // Only trust the marker on our own bot's comment — otherwise anyone
+            // could permanently suppress reminders by pasting the marker string.
+            if (
+              comments.some(
+                (c) =>
+                  c.user?.type === 'Bot' &&
+                  c.user?.login === 'github-actions[bot]' &&
+                  c.body &&
+                  c.body.includes(MARKER),
+              )
+            ) {
+              console.log('Reminder already posted by the bot on this PR; skipping.');
+              return;
+            }
+
+            const english =
+              'Please do not rebase or force-push to an active PR as it invalidates ' +
+              'existing review comments. Note for future reference, the bots always ' +
+              'squash all changes into a single commit automatically as part of the ' +
+              'integration.';
+            const chinese =
+              '请勿对活跃的 PR 执行 rebase 或 force-push，因为这会使已有的评审评论失效。' +
+              '另外，供日后参考：作为集成流程的一部分，机器人始终会自动将所有改动' +
+              '压缩（squash）为单个提交。';
+            const body = [
+              MARKER,
+              '',
+              english,
+              '',
+              '<details>',
+              '<summary>中文</summary>',
+              '',
+              chinese,
+              '',
+              '</details>',
+            ].join('\n');
+
+            try {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr.number,
+                body,
+              });
+              console.log(`Posted force-push reminder on PR #${pr.number}.`);
+            } catch (err) {
+              // Surface auth/rate-limit/transient failures with context and let
+              // the run go red instead of failing silently.
+              core.error(`Failed to comment on PR #${pr.number}: ${err.status} ${err.message}`);
+              throw err;
+            }

@@ -7,7 +7,7 @@
 .container {
   position: relative;
   container-type: inline-size;
-  border-radius: 16px;
+  border-radius: 12px;
   margin: 0;
   cursor: text;
   --chat-editor-input-max-height: 300px;
@@ -15,15 +15,21 @@
   --dac-glow-pulse: 0;
   --dac-g1: #6a78ff;
   --dac-g2: #8a7bff;
+  --chat-send-button-disabled-foreground: var(--secondary-foreground);
+  --chat-send-button-foreground: #fafafa;
 }
 
 .content {
   position: relative;
   z-index: 2;
-  border: 1px solid var(--border-color);
+  display: flex;
+  height: 140px;
+  flex-direction: column;
+  border: 1.5px solid var(--agent-gray-200);
   border-radius: inherit;
-  background: var(--chat-editor-container-bg);
-  padding: 12px 16px 8px;
+  background: var(--chat-editor-bg-primary);
+  opacity: 1;
+  padding: 12px;
 }
 
 .dacAura,
@@ -175,7 +181,12 @@
 .slashPanel {
   position: fixed;
   z-index: var(--web-shell-popover-z-index, 1000);
-  --slash-panel-max-height: min(360px, 50vh);
+  --slash-panel-max-height: min(
+    calc(
+      (22px + 10px) + (22px + 10px) + (22px + 10px) + (22px + 10px) + 6px + 12px
+    ),
+    50vh
+  );
   --slash-anchor-width: 620px;
   --slash-command-col: 20ch;
   --slash-desc-col: 32ch;
@@ -194,13 +205,13 @@
   max-height: var(--slash-panel-max-height);
   padding: 6px;
   overflow: visible;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--chat-editor-border-color);
   border-radius: 8px;
-  background: var(--bg-primary);
+  background: var(--background);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-  color: var(--text-primary);
+  color: var(--chat-editor-text-primary);
   cursor: default;
-  font-family: var(--font-mono);
+  font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 13px;
   line-height: 1.35;
 }
@@ -221,7 +232,7 @@
   overflow-x: hidden;
   overflow-y: auto;
   border-radius: 6px;
-  scrollbar-color: var(--border-color) transparent;
+  scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
 }
 
@@ -236,7 +247,7 @@
 
 .slashList::-webkit-scrollbar-thumb {
   border-radius: 3px;
-  background: var(--border-color);
+  background: var(--chat-editor-border-color);
 }
 
 .slashEntry {
@@ -248,7 +259,7 @@
 .slashSection {
   height: 1px;
   margin: 5px 8px;
-  background: var(--border-color);
+  background: var(--chat-editor-border-color);
 }
 
 .slashItem {
@@ -265,7 +276,7 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--foreground);
   font: inherit;
   text-align: left;
   cursor: pointer;
@@ -273,12 +284,12 @@
 
 .slashItem:hover,
 .slashItemActive {
-  background: var(--bg-tertiary);
+  background: var(--accent);
 }
 
 .slashItem:hover .slashCommand,
 .slashItemActive .slashCommand {
-  color: var(--accent-color);
+  color: var(--foreground);
 }
 
 .slashDetail {
@@ -287,38 +298,45 @@
   width: min(320px, calc(100vw - 48px));
   padding: 8px 10px;
   overflow: auto;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--chat-editor-border-color);
   border-radius: 6px;
-  background: var(--bg-primary);
+  background: var(--background);
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18);
-  color: var(--text-primary);
+  color: var(--foreground);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 12px;
-  line-height: 1.45;
+  font-weight: 400;
+  line-height: 20px;
   overflow-wrap: anywhere;
   pointer-events: auto;
 }
 
 .slashDetailCommand {
   margin-bottom: 5px;
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: 12px;
-  line-height: 1.35;
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
   white-space: nowrap;
 }
 
 .slashDetailText {
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 20px;
   white-space: pre-wrap;
 }
 
 .slashCommand {
   min-width: 0;
   overflow: hidden;
-  font-family: var(--font-mono);
-  font-size: 13px;
-  line-height: 1.35;
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -326,9 +344,10 @@
 .slashDescription {
   min-width: 0;
   overflow: hidden;
-  color: var(--text-secondary);
+  color: var(--muted-foreground);
   font-size: 12px;
-  line-height: 1.35;
+  font-weight: 400;
+  line-height: 20px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -363,10 +382,10 @@
   align-items: center;
   max-width: 100%;
   min-height: 22px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--chat-editor-border-color);
   border-radius: 4px;
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.2;
@@ -382,13 +401,13 @@
 
 .tagLabel {
   padding: 3px 0 3px 7px;
-  color: var(--accent-color);
+  color: var(--chat-editor-accent-color);
 }
 
 .tagValue {
   max-width: 32ch;
   padding: 3px 0 3px 0.5ch;
-  color: var(--text-secondary);
+  color: var(--chat-editor-text-secondary);
 }
 
 .tagRemove {
@@ -398,7 +417,7 @@
   padding: 0;
   border: 0;
   background: transparent;
-  color: var(--text-dimmed);
+  color: var(--chat-editor-text-dimmed);
   font: inherit;
   line-height: 22px;
   cursor: pointer;
@@ -413,10 +432,12 @@
 
 .editorArea {
   display: flex;
+  flex: 1 1 auto;
   align-items: flex-start;
   gap: 6px;
-  min-height: 60px;
+  min-height: 0;
   padding: 4px 0;
+  overflow: auto;
 }
 
 .editorArea > :last-child {
@@ -427,7 +448,7 @@
 .shellPrefix {
   flex: 0 0 auto;
   padding-top: 1px;
-  color: var(--accent-color);
+  color: var(--chat-editor-accent-color);
   font-family: var(--font-mono);
   font-size: 14px;
   font-weight: 600;
@@ -437,13 +458,14 @@
 }
 
 .editorArea .cm-content {
+  color: var(--foreground);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 14px;
   line-height: 1.6;
 }
 
 .editorArea .cm-scroller {
-  scrollbar-color: var(--border-color) transparent;
+  scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
 }
 
@@ -457,7 +479,7 @@
 
 .editorArea .cm-scroller::-webkit-scrollbar-thumb {
   border-radius: 3px;
-  background: var(--border-color);
+  background: var(--chat-editor-border-color);
 }
 
 .toolbar {
@@ -501,6 +523,12 @@
   margin-right: -5px;
 }
 
+.toolbarRightCustom {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+}
+
 @container (max-width: 699px) {
   .toolbarLeft .toolBtn {
     width: auto;
@@ -523,10 +551,12 @@
   left: 0;
   min-width: 160px;
   padding: 4px;
-  background: var(--bg-primary);
-  border: 1px solid var(--border-color);
+  background: var(--background);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+  box-shadow:
+    0 2px 4px -2px rgba(0, 0, 0, 0.1),
+    0 4px 6px -1px rgba(0, 0, 0, 0.1);
   z-index: 100;
   display: flex;
   flex-direction: column;
@@ -551,9 +581,11 @@
   padding: 6px 12px;
   border: none;
   background: transparent;
-  color: var(--text-primary);
+  color: var(--foreground);
   font-family: var(--font-sans, system-ui, sans-serif);
-  font-size: 13px;
+  font-size: 14px;
+  font-weight: 400;
+  line-height: 22px;
   text-align: left;
   border-radius: 4px;
   cursor: pointer;
@@ -578,12 +610,12 @@
 }
 
 .dropdownItem:hover {
-  background: var(--bg-tertiary);
+  background: var(--accent);
 }
 
 .dropdownItemActive {
-  color: var(--accent-color);
-  background: var(--bg-tertiary);
+  color: var(--foreground);
+  background: var(--accent);
 }
 
 .dropdownItemIcon,
@@ -591,7 +623,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: var(--text-secondary);
+  color: var(--secondary-foreground);
 }
 
 .dropdownItemIcon svg {
@@ -613,17 +645,17 @@
 
 .dropdownItemLabel {
   overflow: hidden;
-  color: var(--text-primary);
-  font-size: 13px;
+  color: var(--foreground);
+  font-size: 14px;
   font-weight: 400;
-  line-height: 1.2;
+  line-height: 22px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .dropdownItemDesc {
   overflow: hidden;
-  color: var(--text-dimmed);
+  color: var(--muted-foreground);
   font-size: 12px;
   font-weight: 400;
   line-height: 1.2;
@@ -632,7 +664,7 @@
 
 .dropdownItemActive .dropdownItemIcon,
 .dropdownItemActive .dropdownItemCheck {
-  color: var(--text-primary);
+  color: var(--secondary-foreground);
 }
 
 .toolBtn {
@@ -644,7 +676,7 @@
   padding: 0 8px;
   border: none;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--agent-gray-500);
   font-family: var(--font-sans, system-ui, sans-serif);
   font-size: 13px;
   line-height: 1;
@@ -654,8 +686,8 @@
 }
 
 .toolBtn:hover {
-  background: var(--bg-tertiary);
-  color: var(--text-primary);
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-text-primary);
 }
 
 .toolBtn[data-tooltip]:hover::after,
@@ -665,10 +697,10 @@
   bottom: calc(100% + 8px);
   z-index: 120;
   padding: 4px 7px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--chat-editor-border-color);
   border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  background: var(--background);
+  color: var(--chat-editor-text-primary);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.14);
   content: attr(data-tooltip);
   font-family: var(--font-sans, system-ui, sans-serif);
@@ -705,7 +737,7 @@
 }
 
 .quickActionsBtn {
-  display: none;
+  display: inline-flex;
 }
 
 .quickActionsBtn .toolBtnIcon svg {
@@ -729,10 +761,15 @@
   height: 16px;
 }
 
+.toolBtnModeIcon > span {
+  width: 14px;
+  height: 14px;
+}
+
 .toolBtnText {
   display: inline-flex;
   align-items: center;
-  color: var(--text-primary);
+  color: var(--agent-gray-500);
   line-height: 1;
 }
 
@@ -759,21 +796,21 @@
 }
 
 .quickActionsPanel {
-  display: none;
+  display: block;
   position: relative;
   z-index: 2;
   margin-top: 8px;
   padding: 8px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--chat-editor-border-color);
   border-radius: 12px;
-  background: var(--bg-primary);
+  background: var(--background);
   box-shadow: 0 8px 24px color-mix(in srgb, #000 12%, transparent);
   cursor: default;
 }
 
 .quickActionsHeader {
   padding: 6px 2px;
-  color: var(--text-dimmed);
+  color: var(--chat-editor-text-dimmed);
   font-size: 12px;
   line-height: 1.2;
 }
@@ -791,7 +828,7 @@
   grid-auto-rows: minmax(22px, auto);
   gap: 3px;
   padding-right: 6px;
-  border-right: 1px solid var(--border-color);
+  border-right: 1px solid var(--chat-editor-border-color);
 }
 
 .quickAction {
@@ -801,10 +838,10 @@
   align-items: center;
   justify-content: center;
   padding: 3px 5px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--chat-editor-border-color);
   border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  background: var(--background);
+  color: var(--chat-editor-text-primary);
   font-family: var(--font-sans, system-ui, sans-serif);
   text-align: center;
   cursor: pointer;
@@ -812,7 +849,7 @@
 
 .quickAction:hover,
 .quickAction:focus-visible {
-  background: var(--bg-tertiary);
+  background: var(--chat-editor-bg-tertiary);
   outline: none;
 }
 
@@ -848,10 +885,10 @@
   align-items: center;
   justify-content: center;
   padding: 3px 4px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--chat-editor-border-color);
   border-radius: 6px;
-  background: var(--bg-primary);
-  color: var(--text-primary);
+  background: var(--background);
+  color: var(--chat-editor-text-primary);
   font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1;
@@ -869,28 +906,18 @@
 
 .quickKey:hover,
 .quickKey:focus-visible {
-  background: var(--bg-tertiary);
+  background: var(--chat-editor-bg-tertiary);
   outline: none;
-}
-
-@container (max-width: 699px) {
-  .quickActionsBtn {
-    display: inline-flex;
-  }
-
-  .quickActionsPanel {
-    display: block;
-  }
 }
 
 .sendBtn {
   flex-shrink: 0;
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
   border: none;
-  background: var(--bg-tertiary);
-  color: var(--text-dimmed);
+  background: var(--agent-gray-200);
+  color: var(--chat-send-button-disabled-foreground);
   cursor: default;
   display: flex;
   align-items: center;
@@ -901,29 +928,32 @@
 }
 
 .sendBtn:disabled {
-  opacity: 0.5;
-  cursor: default;
+  opacity: 1;
+  cursor: not-allowed;
 }
 
 .sendBtn:not(:disabled) {
-  background: var(--accent-color);
-  color: #fff;
+  border: none;
+  background: var(--agent-gray-800);
+  box-shadow: var(--agent-purple-shadow);
+  color: var(--chat-send-button-foreground);
   cursor: pointer;
 }
 
 .sendBtn:not(:disabled):hover {
-  filter: brightness(1.15);
-  transform: scale(1.05);
+  filter: brightness(1.08);
 }
 
 .sendBtn:not(:disabled):active {
-  transform: scale(0.95);
+  transform: scale(0.96);
 }
 
 .sendBtnRunning,
 .sendBtnRunning:not(:disabled) {
-  background: #1b1d21;
-  color: #fff;
+  border: none;
+  background: var(--agent-gray-800);
+  box-shadow: none;
+  color: var(--chat-send-button-foreground);
   cursor: pointer;
 }
 
@@ -935,14 +965,123 @@
   display: inline-block;
   width: 16px;
   height: 16px;
-  transform: translateX(1px);
 }
 
 .stopIcon {
   width: 10px;
   height: 10px;
-  border-radius: 2px;
+  border-radius: 3px;
   background: currentColor;
+}
+
+.loadingIcon {
+  width: 14px;
+  height: 14px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: sendBtnLoadingSpin 0.8s linear infinite;
+}
+
+/* Armed-to-cancel state: first Esc primes the stop, the button shows an "Esc"
+   hint, a subtle pulse, and a depleting ring counting down the confirm window
+   until the second press confirms or the window lapses. */
+.sendBtnArmed,
+.sendBtnArmed:not(:disabled) {
+  position: relative;
+  border-radius: 50%;
+  background: var(--error-color, #e06c75);
+  animation: sendBtnArmedPulse 1s ease-in-out infinite;
+}
+
+/* Registered so the conic angle can animate smoothly. */
+@property --esc-countdown {
+  syntax: '<percentage>';
+  inherits: false;
+  initial-value: 100%;
+}
+
+/* Countdown ring around the armed button. Its duration matches
+   ESC_CANCEL_CONFIRM_WINDOW_MS in App.tsx — keep the two in sync. */
+.sendBtnArmed::after {
+  content: '';
+  position: absolute;
+  inset: -4px;
+  border-radius: 50%;
+  background: conic-gradient(
+    var(--error-color, #e06c75) var(--esc-countdown),
+    transparent 0
+  );
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 2px)
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 2px)
+  );
+  animation: escCountdown 2000ms linear forwards;
+  pointer-events: none;
+}
+
+@keyframes escCountdown {
+  to {
+    --esc-countdown: 0%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .loadingIcon {
+    animation: none;
+  }
+
+  .sendBtnArmed,
+  .sendBtnArmed:not(:disabled) {
+    animation: none;
+  }
+
+  .sendBtnArmed::after {
+    animation: none;
+    --esc-countdown: 100%;
+  }
+}
+
+@keyframes sendBtnLoadingSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.escLabel {
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1;
+  letter-spacing: 0.02em;
+}
+
+/* Visually hidden but exposed to assistive tech (for aria-live announcements). */
+.srOnly {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@keyframes sendBtnArmedPulse {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.6;
+  }
 }
 
 .images {
@@ -958,7 +1097,7 @@
   height: 48px;
   border-radius: 4px;
   overflow: hidden;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--chat-editor-border-color);
 }
 
 .imageThumb img {
@@ -985,7 +1124,7 @@
 
 .imageRemove:hover {
   background: var(--error-color);
-  color: var(--text-primary);
+  color: var(--chat-editor-text-primary);
 }
 
 .searchPanel {
@@ -998,9 +1137,9 @@
   z-index: 20;
   max-height: min(320px, 50vh);
   padding: 8px;
-  border: 1px solid var(--border-color);
+  border: 1px solid var(--chat-editor-border-color);
   border-radius: 12px;
-  background: var(--bg-primary);
+  background: var(--background);
   box-shadow: 0 8px 24px color-mix(in srgb, #000 12%, transparent);
   cursor: default;
 }
@@ -1014,7 +1153,7 @@
 }
 
 .searchLabel {
-  color: var(--text-dimmed);
+  color: var(--chat-editor-text-dimmed);
   flex-shrink: 0;
 }
 
@@ -1023,13 +1162,13 @@
   background: transparent;
   border: none;
   outline: none;
-  color: var(--text-primary);
+  color: var(--chat-editor-text-primary);
   font-family: var(--font-mono);
   font-size: 12px;
 }
 
 .searchInput::placeholder {
-  color: var(--text-dimmed);
+  color: var(--chat-editor-text-dimmed);
 }
 
 .searchResults {
@@ -1055,7 +1194,7 @@
   border: 0;
   border-radius: 6px;
   background: transparent;
-  color: var(--text-secondary);
+  color: var(--chat-editor-text-secondary);
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 1.4;
@@ -1066,12 +1205,12 @@
 
 .searchResult:hover,
 .searchResultActive {
-  background: var(--bg-tertiary);
-  color: var(--accent-color);
+  background: var(--chat-editor-bg-tertiary);
+  color: var(--chat-editor-accent-color);
 }
 
 .searchResultMarker {
-  color: var(--accent-color);
+  color: var(--chat-editor-accent-color);
   line-height: 1.45;
 }
 
@@ -1084,6 +1223,6 @@
 
 .searchEmpty {
   padding: 4px 2px 0;
-  color: var(--text-dimmed);
+  color: var(--chat-editor-text-dimmed);
   font-size: 12px;
 }

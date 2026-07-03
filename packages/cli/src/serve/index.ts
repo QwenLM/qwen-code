@@ -92,7 +92,7 @@ export {
   type ServeExtensionInstallType,
   type ServeExtensionOriginSource,
   type ServeWorkspaceExtensionsStatus,
-} from './status.js';
+} from '@qwen-code/acp-bridge/status';
 export {
   ENV_NONSECRET_VARS,
   ENV_PROXY_VARS,
@@ -139,5 +139,5 @@ export {
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
   type SubscribeOptions,
-} from './event-bus.js';
-export { createInMemoryChannel } from './in-memory-channel.js';
+} from '@qwen-code/acp-bridge/eventBus';
+export { createInMemoryChannel } from '@qwen-code/acp-bridge/inMemoryChannel';

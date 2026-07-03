@@ -1,0 +1,443 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Qwen Code</title>
+    <style>
+      /* Terminal-console onboarding. The product is a CLI daemon, so the screen
+         is a small console: the command is the hero, typed at a prompt. Warm
+         charcoal + electric-lime accent, light/dark aware. No web fonts / no
+         inline JS — the extension CSP allows neither. */
+      :root {
+        --bg: #16140f;
+        --bg-grid: #221e16;
+        --panel: #1c190f;
+        --panel-bar: #221d12;
+        --border: #34301f;
+        --text: #f3efe2;
+        --muted: #a39a82;
+        --faint: #6f6850;
+        --accent: #c8f24e;
+        --accent-soft: rgba(200, 242, 78, 0.14);
+        --shadow: 0 18px 40px -18px rgba(0, 0, 0, 0.7);
+        --dot-r: #e0795a;
+        --dot-y: #e0b94e;
+        --dot-g: #8bbf5a;
+      }
+      @media (prefers-color-scheme: light) {
+        :root {
+          --bg: #f6f3ea;
+          --bg-grid: #ece6d6;
+          --panel: #fffdf6;
+          --panel-bar: #f3eee0;
+          --border: #e2dac6;
+          --text: #211e15;
+          --muted: #6c6450;
+          --faint: #a79e85;
+          --accent: #5f7d12;
+          --accent-soft: rgba(95, 125, 18, 0.12);
+          --shadow: 0 16px 34px -20px rgba(60, 50, 20, 0.35);
+          --dot-r: #d0664a;
+          --dot-y: #cf9f33;
+          --dot-g: #6fa53f;
+        }
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        height: 100%;
+      }
+      body {
+        overflow: hidden;
+        background-color: var(--bg);
+        /* faint dotted-grid texture so it reads as a surface, not a flat fill */
+        background-image: radial-gradient(var(--bg-grid) 1px, transparent 1px);
+        background-size: 16px 16px;
+        color: var(--text);
+        font:
+          13px/1.55 ui-sans-serif,
+          system-ui,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      .hidden {
+        display: none !important;
+      }
+
+      #ui {
+        display: block;
+        width: 100%;
+        height: 100vh;
+        border: 0;
+      }
+
+      #welcome {
+        display: flex;
+        flex-direction: column;
+        gap: 22px;
+        height: 100vh;
+        padding: 26px 22px;
+        overflow-y: auto;
+      }
+
+      /* ---- brand ---- */
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        animation: rise 0.5s 0.02s both;
+      }
+      .brand__mark {
+        display: grid;
+        place-items: center;
+        width: 26px;
+        height: 26px;
+        color: var(--accent);
+        background: var(--accent-soft);
+        border: 1px solid var(--border);
+        border-radius: 7px;
+      }
+      .brand__mark svg {
+        width: 15px;
+        height: 15px;
+      }
+      .brand__name {
+        font-weight: 650;
+        letter-spacing: -0.01em;
+      }
+      .brand__tag {
+        margin-left: 2px;
+        padding: 1px 7px;
+        font:
+          600 10px/1.6 ui-monospace,
+          monospace;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        color: var(--muted);
+        background: var(--accent-soft);
+        border-radius: 999px;
+      }
+
+      /* brand pins to the top; the hero + terminal center in the space that
+         remains; the status bar settles at the bottom. */
+      .core {
+        flex: 1;
+        min-height: 0;
+        display: flex;
+        flex-direction: column;
+        justify-content: center;
+        gap: 20px;
+      }
+
+      /* ---- hero copy ---- */
+      #welcome-title {
+        margin: 0 0 8px;
+        font-size: 21px;
+        font-weight: 660;
+        letter-spacing: -0.02em;
+        line-height: 1.2;
+        animation: rise 0.5s 0.08s both;
+      }
+      #welcome-desc {
+        margin: 0;
+        max-width: 42ch;
+        color: var(--muted);
+        animation: rise 0.5s 0.13s both;
+      }
+
+      /* ---- terminal card (the hero element) ---- */
+      .term {
+        margin: 0;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 11px;
+        box-shadow: var(--shadow);
+        overflow: hidden;
+        animation: rise 0.55s 0.19s both;
+      }
+      .term__bar {
+        display: flex;
+        align-items: center;
+        gap: 7px;
+        padding: 9px 11px;
+        background: var(--panel-bar);
+        border-bottom: 1px solid var(--border);
+      }
+      .term__dot {
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+      }
+      .term__dot:nth-child(1) {
+        background: var(--dot-r);
+      }
+      .term__dot:nth-child(2) {
+        background: var(--dot-y);
+      }
+      .term__dot:nth-child(3) {
+        background: var(--dot-g);
+      }
+      .term__label {
+        margin-left: 4px;
+        font:
+          500 11px/1 ui-monospace,
+          monospace;
+        color: var(--faint);
+      }
+      /* command row — click anywhere on it to copy */
+      .term__body {
+        display: flex;
+        gap: 9px;
+        padding: 15px 14px 16px;
+        font:
+          12.5px/1.6 ui-monospace,
+          SFMono-Regular,
+          monospace;
+        cursor: pointer;
+        transition: background 0.15s;
+      }
+      .term__body:hover {
+        background: var(--accent-soft);
+      }
+      .term__body:focus-visible {
+        outline: 2px solid var(--accent);
+        outline-offset: -2px;
+      }
+      .term__prompt {
+        color: var(--accent);
+        user-select: none;
+      }
+      #cmd {
+        flex: 1;
+        white-space: pre-wrap;
+        word-break: break-all;
+        color: var(--text);
+      }
+      .term__cursor {
+        flex: none;
+        align-self: flex-start;
+        width: 7px;
+        height: 1.15em;
+        margin-top: 1px;
+        background: var(--accent);
+        animation: blink 1.1s steps(1) infinite;
+      }
+      /* centered copy action at the foot of the card */
+      .term__copy {
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 7px;
+        width: 100%;
+        padding: 11px;
+        font:
+          600 12px/1 ui-sans-serif,
+          system-ui,
+          sans-serif;
+        color: var(--muted);
+        background: var(--panel-bar);
+        border: 0;
+        border-top: 1px solid var(--border);
+        cursor: pointer;
+        transition:
+          color 0.15s,
+          background 0.15s;
+      }
+      .term__copy:hover {
+        color: var(--accent);
+        background: var(--accent-soft);
+      }
+      .term__copy svg {
+        width: 13px;
+        height: 13px;
+      }
+      .term__copy .ic-check {
+        display: none;
+      }
+      .term__copy.copied {
+        color: var(--accent);
+      }
+      .term__copy.copied .ic-copy {
+        display: none;
+      }
+      .term__copy.copied .ic-check {
+        display: inline;
+      }
+
+      /* ---- live status ---- */
+      .status {
+        display: flex;
+        align-items: center;
+        gap: 9px;
+        margin-bottom: 2px;
+        color: var(--muted);
+        font-size: 12px;
+        animation: rise 0.5s 0.26s both;
+      }
+      .status__pulse {
+        position: relative;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--accent);
+      }
+      .status__pulse::after {
+        content: '';
+        position: absolute;
+        inset: 0;
+        border-radius: 50%;
+        background: var(--accent);
+        animation: ping 1.8s cubic-bezier(0, 0, 0.2, 1) infinite;
+      }
+
+      @keyframes rise {
+        from {
+          opacity: 0;
+          transform: translateY(7px);
+        }
+        to {
+          opacity: 1;
+          transform: none;
+        }
+      }
+      @keyframes blink {
+        0%,
+        50% {
+          opacity: 1;
+        }
+        50.01%,
+        100% {
+          opacity: 0;
+        }
+      }
+      @keyframes ping {
+        0% {
+          transform: scale(1);
+          opacity: 0.55;
+        }
+        80%,
+        100% {
+          transform: scale(2.6);
+          opacity: 0;
+        }
+      }
+      @media (prefers-reduced-motion: reduce) {
+        *,
+        *::after {
+          animation: none !important;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <!-- The extension has no UI of its own; it frames the daemon's Web Shell
+         (chat + tools) once a reachable `qwen serve` permits framing. Until
+         then #welcome guides the user to start/allow the daemon. The default
+         markup is the most common ('down') state so first paint is correct;
+         sidepanel.js updates the title/description/command per probe. -->
+    <main id="welcome">
+      <header class="brand">
+        <span class="brand__mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor">
+            <path
+              d="M5 7l4 5-4 5"
+              stroke-width="2.4"
+              stroke-linecap="round"
+              stroke-linejoin="round"
+            />
+            <path d="M12.5 18h6" stroke-width="2.4" stroke-linecap="round" />
+          </svg>
+        </span>
+        <span class="brand__name">Qwen Code</span>
+        <span class="brand__tag">browser</span>
+      </header>
+
+      <div class="core">
+        <section class="hero">
+          <h1 id="welcome-title">Start qwen serve</h1>
+          <p id="welcome-desc">
+            No local qwen&nbsp;serve daemon is reachable. Run this in a terminal
+            and leave it running — this panel connects on its own.
+          </p>
+        </section>
+
+        <figure class="term" aria-label="Command to run">
+          <div class="term__bar">
+            <span class="term__dot" aria-hidden="true"></span>
+            <span class="term__dot" aria-hidden="true"></span>
+            <span class="term__dot" aria-hidden="true"></span>
+            <span class="term__label">qwen serve</span>
+          </div>
+          <div
+            id="cmd-row"
+            class="term__body"
+            role="button"
+            tabindex="0"
+            title="Click to copy"
+          >
+            <span class="term__prompt" aria-hidden="true">$</span>
+            <code id="cmd"></code>
+            <span class="term__cursor" aria-hidden="true"></span>
+          </div>
+          <button id="copy" class="term__copy" type="button">
+            <svg
+              class="ic-copy"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <rect
+                x="9"
+                y="9"
+                width="11"
+                height="11"
+                rx="2.2"
+                stroke-width="2"
+              />
+              <path
+                d="M5 15V6a2 2 0 0 1 2-2h8"
+                stroke-width="2"
+                stroke-linecap="round"
+              />
+            </svg>
+            <svg
+              class="ic-check"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              aria-hidden="true"
+            >
+              <path
+                d="M5 12.5l4.5 4.5L19 7.5"
+                stroke-width="2.4"
+                stroke-linecap="round"
+                stroke-linejoin="round"
+              />
+            </svg>
+            <span id="copy-label">Copy command</span>
+          </button>
+        </figure>
+      </div>
+
+      <footer class="status">
+        <span class="status__pulse" aria-hidden="true"></span>
+        <span class="status__text">Listening for the daemon…</span>
+      </footer>
+    </main>
+
+    <iframe
+      id="ui"
+      class="hidden"
+      title="Qwen Code"
+      allow="clipboard-read; clipboard-write"
+    ></iframe>
+    <script type="module" src="sidepanel.js"></script>
+  </body>
+</html>

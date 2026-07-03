@@ -1,0 +1,647 @@
+.sidebar {
+  position: relative;
+  width: var(--web-shell-sidebar-width, 260px);
+  min-width: var(--web-shell-sidebar-width, 260px);
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 12px;
+  overflow: hidden;
+  background: var(--sidebar-background);
+  border-right: 1px solid var(--sidebar-border);
+  color: var(--sidebar-foreground);
+  font-family: var(--font-sans);
+  transition:
+    width 180ms ease,
+    min-width 180ms ease;
+}
+
+.resizing {
+  transition: none;
+}
+
+.collapsed {
+  width: 56px;
+  min-width: 56px;
+  align-items: center;
+}
+
+.newChatButton,
+.footerButton,
+.collapseButton,
+.projectRow,
+.sessionRow,
+.retry,
+.iconButton,
+.projectIconButton,
+.sessionActionButton,
+.secondaryButton,
+.dangerButton {
+  appearance: none;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+
+.newChatButton,
+.footerButton,
+.projectRow {
+  width: 100%;
+  height: 40px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 0 8px;
+  border-radius: 8px;
+  color: var(--sidebar-foreground);
+  cursor: pointer;
+}
+
+.newChatButton {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+  padding: 8px 4px;
+}
+
+.newChatButton:hover,
+.footerButton:hover,
+.projectRow:hover,
+.sessionRow:hover,
+.sessionRow:focus-visible,
+.collapseButton:hover,
+.collapseButton:focus-visible,
+.iconButton:hover,
+.iconButton:focus-visible,
+.projectIconButton:hover,
+.projectIconButton:focus-visible {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+}
+
+.newChatButton:focus-visible,
+.footerButton:focus-visible,
+.projectRow:focus-visible,
+.sessionRow:focus-visible,
+.collapseButton:focus-visible,
+.iconButton:focus-visible,
+.projectIconButton:focus-visible,
+.retry:focus-visible {
+  outline: 2px solid var(--sidebar-ring);
+  outline-offset: 2px;
+}
+
+.navIcon {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: currentColor;
+}
+
+.navIcon svg,
+.iconButton svg,
+.collapseButton svg {
+  width: 18px;
+  height: 18px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.settingsIcon svg {
+  width: 16px;
+  height: 16px;
+  stroke-width: 1.6;
+}
+
+.projectFolderIcon svg {
+  stroke-width: 1.5;
+}
+
+.body {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow: hidden;
+}
+
+.sectionTitle {
+  padding: 8px 8px 0;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.projectRow {
+  position: relative;
+  flex: 0 0 auto;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.projectIconButton {
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.projectIconButton svg {
+  width: 15px;
+  height: 15px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.projectName,
+.sessionText {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.projectName {
+  flex: 0 1 auto;
+}
+
+.projectIconButton:last-child {
+  margin-left: auto;
+}
+
+.sessionList {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow: auto;
+  padding-bottom: 48px;
+}
+
+.sessionRow {
+  position: relative;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  margin-left: 26px;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.currentSession {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+}
+
+.busySession {
+  opacity: 0.72;
+  pointer-events: none;
+}
+
+.floatingTooltip {
+  position: fixed;
+  z-index: 1000;
+  max-width: 320px;
+  min-width: 220px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow:
+    0 2px 4px -2px rgb(0 0 0 / 10%),
+    0 4px 6px -1px rgb(0 0 0 / 10%);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  overflow-wrap: anywhere;
+  pointer-events: auto;
+  transform: translateY(-50%);
+}
+
+.floatingTooltip::before {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -12px;
+  width: 12px;
+  content: '';
+}
+
+.tooltipContent {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.tooltipTitle {
+  color: var(--popover-foreground);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+}
+
+.tooltipTags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.tooltipTag {
+  min-width: 0;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  line-height: 18px;
+}
+
+.tooltipTagRunning {
+  background: color-mix(in srgb, var(--agent-blue-500) 16%, transparent);
+  color: var(--agent-blue-500);
+}
+
+.tooltipTagNew {
+  background: color-mix(in srgb, var(--agent-blue-500) 12%, transparent);
+  color: var(--agent-blue-500);
+}
+
+.tooltipMeta {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+}
+
+.sessionText {
+  flex: 1 1 auto;
+  margin-right: 18px;
+  color: currentColor;
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.sessionStatusSlot {
+  position: absolute;
+  left: -15px;
+  width: 8px;
+  height: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sessionStatusDot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: var(--agent-blue-500);
+  box-shadow: 0 0 0 3px
+    color-mix(in srgb, var(--agent-blue-500) 14%, transparent);
+  animation: sidebarPulse 1.6s ease-in-out infinite;
+}
+
+.sessionMetaSlot {
+  position: relative;
+  width: 34px;
+  height: 30px;
+  flex: 0 0 auto;
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+}
+
+.sessionTime {
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+}
+
+.sessionLoading {
+  width: 14px;
+  height: 14px;
+  display: inline-flex;
+  border: 2px solid color-mix(in srgb, var(--agent-blue-300) 24%, transparent);
+  border-top-color: var(--agent-blue-300);
+  border-radius: 999px;
+  animation: sidebarSpin 0.8s linear infinite;
+}
+
+.sessionRow:hover:not(.runningSession) .sessionTime,
+.sessionRow:focus-within:not(.runningSession) .sessionTime,
+.sessionMetaSlot:hover .sessionTime,
+.sessionMetaSlot:focus-within .sessionTime,
+.sessionMetaSlot:hover .sessionLoading,
+.sessionMetaSlot:focus-within .sessionLoading {
+  opacity: 0;
+}
+
+.sessionActions {
+  position: absolute;
+  top: 0;
+  right: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  padding-left: 6px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--sidebar-background) 8px
+  );
+  opacity: 0;
+}
+
+.sessionRow:hover:not(.runningSession) .sessionActions,
+.sessionRow:focus-within:not(.runningSession) .sessionActions,
+.sessionMetaSlot:hover .sessionActions,
+.sessionMetaSlot:focus-within .sessionActions {
+  opacity: 1;
+}
+
+.currentSession .sessionActions,
+.sessionRow:hover .sessionActions,
+.sessionRow:focus-within .sessionActions {
+  background: linear-gradient(90deg, transparent, var(--sidebar-accent) 8px);
+}
+
+@keyframes sidebarSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes sidebarPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px
+      color-mix(in srgb, var(--agent-blue-500) 16%, transparent);
+    opacity: 0.72;
+    transform: scale(0.9);
+  }
+
+  50% {
+    box-shadow: 0 0 0 6px
+      color-mix(in srgb, var(--agent-blue-500) 0%, transparent);
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.iconButton,
+.sessionActionButton,
+.collapseButton {
+  width: 28px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.sessionActionButton {
+  width: 26px;
+  height: 26px;
+  border-radius: 7px;
+}
+
+.sessionActionButton:hover,
+.sessionActionButton:focus-visible {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.sessionActionButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.sessionActionButton svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.searchInput {
+  width: calc(100% - 16px);
+  height: 44px;
+  margin: -2px 8px 2px;
+  padding: 0 10px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font-size: 13px;
+  line-height: 20px;
+}
+
+.searchInput:focus-visible,
+.renameInput:focus-visible {
+  border-color: var(--sidebar-ring);
+  outline: 0;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--sidebar-ring) 18%, transparent);
+}
+
+.iconButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.renameForm {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.renameInput {
+  width: 100%;
+  height: 32px;
+  padding: 0 8px;
+  border: 1px solid var(--sidebar-border);
+  border-radius: 6px;
+  background: var(--background);
+  color: var(--foreground);
+  font: inherit;
+}
+
+.notice,
+.retry {
+  padding: 8px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 18px;
+  text-align: left;
+}
+
+.retry {
+  width: 100%;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.confirmContent {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.confirmDescription {
+  margin: 0;
+  color: var(--muted-foreground);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.confirmActions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.secondaryButton,
+.dangerButton {
+  height: 28px;
+  padding: 0 12px;
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.secondaryButton {
+  border: 1px solid var(--border);
+  background: var(--background);
+  color: var(--foreground);
+}
+
+.dangerButton {
+  border: 1px solid var(--error-color);
+  background: transparent;
+  color: var(--error-color);
+}
+
+.dangerButton:hover,
+.dangerButton:focus-visible {
+  background: var(--error-bg);
+}
+
+.footer {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--sidebar-border);
+}
+
+.footerButton {
+  flex: 1 1 auto;
+}
+
+.collapseButton {
+  flex: 0 0 auto;
+}
+
+.collapsed .newChatButton,
+.collapsed .footerButton,
+.collapsed .projectRow {
+  width: 32px;
+  justify-content: center;
+  padding: 0;
+}
+
+.collapsed .body {
+  align-items: center;
+  width: 100%;
+}
+
+.collapsed .sessionList {
+  align-items: center;
+  width: 100%;
+}
+
+.collapsed .footer {
+  flex-direction: column;
+}
+
+.resizeHandle {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  bottom: 0;
+  width: 6px;
+  cursor: col-resize;
+  touch-action: none;
+}
+
+.resizeHandle::after {
+  position: absolute;
+  top: 0;
+  right: 2px;
+  bottom: 0;
+  width: 1px;
+  background: transparent;
+  content: '';
+}
+
+.resizeHandle:hover::after {
+  background: var(--sidebar-ring);
+}
+
+.collapsed .resizeHandle {
+  display: none;
+}
+
+@media (max-width: 760px) {
+  .sidebar {
+    display: none;
+  }
+
+  .sidebar.mobileOpen {
+    display: flex;
+    z-index: 50;
+    /* The width var is shared with the desktop resize handle and can be wider
+       than a phone viewport; cap it so the drawer never overflows the screen. */
+    max-width: 100vw;
+  }
+
+  .resizeHandle {
+    display: none;
+  }
+}

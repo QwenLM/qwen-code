@@ -23,7 +23,43 @@ function step(name) {
   return match?.[0] ?? '';
 }
 
+function job(name) {
+  const start = workflow.indexOf(`\n  ${name}:`);
+  if (start === -1) {
+    return '';
+  }
+  const nextJob = workflow.slice(start + 1).search(/\n {2}\S/);
+  return nextJob === -1
+    ? workflow.slice(start)
+    : workflow.slice(start, start + 1 + nextJob);
+}
+
 describe('qwen-triage tmux workflow', () => {
+  it('does not require fork PR authors to have write permission for automatic triage', () => {
+    const precheckJob = job('precheck-pr');
+    const authorizeJob = job('authorize');
+    const authorizeStep = step('Check principal write permission');
+
+    expect(precheckJob).toContain("contents: 'read'");
+    expect(precheckJob).toContain("pull-requests: 'read'");
+    expect(precheckJob).toContain("issues: 'write'");
+    expect(authorizeJob).toContain(
+      "needs.precheck-pr.outputs.decision == 'allow_triage'",
+    );
+    expect(authorizeStep).toContain(
+      'if [ "$EVENT_NAME" = "pull_request_target" ]; then',
+    );
+    expect(authorizeStep).toContain(
+      'echo "should_run=true" >> "$GITHUB_OUTPUT"',
+    );
+    expect(authorizeStep).toContain(
+      'Automatic PR triage allowed for PR #${PR_NUMBER} after same-repo/precheck gate.',
+    );
+    expect(authorizeStep).not.toContain(
+      'pull_request_target) principal="$PR_AUTHOR"',
+    );
+  });
+
   it('escapes embedded tmux artifacts without bash pattern replacement ampersands', () => {
     const postStep = step('Post tmux result comment');
 
@@ -52,6 +88,18 @@ describe('qwen-triage tmux workflow', () => {
 
     expect(runStep).toContain('if [ -n "${OPENAI_MODEL:-}" ]; then');
     expect(runStep).toContain('"OPENAI_MODEL=$OPENAI_MODEL"');
+  });
+
+  it('isolates agent state per run', () => {
+    const cleanStep = step('Clean stale agent state');
+    const runStep = step('Run Qwen Triage');
+
+    expect(cleanStep).toContain('QWEN_HOME="${RUNNER_TEMP:?}/qwen-home"');
+    expect(cleanStep).toContain('rm -rf "$QWEN_HOME"');
+    expect(cleanStep).toContain('mkdir -p "$QWEN_HOME"');
+    expect(cleanStep).toContain('rm -f /tmp/stage-*.md');
+    expect(cleanStep).toContain('echo "stale agent state cleaned"');
+    expect(runStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
   });
 
   it('reports timeout and infra-error without claiming the flow was exercised', () => {

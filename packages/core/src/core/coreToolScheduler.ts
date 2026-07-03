@@ -86,6 +86,7 @@ import {
   applyAutoModeDecision,
   evaluateAutoMode,
   getAutoModePermissionDeniedReason,
+  shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
@@ -110,6 +111,12 @@ import levenshtein from 'fast-levenshtein';
 import { getPlanModeSystemReminder } from './prompts.js';
 import { ShellToolInvocation } from '../tools/shell.js';
 import { IdeClient } from '../ide/ide-client.js';
+import {
+  getPlanRequiredTeammatePreApprovalMessage,
+  isPlanRequiredTeammateAwaitingApproval,
+  isPlanRequiredTeammatePreApprovalAllowedTool,
+  shouldUsePlanOnlyReminderInSubagentContext,
+} from '../agents/runtime/subagent-plan-tool-policy.js';
 import { safeSetStatus } from '../telemetry/tracer.js';
 import { SpanStatusCode, type Span } from '@opentelemetry/api';
 import {
@@ -213,6 +220,22 @@ const TOOL_FAILURE_KIND_NON_INTERACTIVE_DENIED = 'non_interactive_denied';
 const TOOL_FAILURE_KIND_BACKGROUND_AGENT_DENIED = 'background_agent_denied';
 
 const TOOL_SPAN_STATUS_PRE_HOOK_BLOCKED = 'Tool execution blocked by hook';
+
+/**
+ * Builds the failure ToolResult surfaced when a tool call exceeds the
+ * execution timeout. Reported as a normal tool error so the model can adapt
+ * (narrow scope, retry, etc.) instead of the session hanging.
+ */
+function createToolTimeoutResult(timeoutMs: number): ToolResult {
+  const message =
+    `Tool execution timed out after ${Math.round(timeoutMs / 1000)}s. ` +
+    `The tool may be stuck or operating on too large a scope.`;
+  return {
+    llmContent: message,
+    returnDisplay: message,
+    error: { message, type: ToolErrorType.EXECUTION_TIMEOUT },
+  };
+}
 const TOOL_SPAN_STATUS_POST_HOOK_STOPPED = 'Tool execution stopped by hook';
 const TOOL_SPAN_STATUS_PERMISSION_DENIED = 'Permission denied for tool';
 const TOOL_SPAN_STATUS_PERMISSION_HOOK_DENIED =
@@ -788,12 +811,22 @@ function batchResponseOutputSize(call: CompletedToolCall): number {
 
 const VALIDATION_RETRY_LOOP_THRESHOLD = 3;
 
+// NOTE: the `⚠` in this and TRUNCATION_RETRY_LOOP_DIRECTIVE below is part of an
+// LLM-facing prompt directive (injected into the model prompt, not rendered in
+// the TUI). The width-1 glyph rationale used elsewhere in this change does not
+// apply here — these are not terminal strings to "fix" for column width.
 /** Directive injected when a tool call repeatedly fails validation. */
 const RETRY_LOOP_STOP_DIRECTIVE =
-  '\n\n⚠️ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
+  '\n\n⚠ RETRY LOOP DETECTED: This tool call has failed validation multiple times with the same error. ' +
   'STOP retrying the same approach. Re-examine the tool schema and parameter requirements, then try a ' +
   'fundamentally different approach. If you cannot resolve the validation error, explain the issue to the user ' +
   'instead of retrying.';
+
+/** Directive injected when a truncated file-modifying call repeats. */
+const TRUNCATION_RETRY_LOOP_DIRECTIVE =
+  '\n\n⚠ RETRY LOOP DETECTED: The same truncated file write has been rejected multiple times. ' +
+  'STOP resending the same large content. Either split it into smaller write_file + incremental edit calls, ' +
+  'or explain to the user that the content is too large to write safely in one call.';
 
 const createErrorResponse = (
   request: ToolCallRequestInfo,
@@ -1773,6 +1806,28 @@ export class CoreToolScheduler {
     }
   }
 
+  /**
+   * Increments the retry counter for a (tool, errorMessage) pair and prunes any
+   * other error counters for the same tool, so a different failure on the same
+   * tool restarts the count rather than tripping the loop threshold. Shared by
+   * the truncated-Edit rejection path and the schema-validation failure path so
+   * both feed the same RETRY LOOP DETECTED detector.
+   */
+  private recordRetryableToolError(
+    toolName: string,
+    errorMessage: string,
+  ): number {
+    const errorKey = `${toolName}:${errorMessage}`;
+    const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
+    for (const key of this.validationRetryCounts.keys()) {
+      if (key.startsWith(`${toolName}:`) && key !== errorKey) {
+        this.validationRetryCounts.delete(key);
+      }
+    }
+    this.validationRetryCounts.set(errorKey, count);
+    return count;
+  }
+
   private async _schedule(
     request: ToolCallRequestInfo | ToolCallRequestInfo[],
     signal: AbortSignal,
@@ -1879,7 +1934,15 @@ export class CoreToolScheduler {
         // Reject file-modifying calls when truncated to prevent
         // writing incomplete content, even if params failed schema validation.
         if (reqInfo.wasOutputTruncated && toolInstance.kind === Kind.Edit) {
-          const truncationError = new Error(TRUNCATION_EDIT_REJECTION);
+          const count = this.recordRetryableToolError(
+            reqInfo.name,
+            TRUNCATION_EDIT_REJECTION,
+          );
+          const truncationError = new Error(
+            count >= VALIDATION_RETRY_LOOP_THRESHOLD
+              ? `${TRUNCATION_EDIT_REJECTION}${TRUNCATION_RETRY_LOOP_DIRECTIVE}`
+              : TRUNCATION_EDIT_REJECTION,
+          );
           newToolCalls.push({
             status: 'error',
             request: reqInfo,
@@ -1910,14 +1973,10 @@ export class CoreToolScheduler {
           // Track validation retry for loop detection. Counts accumulate per
           // (tool, error message) pair so a different validation mistake on
           // the same tool starts fresh rather than tripping the threshold.
-          const errorKey = `${reqInfo.name}:${invocationOrError.message}`;
-          const count = (this.validationRetryCounts.get(errorKey) ?? 0) + 1;
-          for (const key of this.validationRetryCounts.keys()) {
-            if (key.startsWith(`${reqInfo.name}:`) && key !== errorKey) {
-              this.validationRetryCounts.delete(key);
-            }
-          }
-          this.validationRetryCounts.set(errorKey, count);
+          const count = this.recordRetryableToolError(
+            reqInfo.name,
+            invocationOrError.message,
+          );
 
           const finalError =
             count >= VALIDATION_RETRY_LOOP_THRESHOLD
@@ -2025,8 +2084,13 @@ export class CoreToolScheduler {
             canonicalName,
             toolParams,
           );
-          const { finalPermission, pmForcedAsk, pmCtx, denyMessage } =
-            flowResult;
+          const {
+            defaultPermission,
+            finalPermission,
+            pmForcedAsk,
+            pmCtx,
+            denyMessage,
+          } = flowResult;
 
           // ---- L5: Final decision based on permission + ApprovalMode ----
           const approvalMode = this.config.getApprovalMode();
@@ -2037,7 +2101,8 @@ export class CoreToolScheduler {
 
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+              shouldClassifyAllShellForAutoMode(canonicalName, this.config));
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
@@ -2047,6 +2112,52 @@ export class CoreToolScheduler {
             debugLogger.info(
               `Auto mode: L4 allow overridden by protected-write guard for ${canonicalName}`,
             );
+          }
+
+          if (
+            isPlanRequiredTeammateAwaitingApproval(this.config) &&
+            finalPermission !== 'deny'
+          ) {
+            const isExplicitPreApprovalTool =
+              isPlanRequiredTeammatePreApprovalAllowedTool(
+                canonicalName,
+                toolParams,
+              );
+            const canRunBeforeLeaderApproval =
+              isExplicitPreApprovalTool &&
+              (canonicalName === ToolNames.EXIT_PLAN_MODE ||
+                canonicalName === ToolNames.TASK_UPDATE ||
+                (defaultPermission === 'allow' &&
+                  finalPermission === 'allow' &&
+                  !forceAutoReviewForAllow));
+
+            if (canRunBeforeLeaderApproval) {
+              this.setToolCallOutcome(
+                reqInfo.callId,
+                ToolConfirmationOutcome.ProceedAlways,
+              );
+              this.setStatusInternal(reqInfo.callId, 'scheduled');
+              continue;
+            }
+
+            const message =
+              getPlanRequiredTeammatePreApprovalMessage(canonicalName);
+            this.setStatusInternal(
+              reqInfo.callId,
+              'error',
+              createErrorResponse(
+                reqInfo,
+                new Error(message),
+                ToolErrorType.EXECUTION_DENIED,
+              ),
+            );
+            setToolSpanFailure(
+              toolSpan,
+              TOOL_FAILURE_KIND_PLAN_MODE_BLOCKED,
+              TOOL_SPAN_STATUS_PLAN_MODE_BLOCKED,
+            );
+            this.finalizeToolSpan(reqInfo.callId);
+            continue;
           }
 
           if (finalPermission === 'allow' && !forceAutoReviewForAllow) {
@@ -2232,7 +2343,13 @@ export class CoreToolScheduler {
                 responseParts: convertToFunctionResponse(
                   reqInfo.name,
                   reqInfo.callId,
-                  getPlanModeSystemReminder(),
+                  // SDK callers and ordinary subagent-like callers should
+                  // return plans directly. Plan-required teammates have a
+                  // dedicated exit_plan_mode approval path instead.
+                  getPlanModeSystemReminder(
+                    shouldUsePlanOnlyReminderInSubagentContext() ||
+                      this.config.getSdkMode(),
+                  ),
                 ),
                 resultDisplay: 'Plan mode blocked a non-read-only tool call.',
                 error: undefined,
@@ -3214,6 +3331,39 @@ export class CoreToolScheduler {
     );
     try {
       let promise: Promise<ToolResult>;
+
+      // Per-tool-call execution timeout. Disabled by default (experimental):
+      // set QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS to a positive number of
+      // milliseconds to cap how long a single tool call may run.
+      const toolExecutionTimeoutMs = parsePositiveIntegerEnv(
+        process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'],
+        0,
+      );
+
+      // When a timeout is active, run the tool under a derived AbortSignal so
+      // that on timeout we actually cancel the in-flight work (cooperative
+      // tools stop; the shell kills its subprocess) instead of abandoning it
+      // to run on unobserved. A user abort on the parent signal is forwarded
+      // to the derived signal. The forwarding listener is torn down once the
+      // tool settles (see finally below) so it never accumulates on the
+      // long-lived parent (turn) signal across tool calls.
+      let execSignal = signal;
+      let timeoutController: AbortController | undefined;
+      let removeParentAbortForward: (() => void) | undefined;
+      if (toolExecutionTimeoutMs > 0) {
+        timeoutController = new AbortController();
+        execSignal = timeoutController.signal;
+        if (signal.aborted) {
+          timeoutController.abort(signal.reason);
+        } else {
+          const controller = timeoutController;
+          const forwardAbort = () => controller.abort(signal.reason);
+          signal.addEventListener('abort', forwardAbort, { once: true });
+          removeParentAbortForward = () =>
+            signal.removeEventListener('abort', forwardAbort);
+        }
+      }
+
       if (invocation instanceof ShellToolInvocation) {
         const setPidCallback = (pid: number) => {
           this.toolCalls = this.toolCalls.map((tc) =>
@@ -3234,22 +3384,67 @@ export class CoreToolScheduler {
           );
           this.notifyToolCallsUpdate();
         };
+        const canPromoteForegroundShell = () => {
+          const promotableShells = this.toolCalls.filter(
+            (tc) =>
+              tc.status === 'executing' &&
+              tc.request.name === ToolNames.SHELL &&
+              tc.promoteAbortController !== undefined,
+          );
+          return (
+            promotableShells.length === 1 &&
+            promotableShells[0]?.request.callId === callId
+          );
+        };
         promise = invocation.execute(
-          signal,
+          execSignal,
           liveOutputCallback,
           shellExecutionConfig,
           setPidCallback,
           setPromoteAbortControllerCallback,
+          canPromoteForegroundShell,
         );
       } else {
         promise = invocation.execute(
-          signal,
+          execSignal,
           liveOutputCallback,
           shellExecutionConfig,
         );
       }
 
-      const toolResult: ToolResult = await promise;
+      let toolResult: ToolResult;
+      if (timeoutController) {
+        let timeoutTimer: ReturnType<typeof setTimeout> | undefined;
+        try {
+          toolResult = await new Promise<ToolResult>((resolve, reject) => {
+            timeoutTimer = setTimeout(() => {
+              debugLogger.warn(
+                `Tool ${canonicalName} (${callId}) timed out after ` +
+                  `${toolExecutionTimeoutMs}ms — aborting`,
+              );
+              // Cancel the in-flight tool via the derived signal, then resolve
+              // with a timeout error so the scheduler is unblocked even if the
+              // tool ignores the abort. A later settle from `promise` is a
+              // no-op once this wrapper Promise has already resolved.
+              timeoutController?.abort(
+                new Error(
+                  `Tool execution timed out after ${toolExecutionTimeoutMs}ms`,
+                ),
+              );
+              resolve(createToolTimeoutResult(toolExecutionTimeoutMs));
+            }, toolExecutionTimeoutMs);
+            timeoutTimer.unref?.();
+            promise.then(resolve, reject);
+          });
+        } finally {
+          if (timeoutTimer) clearTimeout(timeoutTimer);
+          // Tear down the parent-abort forwarding listener now that the tool
+          // has settled (no-op if a user abort already removed it via `once`).
+          removeParentAbortForward?.();
+        }
+      } else {
+        toolResult = await promise;
+      }
       // A tool that observes signal.aborted and resolves with a normal
       // ToolResult (no .error field) would otherwise close the execution
       // sub-span as success while the parent tool span ends as cancelled.
@@ -3934,15 +4129,18 @@ export class CoreToolScheduler {
         if (this.onAllToolCallsComplete) {
           await this.onAllToolCallsComplete(completedCalls);
         }
-        this.notifyToolCallsUpdate();
       } finally {
-        this.isFinalizingToolCalls = false;
-        // Always drain the queue, even if completion callbacks throw.
-        if (this.requestQueue.length > 0) {
-          const next = this.requestQueue.shift()!;
-          this._schedule(next.request, next.signal)
-            .then(next.resolve)
-            .catch(next.reject);
+        try {
+          this.notifyToolCallsUpdate();
+        } finally {
+          this.isFinalizingToolCalls = false;
+          // Always drain the queue, even if completion callbacks throw.
+          if (this.requestQueue.length > 0) {
+            const next = this.requestQueue.shift()!;
+            this._schedule(next.request, next.signal)
+              .then(next.resolve)
+              .catch(next.reject);
+          }
         }
       }
     }
@@ -4159,11 +4357,15 @@ export class CoreToolScheduler {
 
         const forceAutoReviewForAllow =
           this.config.getApprovalMode() === ApprovalMode.AUTO &&
-          shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+          (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+            shouldClassifyAllShellForAutoMode(
+              pendingTool.request.name,
+              this.config,
+            ));
 
         if (finalPermission === 'allow' && forceAutoReviewForAllow) {
           debugLogger.info(
-            `Auto mode: pending L4 allow overridden by protected-write guard for ${pendingTool.request.name}`,
+            `Auto mode: pending L4 allow overridden by protected-write guard or classifyAllShell for ${pendingTool.request.name}`,
           );
           const denialState = this.config.getAutoModeDenialState();
           const fallback = shouldFallback(denialState);
