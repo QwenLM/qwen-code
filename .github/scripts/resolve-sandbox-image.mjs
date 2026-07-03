@@ -1,10 +1,18 @@
 #!/usr/bin/env node
 import { appendFileSync } from 'node:fs';
 import { spawn } from 'node:child_process';
+import { pathToFileURL } from 'node:url';
 
 const GHCR_REPOSITORY = 'qwenlm/qwen-code';
 const FETCH_TIMEOUT_MS = 30_000;
 const PULL_TIMEOUT_MS = 10 * 60 * 1000;
+
+async function responseError(response, label) {
+  const body = await response.text();
+  return new Error(
+    `${label}: ${response.status} ${body.slice(0, 200)}`.trimEnd(),
+  );
+}
 
 export function latestSemverTag(tags) {
   return tags
@@ -23,7 +31,7 @@ async function fetchLatestGhcrSemver() {
     { signal: AbortSignal.timeout(FETCH_TIMEOUT_MS) },
   );
   if (!tokenResponse.ok) {
-    throw new Error(`Failed to fetch GHCR token: ${tokenResponse.status}`);
+    throw await responseError(tokenResponse, 'Failed to fetch GHCR token');
   }
 
   const { token } = await tokenResponse.json();
@@ -35,7 +43,7 @@ async function fetchLatestGhcrSemver() {
     },
   );
   if (!tagsResponse.ok) {
-    throw new Error(`Failed to fetch GHCR tags: ${tagsResponse.status}`);
+    throw await responseError(tagsResponse, 'Failed to fetch GHCR tags');
   }
 
   const { tags = [] } = await tagsResponse.json();
@@ -121,7 +129,10 @@ async function main() {
   exportImage(fallbackImage);
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (
+  process.argv[1] &&
+  import.meta.url === pathToFileURL(process.argv[1]).href
+) {
   main().catch((error) => {
     console.error(error instanceof Error ? error.message : String(error));
     process.exit(1);
