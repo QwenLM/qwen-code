@@ -5401,7 +5401,8 @@ describe('Truncated tool call detection in streaming', () => {
     {
       name: 'legacy streaming function_call chunks',
       chunks: [
-        { name: 'read_file', arguments: '{"path"' },
+        { name: 'read_file' },
+        { arguments: '{"path"' },
         { arguments: ':"README.md"}' },
       ],
       expectedFinishReason: FinishReason.STOP,
@@ -5410,7 +5411,8 @@ describe('Truncated tool call detection in streaming', () => {
     {
       name: 'legacy streaming function_call when tool_calls is empty',
       chunks: [
-        { name: 'read_file', arguments: '{"path"' },
+        { name: 'read_file' },
+        { arguments: '{"path"' },
         { arguments: ':"README.md"}' },
       ],
       includeEmptyToolCallsOnFirstChunk: true,

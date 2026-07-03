@@ -1088,10 +1088,14 @@ function parseToolCallArgs(argsJson?: string | null): Record<string, unknown> {
     : {};
 }
 
+function generateToolCallId(): string {
+  return `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+}
+
 function createFunctionCallPart(
   name: string,
   argsJson?: string | null,
-  id = `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+  id = generateToolCallId(),
 ): Part {
   return {
     functionCall: {
@@ -1105,7 +1109,7 @@ function createFunctionCallPart(
 function getLegacyFunctionCallChunk(
   functionCall: OpenAI.Chat.ChatCompletionChunk.Choice.Delta.FunctionCall,
 ): string {
-  return functionCall.arguments ?? (functionCall.name ? '{}' : '');
+  return functionCall.arguments ?? '';
 }
 
 /**
@@ -1312,6 +1316,7 @@ export function convertOpenAIChunkToGemini(
 
     // Handle tool calls using the stream-local parser
     if (choice.delta?.tool_calls?.length) {
+      requestContext.legacyFunctionCallWithoutArguments = undefined;
       if (choice.delta.function_call) {
         debugLogger.debug(
           `Ignoring legacy function_call "${choice.delta.function_call.name ?? '<pending>'}" because tool_calls is non-empty`,
@@ -1341,9 +1346,17 @@ export function convertOpenAIChunkToGemini(
       }
     } else if (choice.delta?.function_call) {
       const functionCall = choice.delta.function_call;
-      debugLogger.debug(
-        `Using legacy function_call fallback (streaming): ${functionCall.name ?? '<pending>'}`,
-      );
+      if (functionCall.name) {
+        debugLogger.debug(
+          `Using legacy function_call fallback (streaming): ${functionCall.name}`,
+        );
+        requestContext.legacyFunctionCallWithoutArguments = {
+          name: functionCall.name,
+        };
+      }
+      if (functionCall.arguments) {
+        requestContext.legacyFunctionCallWithoutArguments = undefined;
+      }
       toolCallParser.addChunk(
         0,
         getLegacyFunctionCallChunk(functionCall),
@@ -1364,16 +1377,24 @@ export function convertOpenAIChunkToGemini(
 
       for (const toolCall of completedToolCalls) {
         if (toolCall.name) {
+          requestContext.legacyFunctionCallWithoutArguments = undefined;
           parts.push({
             functionCall: {
-              id:
-                toolCall.id ||
-                `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`,
+              id: toolCall.id || generateToolCallId(),
               name: toolCall.name,
               args: toolCall.args,
             },
           });
         }
+      }
+      if (requestContext.legacyFunctionCallWithoutArguments) {
+        parts.push(
+          createFunctionCallPart(
+            requestContext.legacyFunctionCallWithoutArguments.name,
+            '{}',
+          ),
+        );
+        requestContext.legacyFunctionCallWithoutArguments = undefined;
       }
     }
 

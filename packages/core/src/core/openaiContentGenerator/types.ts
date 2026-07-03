@@ -42,6 +42,7 @@ export interface RequestContext {
   modalities: InputModalities;
   startTime: number;
   toolCallParser?: StreamingToolCallParser;
+  legacyFunctionCallWithoutArguments?: { name: string };
   responseParsingOptions?: OpenAIResponseParsingOptions;
   taggedThinkingParser?: TaggedThinkingParser;
   // When true, media parts in tool-result messages are split into a follow-up
