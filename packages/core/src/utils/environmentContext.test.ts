@@ -20,6 +20,9 @@ import {
   buildMcpServerInstructionsReminder,
   buildAvailableSkillsReminder,
   buildAddedSkillsReminder,
+  buildChangedAgentsReminder,
+  buildChangedMcpToolsReminder,
+  buildChangedSkillsReminder,
   getEnvironmentContext,
   getDirectoryContextString,
   getInitialChatHistory,
@@ -763,5 +766,39 @@ describe('buildAddedSkillsReminder', () => {
     expect(result).toContain('First line only');
     expect(result).not.toContain('Drop this');
     expect(result).not.toContain('And this');
+  });
+});
+
+describe('changed capability reminders', () => {
+  it('renders removed skills and commands', () => {
+    const result = buildChangedSkillsReminder([], ['old-skill', 'old-command']);
+
+    expect(result).not.toBeNull();
+    expect(result).toContain(SYSTEM_REMINDER_OPEN);
+    expect(result).toContain('no longer available');
+    expect(result).toContain('"old-skill"');
+    expect(result).toContain('"old-command"');
+  });
+
+  it('renders removed MCP tools', () => {
+    const result = buildChangedMcpToolsReminder([], ['mcp__old__tool']);
+
+    expect(result).not.toBeNull();
+    expect(result).toContain(SYSTEM_REMINDER_OPEN);
+    expect(result).toContain('MCP tools are no longer available');
+    expect(result).toContain('"mcp__old__tool"');
+  });
+
+  it('renders added and removed agents', () => {
+    const result = buildChangedAgentsReminder(
+      [{ name: 'reviewer', description: 'Reviews code' }],
+      ['old-agent'],
+    );
+
+    expect(result).not.toBeNull();
+    expect(result).toContain(SYSTEM_REMINDER_OPEN);
+    expect(result).toContain('"reviewer"');
+    expect(result).toContain('"Reviews code"');
+    expect(result).toContain('"old-agent"');
   });
 });
