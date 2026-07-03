@@ -144,6 +144,7 @@ const MAX_OPTION_DEPTH = 40;
 const MAX_DATA_ROWS = 2_000;
 const MAX_DATA_CELLS = 40_000;
 const MAX_SERIES_COUNT = 100;
+const DATA_REF_TIMEOUT_MS = 30_000;
 const SUPPORTED_DATA_REF_PREFIXES = ['artifact://', 'session-file://'];
 const SUPPORTED_DATA_REF_FORMATS = new Set(['csv', 'json']);
 const noop = () => {};
@@ -177,7 +178,6 @@ const UNSAFE_OPTION_KEYS = new Set([
   'brush',
   'calendar',
   'data',
-  'datasetIndex',
   'extraCssText',
   'geo',
   'graphic',
@@ -281,20 +281,26 @@ function exceedsMaxDepth(value: unknown, maxDepth: number): boolean {
   return false;
 }
 
-function isUnsafeString(value: string): boolean {
+function isUnsafeUriString(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   return (
+    normalized.startsWith('blob:') ||
     normalized.startsWith('data:') ||
+    normalized.startsWith('file:') ||
     normalized.startsWith('http://') ||
     normalized.startsWith('https://') ||
     normalized.startsWith('image://') ||
     normalized.startsWith('javascript:') ||
-    /<\/?[a-z]/i.test(value)
+    normalized.startsWith('vbscript:')
   );
 }
 
+function isUnsafeOptionString(value: string): boolean {
+  return isUnsafeUriString(value) || /<\/?[a-z]/i.test(value);
+}
+
 function sanitizeDatasetCell(value: unknown): DatasetCell {
-  if (typeof value === 'string') return isUnsafeString(value) ? '' : value;
+  if (typeof value === 'string') return isUnsafeUriString(value) ? '' : value;
   if (typeof value === 'number' && Number.isFinite(value)) return value;
   if (typeof value === 'boolean' || value === null) return value;
   return '';
@@ -306,6 +312,7 @@ function sanitizeDatasetRow(row: unknown): DatasetRow | undefined {
 
   const sanitized: Record<string, DatasetCell> = {};
   for (const [key, value] of Object.entries(row)) {
+    if (key === '__proto__') continue;
     sanitized[key] = sanitizeDatasetCell(value);
   }
   return sanitized;
@@ -331,7 +338,8 @@ function sanitizeOptionValue(value: unknown, path: string[] = []): unknown {
     return sanitized;
   }
 
-  if (typeof value === 'string' && isUnsafeString(value)) return undefined;
+  if (typeof value === 'string' && isUnsafeOptionString(value))
+    return undefined;
   return value;
 }
 
@@ -353,7 +361,12 @@ function sanitizeDatasetValue(value: unknown): unknown {
     return dataset;
   };
 
-  if (Array.isArray(value)) return sanitizeDataset(value[0]);
+  if (Array.isArray(value)) {
+    const datasets = value
+      .map(sanitizeDataset)
+      .filter((entry): entry is EchartsDataset => !!entry);
+    return datasets.length > 0 ? datasets : undefined;
+  }
   return sanitizeDataset(value);
 }
 
@@ -760,7 +773,9 @@ function normalizeDimensions(
   if (!Array.isArray(dimensions)) return [];
   return dimensions.map((dimension, index) => {
     if (typeof dimension === 'string') return dimension;
-    return typeof dimension.name === 'string' && dimension.name
+    return isObject(dimension) &&
+      typeof dimension.name === 'string' &&
+      dimension.name
       ? dimension.name
       : String(index);
   });
@@ -1066,8 +1081,7 @@ function normalizeEnvelope(
     return { parseError: 'Chart data reference resolver is unavailable.' };
   }
 
-  return Promise.resolve()
-    .then(() => resolveDataRef(ref, meta))
+  return resolveDataRefWithTimeout(resolveDataRef, ref, meta)
     .then((resolved) => {
       const result = normalizeEnvelopeDataset({
         kind: 'inline',
@@ -1085,6 +1099,23 @@ function normalizeEnvelope(
           ? `Chart data reference could not be resolved: ${error.message}`
           : 'Chart data reference could not be resolved.',
     }));
+}
+
+function resolveDataRefWithTimeout(
+  resolveDataRef: EchartsFullDataRefResolver,
+  ref: string,
+  meta: EchartsFullDataRefMeta,
+): Promise<EchartsFullDataResolvedDataset> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = globalThis.setTimeout(() => {
+      reject(new Error('Data reference resolution timed out.'));
+    }, DATA_REF_TIMEOUT_MS);
+
+    Promise.resolve()
+      .then(() => resolveDataRef(ref, meta))
+      .then(resolve, reject)
+      .finally(() => globalThis.clearTimeout(timeoutId));
+  });
 }
 
 function parseOption(
@@ -1158,9 +1189,28 @@ function EchartsFullDataBlockFromCode({
   loadEcharts,
   resolveDataRef,
 }: EchartsFullDataBlockFromCodeProps) {
+  const resolveDataRefRef = useRef(resolveDataRef);
+  resolveDataRefRef.current = resolveDataRef;
+  const hasResolveDataRef = !!resolveDataRef;
+  const stableResolveDataRef = useCallback<EchartsFullDataRefResolver>(
+    (ref, meta) => {
+      const resolver = resolveDataRefRef.current;
+      if (!resolver) {
+        throw new Error('Chart data reference resolver is unavailable.');
+      }
+      return resolver(ref, meta);
+    },
+    [],
+  );
   const parsed = useMemo<ParseOptionMaybePromise>(
-    () => (isStreaming ? {} : parseOption(code, resolveDataRef)),
-    [code, isStreaming, resolveDataRef],
+    () =>
+      isStreaming
+        ? {}
+        : parseOption(
+            code,
+            hasResolveDataRef ? stableResolveDataRef : undefined,
+          ),
+    [code, hasResolveDataRef, isStreaming, stableResolveDataRef],
   );
   const [resolvedParsed, setResolvedParsed] = useState<ParseOptionResult>({});
   const isResolvingRef = isPromiseResult(parsed);
@@ -1309,6 +1359,11 @@ function EchartsDataTable({
   rows: DatasetSource;
 }) {
   const { t } = useI18n();
+  const table = useMemo(
+    () => toEnhancedTableData(columns, rows),
+    [columns, rows],
+  );
+
   if (columns.length === 0 || rows.length === 0) {
     return <div className={styles.state}>{t('echartsChart.noData')}</div>;
   }
@@ -1322,7 +1377,7 @@ function EchartsDataTable({
 
   return (
     <div data-testid="echarts-fulldata-table">
-      <EnhancedTable table={toEnhancedTableData(columns, rows)} />
+      <EnhancedTable table={table} />
     </div>
   );
 }
@@ -1353,12 +1408,10 @@ export function EchartsFullDataBlock({
   const removeResizeRef = useRef<() => void>(noop);
   const loadEchartsRef = useRef(loadEcharts);
   const renderRequestRef = useRef(0);
-  const themeRef = useRef(theme);
+  const chartThemeRef = useRef<ChartTheme | undefined>(undefined);
   const [mode, setMode] = useState<'chart' | 'data'>('chart');
   const [chartError, setChartError] = useState<string | null>(null);
   const [chartReady, setChartReady] = useState(false);
-  const rows = useMemo(() => getRows(option), [option]);
-  const columns = useMemo(() => getColumns(option), [option]);
   const { sanitizedOption, chartOptionError } = useMemo(() => {
     if (!option || parseError) return {};
     try {
@@ -1367,6 +1420,8 @@ export function EchartsFullDataBlock({
       return { chartOptionError: error };
     }
   }, [option, parseError]);
+  const rows = useMemo(() => getRows(sanitizedOption), [sanitizedOption]);
+  const columns = useMemo(() => getColumns(sanitizedOption), [sanitizedOption]);
   const chartOption = useMemo(
     () =>
       sanitizedOption ? styleOptionForChart(sanitizedOption, theme) : undefined,
@@ -1374,13 +1429,13 @@ export function EchartsFullDataBlock({
   );
   const hasLoadEcharts = !!loadEcharts;
   loadEchartsRef.current = loadEcharts;
-  themeRef.current = theme;
 
   const disposeChart = useCallback(() => {
     removeResizeRef.current();
     removeResizeRef.current = noop;
     chartInstanceRef.current?.dispose();
     chartInstanceRef.current = undefined;
+    chartThemeRef.current = undefined;
   }, []);
 
   useEffect(
@@ -1431,6 +1486,11 @@ export function EchartsFullDataBlock({
     const renderChart = async () => {
       try {
         let chart = chartInstanceRef.current;
+        if (chart && chartThemeRef.current !== theme) {
+          disposeChart();
+          setChartReady(false);
+          chart = undefined;
+        }
         if (!chart) {
           const loadRuntime = loadEchartsRef.current;
           if (!loadRuntime || !chartRef.current) return;
@@ -1438,23 +1498,35 @@ export function EchartsFullDataBlock({
           if (requestId !== renderRequestRef.current || !chartRef.current) {
             return;
           }
-          chart = runtime.init(chartRef.current, themeRef.current);
+          chart = runtime.init(chartRef.current, theme);
           chartInstanceRef.current = chart;
+          chartThemeRef.current = theme;
         }
 
         if (requestId !== renderRequestRef.current) return;
         chart.setOption(chartOption, { notMerge: true });
         if (removeResizeRef.current === noop && chartRef.current) {
-          const onResize = () => chartInstanceRef.current?.resize();
+          let resizeFrame: number | undefined;
+          const onResize = () => {
+            if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
+            resizeFrame = requestAnimationFrame(() => {
+              resizeFrame = undefined;
+              chartInstanceRef.current?.resize();
+            });
+          };
           const observer =
             typeof ResizeObserver === 'undefined'
               ? undefined
               : new ResizeObserver(onResize);
-          observer?.observe(chartRef.current);
-          window.addEventListener('resize', onResize);
+          if (observer) {
+            observer.observe(chartRef.current);
+          } else {
+            window.addEventListener('resize', onResize);
+          }
           removeResizeRef.current = () => {
+            if (resizeFrame !== undefined) cancelAnimationFrame(resizeFrame);
             observer?.disconnect();
-            window.removeEventListener('resize', onResize);
+            if (!observer) window.removeEventListener('resize', onResize);
           };
         }
         setChartReady(true);
@@ -1480,6 +1552,7 @@ export function EchartsFullDataBlock({
     mode,
     parseError,
     t,
+    theme,
   ]);
 
   const title = getTitle(option) ?? t('echartsChart.defaultTitle');

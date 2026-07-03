@@ -529,6 +529,51 @@ describe('EchartsFullDataBlock', () => {
     expect(setOption).not.toHaveBeenCalled();
   });
 
+  it('reports ref resolver timeouts inside the chart card', async () => {
+    vi.useFakeTimers();
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    try {
+      const container = await renderEchartsMarkdown({
+        code: JSON.stringify({
+          version: 1,
+          data: {
+            kind: 'ref',
+            ref: 'artifact://chart-data/slow',
+            format: 'json',
+            dimensions: ['day', 'orders'],
+          },
+          option: {
+            series: [{ type: 'line', encode: { x: 'day', y: 'orders' } }],
+          },
+        }),
+        loadEcharts: () => runtime,
+        resolveDataRef: () => new Promise(() => {}),
+      });
+
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).toContain(
+        'Chart data reference could not be resolved: Data reference resolution timed out.',
+      );
+      expect(container.querySelector('pre code')).toBeNull();
+      expect(setOption).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('ignores stale ref resolutions after the chart code changes', async () => {
     let resolveFirst: (value: {
       dimensions: string[];
@@ -627,6 +672,63 @@ describe('EchartsFullDataBlock', () => {
     await flushChart();
 
     expect(setOption).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not re-resolve ref data when the resolver prop identity changes', async () => {
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+    const resolveDataRef = vi.fn(async () => ({
+      dimensions: ['day', 'orders'],
+      source: [['Mon', 120]],
+    }));
+    const content = `\`\`\`echarts-fulldata\n${JSON.stringify({
+      version: 1,
+      data: {
+        kind: 'ref',
+        ref: 'artifact://chart-data/orders',
+        format: 'json',
+        dimensions: ['day', 'orders'],
+      },
+      option: {
+        title: { text: 'Stable resolver' },
+        series: [{ type: 'line', encode: { x: 'day', y: 'orders' } }],
+      },
+    })}\n\`\`\``;
+    const tree = (nonce: number) => (
+      <I18nProvider language="en">
+        <ThemeProvider value="dark">
+          <WebShellCustomizationProvider
+            value={{
+              markdown: {
+                renderCodeBlock: createEchartsFullDataRenderer({
+                  loadEcharts: () => runtime,
+                  resolveDataRef: (ref, meta) => {
+                    void nonce;
+                    return resolveDataRef(ref, meta);
+                  },
+                }),
+              },
+            }}
+          >
+            <Markdown content={content} source="assistant" />
+          </WebShellCustomizationProvider>
+        </ThemeProvider>
+      </I18nProvider>
+    );
+
+    const { rerender } = await mount(tree(1));
+    await flushChart();
+    await rerender(tree(2));
+    await flushChart();
+
+    expect(resolveDataRef).toHaveBeenCalledOnce();
+    expect(setOption).toHaveBeenCalledOnce();
   });
 
   it('reports missing and unsupported ref resolver states without showing raw code', async () => {
@@ -799,11 +901,55 @@ describe('EchartsFullDataBlock', () => {
     ]);
   });
 
+  it('uses the sanitized dataset consistently for chart and data views', async () => {
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+    const option: EchartsFullDataOption = {
+      title: { text: 'Sanitized rows' },
+      dataset: {
+        dimensions: ['label', 'url'],
+        source: [{ label: 'x<y', url: 'javascript:alert(1)' }],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 'label', y: 'url' } }],
+    };
+
+    const container = await render(
+      <EchartsFullDataBlock
+        option={option}
+        theme="dark"
+        loadEcharts={() => runtime}
+      />,
+    );
+    await flushChart();
+
+    const renderedOption = setOption.mock.calls[0]?.[0] as {
+      dataset?: { source?: Array<Record<string, unknown>> };
+    };
+    expect(renderedOption.dataset?.source?.[0]).toEqual({
+      label: 'x<y',
+      url: '',
+    });
+
+    await act(async () => {
+      container.querySelectorAll('button')[1]?.click();
+    });
+
+    expect(getDataRows(container)).toEqual([['x<y', '']]);
+  });
+
   it('preserves array-row columns for unnamed object dimensions', async () => {
     const option: EchartsFullDataOption = {
       title: { text: 'Weekly orders' },
       dataset: {
-        dimensions: [{}, { name: 'orders' }],
+        dimensions: [null, {}, { name: 'orders' }] as unknown as string[],
         source: [['Mon', 120]],
       },
       xAxis: { type: 'category' },
@@ -978,7 +1124,7 @@ describe('EchartsFullDataBlock', () => {
     expect(dispose).not.toHaveBeenCalled();
   });
 
-  it('restyles the existing chart when the theme changes', async () => {
+  it('reinitializes the chart when the theme changes', async () => {
     const plainOption: EchartsFullDataOption = {
       title: { text: 'Weekly orders' },
       dataset: {
@@ -1022,8 +1168,18 @@ describe('EchartsFullDataBlock', () => {
     await flushChart();
 
     expect(cloneCount).toBe(1);
-    expect(runtime.init).toHaveBeenCalledOnce();
-    expect(dispose).not.toHaveBeenCalled();
+    expect(runtime.init).toHaveBeenCalledTimes(2);
+    expect(runtime.init).toHaveBeenNthCalledWith(
+      1,
+      expect.any(HTMLElement),
+      'dark',
+    );
+    expect(runtime.init).toHaveBeenNthCalledWith(
+      2,
+      expect.any(HTMLElement),
+      'light',
+    );
+    expect(dispose).toHaveBeenCalledOnce();
     expect(setOption).toHaveBeenCalledTimes(2);
     expect(setOption.mock.calls[0]?.[0]).toEqual(
       expect.objectContaining({ backgroundColor: '#0d0d0d' }),
@@ -1077,6 +1233,7 @@ describe('EchartsFullDataBlock', () => {
 
   it('observes chart container resize after initialization', async () => {
     const originalResizeObserver = globalThis.ResizeObserver;
+    const addEventListener = vi.spyOn(window, 'addEventListener');
     const observe = vi.fn();
     const disconnect = vi.fn();
     class ResizeObserverStub {
@@ -1113,6 +1270,9 @@ describe('EchartsFullDataBlock', () => {
       await flushChart();
 
       expect(observe).toHaveBeenCalledWith(expect.any(HTMLElement));
+      expect(
+        addEventListener.mock.calls.filter(([type]) => type === 'resize'),
+      ).toHaveLength(0);
     } finally {
       globalThis.ResizeObserver = originalResizeObserver;
     }
@@ -1302,10 +1462,10 @@ describe('EchartsFullDataBlock', () => {
       data: [120, 999],
       href: 'javascript:alert(1)',
       id: 'data:text/html,<svg onload=alert(1)>',
-      name: '<a'.repeat(32),
+      name: 'blob:https://example.test/marker',
       encode: { x: 'day', y: 'orders' },
       itemStyle: {
-        image: 'https://example.test/marker.png',
+        image: 'file:///tmp/marker.png',
       },
       renderItem: 'javascript:alert(1)',
       src: 'https://example.test/marker.png',
@@ -1321,12 +1481,20 @@ describe('EchartsFullDataBlock', () => {
       value: { polluted: true },
       enumerable: true,
     });
+    const unsafeRow: Record<string, unknown> = {
+      day: 'javascript:alert(1)',
+      orders: 120,
+    };
+    Object.defineProperty(unsafeRow, '__proto__', {
+      value: null,
+      enumerable: true,
+    });
 
     const option: EchartsFullDataOption = {
       dataset: [
         {
           dimensions: ['day', 'orders'],
-          source: [{ day: '<img src=x onerror=alert(1)>', orders: 120 }],
+          source: [unsafeRow],
           transform: { type: 'filter' },
         },
         {
@@ -1365,10 +1533,10 @@ describe('EchartsFullDataBlock', () => {
     await flushChart();
 
     const renderedOption = setOption.mock.calls[0]?.[0] as {
-      dataset?: {
+      dataset?: Array<{
         source?: Array<Record<string, unknown>>;
         transform?: unknown;
-      };
+      }>;
       graphic?: unknown;
       legend?: { data?: unknown };
       tooltip?: {
@@ -1399,9 +1567,20 @@ describe('EchartsFullDataBlock', () => {
       }>;
     };
     expect(renderedOption.graphic).toBeUndefined();
-    expect(renderedOption.dataset?.transform).toBeUndefined();
-    expect(renderedOption.dataset?.source?.[0]?.day).toBe('');
-    expect(renderedOption.dataset?.source).toHaveLength(1);
+    expect(renderedOption.dataset).toHaveLength(2);
+    expect(renderedOption.dataset?.[0]?.transform).toBeUndefined();
+    expect(renderedOption.dataset?.[0]?.source?.[0]?.day).toBe('');
+    expect(renderedOption.dataset?.[0]?.source).toHaveLength(1);
+    expect(
+      Object.getPrototypeOf(renderedOption.dataset?.[0]?.source?.[0]),
+    ).toBe(Object.prototype);
+    expect(
+      Object.prototype.hasOwnProperty.call(
+        renderedOption.dataset?.[0]?.source?.[0],
+        '__proto__',
+      ),
+    ).toBe(false);
+    expect(renderedOption.dataset?.[1]?.source?.[0]?.day).toBe('Tue');
     expect(renderedOption.legend?.data).toBeUndefined();
     expect(renderedOption.tooltip?.formatter).toBeUndefined();
     expect(renderedOption.tooltip?.extraCssText).not.toContain('https://');
@@ -1413,7 +1592,7 @@ describe('EchartsFullDataBlock', () => {
     );
     expect(renderedOption.xAxis?.data).toBeUndefined();
     expect(renderedOption.series?.[0]?.data).toBeUndefined();
-    expect(renderedOption.series?.[0]?.datasetIndex).toBeUndefined();
+    expect(renderedOption.series?.[0]?.datasetIndex).toBe(1);
     expect(renderedOption.series?.[0]?.href).toBeUndefined();
     expect(renderedOption.series?.[0]?.id).toBeUndefined();
     expect(renderedOption.series?.[0]?.itemStyle?.image).toBeUndefined();
@@ -1508,7 +1687,11 @@ describe('EchartsFullDataBlock', () => {
     );
     await flushChart();
 
-    expect(container.textContent).toContain('图表加载中');
+    expect(
+      container
+        .querySelector('[data-testid="echarts-fulldata-rendered"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('图表');
     expect(container.textContent).toContain('图表运行时不可用。');
     expect(
       container.querySelector('button[aria-label="显示图表"]'),
