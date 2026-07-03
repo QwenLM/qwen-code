@@ -798,7 +798,7 @@ describe('workspace memory remember routes', () => {
     expect(bridge.rememberCalls).toHaveLength(0);
   });
 
-  it('returns remember_failed when the availability check throws', async () => {
+  it('returns kind-specific error codes when the availability check throws', async () => {
     const bridge = buildBridgeStub({
       availableImpl: vi.fn().mockRejectedValue(new Error('bridge closed')),
     });
@@ -810,7 +810,23 @@ describe('workspace memory remember routes', () => {
       .expect((res) => {
         expect(res.body.code).toBe('remember_failed');
       });
+    await request(app)
+      .post('/workspace/memory/forget')
+      .send({ query: 'old preference' })
+      .expect(500)
+      .expect((res) => {
+        expect(res.body.code).toBe('forget_failed');
+      });
+    await request(app)
+      .post('/workspace/memory/dream')
+      .send({})
+      .expect(500)
+      .expect((res) => {
+        expect(res.body.code).toBe('dream_failed');
+      });
     expect(bridge.rememberCalls).toHaveLength(0);
+    expect(bridge.forgetCalls).toHaveLength(0);
+    expect(bridge.dreamCalls).toBe(0);
   });
 
   it('records bridge failures with stable public error codes', async () => {

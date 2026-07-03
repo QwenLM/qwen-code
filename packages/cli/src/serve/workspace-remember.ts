@@ -508,6 +508,7 @@ function validateOriginatorClientId(
 async function validateManagedMemoryAvailable(
   deps: WorkspaceRememberRouteDeps,
   res: Response,
+  kind: WorkspaceMemoryTaskKind,
 ): Promise<boolean> {
   try {
     const available = await deps.bridge.isWorkspaceMemoryRememberAvailable();
@@ -521,9 +522,10 @@ async function validateManagedMemoryAvailable(
     return true;
   } catch (err) {
     debugLogger.error('Availability check failed:', err);
+    const code = `${kind}_failed`;
     res.status(500).json({
-      error: 'Workspace memory task failed.',
-      code: 'remember_failed',
+      error: publicErrorMessage(code, kind),
+      code,
     });
     return false;
   }
@@ -569,7 +571,9 @@ export function mountWorkspaceMemoryRememberRoutes(
       const originatorClientId = validateOriginatorClientId(deps, req, res);
       if (originatorClientId === null) return;
 
-      if (!(await validateManagedMemoryAvailable(deps, res))) return;
+      if (!(await validateManagedMemoryAvailable(deps, res, 'remember'))) {
+        return;
+      }
 
       let task: WorkspaceMemoryRememberTaskSnapshot;
       try {
@@ -638,7 +642,7 @@ export function mountWorkspaceMemoryRememberRoutes(
 
       const originatorClientId = validateOriginatorClientId(deps, req, res);
       if (originatorClientId === null) return;
-      if (!(await validateManagedMemoryAvailable(deps, res))) return;
+      if (!(await validateManagedMemoryAvailable(deps, res, 'forget'))) return;
 
       try {
         const task = deps.lane.enqueueForget({
@@ -684,7 +688,7 @@ export function mountWorkspaceMemoryRememberRoutes(
     async (req, res) => {
       const originatorClientId = validateOriginatorClientId(deps, req, res);
       if (originatorClientId === null) return;
-      if (!(await validateManagedMemoryAvailable(deps, res))) return;
+      if (!(await validateManagedMemoryAvailable(deps, res, 'dream'))) return;
 
       try {
         const task = deps.lane.enqueueDream({
