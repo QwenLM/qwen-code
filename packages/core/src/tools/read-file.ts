@@ -29,6 +29,7 @@ import { Storage } from '../config/storage.js';
 import { isAnyAutoMemPath } from '../memory/paths.js';
 import { memoryFreshnessNote } from '../memory/memoryAge.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { DEFAULT_FILE_FILTERING_OPTIONS } from '../config/constants.js';
 
 const debugLogger = createDebugLogger('READ_FILE_CACHE');
 
@@ -442,7 +443,7 @@ export class ReadFileTool extends BaseDeclarativeTool<
             properties: {
               respect_git_ignore: {
                 description:
-                  'Optional: Whether to respect .gitignore patterns when reading files. Only available in git repositories. Defaults to the value from settings.',
+                  'Optional: Whether to respect .gitignore patterns when reading files. Only available in git repositories. Defaults to false because .gitignore is for version control, not access control. Set to true to block git-excluded files.',
                 type: 'boolean',
               },
               respect_qwen_ignore: {
@@ -515,24 +516,28 @@ export class ReadFileTool extends BaseDeclarativeTool<
 
     const fileService = this.config.getFileService();
     const configOpts = this.config.getFileFilteringOptions();
+
+    // Deliberately defaults to false (not configOpts.respectGitIgnore).
+    // .gitignore means "do not commit", not "do not read" — blocking git-excluded
+    // files by default degrades workflows involving .env, dist/, node_modules, etc.
+    // Users can opt in via file_filtering_options.per-call override.
     const respectGitIgnore =
       params.file_filtering_options?.respect_git_ignore ?? false;
+
     const respectQwenIgnore =
       params.file_filtering_options?.respect_qwen_ignore ??
-      configOpts.respectQwenIgnore;
+      configOpts.respectQwenIgnore ??
+      DEFAULT_FILE_FILTERING_OPTIONS.respectQwenIgnore;
 
+    // Check each ignore rule individually to provide accurate error messages and
+    // avoid redundant double-calls to shouldIgnoreFile + shouldGitIgnoreFile.
+    if (respectGitIgnore && fileService.shouldGitIgnoreFile(params.file_path)) {
+      return `File path '${filePath}' is ignored by .gitignore pattern(s).`;
+    }
     if (
-      fileService.shouldIgnoreFile(params.file_path, {
-        respectGitIgnore,
-        respectQwenIgnore,
-      })
+      respectQwenIgnore &&
+      fileService.shouldQwenIgnoreFile(params.file_path)
     ) {
-      if (
-        respectGitIgnore &&
-        fileService.shouldGitIgnoreFile(params.file_path)
-      ) {
-        return `File path '${filePath}' is ignored by .gitignore pattern(s).`;
-      }
       return `File path '${filePath}' is ignored by ${fileService.getQwenIgnoreFileDisplayForPath(params.file_path)} pattern(s).`;
     }
 
