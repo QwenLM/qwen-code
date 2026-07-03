@@ -396,6 +396,25 @@ describe('SessionArtifactStore', () => {
     }
   });
 
+  it('rejects untrusted file urls', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-untrusted-file-url',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Local file',
+            url: pathToFileURL(path.join(workspace, 'report.html')).href,
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'url' });
+  });
+
   it('evicts non-retained old artifacts before client-retained artifacts', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's3',
@@ -944,6 +963,25 @@ describe('SessionArtifactStore', () => {
         { strict: true },
       ),
     ).rejects.toMatchObject({ field: 'mimeType' });
+  });
+
+  it('rejects external urls with credentials', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-url-credentials',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      store.upsertMany(
+        [
+          {
+            title: 'Credentialed link',
+            url: 'https://user:pass@example.com/report',
+          },
+        ],
+        { strict: true },
+      ),
+    ).rejects.toMatchObject({ field: 'url' });
   });
 
   it('accepts line whitespace in descriptions but not titles', async () => {
