@@ -65,8 +65,6 @@ env:
   # The automated Qwen PR reviewer posts as this account; its review counts as
   # actionable feedback even though it is not a human collaborator.
   REVIEW_BOT: 'qwen-code-ci-bot'
-  # KEEP IN SYNC with KNOWN_AUTOMATION in pr-force-push-reminder.yml.
-  KNOWN_BOTS: '["qwen-code-dev-bot", "qwen-code-ci-bot"]'
   # Human reviews/comments only count when the author is a real maintainer. This
   # is the prompt-injection trust gate: feedback from anyone else is ignored so a
   # hostile commenter cannot steer the agent.
@@ -217,6 +215,18 @@ jobs:
             echo "::error::CI_DEV_BOT_PAT authenticates as ${bot_actor}; expected ${AUTOFIX_BOT}."
             exit 1
           fi
+
+      - name: 'Check runner environment'
+        env:
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+        run: |-
+          case "${RUNNER_ENVIRONMENT}" in
+            github-hosted|self-hosted) ;;
+            *)
+              echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
+              exit 1
+              ;;
+          esac
 
       - name: 'Set up Node.js (hosted)'
         if: |-
@@ -415,79 +425,10 @@ jobs:
             should never be re-scanned. Transient doubts are not permanent.
         run: |-
           start_openai_proxy() {
-            local proxy_info proxy_script local_openai_base_url
+            local proxy_info local_openai_base_url
             proxy_info="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.XXXXXX")"
-            proxy_script="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.XXXXXX.js")"
-            cat > "${proxy_script}" <<'NODE'
-          const fs = require('node:fs');
-          const http = require('node:http');
-          const { Readable } = require('node:stream');
 
-          const baseUrl = process.env.QWEN_UPSTREAM_OPENAI_BASE_URL;
-          const apiKey = process.env.QWEN_UPSTREAM_OPENAI_API_KEY;
-          const infoPath = process.env.QWEN_OPENAI_PROXY_INFO;
-          if (!baseUrl || !apiKey || !infoPath) {
-            console.error('missing OpenAI proxy configuration');
-            process.exit(1);
-          }
-
-          const base = new URL(baseUrl);
-          const basePath = base.pathname.replace(/\/+$/, '');
-          const server = http.createServer(async (req, res) => {
-            if (req.url === '/__health') {
-              res.writeHead(204);
-              res.end();
-              return;
-            }
-            try {
-              const incoming = new URL(req.url || '/', 'http://127.0.0.1');
-              const target = new URL(base.origin);
-              let path = incoming.pathname;
-              if (basePath && basePath !== '/' && path !== basePath && !path.startsWith(`${basePath}/`)) {
-                path = `${basePath}${path.startsWith('/') ? '' : '/'}${path}`;
-              }
-              target.pathname = path;
-              target.search = incoming.search;
-              if (req.method !== 'POST' || !target.pathname.endsWith('/chat/completions')) {
-                res.writeHead(403, { 'content-type': 'text/plain' });
-                res.end('proxy: only POST /chat/completions is allowed\n');
-                return;
-              }
-              const headers = new Headers(req.headers);
-              headers.delete('host');
-              headers.delete('content-length');
-              headers.set('authorization', `Bearer ${apiKey}`);
-              const upstream = await fetch(target, {
-                method: req.method,
-                headers,
-                body: req,
-                duplex: 'half',
-              });
-              const responseHeaders = {};
-              upstream.headers.forEach((value, key) => {
-                if (!['content-encoding', 'content-length'].includes(key.toLowerCase())) {
-                  responseHeaders[key] = value;
-                }
-              });
-              res.writeHead(upstream.status, responseHeaders);
-              if (upstream.body) {
-                Readable.fromWeb(upstream.body).pipe(res);
-              } else {
-                res.end();
-              }
-            } catch (error) {
-              res.writeHead(502, { 'content-type': 'text/plain' });
-              res.end(`proxy error: ${error instanceof Error ? error.message : String(error)}\n`);
-            }
-          });
-          server.listen(0, '127.0.0.1', () => {
-            const address = server.address();
-            const path = basePath && basePath !== '/' ? basePath : '';
-            fs.writeFileSync(infoPath, `http://127.0.0.1:${address.port}${path}`);
-          });
-          NODE
-
-            QWEN_OPENAI_PROXY_INFO="${proxy_info}" node "${proxy_script}" &
+            QWEN_OPENAI_PROXY_INFO="${proxy_info}" node .github/scripts/openai-proxy.mjs &
             OPENAI_PROXY_PID=$!
             trap 'kill "${OPENAI_PROXY_PID}" 2>/dev/null || true' EXIT
             for _ in 1 2 3 4 5; do
@@ -693,79 +634,10 @@ jobs:
           BRANCH="autofix/issue-${ISSUE}"
 
           start_openai_proxy() {
-            local proxy_info proxy_script local_openai_base_url
+            local proxy_info local_openai_base_url
             proxy_info="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.XXXXXX")"
-            proxy_script="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.XXXXXX.js")"
-            cat > "${proxy_script}" <<'NODE'
-          const fs = require('node:fs');
-          const http = require('node:http');
-          const { Readable } = require('node:stream');
 
-          const baseUrl = process.env.QWEN_UPSTREAM_OPENAI_BASE_URL;
-          const apiKey = process.env.QWEN_UPSTREAM_OPENAI_API_KEY;
-          const infoPath = process.env.QWEN_OPENAI_PROXY_INFO;
-          if (!baseUrl || !apiKey || !infoPath) {
-            console.error('missing OpenAI proxy configuration');
-            process.exit(1);
-          }
-
-          const base = new URL(baseUrl);
-          const basePath = base.pathname.replace(/\/+$/, '');
-          const server = http.createServer(async (req, res) => {
-            if (req.url === '/__health') {
-              res.writeHead(204);
-              res.end();
-              return;
-            }
-            try {
-              const incoming = new URL(req.url || '/', 'http://127.0.0.1');
-              const target = new URL(base.origin);
-              let path = incoming.pathname;
-              if (basePath && basePath !== '/' && path !== basePath && !path.startsWith(`${basePath}/`)) {
-                path = `${basePath}${path.startsWith('/') ? '' : '/'}${path}`;
-              }
-              target.pathname = path;
-              target.search = incoming.search;
-              if (req.method !== 'POST' || !target.pathname.endsWith('/chat/completions')) {
-                res.writeHead(403, { 'content-type': 'text/plain' });
-                res.end('proxy: only POST /chat/completions is allowed\n');
-                return;
-              }
-              const headers = new Headers(req.headers);
-              headers.delete('host');
-              headers.delete('content-length');
-              headers.set('authorization', `Bearer ${apiKey}`);
-              const upstream = await fetch(target, {
-                method: req.method,
-                headers,
-                body: req,
-                duplex: 'half',
-              });
-              const responseHeaders = {};
-              upstream.headers.forEach((value, key) => {
-                if (!['content-encoding', 'content-length'].includes(key.toLowerCase())) {
-                  responseHeaders[key] = value;
-                }
-              });
-              res.writeHead(upstream.status, responseHeaders);
-              if (upstream.body) {
-                Readable.fromWeb(upstream.body).pipe(res);
-              } else {
-                res.end();
-              }
-            } catch (error) {
-              res.writeHead(502, { 'content-type': 'text/plain' });
-              res.end(`proxy error: ${error instanceof Error ? error.message : String(error)}\n`);
-            }
-          });
-          server.listen(0, '127.0.0.1', () => {
-            const address = server.address();
-            const path = basePath && basePath !== '/' ? basePath : '';
-            fs.writeFileSync(infoPath, `http://127.0.0.1:${address.port}${path}`);
-          });
-          NODE
-
-            QWEN_OPENAI_PROXY_INFO="${proxy_info}" node "${proxy_script}" &
+            QWEN_OPENAI_PROXY_INFO="${proxy_info}" node .github/scripts/openai-proxy.mjs &
             OPENAI_PROXY_PID=$!
             trap 'kill "${OPENAI_PROXY_PID}" 2>/dev/null || true' EXIT
             for _ in 1 2 3 4 5; do
@@ -805,6 +677,13 @@ jobs:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
         run: |-
           BRANCH="autofix/issue-${ISSUE}"
+
+          if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
+            echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
+            git status --short
+            cat "${WORKDIR}/failure.md"
+            exit 1
+          fi
 
           if [[ -f "${WORKDIR}/failure.md" ]]; then
             echo "🛑 Agent aborted intentionally:"
@@ -1113,6 +992,18 @@ jobs:
           rm -rf "${WORKDIR}"
           mkdir -p "${WORKDIR}"
 
+      - name: 'Check runner environment'
+        env:
+          RUNNER_ENVIRONMENT: '${{ runner.environment }}'
+        run: |-
+          case "${RUNNER_ENVIRONMENT}" in
+            github-hosted|self-hosted) ;;
+            *)
+              echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
+              exit 1
+              ;;
+          esac
+
       - name: 'Set up Node.js (hosted)'
         if: |-
           ${{ runner.environment == 'github-hosted' }}
@@ -1346,79 +1237,10 @@ jobs:
               without committing. An honest abort beats a wrong or churn change.
         run: |-
           start_openai_proxy() {
-            local proxy_info proxy_script local_openai_base_url
+            local proxy_info local_openai_base_url
             proxy_info="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.XXXXXX")"
-            proxy_script="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.XXXXXX.js")"
-            cat > "${proxy_script}" <<'NODE'
-          const fs = require('node:fs');
-          const http = require('node:http');
-          const { Readable } = require('node:stream');
 
-          const baseUrl = process.env.QWEN_UPSTREAM_OPENAI_BASE_URL;
-          const apiKey = process.env.QWEN_UPSTREAM_OPENAI_API_KEY;
-          const infoPath = process.env.QWEN_OPENAI_PROXY_INFO;
-          if (!baseUrl || !apiKey || !infoPath) {
-            console.error('missing OpenAI proxy configuration');
-            process.exit(1);
-          }
-
-          const base = new URL(baseUrl);
-          const basePath = base.pathname.replace(/\/+$/, '');
-          const server = http.createServer(async (req, res) => {
-            if (req.url === '/__health') {
-              res.writeHead(204);
-              res.end();
-              return;
-            }
-            try {
-              const incoming = new URL(req.url || '/', 'http://127.0.0.1');
-              const target = new URL(base.origin);
-              let path = incoming.pathname;
-              if (basePath && basePath !== '/' && path !== basePath && !path.startsWith(`${basePath}/`)) {
-                path = `${basePath}${path.startsWith('/') ? '' : '/'}${path}`;
-              }
-              target.pathname = path;
-              target.search = incoming.search;
-              if (req.method !== 'POST' || !target.pathname.endsWith('/chat/completions')) {
-                res.writeHead(403, { 'content-type': 'text/plain' });
-                res.end('proxy: only POST /chat/completions is allowed\n');
-                return;
-              }
-              const headers = new Headers(req.headers);
-              headers.delete('host');
-              headers.delete('content-length');
-              headers.set('authorization', `Bearer ${apiKey}`);
-              const upstream = await fetch(target, {
-                method: req.method,
-                headers,
-                body: req,
-                duplex: 'half',
-              });
-              const responseHeaders = {};
-              upstream.headers.forEach((value, key) => {
-                if (!['content-encoding', 'content-length'].includes(key.toLowerCase())) {
-                  responseHeaders[key] = value;
-                }
-              });
-              res.writeHead(upstream.status, responseHeaders);
-              if (upstream.body) {
-                Readable.fromWeb(upstream.body).pipe(res);
-              } else {
-                res.end();
-              }
-            } catch (error) {
-              res.writeHead(502, { 'content-type': 'text/plain' });
-              res.end(`proxy error: ${error instanceof Error ? error.message : String(error)}\n`);
-            }
-          });
-          server.listen(0, '127.0.0.1', () => {
-            const address = server.address();
-            const path = basePath && basePath !== '/' ? basePath : '';
-            fs.writeFileSync(infoPath, `http://127.0.0.1:${address.port}${path}`);
-          });
-          NODE
-
-            QWEN_OPENAI_PROXY_INFO="${proxy_info}" node "${proxy_script}" &
+            QWEN_OPENAI_PROXY_INFO="${proxy_info}" node .github/scripts/openai-proxy.mjs &
             OPENAI_PROXY_PID=$!
             trap 'kill "${OPENAI_PROXY_PID}" 2>/dev/null || true' EXIT
             for _ in 1 2 3 4 5; do
@@ -1453,6 +1275,14 @@ jobs:
       - name: 'Verification gate'
         id: 'verify'
         run: |-
+          if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
+            echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
+            git status --short
+            cat "${WORKDIR}/failure.md"
+            echo "outcome=failed" >> "${GITHUB_OUTPUT}"
+            exit 1
+          fi
+
           if [[ -f "${WORKDIR}/failure.md" ]]; then
             echo "🛑 Agent aborted intentionally:"
             cat "${WORKDIR}/failure.md"

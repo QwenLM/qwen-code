@@ -4,10 +4,18 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import http from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+const openAiProxyScript = readFileSync(
+  '.github/scripts/openai-proxy.mjs',
+  'utf8',
+);
 const checkBotCredentialsStep =
   workflow.match(
     /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js \(hosted\)')/,
@@ -47,6 +55,34 @@ const resetAutofixWorkspaceSteps =
 const verificationGateSteps =
   workflow.match(/- name: 'Verification gate'[\s\S]*?(?=\n[ ]{6}- name: ')/g) ??
   [];
+const openAiProxyLaunches =
+  workflow.match(/node \.github\/scripts\/openai-proxy\.mjs/g) ?? [];
+
+function listen(server) {
+  return new Promise((resolve) => {
+    server.listen(0, '127.0.0.1', () => {
+      resolve(server.address().port);
+    });
+  });
+}
+
+async function waitForProxy(infoPath, child) {
+  let stderr = '';
+  child.stderr.on('data', (chunk) => {
+    stderr += chunk.toString();
+  });
+
+  for (let i = 0; i < 50; i += 1) {
+    if (existsSync(infoPath)) {
+      return readFileSync(infoPath, 'utf8');
+    }
+    if (child.exitCode !== null) {
+      throw new Error(`proxy exited early: ${stderr}`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`proxy did not become ready: ${stderr}`);
+}
 
 describe('qwen-autofix workflow', () => {
   it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
@@ -191,6 +227,10 @@ describe('qwen-autofix workflow', () => {
   it('runs heavy autofix jobs on dedicated runners without sandbox images', () => {
     expect(workflow).toContain('["self-hosted", "linux", "x64", "autofix"]');
     expect(workflow).toContain('AUTOFIX_ECS_RUNNER_DISABLED');
+    expect(workflow).toContain(
+      "RUNNER_ENVIRONMENT: '${{ runner.environment }}'",
+    );
+    expect(workflow).toContain('Unsupported runner environment');
     expect(prepareQwenCliSteps).toHaveLength(2);
     for (const step of prepareQwenCliSteps) {
       expect(step).toContain(
@@ -213,6 +253,7 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain('QWEN_SANDBOX_IMAGE');
     expect(workflow).not.toContain('ghcr.io/qwenlm/qwen-code');
     expect(workflow).not.toContain('npm view @qwen-code/qwen-code@latest');
+    expect(workflow).not.toContain('KNOWN_BOTS');
   });
 
   it('uses the standard checkout action for autonomous runner jobs', () => {
@@ -298,9 +339,77 @@ describe('qwen-autofix workflow', () => {
         "QWEN_UPSTREAM_OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'",
       );
       expect(step).toContain('start_openai_proxy');
+      expect(step).toContain('node .github/scripts/openai-proxy.mjs');
       expect(step).toContain('OPENAI_API_KEY=qwen-loopback-proxy');
       expect(step).toContain('unset QWEN_UPSTREAM_OPENAI_API_KEY');
       expect(step).toContain('unset QWEN_UPSTREAM_OPENAI_BASE_URL');
+    }
+    expect(openAiProxyLaunches).toHaveLength(3);
+    expect(workflow).not.toContain('proxy_script="$(mktemp');
+    expect(workflow).not.toContain('cat > "${proxy_script}"');
+  });
+
+  it('keeps the OpenAI proxy behavior covered by a runnable script', async () => {
+    expect(openAiProxyScript).toContain(
+      "headers.set('authorization', `Bearer ${apiKey}`)",
+    );
+    expect(openAiProxyScript).toContain(
+      "finishWith(res, 403, 'proxy: only POST /chat/completions is allowed\\n')",
+    );
+
+    const requests = [];
+    const upstream = http.createServer((req, res) => {
+      requests.push({
+        method: req.method,
+        url: req.url,
+        authorization: req.headers.authorization,
+      });
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ ok: true }));
+    });
+    const upstreamPort = await listen(upstream);
+    const tempDir = mkdtempSync(join(tmpdir(), 'qwen-openai-proxy-'));
+    const infoPath = join(tempDir, 'proxy-info');
+    const child = spawn('node', ['.github/scripts/openai-proxy.mjs'], {
+      env: {
+        ...process.env,
+        QWEN_UPSTREAM_OPENAI_BASE_URL: `http://127.0.0.1:${upstreamPort}/v1`,
+        QWEN_UPSTREAM_OPENAI_API_KEY: 'real-key',
+        QWEN_OPENAI_PROXY_INFO: infoPath,
+      },
+      stdio: ['ignore', 'ignore', 'pipe'],
+    });
+
+    try {
+      const proxyBase = await waitForProxy(infoPath, child);
+
+      const health = await fetch(proxyBase.replace(/\/v1$/, '') + '/__health');
+      expect(health.status).toBe(204);
+
+      const denied = await fetch(`${proxyBase}/chat/completions`);
+      expect(denied.status).toBe(403);
+
+      const proxied = await fetch(`${proxyBase}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          authorization: 'Bearer fake-key',
+          'content-type': 'application/json',
+        },
+        body: JSON.stringify({ messages: [] }),
+      });
+      expect(proxied.status).toBe(200);
+      expect(await proxied.json()).toEqual({ ok: true });
+      expect(requests).toEqual([
+        {
+          method: 'POST',
+          url: '/v1/chat/completions',
+          authorization: 'Bearer real-key',
+        },
+      ]);
+    } finally {
+      child.kill();
+      upstream.close();
+      rmSync(tempDir, { force: true, recursive: true });
     }
   });
 });
