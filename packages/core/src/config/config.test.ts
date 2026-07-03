@@ -1805,6 +1805,31 @@ describe('Server Config (config.ts)', () => {
     expect(reinitialize).toHaveBeenCalledOnce();
   });
 
+  it('should surface partial LSP reinitialize failures in status snapshot', async () => {
+    const result = {
+      reconcile: {
+        added: ['tsserver'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: ['clangd'],
+      },
+      skipped: [],
+    };
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize: vi.fn().mockResolvedValue(result),
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'LSP reload partially failed: clangd',
+    });
+  });
+
   it('should surface LSP reinitialize failures in status snapshot', async () => {
     const config = new Config({
       ...baseParams,
@@ -1849,6 +1874,48 @@ describe('Server Config (config.ts)', () => {
     });
 
     await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(config.getLspStatusSnapshot().initializationError).toBeUndefined();
+  });
+
+  it('should clear partial LSP reinitialize failures after full recovery', async () => {
+    const partialFailure = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: ['clangd'],
+      },
+      skipped: [],
+    };
+    const success = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: ['clangd'],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi
+      .fn()
+      .mockResolvedValueOnce(partialFailure)
+      .mockResolvedValueOnce(success);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(partialFailure);
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'LSP reload partially failed: clangd',
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(success);
     expect(config.getLspStatusSnapshot().initializationError).toBeUndefined();
   });
 

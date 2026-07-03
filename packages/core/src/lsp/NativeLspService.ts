@@ -90,6 +90,8 @@ export class NativeLspService {
   private openedDocuments = new Map<string, Set<string>>();
   private lastConnections = new Map<string, LspConnectionInterface>();
   private reinitializeQueue: Promise<unknown> = Promise.resolve();
+  private reinitializeAbortController: AbortController | undefined;
+  private stopping = false;
 
   constructor(
     config: CoreConfig,
@@ -158,20 +160,45 @@ export class NativeLspService {
   }
 
   async reinitialize(): Promise<LspServiceReinitializeResult> {
-    const run = async () => this.doReinitialize();
+    if (this.stopping) {
+      throw new Error('LSP reinitialize cancelled');
+    }
+    const controller = new AbortController();
+    const run = async () => {
+      this.throwIfReinitializeAborted(controller.signal);
+      this.reinitializeAbortController = controller;
+      try {
+        return await this.doReinitialize(controller.signal);
+      } finally {
+        if (this.reinitializeAbortController === controller) {
+          this.reinitializeAbortController = undefined;
+        }
+      }
+    };
     const next = this.reinitializeQueue.then(run, run);
     this.reinitializeQueue = next.catch(() => undefined);
     return next;
   }
 
-  private async doReinitialize(): Promise<LspServiceReinitializeResult> {
+  private throwIfReinitializeAborted(signal: AbortSignal): void {
+    if (this.stopping || signal.aborted) {
+      throw new Error('LSP reinitialize cancelled');
+    }
+  }
+
+  private async doReinitialize(
+    signal: AbortSignal,
+  ): Promise<LspServiceReinitializeResult> {
+    this.throwIfReinitializeAborted(signal);
     const workspaceTrusted = this.config.isTrustedFolder();
     debugLogger.info(
       `Reinitializing LSP servers: workspaceRoot=${this.workspaceRoot}, trusted=${workspaceTrusted}`,
     );
     if (this.requireTrustedWorkspace && !workspaceTrusted) {
+      this.throwIfReinitializeAborted(signal);
       const removed = Array.from(this.serverManager.getHandles().keys());
       await this.serverManager.stopAll();
+      this.throwIfReinitializeAborted(signal);
       this.clearDocumentTrackingForServers(removed);
       const result = {
         reconcile: {
@@ -191,7 +218,9 @@ export class NativeLspService {
       return result;
     }
 
+    this.throwIfReinitializeAborted(signal);
     const userConfigs = await this.configLoader.loadUserConfigsStrict();
+    this.throwIfReinitializeAborted(signal);
     if (!userConfigs.ok) {
       throw userConfigs.error;
     }
@@ -199,6 +228,7 @@ export class NativeLspService {
     const extensionConfigs = await this.configLoader.loadExtensionConfigs(
       this.getActiveExtensions(),
     );
+    this.throwIfReinitializeAborted(signal);
     const serverConfigs = this.configLoader.mergeConfigs(
       [],
       extensionConfigs,
@@ -208,15 +238,22 @@ export class NativeLspService {
       serverConfigs,
       workspaceTrusted,
     );
-    const restartedOpenDocuments = this.snapshotOpenDocuments(
-      admitted.map((config) => config.name),
-    );
+    this.throwIfReinitializeAborted(signal);
     const reconcile = await this.serverManager.reconcileServerConfigs(admitted);
+    this.throwIfReinitializeAborted(signal);
+    const restartedOpenDocuments = this.snapshotOpenDocuments(
+      reconcile.restarted,
+    );
     this.clearDocumentTrackingForServers([
       ...reconcile.removed,
       ...reconcile.restarted,
     ]);
-    await this.replayOpenDocuments(reconcile.restarted, restartedOpenDocuments);
+    await this.replayOpenDocuments(
+      reconcile.restarted,
+      restartedOpenDocuments,
+      signal,
+    );
+    this.throwIfReinitializeAborted(signal);
     debugLogger.info(
       `LSP reinitialize result: added=${formatServerNames(
         reconcile.added,
@@ -275,7 +312,9 @@ export class NativeLspService {
   private async replayOpenDocuments(
     serverNames: string[],
     snapshots: Map<string, Set<string>>,
+    signal: AbortSignal,
   ): Promise<void> {
+    this.throwIfReinitializeAborted(signal);
     if (
       serverNames.length === 0 ||
       !serverNames.some((name) => snapshots.has(name))
@@ -284,6 +323,7 @@ export class NativeLspService {
     }
     const readyHandles = new Map(this.getReadyHandles());
     for (const name of serverNames) {
+      this.throwIfReinitializeAborted(signal);
       const handle = readyHandles.get(name);
       const documents = snapshots.get(name);
       if (!handle || !documents) {
@@ -291,6 +331,7 @@ export class NativeLspService {
       }
       let openedAny = false;
       for (const uri of documents) {
+        this.throwIfReinitializeAborted(signal);
         try {
           openedAny = this.sendDocumentOpen(name, handle, uri) || openedAny;
         } catch (error) {
@@ -301,7 +342,7 @@ export class NativeLspService {
         }
       }
       if (openedAny) {
-        await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS);
+        await this.delay(DEFAULT_LSP_DOCUMENT_OPEN_DELAY_MS, signal);
       }
     }
   }
@@ -326,6 +367,8 @@ export class NativeLspService {
    * Stop all LSP servers
    */
   async stop(): Promise<void> {
+    this.stopping = true;
+    this.reinitializeAbortController?.abort();
     await this.serverManager.stopAll();
     this.openedDocuments.clear();
     this.lastConnections.clear();
@@ -697,8 +740,24 @@ export class NativeLspService {
     return justOpened && !this.serverManager.isTypescriptServer(handle);
   }
 
-  private async delay(ms: number): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, ms));
+  private async delay(ms: number, signal?: AbortSignal): Promise<void> {
+    if (!signal) {
+      await new Promise((resolve) => setTimeout(resolve, ms));
+      return;
+    }
+    this.throwIfReinitializeAborted(signal);
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timer);
+        signal.removeEventListener('abort', onAbort);
+        reject(new Error('LSP reinitialize cancelled'));
+      };
+      const timer = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, ms);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
   }
 
   /**

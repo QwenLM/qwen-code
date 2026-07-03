@@ -4418,7 +4418,13 @@ export class Config {
     }
     try {
       const result = await this.lspClient.reinitialize();
-      this.setRuntimeLspInitializationError(undefined);
+      if (result.reconcile.failed.length > 0) {
+        this.setRuntimeLspInitializationError(
+          `LSP reload partially failed: ${result.reconcile.failed.join(', ')}`,
+        );
+      } else {
+        this.setRuntimeLspInitializationError(undefined);
+      }
       return result;
     } catch (error) {
       this.setRuntimeLspInitializationError(

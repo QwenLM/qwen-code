@@ -1012,11 +1012,15 @@ describe('LspServerManager', () => {
     ).buildProcessEnv({
       PATH: '/tmp/fake-bin',
       NODE_OPTIONS: '--require /tmp/hook.js',
+      node_options: '--require /tmp/lowercase-hook.js',
+      Ld_PreLoad: '/tmp/preload.so',
       SAFE_VALUE: '1',
     });
 
     expect(env['PATH']).toBe('/tmp/fake-bin');
     expect(env['NODE_OPTIONS']).toBe(process.env['NODE_OPTIONS']);
+    expect(env['node_options']).toBeUndefined();
+    expect(env['Ld_PreLoad']).toBeUndefined();
     expect(env['SAFE_VALUE']).toBe('1');
   });
 

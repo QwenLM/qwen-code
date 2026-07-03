@@ -1284,13 +1284,6 @@ export function isDebugMode(argv: CliArgs): boolean {
   );
 }
 
-function enableDebugLogFileIfUnset(debugMode: boolean): void {
-  if (!debugMode || process.env['QWEN_DEBUG_LOG_FILE'] !== undefined) {
-    return;
-  }
-  process.env['QWEN_DEBUG_LOG_FILE'] = '1';
-}
-
 /**
  * Validates that the provided config is a valid MCP server configuration object.
  */
@@ -1454,7 +1447,6 @@ export async function loadCliConfig(
   settingsWatcher?: { stopWatching(): void },
 ): Promise<Config> {
   const debugMode = isDebugMode(argv);
-  enableDebugLogFileIfUnset(debugMode);
   const bareMode = isBareMode(argv.bare);
   const safeMode =
     argv.safeMode !== undefined ? argv.safeMode : isSafeModeEnv();

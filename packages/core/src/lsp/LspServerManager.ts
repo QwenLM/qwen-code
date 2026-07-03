@@ -671,7 +671,7 @@ export class LspServerManager {
     }
     const filteredEnv: Record<string, string> = {};
     for (const [key, value] of Object.entries(env)) {
-      if (SECURITY_SENSITIVE_ENV_KEYS.has(key)) {
+      if (SECURITY_SENSITIVE_ENV_KEYS.has(key.toUpperCase())) {
         debugLogger.warn(
           `Ignoring security-sensitive LSP server env override: ${key}`,
         );
