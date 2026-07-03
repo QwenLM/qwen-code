@@ -42,6 +42,7 @@ import { ApprovalMode, type Config } from '../config/config.js';
 import { GeminiChat, StreamEventType } from '../core/geminiChat.js';
 import { createRuntimeContentGeneratorView } from '../models/content-generator-config.js';
 import { createApprovalModeOverride } from '../tools/agent/agent.js';
+import { createDebugLogger } from './debugLogger.js';
 import {
   AgentHeadless,
   AgentEventEmitter,
@@ -61,6 +62,8 @@ import {
 } from './modelId.js';
 import { ToolNames } from '../tools/tool-names.js';
 import { runWithChatRecordingSuppressed } from './chat-recording-suppression-context.js';
+
+const debugLogger = createDebugLogger('FORKED_AGENT');
 
 // ---------------------------------------------------------------------------
 // CacheSafeParams — shared prompt-cache slot
@@ -276,7 +279,8 @@ export async function runWithForkedChatModel<T>(
 
 /**
  * Result from a cache-path runForkedAgent (with cacheSafeParams).
- * Single-turn, text-only — tools are denied.
+ * Single-turn, text-only. Tools stripped by default; pass preserveTools
+ * to keep the parent's tools for cache-prefix matching.
  */
 export interface ForkedQueryResult {
   /** Extracted text response, or null if no text */
@@ -496,8 +500,22 @@ export async function runForkedAgent(
       for await (const event of stream) {
         if (event.type !== StreamEventType.CHUNK) continue;
         const response = event.value;
-        const text = response.candidates?.[0]?.content?.parts
-          ?.filter((p) => !(p as Record<string, unknown>)['thought'])
+        const parts = response.candidates?.[0]?.content?.parts ?? [];
+
+        // Defensive: when preserveTools is true the model could produce
+        // functionCall parts instead of text. Log and discard them.
+        if (
+          preserveTools &&
+          parts.some((p) => (p as Record<string, unknown>).functionCall)
+        ) {
+          debugLogger.warn(
+            'Cache-path forked query received functionCall with preserveTools; discarding.',
+          );
+        }
+
+        const text = parts
+          .filter((p) => !(p as Record<string, unknown>)['thought'])
+          .filter((p) => !(p as Record<string, unknown>).functionCall)
           .map((p) => p.text ?? '')
           .join('');
         if (text) fullText += text;
