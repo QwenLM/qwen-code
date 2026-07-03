@@ -35,6 +35,10 @@ export async function fetchAccessToken(
   });
 
   if (!resp.ok) {
+    // Drain the response body to prevent Undici connection leaks on
+    // repeated token failures; do NOT read or log the body — it may
+    // contain raw tokens.
+    await resp.body?.cancel().catch(() => undefined);
     throw new Error(`QQ Bot token request failed (HTTP ${resp.status})`);
   }
 
@@ -52,9 +56,15 @@ export async function fetchAccessToken(
 }
 
 /**
- * Validate the WebSocket Gateway URL to enforce TLS.
+ * Validate the WebSocket Gateway URL to enforce TLS and known hostname.
  * - Enforces wss:// protocol (hard boundary — throws on non-wss).
- * - Rejects unexpected hostnames (hard boundary — throws on non-approved).
+ * - Rejects hostnames outside `*.qq.com` (hard boundary).
+ *
+ * The QQ Bot Open Platform documents all endpoints under qq.com domains
+ * (api.sgroup.qq.com, sandbox.api.sgroup.qq.com, bots.qq.com). Broader
+ * suffixes like *.tencentcs.com would accept attacker-controlled Tencent
+ * Cloud API Gateway default domains, creating a token-exfiltration vector
+ * if /gateway is tampered with or misdirected.
  */
 export function validateGatewayUrl(url: string): string {
   try {
@@ -64,15 +74,10 @@ export function validateGatewayUrl(url: string): string {
         `QQ Bot gateway URL must use wss:// protocol, got: ${parsed.protocol}`,
       );
     }
-    // Hard reject: only allow known QQ/Tencent gateway hostnames
-    const hostname = parsed.hostname.toLowerCase();
-    if (
-      !hostname.endsWith('.qq.com') &&
-      !hostname.endsWith('.tencent.com') &&
-      !hostname.endsWith('.tencentcs.com')
-    ) {
+    // Hard reject: only allow documented QQ gateway hostnames
+    if (!parsed.hostname.toLowerCase().endsWith('.qq.com')) {
       throw new Error(
-        `QQ Bot gateway URL has unexpected hostname: ${hostname}`,
+        `QQ Bot gateway URL has unexpected hostname: ${parsed.hostname}`,
       );
     }
     return url;
