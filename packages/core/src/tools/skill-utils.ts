@@ -148,7 +148,7 @@ function getCachedOrCompute(
     mc = new Map();
     cacheByManager.set(skillManager, mc);
   }
-  mc.set(config, promise as unknown as CollectedAvailableSkills);
+  mc.set(config, promise);
   return promise;
 }
 

@@ -260,4 +260,48 @@ describe('collectAvailableSkillEntries cache', () => {
     expect(result2.entries).toHaveLength(1);
     expect(result2.entries[0].name).toBe('k8s-skill');
   });
+
+  it('failed compute evicts entry so next call retries', async () => {
+    // The .catch() handler evicts the failed entry so the next caller retries
+    // instead of replaying the same rejection. This test verifies that transient
+    // listSkills() failures (e.g. disk I/O hiccup) don't permanently poison
+    // the cache.
+    const sm = createMockSkillManager();
+    const cfg = createMockConfig();
+    const listSkillsMock = sm.listSkills as ReturnType<typeof vi.fn>;
+
+    // First call: simulate a transient disk I/O error.
+    listSkillsMock.mockRejectedValueOnce(new Error('disk I/O'));
+    await expect(collectAvailableSkillEntries(sm, cfg)).rejects.toThrow(
+      'disk I/O',
+    );
+
+    // Second call: error is gone — should succeed with a fresh listSkills().
+    listSkillsMock.mockResolvedValueOnce([]);
+    const result = await collectAvailableSkillEntries(sm, cfg);
+
+    expect(result).toBeDefined();
+    expect(result).toHaveProperty('entries');
+    // listSkills was called twice: once for the failed attempt, once for the retry.
+    expect(listSkillsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('different configs with same skillManager get independent entries', async () => {
+    // WeakMap per-instance isolation: the primary design motivation for switching
+    // from a singleton to a WeakMap keyed by (skillManager, config). Two different
+    // configs sharing the same skillManager should get independent cache entries
+    // without explicit invalidation.
+    const sm = createMockSkillManager();
+    const cfg1 = createMockConfig();
+    const cfg2 = createMockConfig();
+
+    const r1 = await collectAvailableSkillEntries(sm, cfg1);
+    const r2 = await collectAvailableSkillEntries(sm, cfg2);
+
+    // Different configs → different cache keys → independent entries.
+    expect(r1).not.toBe(r2);
+    // Each config triggered its own listSkills() call.
+    const listSkillsMock = sm.listSkills as ReturnType<typeof vi.fn>;
+    expect(listSkillsMock).toHaveBeenCalledTimes(2);
+  });
 });
