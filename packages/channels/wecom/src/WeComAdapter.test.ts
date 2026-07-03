@@ -1,6 +1,6 @@
 import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type {
   ChannelAgentBridge,
@@ -219,6 +219,7 @@ describe('WeComChannel', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.unstubAllGlobals();
   });
 
@@ -895,6 +896,75 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(client.downloadFile).not.toHaveBeenCalled();
     expect(mocks.httpsRequest).not.toHaveBeenCalled();
+  });
+
+  it('deduplicates media URLs across quoted messages', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.text', {
+      msgid: 'msg-quote-duplicate',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: 'hello' },
+      image: { url: 'https://example.invalid/image', aeskey: 'k1' },
+      quote: {
+        msgtype: 'image',
+        image: { url: 'https://example.invalid/image', aeskey: 'k1' },
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(mocks.httpsRequest).toHaveBeenCalledTimes(1);
+  });
+
+  it('rejects media URLs that resolve to IPv6 link-local addresses', async () => {
+    mocks.lookup.mockResolvedValue([{ address: 'fe90::1', family: 6 }]);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-link-local',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://example.invalid/image', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+  });
+
+  it('removes empty attachment directories during delayed cleanup', async () => {
+    vi.useFakeTimers();
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgid: 'msg-cleanup-dir',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'report.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    const filePath = channel.envelopes[0]?.attachments?.[0]?.filePath;
+    expect(filePath).toBeDefined();
+    expect(existsSync(dirname(filePath!))).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(existsSync(filePath!)).toBe(false);
+    expect(existsSync(dirname(filePath!))).toBe(false);
   });
 
   it('sends markdown text and local media through the SDK', async () => {

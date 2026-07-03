@@ -3,6 +3,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  rmdirSync,
   statSync,
   unlinkSync,
   writeFileSync,
@@ -10,7 +11,7 @@ import {
 import { request as httpsRequest } from 'node:https';
 import type { IncomingHttpHeaders } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { basename, join, resolve, win32, posix } from 'node:path';
+import { basename, dirname, join, resolve, win32, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Buffer } from 'node:buffer';
 import { isIP, type LookupFunction } from 'node:net';
@@ -412,6 +413,7 @@ function cleanupAttachmentFiles(attachments: Attachment[]): void {
     if (!attachment.filePath) continue;
     try {
       unlinkSync(attachment.filePath);
+      rmdirSync(dirname(attachment.filePath));
     } catch {
       // Best effort cleanup only.
     }
@@ -516,11 +518,11 @@ interface InboundMediaRef {
 function collectInboundMediaRefs(
   body: Record<string, unknown>,
   depth = 0,
+  seenUrls = new Set<string>(),
 ): InboundMediaRef[] {
   if (depth > 3) return [];
 
   const refs: InboundMediaRef[] = [];
-  const seenUrls = new Set<string>();
   const add = (type: WeComMediaType, source: Record<string, unknown>): void => {
     const url = getString(source, 'url');
     if (!url || seenUrls.has(url)) return;
@@ -552,7 +554,7 @@ function collectInboundMediaRefs(
   add('voice', getRecord(body, 'voice') ?? {});
 
   const quote = getRecord(body, 'quote');
-  if (quote) refs.push(...collectInboundMediaRefs(quote, depth + 1));
+  if (quote) refs.push(...collectInboundMediaRefs(quote, depth + 1, seenUrls));
 
   return refs;
 }
@@ -878,10 +880,15 @@ function isPublicIpAddress(address: string): boolean {
       host === '::1' ||
       host.startsWith('fc') ||
       host.startsWith('fd') ||
-      host.startsWith('fe80:')
+      isIpv6LinkLocal(host)
     );
   }
   return false;
+}
+
+function isIpv6LinkLocal(host: string): boolean {
+  const firstGroup = Number.parseInt(host.split(':', 1)[0] ?? '', 16);
+  return firstGroup >= 0xfe80 && firstGroup <= 0xfebf;
 }
 
 function parseIpv4Parts(host: string): number[] | undefined {
