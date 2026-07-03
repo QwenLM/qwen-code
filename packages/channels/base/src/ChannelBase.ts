@@ -2146,24 +2146,28 @@ export abstract class ChannelBase {
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
   }
 
-  async handleInbound(envelope: Envelope): Promise<void> {
-    // 1. Group gate: policy + allowlist + mention gating
+  protected async preflightInbound(envelope: Envelope): Promise<boolean> {
     const groupResult = this.groupGate.check(envelope);
     if (!groupResult.allowed) {
       if (groupResult.reason === 'mention_required') {
         this.recordPendingGroupHistory(envelope);
       }
-      return; // silently drop — no pairing, no reply
+      return false;
     }
 
-    // 2. Sender gate: allowlist / pairing / open
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairingCode !== undefined) {
         await this.onPairingRequired(envelope.chatId, result.pairingCode);
       }
-      return;
+      return false;
     }
+
+    return true;
+  }
+
+  async handleInbound(envelope: Envelope): Promise<void> {
+    if (!(await this.preflightInbound(envelope))) return;
 
     // 3. Slash command handling — before session/agent routing
     const parsed = this.parseCommand(envelope.text);

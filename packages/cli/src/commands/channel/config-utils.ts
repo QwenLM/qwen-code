@@ -22,6 +22,7 @@ function resolveOptionalStringField(
   channelName: string,
   rawConfig: Record<string, unknown>,
   field: 'token' | 'clientId' | 'clientSecret',
+  shouldResolveEnvVars: boolean,
 ): string | undefined {
   const value = rawConfig[field];
   if (value === undefined || value === null || value === '') {
@@ -32,7 +33,7 @@ function resolveOptionalStringField(
       `Channel "${channelName}" field "${field}" must be a string.`,
     );
   }
-  return resolveEnvVars(value);
+  return shouldResolveEnvVars ? resolveEnvVars(value) : value;
 }
 
 /**
@@ -94,6 +95,7 @@ export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
   defaultCwd: string = process.cwd(),
+  options: { resolveEnvVars?: boolean } = {},
 ): Promise<ChannelConfig & Record<string, unknown>> {
   if (!rawConfig['type']) {
     throw new Error(`Channel "${name}" is missing required field "type".`);
@@ -109,6 +111,7 @@ export async function parseChannelConfig(
   }
 
   const resolvedRawConfig = { ...rawConfig };
+  const shouldResolveEnvVars = options.resolveEnvVars ?? true;
 
   // Validate plugin-required fields
   for (const field of plugin.requiredConfigFields ?? []) {
@@ -121,16 +124,30 @@ export async function parseChannelConfig(
     if (typeof value !== 'string') {
       throw new Error(`Channel "${name}" field "${field}" must be a string.`);
     }
-    resolvedRawConfig[field] = resolveEnvVars(value);
+    resolvedRawConfig[field] = shouldResolveEnvVars
+      ? resolveEnvVars(value)
+      : value;
   }
 
   // Resolve env vars for known credential fields
-  const token = resolveOptionalStringField(name, rawConfig, 'token') ?? '';
-  const clientId = resolveOptionalStringField(name, rawConfig, 'clientId');
+  const token =
+    resolveOptionalStringField(
+      name,
+      rawConfig,
+      'token',
+      shouldResolveEnvVars,
+    ) ?? '';
+  const clientId = resolveOptionalStringField(
+    name,
+    rawConfig,
+    'clientId',
+    shouldResolveEnvVars,
+  );
   const clientSecret = resolveOptionalStringField(
     name,
     rawConfig,
     'clientSecret',
+    shouldResolveEnvVars,
   );
 
   return {

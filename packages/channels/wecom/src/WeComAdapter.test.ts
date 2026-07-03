@@ -144,14 +144,19 @@ describe('WeComChannel', () => {
     expect(stderr).not.toHaveBeenCalledWith(expect.stringContaining('secret'));
 
     logger.warn('No aesKey provided:', 'https://example.invalid/file');
-    expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('[WeCom:bot] SDK warn: No aesKey provided:'),
+    expect(stderr).toHaveBeenCalledWith('[WeCom:bot] SDK warn event.\n');
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('https://example.invalid/file'),
     );
     stderr.mockRestore();
   });
 
   it('normalizes text messages into envelopes', async () => {
-    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    const channel = new TestWeComChannel(
+      'bot',
+      makeConfig({ groupPolicy: 'open', groups: { '*': {} } }),
+      makeBridge(),
+    );
     await channel.connect();
 
     lastClient().emit('message.text', {
@@ -178,7 +183,14 @@ describe('WeComChannel', () => {
   });
 
   it('normalizes group, voice, mixed, quote, and file messages', async () => {
-    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    const channel = new TestWeComChannel(
+      'bot',
+      makeConfig({
+        groupPolicy: 'open',
+        groups: { '*': { requireMention: false } },
+      }),
+      makeBridge(),
+    );
     await channel.connect();
     const client = lastClient();
     client.downloadFile = vi.fn(async (url: string) =>
@@ -249,7 +261,14 @@ describe('WeComChannel', () => {
   });
 
   it('honors explicit group mention metadata when present', async () => {
-    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    const channel = new TestWeComChannel(
+      'bot',
+      makeConfig({
+        groupPolicy: 'open',
+        groups: { '*': { requireMention: false } },
+      }),
+      makeBridge(),
+    );
     await channel.connect();
     const client = lastClient();
 
@@ -279,6 +298,53 @@ describe('WeComChannel', () => {
     ]);
   });
 
+  it('treats empty mention metadata as explicitly unmentioned', async () => {
+    const channel = new TestWeComChannel(
+      'bot',
+      makeConfig({ groupPolicy: 'open', groups: { '*': {} } }),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.text', {
+      msgid: 'msg-empty-mentions',
+      msgtype: 'text',
+      chattype: 'group',
+      chatid: 'group-1',
+      from: { userid: 'bob' },
+      text: { content: 'background' },
+      mentions: [],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(channel.envelopes).toHaveLength(0);
+  });
+
+  it('does not download attachments for messages rejected by mention gate', async () => {
+    const channel = new TestWeComChannel(
+      'bot',
+      makeConfig({ groupPolicy: 'open', groups: { '*': {} } }),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-unmentioned-image',
+      msgtype: 'image',
+      chattype: 'group',
+      chatid: 'group-1',
+      from: { userid: 'bob' },
+      mentions: [],
+      image: { url: 'https://example.invalid/private-image', aeskey: 'k1' },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(channel.envelopes).toHaveLength(0);
+  });
+
   it('skips inbound attachments that exceed the media size cap', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -301,7 +367,10 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
     expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('skipping oversized attachment'),
+      expect.stringContaining('skipping oversized image attachment'),
+    );
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining('https://example.invalid/large-image'),
     );
     stderr.mockRestore();
   });

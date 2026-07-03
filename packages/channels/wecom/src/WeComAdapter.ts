@@ -3,6 +3,7 @@ import {
   readFileSync,
   realpathSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -75,7 +76,7 @@ const MESSAGE_EVENTS = [
 ] as const;
 
 const DEDUP_TTL_MS = 5 * 60 * 1000;
-const MAX_OUTBOUND_MEDIA_BYTES = 20 * 1024 * 1024;
+const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const MARKDOWN_CHUNK_BYTES = 3800;
 
 export class WeComChannel extends ChannelBase {
@@ -125,7 +126,12 @@ export class WeComChannel extends ChannelBase {
       );
     });
 
-    await client.connect();
+    try {
+      await client.connect();
+    } catch (err) {
+      client.disconnect();
+      throw err;
+    }
     this.client = client;
     this.dedupTimer = setInterval(() => this.cleanupSeenMessages(), 60_000);
     process.stderr.write(`[WeCom:${this.name}] Connected via smart bot.\n`);
@@ -212,8 +218,11 @@ export class WeComChannel extends ChannelBase {
       referencedText: extractQuoteText(body),
     };
 
+    if (!(await this.preflightInbound(envelope))) return;
+
+    let attachments: Attachment[] = [];
     try {
-      const attachments = await this.downloadAttachments(body);
+      attachments = await this.downloadAttachments(body);
       if (attachments.length) {
         envelope.attachments = attachments;
       }
@@ -225,6 +234,14 @@ export class WeComChannel extends ChannelBase {
       await this.handleInbound(envelope);
     } catch (err) {
       if (messageId) this.seenMessages.delete(messageId);
+      for (const attachment of attachments) {
+        if (!attachment.filePath) continue;
+        try {
+          unlinkSync(attachment.filePath);
+        } catch {
+          // Best effort cleanup only.
+        }
+      }
       throw err;
     }
   }
@@ -240,12 +257,9 @@ export class WeComChannel extends ChannelBase {
     for (const ref of refs) {
       const downloaded = await client.downloadFile(ref.url, ref.aesKey);
       const data = downloaded.buffer;
-      if (data.length > MAX_OUTBOUND_MEDIA_BYTES) {
+      if (data.length > MAX_MEDIA_BYTES) {
         process.stderr.write(
-          `[WeCom:${this.name}] skipping oversized attachment (${data.length} bytes): ${sanitizeLogText(
-            ref.url,
-            200,
-          )}\n`,
+          `[WeCom:${this.name}] skipping oversized ${ref.type} attachment (${data.length} bytes).\n`,
         );
         continue;
       }
@@ -314,17 +328,14 @@ function readOptionalString(
 }
 
 function createWeComLogger(name: string): WeComLogger {
-  const write = (level: 'warn' | 'error', parts: unknown[]): void => {
-    const text = parts.map((part) => String(part)).join(' ');
-    process.stderr.write(
-      `[WeCom:${name}] SDK ${level}: ${sanitizeLogText(text, 300)}\n`,
-    );
+  const write = (level: 'warn' | 'error'): void => {
+    process.stderr.write(`[WeCom:${name}] SDK ${level} event.\n`);
   };
   return {
     debug: () => {},
     info: () => {},
-    warn: (...parts) => write('warn', parts),
-    error: (...parts) => write('error', parts),
+    warn: () => write('warn'),
+    error: () => write('error'),
   };
 }
 
@@ -417,6 +428,7 @@ function collectInboundMediaRefs(
   add('image', getRecord(body, 'image') ?? {});
   add('file', getRecord(body, 'file') ?? {});
   add('video', getRecord(body, 'video') ?? {});
+  add('voice', getRecord(body, 'voice') ?? {});
 
   const quote = getRecord(body, 'quote');
   if (quote) refs.push(...collectInboundMediaRefs(quote, depth + 1));
@@ -522,7 +534,7 @@ function readOutboundMedia(
   const real = realpathSync(resolved);
   const stat = statSync(real);
   if (!stat.isFile()) throw new Error(`Not a regular file: ${real}`);
-  if (stat.size > MAX_OUTBOUND_MEDIA_BYTES) {
+  if (stat.size > MAX_MEDIA_BYTES) {
     throw new Error(`Media file too large: ${stat.size} bytes`);
   }
 
@@ -658,15 +670,19 @@ function getExplicitMention(
   if (explicitBoolean !== undefined) return explicitBoolean;
 
   const mentions = collectMentionValues(body);
-  if (!mentions.length) return undefined;
+  if (!mentions.present) return undefined;
 
-  return mentions.some(
+  return mentions.values.some(
     (mention) => mention === botId || mention === '@all' || mention === 'all',
   );
 }
 
-function collectMentionValues(body: Record<string, unknown>): string[] {
+function collectMentionValues(body: Record<string, unknown>): {
+  present: boolean;
+  values: string[];
+} {
   const values: string[] = [];
+  let present = false;
   for (const key of [
     'mentions',
     'mentioned_list',
@@ -676,6 +692,9 @@ function collectMentionValues(body: Record<string, unknown>): string[] {
     'at_userids',
     'atUserIds',
   ]) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) {
+      present = true;
+    }
     for (const item of getArray(body, key)) {
       if (typeof item === 'string') {
         values.push(item);
@@ -689,5 +708,5 @@ function collectMentionValues(body: Record<string, unknown>): string[] {
       }
     }
   }
-  return values;
+  return { present, values };
 }

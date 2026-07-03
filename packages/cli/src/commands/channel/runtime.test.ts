@@ -41,4 +41,19 @@ describe('parseConfiguredChannels', () => {
       }),
     ]);
   });
+
+  it('does not re-expand credentials already resolved by settings loading', async () => {
+    const parsed = await parseConfiguredChannels(
+      {
+        telegram: {
+          type: 'telegram',
+          token: '$TOKEN_LITERAL_VALUE',
+        },
+      },
+      ['telegram'],
+      { defaultCwd: '/workspace' },
+    );
+
+    expect(parsed[0]?.config.token).toBe('$TOKEN_LITERAL_VALUE');
+  });
 });

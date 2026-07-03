@@ -157,6 +157,8 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
     config = await parseChannelConfig(
       name,
       channelsConfig[name] as Record<string, unknown>,
+      process.cwd(),
+      { resolveEnvVars: false },
     );
   } catch (err) {
     writeStderrLine(
