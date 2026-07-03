@@ -319,16 +319,22 @@ pub fn screen_size() -> Option<(u32, u32)> {
 }
 
 /// Ingest the screen size from a `get_screen_size` or `get_desktop_state`
-/// result into the cache. `get_desktop_state` reports `screen_width/height`
-/// (true display size in points); `get_screen_size` reports `width/height`.
+/// result into the cache. For desktop-scope coordinate normalization the
+/// relevant basis is the **screenshot pixel size** (what the model sees),
+/// not the logical display size — on Retina displays these differ by the
+/// backing scale factor.
 pub fn ingest_screen_size(tool: &str, result: &ToolResult) {
     if tool != "get_screen_size" && tool != "get_desktop_state" {
         return;
     }
     if let Some(sc) = result.structured_content.as_ref() {
         let (w, h) = if tool == "get_desktop_state" {
-            let w = sc.get("screen_width").and_then(|v| v.as_u64());
-            let h = sc.get("screen_height").and_then(|v| v.as_u64());
+            // Use screenshot_width/height (physical pixels) — this is the
+            // image the model reasons over and the basis normalize_result
+            // rewrites to 1000. Using screen_width (logical points) would
+            // produce 1/scale coordinate drift on Retina displays.
+            let w = sc.get("screenshot_width").and_then(|v| v.as_u64());
+            let h = sc.get("screenshot_height").and_then(|v| v.as_u64());
             (w, h)
         } else {
             let w = sc.get("width").and_then(|v| v.as_u64());
@@ -643,12 +649,16 @@ mod tests {
 
     #[test]
     fn ingest_screen_size_from_get_desktop_state() {
+        // Retina display: screen_width is logical points, screenshot_width is
+        // physical pixels. The cache must store screenshot (physical) dimensions
+        // because that's the image basis the model operates on.
         let r = ToolResult::text("ok")
             .with_structured(json!({
-                "screen_width": 3840,
-                "screen_height": 2160,
+                "screen_width": 1920,
+                "screen_height": 1080,
                 "screenshot_width": 3840,
                 "screenshot_height": 2160,
+                "scale_factor": 2.0,
             }));
         ingest_screen_size("get_desktop_state", &r);
         assert_eq!(screen_size(), Some((3840, 2160)));
