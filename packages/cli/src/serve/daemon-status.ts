@@ -684,7 +684,33 @@ function summarizeStatusData(data: unknown): SectionSummary {
     }
   }
 
+  summarizeMcpServers(data, summary);
+
   return summary;
+}
+
+function summarizeMcpServers(
+  data: StatusRecord,
+  summary: SectionSummary,
+): void {
+  const servers = data['servers'];
+  if (!Array.isArray(servers)) return;
+  let connected = 0;
+  let errored = 0;
+  let disabled = 0;
+  for (const server of servers) {
+    if (!isRecord(server)) continue;
+    if (server['disabled'] === true) {
+      disabled++;
+    } else if (server['status'] === 'error') {
+      errored++;
+    } else if (server['mcpStatus'] === 'connected') {
+      connected++;
+    }
+  }
+  summary['serversConnected'] = connected;
+  summary['serversErrored'] = errored;
+  summary['serversDisabled'] = disabled;
 }
 
 function collectStatuses(data: unknown): string[] {

@@ -307,6 +307,37 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('summarizes MCP server health in workspace.mcp.summary', async () => {
+    const response = await buildDaemonStatusResponse(
+      'full',
+      makeOptions({
+        mcpStatus: {
+          v: 1,
+          workspaceCwd: BASE_WORKSPACE,
+          initialized: true,
+          servers: [
+            { name: 'a', mcpStatus: 'connected', disabled: false },
+            { name: 'b', mcpStatus: 'connected', disabled: false },
+            {
+              name: 'c',
+              mcpStatus: 'disconnected',
+              status: 'error',
+              disabled: false,
+            },
+            { name: 'd', disabled: true },
+          ],
+        },
+      }),
+    );
+    const mcpSummary = response.full?.workspace?.['mcp']?.summary;
+    expect(mcpSummary).toMatchObject({
+      serversCount: 4,
+      serversConnected: 2,
+      serversErrored: 1,
+      serversDisabled: 1,
+    });
+  });
+
   it('marks a timed-out full workspace section unavailable', async () => {
     vi.useFakeTimers();
 
