@@ -723,6 +723,38 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
+          setConnection((current) => ({
+            ...current,
+            status: 'connected',
+            sessionId: activeSession.sessionId,
+            ...(activeSession.clientId
+              ? { clientId: activeSession.clientId }
+              : {}),
+            workspaceCwd: activeSession.workspaceCwd,
+            displayName:
+              getSessionDisplayName(activeSession.state) ??
+              (current.sessionId === activeSession.sessionId
+                ? current.displayName
+                : undefined),
+            tokenUsage:
+              replayTokenUsage !== undefined
+                ? replayTokenUsage
+                : current.sessionId === activeSession.sessionId
+                  ? current.tokenUsage
+                  : undefined,
+            tokenCount:
+              replayTokenCount !== undefined
+                ? replayTokenCount
+                : current.sessionId === activeSession.sessionId
+                  ? (current.tokenCount ?? 0)
+                  : 0,
+            loadingTranscript: undefined,
+            catchingUp: replayInjected
+              ? current.catchingUp
+              : isSameSessionReconnect ||
+                activeSession.lastEventId != null ||
+                undefined,
+          }));
           if (pendingLoadToResolve) {
             pendingSessionLoadRef.current = undefined;
             clearTimeout(pendingLoadToResolve.timeout);

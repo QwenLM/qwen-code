@@ -4851,6 +4851,9 @@ describe('DaemonSessionProvider', () => {
     await act(async () => {
       await flushPromises();
     });
+    sdkMocks.MockDaemonSessionClient.load.mockImplementationOnce(async () => {
+      throw createAbortError();
+    });
 
     await act(async () => {
       const loadPromise = requireActions(actions).loadSession('session-b');
@@ -5036,6 +5039,70 @@ describe('DaemonSessionProvider', () => {
     expect(blocks).toMatchObject([
       { kind: 'assistant', text: 'new transcript' },
     ]);
+  });
+
+  it('clears transcript loading after replay before metadata finishes', async () => {
+    const providers = createDeferred<unknown>();
+    const commands =
+      createDeferred<Awaited<ReturnType<MockSession['supportedCommands']>>>();
+    const context =
+      createDeferred<Awaited<ReturnType<MockSession['context']>>>();
+    sdkMocks.workspaceProviders.mockReturnValueOnce(providers.promise);
+    sdkMocks.sessions.push(
+      createMockSession({
+        sessionId: 'session-a',
+        replaySnapshot: createTextReplaySnapshot('restored transcript'),
+        supportedCommands: vi.fn(() => commands.promise),
+        context: vi.fn(() => context.promise),
+      }),
+    );
+    let blocks: readonly DaemonTranscriptBlock[] = [];
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      blocks = useDaemonTranscriptBlocks();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+
+    expect(blocks).toMatchObject([
+      { kind: 'assistant', text: 'restored transcript' },
+    ]);
+    expect(connection).toMatchObject({
+      status: 'connected',
+      sessionId: 'session-a',
+      loadingTranscript: undefined,
+    });
+
+    providers.resolve({
+      v: 1,
+      workspaceCwd: '/mock-workspace',
+      initialized: true,
+      providers: [],
+    });
+    commands.resolve({
+      v: 1,
+      sessionId: 'session-a',
+      availableCommands: [],
+      availableSkills: [],
+    });
+    context.resolve({
+      v: 1,
+      sessionId: 'session-a',
+      workspaceCwd: '/mock-workspace',
+      state: {},
+    });
+    await act(async () => {
+      await flushPromises();
+    });
   });
 
   it('loads controlled sessionId on mount without creating a session', async () => {

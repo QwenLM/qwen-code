@@ -144,6 +144,26 @@ describe('createDaemonSessionActions', () => {
     expect(getConnection()).not.toHaveProperty('sessionId');
   });
 
+  it('clears the active session while a session switch is loading', async () => {
+    const existingSession = createMockSession('session-a');
+    const { actions, getConnection, pendingSessionLoadRef, sessionRef } =
+      createActionsHarness({
+        connection: { status: 'connected', sessionId: 'session-a' },
+        session: existingSession,
+      });
+
+    void actions.loadSession('session-b').catch(() => undefined);
+
+    expect(sessionRef.current).toBeUndefined();
+    expect(getConnection()).toMatchObject({
+      status: 'connecting',
+      sessionId: 'session-b',
+      loadingTranscript: true,
+      catchingUp: undefined,
+    });
+    expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
+  });
+
   it('creates a detached session when the ref and connection do not match', async () => {
     const existingSession = createMockSession('session-a');
     const nextSession = createMockSession('session-b');

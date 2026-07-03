@@ -71,6 +71,10 @@ function getLastUserMessageId(messages: Message[]): string | null {
   return null;
 }
 
+function getLastMessage(messages: Message[]): Message | undefined {
+  return messages[messages.length - 1];
+}
+
 function getLastTurnStartMessageId(messages: Message[]): string | null {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
@@ -1805,9 +1809,9 @@ export const MessageList = memo(
     const scrollCooldownCount = useRef(0);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
-    const didMountRef = useRef(false);
     const didTrackLastUserMsgRef = useRef(false);
     const prevLastUserMsgId = useRef<string | null>(null);
+    const pendingNewUserSmoothScroll = useRef(false);
     const prevActiveExecutionKey = useRef<string | null>(null);
     const prevCatchingUp: MutableRefObject<boolean | undefined> =
       useRef(catchingUp);
@@ -2480,32 +2484,35 @@ export const MessageList = memo(
 
     // Rule 4: new user message → force follow on so the model's reply
     // scrolls into view as it streams in.
-    useEffect(() => {
+    useLayoutEffect(() => {
       const lastId = getLastUserMessageId(messages);
       if (catchingUp) {
         prevLastUserMsgId.current = lastId;
         didTrackLastUserMsgRef.current = true;
+        pendingNewUserSmoothScroll.current = false;
         return;
       }
       if (!didTrackLastUserMsgRef.current) {
         prevLastUserMsgId.current = lastId;
         didTrackLastUserMsgRef.current = true;
+        pendingNewUserSmoothScroll.current = false;
         return;
       }
+      const lastMessage = getLastMessage(messages);
       if (
         lastId &&
-        prevLastUserMsgId.current !== null &&
+        lastMessage?.role === 'user' &&
         lastId !== prevLastUserMsgId.current
       ) {
         setShouldFollow(true);
         // A new prompt supersedes any pending "Show in transcript" scroll.
         pendingScrollRef.current = null;
-        requestAnimationFrame(() => {
-          if (shouldFollow.current) scrollToBottom('smooth');
-        });
+        pendingNewUserSmoothScroll.current = true;
+      } else {
+        pendingNewUserSmoothScroll.current = false;
       }
       prevLastUserMsgId.current = lastId;
-    }, [messages, catchingUp, scrollToBottom, setShouldFollow]);
+    }, [messages, catchingUp, setShouldFollow]);
 
     // Rule 5: session restore — when catchingUp flips from true → falsy,
     // replay just finished. Scroll to bottom once so the user sees the
@@ -2692,19 +2699,13 @@ export const MessageList = memo(
     //         and is a no-op when there's no overflow.
     useLayoutEffect(() => {
       if (catchingUp) return;
-      if (scrollCooldown.current) return;
-      if (pendingFollowRecheck.current) return;
-      if (shouldFollow.current) {
-        const lastId = getLastUserMessageId(messages);
-        const isNewUserMessage =
-          didMountRef.current &&
-          didTrackLastUserMsgRef.current &&
-          lastId !== null &&
-          prevLastUserMsgId.current !== null &&
-          lastId !== prevLastUserMsgId.current;
+      const isNewUserMessage = pendingNewUserSmoothScroll.current;
+      if (scrollCooldown.current && !isNewUserMessage) return;
+      if (pendingFollowRecheck.current && !isNewUserMessage) return;
+      if (shouldFollow.current || isNewUserMessage) {
         scrollToBottom(isNewUserMessage ? 'smooth' : 'auto');
+        pendingNewUserSmoothScroll.current = false;
       }
-      didMountRef.current = true;
     }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
 
     useLayoutEffect(() => {

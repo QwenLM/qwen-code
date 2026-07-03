@@ -205,10 +205,16 @@ export function createDaemonSessionActions({
       activePromptsRef.current.delete(currentSessionId);
     }
     resetCurrentSessionActivePrompt();
+    sessionRef.current = undefined;
     setConnection((current) => ({
       ...current,
+      status: 'connecting',
+      sessionId,
+      clientId: undefined,
+      displayName: undefined,
       error: undefined,
       loadingTranscript: true,
+      catchingUp: undefined,
     }));
     setPromptStatus('idle');
     settledPromptsRef.current.clear();

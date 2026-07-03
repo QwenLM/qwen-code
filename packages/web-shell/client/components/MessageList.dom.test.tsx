@@ -555,6 +555,35 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(scrollTo).not.toHaveBeenCalled();
   });
 
+  it('smooth-scrolls the first new prompt after an empty render', async () => {
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, []);
+    renderInto(root, [userMsg('u1')]);
+    await nextFrame();
+
+    expect(scrollTo).toHaveBeenCalledWith({
+      top: 1200,
+      behavior: 'smooth',
+    });
+  });
+
   it('snaps to bottom without smooth scrolling when catch-up completes', () => {
     const scrollTo = vi.fn();
     let scrollTop = 0;
