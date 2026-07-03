@@ -610,6 +610,91 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  describe('getCronRecurringMaxAgeDays', () => {
+    const prevEnv = process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      } else {
+        process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = prevEnv;
+      }
+    });
+
+    it('defaults to 7 days and follows the setting', () => {
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(7);
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 30,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(30);
+    });
+
+    it('maps 0 to Infinity (no expiry)', () => {
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 0,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(Infinity);
+    });
+
+    it('QWEN_CODE_CRON_MAX_AGE_DAYS overrides the setting', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '90';
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 30,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(90);
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '0';
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(
+        Infinity,
+      );
+    });
+
+    it('falls back to the default on invalid values', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = 'not-a-number';
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(7);
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: -3,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(7);
+    });
+
+    it('warns on the console once at construction for an invalid value', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = 'not-a-number';
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const config = new Config(baseParams);
+        // The warning fires during construction, before any getter call,
+        // and repeated getter calls do not re-emit it.
+        expect(config.getCronRecurringMaxAgeDays()).toBe(7);
+        expect(config.getCronRecurringMaxAgeDays()).toBe(7);
+        const cronWarnings = warnSpy.mock.calls.filter((call) =>
+          String(call[0]).includes('QWEN_CODE_CRON_MAX_AGE_DAYS'),
+        );
+        expect(cronWarnings).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('resolves once at construction, ignoring later env changes (requiresRestart)', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '90';
+      const config = new Config(baseParams);
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '3';
+      expect(config.getCronRecurringMaxAgeDays()).toBe(90);
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(config.getCronRecurringMaxAgeDays()).toBe(90);
+    });
+  });
+
   describe('getTeamMemorySyncEnabled', () => {
     const prevEnv = process.env['QWEN_CODE_MEMORY_TEAM_SYNC'];
     afterEach(() => {
