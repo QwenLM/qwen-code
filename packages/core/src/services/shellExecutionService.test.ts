@@ -1851,7 +1851,11 @@ describe('ShellExecutionService', () => {
 
     it('should normalize PATH-like env keys on Windows for pty execution', async () => {
       mockPlatform.mockReturnValue('win32');
-      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'cmd.exe',
+        argsPrefix: ['/d', '/s', '/c'],
+        shell: 'cmd',
+      });
       setupConflictingPathEnv();
 
       await simulateExecution('dir', (pty) =>
@@ -1860,6 +1864,11 @@ describe('ShellExecutionService', () => {
 
       const spawnOptions = mockPtySpawn.mock.calls[0][2];
       expectNormalizedWindowsPathEnv(spawnOptions.env);
+      mockGetShellConfiguration.mockReturnValue({
+        executable: 'bash',
+        argsPrefix: ['-c'],
+        shell: 'bash',
+      });
     });
 
     it('should use bash on Linux', async () => {
@@ -3055,7 +3064,7 @@ describe('ShellExecutionService child_process fallback', () => {
           '/d',
           '/s',
           '/c',
-          '%SystemRoot%\\System32\\chcp.com 65001 >nul && dir "foo bar"',
+          'C:\\Windows\\System32\\chcp.com 65001 >nul & dir "foo bar"',
         ],
         expect.objectContaining({
           detached: false,

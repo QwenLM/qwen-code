@@ -105,7 +105,7 @@ export function getShellAbortReasonKind(
  * the system codepage.
  *
  * - PowerShell: uses `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;`
- * - cmd.exe: uses `chcp 65001 >nul &&`
+ * - cmd.exe: uses `chcp 65001 >nul &`
  */
 function applyUtf8Prefix(command: string, shell: string): string {
   if (os.platform() === 'win32') {
