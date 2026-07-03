@@ -67,17 +67,25 @@ Grouped by domain.
 
 ### Mutation control (Wave 4 PR 16+17)
 
-| Type                     | Direction | Payload                                                                                                                          |
-| ------------------------ | --------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `memory_changed`         | S->C      | `scope: 'workspace' \| 'global', filePath, mode: 'append' \| 'replace', bytesWritten`                                            |
-| `agent_changed`          | S->C      | `change: 'created' \| 'updated' \| 'deleted', name, level: 'project' \| 'user'`                                                  |
-| `approval_mode_changed`  | S->C      | `sessionId, previous, next, persisted: boolean`                                                                                  |
-| `tool_toggled`           | S->C      | `toolName, enabled`; affects the next ACP child spawn and does not mutate already-running sessions.                              |
-| `settings_changed`       | S->C      | Workspace settings write completed. Payload is open; consumers should refresh with read-after-write.                             |
-| `settings_reloaded`      | S->C      | Daemon workspace service reread settings. Payload is open.                                                                       |
-| `trust_change_requested` | S->C      | `workspaceCwd, desiredState: 'trusted' \| 'untrusted', reason?`                                                                  |
-| `workspace_initialized`  | S->C      | `path, action: 'created' \| 'overwrote' \| 'noop', originatorClientId?`                                                          |
-| `github_setup_completed` | S->C      | `releaseTag, readmeUrl, secretsUrl?, workflows: [{path, status, sizeBytes?, error?}], gitignore: {path, status, added?, error?}` |
+| Type                     | Direction | Payload                                                                                                                                        |
+| ------------------------ | --------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `memory_changed`         | S->C      | File memory: `scope: 'workspace' \| 'global', filePath, mode, bytesWritten`; managed memory: `scope: 'managed', source, taskId, touchedScopes` |
+| `agent_changed`          | S->C      | `change: 'created' \| 'updated' \| 'deleted', name, level: 'project' \| 'user'`                                                                |
+| `approval_mode_changed`  | S->C      | `sessionId, previous, next, persisted: boolean`                                                                                                |
+| `tool_toggled`           | S->C      | `toolName, enabled`; affects the next ACP child spawn and does not mutate already-running sessions.                                            |
+| `settings_changed`       | S->C      | Workspace settings write completed. Payload is open; consumers should refresh with read-after-write.                                           |
+| `settings_reloaded`      | S->C      | Daemon workspace service reread settings. Payload is open.                                                                                     |
+| `trust_change_requested` | S->C      | `workspaceCwd, desiredState: 'trusted' \| 'untrusted', reason?`                                                                                |
+| `workspace_initialized`  | S->C      | `path, action: 'created' \| 'overwrote' \| 'noop', originatorClientId?`                                                                        |
+| `github_setup_completed` | S->C      | `releaseTag, readmeUrl, secretsUrl?, workflows: [{path, status, sizeBytes?, error?}], gitignore: {path, status, added?, error?}`               |
+
+`memory_changed` also covers sessionless managed-memory tasks. For those
+payloads, `scope` is `"managed"`, `source` is one of
+`"workspace_memory_remember"`, `"workspace_memory_forget"`, or
+`"workspace_memory_dream"`, `taskId` is the queued task id, and
+`touchedScopes` lists the managed memory scopes that changed (`"user"` and/or
+`"project"`). No event is emitted when a remember/forget/dream task completes
+without touching managed memory.
 
 ### Auth device flow (PR 21)
 

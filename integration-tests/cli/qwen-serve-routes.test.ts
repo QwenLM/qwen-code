@@ -261,6 +261,8 @@ describe('qwen serve — capabilities envelope', () => {
       'auth_provider_install',
       'workspace_memory',
       'workspace_memory_remember',
+      'workspace_memory_forget',
+      'workspace_memory_dream',
       'workspace_agents',
       'workspace_agent_generate',
       'workspace_env',

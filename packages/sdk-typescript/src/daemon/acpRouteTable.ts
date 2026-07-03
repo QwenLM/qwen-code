@@ -552,6 +552,42 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (segs) => ({ taskId: segs[0] }),
     },
   },
+  // POST /workspace/memory/forget → _qwen/workspace/memory/forget
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/memory\/forget\/?$/,
+    mapping: {
+      method: '_qwen/workspace/memory/forget',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
+  // GET /workspace/memory/forget/:taskId → _qwen/workspace/memory/forget/get
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/memory\/forget\/([^/]+)$/,
+    mapping: {
+      method: '_qwen/workspace/memory/forget/get',
+      extractParams: (segs) => ({ taskId: segs[0] }),
+    },
+  },
+  // POST /workspace/memory/dream → _qwen/workspace/memory/dream
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/memory\/dream\/?$/,
+    mapping: {
+      method: '_qwen/workspace/memory/dream',
+      extractParams: () => ({}),
+    },
+  },
+  // GET /workspace/memory/dream/:taskId → _qwen/workspace/memory/dream/get
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/memory\/dream\/([^/]+)$/,
+    mapping: {
+      method: '_qwen/workspace/memory/dream/get',
+      extractParams: (segs) => ({ taskId: segs[0] }),
+    },
+  },
   // GET /workspace/agents → _qwen/workspace/agents/list
   {
     httpMethod: 'GET',

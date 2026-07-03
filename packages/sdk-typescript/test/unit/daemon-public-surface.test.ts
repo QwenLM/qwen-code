@@ -73,6 +73,13 @@ import type {
   DaemonWorkspaceTrustSource,
   DaemonWorkspaceTrustState,
   DaemonWorkspaceTrustStatus,
+  DaemonWorkspaceMemoryDreamOptions,
+  DaemonWorkspaceMemoryDreamResult,
+  DaemonWorkspaceMemoryDreamTask,
+  DaemonWorkspaceMemoryForgetMatch,
+  DaemonWorkspaceMemoryForgetOptions,
+  DaemonWorkspaceMemoryForgetResult,
+  DaemonWorkspaceMemoryForgetTask,
   DaemonVoiceAudioInput,
   DaemonVoiceMode,
   DaemonVoiceModelDescriptor,
@@ -82,6 +89,8 @@ import type {
   DaemonWorkspaceMemoryRememberResult,
   DaemonWorkspaceMemoryRememberTask,
   DaemonWorkspaceMemoryRememberTaskStatus,
+  DaemonWorkspaceMemoryTaskStatus,
+  DaemonWorkspaceMemoryTopic,
   DaemonWorkspaceVoiceStatus,
   DaemonWorkspaceVoiceTranscribeOptions,
   DaemonWorkspaceVoiceTranscriptionResult,
@@ -196,6 +205,15 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonWorkspaceMemoryRememberResult>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceMemoryRememberTask>().not.toBeNever();
     expectTypeOf<DaemonWorkspaceMemoryRememberTaskStatus>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryTaskStatus>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryTopic>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryForgetMatch>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryForgetOptions>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryForgetResult>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryForgetTask>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryDreamOptions>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryDreamResult>().not.toBeNever();
+    expectTypeOf<DaemonWorkspaceMemoryDreamTask>().not.toBeNever();
     expectTypeOf<DaemonGithubSetupCompletedData>().not.toBeNever();
     expectTypeOf<DaemonGithubSetupCompletedEvent>().not.toBeNever();
     expectTypeOf<DaemonGithubSetupGitignoreResult>().not.toBeNever();
