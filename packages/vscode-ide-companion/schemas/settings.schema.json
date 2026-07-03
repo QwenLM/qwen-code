@@ -2768,6 +2768,12 @@
           "type": "boolean",
           "default": true
         },
+        "cronRecurringMaxAgeDays": {
+          "type": "number",
+          "minimum": 0,
+          "default": 7,
+          "description": "Days a recurring cron/loop job lives before auto-expiring (it fires one final time, then is deleted). Set to 0 to disable expiry so jobs run until deleted — useful for long-running daemon deployments. Can be overridden via the QWEN_CODE_CRON_MAX_AGE_DAYS environment variable."
+        },
         "agentTeam": {
           "description": "Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.",
           "type": "boolean",
