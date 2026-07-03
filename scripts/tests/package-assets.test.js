@@ -31,6 +31,11 @@ describe('package asset scripts', () => {
 
   it('copies extension examples into the bundled runtime dist', () => {
     const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/cli/src/commands/extensions/examples/mcp-server/keep.test.js',
+      'console.log("example test fixture");\n',
+    );
     stubConsole();
 
     copyBundleAssets({ root: rootDir });
@@ -45,6 +50,156 @@ describe('package asset scripts', () => {
     expect(
       existsSync(
         path.join(rootDir, 'dist', 'examples', 'mcp-server', 'package.json'),
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        path.join(rootDir, 'dist', 'examples', 'mcp-server', 'keep.test.js'),
+      ),
+    ).toBe(true);
+  });
+
+  it('copies bundled skill scripts and references into the runtime dist', () => {
+    const rootDir = createFixtureRoot();
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/SKILL.md',
+      '---\nname: dataviz\ndescription: Chart guidance\n---\nBody\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.js',
+      'console.log("ok");\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.test.js',
+      'import { it } from "vitest";\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.test.d.ts',
+      'export {};\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/validate_palette.test.js.map',
+      '{}\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/chart.spec.tsx',
+      'export {};\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/scripts/font-test-regular.woff2',
+      'font\n',
+    );
+    writeFile(
+      rootDir,
+      'packages/core/src/skills/bundled/dataviz/references/palette.md',
+      '# Palette\n',
+    );
+    writeFile(rootDir, 'dist/bundled/dataviz/scripts/stale.test.js', 'stale\n');
+    stubConsole();
+
+    copyBundleAssets({ root: rootDir });
+
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'validate_palette.js',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'validate_palette.test.js',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'validate_palette.test.d.ts',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'validate_palette.test.js.map',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'chart.spec.tsx',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'stale.test.js',
+        ),
+      ),
+    ).toBe(false);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'scripts',
+          'font-test-regular.woff2',
+        ),
+      ),
+    ).toBe(true);
+    expect(
+      existsSync(
+        path.join(
+          rootDir,
+          'dist',
+          'bundled',
+          'dataviz',
+          'references',
+          'palette.md',
+        ),
       ),
     ).toBe(true);
   });
