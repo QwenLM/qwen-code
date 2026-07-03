@@ -150,7 +150,8 @@ function matchesQuery(query: string, ...values: Array<string | undefined>) {
 
 function directoryInsertText(path: string): string {
   const normalized = normalizeDirectoryPath(path);
-  return normalized === '.' ? '@./ ' : `@${normalized}/ `;
+  const safePath = sanitizeInsertText(normalized);
+  return normalized === '.' ? '@./ ' : `@${safePath}/ `;
 }
 
 function buildMcpResourceRef(serverName: string, uri: string): string {
@@ -162,7 +163,12 @@ function escapeAtReferenceText(ref: string): string {
 }
 
 function mcpResourceInsertText(serverName: string, uri: string): string {
-  return `@${escapeAtReferenceText(buildMcpResourceRef(serverName, uri))} `;
+  return `@${escapeAtReferenceText(
+    buildMcpResourceRef(
+      sanitizeInsertText(serverName),
+      sanitizeInsertText(uri),
+    ),
+  )} `;
 }
 
 function splitInsertedReferenceQuery(
@@ -252,6 +258,11 @@ export function sanitizeDisplayText(raw: string): string | undefined {
   return stripped.length > 0 ? stripped : undefined;
 }
 
+function sanitizeInsertText(raw: string): string {
+  const stripped = raw.replace(ANSI_RE, '').replace(BIDI_CONTROL_RE, '');
+  return stripped.length > 0 ? stripped : SAFE_DISPLAY_FALLBACK;
+}
+
 function safeDisplayText(raw: string | undefined): string {
   if (raw === undefined) return SAFE_DISPLAY_FALLBACK;
   return sanitizeDisplayText(raw) ?? SAFE_DISPLAY_FALLBACK;
@@ -267,6 +278,10 @@ function sanitizeAtMentionItem(item: AtMentionItem): AtMentionItem {
         : sanitizeDisplayText(item.description),
     detail:
       item.detail === undefined ? undefined : sanitizeDisplayText(item.detail),
+    insertText:
+      item.insertText === undefined
+        ? undefined
+        : sanitizeInsertText(item.insertText),
   };
 }
 
@@ -302,7 +317,7 @@ function createFileProvider(
           const currentDirectoryItem: AtMentionItem = {
             id: `current:${dirPath}`,
             label: directoryInsertText(dirPath).trim(),
-            description: dirPath,
+            description: sanitizeDisplayText(dirPath),
             insertText: directoryInsertText(dirPath),
             kind: 'insert',
           };
@@ -312,6 +327,7 @@ function createFileProvider(
               const path = joinWorkspacePath(dirPath, entry.name);
               const safeName = safeDisplayText(entry.name);
               const safePath = sanitizeDisplayText(path);
+              const safeInsertPath = sanitizeInsertText(path);
               if (entry.kind === 'directory') {
                 return {
                   id: `dir:${path}`,
@@ -325,7 +341,7 @@ function createFileProvider(
                 id: `file:${path}`,
                 label: safeName,
                 description: safePath,
-                insertText: `@${path} `,
+                insertText: `@${safeInsertPath} `,
                 kind: 'insert',
               };
             }),
@@ -941,10 +957,7 @@ export function useAtMentionMenu({
             selectedProviderId: providerId,
             selectedIndex: 0,
             providers: providerViewsRef.current,
-            itemMode:
-              providerId === MCP_RESOURCES_PROVIDER_ID
-                ? 'mcpServers'
-                : 'default',
+            itemMode: 'default',
             mcpServerName: undefined,
           });
           return;

@@ -1210,6 +1210,7 @@ export const ChatEditor = memo(
         setModeDropdownOpen(false);
         setModelDropdownOpen(false);
         core.closeSlashMenu();
+        core.closeAtMenu();
         if (action.action.type === 'insert') {
           core.insertText(action.action.text, { mode: 'replace' });
           return;
@@ -1461,6 +1462,7 @@ export const ChatEditor = memo(
                         onClick={(e) => {
                           e.stopPropagation();
                           core.closeSlashMenu();
+                          core.closeAtMenu();
                           setQuickActionsOpen(false);
                           setModeDropdownOpen((v) => !v);
                           setModelDropdownOpen(false);
@@ -1495,6 +1497,7 @@ export const ChatEditor = memo(
                         onClick={(e) => {
                           e.stopPropagation();
                           core.closeSlashMenu();
+                          core.closeAtMenu();
                           setQuickActionsOpen(false);
                           setModelDropdownOpen((v) => !v);
                           setModeDropdownOpen(false);
@@ -1531,6 +1534,7 @@ export const ChatEditor = memo(
                     onClick={(e) => {
                       e.stopPropagation();
                       core.closeSlashMenu();
+                      core.closeAtMenu();
                       setModeDropdownOpen(false);
                       setModelDropdownOpen(false);
                       setQuickActionsOpen((value) => !value);

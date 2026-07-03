@@ -125,6 +125,12 @@ describe('AtMentionPanel', () => {
     mount(itemsMenu(), { onBack, onAccept, onSelect });
 
     const input = document.body.querySelector('input')!;
+    expect(input.getAttribute('aria-label')).toBe('Search');
+    expect(input.getAttribute('aria-controls')).toBe('at-mention-listbox');
+    expect(input.getAttribute('aria-activedescendant')).toBe(
+      'at-mention-option-0',
+    );
+    expect(document.getElementById('at-mention-option-0')).not.toBeNull();
     act(() => {
       input.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),

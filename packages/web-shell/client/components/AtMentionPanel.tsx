@@ -92,6 +92,7 @@ export function AtMentionPanel({
   useLayoutEffect(() => {
     const anchor = anchorRef.current;
     if (!anchor) return undefined;
+    let frame: number | null = null;
 
     const updatePosition = () => {
       const rect = anchor.getBoundingClientRect();
@@ -116,16 +117,26 @@ export function AtMentionPanel({
         return next;
       });
     };
+    const scheduleUpdatePosition = () => {
+      if (frame !== null) return;
+      frame = window.requestAnimationFrame(() => {
+        frame = null;
+        updatePosition();
+      });
+    };
 
     updatePosition();
-    const resizeObserver = new ResizeObserver(updatePosition);
+    const resizeObserver = new ResizeObserver(scheduleUpdatePosition);
     resizeObserver.observe(anchor);
-    window.addEventListener('resize', updatePosition);
-    window.addEventListener('scroll', updatePosition, true);
+    window.addEventListener('resize', scheduleUpdatePosition);
+    window.addEventListener('scroll', scheduleUpdatePosition, true);
     return () => {
+      if (frame !== null) {
+        window.cancelAnimationFrame(frame);
+      }
       resizeObserver.disconnect();
-      window.removeEventListener('resize', updatePosition);
-      window.removeEventListener('scroll', updatePosition, true);
+      window.removeEventListener('resize', scheduleUpdatePosition);
+      window.removeEventListener('scroll', scheduleUpdatePosition, true);
     };
   }, [anchorRef, panelRef]);
 
@@ -161,6 +172,11 @@ export function AtMentionPanel({
     menu.level === 'items'
       ? (selectedProvider?.label ?? t('at.menu'))
       : t('at.menu');
+  const listboxId = 'at-mention-listbox';
+  const activeOptionId =
+    menu.selectedIndex >= 0 && menu.selectedIndex < rows.length
+      ? `at-mention-option-${menu.selectedIndex}`
+      : undefined;
 
   return createPortal(
     <div className={styles.atPortalLayer} style={themeVars}>
@@ -207,6 +223,9 @@ export function AtMentionPanel({
               className={styles.atSearchInput}
               value={menu.query}
               placeholder={t('common.search')}
+              aria-label={t('common.search')}
+              aria-controls={listboxId}
+              aria-activedescendant={activeOptionId}
               onMouseDown={(event) => event.stopPropagation()}
               onClick={(event) => event.stopPropagation()}
               onChange={(event) => onSearch(event.currentTarget.value)}
@@ -251,6 +270,7 @@ export function AtMentionPanel({
           </div>
         )}
         <div
+          id={listboxId}
           className={styles.atList}
           role={rows.length > 0 ? 'listbox' : undefined}
           aria-label={rows.length > 0 ? listboxLabel : undefined}
@@ -267,6 +287,7 @@ export function AtMentionPanel({
                   itemRefs.current[index] = node;
                 }}
                 type="button"
+                id={`at-mention-option-${index}`}
                 role="option"
                 aria-selected={index === menu.selectedIndex}
                 className={`${styles.atItem} ${

@@ -575,6 +575,41 @@ describe('useAtMentionMenu', () => {
     });
   });
 
+  it('strips unsafe controls from custom provider insert text', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    mount({
+      view,
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search: vi.fn().mockResolvedValue([
+            {
+              id: 'custom-item',
+              label: 'Name',
+              insertText: '@\u001b[31mName\u001b[0m\u202E ',
+            },
+          ]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept()).toBe(true);
+    });
+
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '@Name ' },
+      selection: { anchor: 6 },
+      scrollIntoView: true,
+    });
+  });
+
   it('uses a safe label fallback when display text strips to empty', async () => {
     vi.useFakeTimers();
     mount({
@@ -663,6 +698,37 @@ describe('useAtMentionMenu', () => {
     expect(view.dispatch).toHaveBeenCalledWith({
       changes: { from: 0, to: 1, insert: '@README.md ' },
       selection: { anchor: 11 },
+      scrollIntoView: true,
+    });
+  });
+
+  it('strips unsafe controls from file insert paths', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [
+        {
+          name: 'safe\u202E.md',
+          kind: 'file',
+          ignored: false,
+        },
+      ],
+      truncated: false,
+    });
+    mount({ actions: { listDirectory }, view });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept(1)).toBe(true);
+    });
+
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '@safe.md ' },
+      selection: { anchor: 9 },
       scrollIntoView: true,
     });
   });
