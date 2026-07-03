@@ -196,6 +196,16 @@ class FailingPreflightWeComChannel extends WeComChannel {
   }
 }
 
+class FailingProcessWeComChannel extends WeComChannel {
+  readonly processes = vi.fn(async (_envelope: Envelope) => {
+    throw new Error('process failed after side effects started');
+  });
+
+  protected override async processInbound(envelope: Envelope): Promise<void> {
+    return this.processes(envelope);
+  }
+}
+
 function lastClient(): MockWSClient {
   const client = mocks.instances.at(-1);
   if (!client) throw new Error('missing mock client');
@@ -639,6 +649,39 @@ describe('WeComChannel', () => {
 
     client.emit('message.text', payload);
     await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(2));
+    stderr.mockRestore();
+  });
+
+  it('keeps message dedup when processing fails after side effects start', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new FailingProcessWeComChannel(
+      'bot',
+      makeConfig(),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+    const payload = {
+      msgid: 'msg-process-fails',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: 'hello' },
+    };
+
+    client.emit('message.text', payload);
+    await vi.waitFor(() => expect(channel.processes).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() =>
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('message handling failed'),
+      ),
+    );
+
+    client.emit('message.text', payload);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(channel.processes).toHaveBeenCalledTimes(1);
     stderr.mockRestore();
   });
 

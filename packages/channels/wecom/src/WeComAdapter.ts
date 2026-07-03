@@ -259,6 +259,7 @@ export class WeComChannel extends ChannelBase {
     };
 
     let attachments: Attachment[] = [];
+    let processingStarted = false;
     try {
       if (!(await this.preflightInbound(envelope))) return;
       attachments = await this.downloadAttachments(body, attachments);
@@ -270,10 +271,11 @@ export class WeComChannel extends ChannelBase {
           ? '(image)'
           : `(file: ${attachments[0]?.fileName ?? 'file'})`;
       }
+      processingStarted = true;
       await this.processInbound(envelope);
       scheduleAttachmentCleanup(attachments);
     } catch (err) {
-      if (messageId) this.seenMessages.delete(messageId);
+      if (messageId && !processingStarted) this.seenMessages.delete(messageId);
       scheduleAttachmentCleanup(attachments);
       throw err;
     }

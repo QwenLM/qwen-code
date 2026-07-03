@@ -174,6 +174,25 @@ describe('parseChannelConfig', () => {
     delete process.env['TEST_TOKEN'];
   });
 
+  it('resolves available env vars to empty strings when explicitly set', async () => {
+    process.env['TEST_EMPTY_SECRET'] = '';
+
+    const result = await parseChannelConfig(
+      'bot',
+      {
+        type: 'wecom',
+        botId: 'bot-id',
+        secret: '$TEST_EMPTY_SECRET',
+      },
+      process.cwd(),
+      { resolveEnvVars: 'available' },
+    );
+
+    expect(result['secret']).toBe('');
+
+    delete process.env['TEST_EMPTY_SECRET'];
+  });
+
   it('preserves explicit config values over defaults', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',

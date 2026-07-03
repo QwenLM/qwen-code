@@ -41,7 +41,8 @@ type EnvResolution = boolean | 'available';
 function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
   if (mode === false) return value;
   if (mode === 'available' && value.startsWith('$')) {
-    return process.env[value.substring(1)] || value;
+    const envName = value.substring(1);
+    return envName in process.env ? (process.env[envName] ?? '') : value;
   }
   return resolveEnvVars(value);
 }
