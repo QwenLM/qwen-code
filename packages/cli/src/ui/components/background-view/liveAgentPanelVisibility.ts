@@ -13,6 +13,15 @@ import type {
 // must be something the live panel can actually render.
 export const TERMINAL_VISIBLE_MS = 8000;
 
+// Row budget the panel renders (it windows to the LAST rows of its
+// display-ordered list when the roster outgrows this). Shared with the
+// composer's panel-focus keyboard handler, which slices its candidate
+// list by the same amount so `livePanelSelectedIndex` always addresses
+// a row that is actually on screen. No caller overrides the panel's
+// `maxRows` prop today; if one ever does, it must thread the same value
+// to the keyboard handler.
+export const LIVE_AGENT_PANEL_MAX_ROWS = 12;
+
 export function isLiveAgentPanelVisibleEntry(
   entry: DialogEntry,
   nowMs: number,
