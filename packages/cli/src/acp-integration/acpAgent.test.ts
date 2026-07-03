@@ -3009,6 +3009,52 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('uses forget-specific error codes for workspace memory forget timeouts', async () => {
+    const forget = vi.fn().mockRejectedValue(new Error('late abort'));
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getMemoryManager: vi.fn().mockReturnValue({ forget }),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    const controller = new AbortController();
+    controller.abort();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(controller.signal);
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget, {
+          query: 'old preference',
+        }),
+      ).rejects.toMatchObject({
+        code: -32099,
+        message: 'Workspace memory forget timed out',
+        data: { errorKind: 'forget_timeout' },
+      });
+    } finally {
+      timeoutSpy.mockRestore();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
   it('runs workspace memory dream without requiring a session', async () => {
     Object.assign(mockConfig, {
       isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
@@ -3095,6 +3141,49 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('uses dream-specific error codes for workspace memory dream timeouts', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+    mockRunManagedAutoMemoryDream.mockRejectedValue(new Error('late abort'));
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    const controller = new AbortController();
+    controller.abort();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(controller.signal);
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream, {}),
+      ).rejects.toMatchObject({
+        code: -32099,
+        message: 'Workspace memory dream timed out',
+        data: { errorKind: 'dream_timeout' },
+      });
+    } finally {
+      timeoutSpy.mockRestore();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('reports workspace memory remember availability', async () => {

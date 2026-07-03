@@ -193,14 +193,17 @@ export class WorkspaceRememberTaskLane {
 
   constructor(private readonly bridge: AcpSessionBridge) {}
 
-  private pendingCount(kind?: WorkspaceMemoryTaskRecord['kind']): number {
-    let count = 0;
+  private pendingCounts(): { total: number; nonRemember: number } {
+    let total = 0;
+    let nonRemember = 0;
     for (const task of this.tasks.values()) {
       if (task.status !== 'queued' && task.status !== 'running') continue;
-      if (kind && task.kind !== kind) continue;
-      count++;
+      total++;
+      if (WorkspaceRememberTaskLane.NON_REMEMBER_KINDS.has(task.kind)) {
+        nonRemember++;
+      }
     }
-    return count;
+    return { total, nonRemember };
   }
 
   private evictTerminalTasks(nowMs = Date.now()): void {
@@ -210,6 +213,14 @@ export class WorkspaceRememberTaskLane {
       const updatedAtMs = Date.parse(task.updatedAt);
       if (!Number.isNaN(updatedAtMs) && updatedAtMs <= cutoffMs) {
         this.tasks.delete(id);
+      } else if (Number.isNaN(updatedAtMs)) {
+        debugLogger.warn(
+          'Task with unparseable updatedAt skipped for TTL eviction:',
+          {
+            taskId: id,
+            updatedAt: task.updatedAt,
+          },
+        );
       }
     }
 
@@ -223,7 +234,8 @@ export class WorkspaceRememberTaskLane {
   }
 
   private assertCapacity(kind: WorkspaceMemoryTaskRecord['kind']): void {
-    if (this.pendingCount() >= WorkspaceRememberTaskLane.MAX_PENDING) {
+    const pending = this.pendingCounts();
+    if (pending.total >= WorkspaceRememberTaskLane.MAX_PENDING) {
       throw Object.assign(new Error('Workspace memory task queue is full'), {
         code: 'remember_queue_full',
       });
@@ -232,8 +244,7 @@ export class WorkspaceRememberTaskLane {
     // available during heavier destructive or compaction bursts.
     if (
       WorkspaceRememberTaskLane.NON_REMEMBER_KINDS.has(kind) &&
-      this.pendingCount('forget') + this.pendingCount('dream') >=
-        WorkspaceRememberTaskLane.MAX_NON_REMEMBER_PENDING
+      pending.nonRemember >= WorkspaceRememberTaskLane.MAX_NON_REMEMBER_PENDING
     ) {
       throw Object.assign(new Error('Workspace memory task queue is full'), {
         code: 'remember_queue_full',
@@ -332,17 +343,20 @@ export class WorkspaceRememberTaskLane {
         };
         task.updatedAt = nowIso();
       }
-      if (task.status === 'completed' && task.result) {
-        this.publishManagedMemoryChanged({
-          source: 'workspace_memory_remember',
-          taskId: task.taskId,
-          touchedScopes: task.result.touchedScopes,
-          ...(params.originatorClientId
-            ? { originatorClientId: params.originatorClientId }
-            : {}),
-        });
+      try {
+        if (task.status === 'completed' && task.result) {
+          this.publishManagedMemoryChanged({
+            source: 'workspace_memory_remember',
+            taskId: task.taskId,
+            touchedScopes: task.result.touchedScopes,
+            ...(params.originatorClientId
+              ? { originatorClientId: params.originatorClientId }
+              : {}),
+          });
+        }
+      } finally {
+        this.evictTerminalTasks();
       }
-      this.evictTerminalTasks();
     };
 
     return this.queue(task, run) as WorkspaceMemoryRememberTaskSnapshot;
@@ -394,17 +408,20 @@ export class WorkspaceRememberTaskLane {
         };
         task.updatedAt = nowIso();
       }
-      if (task.status === 'completed' && task.result) {
-        this.publishManagedMemoryChanged({
-          source: 'workspace_memory_forget',
-          taskId: task.taskId,
-          touchedScopes: touchedScopesFromTopics(task.result.touchedTopics),
-          ...(params.originatorClientId
-            ? { originatorClientId: params.originatorClientId }
-            : {}),
-        });
+      try {
+        if (task.status === 'completed' && task.result) {
+          this.publishManagedMemoryChanged({
+            source: 'workspace_memory_forget',
+            taskId: task.taskId,
+            touchedScopes: touchedScopesFromTopics(task.result.touchedTopics),
+            ...(params.originatorClientId
+              ? { originatorClientId: params.originatorClientId }
+              : {}),
+          });
+        }
+      } finally {
+        this.evictTerminalTasks();
       }
-      this.evictTerminalTasks();
     };
 
     return this.queue(task, run) as WorkspaceMemoryForgetTaskSnapshot;
@@ -453,17 +470,20 @@ export class WorkspaceRememberTaskLane {
         };
         task.updatedAt = nowIso();
       }
-      if (task.status === 'completed' && task.result) {
-        this.publishManagedMemoryChanged({
-          source: 'workspace_memory_dream',
-          taskId: task.taskId,
-          touchedScopes: touchedScopesFromTopics(task.result.touchedTopics),
-          ...(params.originatorClientId
-            ? { originatorClientId: params.originatorClientId }
-            : {}),
-        });
+      try {
+        if (task.status === 'completed' && task.result) {
+          this.publishManagedMemoryChanged({
+            source: 'workspace_memory_dream',
+            taskId: task.taskId,
+            touchedScopes: touchedScopesFromTopics(task.result.touchedTopics),
+            ...(params.originatorClientId
+              ? { originatorClientId: params.originatorClientId }
+              : {}),
+          });
+        }
+      } finally {
+        this.evictTerminalTasks();
       }
-      this.evictTerminalTasks();
     };
 
     return this.queue(task, run) as WorkspaceMemoryDreamTaskSnapshot;

@@ -206,7 +206,7 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
     }
   });
 
-  it('falls back to summary matching when the selected entry index is stale', async () => {
+  it('falls back to normalized summary matching when the selected entry index is stale', async () => {
     const tempDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'forget-stale-index-'),
     );
@@ -237,7 +237,7 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
         [
           {
             topic: 'project',
-            summary: 'Target summary',
+            summary: 'Target   summary',
             filePath: memoryFile,
             entryIndex: 0,
           },
@@ -248,7 +248,7 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       expect(result.removedEntries).toEqual([
         {
           topic: 'project',
-          summary: 'Target summary',
+          summary: 'Target   summary',
           filePath: memoryFile,
           entryIndex: 0,
         },

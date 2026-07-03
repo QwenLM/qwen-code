@@ -606,6 +606,31 @@ describe('workspace memory remember routes', () => {
     });
   });
 
+  it('evicts terminal tasks after the TTL when new tasks are queued', async () => {
+    const bridge = buildBridgeStub({});
+    const lane = new WorkspaceRememberTaskLane(bridge);
+    const first = lane.enqueue({
+      content: 'old remember',
+      contextMode: 'workspace',
+    });
+    await waitFor(() => lane.get(first.taskId)?.status === 'completed');
+
+    const internalLane = lane as unknown as {
+      tasks: Map<string, { updatedAt: string }>;
+    };
+    const firstRecord = internalLane.tasks.get(first.taskId);
+    expect(firstRecord).toBeDefined();
+    firstRecord!.updatedAt = new Date(Date.now() - 6 * 60_000).toISOString();
+
+    expect(lane.get(first.taskId)).toBeDefined();
+    lane.enqueue({
+      content: 'fresh remember',
+      contextMode: 'workspace',
+    });
+
+    expect(lane.get(first.taskId)).toBeUndefined();
+  });
+
   it('runs hidden remember tasks serially within the remember lane', async () => {
     const first = deferred<BridgeWorkspaceMemoryRememberResult>();
     const second = deferred<BridgeWorkspaceMemoryRememberResult>();

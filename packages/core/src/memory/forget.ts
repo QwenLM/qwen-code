@@ -353,11 +353,11 @@ export async function forgetManagedAutoMemoryMatches(
       } else {
         const remainingBySummary = new Map<string, number>();
         for (const match of fileMatches) {
-          const key = match.summary.toLowerCase();
+          const key = normalizeSummary(match.summary);
           remainingBySummary.set(key, (remainingBySummary.get(key) ?? 0) + 1);
         }
         kept = allEntries.filter((entry) => {
-          const key = entry.summary.toLowerCase();
+          const key = normalizeSummary(entry.summary);
           const remaining = remainingBySummary.get(key) ?? 0;
           if (remaining === 0) return true;
           remainingBySummary.set(key, remaining - 1);
