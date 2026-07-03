@@ -185,30 +185,11 @@ jobs:
       READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
       AUTOFIX_ISSUE_EXCLUDES: 'no:assignee -linked:pr -label:autofix/skip -label:autofix/in-progress -label:status/need-information -label:status/need-retesting sort:created-desc'
     steps:
-      - name: 'Checkout with retry'
-        run: |-
-          checkout_repo() {
-            rm -rf .git &&
-            git init . &&
-            git remote add origin "https://github.com/${REPO}.git" &&
-            git config --global --add safe.directory "${GITHUB_WORKSPACE}" &&
-            git -c protocol.version=2 fetch --prune --force origin \
-              '+refs/heads/*:refs/remotes/origin/*' &&
-            git checkout --force "${GITHUB_SHA}" &&
-            git clean -ffdx
-          }
-
-          for attempt in 1 2 3; do
-            if checkout_repo; then
-              exit 0
-            fi
-            if [[ "${attempt}" == "3" ]]; then
-              echo '::error::Repository checkout failed after 3 attempts.'
-              exit 1
-            fi
-            echo "::warning::Repository checkout failed on attempt ${attempt}; retrying."
-            sleep "$((attempt * 10))"
-          done
+      - name: 'Checkout'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: 'Reset autofix workspace'
         run: |-
@@ -533,21 +514,11 @@ jobs:
 
           start_openai_proxy
 
-          for attempt in 1 2; do
-            rm -rf "${QWEN_HOME}"
-            mkdir -p .qwen "${QWEN_HOME}"
-            printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
-            rm -f "${WORKDIR}/decision.json"
-            if qwen --yolo --prompt "${PROMPT}"; then
-              exit 0
-            fi
-            if [[ "${attempt}" == "2" ]]; then
-              echo "::error::Qwen Code failed after ${attempt} attempts."
-              exit 1
-            fi
-            echo "::warning::Qwen Code failed on attempt ${attempt}; retrying."
-            sleep "$((attempt * 30))"
-          done
+          rm -rf "${QWEN_HOME}"
+          mkdir -p .qwen "${QWEN_HOME}"
+          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          rm -f "${WORKDIR}/decision.json"
+          qwen --yolo --prompt "${PROMPT}"
 
       - name: 'Read decision'
         id: 'decision'
@@ -819,35 +790,12 @@ jobs:
             echo "openai_proxy=enabled (${OPENAI_BASE_URL})"
           }
 
-          qwen_worktree_dirty() {
-            [[ -n "$(git status --porcelain --untracked-files=all)" ]]
-          }
-
           start_openai_proxy
 
-          for attempt in 1 2; do
-            rm -rf "${QWEN_HOME}"
-            mkdir -p .qwen "${QWEN_HOME}"
-            printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
-            if qwen --yolo --prompt "${PROMPT}"; then
-              exit 0
-            fi
-            if [[ -f "${WORKDIR}/failure.md" ]]; then
-              echo '::error::Qwen Code wrote failure.md; not retrying.'
-              exit 1
-            fi
-            if [[ "${attempt}" == "2" ]]; then
-              echo "::error::Qwen Code failed after ${attempt} attempts."
-              exit 1
-            fi
-            if git rev-parse --verify "${BRANCH}" > /dev/null 2>&1 || qwen_worktree_dirty; then
-              echo '::error::Qwen Code failed after changing the workspace; not retrying automatically.'
-              exit 1
-            fi
-            rm -f "${WORKDIR}/failure.md" "${WORKDIR}/e2e-report.md" "${WORKDIR}/pr-title.txt" "${WORKDIR}/pr-body.md" "${WORKDIR}/fix.diff"
-            echo "::warning::Qwen Code failed on attempt ${attempt}; retrying."
-            sleep "$((attempt * 30))"
-          done
+          rm -rf "${QWEN_HOME}"
+          mkdir -p .qwen "${QWEN_HOME}"
+          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          qwen --yolo --prompt "${PROMPT}"
 
       - name: 'Verification gate'
         id: 'verify'
@@ -1154,30 +1102,11 @@ jobs:
       ROUND: '${{ matrix.target.round }}'
       WATERMARK: '${{ matrix.target.watermark }}'
     steps:
-      - name: 'Checkout with retry'
-        run: |-
-          checkout_repo() {
-            rm -rf .git &&
-            git init . &&
-            git remote add origin "https://github.com/${REPO}.git" &&
-            git config --global --add safe.directory "${GITHUB_WORKSPACE}" &&
-            git -c protocol.version=2 fetch --prune --force origin \
-              '+refs/heads/*:refs/remotes/origin/*' &&
-            git checkout --force "${GITHUB_SHA}" &&
-            git clean -ffdx
-          }
-
-          for attempt in 1 2 3; do
-            if checkout_repo; then
-              exit 0
-            fi
-            if [[ "${attempt}" == "3" ]]; then
-              echo '::error::Repository checkout failed after 3 attempts.'
-              exit 1
-            fi
-            echo "::warning::Repository checkout failed on attempt ${attempt}; retrying."
-            sleep "$((attempt * 10))"
-          done
+      - name: 'Checkout'
+        uses: 'actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd' # v6.0.2
+        with:
+          fetch-depth: 0
+          persist-credentials: false
 
       - name: 'Reset autofix workspace'
         run: |-
@@ -1514,36 +1443,12 @@ jobs:
             echo "openai_proxy=enabled (${OPENAI_BASE_URL})"
           }
 
-          qwen_review_changed() {
-            [[ -n "$(git status --porcelain --untracked-files=all)" ]] && return 0
-            ! git diff --quiet "origin/${BRANCH}...${BRANCH}"
-          }
-
           start_openai_proxy
 
-          for attempt in 1 2; do
-            rm -rf "${QWEN_HOME}"
-            mkdir -p .qwen "${QWEN_HOME}"
-            printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
-            if qwen --yolo --prompt "${PROMPT}"; then
-              exit 0
-            fi
-            if [[ -f "${WORKDIR}/failure.md" ]]; then
-              echo '::error::Qwen Code wrote failure.md; not retrying.'
-              exit 1
-            fi
-            if [[ "${attempt}" == "2" ]]; then
-              echo "::error::Qwen Code failed after ${attempt} attempts."
-              exit 1
-            fi
-            if qwen_review_changed; then
-              echo '::error::Qwen Code failed after changing the workspace; not retrying automatically.'
-              exit 1
-            fi
-            rm -f "${WORKDIR}/failure.md" "${WORKDIR}/address-summary.md" "${WORKDIR}/no-action.md" "${WORKDIR}/pr.diff" "${WORKDIR}/report.md"
-            echo "::warning::Qwen Code failed on attempt ${attempt}; retrying."
-            sleep "$((attempt * 30))"
-          done
+          rm -rf "${QWEN_HOME}"
+          mkdir -p .qwen "${QWEN_HOME}"
+          printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          qwen --yolo --prompt "${PROMPT}"
 
       - name: 'Verification gate'
         id: 'verify'
