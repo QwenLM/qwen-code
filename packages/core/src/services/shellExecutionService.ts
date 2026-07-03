@@ -115,7 +115,7 @@ function applyUtf8Prefix(command: string, shell: string): string {
       );
     }
     if (shell === 'cmd') {
-      return `chcp 65001 >nul && ${command}`;
+      return `%SystemRoot%\\System32\\chcp.com 65001 >nul && ${command}`;
     }
   }
   return command;
