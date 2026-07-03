@@ -75,7 +75,7 @@ export function validateGatewayUrl(url: string): string {
     // Hard reject: only allow documented QQ gateway hostnames
     if (!parsed.hostname.toLowerCase().endsWith('.qq.com')) {
       throw new Error(
-        `QQ Bot gateway URL has unexpected hostname: ${parsed.hostname}`,
+        `QQ Bot gateway URL has unexpected hostname: ${parsed.hostname} (expected *.qq.com)`,
       );
     }
     const clean = new URL(url);

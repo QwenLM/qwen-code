@@ -135,6 +135,8 @@ export class QQChannel extends ChannelBase {
   private lastHeartbeatAck: number = 0;
   /** Debounce timer for saveQQState to avoid blocking event loop. */
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** beforeExit hook to flush state on abnormal process exit (unref'd timer bypass). */
+  private beforeExitHook: (() => void) | null = null;
   /** Timer for reconnectWithRetry fallback (unref'd so it doesn't block exit). */
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   /** Guard against parallel reconnectWithRetry chains from stale close events. */
@@ -206,6 +208,10 @@ export class QQChannel extends ChannelBase {
       try {
         await this.fetchToken();
         await this.connectGateway();
+        // Register beforeExit hook for abnormal exit (SIGKILL, OOM, crash) — the
+        // unref'd debounce timer may have 500ms of unflushed state at exit.
+        this.beforeExitHook = () => this.flushQQState();
+        process.on('beforeExit', this.beforeExitHook);
         return;
       } catch (e: unknown) {
         if (attempt < 2) {
@@ -341,6 +347,10 @@ export class QQChannel extends ChannelBase {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    if (this.beforeExitHook) {
+      process.off('beforeExit', this.beforeExitHook);
+      this.beforeExitHook = null;
+    }
     this.flushQQState();
     this.backupGlobalSessions();
     if (this.ws) {
@@ -452,7 +462,12 @@ export class QQChannel extends ChannelBase {
         const rawCT = raw.chatTypeMap as Array<[string, unknown]>;
         // Validate: only accept 'c2c' | 'group' values
         this.chatTypeMap = new Map(
-          rawCT.filter(([, v]) => v === 'c2c' || v === 'group'),
+          rawCT.filter(
+            ([k, v]) =>
+              typeof k === 'string' &&
+              k.length <= 256 &&
+              (v === 'c2c' || v === 'group'),
+          ),
         ) as Map<string, 'c2c' | 'group'>;
         const dropped = rawCT.length - this.chatTypeMap.size;
         if (dropped > 0)
@@ -464,7 +479,13 @@ export class QQChannel extends ChannelBase {
         const rawRM = raw.replyMsgId as Array<[string, unknown]>;
         // Validate: entries must be strings ≤ 128 chars
         this.replyMsgId = new Map(
-          rawRM.filter(([, v]) => typeof v === 'string' && v.length <= 128),
+          rawRM.filter(
+            ([k, v]) =>
+              typeof k === 'string' &&
+              k.length <= 256 &&
+              typeof v === 'string' &&
+              v.length <= 128,
+          ),
         ) as Map<string, string>;
         const dropped = rawRM.length - this.replyMsgId.size;
         if (dropped > 0)
@@ -477,8 +498,12 @@ export class QQChannel extends ChannelBase {
         // Validate: entries must be non-negative safe integers
         this.msgSeqMap = new Map(
           rawMS.filter(
-            ([, v]) =>
-              typeof v === 'number' && Number.isSafeInteger(v) && v >= 0,
+            ([k, v]) =>
+              typeof k === 'string' &&
+              k.length <= 256 &&
+              typeof v === 'number' &&
+              Number.isSafeInteger(v) &&
+              v >= 0,
           ),
         ) as Map<string, number>;
         const dropped = rawMS.length - this.msgSeqMap.size;
