@@ -875,4 +875,44 @@ describe('workspace memory remember routes', () => {
         });
       });
   });
+
+  it('records forget and dream failures with kind-specific error codes', async () => {
+    const bridge = buildBridgeStub({
+      forgetImpl: vi.fn().mockRejectedValue(new Error('forget failed')),
+      dreamImpl: vi.fn().mockRejectedValue(new Error('dream failed')),
+    });
+    const app = buildApp(bridge);
+
+    const forgetPost = await request(app)
+      .post('/workspace/memory/forget')
+      .send({ query: 'old preference' })
+      .expect(202);
+    await waitFor(() => bridge.forgetCalls.length === 1);
+    await request(app)
+      .get(`/workspace/memory/forget/${forgetPost.body.taskId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.status).toBe('failed');
+        expect(res.body.error).toEqual({
+          code: 'forget_failed',
+          message: 'Workspace memory forget failed.',
+        });
+      });
+
+    const dreamPost = await request(app)
+      .post('/workspace/memory/dream')
+      .send({})
+      .expect(202);
+    await waitFor(() => bridge.dreamCalls === 1);
+    await request(app)
+      .get(`/workspace/memory/dream/${dreamPost.body.taskId}`)
+      .expect(200)
+      .expect((res) => {
+        expect(res.body.status).toBe('failed');
+        expect(res.body.error).toEqual({
+          code: 'dream_failed',
+          message: 'Workspace memory dream failed.',
+        });
+      });
+  });
 });

@@ -5987,6 +5987,27 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       }
     });
 
+    it('_qwen/workspace/memory/forget rejects oversized queries', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'x'.repeat(64 * 1024 + 1) },
+        });
+        const frame = (await reader.next()) as {
+          error: { code: number; message: string };
+        };
+        expect(frame.error.code).toBe(-32602);
+        expect(frame.error.message).toContain('`query` exceeds');
+      } finally {
+        reader.close();
+      }
+    });
+
     it('_qwen/workspace/memory/dream queues and polls hidden tasks', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);

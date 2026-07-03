@@ -158,6 +158,7 @@ import {
   loadCliConfig,
 } from '../config/config.js';
 import { extractRememberErrorCode } from '../serve/workspace-remember-errors.js';
+import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
 import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
@@ -5499,6 +5500,15 @@ class QwenAgent implements Agent {
             'Invalid or missing query',
           );
         }
+        const trimmedQuery = query.trim();
+        if (
+          Buffer.byteLength(trimmedQuery, 'utf8') > MAX_REMEMBER_CONTENT_BYTES
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Query exceeds maximum size',
+          );
+        }
         if (!this.config.isManagedMemoryAvailable()) {
           throw new RequestError(
             -32009,
@@ -5515,16 +5525,14 @@ class QwenAgent implements Agent {
           const hiddenConfig = createHiddenWorkspaceMemoryConfig(this.config);
           const result = await this.config
             .getMemoryManager()
-            .forget(projectRoot, query.trim(), {
+            .forget(projectRoot, trimmedQuery, {
               config: hiddenConfig,
               abortSignal: childSignal,
             });
           return {
             summary:
               result.systemMessage ??
-              (result.removedEntries.length > 0
-                ? `Forgot ${result.removedEntries.length} memory entr${result.removedEntries.length === 1 ? 'y' : 'ies'}.`
-                : 'No managed auto-memory entries matched.'),
+              formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
             removedEntries: result.removedEntries,
             touchedTopics: result.touchedTopics,
           } as unknown as Record<string, unknown>;
@@ -5537,11 +5545,11 @@ class QwenAgent implements Agent {
               -32099,
               'Workspace memory forget timed out',
               {
-                errorKind: 'remember_timeout',
+                errorKind: 'forget_timeout',
               },
             );
           }
-          const code = extractRememberErrorCode(err);
+          const code = extractRememberErrorCode(err, 'forget_failed');
           if (code === 'managed_memory_unavailable') {
             throw new RequestError(
               -32009,
@@ -5595,10 +5603,10 @@ class QwenAgent implements Agent {
           }
           if (childSignal.aborted) {
             throw new RequestError(-32099, 'Workspace memory dream timed out', {
-              errorKind: 'remember_timeout',
+              errorKind: 'dream_timeout',
             });
           }
-          const code = extractRememberErrorCode(err);
+          const code = extractRememberErrorCode(err, 'dream_failed');
           if (code === 'managed_memory_unavailable') {
             throw new RequestError(
               -32009,

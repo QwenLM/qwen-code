@@ -2510,13 +2510,28 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}workspace/memory/forget`: {
           const query = params['query'];
-          if (typeof query !== 'string' || !query.trim()) {
+          const trimmedQuery = typeof query === 'string' ? query.trim() : '';
+          if (!trimmedQuery) {
             if (id !== undefined) {
               conn.sendConn(
                 error(
                   id,
                   RPC.INVALID_PARAMS,
                   '`query` must be a non-empty string',
+                ),
+              );
+            }
+            return;
+          }
+          if (
+            Buffer.byteLength(trimmedQuery, 'utf8') > MAX_REMEMBER_CONTENT_BYTES
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`query\` exceeds the ${MAX_REMEMBER_CONTENT_BYTES}-byte limit`,
                 ),
               );
             }
@@ -2542,12 +2557,12 @@ export class AcpDispatcher {
               return;
             }
             const task = this.workspaceRememberLane.enqueueForget({
-              query: query.trim(),
+              query: trimmedQuery,
               ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
             });
             this.replyConn(conn, id, task);
           } catch (err) {
-            const code = extractRememberErrorCode(err);
+            const code = extractRememberErrorCode(err, 'forget_failed');
             if (id !== undefined) {
               conn.sendConn(
                 error(
@@ -2627,7 +2642,7 @@ export class AcpDispatcher {
             });
             this.replyConn(conn, id, task);
           } catch (err) {
-            const code = extractRememberErrorCode(err);
+            const code = extractRememberErrorCode(err, 'dream_failed');
             if (id !== undefined) {
               conn.sendConn(
                 error(

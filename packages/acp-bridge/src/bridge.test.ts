@@ -578,6 +578,45 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('rejects malformed workspace memory forget responses', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/control/workspace/memory/forget') {
+              return {
+                summary: 'forgot',
+                removedEntries: [
+                  {
+                    topic: 'not-a-topic',
+                    summary: 'old preference',
+                    filePath: '/mem/project.md',
+                  },
+                ],
+                touchedTopics: ['project'],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    await expect(
+      bridge.runWorkspaceMemoryForget({
+        query: 'old preference',
+      }),
+    ).rejects.toThrow('Malformed workspace memory forget response');
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+
+    await bridge.shutdown();
+  });
+
   it('runs workspace memory dream without creating a session', async () => {
     const handles: ChannelHandle[] = [];
     const bridge = makeBridge({
@@ -616,6 +655,37 @@ describe('createAcpSessionBridge', () => {
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
     expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
+  it('rejects malformed workspace memory dream responses', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/control/workspace/memory/dream') {
+              return {
+                summary: 'dreamed',
+                touchedTopics: ['project'],
+                dedupedEntries: Number.NaN,
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    await expect(bridge.runWorkspaceMemoryDream()).rejects.toThrow(
+      'Malformed workspace memory dream response',
+    );
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
 
     await bridge.shutdown();
   });

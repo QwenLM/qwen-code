@@ -17,6 +17,10 @@ import type {
 } from './acp-session-bridge.js';
 import { extractRememberErrorCode } from './workspace-remember-errors.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from './workspace-memory-remember-constants.js';
+import {
+  formatWorkspaceMemoryDreamSummary,
+  formatWorkspaceMemoryForgetSummary,
+} from './workspace-memory-summaries.js';
 
 const debugLogger = createDebugLogger('WORKSPACE_REMEMBER');
 
@@ -153,14 +157,14 @@ function publicErrorMessage(
       ? 'Workspace memory remember queue is full.'
       : 'Workspace memory task queue is full.';
   }
-  if (code === 'remember_timeout') {
-    return kind === 'remember'
-      ? 'Workspace memory remember timed out.'
-      : 'Workspace memory task timed out.';
+  if (
+    code === 'remember_timeout' ||
+    code === 'forget_timeout' ||
+    code === 'dream_timeout'
+  ) {
+    return `Workspace memory ${kind} timed out.`;
   }
-  return kind === 'remember'
-    ? 'Workspace memory remember failed.'
-    : 'Workspace memory task failed.';
+  return `Workspace memory ${kind} failed.`;
 }
 
 function publicErrorStatus(code: string): number {
@@ -346,15 +350,13 @@ export class WorkspaceRememberTaskLane {
         task.result = {
           summary:
             result.summary ??
-            (result.removedEntries.length > 0
-              ? `Forgot ${result.removedEntries.length} memory entr${result.removedEntries.length === 1 ? 'y' : 'ies'}.`
-              : 'No managed auto-memory entries matched.'),
+            formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
           removedEntries: result.removedEntries,
           touchedTopics: result.touchedTopics,
         };
         task.updatedAt = nowIso();
       } catch (err) {
-        const code = extractRememberErrorCode(err);
+        const code = extractRememberErrorCode(err, 'forget_failed');
         debugLogger.error('Workspace memory forget task failed:', err);
         task.status = 'failed';
         task.error = {
@@ -404,15 +406,13 @@ export class WorkspaceRememberTaskLane {
         task.result = {
           summary:
             result.summary ??
-            (result.touchedTopics.length > 0
-              ? 'Managed auto-memory dream completed.'
-              : 'No managed auto-memory topics changed.'),
+            formatWorkspaceMemoryDreamSummary(result.touchedTopics.length),
           touchedTopics: result.touchedTopics,
           dedupedEntries: result.dedupedEntries,
         };
         task.updatedAt = nowIso();
       } catch (err) {
-        const code = extractRememberErrorCode(err);
+        const code = extractRememberErrorCode(err, 'dream_failed');
         debugLogger.error('Workspace memory dream task failed:', err);
         task.status = 'failed';
         task.error = {
@@ -621,7 +621,7 @@ export function mountWorkspaceMemoryRememberRoutes(
         });
         res.status(202).json(task);
       } catch (err) {
-        const code = extractRememberErrorCode(err);
+        const code = extractRememberErrorCode(err, 'forget_failed');
         res.status(publicErrorStatus(code)).json({
           error: publicErrorMessage(code, 'forget'),
           code,
@@ -666,7 +666,7 @@ export function mountWorkspaceMemoryRememberRoutes(
         });
         res.status(202).json(task);
       } catch (err) {
-        const code = extractRememberErrorCode(err);
+        const code = extractRememberErrorCode(err, 'dream_failed');
         res.status(publicErrorStatus(code)).json({
           error: publicErrorMessage(code, 'dream'),
           code,
