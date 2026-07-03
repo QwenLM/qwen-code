@@ -395,6 +395,7 @@ export class QQChannel extends ChannelBase {
     // sets disposed=true *before* calling it, so it must still write final state.
     if (this.disposed) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
+    const tmpPath = this.qqStatePath + '.tmp';
     this.saveTimer = setTimeout(() => {
       if (this.disposed) return;
       try {
