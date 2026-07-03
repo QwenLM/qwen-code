@@ -255,7 +255,11 @@ export function DaemonStatusDialog() {
             time: new Date(report.generatedAt).toLocaleTimeString(),
           })}
         </span>
-        {error && (
+        {/* Only flag a stale toolbar when the summary — which owns the visible
+            counters and timestamp — failed to refresh. A failed full fetch is
+            surfaced on its own in the diagnostics section below, so it must not
+            make an otherwise-healthy summary read as broken. */}
+        {summary.error && (
           <span className={styles.refreshError}>{t('daemon.loadFailed')}</span>
         )}
         <div className={styles.toolbarActions}>

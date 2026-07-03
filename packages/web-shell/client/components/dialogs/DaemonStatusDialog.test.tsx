@@ -369,4 +369,75 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('Failed to load daemon status');
     expect(text).toContain('connection refused');
   });
+
+  it('keeps the toolbar healthy when only the full fetch fails, and flags the detail section', () => {
+    // Summary succeeds (cards + timestamp fresh); only the detail fetch fails.
+    fullState = {
+      report: undefined,
+      loading: false,
+      error: new Error('full boom'),
+    };
+    mount();
+    const text = container!.textContent ?? '';
+    // Live summary cards still render...
+    expect(text).toContain('4242');
+    expect(text).toContain('http-bridge');
+    // ...the toolbar does NOT show the summary-failure banner...
+    expect(text).not.toContain('Failed to load daemon status');
+    // ...and the failure is confined to the diagnostics section.
+    expect(text).toContain('Failed to load diagnostics');
+    // With no full report, the badge falls back to the summary rollup.
+    expect(topBadgeText()).toBe('Warning');
+  });
+
+  it('renders the ACP-disabled branch when the transport is off', () => {
+    const acpOff = {
+      ...summaryReport,
+      runtime: {
+        ...summaryReport.runtime,
+        transport: {
+          ...summaryReport.runtime.transport,
+          acp: {
+            ...summaryReport.runtime.transport.acp,
+            enabled: false,
+          },
+        },
+      },
+    };
+    summaryState = { report: acpOff, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('ACP transport disabled');
+    expect(text).not.toContain('ACP streams (session/SSE/WS)');
+  });
+
+  it('formats uptime, memory, and durations across unit boundaries', () => {
+    const boundaries = {
+      ...summaryReport,
+      daemon: { ...summaryReport.daemon, uptimeMs: 90_061_000 }, // 1d 1h 1m
+      limits: {
+        ...summaryReport.limits,
+        promptDeadlineMs: 1_500, // fractional seconds -> "1.5s"
+        sessionIdleTimeoutMs: 500, // sub-second -> "500ms"
+      },
+      runtime: {
+        ...summaryReport.runtime,
+        process: {
+          rss: 2 * 1024 * 1024 * 1024, // 2 GB
+          heapTotal: 1024 * 1024 * 1024,
+          heapUsed: 512 * 1024 * 1024, // 512.0 MB
+        },
+      },
+    };
+    summaryState = { report: boundaries, loading: false, error: undefined };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('1d 1h 1m'); // formatUptime day branch
+    expect(text).toContain('2.00 GB'); // formatBytes GB branch
+    expect(text).toContain('512.0 MB'); // formatBytes MB branch
+    expect(text).toContain('1.5s'); // formatDurationMs fractional-second branch
+    expect(text).toContain('500ms'); // formatDurationMs sub-second branch
+  });
 });
