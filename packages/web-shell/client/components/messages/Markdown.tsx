@@ -52,6 +52,7 @@ const SUPPORTED_LANGUAGES = new Set([
   'c',
   'cpp',
   'csharp',
+  'fsharp',
   'ruby',
   'php',
   'swift',
@@ -94,6 +95,9 @@ const SUPPORTED_LANGUAGES = new Set([
 // tagged ```ts / ```js / ```py fall through to the unhighlighted "text" path
 // even though Shiki supports them under their full names.
 const LANGUAGE_ALIASES: Record<string, string> = {
+  'c++': 'cpp',
+  'c#': 'csharp',
+  'f#': 'fsharp',
   ts: 'typescript',
   js: 'javascript',
   py: 'python',
@@ -460,6 +464,39 @@ class EnhancedMarkdownTableBoundary extends Component<
   }
 }
 
+class CustomCodeBlockBoundary extends Component<
+  { children: ReactNode; fallback: ReactNode; resetKey: string },
+  { hasError: boolean; resetKey: string }
+> {
+  state = { hasError: false, resetKey: this.props.resetKey };
+
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+
+  static getDerivedStateFromProps(
+    props: { resetKey: string },
+    state: { resetKey: string },
+  ) {
+    if (props.resetKey !== state.resetKey) {
+      return { hasError: false, resetKey: props.resetKey };
+    }
+    return null;
+  }
+
+  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
+    console.error(
+      '[web-shell] custom code block renderer failed:',
+      error,
+      errorInfo.componentStack,
+    );
+  }
+
+  render() {
+    return this.state.hasError ? this.props.fallback : this.props.children;
+  }
+}
+
 // Carries the streaming flag to CodeBlock via context instead of a closure, so
 // the `code` renderer below can be a single stable reference. Toggling
 // isStreaming then no longer changes the `code` element type, so React reuses
@@ -478,34 +515,65 @@ function MarkdownCode({
   children?: ReactNode;
 }) {
   const isStreaming = useContext(IsStreamingContext);
-  const source = useContext(MarkdownSourceContext);
-  const appTheme = useTheme();
-  const { markdown } = useWebShellCustomization();
   const isBlock =
     className?.startsWith('language-') ||
     (typeof children === 'string' && children.includes('\n'));
 
   if (isBlock) {
-    const code = String(children).replace(/\n$/, '');
-    const custom = source
-      ? markdown?.renderCodeBlock?.({
-          language: extractRawFenceLanguage(className),
-          className,
-          code,
-          isStreaming,
-          source,
-          theme: appTheme,
-        })
-      : undefined;
-    if (custom !== undefined) return custom;
-
     return (
-      <CodeBlock className={className} isStreaming={isStreaming}>
-        {code}
-      </CodeBlock>
+      <MarkdownFencedCode className={className} isStreaming={isStreaming}>
+        {children}
+      </MarkdownFencedCode>
     );
   }
   return <InlineCode>{children}</InlineCode>;
+}
+
+function MarkdownFencedCode({
+  className,
+  children,
+  isStreaming,
+}: {
+  className?: string;
+  children?: ReactNode;
+  isStreaming?: boolean;
+}) {
+  const source = useContext(MarkdownSourceContext);
+  const appTheme = useTheme();
+  const { markdown } = useWebShellCustomization();
+  const rawCode = String(children);
+  const code = rawCode.replace(/\n$/, '');
+  const fallback = (
+    <CodeBlock className={className} isStreaming={isStreaming}>
+      {rawCode}
+    </CodeBlock>
+  );
+  const language = extractRawFenceLanguage(className);
+  const canUseCustomRenderer = !!source && !!className && !!language;
+
+  if (canUseCustomRenderer) {
+    try {
+      const custom = markdown?.renderCodeBlock?.({
+        language,
+        className,
+        code,
+        isStreaming: !!isStreaming,
+        source,
+        theme: appTheme,
+      });
+      if (custom != null) {
+        return (
+          <CustomCodeBlockBoundary fallback={fallback} resetKey={code}>
+            {custom}
+          </CustomCodeBlockBoundary>
+        );
+      }
+    } catch (error) {
+      console.error('[web-shell] custom code block renderer failed:', error);
+    }
+  }
+
+  return fallback;
 }
 
 function MarkdownPre({ children }: { children?: ReactNode }) {

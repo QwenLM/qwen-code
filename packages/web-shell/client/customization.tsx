@@ -20,14 +20,20 @@ export interface WebShellCodeBlockRenderInfo {
   language: string;
   className?: string;
   code: string;
+  /** True while the assistant message is still streaming partial content. */
   isStreaming: boolean;
   source: MarkdownContentSource;
   theme: 'dark' | 'light';
 }
 
+/**
+ * Return a React node to replace the default code block, or `null`/`undefined`
+ * to decline and fall back to the built-in code block renderer. Expensive
+ * renderers should debounce or defer work while `info.isStreaming` is true.
+ */
 export type CodeBlockRenderer = (
   info: WebShellCodeBlockRenderInfo,
-) => ReactNode | undefined;
+) => ReactNode | null | undefined;
 
 export interface WebShellMarkdownCustomization {
   transformMarkdown?: (

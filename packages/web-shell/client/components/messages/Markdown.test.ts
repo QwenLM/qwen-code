@@ -265,6 +265,9 @@ describe('resolveFenceLanguage', () => {
     expect(resolveFenceLanguage('ts').resolvedLang).toBe('typescript');
     expect(resolveFenceLanguage('js').resolvedLang).toBe('javascript');
     expect(resolveFenceLanguage('py').resolvedLang).toBe('python');
+    expect(resolveFenceLanguage('c++').resolvedLang).toBe('cpp');
+    expect(resolveFenceLanguage('c#').resolvedLang).toBe('csharp');
+    expect(resolveFenceLanguage('f#').resolvedLang).toBe('fsharp');
     expect(resolveFenceLanguage('sh').resolvedLang).toBe('bash');
     expect(resolveFenceLanguage('yml').resolvedLang).toBe('yaml');
     expect(resolveFenceLanguage('golang').resolvedLang).toBe('go');
@@ -400,13 +403,17 @@ describe('Markdown custom code block rendering', () => {
     await act(async () => {
       root.render(
         createElement(
-          WebShellCustomizationProvider,
-          { value: { markdown: { renderCodeBlock } } },
-          createElement(Markdown, {
-            content: '```custom-chart\nconst option = {};\n```',
-            source: 'assistant',
-            isStreaming: false,
-          }),
+          ThemeProvider,
+          { value: 'light' },
+          createElement(
+            WebShellCustomizationProvider,
+            { value: { markdown: { renderCodeBlock } } },
+            createElement(Markdown, {
+              content: '```custom-chart\nconst option = {};\n```',
+              source: 'assistant',
+              isStreaming: false,
+            }),
+          ),
         ),
       );
     });
@@ -416,6 +423,7 @@ describe('Markdown custom code block rendering', () => {
         language: 'custom-chart',
         className: 'language-custom-chart',
         code: 'const option = {};',
+        theme: 'light',
       }),
     );
     expect(container.textContent).toContain('custom-chart');
@@ -427,6 +435,210 @@ describe('Markdown custom code block rendering', () => {
       root.unmount();
     });
     container.remove();
+  });
+
+  it('falls back to the default code block when the host renderer returns null', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() => null);
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content: '```custom-chart\nconst option = {};\n```',
+            source: 'assistant',
+          }),
+        ),
+      );
+    });
+
+    expect(renderCodeBlock).toHaveBeenCalledOnce();
+    expect(container.textContent).toContain('custom-chart');
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      'const option = {};',
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('does not call host renderers when markdown source is omitted', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() => createElement('div', null, 'custom'));
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content: '```echarts-fulldata\nconst option = {};\n```',
+          }),
+        ),
+      );
+    });
+
+    expect(renderCodeBlock).not.toHaveBeenCalled();
+    expect(container.textContent).toContain('echarts-fulldata');
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      'const option = {};',
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('does not call host renderers for inline code', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() => createElement('div', null, 'custom'));
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content: 'Inline `const x = 1` example.',
+            source: 'assistant',
+          }),
+        ),
+      );
+    });
+
+    expect(renderCodeBlock).not.toHaveBeenCalled();
+    expect(container.querySelector('code')?.textContent).toBe('const x = 1');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('does not call host renderers for unfenced multiline code blocks', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() => createElement('div', null, 'custom'));
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content: '    const x = 1;\n    const y = 2;',
+            source: 'assistant',
+          }),
+        ),
+      );
+    });
+
+    expect(renderCodeBlock).not.toHaveBeenCalled();
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      'const x = 1;',
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('falls back to the default code block when the host renderer throws', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() => {
+      throw new Error('boom');
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(
+            WebShellCustomizationProvider,
+            { value: { markdown: { renderCodeBlock } } },
+            createElement(Markdown, {
+              content: '```echarts-fulldata\nconst option = {};\n```',
+              source: 'assistant',
+            }),
+          ),
+        );
+      });
+
+      expect(renderCodeBlock).toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[web-shell] custom code block renderer failed:',
+        expect.any(Error),
+      );
+      expect(container.textContent).toContain('echarts-fulldata');
+      expect(container.querySelector('pre code')?.textContent).toContain(
+        'const option = {};',
+      );
+    } finally {
+      errorSpy.mockRestore();
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
+  it('falls back to the default code block when custom rendered content throws', async () => {
+    function ThrowingChart() {
+      throw new Error('render boom');
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() => createElement(ThrowingChart));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(
+            WebShellCustomizationProvider,
+            { value: { markdown: { renderCodeBlock } } },
+            createElement(Markdown, {
+              content: '```echarts-fulldata\nconst option = {};\n```',
+              source: 'assistant',
+            }),
+          ),
+        );
+      });
+
+      expect(renderCodeBlock).toHaveBeenCalled();
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[web-shell] custom code block renderer failed:',
+        expect.any(Error),
+        expect.any(String),
+      );
+      expect(container.textContent).toContain('echarts-fulldata');
+      expect(container.querySelector('pre code')?.textContent).toContain(
+        'const option = {};',
+      );
+    } finally {
+      errorSpy.mockRestore();
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
   });
 });
 
