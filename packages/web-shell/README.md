@@ -129,8 +129,11 @@ icon 切换；ECharts runtime 由宿主通过 `loadEcharts` 提供。若启用
 renderer 不会自己读取 URL 或本地路径。
 
 如果需要让模型主动输出 `echarts-fulldata` block，宿主应在自己的 skills 来源中
-提供对应 skill，并且只在确认当前 Web Shell 宿主已经注册 renderer 时启用。`@qwen-code/web-shell`
-不内置或分发这个 skill。
+提供对应 skill，并且只在确认当前 Web Shell 宿主已经注册 renderer 时启用。
+`@qwen-code/web-shell` 不内置或自动加载这个 skill；可从
+`packages/web-shell/docs/examples/qwencode-viz/SKILL.md` 复制模板到宿主的
+`.qwen/skills/qwencode-viz/SKILL.md`，或通过宿主自己的 skill 注入机制提供等价
+说明。
 
 `echarts-fulldata` 的 block body 可以是旧版纯 JSON ECharts option，也可以是
 `{ "version": 1, "data": ..., "option": ... }` envelope。新版 inline envelope

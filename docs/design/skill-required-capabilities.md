@@ -20,9 +20,9 @@ in a non-Web-Shell session, the model can still choose an output format that the
 client cannot render.
 
 For the current PR, Qwen Code keeps the renderer extension point in Web Shell
-but does not bundle `qwencode-viz` in core. The Web Shell package may include an
-optional skill template, and hosts should install or inject that skill only when
-they also register an `echarts-fulldata` renderer.
+but does not bundle `qwencode-viz` in core. The Web Shell package includes a
+copyable, non-auto-loaded skill template, and hosts should install or inject
+that skill only when they also register an `echarts-fulldata` renderer.
 
 ## Problem
 
@@ -325,8 +325,8 @@ If Option A is implemented, add tests for:
 Existing skills require no migration because the new field is optional.
 
 For the current Option B path, remove the chart skill from core bundled skills.
-If the Web Shell package includes a template, it must not be loaded by core
-automatically; hosts opt in by installing or injecting it.
+The Web Shell package template must not be loaded by core automatically; hosts
+opt in by installing or injecting it.
 
 If Option A is accepted, add:
 
