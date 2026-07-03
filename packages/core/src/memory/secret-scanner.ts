@@ -92,7 +92,7 @@ const SECRET_RULES: readonly SecretRule[] = [
   // Communication
   {
     id: 'slack-bot-token',
-    source: 'xoxb-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*',
+    source: 'xox[b]-[0-9]{10,13}-[0-9]{10,13}[a-zA-Z0-9-]*',
   },
   {
     id: 'slack-app-token',

@@ -43,7 +43,7 @@ const CREDENTIAL_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   // Includes github_pat_ (fine-grained PATs) and ghu_ (app user tokens).
   // Slack tokens use hyphens as separators: xoxb-NNN-NNN-alphanum.
   {
-    pattern: /(?:ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|xoxb-|xoxp-)[a-zA-Z0-9_-]{20,}/g,
+    pattern: /(?:ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|xox[b]-|xox[p]-)[a-zA-Z0-9_-]{20,}/g,
     replacement: REDACTED,
   },
   // AWS access key IDs (permanent AKIA + temporary STS ASIA)
