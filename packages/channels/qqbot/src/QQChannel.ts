@@ -135,7 +135,7 @@ export class QQChannel extends ChannelBase {
   private lastHeartbeatAck: number = 0;
   /** Debounce timer for saveQQState to avoid blocking event loop. */
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
-  /** beforeExit hook to flush state on abnormal process exit (unref'd timer bypass). */
+  /** beforeExit hook to flush state when the event loop drains naturally. Does NOT fire for SIGKILL, OOM kills, or uncaughtException. */
   private beforeExitHook: (() => void) | null = null;
   /** Timer for reconnectWithRetry fallback (unref'd so it doesn't block exit). */
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
