@@ -24,6 +24,7 @@ import {
 } from './constants.js';
 import type {
   LspConnectionResult,
+  LspProcessDiagnostics,
   LspReconcileResult,
   LspServerConfig,
   LspServerHandle,
@@ -356,9 +357,11 @@ export class LspServerManager {
       return;
     }
     handle.stopRequested = false;
+    handle.processExitedUnexpectedly = false;
 
     handle.startingPromise = this.doStartServer(name, handle).finally(() => {
       handle.startingPromise = undefined;
+      handle.startupAbortController = undefined;
     });
 
     return handle.startingPromise;
@@ -439,7 +442,10 @@ export class LspServerManager {
     }
 
     try {
+      const startupAbortController = new AbortController();
+      handle.startupAbortController = startupAbortController;
       handle.error = undefined;
+      handle.processDiagnostics = undefined;
       handle.warmedUp = false;
       handle.status = 'IN_PROGRESS';
       debugLogger.info(
@@ -451,21 +457,36 @@ export class LspServerManager {
       );
 
       // Create LSP connection
-      const connection = await this.createLspConnection(handle.config);
+      const connection = await this.createLspConnection(
+        handle.config,
+        startupAbortController.signal,
+      );
       handle.connection = connection.connection;
       handle.process = connection.process;
       handle.processDiagnostics = connection.processDiagnostics;
+
+      this.attachRestartHandler(name, handle);
 
       // Initialize LSP server
       await this.initializeLspServer(connection, handle.config);
 
       handle.status = 'READY';
-      this.attachRestartHandler(name, handle);
       debugLogger.info(`LSP server ${name} started successfully`);
     } catch (error) {
       handle.status = 'FAILED';
       handle.error = error as Error;
+      const processDiagnostics =
+        typeof error === 'object' && error !== null
+          ? (error as { processDiagnostics?: LspProcessDiagnostics })
+              .processDiagnostics
+          : undefined;
+      if (processDiagnostics) {
+        handle.processDiagnostics = processDiagnostics;
+      }
       this.serverConfigHashes.delete(name);
+      if (!handle.processExitedUnexpectedly) {
+        handle.stopRequested = true;
+      }
       await this.releaseServerResources(name, handle, false);
       if (handle.processDiagnostics) {
         debugLogger.error(
@@ -475,7 +496,6 @@ export class LspServerManager {
       }
       handle.connection = undefined;
       handle.process = undefined;
-      handle.processDiagnostics = undefined;
       debugLogger.error(`LSP server ${name} failed to start:`, error);
     }
   }
@@ -489,6 +509,7 @@ export class LspServerManager {
   ): Promise<void> {
     debugLogger.info(`Stopping LSP server ${name}`);
     handle.stopRequested = true;
+    handle.startupAbortController?.abort();
 
     if (handle.startingPromise) {
       await handle.startingPromise;
@@ -585,6 +606,7 @@ export class LspServerManager {
       if (handle.stopRequested) {
         return;
       }
+      handle.processExitedUnexpectedly = true;
       // Only unexpected process exits can trigger restart. Explicit stops set
       // stopRequested before terminating the process.
       if (!handle.config.restartOnCrash) {
@@ -617,6 +639,9 @@ export class LspServerManager {
 
   private enqueueCrashRestart(name: string, handle: LspServerHandle): void {
     const restart = async () => {
+      if (handle.startingPromise) {
+        await handle.startingPromise.catch(() => undefined);
+      }
       if (
         this.stoppingAll ||
         this.serverHandles.get(name) !== handle ||
@@ -661,6 +686,7 @@ export class LspServerManager {
     handle.error = undefined;
     handle.warmedUp = false;
     handle.stopRequested = false;
+    handle.processExitedUnexpectedly = false;
   }
 
   private buildProcessEnv(
@@ -685,6 +711,7 @@ export class LspServerManager {
   private async connectSocketWithRetry(
     socket: LspSocketOptions,
     timeoutMs: number,
+    signal?: AbortSignal,
   ): Promise<
     Awaited<ReturnType<typeof LspConnectionFactory.createSocketConnection>>
   > {
@@ -693,14 +720,15 @@ export class LspServerManager {
     const deadline = Date.now() + timeoutMs;
     let attempt = 0;
     while (true) {
+      this.throwIfStartupAborted(signal);
       const remaining = deadline - Date.now();
       if (remaining <= 0) {
         throw new Error('LSP server connection timeout');
       }
       try {
-        return await LspConnectionFactory.createSocketConnection(
-          socket,
-          remaining,
+        return await this.raceStartupAbort(
+          LspConnectionFactory.createSocketConnection(socket, remaining),
+          signal,
         );
       } catch (error) {
         attempt += 1;
@@ -711,7 +739,63 @@ export class LspServerManager {
           DEFAULT_LSP_SOCKET_RETRY_DELAY_MS * attempt,
           DEFAULT_LSP_SOCKET_MAX_RETRY_DELAY_MS,
         );
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        await this.delayWithAbort(delay, signal);
+      }
+    }
+  }
+
+  private throwIfStartupAborted(signal: AbortSignal | undefined): void {
+    if (signal?.aborted) {
+      throw new Error('LSP server startup cancelled');
+    }
+  }
+
+  private async delayWithAbort(
+    delayMs: number,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    if (!signal) {
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      return;
+    }
+    this.throwIfStartupAborted(signal);
+    await new Promise<void>((resolve, reject) => {
+      const onAbort = () => {
+        clearTimeout(timerId);
+        signal.removeEventListener('abort', onAbort);
+        reject(new Error('LSP server startup cancelled'));
+      };
+      const timerId = setTimeout(() => {
+        signal.removeEventListener('abort', onAbort);
+        resolve();
+      }, delayMs);
+      signal.addEventListener('abort', onAbort, { once: true });
+    });
+  }
+
+  private async raceStartupAbort<T>(
+    promise: Promise<T>,
+    signal: AbortSignal | undefined,
+  ): Promise<T> {
+    if (!signal) {
+      return promise;
+    }
+    this.throwIfStartupAborted(signal);
+    let onAbort: (() => void) | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_, reject) => {
+          onAbort = () => {
+            signal.removeEventListener('abort', onAbort!);
+            reject(new Error('LSP server startup cancelled'));
+          };
+          signal.addEventListener('abort', onAbort, { once: true });
+        }),
+      ]);
+    } finally {
+      if (onAbort) {
+        signal.removeEventListener('abort', onAbort);
       }
     }
   }
@@ -725,6 +809,7 @@ export class LspServerManager {
    */
   private async createLspConnection(
     config: LspServerConfig,
+    signal?: AbortSignal,
   ): Promise<LspConnectionResult> {
     const workspaceFolder = config.workspaceFolder ?? this.workspaceRoot;
     const startupTimeout =
@@ -766,12 +851,29 @@ export class LspServerManager {
       }
 
       let process: ChildProcess | undefined;
+      let processDiagnostics: LspProcessDiagnostics | undefined;
+      let earlyExit:
+        | {
+            promise: Promise<never>;
+            dispose: () => void;
+          }
+        | undefined;
       if (config.command) {
+        processDiagnostics = { stderrTail: '' };
         process = spawn(config.command, config.args ?? [], {
           cwd: workspaceFolder,
           env,
-          stdio: 'ignore',
+          stdio: ['ignore', 'ignore', 'pipe'],
         });
+        process.stderr?.on('data', (chunk: Buffer | string) => {
+          processDiagnostics!.stderrTail = (
+            processDiagnostics!.stderrTail + chunk.toString()
+          ).slice(-4000);
+        });
+        earlyExit = this.watchSocketProcessEarlyExit(
+          process,
+          processDiagnostics,
+        );
         await new Promise<void>((resolve, reject) => {
           process?.once('spawn', () => resolve());
           process?.once('error', (error) => {
@@ -781,14 +883,22 @@ export class LspServerManager {
       }
 
       try {
-        const lspConnection = await this.connectSocketWithRetry(
+        const socketConnection = this.connectSocketWithRetry(
           config.socket,
           startupTimeout,
+          signal,
         );
+        const lspConnection = process
+          ? await this.waitForSocketConnectionOrProcessExit(
+              socketConnection,
+              earlyExit!,
+            )
+          : await socketConnection;
 
         return {
           connection: lspConnection.connection,
           process,
+          processDiagnostics,
           shutdown: async () => {
             await lspConnection.connection.shutdown();
           },
@@ -799,6 +909,15 @@ export class LspServerManager {
             lspConnection.connection.initialize(params),
         };
       } catch (error) {
+        if (
+          processDiagnostics &&
+          error instanceof Error &&
+          !('processDiagnostics' in error)
+        ) {
+          (
+            error as Error & { processDiagnostics: LspProcessDiagnostics }
+          ).processDiagnostics = processDiagnostics;
+        }
         if (process && process.exitCode === null) {
           process.kill();
         }
@@ -807,6 +926,50 @@ export class LspServerManager {
     } else {
       throw new Error(`Unsupported transport: ${config.transport}`);
     }
+  }
+
+  private async waitForSocketConnectionOrProcessExit(
+    socketConnection: Promise<
+      Awaited<ReturnType<typeof LspConnectionFactory.createSocketConnection>>
+    >,
+    earlyExit: { promise: Promise<never>; dispose: () => void },
+  ): Promise<
+    Awaited<ReturnType<typeof LspConnectionFactory.createSocketConnection>>
+  > {
+    try {
+      return await Promise.race([socketConnection, earlyExit.promise]);
+    } finally {
+      earlyExit.dispose();
+    }
+  }
+
+  private watchSocketProcessEarlyExit(
+    process: ChildProcess,
+    diagnostics: LspProcessDiagnostics | undefined,
+  ): { promise: Promise<never>; dispose: () => void } {
+    let onExit: (code: number | null, signal: NodeJS.Signals | null) => void;
+    const promise = new Promise<never>((_, reject) => {
+      onExit = (code, signal) => {
+        if (diagnostics) {
+          diagnostics.exitCode = code;
+          diagnostics.exitSignal = signal;
+        }
+        reject(
+          new Error(
+            `LSP server exited before socket connection was ready: code=${
+              code ?? 'unknown'
+            }, signal=${signal ?? 'none'}`,
+          ),
+        );
+      };
+      process.once('exit', onExit);
+    });
+    return {
+      promise,
+      dispose: () => {
+        process.off('exit', onExit);
+      },
+    };
   }
 
   /**

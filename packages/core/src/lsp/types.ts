@@ -611,6 +611,10 @@ export interface LspServerHandle {
   processDiagnostics?: LspProcessDiagnostics;
   /** Lock to prevent concurrent startup attempts */
   startingPromise?: Promise<void>;
+  /** Cancels an in-flight startup attempt */
+  startupAbortController?: AbortController;
+  /** Whether the owned process exited unexpectedly during the current startup */
+  processExitedUnexpectedly?: boolean;
 }
 
 /**

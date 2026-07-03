@@ -5,12 +5,14 @@
  */
 
 import path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type { ChildProcess } from 'node:child_process';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Config as CoreConfig } from '../config/config.js';
 import type { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import type { WorkspaceContext } from '../utils/workspaceContext.js';
 import { LspServerManager } from './LspServerManager.js';
+import { LspConnectionFactory } from './LspConnectionFactory.js';
 import type {
   LspConnectionInterface,
   LspConnectionResult,
@@ -90,6 +92,10 @@ function createTrustedManager(): LspServerManager {
       workspaceRoot: '/workspace',
     },
   );
+}
+
+function pathToRootUri(rootPath: string): string {
+  return pathToFileURL(rootPath).toString();
 }
 
 describe('LspServerManager', () => {
@@ -467,9 +473,9 @@ describe('LspServerManager', () => {
     expect(process.kill).toHaveBeenCalledOnce();
     expect(manager.getHandles().get('clangd')?.connection).toBeUndefined();
     expect(manager.getHandles().get('clangd')?.process).toBeUndefined();
-    expect(
-      manager.getHandles().get('clangd')?.processDiagnostics,
-    ).toBeUndefined();
+    expect(manager.getHandles().get('clangd')?.processDiagnostics).toBe(
+      processDiagnostics,
+    );
     expect(debugLoggerMock.error).toHaveBeenCalledWith(
       'LSP server clangd process diagnostics:',
       processDiagnostics,
@@ -1125,6 +1131,180 @@ describe('LspServerManager', () => {
     expect(connection.shutdown).toHaveBeenCalledOnce();
     expect(connection.end).toHaveBeenCalledOnce();
     expect(process.kill).toHaveBeenCalledOnce();
+  });
+
+  it('cancels an in-flight socket startup retry when stopped', async () => {
+    const manager = createTrustedManager();
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    ).mockResolvedValue(true);
+    vi.spyOn(LspConnectionFactory, 'createSocketConnection').mockReturnValue(
+      new Promise(() => {}),
+    );
+    manager.setServerConfigs([
+      {
+        ...serverConfig,
+        command: process.execPath,
+        args: ['-e', 'setTimeout(() => {}, 10000);'],
+        transport: 'tcp',
+        socket: { host: '127.0.0.1', port: 65534 },
+        workspaceFolder: process.cwd(),
+        rootUri: pathToRootUri(process.cwd()),
+        startupTimeout: 30_000,
+      },
+    ]);
+
+    const startAll = manager.startAll();
+    await vi.waitFor(() => {
+      expect(LspConnectionFactory.createSocketConnection).toHaveBeenCalled();
+    });
+
+    const stopped = await Promise.race([
+      manager.stopAll().then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1000)),
+    ]);
+    await startAll;
+
+    expect(stopped).toBe(true);
+    expect(manager.getHandles().size).toBe(0);
+  });
+
+  it('fails socket startup early when the child exits before connect', async () => {
+    const manager = createTrustedManager();
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    ).mockResolvedValue(true);
+    vi.spyOn(LspConnectionFactory, 'createSocketConnection').mockReturnValue(
+      new Promise(() => {}),
+    );
+    manager.setServerConfigs([
+      {
+        ...serverConfig,
+        command: process.execPath,
+        args: [
+          '-e',
+          'process.stderr.write("socket startup failed\\n"); process.exit(7);',
+        ],
+        transport: 'tcp',
+        socket: { host: '127.0.0.1', port: 65533 },
+        workspaceFolder: process.cwd(),
+        rootUri: pathToRootUri(process.cwd()),
+        startupTimeout: 30_000,
+      },
+    ]);
+
+    await manager.startAll();
+
+    const handle = manager.getHandles().get('clangd');
+    expect(handle?.status).toBe('FAILED');
+    expect(handle?.error?.message).toContain(
+      'LSP server exited before socket connection was ready',
+    );
+    expect(handle?.processDiagnostics).toMatchObject({
+      stderrTail: 'socket startup failed\n',
+      exitCode: 7,
+      exitSignal: null,
+    });
+  });
+
+  it('registers the restart handler before protocol initialization completes', async () => {
+    const manager = createTrustedManager();
+    let exitHandler: ((code: number | null) => void) | undefined;
+    const process = createMockProcess();
+    process.once = vi.fn(
+      (event: string, handler: (code: number | null) => void) => {
+        if (event === 'exit') {
+          exitHandler = handler;
+        }
+        return process;
+      },
+    );
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    ).mockResolvedValue(true);
+    const createLspConnection = vi
+      .spyOn(
+        manager as unknown as {
+          createLspConnection: (
+            config: LspServerConfig,
+          ) => Promise<LspConnectionResult>;
+        },
+        'createLspConnection',
+      )
+      .mockResolvedValue({
+        connection: createMockConnection(),
+        process: process as unknown as ChildProcess,
+      } as unknown as LspConnectionResult);
+    let resolveInitialize!: () => void;
+    vi.spyOn(
+      manager as unknown as {
+        initializeLspServer: () => Promise<void>;
+      },
+      'initializeLspServer',
+    ).mockReturnValue(
+      new Promise<void>((resolve) => {
+        resolveInitialize = resolve;
+      }),
+    );
+
+    manager.setServerConfigs([{ ...serverConfig, restartOnCrash: true }]);
+    const startAll = manager.startAll();
+    await vi.waitFor(() => {
+      expect(exitHandler).toBeDefined();
+    });
+    exitHandler?.(1);
+    resolveInitialize();
+    await startAll;
+
+    expect(process.once).toHaveBeenCalledWith('exit', expect.any(Function));
+    await vi.waitFor(() => {
+      expect(createLspConnection).toHaveBeenCalledTimes(2);
+    });
   });
 
   it('logs and continues when killing an owned process throws', async () => {
