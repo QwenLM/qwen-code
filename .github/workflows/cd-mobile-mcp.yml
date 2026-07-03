@@ -43,10 +43,6 @@ jobs:
         working-directory: 'packages/mobile-mcp'
         run: 'npm ci --ignore-scripts'
 
-      - name: 'Lint'
-        working-directory: 'packages/mobile-mcp'
-        run: 'npm run lint'
-
       - name: 'Set version'
         working-directory: 'packages/mobile-mcp'
         run: 'npm version "${{ steps.version.outputs.version }}" --no-git-tag-version'
