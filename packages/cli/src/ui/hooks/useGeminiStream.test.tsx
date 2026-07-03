@@ -5536,6 +5536,47 @@ describe('useGeminiStream', () => {
       );
     });
 
+    it('should not auto-approve prompts that hide always allow', async () => {
+      const mockOnConfirm = vi.fn().mockResolvedValue(undefined);
+      const awaitingApprovalToolCalls: TrackedToolCall[] = [
+        {
+          request: {
+            callId: 'call1',
+            name: 'replace',
+            args: { old_string: 'old', new_string: 'new' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-id-1',
+          },
+          status: 'awaiting_approval',
+          responseSubmittedToGemini: false,
+          confirmationDetails: {
+            onConfirm: mockOnConfirm,
+            onCancel: vi.fn(),
+            message: 'Confirm hook ask?',
+            displayedText: 'Hook requested confirmation',
+            hideAlwaysAllow: true,
+          },
+          tool: {
+            name: 'replace',
+            displayName: 'replace',
+            description: 'Replace text',
+            build: vi.fn(),
+          } as any,
+          invocation: {
+            getDescription: () => 'Mock description',
+          } as unknown as AnyToolInvocation,
+        } as unknown as TrackedWaitingToolCall,
+      ];
+
+      const { result } = renderTestHook(awaitingApprovalToolCalls);
+
+      await act(async () => {
+        await result.current.handleApprovalModeChange(ApprovalMode.YOLO);
+      });
+
+      expect(mockOnConfirm).not.toHaveBeenCalled();
+    });
+
     it('should only auto-approve edit tools when switching to AUTO_EDIT mode', async () => {
       const mockOnConfirmReplace = vi.fn().mockResolvedValue(undefined);
       const mockOnConfirmWrite = vi.fn().mockResolvedValue(undefined);
