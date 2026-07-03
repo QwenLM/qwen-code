@@ -930,6 +930,71 @@ describe('Markdown custom code block rendering', () => {
     }
   });
 
+  it('retries custom rendered content when source or theme changes', async () => {
+    function ThrowingChart(): never {
+      throw new Error('render boom');
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn((info: WebShellCodeBlockRenderInfo) => {
+      if (info.source === 'assistant' && info.theme === 'dark') {
+        return createElement(ThrowingChart);
+      }
+      return createElement(
+        'div',
+        { 'data-custom-code': `${info.source}:${info.theme}` },
+        info.code,
+      );
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const tree = (source: 'assistant' | 'thinking', theme: 'dark' | 'light') =>
+      createElement(
+        ThemeProvider,
+        { value: theme },
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content: '```echarts-fulldata\nsame\n```',
+            source,
+          }),
+        ),
+      );
+
+    try {
+      await act(async () => {
+        root.render(tree('assistant', 'dark'));
+      });
+
+      expect(container.querySelector('pre code')?.textContent).toContain(
+        'same',
+      );
+
+      await act(async () => {
+        root.render(tree('thinking', 'light'));
+      });
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[web-shell] custom code block component render (lang=echarts-fulldata) failed:',
+        expect.any(Error),
+        expect.any(String),
+      );
+      expect(
+        container.querySelector('[data-custom-code="thinking:light"]'),
+      ).not.toBeNull();
+      expect(container.querySelector('pre code')).toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
   it('lets custom code components take precedence over renderCodeBlock', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);

@@ -7,10 +7,12 @@ import { I18nProvider } from '../../i18n';
 import { ThemeProvider } from '../../themeContext';
 import { Markdown } from './Markdown';
 import {
+  ECHARTS_FULLDATA_SANITIZER_KEY_OVERLAP,
   EchartsFullDataBlock,
   createEchartsFullDataRenderer,
   type EchartsFullDataOption,
   type EchartsRuntime,
+  type EchartsRuntimeLoader,
 } from './EchartsFullDataBlock';
 
 (
@@ -54,6 +56,37 @@ async function flushChart(): Promise<void> {
   });
 }
 
+async function renderEchartsMarkdown({
+  code,
+  loadEcharts,
+  language = 'en',
+  source = 'assistant',
+}: {
+  code: string;
+  loadEcharts?: EchartsRuntimeLoader;
+  language?: 'en' | 'zh-CN';
+  source?: 'assistant' | 'thinking';
+}): Promise<HTMLElement> {
+  return render(
+    <I18nProvider language={language}>
+      <ThemeProvider value="dark">
+        <WebShellCustomizationProvider
+          value={{
+            markdown: {
+              renderCodeBlock: createEchartsFullDataRenderer({ loadEcharts }),
+            },
+          }}
+        >
+          <Markdown
+            content={`\`\`\`echarts-fulldata\n${code}\n\`\`\``}
+            source={source}
+          />
+        </WebShellCustomizationProvider>
+      </ThemeProvider>
+    </I18nProvider>,
+  );
+}
+
 function getDataRows(container: HTMLElement): string[][] {
   return Array.from(container.querySelectorAll('tbody tr')).map((row) =>
     Array.from(row.querySelectorAll('td'))
@@ -73,6 +106,34 @@ afterEach(async () => {
 });
 
 describe('EchartsFullDataBlock', () => {
+  it('keeps top-level allowlist keys disjoint from nested denylist keys', () => {
+    expect(ECHARTS_FULLDATA_SANITIZER_KEY_OVERLAP).toEqual([]);
+  });
+
+  it('does not render echarts blocks from thinking markdown', async () => {
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption: vi.fn(),
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        dataset: { source: [[1]] },
+        series: [{ type: 'bar' }],
+      }),
+      loadEcharts: () => runtime,
+      source: 'thinking',
+    });
+
+    expect(runtime.init).not.toHaveBeenCalled();
+    expect(
+      container.querySelector('[data-testid="echarts-fulldata-rendered"]'),
+    ).toBeNull();
+    expect(container.textContent).toContain('echarts-fulldata');
+  });
+
   it('renders chart/data icon switching from dataset-backed options', async () => {
     const option: EchartsFullDataOption = {
       title: { text: 'Weekly orders' },
@@ -766,23 +827,41 @@ describe('EchartsFullDataBlock', () => {
 
   it('sanitizes unsafe chart option fields before calling ECharts', async () => {
     const option: EchartsFullDataOption = {
-      dataset: {
-        dimensions: ['day', 'orders'],
-        source: [{ day: '<img src=x onerror=alert(1)>', orders: 120 }],
-        transform: { type: 'filter' },
-      } as EchartsFullDataOption['dataset'],
+      dataset: [
+        {
+          dimensions: ['day', 'orders'],
+          source: [{ day: '<img src=x onerror=alert(1)>', orders: 120 }],
+          transform: { type: 'filter' },
+        },
+        {
+          dimensions: ['day', 'orders'],
+          source: [{ day: 'Tue', orders: 999 }],
+        },
+      ] as EchartsFullDataOption['dataset'],
       graphic: { type: 'text', style: { text: '<img src=x>' } },
+      legend: {
+        data: ['Mon', 'Tue'],
+      },
       tooltip: {
         formatter: '<img src=x onerror=alert(1)>',
         extraCssText: 'background-image:url(https://example.test/x.png)',
       },
-      xAxis: { type: 'category' },
+      xAxis: { type: 'category', data: ['Mon', 'Tue'] },
       yAxis: { type: 'value' },
       series: [
         {
           type: 'line',
+          datasetIndex: 1,
+          data: [120, 999],
+          href: 'javascript:alert(1)',
+          id: 'data:text/html,<svg onload=alert(1)>',
           name: '<a'.repeat(32),
           encode: { x: 'day', y: 'orders' },
+          itemStyle: {
+            image: 'https://example.test/marker.png',
+          },
+          renderItem: 'javascript:alert(1)',
+          src: 'https://example.test/marker.png',
           symbol: 'image://https://example.test/marker.png',
           tooltip: {
             appendToBody: true,
@@ -817,14 +896,23 @@ describe('EchartsFullDataBlock', () => {
         transform?: unknown;
       };
       graphic?: unknown;
+      legend?: { data?: unknown };
       tooltip?: {
         formatter?: unknown;
         extraCssText?: string;
         renderMode?: string;
         enterable?: boolean;
       };
+      xAxis?: { data?: unknown };
       series?: Array<{
+        data?: unknown;
+        datasetIndex?: unknown;
+        href?: unknown;
+        id?: unknown;
+        itemStyle?: { image?: unknown };
         name?: string;
+        renderItem?: unknown;
+        src?: unknown;
         symbol?: string;
         tooltip?: {
           appendToBody?: boolean;
@@ -838,6 +926,8 @@ describe('EchartsFullDataBlock', () => {
     expect(renderedOption.graphic).toBeUndefined();
     expect(renderedOption.dataset?.transform).toBeUndefined();
     expect(renderedOption.dataset?.source?.[0]?.day).toBe('');
+    expect(renderedOption.dataset?.source).toHaveLength(1);
+    expect(renderedOption.legend?.data).toBeUndefined();
     expect(renderedOption.tooltip?.formatter).toBeUndefined();
     expect(renderedOption.tooltip?.extraCssText).not.toContain('https://');
     expect(renderedOption.tooltip).toEqual(
@@ -846,7 +936,15 @@ describe('EchartsFullDataBlock', () => {
         renderMode: 'richText',
       }),
     );
+    expect(renderedOption.xAxis?.data).toBeUndefined();
+    expect(renderedOption.series?.[0]?.data).toBeUndefined();
+    expect(renderedOption.series?.[0]?.datasetIndex).toBeUndefined();
+    expect(renderedOption.series?.[0]?.href).toBeUndefined();
+    expect(renderedOption.series?.[0]?.id).toBeUndefined();
+    expect(renderedOption.series?.[0]?.itemStyle?.image).toBeUndefined();
     expect(renderedOption.series?.[0]?.name).toBeUndefined();
+    expect(renderedOption.series?.[0]?.renderItem).toBeUndefined();
+    expect(renderedOption.series?.[0]?.src).toBeUndefined();
     expect(renderedOption.series?.[0]?.symbol).toBe('circle');
     expect(renderedOption.series?.[0]?.tooltip?.formatter).toBeUndefined();
     expect(renderedOption.series?.[0]?.tooltip).toEqual(
@@ -915,6 +1013,33 @@ describe('EchartsFullDataBlock', () => {
     ).not.toBeNull();
   });
 
+  it('localizes chart chrome strings', async () => {
+    const option: EchartsFullDataOption = {
+      dataset: {
+        source: [{ day: 'Mon', orders: 120 }],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar' }],
+    };
+    const { container } = await mount(
+      <I18nProvider language="zh-CN">
+        <EchartsFullDataBlock option={option} theme="dark" />
+      </I18nProvider>,
+    );
+    await flushChart();
+
+    expect(container.textContent).toContain('数据集图表');
+    expect(container.textContent).toContain('图表运行时不可用。');
+    expect(
+      container.querySelector('button[aria-label="显示图表"]'),
+    ).not.toBeNull();
+    expect(
+      container.querySelector('button[aria-label="显示数据"]'),
+    ).not.toBeNull();
+    expect(container.querySelector('[aria-label="视图模式"]')).not.toBeNull();
+  });
+
   it('caps the rendered data table rows', async () => {
     const rows = Array.from({ length: 501 }, (_, index) => ({
       day: `Day ${index + 1}`,
@@ -951,6 +1076,169 @@ describe('EchartsFullDataBlock', () => {
 
     expect(container.textContent).toContain('Showing 500 of 501 rows');
     expect(container.querySelectorAll('tbody tr')).toHaveLength(500);
+  });
+
+  it('caps the rendered data table columns', async () => {
+    const columns = Array.from({ length: 60 }, (_, index) => `Metric ${index}`);
+    const option: EchartsFullDataOption = {
+      dataset: {
+        dimensions: columns,
+        source: [columns.map((_, index) => index)],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 0, y: 1 } }],
+    };
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption: vi.fn(),
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await render(
+      <EchartsFullDataBlock
+        option={option}
+        theme="dark"
+        loadEcharts={() => runtime}
+      />,
+    );
+    await flushChart();
+    await act(async () => {
+      container.querySelectorAll('button')[1]?.click();
+    });
+
+    expect(container.textContent).toContain('Showing 50 of 60 columns');
+    expect(container.querySelectorAll('thead th')).toHaveLength(50);
+    expect(container.querySelectorAll('tbody td')).toHaveLength(50);
+  });
+
+  it('accepts chart data at the row and cell limits', async () => {
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+    const columns = Array.from({ length: 40 }, (_, index) => `metric${index}`);
+    const rows = Array.from({ length: 1000 }, () => columns.map(() => 1));
+
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        dataset: {
+          dimensions: columns,
+          source: rows,
+        },
+        xAxis: { type: 'category' },
+        yAxis: { type: 'value' },
+        series: [{ type: 'bar', encode: { x: 0, y: 1 } }],
+      }),
+      loadEcharts: () => runtime,
+    });
+    await flushChart();
+
+    expect(container.textContent).not.toContain('too many');
+    expect(setOption).toHaveBeenCalledOnce();
+  });
+
+  it('rejects chart data over the row limit', async () => {
+    const rows = Array.from({ length: 2001 }, (_, index) => [index]);
+
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        dataset: {
+          source: rows,
+        },
+        series: [{ type: 'bar' }],
+      }),
+    });
+
+    expect(container.textContent).toContain(
+      'Chart data has too many rows. Maximum supported rows: 2000.',
+    );
+  });
+
+  it('rejects chart data over the cell limit', async () => {
+    const columns = Array.from({ length: 40 }, (_, index) => `metric${index}`);
+    const rows = Array.from({ length: 1001 }, () => columns.map(() => 1));
+
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        dataset: {
+          dimensions: columns,
+          source: rows,
+        },
+        series: [{ type: 'bar' }],
+      }),
+    });
+
+    expect(container.textContent).toContain(
+      'Chart data has too many cells. Maximum supported cells: 40000.',
+    );
+  });
+
+  it('rejects chart data over the series limit', async () => {
+    const series = Array.from({ length: 101 }, () => ({ type: 'line' }));
+
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        dataset: {
+          source: [[1]],
+        },
+        series,
+      }),
+    });
+
+    expect(container.textContent).toContain(
+      'Chart data has too many series. Maximum supported series: 100.',
+    );
+  });
+
+  it('rejects chart data over the nesting depth limit', async () => {
+    let nested: unknown = 'leaf';
+    for (let index = 0; index < 42; index += 1) {
+      nested = { child: nested };
+    }
+
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        dataset: {
+          source: [[1]],
+        },
+        series: [{ type: 'bar' }],
+        title: nested,
+      }),
+    });
+
+    expect(container.textContent).toContain('Chart data is too deeply nested.');
+  });
+
+  it('rejects chart code over the size limit before parsing', async () => {
+    const container = await renderEchartsMarkdown({
+      code: 'x'.repeat(500_001),
+    });
+
+    expect(container.textContent).toContain(
+      'Chart data is too large. Maximum supported size: 500000 characters.',
+    );
+  });
+
+  it('rejects chart data without dataset source rows', async () => {
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        dataset: {
+          source: [],
+        },
+        series: [{ type: 'bar' }],
+      }),
+    });
+
+    expect(container.textContent).toContain(
+      'Chart data must include dataset.source.',
+    );
   });
 
   it('rejects syntactically valid JSON that is not an option object', async () => {

@@ -501,7 +501,12 @@ function MarkdownFencedCode({
           <ErrorBoundary
             fallback={fallback}
             label={`custom code block component render (lang=${language})`}
-            resetKeys={[language, isStreaming ? 'streaming' : code]}
+            resetKeys={[
+              language,
+              source,
+              appTheme,
+              isStreaming ? 'streaming' : code,
+            ]}
           >
             {custom}
           </ErrorBoundary>

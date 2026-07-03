@@ -9,6 +9,7 @@ import {
   MAX_ENHANCED_TABLE_ROWS,
   type EnhancedTableData,
 } from './EnhancedMarkdownTable';
+import { useI18n } from '../../i18n';
 import styles from './EchartsFullDataBlock.module.css';
 
 export const ECHARTS_FULLDATA_LANGUAGE = 'echarts-fulldata';
@@ -125,8 +126,13 @@ const MAX_CHART_CODE_LENGTH = 500_000;
 const MAX_OPTION_DEPTH = 40;
 const MAX_DATA_ROWS = 2_000;
 const MAX_DATA_CELLS = 40_000;
+const MAX_SERIES_COUNT = 100;
 const noop = () => {};
 
+// Sanitization is intentionally two-layered: top-level option keys are an
+// allowlist/default-deny surface, while nested keys are a denylist/default-allow
+// surface. UNSAFE_OPTION_KEYS does not backstop SAFE_TOP_LEVEL_OPTION_KEYS; any
+// key promoted to the top-level allowlist needs a fresh subtree review.
 const SAFE_TOP_LEVEL_OPTION_KEYS = new Set([
   'angleAxis',
   'backgroundColor',
@@ -151,6 +157,8 @@ const UNSAFE_OPTION_KEYS = new Set([
   'backgroundImage',
   'brush',
   'calendar',
+  'data',
+  'datasetIndex',
   'extraCssText',
   'geo',
   'graphic',
@@ -166,6 +174,10 @@ const UNSAFE_OPTION_KEYS = new Set([
   'toolbox',
   'url',
 ]);
+
+export const ECHARTS_FULLDATA_SANITIZER_KEY_OVERLAP = Object.freeze(
+  [...SAFE_TOP_LEVEL_OPTION_KEYS].filter((key) => UNSAFE_OPTION_KEYS.has(key)),
+);
 
 function isObject(value: unknown): value is EchartsObject {
   return !!value && typeof value === 'object' && !Array.isArray(value);
@@ -321,7 +333,7 @@ function sanitizeDatasetValue(value: unknown): unknown {
     return dataset;
   };
 
-  if (Array.isArray(value)) return value.map(sanitizeDataset).filter(Boolean);
+  if (Array.isArray(value)) return sanitizeDataset(value[0]);
   return sanitizeDataset(value);
 }
 
@@ -702,19 +714,19 @@ function getPrimaryDataset(
   return Array.isArray(option.dataset) ? option.dataset[0] : option.dataset;
 }
 
-function getTitle(option: EchartsFullDataOption | undefined): string {
+function getTitle(
+  option: EchartsFullDataOption | undefined,
+): string | undefined {
   const title = option?.title;
   if (Array.isArray(title)) {
-    return (
-      title.find(
-        (entry): entry is { text: string } =>
-          isObject(entry) && typeof entry.text === 'string' && !!entry.text,
-      )?.text ?? 'Dataset chart'
-    );
+    return title.find(
+      (entry): entry is { text: string } =>
+        isObject(entry) && typeof entry.text === 'string' && !!entry.text,
+    )?.text;
   }
   return isObject(title) && typeof title.text === 'string'
     ? title.text
-    : 'Dataset chart';
+    : undefined;
 }
 
 function getRows(option: EchartsFullDataOption | undefined): DatasetSource {
@@ -781,6 +793,11 @@ function validateOptionShape(
     return `Chart data has too many cells. Maximum supported cells: ${MAX_DATA_CELLS}.`;
   }
 
+  const seriesCount = getSeriesList(option.series).length;
+  if (seriesCount > MAX_SERIES_COUNT) {
+    return `Chart data has too many series. Maximum supported series: ${MAX_SERIES_COUNT}.`;
+  }
+
   return undefined;
 }
 
@@ -817,7 +834,12 @@ export function createEchartsFullDataRenderer({
   return function renderEchartsFullDataBlock(
     info: WebShellCodeBlockRenderInfo,
   ) {
-    if (info.language !== ECHARTS_FULLDATA_LANGUAGE) return undefined;
+    if (
+      info.source !== 'assistant' ||
+      info.language !== ECHARTS_FULLDATA_LANGUAGE
+    ) {
+      return undefined;
+    }
     return (
       <EchartsFullDataBlockFromCode
         code={info.code}
@@ -913,20 +935,31 @@ function SimpleDatasetTable({
   columns: string[];
   rows: DatasetSource;
 }) {
+  const { t } = useI18n();
   const visibleRows = rows.slice(0, MAX_ENHANCED_TABLE_ROWS);
-  const isTruncated = rows.length > visibleRows.length;
+  const visibleColumns = columns.slice(0, MAX_ENHANCED_TABLE_COLUMNS);
+  const omittedRows = rows.length - visibleRows.length;
+  const omittedColumns = columns.length - visibleColumns.length;
+  const isTruncated = omittedRows > 0 || omittedColumns > 0;
 
   return (
     <div className={styles.tableWrap} data-testid="echarts-fulldata-table">
       {isTruncated && (
         <div className={styles.tableNotice}>
-          Showing {visibleRows.length} of {rows.length} rows
+          {t('echartsChart.tableNotice', {
+            visibleRows: visibleRows.length,
+            totalRows: rows.length,
+            visibleColumns: visibleColumns.length,
+            totalColumns: columns.length,
+            omittedRows,
+            omittedColumns,
+          })}
         </div>
       )}
       <table className={styles.table}>
         <thead>
           <tr>
-            {columns.map((column, columnIndex) => (
+            {visibleColumns.map((column, columnIndex) => (
               <th key={`${columnIndex}-${column}`}>{column}</th>
             ))}
           </tr>
@@ -934,7 +967,7 @@ function SimpleDatasetTable({
         <tbody>
           {visibleRows.map((row, rowIndex) => (
             <tr key={rowIndex}>
-              {columns.map((column, columnIndex) => (
+              {visibleColumns.map((column, columnIndex) => (
                 <td key={`${columnIndex}-${column}`}>
                   {formatCell(getCell(row, column, columnIndex))}
                 </td>
@@ -954,8 +987,9 @@ function EchartsDataTable({
   columns: string[];
   rows: DatasetSource;
 }) {
+  const { t } = useI18n();
   if (columns.length === 0 || rows.length === 0) {
-    return <div className={styles.state}>No data</div>;
+    return <div className={styles.state}>{t('echartsChart.noData')}</div>;
   }
 
   if (
@@ -973,11 +1007,12 @@ function EchartsDataTable({
 }
 
 function ChartLoadingState() {
+  const { t } = useI18n();
   return (
     <div
       className={`${styles.state} ${styles.loading}`}
       role="status"
-      aria-label="Rendering chart"
+      aria-label={t('echartsChart.rendering')}
     >
       <span className={styles.spinner} aria-hidden="true" />
     </div>
@@ -991,6 +1026,7 @@ export function EchartsFullDataBlock({
   theme,
   loadEcharts,
 }: EchartsFullDataBlockProps) {
+  const { t } = useI18n();
   const chartRef = useRef<HTMLDivElement>(null);
   const chartInstanceRef = useRef<EchartsInstance | undefined>(undefined);
   const removeResizeRef = useRef<() => void>(noop);
@@ -1052,7 +1088,7 @@ export function EchartsFullDataBlock({
       setChartError(
         chartOptionError instanceof Error
           ? chartOptionError.message
-          : 'Chart render failed.',
+          : t('echartsChart.renderFailed'),
       );
       return;
     }
@@ -1064,7 +1100,7 @@ export function EchartsFullDataBlock({
     if (!hasLoadEcharts) {
       disposeChart();
       setChartReady(false);
-      setChartError('Chart runtime is unavailable.');
+      setChartError(t('echartsChart.runtimeUnavailable'));
       return;
     }
 
@@ -1107,7 +1143,9 @@ export function EchartsFullDataBlock({
         disposeChart();
         setChartReady(false);
         setChartError(
-          error instanceof Error ? error.message : 'Chart render failed.',
+          error instanceof Error
+            ? error.message
+            : t('echartsChart.renderFailed'),
         );
       }
     };
@@ -1120,9 +1158,10 @@ export function EchartsFullDataBlock({
     hasLoadEcharts,
     mode,
     parseError,
+    t,
   ]);
 
-  const title = getTitle(option);
+  const title = getTitle(option) ?? t('echartsChart.defaultTitle');
 
   return (
     <section className={styles.card} data-testid="echarts-fulldata-rendered">
@@ -1131,13 +1170,16 @@ export function EchartsFullDataBlock({
           {title}
         </div>
         {!parseError && (
-          <div className={styles.toggle} aria-label="View mode">
+          <div
+            className={styles.toggle}
+            aria-label={t('echartsChart.viewMode')}
+          >
             <button
               type="button"
               className={styles.toggleButton}
-              aria-label="Show chart"
+              aria-label={t('echartsChart.showChart')}
               aria-pressed={mode === 'chart'}
-              title="Chart"
+              title={t('echartsChart.chart')}
               onClick={() => setMode('chart')}
             >
               <ChartIcon />
@@ -1145,9 +1187,9 @@ export function EchartsFullDataBlock({
             <button
               type="button"
               className={styles.toggleButton}
-              aria-label="Show data"
+              aria-label={t('echartsChart.showData')}
               aria-pressed={mode === 'data'}
-              title="Data"
+              title={t('echartsChart.data')}
               onClick={() => setMode('data')}
             >
               <DataIcon />
