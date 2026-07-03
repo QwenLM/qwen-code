@@ -58,12 +58,12 @@ describe('atCompletionSource', () => {
 
     expect(result?.from).toBe(0);
     expect(result?.options.map((option) => option.label)).toEqual([
-      '@ext:browser',
-      '@ext:review-tools',
-      '@README.md',
-      '@src/index.ts',
-      '@mcp:clickhouse',
-      '@mcp:dataworks',
+      'browser',
+      'review-tools',
+      'README.md',
+      'src/index.ts',
+      'clickhouse',
+      'dataworks',
     ]);
     expect(glob).toHaveBeenCalledWith('**/*', { maxResults: 50 });
   });
@@ -86,9 +86,9 @@ describe('atCompletionSource', () => {
     );
 
     expect(result?.options.map((option) => option.label)).toEqual([
-      '@ext:browser',
-      '@browser-test.ts',
-      '@mcp:browser-mcp',
+      'browser',
+      'browser-test.ts',
+      'browser-mcp',
     ]);
     expect(glob).toHaveBeenCalledWith('bro*', { maxResults: 50 });
   });
@@ -105,7 +105,7 @@ describe('atCompletionSource', () => {
     );
 
     expect(result?.options.map((option) => option.label)).toEqual([
-      '@ext:review-tools',
+      'review-tools',
     ]);
     expect(result?.options[0]?.apply).toBe('@ext:review-tools ');
     expect(glob).not.toHaveBeenCalled();
@@ -125,7 +125,7 @@ describe('atCompletionSource', () => {
     );
 
     expect(result?.options.map((option) => option.label)).toEqual([
-      '@README.md',
+      'README.md',
     ]);
   });
 });

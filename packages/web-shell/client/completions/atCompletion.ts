@@ -1,4 +1,5 @@
 import type {
+  Completion,
   CompletionContext,
   CompletionResult,
   CompletionSection,
@@ -19,6 +20,12 @@ export interface ExtensionCompletionEntry {
 export interface McpServerCompletionEntry {
   name: string;
   description?: string;
+}
+
+export interface AtReferenceCompletion extends Completion {
+  atReferenceKind?: 'extension' | 'mcp' | 'file';
+  atReferenceLabel?: string;
+  atReferenceValue?: string;
 }
 
 export type LoadExtensionsFn = () => Promise<{
@@ -105,31 +112,51 @@ export function atCompletionSource(
       mcpServers: createSection(sectionLabels.mcpServers, 2),
     };
 
+    const bareAt = prefix.length === 0;
+    const extensionPreview = bareAt ? 4 : extensions.length;
+    const filePreview = bareAt ? 3 : files.length;
+    const mcpPreview = bareAt ? 4 : mcpServers.length;
+
     return {
       from: atPos,
       options: [
-        ...extensions.map((ext) => ({
-          label: `@ext:${ext.name}`,
-          apply: `@ext:${ext.name} `,
-          detail: extensionDetail(ext),
-          type: 'keyword',
-          section: sections.extensions,
-          boost: 20,
-        })),
-        ...files.map((f) => ({
-          label: `@${f}`,
-          apply: `@${f} `,
-          type: 'file',
-          section: sections.files,
-        })),
-        ...mcpServers.map((server) => ({
-          label: `@mcp:${server.name}`,
-          apply: `@mcp:${server.name} `,
-          detail: server.description,
-          type: 'keyword',
-          section: sections.mcpServers,
-          boost: 18,
-        })),
+        ...extensions.slice(0, extensionPreview).map(
+          (ext) =>
+            ({
+              label: ext.name,
+              apply: `@ext:${ext.name} `,
+              detail: extensionDetail(ext),
+              type: 'keyword',
+              section: sections.extensions,
+              boost: 20,
+              atReferenceKind: 'extension',
+              atReferenceValue: ext.name,
+            }) satisfies AtReferenceCompletion,
+        ),
+        ...files.slice(0, filePreview).map(
+          (f) =>
+            ({
+              label: f,
+              apply: `@${f} `,
+              type: 'file',
+              section: sections.files,
+              atReferenceKind: 'file',
+              atReferenceValue: f,
+            }) satisfies AtReferenceCompletion,
+        ),
+        ...mcpServers.slice(0, mcpPreview).map(
+          (server) =>
+            ({
+              label: server.name,
+              apply: `@mcp:${server.name} `,
+              detail: server.description,
+              type: 'keyword',
+              section: sections.mcpServers,
+              boost: 18,
+              atReferenceKind: 'mcp',
+              atReferenceValue: server.name,
+            }) satisfies AtReferenceCompletion,
+        ),
       ],
       filter: false,
     };
