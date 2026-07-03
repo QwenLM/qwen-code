@@ -478,6 +478,9 @@ export const useGeminiStream = (
   // tall enough to trigger the scroll-to-top redraw. A ref (not a value) because
   // it is computed after this hook is called in AppContainer.
   availableTerminalHeightRef?: React.RefObject<number>,
+  // Live terminal width, paired with the height ref so the commit loop reads
+  // both dimensions consistently across a mid-stream resize.
+  terminalWidthRef?: React.RefObject<number>,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -1293,6 +1296,12 @@ export const useGeminiStream = (
         (availableTerminalHeightRef?.current ?? 0) > 0
           ? availableTerminalHeightRef!.current
           : Math.max(4, terminalHeight - STREAM_PENDING_COMPOSER_RESERVE_ROWS);
+      // Read width from the same live ref as the height so a mid-stream resize
+      // is handled consistently; fall back to the render-time width.
+      const commitWidth =
+        (terminalWidthRef?.current ?? 0) > 0
+          ? terminalWidthRef!.current
+          : terminalWidth;
       const commitRowBudget = Math.max(
         4,
         viewportRows - STREAM_PENDING_COMMIT_RESERVE_ROWS,
@@ -1302,7 +1311,7 @@ export const useGeminiStream = (
         const bufferLines = newGeminiMessageBuffer.split('\n');
         const { keptLines, clipped } = fitPendingSlice(
           bufferLines,
-          terminalWidth,
+          commitWidth,
           commitRowBudget,
           tableClampRows,
         );
@@ -1363,6 +1372,7 @@ export const useGeminiStream = (
       terminalWidth,
       terminalHeight,
       availableTerminalHeightRef,
+      terminalWidthRef,
     ],
   );
 

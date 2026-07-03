@@ -877,8 +877,10 @@ export const AppContainer = (props: AppContainerProps) => {
   const isIdleRef = useRef(true);
   // Live content-area height, kept in a ref so useGeminiStream (called above the
   // point where availableTerminalHeight is computed) can read the current value
-  // when bounding the pending item's rendered height.
+  // when bounding the pending item's rendered height. terminalWidthRef pairs
+  // with it so the commit loop reads width and height consistently (both live).
   const availableTerminalHeightRef = useRef(0);
+  const terminalWidthRef = useRef(0);
   const updateHandlerRef = useRef<{
     cleanup: () => void;
     flush: () => void;
@@ -1669,6 +1671,7 @@ export const AppContainer = (props: AppContainerProps) => {
     midTurnDrainRef,
     logger,
     availableTerminalHeightRef,
+    terminalWidthRef,
   );
 
   // Now that streamingState is available, keep isIdleRef in sync and
@@ -2739,6 +2742,7 @@ export const AppContainer = (props: AppContainerProps) => {
   );
   // Expose to useGeminiStream (called earlier) for rendered-height-aware commit.
   availableTerminalHeightRef.current = availableTerminalHeight;
+  terminalWidthRef.current = terminalWidth;
 
   config.setShellExecutionConfig({
     terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
