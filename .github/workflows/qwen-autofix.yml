@@ -167,9 +167,7 @@ jobs:
     needs: 'route'
     if: |-
       ${{ needs.route.outputs.do_issue == 'true' }}
-    # Heavy autonomous jobs run on the dedicated ECS pool when available. Hosted
-    # remains as a guarded fallback so maintainers can disable the pool quickly.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.AUTOFIX_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "autofix"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 180
     concurrency:
       group: 'qwen-autofix-issue'
@@ -221,7 +219,7 @@ jobs:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
-            github-hosted|self-hosted) ;;
+            github-hosted) ;;
             *)
               echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
               exit 1
@@ -237,17 +235,6 @@ jobs:
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
 
-      - name: 'Use pre-installed Node.js (self-hosted)'
-        if: |-
-          ${{ runner.environment == 'self-hosted' }}
-        run: |-
-          if ! command -v node > /dev/null 2>&1; then
-            echo '::error::Node.js is required on the autofix self-hosted runner.'
-            exit 1
-          fi
-          node --version
-          npm --version
-
       - name: 'Install tmux'
         run: |-
           if command -v tmux > /dev/null 2>&1; then
@@ -262,7 +249,15 @@ jobs:
 
       - name: 'Install dependencies and build'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
           npm run build
           npm run bundle
 
@@ -340,15 +335,23 @@ jobs:
           fi
           echo "has_candidates=$([[ "${COUNT}" -gt 0 ]] && echo true || echo false)" >> "${GITHUB_OUTPUT}"
 
+      - name: 'Resolve sandbox image'
+        if: |-
+          ${{ steps.scan.outputs.has_candidates == 'true' }}
+        run: |-
+          node .github/scripts/resolve-sandbox-image.mjs \
+            "$(node -p "require('./package.json').config.sandboxImageUri")"
+
       - name: 'Assess candidates'
         id: 'assess'
         if: |-
           ${{ steps.scan.outputs.has_candidates == 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          QWEN_UPSTREAM_OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-          QWEN_UPSTREAM_OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-home'
           SETTINGS_JSON: |-
             {
@@ -361,11 +364,11 @@ jobs:
                 "write_file",
                 "run_shell_command(cat)",
                 "run_shell_command(git log)",
-                "run_shell_command(git diff)",
-                "run_shell_command(gh issue view)",
-                "run_shell_command(gh search)"
+                "run_shell_command(git diff)"
               ],
-              "sandbox": false
+              "tools": {
+                "sandbox": "docker"
+              }
             }
           PROMPT: |-
             ## Role
@@ -424,39 +427,12 @@ jobs:
             this bot (wrong platform, needs more info, not a real task) and
             should never be re-scanned. Transient doubts are not permanent.
         run: |-
-          start_openai_proxy() {
-            local proxy_info local_openai_base_url
-            proxy_info="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.XXXXXX")"
-
-            QWEN_OPENAI_PROXY_INFO="${proxy_info}" node .github/scripts/openai-proxy.mjs &
-            OPENAI_PROXY_PID=$!
-            trap 'kill "${OPENAI_PROXY_PID}" 2>/dev/null || true' EXIT
-            for _ in 1 2 3 4 5; do
-              if [[ -s "${proxy_info}" ]]; then
-                break
-              fi
-              if ! kill -0 "${OPENAI_PROXY_PID}" 2>/dev/null; then
-                echo '::error::OpenAI proxy exited before becoming ready.'
-                exit 1
-              fi
-              sleep 1
-            done
-            if [[ ! -s "${proxy_info}" ]]; then
-              echo '::error::OpenAI proxy did not become ready.'
-              exit 1
-            fi
-            local_openai_base_url="$(cat "${proxy_info}")"
-            unset QWEN_UPSTREAM_OPENAI_API_KEY
-            unset QWEN_UPSTREAM_OPENAI_BASE_URL
-            export OPENAI_API_KEY=qwen-loopback-proxy
-            export OPENAI_BASE_URL="${local_openai_base_url}"
-            echo "openai_proxy=enabled (${OPENAI_BASE_URL})"
-          }
-
-          start_openai_proxy
-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.'
+            exit 1
+          fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           rm -f "${WORKDIR}/decision.json"
           qwen --yolo --prompt "${PROMPT}"
@@ -544,9 +520,10 @@ jobs:
           ${{ steps.decision.outputs.go_issue != '' }}
         env:
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
-          QWEN_UPSTREAM_OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-          QWEN_UPSTREAM_OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-home'
           SETTINGS_JSON: |-
             {
@@ -569,7 +546,9 @@ jobs:
                 "run_shell_command(mkdir)",
                 "run_shell_command(pwd)"
               ],
-              "sandbox": false
+              "tools": {
+                "sandbox": "docker"
+              }
             }
           PROMPT: |-
             ## Role
@@ -624,41 +603,12 @@ jobs:
             exit without committing. An honest abort is better than a wrong
             fix.
         run: |-
-          BRANCH="autofix/issue-${ISSUE}"
-
-          start_openai_proxy() {
-            local proxy_info local_openai_base_url
-            proxy_info="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.XXXXXX")"
-
-            QWEN_OPENAI_PROXY_INFO="${proxy_info}" node .github/scripts/openai-proxy.mjs &
-            OPENAI_PROXY_PID=$!
-            trap 'kill "${OPENAI_PROXY_PID}" 2>/dev/null || true' EXIT
-            for _ in 1 2 3 4 5; do
-              if [[ -s "${proxy_info}" ]]; then
-                break
-              fi
-              if ! kill -0 "${OPENAI_PROXY_PID}" 2>/dev/null; then
-                echo '::error::OpenAI proxy exited before becoming ready.'
-                exit 1
-              fi
-              sleep 1
-            done
-            if [[ ! -s "${proxy_info}" ]]; then
-              echo '::error::OpenAI proxy did not become ready.'
-              exit 1
-            fi
-            local_openai_base_url="$(cat "${proxy_info}")"
-            unset QWEN_UPSTREAM_OPENAI_API_KEY
-            unset QWEN_UPSTREAM_OPENAI_BASE_URL
-            export OPENAI_API_KEY=qwen-loopback-proxy
-            export OPENAI_BASE_URL="${local_openai_base_url}"
-            echo "openai_proxy=enabled (${OPENAI_BASE_URL})"
-          }
-
-          start_openai_proxy
-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.'
+            exit 1
+          fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           qwen --yolo --prompt "${PROMPT}"
 
@@ -951,9 +901,7 @@ jobs:
     needs: 'review-scan'
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
-    # Heavy autonomous jobs run on the dedicated ECS pool when available. Hosted
-    # remains as a guarded fallback so maintainers can disable the pool quickly.
-    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.AUTOFIX_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "autofix"]'') || fromJSON(''["ubuntu-latest"]'') }}'
+    runs-on: 'ubuntu-latest'
     timeout-minutes: 120
     permissions:
       contents: 'read'
@@ -990,7 +938,7 @@ jobs:
           RUNNER_ENVIRONMENT: '${{ runner.environment }}'
         run: |-
           case "${RUNNER_ENVIRONMENT}" in
-            github-hosted|self-hosted) ;;
+            github-hosted) ;;
             *)
               echo "::error::Unsupported runner environment: ${RUNNER_ENVIRONMENT:-unset}."
               exit 1
@@ -1006,17 +954,6 @@ jobs:
           cache: 'npm'
           cache-dependency-path: 'package-lock.json'
 
-      - name: 'Use pre-installed Node.js (self-hosted)'
-        if: |-
-          ${{ runner.environment == 'self-hosted' }}
-        run: |-
-          if ! command -v node > /dev/null 2>&1; then
-            echo '::error::Node.js is required on the autofix self-hosted runner.'
-            exit 1
-          fi
-          node --version
-          npm --version
-
       - name: 'Install tmux'
         run: |-
           if command -v tmux > /dev/null 2>&1; then
@@ -1031,7 +968,15 @@ jobs:
 
       - name: 'Install dependencies and build'
         run: |-
-          npm ci --prefer-offline --no-audit --progress=false
+          for attempt in 1 2 3; do
+            if npm ci --prefer-offline --no-audit --progress=false; then
+              break
+            fi
+            if [[ "${attempt}" == "3" ]]; then
+              exit 1
+            fi
+            sleep $((attempt * 15))
+          done
           npm run build
           npm run bundle
 
@@ -1050,12 +995,22 @@ jobs:
           PATH="${qwen_bin}:${PATH}"
           qwen --version
 
+      - name: 'Resolve sandbox image'
+        run: |-
+          node .github/scripts/resolve-sandbox-image.mjs \
+            "$(node -p "require('./package.json').config.sandboxImageUri")"
+
       - name: 'Prepare branch and feedback'
         id: 'prepare'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
         run: |-
           mkdir -p "${WORKDIR}"
+          if ! git diff --quiet || ! git diff --cached --quiet; then
+            echo 'Restoring tracked build output before switching to the PR branch.'
+            git status --short
+            git restore --source=HEAD --staged --worktree .
+          fi
           git checkout -B "${BRANCH}" "origin/${BRANCH}"
 
           # Does the branch conflict with base? merge-tree computes the merge
@@ -1125,9 +1080,10 @@ jobs:
         env:
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
-          QWEN_UPSTREAM_OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'
-          QWEN_UPSTREAM_OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'
+          OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
+          OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
+          NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
           SETTINGS_JSON: |-
             {
@@ -1150,7 +1106,9 @@ jobs:
                 "run_shell_command(mkdir)",
                 "run_shell_command(pwd)"
               ],
-              "sandbox": false
+              "tools": {
+                "sandbox": "docker"
+              }
             }
           PROMPT: |-
             ## Role
@@ -1228,39 +1186,12 @@ jobs:
               /tmp/autofix-review-${{ matrix.target.pr }}/failure.md with what you learned and exit
               without committing. An honest abort beats a wrong or churn change.
         run: |-
-          start_openai_proxy() {
-            local proxy_info local_openai_base_url
-            proxy_info="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.XXXXXX")"
-
-            QWEN_OPENAI_PROXY_INFO="${proxy_info}" node .github/scripts/openai-proxy.mjs &
-            OPENAI_PROXY_PID=$!
-            trap 'kill "${OPENAI_PROXY_PID}" 2>/dev/null || true' EXIT
-            for _ in 1 2 3 4 5; do
-              if [[ -s "${proxy_info}" ]]; then
-                break
-              fi
-              if ! kill -0 "${OPENAI_PROXY_PID}" 2>/dev/null; then
-                echo '::error::OpenAI proxy exited before becoming ready.'
-                exit 1
-              fi
-              sleep 1
-            done
-            if [[ ! -s "${proxy_info}" ]]; then
-              echo '::error::OpenAI proxy did not become ready.'
-              exit 1
-            fi
-            local_openai_base_url="$(cat "${proxy_info}")"
-            unset QWEN_UPSTREAM_OPENAI_API_KEY
-            unset QWEN_UPSTREAM_OPENAI_BASE_URL
-            export OPENAI_API_KEY=qwen-loopback-proxy
-            export OPENAI_BASE_URL="${local_openai_base_url}"
-            echo "openai_proxy=enabled (${OPENAI_BASE_URL})"
-          }
-
-          start_openai_proxy
-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
+          if [[ -z "${OPENAI_API_KEY:-}" ]]; then
+            echo '::error::AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.'
+            exit 1
+          fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           qwen --yolo --prompt "${PROMPT}"
 
