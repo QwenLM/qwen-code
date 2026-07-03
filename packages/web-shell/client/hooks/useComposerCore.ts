@@ -149,7 +149,7 @@ const TOOLTIP_STYLES = `
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section:first-of-type {
-  margin-top: 0;
+  margin-top: 6px;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete .cm-completionLabel {
@@ -1352,6 +1352,11 @@ export function useComposerCore(
                 };
               }
             : undefined,
+        {
+          extensions: t('quickActions.extensions'),
+          mcpServers: t('mcp.title'),
+          files: t('editor.hintFiles'),
+        },
       ),
     ];
 

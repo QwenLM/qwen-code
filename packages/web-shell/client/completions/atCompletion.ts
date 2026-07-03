@@ -1,6 +1,7 @@
 import type {
   CompletionContext,
   CompletionResult,
+  CompletionSection,
 } from '@codemirror/autocomplete';
 
 export type GlobFn = (
@@ -28,15 +29,36 @@ export type LoadMcpServersFn = () => Promise<{
   servers: McpServerCompletionEntry[];
 }>;
 
+export interface AtCompletionSectionLabels {
+  extensions: string;
+  mcpServers: string;
+  files: string;
+}
+
+function createSection(name: string, rank: number): CompletionSection {
+  return { name, rank };
+}
+
 export function createAtCompletionSource(
   getGlob: () => GlobFn | undefined,
   getLoadExtensions: () => LoadExtensionsFn | undefined = () => undefined,
   getLoadMcpServers: () => LoadMcpServersFn | undefined = () => undefined,
+  sectionLabels: AtCompletionSectionLabels = {
+    extensions: 'Extensions',
+    mcpServers: 'MCP Servers',
+    files: 'Files',
+  },
 ): (
   context: CompletionContext,
 ) => CompletionResult | null | Promise<CompletionResult | null> {
   return (context) =>
-    atCompletionSource(context, getGlob, getLoadExtensions, getLoadMcpServers);
+    atCompletionSource(
+      context,
+      getGlob,
+      getLoadExtensions,
+      getLoadMcpServers,
+      sectionLabels,
+    );
 }
 
 export function atCompletionSource(
@@ -44,6 +66,11 @@ export function atCompletionSource(
   getGlob: () => GlobFn | undefined,
   getLoadExtensions: () => LoadExtensionsFn | undefined = () => undefined,
   getLoadMcpServers: () => LoadMcpServersFn | undefined = () => undefined,
+  sectionLabels: AtCompletionSectionLabels = {
+    extensions: 'Extensions',
+    mcpServers: 'MCP Servers',
+    files: 'Files',
+  },
 ): CompletionResult | null | Promise<CompletionResult | null> {
   const line = context.state.doc.lineAt(context.pos);
   const textBefore = line.text.slice(0, context.pos - line.from);
@@ -72,6 +99,12 @@ export function atCompletionSource(
       files.length === 0
     )
       return null;
+    const sections = {
+      extensions: createSection(sectionLabels.extensions, 0),
+      files: createSection(sectionLabels.files, 1),
+      mcpServers: createSection(sectionLabels.mcpServers, 2),
+    };
+
     return {
       from: atPos,
       options: [
@@ -80,22 +113,22 @@ export function atCompletionSource(
           apply: `@ext:${ext.name} `,
           detail: extensionDetail(ext),
           type: 'keyword',
-          section: 'Extensions',
+          section: sections.extensions,
           boost: 20,
+        })),
+        ...files.map((f) => ({
+          label: `@${f}`,
+          apply: `@${f} `,
+          type: 'file',
+          section: sections.files,
         })),
         ...mcpServers.map((server) => ({
           label: `@mcp:${server.name}`,
           apply: `@mcp:${server.name} `,
           detail: server.description,
           type: 'keyword',
-          section: 'MCP Servers',
+          section: sections.mcpServers,
           boost: 18,
-        })),
-        ...files.map((f) => ({
-          label: `@${f}`,
-          apply: `@${f} `,
-          type: 'file',
-          section: 'Files',
         })),
       ],
       filter: false,

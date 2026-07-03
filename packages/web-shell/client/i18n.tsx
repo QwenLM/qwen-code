@@ -2008,7 +2008,7 @@ const ZH: Messages = {
   'mcp.toolCount': (v) => `${v?.count ?? 0} 个工具`,
   'mcp.toolsCount': (v) => `${v?.count ?? 0} 个工具`,
   'mcp.toolsLabel': '工具：',
-  'mcp.title': 'MCP Servers',
+  'mcp.title': 'MCP 服务器',
   'mcp.toolDetail': '工具详情',
   'mcp.tools': '工具',
   'mcp.toolsForServer': (v) => `${v?.name ?? 'Server'} 的工具`,

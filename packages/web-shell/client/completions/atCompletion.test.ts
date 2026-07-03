@@ -60,10 +60,10 @@ describe('atCompletionSource', () => {
     expect(result?.options.map((option) => option.label)).toEqual([
       '@ext:browser',
       '@ext:review-tools',
-      '@mcp:clickhouse',
-      '@mcp:dataworks',
       '@README.md',
       '@src/index.ts',
+      '@mcp:clickhouse',
+      '@mcp:dataworks',
     ]);
     expect(glob).toHaveBeenCalledWith('**/*', { maxResults: 50 });
   });
@@ -87,8 +87,8 @@ describe('atCompletionSource', () => {
 
     expect(result?.options.map((option) => option.label)).toEqual([
       '@ext:browser',
-      '@mcp:browser-mcp',
       '@browser-test.ts',
+      '@mcp:browser-mcp',
     ]);
     expect(glob).toHaveBeenCalledWith('bro*', { maxResults: 50 });
   });
