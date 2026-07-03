@@ -65,6 +65,8 @@ env:
   # The automated Qwen PR reviewer posts as this account; its review counts as
   # actionable feedback even though it is not a human collaborator.
   REVIEW_BOT: 'qwen-code-ci-bot'
+  # KEEP IN SYNC with KNOWN_AUTOMATION in pr-force-push-reminder.yml.
+  KNOWN_BOTS: '["qwen-code-dev-bot", "qwen-code-ci-bot"]'
   # Human reviews/comments only count when the author is a real maintainer. This
   # is the prompt-injection trust gate: feedback from anyone else is ignored so a
   # hostile commenter cannot steer the agent.
