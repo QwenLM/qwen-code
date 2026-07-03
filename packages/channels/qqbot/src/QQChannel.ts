@@ -247,7 +247,7 @@ export class QQChannel extends ChannelBase {
       if (!resp.ok) {
         const errBody = await resp.text().catch(() => '');
         process.stderr.write(
-          `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${sanitizeLogText(errBody, 200)})\n`,
+          `[QQ:${this.name}] Send failed (HTTP ${resp.status}: ${sanitizeLogText(errBody, 200)})\n`,
         );
 
         // 429 = rate-limited — do not retry, bail immediately
@@ -292,9 +292,13 @@ export class QQChannel extends ChannelBase {
             this.saveQQState();
             return;
           }
+          // Active retry failed with non-429 — don't fall through to plain-text
+          process.stderr.write(
+            `[QQ:${this.name}] MESSAGE DROPPED: both passive and active send failed for ${sanitizeLogText(chatId, 64)}\n`,
+          );
+          this.saveQQState();
+          return;
         }
-
-        if (msgId) return;
 
         // Plain-text fallback for active messages (no reply context)
         const plainBody: Record<string, unknown> = {
@@ -309,6 +313,12 @@ export class QQChannel extends ChannelBase {
         );
         if (!fallbackRes.ok) {
           await fallbackRes.text().catch(() => '');
+          if (fallbackRes.status === 429) {
+            process.stderr.write(
+              `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on plain-text fallback for ${sanitizeLogText(chatId, 64)}\n`,
+            );
+            return;
+          }
           process.stderr.write(
             `[QQ:${this.name}] Plain-text fallback failed: ${fallbackRes.status}\n`,
           );
@@ -324,11 +334,8 @@ export class QQChannel extends ChannelBase {
         this.msgSeqMap.set(msgId, nextSeq - 1);
         this.saveQQState();
       }
-      if (e instanceof Error && /429/.test(e.message)) {
-        process.stderr.write(
-          `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on all send attempts for ${sanitizeLogText(chatId, 64)}\n`,
-        );
-      }
+      // Note: sendQQMessage only throws on network/timeout errors, never HTTP status.
+      // Rate-limit (429) handling is in the resp.status checks above.
       process.stderr.write(
         `[QQ:${this.name}] Send error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
       );
