@@ -35,7 +35,7 @@ import {
 } from './audit.js';
 import { FsError, wrapAsFsError } from './errors.js';
 import {
-  canonicalizeWorkspace,
+  canonicalizeWorkspaces,
   resolveWithinWorkspace,
   type Intent,
   type ResolvedPath,
@@ -47,6 +47,7 @@ import {
   enforceReadSize,
   enforceWriteSize,
   shouldIgnore,
+  type IgnoreVerdict,
 } from './policy.js';
 
 /**
@@ -251,8 +252,8 @@ export interface WorkspaceFileSystemFactory {
 }
 
 export interface CreateWorkspaceFileSystemFactoryDeps {
-  /** Canonical workspace path; the daemon's `boundWorkspace`. */
-  boundWorkspace: string;
+  /** Canonical workspace roots; index 0 is the primary cwd. */
+  boundWorkspaces: readonly string[];
   /** Snapshot of `Config.isTrustedFolder()` at boot. */
   trusted: boolean;
   /** Bridge-bound publisher into `EventBus.publish`. */
@@ -277,18 +278,30 @@ export interface CreateWorkspaceFileSystemFactoryDeps {
 export function createWorkspaceFileSystemFactory(
   deps: CreateWorkspaceFileSystemFactoryDeps,
 ): WorkspaceFileSystemFactory {
-  const boundWorkspace = canonicalizeWorkspace(deps.boundWorkspace);
-  const ignore =
-    deps.ignore ??
-    loadIgnoreRules({
-      projectRoot: boundWorkspace,
-      useGitignore: true,
-      useQwenignore: true,
-      ...(deps.customIgnoreFiles !== undefined
-        ? { customIgnoreFiles: deps.customIgnoreFiles }
-        : {}),
-      ignoreDirs: [],
-    });
+  const boundWorkspaces = canonicalizeWorkspaces(deps.boundWorkspaces);
+  if (boundWorkspaces.length === 0) {
+    throw new Error('WorkspaceFileSystem requires at least one workspace root');
+  }
+  assertNoNestedWorkspaces(boundWorkspaces);
+  const primaryWorkspace = boundWorkspaces[0];
+  if (primaryWorkspace === undefined) {
+    throw new Error('WorkspaceFileSystem requires at least one workspace root');
+  }
+  const workspaces = boundWorkspaces.map((workspace) => {
+    const ignore =
+      deps.ignore ??
+      loadIgnoreRules({
+        projectRoot: workspace,
+        useGitignore: true,
+        useQwenignore: true,
+        ...(deps.customIgnoreFiles !== undefined
+          ? { customIgnoreFiles: deps.customIgnoreFiles }
+          : {}),
+        ignoreDirs: [],
+      });
+    Object.freeze(ignore);
+    return { path: workspace, ignore };
+  });
   // Freeze the `Ignore` instance so it cannot be mutated after
   // the factory builds it. The `Ignore` class exposes a public
   // `add(patterns): this` method that mutates state in-place;
@@ -302,10 +315,9 @@ export function createWorkspaceFileSystemFactory(
   // `getDirectoryFilter`) are unaffected. Operators wanting
   // per-session ignore rules should pass a different `Ignore`
   // instance via `deps.ignore` to a separate factory.
-  Object.freeze(ignore);
   const audit: AuditPublisher = createAuditPublisher({
     emit: deps.emit,
-    boundWorkspace,
+    boundWorkspace: primaryWorkspace,
     includeRawPaths: deps.includeRawPaths,
   });
   const lowFs = new StandardFileSystemService();
@@ -317,9 +329,9 @@ export function createWorkspaceFileSystemFactory(
     },
     forRequest(ctx) {
       return new WorkspaceFileSystemImpl({
-        boundWorkspace,
+        primaryWorkspace,
+        workspaces,
         trusted: deps.trusted,
-        ignore,
         audit,
         ctx,
         lowFs,
@@ -329,24 +341,69 @@ export function createWorkspaceFileSystemFactory(
   };
 }
 
-interface ImplDeps {
-  boundWorkspace: string;
-  trusted: boolean;
+interface WorkspaceRoot {
+  path: string;
   ignore: Ignore;
+}
+
+interface ImplDeps {
+  primaryWorkspace: string;
+  workspaces: readonly WorkspaceRoot[];
+  trusted: boolean;
   audit: AuditPublisher;
   ctx: RequestContext;
   lowFs: StandardFileSystemService;
   pathLocks: PathMutexRegistry;
 }
 
+function assertNoNestedWorkspaces(workspaces: readonly string[]): void {
+  for (let i = 0; i < workspaces.length; i++) {
+    const a = workspaces[i];
+    if (a === undefined) continue;
+    for (let j = i + 1; j < workspaces.length; j++) {
+      const b = workspaces[j];
+      if (b === undefined) continue;
+      if (isWithinRoot(a, b) || isWithinRoot(b, a)) {
+        throw new Error(
+          `Nested workspace roots are not supported: ${JSON.stringify(
+            a,
+          )} and ${JSON.stringify(b)}`,
+        );
+      }
+    }
+  }
+}
+
 class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
   constructor(private readonly deps: ImplDeps) {}
+
+  private workspaceForPath(p: string): WorkspaceRoot | undefined {
+    let match: WorkspaceRoot | undefined;
+    for (const workspace of this.deps.workspaces) {
+      if (
+        isWithinRoot(p, workspace.path) &&
+        (match === undefined || workspace.path.length > match.path.length)
+      ) {
+        match = workspace;
+      }
+    }
+    return match;
+  }
+
+  private ignoreVerdict(
+    p: ResolvedPath,
+    kind: 'file' | 'directory' = 'file',
+  ): IgnoreVerdict {
+    const workspace = this.workspaceForPath(p as string);
+    if (!workspace) return { ignored: false };
+    return shouldIgnore(p, workspace.path, workspace.ignore, kind);
+  }
 
   async resolve(input: string, intent: Intent): Promise<ResolvedPath> {
     try {
       return await resolveWithinWorkspace(
         input,
-        this.deps.boundWorkspace,
+        this.deps.workspaces.map((workspace) => workspace.path),
         intent,
       );
     } catch (err) {
@@ -410,12 +467,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         );
       }
       const snapshot = await readTextSnapshotFromResolvedFile(p, opts);
-      const ignoreVerdict = shouldIgnore(
-        p,
-        this.deps.boundWorkspace,
-        this.deps.ignore,
-        'file',
-      );
+      const ignoreVerdict = this.ignoreVerdict(p, 'file');
       const meta = snapshot.meta;
       if (ignoreVerdict.ignored) meta.matchedIgnore = ignoreVerdict.category;
       this.deps.audit.recordAccess(this.deps.ctx, {
@@ -552,10 +604,8 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         // implicitly-resolved here would be a brand-cast bypass.
         const childAbs = path.join(p as string, d.name);
         const kind = kindFromStatLike(d);
-        const verdict = shouldIgnore(
+        const verdict = this.ignoreVerdict(
           childAbs as ResolvedPath,
-          this.deps.boundWorkspace,
-          this.deps.ignore,
           kind === 'directory' ? 'directory' : 'file',
         );
         if (verdict.ignored && !opts.includeIgnored) continue;
@@ -615,53 +665,45 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           { hint: 'pass a relative pattern such as "src/**/*.ts"' },
         );
       }
-      // `opts.cwd` is typed `ResolvedPath` but a brand cast in
-      // calling code can produce a path that's never been verified
-      // against `boundWorkspace` (or was verified at a stale
-      // moment). Re-validate at the entry point so a glob with
-      // `cwd: '/etc'` cannot enumerate files outside the workspace
-      // even when the *pattern* is harmlessly relative.
-      //
-      // **Important**: use `realpath` rather than `path.resolve` —
-      // a textual containment check on `path.resolve(cwd)` admits
-      // `<ws>/link` even when `<ws>/link → /etc` is a symlink to
-      // outside the workspace; `globAsync` would then walk
-      // `/etc` before the per-hit filter drops the results.
-      // `realpath` follows the chain (or throws ENOENT for missing
-      // ancestors), so the containment check sees the actual
-      // walk root.
-      const cwd = (opts.cwd as string | undefined) ?? this.deps.boundWorkspace;
-      let cwdReal: string;
-      // Short-circuit when `cwd` is exactly the canonical
-      // boundWorkspace — the factory already canonicalized it via
-      // `realpathSync.native`, so a per-request async `realpath`
-      // is a redundant syscall. Saves the syscall on the common
-      // path (route handlers omitting `opts.cwd` to glob the
-      // whole workspace) without losing the canonicalization
-      // guarantee — the factory's stored value IS the canonical.
-      if (cwd === this.deps.boundWorkspace) {
-        cwdReal = cwd;
-      } else {
-        try {
-          cwdReal = await fsp.realpath(path.resolve(cwd));
-        } catch (err) {
-          const code = (err as NodeJS.ErrnoException)?.code;
-          if (code === 'ENOENT') {
-            throw new FsError(
-              'path_not_found',
-              `glob cwd does not exist: ${cwd}`,
-              { cause: err },
-            );
-          }
-          throw err;
+      const searchRoots: Array<{ cwd: string; workspace: WorkspaceRoot }> = [];
+      if (opts.cwd === undefined) {
+        for (const workspace of this.deps.workspaces) {
+          searchRoots.push({ cwd: workspace.path, workspace });
         }
-      }
-      if (!isWithinRoot(cwdReal, this.deps.boundWorkspace)) {
-        throw new FsError(
-          'path_outside_workspace',
-          `glob cwd is outside workspace: ${cwd}`,
-          { hint: 'opts.cwd must be a path obtained from fs.resolve()' },
-        );
+      } else {
+        const cwd = opts.cwd as string;
+        let cwdReal: string;
+        const directWorkspace = this.workspaceForPath(cwd);
+        if (directWorkspace && cwd === directWorkspace.path) {
+          cwdReal = cwd;
+        } else {
+          // `opts.cwd` is typed `ResolvedPath` but a brand cast in
+          // calling code can produce a path that's never been verified.
+          // Realpath before walking so `<ws>/link -> /etc` is rejected
+          // before `globAsync` can enumerate outside the workspace.
+          try {
+            cwdReal = await fsp.realpath(path.resolve(cwd));
+          } catch (err) {
+            const code = (err as NodeJS.ErrnoException)?.code;
+            if (code === 'ENOENT') {
+              throw new FsError(
+                'path_not_found',
+                `glob cwd does not exist: ${cwd}`,
+                { cause: err },
+              );
+            }
+            throw err;
+          }
+        }
+        const workspace = this.workspaceForPath(cwdReal);
+        if (!workspace) {
+          throw new FsError(
+            'path_outside_workspace',
+            `glob cwd is outside workspace: ${cwd}`,
+            { hint: 'opts.cwd must be a path obtained from fs.resolve()' },
+          );
+        }
+        searchRoots.push({ cwd: cwdReal, workspace });
       }
       // Pass an `ignore` option so the glob library prunes
       // common-and-huge directories at traversal time. Without
@@ -673,85 +715,88 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // walk-time optimization that aligns with the
       // `loadIgnoreRules` defaults (which already include `.git`
       // as a default ignore dir).
-      const matches = await globAsync(pattern, {
-        cwd: cwdReal,
-        nodir: false,
-        absolute: true,
-        dot: true,
-        ignore: ['**/node_modules/**', '**/.git/**'],
-      });
       const out: ResolvedPath[] = [];
       const max = opts.maxResults ?? Number.POSITIVE_INFINITY;
       let escapedCount = 0;
       let permissionErrorCount = 0;
       let transientErrorCount = 0;
-      for (const hit of matches) {
+      for (const searchRoot of searchRoots) {
         if (out.length >= max) break;
-        const absolute = path.resolve(hit);
-        // Per-hit boundary check defends against a glob that
-        // matches a symlink whose target escapes the workspace.
-        // The literal path is in-workspace (the symlink itself
-        // sits there), but the realpath isn't — so we resolve
-        // each hit's symlink chain and compare the canonical to
-        // the canonical workspace root. Filtered hits are counted
-        // and reported via aggregated `fs.denied` events after
-        // the loop so per-hit emit doesn't flood the bus when a
-        // misconfigured tree contains many escape symlinks.
-        let canonical: string;
-        try {
-          canonical = await fsp.realpath(absolute);
-        } catch (err) {
-          // Three-way classification so monitoring pipelines can
-          // tell escapes from access denials from transient I/O:
-          //   - `ENOENT` / `ELOOP`  → real `symlink_escape`
-          //     (dangling symlink, symlink cycle)
-          //   - `EACCES` / `EPERM`  → `permission_denied`
-          //     (the literal access-denied case the kind names)
-          //   - everything else     → `io_error` (EIO, EBUSY,
-          //     ENAMETOOLONG, EMFILE, …) — environmental, NOT a
-          //     security signal. Conflating these poisons audit:
-          //     a failing disk would page security oncall.
-          const code = (err as NodeJS.ErrnoException)?.code;
-          if (code === 'ENOENT' || code === 'ELOOP') {
-            escapedCount += 1;
-          } else if (code === 'EACCES' || code === 'EPERM') {
-            permissionErrorCount += 1;
-          } else {
-            transientErrorCount += 1;
+        const matches = await globAsync(pattern, {
+          cwd: searchRoot.cwd,
+          nodir: false,
+          absolute: true,
+          dot: true,
+          ignore: ['**/node_modules/**', '**/.git/**'],
+        });
+        for (const hit of matches) {
+          if (out.length >= max) break;
+          const absolute = path.resolve(hit);
+          // Per-hit boundary check defends against a glob that
+          // matches a symlink whose target escapes the workspace.
+          // The literal path is in-workspace (the symlink itself
+          // sits there), but the realpath isn't — so we resolve
+          // each hit's symlink chain and compare the canonical to
+          // the canonical workspace root. Filtered hits are counted
+          // and reported via aggregated `fs.denied` events after
+          // the loop so per-hit emit doesn't flood the bus when a
+          // misconfigured tree contains many escape symlinks.
+          let canonical: string;
+          try {
+            canonical = await fsp.realpath(absolute);
+          } catch (err) {
+            // Three-way classification so monitoring pipelines can
+            // tell escapes from access denials from transient I/O:
+            //   - `ENOENT` / `ELOOP`  → real `symlink_escape`
+            //     (dangling symlink, symlink cycle)
+            //   - `EACCES` / `EPERM`  → `permission_denied`
+            //     (the literal access-denied case the kind names)
+            //   - everything else     → `io_error` (EIO, EBUSY,
+            //     ENAMETOOLONG, EMFILE, …) — environmental, NOT a
+            //     security signal. Conflating these poisons audit:
+            //     a failing disk would page security oncall.
+            const code = (err as NodeJS.ErrnoException)?.code;
+            if (code === 'ENOENT' || code === 'ELOOP') {
+              escapedCount += 1;
+            } else if (code === 'EACCES' || code === 'EPERM') {
+              permissionErrorCount += 1;
+            } else {
+              transientErrorCount += 1;
+            }
+            continue;
           }
-          continue;
+          const rel = path.relative(searchRoot.workspace.path, canonical);
+          if (rel.startsWith('..') || path.isAbsolute(rel)) {
+            escapedCount += 1;
+            continue;
+          }
+          // Check the dirent kind so directory ignore rules (`dist/`,
+          // `.git/`, `node_modules/`) actually match — `shouldIgnore`
+          // probes `<rel>/` for the directory filter, which the
+          // underlying `ignore` library requires for trailing-slash
+          // patterns. Probing every hit as a `file` (the prior
+          // behavior) silently leaks ignored directories from
+          // `glob('**/*')` even when `includeIgnored` is false. We
+          // already realpath'd the hit, so an extra `lstat` here is
+          // cheap; on `lstat` failure (raced unlink) we conservatively
+          // treat the hit as a file so the file-pattern check still
+          // runs.
+          let dirent: { isDirectory(): boolean } | null = null;
+          try {
+            dirent = await fsp.lstat(canonical);
+          } catch {
+            dirent = null;
+          }
+          const kind = dirent?.isDirectory() ? 'directory' : 'file';
+          const verdict = shouldIgnore(
+            canonical as ResolvedPath,
+            searchRoot.workspace.path,
+            searchRoot.workspace.ignore,
+            kind,
+          );
+          if (verdict.ignored && !opts.includeIgnored) continue;
+          out.push(canonical as ResolvedPath);
         }
-        const rel = path.relative(this.deps.boundWorkspace, canonical);
-        if (rel.startsWith('..') || path.isAbsolute(rel)) {
-          escapedCount += 1;
-          continue;
-        }
-        // Check the dirent kind so directory ignore rules (`dist/`,
-        // `.git/`, `node_modules/`) actually match — `shouldIgnore`
-        // probes `<rel>/` for the directory filter, which the
-        // underlying `ignore` library requires for trailing-slash
-        // patterns. Probing every hit as a `file` (the prior
-        // behavior) silently leaks ignored directories from
-        // `glob('**/*')` even when `includeIgnored` is false. We
-        // already realpath'd the hit, so an extra `lstat` here is
-        // cheap; on `lstat` failure (raced unlink) we conservatively
-        // treat the hit as a file so the file-pattern check still
-        // runs.
-        let dirent: { isDirectory(): boolean } | null = null;
-        try {
-          dirent = await fsp.lstat(canonical);
-        } catch {
-          dirent = null;
-        }
-        const kind = dirent?.isDirectory() ? 'directory' : 'file';
-        const verdict = shouldIgnore(
-          canonical as ResolvedPath,
-          this.deps.boundWorkspace,
-          this.deps.ignore,
-          kind,
-        );
-        if (verdict.ignored && !opts.includeIgnored) continue;
-        out.push(canonical as ResolvedPath);
       }
       if (escapedCount > 0) {
         this.deps.audit.recordDenied(this.deps.ctx, {
@@ -787,14 +832,14 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           pattern,
         });
       }
-      // `absolute: boundWorkspace` (rather than `cwd`) ties every
+      // `absolute: primaryWorkspace` (rather than `cwd`) ties every
       // glob audit row's `pathHash` to the workspace itself.
       // The literal `pattern` field is the per-call signal;
       // `pathHash` is the workspace marker operators correlate
       // across audit rows.
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'glob',
-        absolute: this.deps.boundWorkspace,
+        absolute: this.deps.primaryWorkspace,
         durationMs: performance.now() - start,
         sizeBytes: out.length,
         pattern,
@@ -834,12 +879,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             expectedHash: opts.expectedHash,
             meta,
           });
-          const verdict = shouldIgnore(
-            p,
-            this.deps.boundWorkspace,
-            this.deps.ignore,
-            'file',
-          );
+          const verdict = this.ignoreVerdict(p, 'file');
           if (verdict.ignored) meta.matchedIgnore = verdict.category;
           meta.sizeBytes = result.sizeBytes;
           meta.hash = result.hash;
@@ -939,12 +979,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             mode: 'overwrite',
             meta,
           });
-          const verdict = shouldIgnore(
-            p,
-            this.deps.boundWorkspace,
-            this.deps.ignore,
-            'file',
-          );
+          const verdict = this.ignoreVerdict(p, 'file');
           if (verdict.ignored) meta.matchedIgnore = verdict.category;
           meta.sizeBytes = result.sizeBytes;
           meta.hash = result.hash;
@@ -996,12 +1031,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
         content,
         _meta: opts ? buildWriteMeta(opts) : undefined,
       });
-      const verdict = shouldIgnore(
-        p,
-        this.deps.boundWorkspace,
-        this.deps.ignore,
-        'file',
-      );
+      const verdict = this.ignoreVerdict(p, 'file');
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'write',
         absolute: p,
@@ -1081,12 +1111,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             expectedHash: opts.expectedHash,
             meta,
           });
-          const verdict = shouldIgnore(
-            p,
-            this.deps.boundWorkspace,
-            this.deps.ignore,
-            'file',
-          );
+          const verdict = this.ignoreVerdict(p, 'file');
           if (verdict.ignored) meta.matchedIgnore = verdict.category;
           meta.sizeBytes = result.sizeBytes;
           meta.hash = result.hash;
@@ -1220,12 +1245,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // a `.gitignore`d / `.qwenignore`d file (build artifacts,
       // logs, etc.) rather than only learning about
       // matchedIgnore for reads and writes.
-      const editVerdict = shouldIgnore(
-        p,
-        this.deps.boundWorkspace,
-        this.deps.ignore,
-        'file',
-      );
+      const editVerdict = this.ignoreVerdict(p, 'file');
       this.deps.audit.recordAccess(this.deps.ctx, {
         intent: 'edit',
         absolute: p,

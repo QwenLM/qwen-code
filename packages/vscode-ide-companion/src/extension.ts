@@ -5,6 +5,7 @@
  */
 
 import * as vscode from 'vscode';
+import * as path from 'node:path';
 import { IDEServer } from './ide-server.js';
 import semver from 'semver';
 import { DiffContentProvider, DiffManager } from './diff-manager.js';
@@ -27,6 +28,7 @@ export { createSdkDaemonSessionFactory as __daemonIdeSessionFactoryForBundle } f
 
 const CLI_IDE_COMPANION_IDENTIFIER = 'qwenlm.qwen-code-vscode-ide-companion';
 const INFO_MESSAGE_SHOWN_KEY = 'qwenCodeInfoMessageShown';
+const IDE_WORKSPACE_PATH_ENV_VAR = 'QWEN_CODE_IDE_WORKSPACE_PATH';
 export const DIFF_SCHEME = 'qwen-diff';
 
 /**
@@ -362,6 +364,11 @@ export async function activate(context: vscode.ExtensionContext) {
           const terminalOptions: vscode.TerminalOptions = {
             name: `Qwen Code (${selectedFolder.name})`,
             cwd: selectedFolder.uri.fsPath,
+            env: {
+              [IDE_WORKSPACE_PATH_ENV_VAR]: workspaceFolders
+                .map((folder) => folder.uri.fsPath)
+                .join(path.delimiter),
+            },
             location,
           };
 

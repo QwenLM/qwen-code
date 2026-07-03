@@ -706,6 +706,8 @@ async function loadServeRuntimeModules() {
   return {
     createServeApp: serverModule.createServeApp,
     getActiveSseCount: serverModule.getActiveSseCount,
+    resolveBoundWorkspacesFromIdeEnv:
+      serverModule.resolveBoundWorkspacesFromIdeEnv,
     resolveBridgeFsFactory: serverModule.resolveBridgeFsFactory,
     createAcpSessionBridge: bridgeModule.createAcpSessionBridge,
     createSpawnChannelFactory: spawnChannelModule.createSpawnChannelFactory,
@@ -2019,8 +2021,10 @@ export async function runQwenServe(
     });
     const customIgnoreFiles =
       runtimeBootSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
+    const boundWorkspaces =
+      runtime.resolveBoundWorkspacesFromIdeEnv(boundWorkspace);
     const fsFactory = runtime.resolveBridgeFsFactory({
-      boundWorkspace,
+      boundWorkspaces,
       injected: deps.fsFactory,
       trusted: trustedWorkspace,
       emit: deps.fsAuditEmit,

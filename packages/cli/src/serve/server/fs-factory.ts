@@ -4,12 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import * as path from 'node:path';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
+  canonicalizeWorkspaces,
   createWorkspaceFileSystemFactory,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
+
+const IDE_WORKSPACE_PATH_ENV_VAR = 'QWEN_CODE_IDE_WORKSPACE_PATH';
 
 /**
  * Build a no-op fs-audit emitter that logs a warning every
@@ -54,7 +58,7 @@ export function createDefaultFsAuditEmit(): (event: BridgeEvent) => void {
  *   - `createServeApp` defaults to `trusted: false` (test-safe)
  */
 export function resolveBridgeFsFactory(input: {
-  boundWorkspace: string;
+  boundWorkspaces: readonly string[];
   injected?: WorkspaceFileSystemFactory;
   trusted: boolean;
   emit?: (event: BridgeEvent) => void;
@@ -62,11 +66,46 @@ export function resolveBridgeFsFactory(input: {
 }): WorkspaceFileSystemFactory {
   if (input.injected) return input.injected;
   return createWorkspaceFileSystemFactory({
-    boundWorkspace: input.boundWorkspace,
+    boundWorkspaces: input.boundWorkspaces,
     trusted: input.trusted,
     emit: input.emit ?? createDefaultFsAuditEmit(),
     ...(input.customIgnoreFiles !== undefined
       ? { customIgnoreFiles: input.customIgnoreFiles }
       : {}),
   });
+}
+
+export function resolveBoundWorkspacesFromIdeEnv(
+  primaryWorkspace: string,
+  ideWorkspacePath = process.env[IDE_WORKSPACE_PATH_ENV_VAR],
+): string[] {
+  const envWorkspaces =
+    ideWorkspacePath
+      ?.split(path.delimiter)
+      .filter((workspace) => workspace.length > 0) ?? [];
+  const envCanonical = canonicalizeWorkspaces(envWorkspaces);
+  const workspaces = canonicalizeWorkspaces([
+    primaryWorkspace,
+    ...envCanonical,
+  ]);
+  const primary = workspaces[0];
+  if (primary === undefined) return [];
+  if (
+    envCanonical.length > 0 &&
+    !envCanonical.some(
+      (workspace) => workspace === primary || isPathInside(workspace, primary),
+    )
+  ) {
+    return [primary];
+  }
+  return workspaces;
+}
+
+function isPathInside(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return (
+    relative.length > 0 &&
+    !relative.startsWith('..') &&
+    !path.isAbsolute(relative)
+  );
 }

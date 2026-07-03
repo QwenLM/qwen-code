@@ -198,6 +198,38 @@ describe('resolveWithinWorkspace', () => {
     expect(out).toBe(realpathSync.native(target));
   });
 
+  it('resolves an absolute path inside any workspace root', async () => {
+    const secondWorkspace = path.join(scratch, 'second-workspace');
+    await fsp.mkdir(secondWorkspace);
+    const target = path.join(secondWorkspace, 'src', 'b.txt');
+    await fsp.mkdir(path.dirname(target));
+    await fsp.writeFile(target, 'hello from second root');
+
+    const out = await resolveWithinWorkspace(
+      target,
+      [workspace, secondWorkspace],
+      'read',
+    );
+
+    expect(out).toBe(realpathSync.native(target));
+  });
+
+  it('resolves relative writes against the first workspace root', async () => {
+    const secondWorkspace = path.join(scratch, 'second-workspace');
+    await fsp.mkdir(secondWorkspace);
+    await fsp.mkdir(path.join(secondWorkspace, 'src'));
+
+    const out = await resolveWithinWorkspace(
+      'src/new-file.txt',
+      [workspace, secondWorkspace],
+      'write',
+    );
+
+    expect(out).toBe(
+      path.join(realpathSync.native(workspace), 'src', 'new-file.txt'),
+    );
+  });
+
   it('rejects a `..` traversal that lands outside the workspace', async () => {
     await expect(
       resolveWithinWorkspace('../escape', workspace, 'read'),

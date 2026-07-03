@@ -12185,7 +12185,7 @@ describe('runQwenServe', () => {
         './fs/index.js'
       );
       const factory = createWorkspaceFileSystemFactory({
-        boundWorkspace: wsRoot,
+        boundWorkspaces: [wsRoot],
         trusted: false,
         emit: () => undefined,
       });
@@ -13308,7 +13308,7 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
       await fsp.writeFile(path.join(tmp, 'agent.txt'), 'agent');
 
       const factory = resolveBridgeFsFactory({
-        boundWorkspace: tmp,
+        boundWorkspaces: [tmp],
         trusted: true,
         customIgnoreFiles: ['.cursorignore'],
       });
