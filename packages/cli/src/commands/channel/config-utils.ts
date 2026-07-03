@@ -108,6 +108,8 @@ export async function parseChannelConfig(
     );
   }
 
+  const resolvedRawConfig = { ...rawConfig };
+
   // Validate plugin-required fields
   for (const field of plugin.requiredConfigFields ?? []) {
     const value = rawConfig[field];
@@ -116,19 +118,28 @@ export async function parseChannelConfig(
         `Channel "${name}" (${channelType}) requires "${field}".`,
       );
     }
+    if (typeof value !== 'string') {
+      throw new Error(`Channel "${name}" field "${field}" must be a string.`);
+    }
+    resolvedRawConfig[field] = resolveEnvVars(value);
   }
 
   // Resolve env vars for known credential fields
-  const token = resolveOptionalStringField(name, rawConfig, 'token') ?? '';
-  const clientId = resolveOptionalStringField(name, rawConfig, 'clientId');
+  const token =
+    resolveOptionalStringField(name, resolvedRawConfig, 'token') ?? '';
+  const clientId = resolveOptionalStringField(
+    name,
+    resolvedRawConfig,
+    'clientId',
+  );
   const clientSecret = resolveOptionalStringField(
     name,
-    rawConfig,
+    resolvedRawConfig,
     'clientSecret',
   );
 
   return {
-    ...rawConfig,
+    ...resolvedRawConfig,
     type: channelType,
     token,
     clientId,

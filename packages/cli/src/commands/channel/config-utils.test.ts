@@ -15,11 +15,15 @@ vi.mock('./channel-registry.js', () => ({
         channelType: 'dingtalk',
         requiredConfigFields: ['clientId', 'clientSecret'],
       },
+      wecom: {
+        channelType: 'wecom',
+        requiredConfigFields: ['botId', 'secret'],
+      },
       bare: { channelType: 'bare' }, // no requiredConfigFields
     };
     return plugins[type];
   },
-  supportedTypes: async () => ['telegram', 'dingtalk', 'bare'],
+  supportedTypes: async () => ['telegram', 'dingtalk', 'wecom', 'bare'],
 }));
 
 describe('resolveEnvVars', () => {
@@ -67,6 +71,33 @@ describe('parseChannelConfig', () => {
     await expect(
       parseChannelConfig('bot', { type: 'telegram' }),
     ).rejects.toThrow('requires "token"');
+  });
+
+  it('resolves env vars in plugin-required bot credentials', async () => {
+    process.env['TEST_WECOM_BOT_ID'] = 'bot-from-env';
+    process.env['TEST_WECOM_SECRET'] = 'secret-from-env';
+
+    const result = await parseChannelConfig('bot', {
+      type: 'wecom',
+      botId: '$TEST_WECOM_BOT_ID',
+      secret: '$TEST_WECOM_SECRET',
+    });
+
+    expect(result['botId']).toBe('bot-from-env');
+    expect(result['secret']).toBe('secret-from-env');
+
+    delete process.env['TEST_WECOM_BOT_ID'];
+    delete process.env['TEST_WECOM_SECRET'];
+  });
+
+  it('throws a clear error when plugin-required fields are not strings', async () => {
+    await expect(
+      parseChannelConfig('bot', {
+        type: 'wecom',
+        botId: 123,
+        secret: 'secret',
+      }),
+    ).rejects.toThrow('Channel "bot" field "botId" must be a string.');
   });
 
   it('throws a clear error when token is not a string', async () => {

@@ -1,0 +1,29 @@
+{
+  "name": "@qwen-code/channel-wecom",
+  "version": "0.19.5",
+  "description": "WeCom channel adapter for Qwen Code",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "test": "vitest run",
+    "test:ci": "vitest run"
+  },
+  "dependencies": {
+    "@qwen-code/channel-base": "file:../base",
+    "@wecom/aibot-node-sdk": "^1.0.7"
+  },
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  }
+}
