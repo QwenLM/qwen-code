@@ -60,7 +60,6 @@ vi.mock('@agentclientprotocol/sdk', () => ({
       return mockConnectionState.promise;
     },
   })),
-  ndJsonStream: vi.fn().mockReturnValue({}),
   RequestError: class RequestError extends Error {
     code: number;
     data: unknown;
@@ -104,6 +103,10 @@ vi.mock('@agentclientprotocol/sdk', () => ({
   PROTOCOL_VERSION: '1.0.0',
 }));
 
+vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
+  ndJsonStream: vi.fn().mockReturnValue({}),
+}));
+
 // Mock stream conversion
 vi.mock('node:stream', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:stream')>();
@@ -122,6 +125,16 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     warn: vi.fn(),
     info: vi.fn(),
   }),
+  registerAcpEventLoopLagGauge: vi.fn(),
+  startEventLoopLagMonitor: vi.fn(() => ({
+    snapshot: vi.fn(() => ({
+      meanMs: 0,
+      p50Ms: 0,
+      p99Ms: 0,
+      maxMs: 0,
+    })),
+    dispose: vi.fn(),
+  })),
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
   AuthType: {
@@ -601,6 +614,8 @@ import {
   applyProviderInstallPlan,
   Storage,
   unregisterGoalHook,
+  startEventLoopLagMonitor,
+  registerAcpEventLoopLagGauge,
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
@@ -791,6 +806,64 @@ describe('runAcpAgent shutdown cleanup', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('registers and disposes the event loop monitor on normal connection close', async () => {
+    const snapshot = vi.fn(() => ({
+      meanMs: 0,
+      p50Ms: 0,
+      p99Ms: 0,
+      maxMs: 0,
+    }));
+    const dispose = vi.fn();
+    vi.mocked(startEventLoopLagMonitor).mockReturnValueOnce({
+      snapshot,
+      dispose,
+    });
+
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+
+    await vi.waitFor(() => {
+      expect(registerAcpEventLoopLagGauge).toHaveBeenCalledWith(
+        expect.any(Function),
+      );
+    });
+    const readGauge = vi.mocked(registerAcpEventLoopLagGauge).mock.calls[0]![0];
+    expect(readGauge()).toEqual({
+      meanMs: 0,
+      p50Ms: 0,
+      p99Ms: 0,
+      maxMs: 0,
+    });
+    expect(snapshot).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('disposes the event loop monitor when connection setup fails', async () => {
+    const dispose = vi.fn();
+    vi.mocked(startEventLoopLagMonitor).mockReturnValueOnce({
+      snapshot: vi.fn(() => ({
+        meanMs: 0,
+        p50Ms: 0,
+        p99Ms: 0,
+        maxMs: 0,
+      })),
+      dispose,
+    });
+    vi.mocked(AgentSideConnection).mockImplementationOnce(() => {
+      throw new Error('connection setup failed');
+    });
+
+    await expect(
+      runAcpAgent(mockConfig, mockSettings, mockArgv),
+    ).rejects.toThrow('connection setup failed');
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(registerAcpEventLoopLagGauge).not.toHaveBeenCalled();
   });
 });
 
