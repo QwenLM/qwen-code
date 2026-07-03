@@ -104,7 +104,7 @@ describe('qwen-autofix workflow', () => {
       'any(. == "autofix/skip" or . == "autofix/in-progress")',
     );
     expect(workflow).toContain(
-      '--search "is:open is:issue label:${READY_FOR_AGENT_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}"',
+      '--search "is:open is:issue label:${READY_FOR_AGENT_LABEL} label:${AUTOFIX_APPROVED_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}"',
     );
     expect(workflow).toContain('.[0:10] | map(. + {autofixTier: 1})');
   });
@@ -153,6 +153,9 @@ describe('qwen-autofix workflow', () => {
     );
     expect(workflow).toContain(
       'is missing ${READY_FOR_AGENT_LABEL}; skipping.',
+    );
+    expect(workflow).toContain(
+      'is missing ${AUTOFIX_APPROVED_LABEL}; skipping.',
     );
     expect(workflow).not.toContain(
       "contains(github.event.issue.labels.*.name, 'type/bug')",

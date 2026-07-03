@@ -691,6 +691,8 @@ jobs:
               fi
               # Ensure the fallback labels are present so that, if the dispatch
               # below fails, the scheduled ready-for-agent scan can still find it.
+              # Safe to auto-apply approval: release-failure issue content is
+              # fully CI-generated, not user-controlled issue text.
               gh issue edit "${issue_number}" --repo "${GH_REPO}" \
                 --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}" \
                 || echo "::warning::Failed to ensure ${BUG_LABEL}/${READY_FOR_AGENT_LABEL}/${AUTOFIX_APPROVED_LABEL} on issue #${issue_number}."
@@ -698,6 +700,8 @@ jobs:
           fi
 
           if [[ -z "${existing_issue}" ]]; then
+            # Safe to auto-apply approval: release-failure issue content is
+            # fully CI-generated, not user-controlled issue text.
             issue_url="$(gh issue create --repo "${GH_REPO}" \
               --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
               --body-file "${body_file}" \

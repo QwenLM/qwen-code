@@ -69,10 +69,6 @@ env:
   # is the prompt-injection trust gate: feedback from anyone else is ignored so a
   # hostile commenter cannot steer the agent.
   TRUSTED_ASSOC: '["OWNER", "MEMBER", "COLLABORATOR"]'
-  # Maintainer-applied label that gates tier-1 fast-path entry. Without this
-  # label the scheduled scan will not pick up an issue, closing the trust gap
-  # where an LLM-applied label alone could be influenced by crafted issue text.
-  AUTOFIX_APPROVED_LABEL: 'autofix/approved'
   # Hard cap on automated review-address rounds per PR. After this the bot stops
   # and leaves the PR for a human.
   MAX_ROUNDS: '3'
@@ -310,6 +306,9 @@ jobs:
             elif [[ "$(jq -r '.state // ""' "${forced_issue_json}")" != 'OPEN' ]]; then
               echo "⏭️ Forced issue #${FORCED_ISSUE} is not open; skipping."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
+            # workflow_dispatch is a maintainer-initiated escape hatch, so it
+            # intentionally bypasses the label gates that protect event/cron
+            # paths from issue-content prompt injection.
             elif [[ "${EVENT_NAME}" != 'workflow_dispatch' ]] && ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}" \
               '(.labels // []) | map(.name) as $labels | ($labels | index($ready))' \
               "${forced_issue_json}" > /dev/null; then
@@ -547,12 +546,12 @@ jobs:
           gh label create 'autofix/in-progress' --repo "${REPO}" \
             --description 'The scheduled autofix agent has claimed this issue' \
             --color '1d76db' 2> /dev/null || true
-          gh label create 'autofix/approved' --repo "${REPO}" \
+          gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${REPO}" \
             --description 'Maintainer explicitly approved this issue for autonomous autofix' \
             --color '0e8a16' 2> /dev/null || true
           gh issue edit "${ISSUE}" --repo "${REPO}" \
             --add-label 'autofix/in-progress' \
-            --remove-label 'autofix/approved'
+            --remove-label "${AUTOFIX_APPROVED_LABEL}"
           echo "📌 Claimed #${ISSUE} (comment ${COMMENT_ID})"
 
       - name: 'Develop fix'
