@@ -97,6 +97,11 @@ import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
+import {
+  decodeVisionModelForPicker,
+  encodeVisionModelForSetting,
+  extractBareModelId,
+} from './utils/modelEncoding';
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
@@ -217,6 +222,14 @@ const MAX_TOASTS = 4;
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
+
+/** Maps each ModelDialogMode to its i18n title key — single source of truth. */
+const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
+  main: 'model.select',
+  fast: 'model.setFast',
+  voice: 'model.setVoice',
+  vision: 'model.setVision',
+};
 
 function isVisibleComposerModel(model: { id: string }): boolean {
   return !HIDDEN_COMPOSER_MODEL_IDS.has(model.id);
@@ -1650,6 +1663,19 @@ export function App({
     )?.values.effective;
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
+  const currentVisionModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'visionModel',
+    )?.values.effective;
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    return decodeVisionModelForPicker(value.trim());
+  })();
+  const currentFastModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'fastModel',
+    )?.values.effective;
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  })();
   const shellOutputMaxLines = resolveShellOutputMaxLines(workspaceSettings);
   const [compactMode, setCompactMode] = useState(false);
   const compactModeRef = useRef(compactMode);
@@ -2028,14 +2054,11 @@ export function App({
   const loadSidebarSession = useCallback(
     async (sessionId: string) => {
       setSidebarSwitchingSessionId(sessionId);
-      // Close the drawer before awaiting the load so it doesn't linger over the
-      // old transcript while the new session streams in, matching the other
-      // session-switch paths (/resume, ResumeDialog).
+      // Close the drawer before awaiting the load; the transcript clears
+      // immediately and shows its loading skeleton for the selected session.
       closeMobileDrawer();
       try {
-        await sessionActions.loadSession(sessionId, {
-          deferTranscriptReset: true,
-        });
+        await sessionActions.loadSession(sessionId);
       } catch (error) {
         setSidebarSwitchingSessionId((current) =>
           current === sessionId ? null : current,
@@ -2050,11 +2073,17 @@ export function App({
     if (
       sidebarSwitchingSessionId !== null &&
       connection.sessionId === sidebarSwitchingSessionId &&
+      !connection.loadingTranscript &&
       !connection.catchingUp
     ) {
       setSidebarSwitchingSessionId(null);
     }
-  }, [connection.catchingUp, connection.sessionId, sidebarSwitchingSessionId]);
+  }, [
+    connection.catchingUp,
+    connection.loadingTranscript,
+    connection.sessionId,
+    sidebarSwitchingSessionId,
+  ]);
 
   const openTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
@@ -2200,6 +2229,10 @@ export function App({
 
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
+      if (connectionRef.current.loadingTranscript) {
+        pushToast('warning', t('editor.sessionLoading'));
+        return false;
+      }
       if (
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
@@ -2427,6 +2460,21 @@ export function App({
                 voiceModelId,
               ).catch((error: unknown) =>
                 reportError(error, t('model.setVoice')),
+              );
+              return true;
+            }
+            if (modelArg === '--vision') {
+              setModelDialogMode('vision');
+              return true;
+            }
+            if (modelArg.startsWith('--vision ')) {
+              const visionModelId = modelArg.replace(/^--vision\s+/, '');
+              setWorkspaceSetting(
+                'workspace',
+                'visionModel',
+                visionModelId,
+              ).catch((error: unknown) =>
+                reportError(error, t('model.setVision')),
               );
               return true;
             }
@@ -3282,6 +3330,9 @@ export function App({
         blockLocalCommandDuringTurn();
         return;
       }
+      // Model IDs from the picker arrive as bare model IDs (baseModelId), not
+      // ACP format. The model picker strips the (authType) suffix before
+      // calling this handler.
       sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
@@ -3291,12 +3342,34 @@ export function App({
 
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
-      setWorkspaceSetting('workspace', 'voiceModel', modelId).catch(
+      // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
+      // not ACP format. extractVoiceModels() sets id to the baseModelId.
+      const bareModelId = extractBareModelId(modelId);
+      setWorkspaceSetting('workspace', 'voiceModel', bareModelId).catch(
         (error: unknown) => reportError(error, t('model.setVoice')),
       );
     },
     [reportError, setWorkspaceSetting, t],
   );
+
+  const handleVisionModelSelect = useCallback(
+    (modelId: string) => {
+      // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
+      // Core's resolveVisionModelSelection() expects `authType:modelId`.
+      const encoded = encodeVisionModelForSetting(modelId);
+      setWorkspaceSetting('workspace', 'visionModel', encoded).catch(
+        (error: unknown) => reportError(error, t('model.setVision')),
+      );
+    },
+    [reportError, setWorkspaceSetting, t],
+  );
+
+  const modelHandlers: Record<ModelDialogMode, (id: string) => void> = {
+    main: handleModelSelect,
+    fast: handleFastModelSelect,
+    voice: handleVoiceModelSelect,
+    vision: handleVisionModelSelect,
+  };
 
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
@@ -3432,13 +3505,7 @@ export function App({
           )}
           {modelDialogMode && (
             <DialogShell
-              title={
-                modelDialogMode === 'fast'
-                  ? t('model.setFast')
-                  : modelDialogMode === 'voice'
-                    ? t('model.setVoice')
-                    : t('model.select')
-              }
+              title={t(MODE_TITLE_KEY[modelDialogMode])}
               size="lg"
               onClose={() => setModelDialogMode(null)}
             >
@@ -3446,15 +3513,17 @@ export function App({
                 mode={modelDialogMode}
                 models={modelDialogMode === 'voice' ? voiceModels : undefined}
                 currentModelId={
-                  modelDialogMode === 'voice' ? currentVoiceModel : undefined
+                  modelDialogMode === 'voice'
+                    ? currentVoiceModel
+                    : modelDialogMode === 'vision'
+                      ? currentVisionModel
+                      : modelDialogMode === 'fast'
+                        ? currentFastModel
+                        : undefined
                 }
                 onSelect={(modelId) => {
-                  if (modelDialogMode === 'fast') {
-                    handleFastModelSelect(modelId);
-                  } else if (modelDialogMode === 'voice') {
-                    handleVoiceModelSelect(modelId);
-                  } else {
-                    handleModelSelect(modelId);
+                  if (modelDialogMode) {
+                    modelHandlers[modelDialogMode](modelId);
                   }
                   setModelDialogMode(null);
                 }}
@@ -3556,6 +3625,7 @@ export function App({
                 onSubDialog={(key) => {
                   setShowSettingsDialog(false);
                   if (key === 'fastModel') setModelDialogMode('fast');
+                  else if (key === 'visionModel') setModelDialogMode('vision');
                   else if (key === 'tools.approvalMode')
                     setShowApprovalModeDialog(true);
                 }}
@@ -3771,6 +3841,7 @@ export function App({
                         messages={displayMessages}
                         pendingApproval={pendingToolApproval}
                         onShowContextDetail={handleShowContextDetail}
+                        loadingTranscript={connection.loadingTranscript}
                         catchingUp={connection.catchingUp}
                         isResponding={streamingState !== 'idle'}
                         activeTurnStartedAt={activeTurnStartedAt}

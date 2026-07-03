@@ -231,6 +231,45 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result!.mapping.method).toBe('_qwen/session/heartbeat');
   });
 
+  it('GET /session/:id/artifacts maps to _qwen/session/artifacts', () => {
+    const result = matchRoute('/session/s8/artifacts', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/artifacts');
+    expect(
+      result!.mapping.extractParams(result!.segments, undefined, 'GET'),
+    ).toEqual({ sessionId: 's8' });
+  });
+
+  it('POST /session/:id/artifacts maps to _qwen/session/artifacts/add', () => {
+    const result = matchRoute('/session/s8/artifacts', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/artifacts/add');
+    expect(
+      result!.mapping.extractParams(
+        result!.segments,
+        {
+          sessionId: 'body-session',
+          title: 'Lineage',
+          url: 'https://example.com/lineage',
+        },
+        'POST',
+      ),
+    ).toEqual({
+      sessionId: 's8',
+      title: 'Lineage',
+      url: 'https://example.com/lineage',
+    });
+  });
+
+  it('DELETE /session/:id/artifacts/:artifactId maps to _qwen/session/artifacts/remove', () => {
+    const result = matchRoute('/session/s8/artifacts/art%201', 'DELETE');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/artifacts/remove');
+    expect(
+      result!.mapping.extractParams(result!.segments, undefined, 'DELETE'),
+    ).toEqual({ sessionId: 's8', artifactId: 'art 1' });
+  });
+
   it('POST /session/:id/recap maps to _qwen/session/recap', () => {
     const result = matchRoute('/session/s9/recap', 'POST');
     expect(result).not.toBeNull();
@@ -461,6 +500,54 @@ describe('acpRouteTable – matchRoute', () => {
       'GET',
     );
     expect(params).toEqual({ taskId: 'remember/a' });
+  });
+
+  it('POST /workspace/memory/forget maps to _qwen/workspace/memory/forget', () => {
+    const result = matchRoute('/workspace/memory/forget', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/forget');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { query: 'old preference' },
+      'POST',
+    );
+    expect(params).toEqual({ query: 'old preference' });
+  });
+
+  it('GET /workspace/memory/forget/:taskId maps to _qwen/workspace/memory/forget/get', () => {
+    const result = matchRoute('/workspace/memory/forget/forget%2Fa', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/forget/get');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ taskId: 'forget/a' });
+  });
+
+  it('POST /workspace/memory/dream maps to _qwen/workspace/memory/dream', () => {
+    const result = matchRoute('/workspace/memory/dream', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/dream');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'POST',
+    );
+    expect(params).toEqual({});
+  });
+
+  it('GET /workspace/memory/dream/:taskId maps to _qwen/workspace/memory/dream/get', () => {
+    const result = matchRoute('/workspace/memory/dream/dream%2Fa', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/dream/get');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ taskId: 'dream/a' });
   });
 
   it('GET /workspace/agents maps to _qwen/workspace/agents/list', () => {

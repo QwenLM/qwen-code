@@ -16,6 +16,7 @@ import {
 } from '@google/genai';
 import type {
   ToolCallConfirmationDetails,
+  ToolArtifact,
   ToolResult,
   ToolResultDisplay,
 } from '../tools/tools.js';
@@ -125,6 +126,7 @@ export interface ToolCallResponseInfo {
   errorType: ToolErrorType | undefined;
   contentLength?: number;
   modelOverride?: string;
+  artifacts?: ToolArtifact[];
 }
 
 function normalizeRequestParts(req: PartListUnion): Part[] {

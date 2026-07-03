@@ -473,6 +473,7 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
           model: 'agent-model',
           maxSessionTurns: 7,
           maxToolCalls: 11,
+          maxSubagentDepth: 2,
         },
       },
     );
@@ -483,6 +484,9 @@ describe('createApprovalModeOverride bound-tool isolation', () => {
     expect(child.getModel()).toBe('agent-model');
     expect(child.getMaxSessionTurns()).toBe(7);
     expect(child.getMaxToolCalls()).toBe(11);
+    // Launch-time nesting cap survives resume even when the resuming
+    // session's own cap differs (codex review).
+    expect(child.getMaxSubagentDepth()).toBe(2);
 
     await child.getToolRegistry().warmAll();
     expect(child.getToolRegistry().getAllToolNames()).not.toContain(

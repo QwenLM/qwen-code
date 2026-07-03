@@ -165,6 +165,13 @@ const WORKFLOW_SUBAGENT_DISALLOWED_TOOLS: string[] = [
   ToolNames.SEND_MESSAGE,
   ToolNames.MONITOR,
   ...SUBAGENT_PLAN_LIFECYCLE_TOOLS,
+  // AgentTool: workflow subagents must not spawn sub-agents even where
+  // maxSubagentDepth would permit nesting — a leaf-spawned agent would run
+  // outside the orchestrator's concurrency cap, agent counter, and token
+  // budget, and its result would bypass the script's return-value contract.
+  // The WorkflowTool itself is already excluded from every subagent; this
+  // closes the same loop for plain `agent` calls (review #6189).
+  ToolNames.AGENT,
 ];
 
 /**
