@@ -662,6 +662,9 @@ jobs:
             | jq -c --arg tag "${RELEASE_TAG}" \
               '[ .[] | select(.title | startswith("Release Failed for " + $tag + " on ")) ] | (map(select(.author.login == "github-actions[bot]"))[0] // .[0]) // empty'
           )"
+          gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${GH_REPO}" \
+            --description 'Maintainer explicitly approved this issue for autonomous autofix' \
+            --color '0e8a16' 2> /dev/null || true
           if [[ -n "${existing_issue}" ]]; then
             issue_number="$(jq -r '.number' <<<"${existing_issue}")"
             issue_url="$(jq -r '.url' <<<"${existing_issue}")"

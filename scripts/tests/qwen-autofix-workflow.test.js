@@ -116,6 +116,7 @@ describe('qwen-autofix workflow', () => {
     );
     expect(workflow).toContain('bug=${issue_is_bug}');
     expect(workflow).toContain('ready=${issue_is_ready}');
+    expect(workflow).toContain('approved=${issue_is_approved}');
     expect(workflow).toContain('trigger_label=${label_is_trigger}');
     expect(workflow).toContain('trigger_label=false label=');
     expect(workflow).toContain('sender_trusted=${sender_is_trusted}');
@@ -138,6 +139,8 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'is missing ${AUTOFIX_APPROVED_LABEL}; skipping.',
     );
+    expect(workflow).toContain('"${issue_is_approved}" == \'true\'');
+    expect(workflow).toContain('--remove-label "${AUTOFIX_APPROVED_LABEL}"');
     expect(workflow).not.toContain(
       "contains(github.event.issue.labels.*.name, 'type/bug')",
     );
