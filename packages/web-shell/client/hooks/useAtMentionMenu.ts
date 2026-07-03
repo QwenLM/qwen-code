@@ -553,6 +553,8 @@ export function useAtMentionMenu({
         query: current.query,
         items: [],
         loading: false,
+        itemMode: undefined,
+        mcpServerName: undefined,
       });
       return true;
     }
@@ -631,7 +633,7 @@ export function useAtMentionMenu({
             return;
           }
           console.warn(
-            `[@mention] provider="${providerId}" query="${query}" failed`,
+            `[@mention] provider="${providerId}" query=<redacted> failed`,
             error,
           );
           setMenu({

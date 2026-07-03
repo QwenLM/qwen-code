@@ -29,12 +29,14 @@ function makeView(doc: string): EditorView {
 function Harness({
   actions,
   providers,
+  view,
 }: {
   actions?: AtMentionWorkspaceActions;
   providers?: readonly WebShellAtProvider[];
+  view?: EditorView | null;
 }) {
   latest = useAtMentionMenu({
-    viewRef: { current: null },
+    viewRef: { current: view ?? null },
     disabledRef: { current: false },
     shellModeRef: { current: false },
     workspaceActionsRef: { current: actions },
@@ -46,15 +48,19 @@ function Harness({
 function mount({
   actions,
   providers,
+  view,
 }: {
   actions?: AtMentionWorkspaceActions;
   providers?: readonly WebShellAtProvider[];
+  view?: EditorView | null;
 } = {}) {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
-    root!.render(<Harness actions={actions} providers={providers} />);
+    root!.render(
+      <Harness actions={actions} providers={providers} view={view} />,
+    );
   });
 }
 
@@ -352,6 +358,153 @@ describe('useAtMentionMenu', () => {
       'extensions',
       'mcp-resources',
     ]);
+  });
+
+  it('accepts a custom item by inserting its label fallback', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    mount({
+      view,
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search: vi.fn().mockResolvedValue([
+            {
+              id: 'item',
+              label: 'snippet',
+            },
+          ]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept()).toBe(true);
+    });
+
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '@snippet ' },
+      selection: { anchor: 9 },
+      scrollIntoView: true,
+    });
+    expect(latest!.state).toBeNull();
+  });
+
+  it('accepts a directory item by drilling into that directory', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi
+      .fn()
+      .mockResolvedValueOnce({
+        kind: 'list',
+        path: '.',
+        entries: [
+          {
+            name: 'src',
+            kind: 'directory',
+            ignored: false,
+          },
+        ],
+        truncated: false,
+      })
+      .mockResolvedValueOnce({
+        kind: 'list',
+        path: 'src',
+        entries: [],
+        truncated: false,
+      });
+    mount({ actions: { listDirectory }, view: makeView('@') });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept(1)).toBe(true);
+    });
+    await runDebounce();
+
+    expect(listDirectory).toHaveBeenLastCalledWith('src', {
+      signal: expect.any(AbortSignal),
+    });
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'files',
+      query: '',
+    });
+  });
+
+  it('accepts an MCP server item by drilling into its resources', async () => {
+    vi.useFakeTimers();
+    const loadMcpResources = vi.fn().mockResolvedValue({ resources: [] });
+    mount({
+      view: makeView('@'),
+      actions: {
+        loadMcpStatus: vi.fn().mockResolvedValue({
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'docs',
+              disabled: false,
+              resourceCount: 1,
+            },
+          ],
+        }),
+        loadMcpResources,
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(2));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept()).toBe(true);
+    });
+    await runDebounce();
+
+    expect(loadMcpResources).toHaveBeenCalledWith('docs', {
+      signal: expect.any(AbortSignal),
+    });
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'mcp-resources',
+      itemMode: 'mcpResources',
+      mcpServerName: 'docs',
+    });
+  });
+
+  it('closes without dispatching when accept uses stale document positions', async () => {
+    vi.useFakeTimers();
+    const view = makeView('');
+    mount({
+      view,
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search: vi.fn().mockResolvedValue([
+            {
+              id: 'item',
+              label: 'snippet',
+            },
+          ]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept()).toBe(false);
+    });
+
+    expect(view.dispatch).not.toHaveBeenCalled();
+    expect(latest!.state).toBeNull();
   });
 
   it('normalizes parent directory segments before listing files', async () => {
