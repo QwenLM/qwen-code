@@ -19,6 +19,7 @@ import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentHeadless, ContextState } from './runtime/agent-headless.js';
 import {
   getSubagentSessionDir,
+  normalizeResumedAgentDepth,
   readAgentMeta,
   patchAgentMeta,
   attachJsonlTranscriptWriter,
@@ -1030,9 +1031,15 @@ export class BackgroundAgentResumeService {
 
       // Restore the persisted launch depth so a resumed nested agent keeps
       // its original nesting level (and spawn eligibility) instead of
-      // recomputing to depth 0 from this top-level resume frame.
+      // recomputing to depth 0 from this top-level resume frame. Normalized
+      // because the sidecar is untrusted input — a tampered negative depth
+      // would otherwise mint unbounded spawn capacity.
       const framedRunBody = () =>
-        runWithAgentContext(meta.agentId, runBody, meta.depth);
+        runWithAgentContext(
+          meta.agentId,
+          runBody,
+          normalizeResumedAgentDepth(meta.depth),
+        );
       void (target.isFork ? runInForkContext(framedRunBody) : framedRunBody());
       return entry;
     } catch (error) {

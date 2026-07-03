@@ -33,6 +33,7 @@ import type {
   AgentBootstrapRecordPayload,
   ChatRecord,
 } from '../services/chatRecordingService.js';
+import { MAX_SUBAGENT_DEPTH_LIMIT } from '../config/config.js';
 import type { SandboxConfig } from '../config/config.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { _recoverObjectsFromLine } from '../utils/jsonl-utils.js';
@@ -121,7 +122,10 @@ export interface AgentMeta {
   agentColor?: string;
   /** Number of explicit resume attempts performed so far. */
   resumeCount?: number;
-  /** Nesting depth at launch time; restored on background/foreground resume. */
+  /**
+   * Nesting depth at launch time; restored on background/foreground resume
+   * via {@link normalizeResumedAgentDepth} — never trust the raw value.
+   */
   depth?: number;
   /** Last terminal error, if any. */
   lastError?: string;
@@ -142,11 +146,35 @@ export interface AgentPersistedCliFlags {
    * nested agent launched under a lower cap would resume after restart under
    * the new session's (or default) cap and regain spawn capacity.
    *
-   * `null` occurs when a non-finite in-memory value crossed JSON
-   * serialization (JSON.stringify(Infinity) === 'null'); the resume path
-   * normalizes it back to the default.
+   * Always a normalized 1–100 integer when written by this codebase; the
+   * resume path still re-normalizes because the sidecar is a plain JSON
+   * file a malformed or hand-edited copy of which can carry anything.
    */
-  maxSubagentDepth?: number | null;
+  maxSubagentDepth?: number;
+}
+
+/**
+ * Normalizes a persisted launch depth read from an agent sidecar before it
+ * is pinned via the `runWithAgentContext` depthOverride. The sidecar is a
+ * plain JSON file, so a malformed or hand-edited value must not mint spawn
+ * capacity: a negative depth (or `-1e309`, which parses to -Infinity) would
+ * make `canSpawnNestedAgent()` pass for every cap.
+ *
+ * Absent values return undefined (the resume frame derives its depth as a
+ * fresh launch). Anything but an integer within 0–{@link
+ * MAX_SUBAGENT_DEPTH_LIMIT} fails CLOSED to the limit: the resumed agent
+ * keeps running but cannot spawn — clamping a corrupt value down to 0 would
+ * fail open by granting full spawn capacity.
+ */
+export function normalizeResumedAgentDepth(
+  value: number | undefined,
+): number | undefined {
+  if (value == null) return undefined;
+  return Number.isInteger(value) &&
+    value >= 0 &&
+    value <= MAX_SUBAGENT_DEPTH_LIMIT
+    ? value
+    : MAX_SUBAGENT_DEPTH_LIMIT;
 }
 
 /**

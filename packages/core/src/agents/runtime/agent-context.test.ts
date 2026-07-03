@@ -14,8 +14,11 @@ import {
   isTopLevelSession,
   runWithAgentContext,
   runWithRuntimeContentGenerator,
+  spawnBlockReason,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
+import { runWithTeammateIdentity } from '../team/identity.js';
+import { runInForkContext } from '../../tools/agent/fork-subagent.js';
 import {
   AuthType,
   type ContentGenerator,
@@ -266,5 +269,30 @@ describe('agent-context (nesting predicates)', () => {
       },
       4,
     );
+  });
+
+  it('spawnBlockReason: depth wins first, then teammate, then fork, else null', async () => {
+    expect(spawnBlockReason(5)).toBeNull();
+    await runWithAgentContext('lvl1', async () => {
+      expect(spawnBlockReason(5)).toBeNull();
+      expect(spawnBlockReason(1)).toBe('depth');
+      await runWithTeammateIdentity(
+        {
+          agentId: 'scribe@demo',
+          agentName: 'scribe',
+          teamName: 'demo',
+          isTeamLead: false,
+        },
+        async () => {
+          expect(spawnBlockReason(5)).toBe('teammate');
+          // A teammate at leaf depth reports depth — the reason order is
+          // execute()'s guard order, keeping the user-facing message stable.
+          expect(spawnBlockReason(1)).toBe('depth');
+        },
+      );
+      await runInForkContext(async () => {
+        expect(spawnBlockReason(5)).toBe('fork');
+      });
+    });
   });
 });

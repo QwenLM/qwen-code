@@ -16,6 +16,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
+  DEFAULT_MAX_SUBAGENT_DEPTH,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
@@ -1365,7 +1366,7 @@ const SETTINGS_SCHEMA = {
         label: 'Max Sub-agent Nesting Depth',
         category: 'Model',
         requiresRestart: false,
-        default: 5,
+        default: DEFAULT_MAX_SUBAGENT_DEPTH,
         description:
           'Maximum sub-agent nesting depth (1-based levels: a top-level sub-agent is level 1). 1 keeps sub-agents available but disables nesting; the default 5 allows nesting up to five levels deep. Values clamp to the range 1-100; non-finite values fall back to the default. Teammates, forks, and workflow-spawned agents never nest regardless of this setting. Overridable via --max-subagent-depth.',
         showInDialog: false,

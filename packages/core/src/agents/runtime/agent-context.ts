@@ -23,6 +23,8 @@ import type {
   ContentGenerator,
   ContentGeneratorConfig,
 } from '../../core/contentGenerator.js';
+import { isTeammate } from '../team/identity.js';
+import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 
 export interface RuntimeContentGeneratorView {
   readonly contentGenerator: ContentGenerator;
@@ -131,4 +133,32 @@ export function childLaunchDepth(): number {
  */
 export function canSpawnNestedAgent(maxDepth: number): boolean {
   return childLaunchDepth() + 1 <= maxDepth;
+}
+
+/**
+ * Single source of the sub-agent spawn exclusion policy, shared by
+ * `AgentCore.prepareTools()` (schema gating) and `AgentTool.execute()`
+ * (runtime guards) so the two layers cannot drift: a rule missed on the
+ * runtime side is a silent spawn bypass, missed on the schema side it burns
+ * model turns on guaranteed-rejected calls.
+ *
+ * Returns the first blocking reason — evaluated in `execute()`'s guard
+ * order, so the winning reason (and its user-facing message) is stable for
+ * contexts that trip several rules (e.g. a teammate at leaf depth) — or
+ * null when a spawn is permitted. All four inputs are pure
+ * AsyncLocalStorage reads, so the composition is order-insensitive for the
+ * schema side's boolean use.
+ *
+ * Callers gate on different frame requirements on top of this:
+ * `prepareTools()` adds `!isTopLevelSession()` to fail closed on a missing
+ * agent frame (it only ever serves agents), while `execute()` must allow
+ * the top-level session — that is the normal spawn path.
+ */
+export function spawnBlockReason(
+  maxDepth: number,
+): 'depth' | 'teammate' | 'fork' | null {
+  if (!canSpawnNestedAgent(maxDepth)) return 'depth';
+  if (isTeammate()) return 'teammate';
+  if (isInForkExecution()) return 'fork';
+  return null;
 }

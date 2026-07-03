@@ -36,6 +36,7 @@ import {
   SchemaValidator,
   type ConfigParameters,
   type MCPServerConfig,
+  MAX_SUBAGENT_DEPTH_LIMIT,
 } from '@qwen-code/qwen-code-core';
 import { extensionsCommand } from '../commands/extensions.js';
 import { hooksCommand } from '../commands/hooks.js';
@@ -1257,9 +1258,13 @@ function resolveMaxSubagentDepth(
 ): number | undefined {
   const value = argv.maxSubagentDepth;
   if (value !== undefined && value !== null) {
-    if (!Number.isInteger(value) || value < 1 || value > 100) {
+    if (
+      !Number.isInteger(value) ||
+      value < 1 ||
+      value > MAX_SUBAGENT_DEPTH_LIMIT
+    ) {
       throw new Error(
-        `--max-subagent-depth must be an integer between 1 and 100; got ${value}.`,
+        `--max-subagent-depth must be an integer between 1 and ${MAX_SUBAGENT_DEPTH_LIMIT}; got ${value}.`,
       );
     }
     return value;

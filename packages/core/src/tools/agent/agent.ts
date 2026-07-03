@@ -41,7 +41,6 @@ import {
   buildForkedMessages,
   buildChildMessage,
   buildWorktreeNotice,
-  isInForkExecution,
   isForkSubagentEnabled,
   runInForkContext,
 } from './fork-subagent.js';
@@ -53,11 +52,11 @@ import {
 import { FileDiscoveryService } from '../../services/fileDiscoveryService.js';
 import { WorkspaceContext } from '../../utils/workspaceContext.js';
 import {
-  canSpawnNestedAgent,
   childLaunchDepth,
   getCurrentAgentId,
   isTopLevelSession,
   runWithAgentContext,
+  spawnBlockReason,
 } from '../../agents/runtime/agent-context.js';
 import { trace, context as otelContext } from '@opentelemetry/api';
 import {
@@ -444,10 +443,11 @@ function applyPersistedCliFlagOverrides(
     ov.getMaxToolCalls = () => flags.maxToolCalls;
   }
   if (flags.maxSubagentDepth !== undefined) {
-    // Re-normalize across the serialization boundary: a malformed or
-    // tampered sidecar (JSON `1e309` parses to Infinity; JSON.stringify
-    // turns Infinity into null) must not bypass the nesting cap for
-    // resumed agents. Same semantics as the Config constructor.
+    // Re-normalize across the serialization boundary: this codebase only
+    // ever persists a normalized 1-100 integer, but the sidecar is a plain
+    // JSON file — a malformed or hand-edited copy (out-of-range numbers,
+    // `1e309` → Infinity, or a literal null) must not bypass the nesting
+    // cap for resumed agents. Same semantics as the Config constructor.
     const maxSubagentDepth = normalizeMaxSubagentDepth(flags.maxSubagentDepth);
     ov.getMaxSubagentDepth = () => maxSubagentDepth;
   }
@@ -628,7 +628,7 @@ export class AgentTool extends BaseDeclarativeTool<AgentParams, ToolResult> {
         run_in_background: {
           type: 'boolean',
           description:
-            'Set to true to run this agent in the background. You will be notified when it completes.',
+            'Set to true to run this agent in the background. You will be notified when it completes. Top-level session only: from within a sub-agent the task runs in the foreground and returns its result inline.',
         },
         ...(config.isAgentTeamEnabled()
           ? {
@@ -1830,64 +1830,57 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       } else {
         return this.executeTeammate(this.params.name, signal, updateOutput);
       }
+    } else if (this.params.name && !isTeammate()) {
+      // Nested sub-agent passing `name`: the parameter is dropped and a
+      // regular one-shot agent spawns at the next level. Log it — the
+      // silent fall-through is otherwise invisible to operators debugging
+      // why an expected teammate never appeared.
+      debugLogger.debug(
+        `[AgentTool] Ignoring teammate name "${this.params.name}" from a nested sub-agent; spawning a regular sub-agent instead.`,
+      );
     }
 
-    // ─── Nesting depth guard ──────────────────────────────────────
-    // Authoritative runtime backstop for sub-agent nesting: reject the spawn
-    // when it would exceed maxSubagentDepth. AgentCore.prepareTools() also
-    // hides the AgentTool from leaf-depth sub-agents (same canSpawnNestedAgent
-    // check), so a well-behaved model never reaches here. Teammate spawns
-    // returned above and are not gated by depth.
+    // ─── Spawn guards ─────────────────────────────────────────────
+    // Authoritative runtime backstop for the shared spawn exclusion policy
+    // (spawnBlockReason — the same predicate prepareTools() uses to hide the
+    // AgentTool, so the two layers cannot drift). A well-behaved model never
+    // reaches here, but wildcard/fallback tool lists and hallucinated calls
+    // make the runtime check load-bearing: depth bounds nesting, teammates
+    // do not nest in v1, and forks must never spawn (the fork contract is
+    // context-sharing, not isolation — blocking ALL agent calls here, before
+    // the fork branch below, subsumes the recursive-fork case). Teammate
+    // spawns via `name` returned in the team-routing branch above, which
+    // requires !isTeammate().
     const maxSubagentDepth = this.config.getMaxSubagentDepth();
-    if (!canSpawnNestedAgent(maxSubagentDepth)) {
+    const spawnBlocked = spawnBlockReason(maxSubagentDepth);
+    if (spawnBlocked !== null) {
       debugLogger.debug(
-        `[AgentTool] Nesting depth guard blocked spawn: childLevel=${childLaunchDepth() + 1} max=${maxSubagentDepth} type=${this.params.subagent_type ?? DEFAULT_BUILTIN_SUBAGENT_TYPE}`,
+        `[AgentTool] Spawn blocked (${spawnBlocked}): childLevel=${childLaunchDepth() + 1} max=${maxSubagentDepth} type=${this.params.subagent_type ?? DEFAULT_BUILTIN_SUBAGENT_TYPE}`,
       );
-      return this.buildSpawnBlockedResult(
-        `Error: sub-agent nesting depth limit reached ` +
-          `(max ${maxSubagentDepth} level${maxSubagentDepth === 1 ? '' : 's'}). ` +
-          `Complete this task directly with your own tools instead of ` +
-          `spawning another sub-agent.`,
-        `Nesting depth limit reached (max ${maxSubagentDepth})`,
-      );
-    }
-
-    // ─── Teammate spawn guard ─────────────────────────────────────
-    // Teammates do not nest in v1: prepareTools() strips `agent` from every
-    // teammate schema, and this backstop rejects a hallucinated spawn call
-    // that slips past schema-hiding — symmetric with the fork guard below so
-    // the execute() backstops cover the same exclusions as prepareTools().
-    // (execute() intentionally has no isTopLevelSession() term: the
-    // top-level session is the normal spawn path, while prepareTools() only
-    // ever serves agents and uses that check to fail closed on a missing
-    // frame — that asymmetry is why the two layers share canSpawnNestedAgent
-    // rather than one full predicate.) Teammate spawns via `name` returned
-    // in the team-routing branch above, which requires !isTeammate().
-    if (isTeammate()) {
-      debugLogger.debug(
-        `[AgentTool] Teammate containment guard blocked spawn: type=${this.params.subagent_type ?? DEFAULT_BUILTIN_SUBAGENT_TYPE}`,
-      );
-      return this.buildSpawnBlockedResult(
-        'Error: Teammates cannot spawn sub-agents. Complete this task directly with your own tools, or coordinate through send_message.',
-        'Sub-agent spawning is not allowed from a teammate context',
-      );
-    }
-
-    // ─── Fork spawn guard ─────────────────────────────────────────
-    // Forks must never spawn sub-agents — the fork contract is
-    // context-sharing, not isolation. AgentCore.prepareTools() already strips
-    // `agent` from fork contexts, but wildcard/fallback tool lists make this
-    // runtime backstop necessary. Blocks ALL agent calls from a fork child
-    // (not just fork-in-fork). This runs before the fork branch below, so the
-    // recursive-fork case is subsumed here.
-    if (isInForkExecution()) {
-      debugLogger.debug(
-        `[AgentTool] Fork containment guard blocked spawn: type=${this.params.subagent_type ?? DEFAULT_BUILTIN_SUBAGENT_TYPE}`,
-      );
-      return this.buildSpawnBlockedResult(
-        'Error: Cannot spawn sub-agents from within a fork. Please execute tasks directly.',
-        'Sub-agent spawning is not allowed inside a fork',
-      );
+      switch (spawnBlocked) {
+        case 'depth':
+          return this.buildSpawnBlockedResult(
+            `Error: sub-agent nesting depth limit reached ` +
+              `(max ${maxSubagentDepth} level${maxSubagentDepth === 1 ? '' : 's'}). ` +
+              `Complete this task directly with your own tools instead of ` +
+              `spawning another sub-agent.`,
+            `Nesting depth limit reached (max ${maxSubagentDepth})`,
+          );
+        case 'teammate':
+          return this.buildSpawnBlockedResult(
+            'Error: Teammates cannot spawn sub-agents. Complete this task directly with your own tools, or coordinate through send_message.',
+            'Sub-agent spawning is not allowed from a teammate context',
+          );
+        case 'fork':
+          return this.buildSpawnBlockedResult(
+            'Error: Cannot spawn sub-agents from within a fork. Please execute tasks directly.',
+            'Sub-agent spawning is not allowed inside a fork',
+          );
+        default: {
+          const exhaustive: never = spawnBlocked;
+          throw new Error(`Unhandled spawn block reason: ${exhaustive}`);
+        }
+      }
     }
 
     // ── Isolation state hoisted to the outermost scope ────────────
@@ -2102,9 +2095,25 @@ class AgentToolInvocation extends BaseToolInvocation<AgentParams, ToolResult> {
       }
 
       // OR the tool parameter with the agent definition's background flag.
-      const shouldRunInBackground =
+      //
+      // Background delegation is top-level-only in v1, mirroring the fork
+      // downgrade above: a nested launcher would be handed a completion
+      // contract it cannot honor — the success guidance names send_message
+      // and task_stop (both excluded from sub-agent toolsets), and
+      // BackgroundTaskRegistry's single session-level notification callback
+      // would inject the child's completion into the top-level conversation
+      // while the launcher (typically finished by then) never hears back.
+      // Downgrade to an awaited foreground run instead of orphaning the
+      // child's results.
+      const backgroundRequested =
         this.params.run_in_background === true ||
         subagentConfig.background === true;
+      const shouldRunInBackground = backgroundRequested && isTopLevelSession();
+      if (backgroundRequested && !shouldRunInBackground) {
+        debugLogger.debug(
+          `[AgentTool] Background request downgraded to a foreground run for a nested sub-agent (type=${subagentConfig.name}).`,
+        );
+      }
 
       // Preflight: fast-fail before expensive worktree/subagent setup.
       // This is not redundant with registry.register() below — that call

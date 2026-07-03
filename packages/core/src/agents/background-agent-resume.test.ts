@@ -1131,10 +1131,10 @@ describe('BackgroundAgentResumeService', () => {
   it.each([
     // Out-of-range values clamp with Config semantics.
     { persisted: 5000, expected: 100 },
-    // JSON.stringify(Infinity) === 'null' — the sidecar can legitimately
-    // carry null for a non-finite in-memory value; it must fall back to
-    // the default, not leak through the getter override.
-    { persisted: null, expected: 5 },
+    // This codebase never writes null, but the sidecar is a plain JSON
+    // file — a malformed or hand-edited copy can carry it; it must fall
+    // back to the default, not leak through the getter override.
+    { persisted: null as unknown as number, expected: 5 },
   ])(
     'normalizes persisted maxSubagentDepth $persisted to $expected on resume',
     async ({ persisted, expected }) => {
@@ -1209,81 +1209,91 @@ describe('BackgroundAgentResumeService', () => {
     20000,
   );
 
-  it('restores the persisted launch depth so a resumed nested agent keeps its level', async () => {
+  it.each([
     // Resume happens from a top-level frame (depth would recompute to 0);
     // the persisted meta.depth must be pinned via the runWithAgentContext
     // depthOverride, or a resumed nested agent would regain spawn capacity.
-    const sessionId = 'session-depth';
-    const agentId = 'agent-depth';
-    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
-    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+    { persisted: 2, expected: 2 },
+    // The sidecar is untrusted input: a tampered negative depth must fail
+    // closed to the depth ceiling (no spawn capacity), not pin the frame
+    // at a level that passes canSpawnNestedAgent() for every cap.
+    { persisted: -50, expected: 100 },
+  ])(
+    'restores persisted launch depth $persisted as $expected on resume',
+    async ({ persisted, expected }) => {
+      const sessionId = `session-depth-${expected}`;
+      const agentId = `agent-depth-${expected}`;
+      const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+      const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
 
-    writeAgentMeta(metaPath, {
-      agentId,
-      agentType: 'researcher',
-      description: 'Resume nested agent',
-      parentSessionId: sessionId,
-      parentAgentId: 'agent-parent',
-      createdAt: '2026-04-20T00:00:00.000Z',
-      status: 'running',
-      subagentName: 'researcher',
-      depth: 2,
-    });
-    fs.writeFileSync(
-      outputFile,
-      JSON.stringify({
-        uuid: 'u1',
-        parentUuid: null,
-        sessionId,
-        timestamp: '2026-04-20T00:00:00.000Z',
-        type: 'user',
-        message: { role: 'user', parts: [{ text: 'Resume nested agent' }] },
-      }) + '\n',
-      'utf8',
-    );
+      writeAgentMeta(metaPath, {
+        agentId,
+        agentType: 'researcher',
+        description: 'Resume nested agent',
+        parentSessionId: sessionId,
+        parentAgentId: 'agent-parent',
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'running',
+        subagentName: 'researcher',
+        depth: persisted,
+      });
+      fs.writeFileSync(
+        outputFile,
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Resume nested agent' }] },
+        }) + '\n',
+        'utf8',
+      );
 
-    registry.register({
-      agentId,
-      description: 'Resume nested agent',
-      subagentType: 'researcher',
-      status: 'paused',
-      startTime: Date.now(),
-      abortController: new AbortController(),
-      prompt: 'Resume nested agent',
-      outputFile,
-      metaPath,
-      isBackgrounded: true,
-    });
+      registry.register({
+        agentId,
+        description: 'Resume nested agent',
+        subagentType: 'researcher',
+        status: 'paused',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        prompt: 'Resume nested agent',
+        outputFile,
+        metaPath,
+        isBackgrounded: true,
+      });
 
-    let observedDepth = -1;
-    const createAgentHeadless = vi.fn().mockResolvedValue({
-      subagent: {
-        execute: vi.fn(async () => {
-          observedDepth = getCurrentAgentDepth();
-        }),
-        setExternalMessageProvider: vi.fn(),
-        getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
-        getExecutionSummary: () => ({
-          totalTokens: 0,
-          outputTokens: 0,
-          totalDurationMs: 0,
-        }),
-        getTerminateMode: () => AgentTerminateMode.GOAL,
-        getFinalText: () => 'done',
-      },
-      dispose: vi.fn().mockResolvedValue(undefined),
-    });
+      let observedDepth = -1;
+      const createAgentHeadless = vi.fn().mockResolvedValue({
+        subagent: {
+          execute: vi.fn(async () => {
+            observedDepth = getCurrentAgentDepth();
+          }),
+          setExternalMessageProvider: vi.fn(),
+          getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+          getExecutionSummary: () => ({
+            totalTokens: 0,
+            outputTokens: 0,
+            totalDurationMs: 0,
+          }),
+          getTerminateMode: () => AgentTerminateMode.GOAL,
+          getFinalText: () => 'done',
+        },
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
 
-    const { service, subagentManager } = createService();
-    subagentManager.createAgentHeadless = createAgentHeadless;
+      const { service, subagentManager } = createService();
+      subagentManager.createAgentHeadless = createAgentHeadless;
 
-    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+      const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
 
-    expect(resumed).toBeDefined();
-    await vi.waitFor(() => {
-      expect(observedDepth).toBe(2);
-    });
-  }, 20000);
+      expect(resumed).toBeDefined();
+      await vi.waitFor(() => {
+        expect(observedDepth).toBe(expected);
+      });
+    },
+    20000,
+  );
 
   it('coalesces concurrent resume calls into a single running agent', async () => {
     const sessionId = 'session-double';

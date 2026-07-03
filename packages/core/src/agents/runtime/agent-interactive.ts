@@ -91,6 +91,14 @@ export class AgentInteractive {
   constructor(config: AgentInteractiveConfig, core: AgentCore) {
     this.config = config;
     this.core = core;
+    // Ambient capture: reads the SPAWNER's AsyncLocalStorage frame, so this
+    // is correct only while construction stays on the spawner's await chain
+    // (today: InProcessBackend.spawnAgent, whose entry paths are top-level
+    // gated). A future factory/queue/deferred construction would silently
+    // record depth 0 — the same deferral-loses-frame failure the resume
+    // path solves explicitly by persisting AgentMeta.depth. If construction
+    // ever moves off the spawn chain, thread the depth through
+    // AgentInteractiveConfig instead.
     this.agentDepth = childLaunchDepth();
     this.setupEventListeners();
   }

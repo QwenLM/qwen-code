@@ -1216,13 +1216,18 @@ function loadMemoryPressureConfig(): MemoryPressureConfig {
   return config;
 }
 
+/** Default sub-agent nesting cap (1-based levels). */
+export const DEFAULT_MAX_SUBAGENT_DEPTH = 5;
+/** Ceiling for the nesting cap — catches typos the way maxToolCalls' does. */
+export const MAX_SUBAGENT_DEPTH_LIMIT = 100;
+
 /**
  * Normalizes a maxSubagentDepth value: absent or non-finite values fall back
- * to the default of 5 (NaN would silently block all nesting, Infinity — e.g.
+ * to the default (NaN would silently block all nesting, Infinity — e.g.
  * JSON `1e309` — would unbound the recursion cap), and finite values floor
- * and clamp to 1–100. Values below 1 clamp up so the knob never disables
- * sub-agents outright — it only bounds nesting; 100 caps typos the way
- * maxToolCalls' ceiling does.
+ * and clamp to the 1–{@link MAX_SUBAGENT_DEPTH_LIMIT} range. Values below 1
+ * clamp up so the knob never disables sub-agents outright — it only bounds
+ * nesting.
  *
  * Shared by the Config constructor and the resume path that restores
  * persisted launch flags, so a malformed or tampered agent sidecar cannot
@@ -1232,8 +1237,8 @@ export function normalizeMaxSubagentDepth(
   value: number | null | undefined,
 ): number {
   return value == null || !Number.isFinite(value)
-    ? 5
-    : Math.min(100, Math.max(1, Math.floor(value)));
+    ? DEFAULT_MAX_SUBAGENT_DEPTH
+    : Math.min(MAX_SUBAGENT_DEPTH_LIMIT, Math.max(1, Math.floor(value)));
 }
 
 function readMemoryPressureRatioEnv(envName: string, fallback: number): number {

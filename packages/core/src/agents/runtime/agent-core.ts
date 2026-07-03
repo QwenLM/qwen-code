@@ -22,16 +22,15 @@ import { reportError } from '../../utils/errorReporting.js';
 import { subagentNameContext } from '../../utils/subagentNameContext.js';
 import type { Config } from '../../config/config.js';
 import {
-  canSpawnNestedAgent,
   getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
   isTopLevelSession,
   runWithAgentContext,
   runWithRuntimeContentGenerator,
+  spawnBlockReason,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
-import { isInForkExecution } from '../../tools/agent/fork-subagent.js';
 import {
   createDuplicateProviderToolCallResponse,
   findRepeatedDuplicateProviderToolCall,
@@ -506,9 +505,8 @@ export class AgentCore {
     // recursive spawning, but when maxSubagentDepth permits another level we
     // let it back in. prepareTools() runs inside this sub-agent's own
     // AsyncLocalStorage frame (see AgentHeadless.run / AgentInteractive), so
-    // canSpawnNestedAgent() reads this agent's own depth. Teammates do not
-    // nest in v1, and forks must never spawn sub-agents (the fork contract is
-    // context-sharing, not isolation).
+    // spawnBlockReason() reads this agent's own depth and context — the same
+    // shared predicate AgentTool.execute() backstops at runtime.
     //
     // !isTopLevelSession() fails closed: prepareTools() only ever serves
     // agents — never the top-level user session — so a missing agent frame
@@ -518,9 +516,7 @@ export class AgentCore {
     // AgentInteractive.start(), since fixed to establish its frame).
     const nestingAllowed =
       !isTopLevelSession() &&
-      !isTeammate() &&
-      !isInForkExecution() &&
-      canSpawnNestedAgent(this.runtimeContext.getMaxSubagentDepth());
+      spawnBlockReason(this.runtimeContext.getMaxSubagentDepth()) === null;
 
     // Effective exclusion test. AgentTool is depth-gated (allowed only when
     // this sub-agent is shallow enough to spawn another level); every other

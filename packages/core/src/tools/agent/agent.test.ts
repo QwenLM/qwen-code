@@ -873,6 +873,33 @@ describe('AgentTool', () => {
       );
     });
 
+    it('ignores a teammate name from a nested sub-agent and spawns a regular sub-agent', async () => {
+      // With a team active and depth permitting the spawn, a nested
+      // sub-agent's `name` must not reach executeTeammate (teammates do not
+      // nest in v1) — the spawn proceeds as a regular one-shot agent of the
+      // requested type. Pins the silent-success path at the default cap.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      const invocation = agentTool.build({
+        description: 'Spawn with a name from a nested sub-agent',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        name: 'helper',
+      });
+      await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(spawnTeammate).not.toHaveBeenCalled();
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
+    });
+
     it('falls back to a regular general-purpose sub-agent when a nested sub-agent requests a fork', async () => {
       // Fork is a top-level-only capability in v1. A nested sub-agent
       // requesting `subagent_type: "fork"` must get the awaitable
@@ -3110,6 +3137,35 @@ describe('AgentTool', () => {
       const llmText = partToString(result.llmContent);
       expect(llmText).toContain('Background agent launched');
       expect(mockRegistry.register).toHaveBeenCalled();
+    });
+
+    it('downgrades a background request from a nested sub-agent to an awaited foreground run', async () => {
+      // Background delegation is top-level-only in v1: a nested launcher
+      // cannot honor the background completion contract (send_message /
+      // task_stop are excluded from its toolset, and completion
+      // notifications go to the top-level session). The run must complete
+      // inline instead of orphaning the child's results.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      const params: AgentParams = {
+        description: 'Start monitor from a nested sub-agent',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+        run_in_background: true,
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await runWithAgentContext('sub-1', () =>
+        invocation.execute(),
+      );
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).not.toContain('Background agent launched');
+      expect(llmText).toContain('Monitor done');
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ isBackgrounded: false }),
+      );
     });
 
     it('returns registry registration errors to the model without launching the background body', async () => {
