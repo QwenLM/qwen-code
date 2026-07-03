@@ -407,4 +407,31 @@ describe('qwen-autofix workflow', () => {
       'git diff --quiet "origin/${BRANCH}...${BRANCH}"',
     );
   });
+
+  it('keeps real model credentials out of qwen subprocess environments', () => {
+    const qwenSteps = [
+      assessCandidatesStep,
+      developFixStep,
+      triageAndAddressStep,
+    ];
+    for (const step of qwenSteps) {
+      expect(step.length).toBeGreaterThan(0);
+      expect(step).not.toMatch(
+        /^[ ]{10}OPENAI_API_KEY: '\$\{\{ secrets\.OPENAI_API_KEY \}\}'$/m,
+      );
+      expect(step).not.toMatch(
+        /^[ ]{10}OPENAI_BASE_URL: '\$\{\{ secrets\.OPENAI_BASE_URL \}\}'$/m,
+      );
+      expect(step).toContain(
+        "QWEN_UPSTREAM_OPENAI_API_KEY: '${{ secrets.OPENAI_API_KEY }}'",
+      );
+      expect(step).toContain(
+        "QWEN_UPSTREAM_OPENAI_BASE_URL: '${{ secrets.OPENAI_BASE_URL }}'",
+      );
+      expect(step).toContain('start_openai_proxy');
+      expect(step).toContain('OPENAI_API_KEY=qwen-loopback-proxy');
+      expect(step).toContain('unset QWEN_UPSTREAM_OPENAI_API_KEY');
+      expect(step).toContain('unset QWEN_UPSTREAM_OPENAI_BASE_URL');
+    }
+  });
 });
