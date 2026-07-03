@@ -55,6 +55,10 @@ jobs:
         working-directory: 'packages/mobile-mcp'
         run: 'npm run build'
 
+      - name: 'Test'
+        working-directory: 'packages/mobile-mcp'
+        run: 'npx playwright test test/coord-norm.test.ts'
+
       - name: 'Publish'
         if: '${{ !inputs.dry_run }}'
         working-directory: 'packages/mobile-mcp'

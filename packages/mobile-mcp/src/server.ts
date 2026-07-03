@@ -24,6 +24,7 @@ import {
   ingestScreenSizeFromResult,
   getCachedScreenSize,
   cacheScreenSize,
+  invalidateScreenSize,
   rewriteDescription,
   coordParamDesc,
 } from './coord-norm';
@@ -318,7 +319,10 @@ export const createMcpServer = (): McpServer => {
       const screenSize = await robot.getScreenSize();
       cacheScreenSize(deviceId, screenSize.width, screenSize.height);
       return { width: screenSize.width, height: screenSize.height };
-    } catch {
+    } catch (err: any) {
+      trace(
+        `[coord-norm] Failed to get screen size for ${deviceId}: ${err.message}. Coordinates will pass through without normalization.`,
+      );
       return undefined;
     }
   }
@@ -1023,6 +1027,7 @@ export const createMcpServer = (): McpServer => {
     async ({ device, orientation }) => {
       const robot = getRobotFromDevice(device);
       await robot.setOrientation(orientation);
+      invalidateScreenSize(device);
       return `Changed device orientation to ${orientation}`;
     },
   );
@@ -1269,7 +1274,7 @@ export const createMcpServer = (): McpServer => {
         .string()
         .describe('The local file path to save the pulled file to.'),
     },
-    { readOnlyHint: true },
+    { destructiveHint: true },
     async ({ device, remote_path, local_path }) => {
       const robot = getAndroidRobotFromDevice(device, 'mobile_adb_pull');
       validateOutputPath(local_path);
@@ -1304,15 +1309,17 @@ export const createMcpServer = (): McpServer => {
     { destructiveHint: true },
     async ({ device, local_path, remote_path, force }) => {
       const robot = getAndroidRobotFromDevice(device, 'mobile_adb_push');
-      if (!force && !remote_path.startsWith('/sdcard/')) {
-        throw new ActionableError(
-          `Push target path must start with /sdcard/ for safety. Got: "${remote_path}". Set force=true to override this restriction.`,
-        );
+      if (!force) {
+        const resolved = path.posix.resolve('/', remote_path);
+        if (!resolved.startsWith('/sdcard/')) {
+          throw new ActionableError(
+            `Push target path must resolve under /sdcard/ for safety. Got: "${remote_path}" (resolved: "${resolved}"). Set force=true to override.`,
+          );
+        }
       }
       if (!fs.existsSync(local_path)) {
         throw new ActionableError(`Local file not found: "${local_path}"`);
       }
-      validateOutputPath(local_path);
       robot.pushFile(local_path, remote_path);
       return `Successfully pushed ${local_path} to ${remote_path}`;
     },

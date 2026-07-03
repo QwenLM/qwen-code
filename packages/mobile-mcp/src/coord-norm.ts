@@ -69,6 +69,10 @@ export function cacheScreenSize(
   screenSizeCache.set(deviceId, { width, height });
 }
 
+export function invalidateScreenSize(deviceId: string): void {
+  screenSizeCache.delete(deviceId);
+}
+
 export function getCachedScreenSize(
   deviceId: string,
 ): { width: number; height: number } | undefined {
@@ -138,7 +142,8 @@ export function normalizeElementResult(
       }
     }
     return prefix + JSON.stringify(elements);
-  } catch {
+  } catch (err) {
+    console.error('[coord-norm] Failed to normalize element coordinates:', err);
     return response;
   }
 }
@@ -169,9 +174,10 @@ export function ingestScreenSizeFromResult(
 
 export function rewriteDescription(description: string): string {
   const scale = coordinateScale();
-  return description
-    .replace(/in pixels/g, `in 0-${scale} normalized coordinates`)
-    .replace(/\bin pixels\b/g, `in 0-${scale} normalized coordinates`);
+  return description.replace(
+    /\bin pixels\b/g,
+    `in 0-${scale} normalized coordinates`,
+  );
 }
 
 export function coordParamDesc(baseDesc: string): string {
