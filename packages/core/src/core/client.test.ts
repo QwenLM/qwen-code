@@ -1407,6 +1407,31 @@ describe('Gemini Client (client.ts)', () => {
       });
     });
 
+    it('does not announce MCP removal before an added tool was drained', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      const tool = {
+        name: 'mcp__flaky__do',
+        description: 'd',
+        serverName: 'flaky',
+      };
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      reg.getDeferredToolSummary.mockReturnValue([tool]);
+      await client.setTools();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      await client.setTools();
+
+      await runTurn();
+
+      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
     it('omits already-revealed deferred tools from added reminders', async () => {
       const reg = getRegistryMock();
       reg.getTool.mockImplementation((n: string) =>
@@ -1509,6 +1534,25 @@ describe('Gemini Client (client.ts)', () => {
       });
     });
 
+    it('keeps queued MCP changes when the reminder builder returns null', () => {
+      const priv = client as unknown as {
+        pendingAddedMcpTools: Map<
+          string,
+          { name: string; description: string; serverName: string }
+        >;
+        pendingRemovedMcpToolNames: Set<string>;
+        drainPendingAddedMcpToolsReminder(): void;
+      };
+      priv.pendingRemovedMcpToolNames = new Set(['mcp__gone__do']);
+      vi.mocked(buildChangedMcpToolsReminder).mockReturnValueOnce(null);
+
+      priv.drainPendingAddedMcpToolsReminder();
+
+      expect(priv.pendingRemovedMcpToolNames).toEqual(
+        new Set(['mcp__gone__do']),
+      );
+    });
+
     it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
       // Mirrors startChat's silent-disappearance guard: without ToolSearch
       // a deferred MCP tool can't be reached, so the only safe option is
@@ -1607,6 +1651,30 @@ describe('Gemini Client (client.ts)', () => {
           },
         ],
       });
+    });
+
+    it('keeps draining later capability reminders when MCP drain fails', async () => {
+      const priv = client as unknown as {
+        drainPendingAddedMcpToolsReminder(): void;
+        drainSkillAndCommandReminders(): Promise<void>;
+        drainAgentReminders(): Promise<void>;
+      };
+      vi.spyOn(priv, 'drainPendingAddedMcpToolsReminder').mockImplementation(
+        () => {
+          throw new Error('mcp drain failed');
+        },
+      );
+      const skillDrainSpy = vi
+        .spyOn(priv, 'drainSkillAndCommandReminders')
+        .mockResolvedValue();
+      const agentDrainSpy = vi
+        .spyOn(priv, 'drainAgentReminders')
+        .mockResolvedValue();
+
+      await runTurn();
+
+      expect(skillDrainSpy).toHaveBeenCalled();
+      expect(agentDrainSpy).toHaveBeenCalled();
     });
 
     it('preserves SessionStart additionalContext because setTools does not rewrite the system instruction', async () => {

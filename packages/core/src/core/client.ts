@@ -972,7 +972,6 @@ export class GeminiClient {
     for (const name of this.announcedMcpToolNames) {
       if (!currentMcpToolNames.has(name)) {
         this.pendingRemovedMcpToolNames.add(name);
-        this.announcedMcpToolNames.delete(name);
       }
     }
 
@@ -981,7 +980,6 @@ export class GeminiClient {
         if (!this.announcedMcpToolNames.has(tool.name)) {
           this.pendingAddedMcpTools.set(tool.name, tool);
         }
-        this.announcedMcpToolNames.add(tool.name);
       }
       this.announcedDeferredToolNames.add(tool.name);
     }
@@ -1001,8 +999,6 @@ export class GeminiClient {
       removedMcpToolNames.length > 0
         ? buildChangedMcpToolsReminder(addedMcpTools, removedMcpToolNames)
         : buildAddedMcpToolsReminder(addedMcpTools);
-    this.pendingAddedMcpTools.clear();
-    this.pendingRemovedMcpToolNames.clear();
 
     if (!reminder) {
       return;
@@ -1012,6 +1008,15 @@ export class GeminiClient {
       role: 'user',
       parts: [{ text: reminder }],
     });
+
+    for (const name of removedMcpToolNames) {
+      this.announcedMcpToolNames.delete(name);
+    }
+    for (const tool of addedMcpTools) {
+      this.announcedMcpToolNames.add(tool.name);
+    }
+    this.pendingAddedMcpTools.clear();
+    this.pendingRemovedMcpToolNames.clear();
   }
 
   /**
@@ -1125,6 +1130,11 @@ export class GeminiClient {
       return;
     }
 
+    if (!this.agentRemindersInitialized) {
+      await this.seedAgentReminderDedupFromCurrent();
+      return;
+    }
+
     let agents: Array<{ name: string; description: string }>;
     try {
       agents = await this.config.getSubagentManager().listSubagents();
@@ -1134,12 +1144,6 @@ export class GeminiClient {
     }
 
     const currentByName = new Map(agents.map((agent) => [agent.name, agent]));
-    if (!this.agentRemindersInitialized) {
-      this.announcedAgentReminderNames = new Set(currentByName.keys());
-      this.agentRemindersInitialized = true;
-      return;
-    }
-
     const addedAgents: Array<{ name: string; description: string }> = [];
     const removedAgentNames: string[] = [];
 
@@ -2180,9 +2184,21 @@ export class GeminiClient {
         (messageType === SendMessageType.UserQuery ||
           messageType === SendMessageType.Cron)
       ) {
-        this.drainPendingAddedMcpToolsReminder();
-        await this.drainSkillAndCommandReminders();
-        await this.drainAgentReminders();
+        try {
+          this.drainPendingAddedMcpToolsReminder();
+        } catch (error) {
+          debugLogger.warn('drainPendingAddedMcpToolsReminder failed', error);
+        }
+        try {
+          await this.drainSkillAndCommandReminders();
+        } catch (error) {
+          debugLogger.warn('drainSkillAndCommandReminders failed', error);
+        }
+        try {
+          await this.drainAgentReminders();
+        } catch (error) {
+          debugLogger.warn('drainAgentReminders failed', error);
+        }
       }
 
       const turn = new Turn(this.getChat(), prompt_id);

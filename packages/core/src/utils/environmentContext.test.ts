@@ -16,6 +16,7 @@ import {
 import { createUserContent, type Content } from '@google/genai';
 import {
   buildAddedMcpToolsReminder,
+  buildAddedAgentsReminder,
   buildDeferredToolsReminder,
   buildMcpServerInstructionsReminder,
   buildAvailableSkillsReminder,
@@ -800,5 +801,16 @@ describe('changed capability reminders', () => {
     expect(result).toContain('"reviewer"');
     expect(result).toContain('"Reviews code"');
     expect(result).toContain('"old-agent"');
+  });
+
+  it('renders added-only agents with an added reminder', () => {
+    const result = buildAddedAgentsReminder([
+      { name: 'reviewer', description: 'Reviews code' },
+    ]);
+
+    expect(result).not.toBeNull();
+    expect(result).toContain('became available after startup');
+    expect(result).not.toContain('changed after startup');
+    expect(result).toContain('"reviewer"');
   });
 });
