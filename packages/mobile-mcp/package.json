@@ -1,11 +1,11 @@
 {
-  "name": "@mobilenext/mobile-mcp",
-  "mcpName": "io.github.mobile-next/mobile-mcp",
+  "name": "@qwen-code/mobile-mcp",
   "version": "0.0.1",
-  "description": "Mobile MCP",
+  "description": "Mobile MCP with opt-in relative coordinate support",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/mobile-next/mobile-mcp.git"
+    "url": "git+https://github.com/QwenLM/qwen-code.git",
+    "directory": "packages/mobile-mcp"
   },
   "engines": {
     "node": ">=18"
@@ -18,7 +18,7 @@
     "test": "c8 playwright test",
     "watch": "tsc --watch",
     "clean": "rm -rf lib",
-    "prepare": "husky"
+    "prepare": ""
   },
   "files": [
     "lib"
@@ -62,7 +62,7 @@
   },
   "author": "",
   "bugs": {
-    "url": "https://github.com/mobile-next/mobile-mcp/issues"
+    "url": "https://github.com/QwenLM/qwen-code/issues"
   },
-  "homepage": "https://github.com/mobile-next/mobile-mcp#readme"
+  "homepage": "https://github.com/QwenLM/qwen-code/tree/main/packages/mobile-mcp#readme"
 }
