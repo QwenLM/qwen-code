@@ -14,12 +14,14 @@ import {
   type ApprovalMode,
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
+import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
 import type { Application, Request, RequestHandler, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   canonicalizeWorkspace,
   InvalidClientIdError,
   PromptQueueFullError,
+  SessionArtifactValidationError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   type AcpSessionBridge,
@@ -61,6 +63,21 @@ interface RegisterSessionRoutesDeps {
   promptDeadlineMs?: number;
   sessionShellCommandEnabled: boolean;
   languageCodes: string[];
+}
+
+function sendArtifactValidationError(res: Response, err: unknown): boolean {
+  if (!(err instanceof SessionArtifactValidationError)) {
+    return false;
+  }
+  res.status(400).json({
+    v: 1,
+    error: {
+      code: err.code,
+      message: err.message,
+      ...(err.field ? { field: err.field } : {}),
+    },
+  });
+  return true;
 }
 
 export function registerSessionRoutes(
@@ -506,6 +523,99 @@ export function registerSessionRoutes(
     }
   });
 
+  app.get('/session/:id/artifacts', async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    try {
+      res.status(200).json(await bridge.getSessionArtifacts(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/artifacts',
+        sessionId,
+      });
+    }
+  });
+
+  app.post(
+    '/session/:id/artifacts',
+    mutate({ strict: true }),
+    withMutableSession(
+      'POST /session/:id/artifacts',
+      async (req, res, sessionId) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        try {
+          const body = safeBody(req);
+          const artifact: SessionArtifactInput = {
+            title: body['title'] as SessionArtifactInput['title'],
+            kind: body['kind'] as SessionArtifactInput['kind'],
+            storage: body['storage'] as SessionArtifactInput['storage'],
+            description: body[
+              'description'
+            ] as SessionArtifactInput['description'],
+            workspacePath: body[
+              'workspacePath'
+            ] as SessionArtifactInput['workspacePath'],
+            managedId: body['managedId'] as SessionArtifactInput['managedId'],
+            url: body['url'] as SessionArtifactInput['url'],
+            mimeType: body['mimeType'] as SessionArtifactInput['mimeType'],
+            sizeBytes: body['sizeBytes'] as SessionArtifactInput['sizeBytes'],
+            metadata: body['metadata'] as SessionArtifactInput['metadata'],
+          };
+          const result = await bridge.addSessionArtifact(
+            sessionId,
+            artifact,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          res.status(200).json(result);
+        } catch (err) {
+          if (sendArtifactValidationError(res, err)) return;
+          sendBridgeError(res, err, {
+            route: 'POST /session/:id/artifacts',
+            sessionId,
+          });
+        }
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/artifacts/:artifactId',
+    mutate({ strict: true }),
+    withMutableSession(
+      'DELETE /session/:id/artifacts/:artifactId',
+      async (req, res, sessionId) => {
+        const artifactId = req.params['artifactId'];
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (!artifactId) {
+          res.status(400).json({
+            v: 1,
+            error: {
+              code: 'VALIDATION_FAILED',
+              message: '`artifactId` route parameter is required',
+              field: 'artifactId',
+            },
+          });
+          return;
+        }
+        try {
+          const result = await bridge.removeSessionArtifact(
+            sessionId,
+            artifactId,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          res.status(200).json(result);
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: 'DELETE /session/:id/artifacts/:artifactId',
+            sessionId,
+          });
+        }
+      },
+    ),
+  );
+
   app.post(
     '/session/:id/tasks/:taskId/cancel',
     mutate({ strict: true }),
@@ -875,6 +985,7 @@ export function registerSessionRoutes(
 
   app.patch(
     '/session/:id/metadata',
+    mutate({ strict: true }),
     withMutableSession('PATCH /session/:id/metadata', (req, res, sessionId) => {
       const body = safeBody(req);
       const clientId = parseClientIdHeader(req, res);

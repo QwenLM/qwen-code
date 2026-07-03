@@ -173,6 +173,10 @@ export type {
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
 export type {
+  RecordArtifactTool,
+  RecordArtifactParams,
+} from './tools/record-artifact.js';
+export type {
   ArtifactPublisher,
   PublishArtifactInput,
   PublishedArtifact,
@@ -283,6 +287,7 @@ export * from './memory/store.js';
 export * from './memory/const.js';
 export * from './memory/channel-memory.js';
 export * from './memory/remember.js';
+export * from './memory/dream.js';
 // Issue : write helper for hierarchical context files,
 // re-exported so the `qwen serve` daemon can mutate workspace memory
 // via `POST /workspace/memory` without depending on internal paths.
@@ -541,11 +546,13 @@ export {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  firePostToolBatchHook,
   type NotificationHookResult,
   type PermissionRequestHookResult,
   type PreToolUseHookResult,
   type PostToolUseHookResult,
   type PostToolUseFailureHookResult,
+  type PostToolBatchHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
 

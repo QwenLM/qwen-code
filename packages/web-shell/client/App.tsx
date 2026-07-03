@@ -2032,14 +2032,11 @@ export function App({
   const loadSidebarSession = useCallback(
     async (sessionId: string) => {
       setSidebarSwitchingSessionId(sessionId);
-      // Close the drawer before awaiting the load so it doesn't linger over the
-      // old transcript while the new session streams in, matching the other
-      // session-switch paths (/resume, ResumeDialog).
+      // Close the drawer before awaiting the load; the transcript clears
+      // immediately and shows its loading skeleton for the selected session.
       closeMobileDrawer();
       try {
-        await sessionActions.loadSession(sessionId, {
-          deferTranscriptReset: true,
-        });
+        await sessionActions.loadSession(sessionId);
       } catch (error) {
         setSidebarSwitchingSessionId((current) =>
           current === sessionId ? null : current,
@@ -2054,11 +2051,17 @@ export function App({
     if (
       sidebarSwitchingSessionId !== null &&
       connection.sessionId === sidebarSwitchingSessionId &&
+      !connection.loadingTranscript &&
       !connection.catchingUp
     ) {
       setSidebarSwitchingSessionId(null);
     }
-  }, [connection.catchingUp, connection.sessionId, sidebarSwitchingSessionId]);
+  }, [
+    connection.catchingUp,
+    connection.loadingTranscript,
+    connection.sessionId,
+    sidebarSwitchingSessionId,
+  ]);
 
   const openTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
@@ -2204,6 +2207,10 @@ export function App({
 
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
+      if (connectionRef.current.loadingTranscript) {
+        pushToast('warning', t('editor.sessionLoading'));
+        return false;
+      }
       if (
         shouldBlockComposerSubmit({
           connectionStatus: connectionRef.current.status,
@@ -2431,6 +2438,21 @@ export function App({
                 voiceModelId,
               ).catch((error: unknown) =>
                 reportError(error, t('model.setVoice')),
+              );
+              return true;
+            }
+            if (modelArg === '--vision') {
+              setModelDialogMode('vision');
+              return true;
+            }
+            if (modelArg.startsWith('--vision ')) {
+              const visionModelId = modelArg.replace(/^--vision\s+/, '');
+              setWorkspaceSetting(
+                'workspace',
+                'visionModel',
+                visionModelId,
+              ).catch((error: unknown) =>
+                reportError(error, t('model.setVision')),
               );
               return true;
             }
@@ -3302,6 +3324,15 @@ export function App({
     [reportError, setWorkspaceSetting, t],
   );
 
+  const handleVisionModelSelect = useCallback(
+    (modelId: string) => {
+      setWorkspaceSetting('workspace', 'visionModel', modelId).catch(
+        (error: unknown) => reportError(error, t('model.setVision')),
+      );
+    },
+    [reportError, setWorkspaceSetting, t],
+  );
+
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
     return mergeCommands(connection.commands ?? [], getLocalCommands(t))
@@ -3441,7 +3472,9 @@ export function App({
                   ? t('model.setFast')
                   : modelDialogMode === 'voice'
                     ? t('model.setVoice')
-                    : t('model.select')
+                    : modelDialogMode === 'vision'
+                      ? t('model.setVision')
+                      : t('model.select')
               }
               size="lg"
               onClose={() => setModelDialogMode(null)}
@@ -3457,6 +3490,8 @@ export function App({
                     handleFastModelSelect(modelId);
                   } else if (modelDialogMode === 'voice') {
                     handleVoiceModelSelect(modelId);
+                  } else if (modelDialogMode === 'vision') {
+                    handleVisionModelSelect(modelId);
                   } else {
                     handleModelSelect(modelId);
                   }
@@ -3560,6 +3595,7 @@ export function App({
                 onSubDialog={(key) => {
                   setShowSettingsDialog(false);
                   if (key === 'fastModel') setModelDialogMode('fast');
+                  else if (key === 'visionModel') setModelDialogMode('vision');
                   else if (key === 'tools.approvalMode')
                     setShowApprovalModeDialog(true);
                 }}
@@ -3775,6 +3811,7 @@ export function App({
                         messages={displayMessages}
                         pendingApproval={pendingToolApproval}
                         onShowContextDetail={handleShowContextDetail}
+                        loadingTranscript={connection.loadingTranscript}
                         catchingUp={connection.catchingUp}
                         isResponding={streamingState !== 'idle'}
                         activeTurnStartedAt={activeTurnStartedAt}
