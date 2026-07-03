@@ -255,3 +255,22 @@
   gap: 6px;
   margin-top: 4px;
 }
+
+.workspaceCell {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.workspaceCellLabel {
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+}
+
+.workspaceCellMessage {
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}

@@ -724,6 +724,45 @@ describe('DaemonStatusDialog', () => {
     expect(container!.textContent ?? '').toContain('sess-no-name-9');
   });
 
+  it('names the individual warning/error cells behind a section status', () => {
+    fullState = {
+      report: {
+        ...fullReport,
+        full: {
+          ...fullReport.full,
+          workspace: {
+            preflight: {
+              status: 'warning',
+              durationMs: 8,
+              summary: { initialized: true, cellsCount: 3 },
+              data: {
+                cells: [
+                  { kind: 'node_version', status: 'ok' },
+                  {
+                    kind: 'auth',
+                    status: 'warning',
+                    error: 'No auth method configured.',
+                  },
+                  { kind: 'egress', status: 'not_started', hint: 'not impl' },
+                ],
+              },
+            },
+          },
+        },
+      },
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    const text = container!.textContent ?? '';
+    // The warning cell is named with its message...
+    expect(text).toContain('auth');
+    expect(text).toContain('No auth method configured.');
+    // ...while ok / not_started cells are not surfaced as problems.
+    expect(text).not.toContain('node_version');
+    expect(text).not.toContain('not impl');
+  });
+
   it('formats the channel-worker signal branch', () => {
     summaryState = {
       report: {

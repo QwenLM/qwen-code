@@ -51,6 +51,58 @@ function channelWorkerState(
   return worker.state;
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+interface WorkspaceProblemCell {
+  label: string;
+  status: 'warning' | 'error';
+  message?: string;
+}
+
+// A section's status is the worst of its individual checks, but the summary
+// chips only carry counts — so a "warning preflight" reads as opaque. Pull the
+// individual warning/error entries out of the raw section data so the dashboard
+// can say *what* is wrong (e.g. "auth: No auth method configured"). Section
+// payloads differ but consistently carry status cells under these keys.
+const SECTION_CELL_KEYS = [
+  'cells',
+  'servers',
+  'errors',
+  'skills',
+  'tools',
+  'providers',
+  'hooks',
+  'extensions',
+  'budgets',
+] as const;
+
+function extractProblemCells(data: unknown): WorkspaceProblemCell[] {
+  if (!isRecord(data)) return [];
+  const problems: WorkspaceProblemCell[] = [];
+  for (const key of SECTION_CELL_KEYS) {
+    const arr = data[key];
+    if (!Array.isArray(arr)) continue;
+    for (const item of arr) {
+      if (!isRecord(item)) continue;
+      const status = item['status'];
+      if (status !== 'warning' && status !== 'error') continue;
+      const label = String(
+        item['kind'] ?? item['name'] ?? item['serverName'] ?? key,
+      );
+      const message =
+        typeof item['error'] === 'string'
+          ? item['error']
+          : typeof item['hint'] === 'string'
+            ? item['hint']
+            : undefined;
+      problems.push({ label, status, message });
+    }
+  }
+  return problems;
+}
+
 function levelClass(
   level: DaemonStatusReportLevel | 'unavailable',
 ): string | undefined {
@@ -93,6 +145,7 @@ function WorkspaceSectionRow({
 }) {
   const { t } = useI18n();
   const summaryEntries = Object.entries(section.summary ?? {});
+  const problemCells = extractProblemCells(section.data);
   return (
     <div className={styles.workspaceRow}>
       <div className={styles.workspaceRowHead}>
@@ -107,6 +160,19 @@ function WorkspaceSectionRow({
       {section.error && (
         <div className={styles.workspaceError}>{section.error.message}</div>
       )}
+      {/* Name the individual checks that pushed this section to warning/error,
+          so the badge is self-explanatory. */}
+      {problemCells.map((cell, index) => (
+        <div key={`${cell.label}-${index}`} className={styles.workspaceCell}>
+          <span className={`${styles.badge} ${levelClass(cell.status)}`}>
+            {t(`daemon.level.${cell.status}`)}
+          </span>
+          <span className={styles.workspaceCellLabel}>{cell.label}</span>
+          {cell.message && (
+            <span className={styles.workspaceCellMessage}>{cell.message}</span>
+          )}
+        </div>
+      ))}
       {summaryEntries.length > 0 && (
         <div className={styles.workspaceSummary}>
           {summaryEntries.map(([key, value]) => (
