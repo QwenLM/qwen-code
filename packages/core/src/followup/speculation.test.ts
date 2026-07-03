@@ -153,6 +153,56 @@ describe('generatePipelinedSuggestion preserveTools', () => {
   });
 });
 
+describe('generatePipelinedSuggestion preserveTools conditional', () => {
+  it('passes preserveTools: false when fast model differs from cache-safe model', async () => {
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue('different-fast-model'),
+      getToolRegistry: vi.fn().mockReturnValue({
+        ensureTool: vi.fn().mockResolvedValue({
+          build: vi.fn().mockReturnValue({
+            execute: vi.fn().mockResolvedValue({
+              llmContent: '',
+              returnDisplay: '',
+            }),
+          }),
+        }),
+      }),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: 'next step' },
+    });
+
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'done' }],
+              },
+            },
+          ],
+        },
+      };
+    });
+
+    const state = await startSpeculation(config, 'do something');
+    await vi.waitFor(() => {
+      expect(state.status).toBe('completed');
+    });
+
+    expect(forkedAgentMocks.runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ preserveTools: false }),
+    );
+
+    await abortSpeculation(state);
+  });
+});
+
 describe('ensureToolResultPairing', () => {
   it('returns empty array unchanged', () => {
     expect(ensureToolResultPairing([])).toEqual([]);

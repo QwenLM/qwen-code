@@ -869,6 +869,83 @@ describe('runForkedAgent (cache path)', () => {
     expect(result.text).toBeNull();
   });
 
+  it('preserves tools and includes jsonSchema fields when both preserveTools and jsonSchema are set', async () => {
+    saveCacheSafeParams(
+      {
+        systemInstruction: 'You are helpful',
+        tools: [
+          {
+            functionDeclarations: [
+              { name: 'edit', description: 'Edit a file' },
+              { name: 'shell', description: 'Run a command' },
+            ],
+          },
+        ],
+      },
+      [],
+      'test-model',
+    );
+
+    let capturedParams: unknown = null;
+
+    const mockSendMessageStream = vi.fn(
+      (_model: string, params: unknown, _promptId: string) => {
+        capturedParams = params;
+        async function* generate() {
+          yield {
+            type: StreamEventType.CHUNK,
+            value: {
+              candidates: [
+                {
+                  content: {
+                    role: 'model',
+                    parts: [{ text: '{"suggestion":"run tests"}' }],
+                  },
+                },
+              ],
+              usageMetadata: {
+                promptTokenCount: 10,
+                candidatesTokenCount: 5,
+              },
+            },
+          };
+        }
+        return Promise.resolve(generate());
+      },
+    );
+
+    vi.mocked(GeminiChat).mockImplementation(
+      () =>
+        ({
+          sendMessageStream: mockSendMessageStream,
+        }) as unknown as GeminiChat,
+    );
+
+    const schema = {
+      type: 'object',
+      properties: { suggestion: { type: 'string' } },
+    };
+
+    await runForkedAgent({
+      config: {} as Config,
+      userMessage: 'suggest something',
+      cacheSafeParams: getCacheSafeParams()!,
+      preserveTools: true,
+      jsonSchema: schema,
+    });
+
+    const sendParams = capturedParams as {
+      config?: {
+        tools?: unknown;
+        responseMimeType?: string;
+        responseJsonSchema?: unknown;
+      };
+    };
+    expect(sendParams.config!.tools).toBeUndefined();
+    expect(sendParams.config!.responseMimeType).toBe('application/json');
+    expect(sendParams.config!.responseJsonSchema).toBe(schema);
+  });
+
   it('throws when CacheSafeParams are not available', async () => {
     const mockConfig = {} as unknown as Config;
 

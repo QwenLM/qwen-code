@@ -554,6 +554,7 @@ ${SUGGESTION_PROMPT}`;
     const cacheSafeParams = getCacheSafeParams();
     if (!cacheSafeParams) return null;
     const model = modelOverride ?? config.getFastModel();
+    const resolvedModel = model ?? cacheSafeParams.model;
     const result = await runForkedAgent({
       config,
       userMessage: augmentedPrompt,
@@ -561,7 +562,7 @@ ${SUGGESTION_PROMPT}`;
       jsonSchema: PIPELINED_SCHEMA,
       ...(model !== undefined ? { model } : {}),
       abortSignal,
-      preserveTools: true,
+      preserveTools: resolvedModel === cacheSafeParams.model,
     });
 
     if (abortSignal.aborted) return null;

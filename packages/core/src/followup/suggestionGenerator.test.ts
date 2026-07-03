@@ -127,6 +127,35 @@ describe('generatePromptSuggestion', () => {
       expect.objectContaining({ preserveTools: true }),
     );
   });
+
+  it('passes preserveTools: false when fast model differs from cache-safe model', async () => {
+    mockGetCacheSafeParams.mockReturnValue({
+      generationConfig: {},
+      history: conversationHistory,
+      model: 'main-model',
+      version: 1,
+    });
+    mockRunForkedAgent.mockResolvedValue({
+      text: null,
+      jsonResult: { suggestion: 'run tests' },
+      usage: { inputTokens: 10, outputTokens: 3, cacheHitTokens: 5 },
+    });
+    const config = {
+      getFastModel: vi.fn(() => 'different-fast-model'),
+      getModel: vi.fn(() => 'main-model'),
+    } as unknown as Config;
+
+    await generatePromptSuggestion(
+      config,
+      conversationHistory,
+      new AbortController().signal,
+      { enableCacheSharing: true },
+    );
+
+    expect(mockRunForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ preserveTools: false }),
+    );
+  });
 });
 
 describe('shouldFilterSuggestion', () => {
