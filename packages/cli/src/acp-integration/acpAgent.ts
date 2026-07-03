@@ -157,6 +157,7 @@ import {
   loadCliConfig,
 } from '../config/config.js';
 import { extractRememberErrorCode } from '../serve/workspace-remember-errors.js';
+import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
@@ -216,7 +217,6 @@ import {
   type ServeWorkspaceProviderModel,
   type ServeWorkspaceProviderStatus,
   type ServeWorkspaceProvidersStatus,
-  type ServeWorkspaceSkillStatus,
   type ServeWorkspaceSkillsStatus,
   type ServeWorkspaceToolStatus,
   type ServeWorkspaceToolsStatus,
@@ -3896,22 +3896,7 @@ class QwenAgent implements Agent {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
         initialized: true,
-        skills: skills.map((skill): ServeWorkspaceSkillStatus => {
-          const modelInvocable = skill.disableModelInvocation !== true;
-          return {
-            kind: 'skill',
-            status: modelInvocable ? 'ok' : 'disabled',
-            name: skill.name,
-            description: skill.description,
-            level: skill.level,
-            modelInvocable,
-            ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
-            ...(skill.model ? { model: skill.model } : {}),
-            ...(skill.extensionName
-              ? { extensionName: skill.extensionName }
-              : {}),
-          };
-        }),
+        skills: skills.map(mapSkillConfigToStatus),
       };
     } catch (error) {
       return {

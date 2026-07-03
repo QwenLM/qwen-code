@@ -692,6 +692,7 @@ async function loadServeRuntimeModules() {
     workspaceTypesModule,
     daemonStatusProviderModule,
     workspaceProvidersStatusModule,
+    workspaceSkillsStatusModule,
   ] = await Promise.all([
     import('./server.js'),
     import('@qwen-code/acp-bridge/bridge'),
@@ -700,6 +701,7 @@ async function loadServeRuntimeModules() {
     import('./workspace-service/types.js'),
     import('./daemon-status-provider.js'),
     import('./workspace-providers-status.js'),
+    import('./workspace-skills-status.js'),
   ]);
   return {
     createServeApp: serverModule.createServeApp,
@@ -714,6 +716,8 @@ async function loadServeRuntimeModules() {
       daemonStatusProviderModule.createDaemonStatusProvider,
     createWorkspaceProvidersStatusProvider:
       workspaceProvidersStatusModule.createWorkspaceProvidersStatusProvider,
+    createWorkspaceSkillsStatusProvider:
+      workspaceSkillsStatusModule.createWorkspaceSkillsStatusProvider,
   };
 }
 
@@ -2031,6 +2035,8 @@ export async function runQwenServe(
     const statusProvider = runtime.createDaemonStatusProvider();
     const workspaceProvidersStatusProvider =
       runtime.createWorkspaceProvidersStatusProvider();
+    const workspaceSkillsStatusProvider =
+      runtime.createWorkspaceSkillsStatusProvider();
     // Reverse tool channel (issue #5626, Phase 2). ONE sender registry shared
     // between the bridge (which answers the ACP child's `client_mcp/message`
     // ext-method via `clientMcpSender`) and the WS provider in `createServeApp`
@@ -2161,6 +2167,7 @@ export async function runQwenServe(
       contextFilename: contextFilenameForInit ?? 'QWEN.md',
       statusProvider,
       workspaceProvidersStatusProvider,
+      workspaceSkillsStatusProvider,
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools: persistDisabledToolsFn,
       persistSetting: persistSettingFn,

@@ -16,6 +16,7 @@ import type {
 } from '@qwen-code/qwen-code-core';
 import {
   ApprovalMode,
+  DEFAULT_MAX_SUBAGENT_DEPTH,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH,
   DEFAULT_QWEN_CUSTOM_IGNORE_FILE_NAMES,
   DEFAULT_STOP_HOOK_BLOCK_CAP,
@@ -1358,6 +1359,16 @@ const SETTINGS_SCHEMA = {
         default: -1,
         description:
           'Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means "no tool calls allowed" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.',
+        showInDialog: false,
+      },
+      maxSubagentDepth: {
+        type: 'number',
+        label: 'Max Sub-agent Nesting Depth',
+        category: 'Model',
+        requiresRestart: false,
+        default: DEFAULT_MAX_SUBAGENT_DEPTH,
+        description:
+          'Maximum sub-agent nesting depth (1-based levels: a top-level sub-agent is level 1). 1 keeps sub-agents available but disables nesting; the default 5 allows nesting up to five levels deep. Values clamp to the range 1-100; non-finite values fall back to the default. Teammates, forks, and workflow-spawned agents never nest regardless of this setting. Overridable via --max-subagent-depth.',
         showInDialog: false,
       },
       chatCompression: {
