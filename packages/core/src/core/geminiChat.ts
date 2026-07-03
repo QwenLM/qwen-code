@@ -2678,9 +2678,9 @@ export class GeminiChat {
               let fallbackSucceeded = false;
               let fallbackIndex = 0;
               let currentModel = model;
+              const attemptedFallbackModels = new Set<string>([model]);
 
               for (const fallbackModelId of fallbackModels) {
-                fallbackIndex++;
                 // Skip fallback models that match the current/primary model
                 if (
                   fallbackModelId === model ||
@@ -2692,14 +2692,6 @@ export class GeminiChat {
                   );
                   continue;
                 }
-
-                debugLogger.warn(
-                  `[FALLBACK] Primary model "${currentModel}" exhausted retries ` +
-                    `(reason: ${currentErrorClassification.reason}, ` +
-                    `status: ${currentErrorClassification.statusCode ?? 'unknown'}). ` +
-                    `Switching to fallback model "${fallbackModelId}" ` +
-                    `(${fallbackIndex}/${fallbackModels.length}).`,
-                );
 
                 // Resolve the fallback model's content generator
                 let fallbackGenerator: ContentGenerator;
@@ -2724,6 +2716,24 @@ export class GeminiChat {
                   );
                   continue;
                 }
+
+                if (attemptedFallbackModels.has(resolvedFallbackModel)) {
+                  debugLogger.warn(
+                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
+                      `resolved to already attempted model "${resolvedFallbackModel}".`,
+                  );
+                  continue;
+                }
+                fallbackIndex++;
+                attemptedFallbackModels.add(resolvedFallbackModel);
+
+                debugLogger.warn(
+                  `[FALLBACK] Model "${currentModel}" exhausted retries ` +
+                    `(reason: ${currentErrorClassification.reason}, ` +
+                    `status: ${currentErrorClassification.statusCode ?? 'unknown'}). ` +
+                    `Switching to fallback model "${fallbackModelId}" ` +
+                    `(${fallbackIndex}/${fallbackModels.length}).`,
+                );
 
                 // Emit fallback event so the UI can notify the user
                 yield {
@@ -2764,6 +2774,7 @@ export class GeminiChat {
                   break;
                 } catch (fallbackError) {
                   if (isAbortError(fallbackError)) throw fallbackError;
+                  self.popPendingPartialAssistantTurn();
 
                   // Classify the fallback error to decide whether to continue
                   // to the next fallback or give up
@@ -2795,9 +2806,6 @@ export class GeminiChat {
                         `Stopping fallback chain.`,
                     );
                     break;
-                  }
-                  if (fallbackIndex < fallbackModels.length) {
-                    self.popPendingPartialAssistantTurn();
                   }
                 }
               }

@@ -4814,6 +4814,99 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('rolls back fallback partial tool calls before throwing final fallback errors', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'test-model',
+          maxRetries: 0,
+        });
+        vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+          'fallback-model',
+        ]);
+
+        const fallbackGenerateContentStream = vi.fn();
+        const fallbackContentGenerator = {
+          generateContent: vi.fn(),
+          generateContentStream: fallbackGenerateContentStream,
+          countTokens: vi.fn(),
+          embedContent: vi.fn(),
+          batchEmbedContents: vi.fn(),
+          useSummarizedThinking: vi.fn().mockReturnValue(false),
+        } as unknown as ContentGenerator;
+        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+          resolveForModel: vi.fn().mockResolvedValue({
+            contentGenerator: fallbackContentGenerator,
+            retryAuthType: AuthType.USE_GEMINI,
+            retryErrorCodes: undefined,
+            model: 'fallback-model',
+          }),
+        } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+
+        const capacityError = new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        );
+        const authError = new StreamContentError(
+          '{"error":{"code":"401","message":"Unauthorized"}}',
+        );
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockResolvedValueOnce(
+          (async function* () {
+            throw capacityError;
+
+            yield {} as GenerateContentResponse;
+          })(),
+        );
+        fallbackGenerateContentStream.mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        functionCall: {
+                          id: 'call_failed_final_fallback',
+                          name: 'read_file',
+                          args: { path: '/tmp/fallback.txt' },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+            throw authError;
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-final-fallback-failure',
+        );
+
+        const collecting = (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })();
+        const resultPromise = await expect(collecting).rejects.toBe(authError);
+        await vi.advanceTimersByTimeAsync(0);
+        await vi.advanceTimersByTimeAsync(10_000);
+        await resultPromise;
+        expect(
+          chat
+            .getHistory()
+            .some((entry) => entry.parts?.some((part) => part.functionCall)),
+        ).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('retries retryable transport stream errors and succeeds on a later attempt', async () => {
       vi.useFakeTimers();
       try {

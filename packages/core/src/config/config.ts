@@ -1121,8 +1121,9 @@ export interface ConfigParameters {
   visionModel?: string;
   /**
    * Ordered list of fallback model IDs to try when the primary model hits
-   * capacity errors (429/503/529). At most 3 entries; duplicates and the
-   * primary model itself are filtered out during normalization.
+   * capacity errors (429/503/529). At most 3 entries; duplicate fallback
+   * entries are filtered during normalization, and primary/current model
+   * matches are skipped at runtime.
    * Configurable via the `modelFallbacks` setting or `--fallback-model` CLI flag.
    */
   modelFallbacks?: string[];
