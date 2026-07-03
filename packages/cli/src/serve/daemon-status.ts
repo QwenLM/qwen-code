@@ -244,7 +244,7 @@ export async function buildDaemonStatusResponse(
   input: BuildDaemonStatusOptions,
 ): Promise<DaemonStatusResponse> {
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
-  const lastActivity = input.bridge.lastActivityAt;
+  const lastActivity = input.bridge.lastActivityAt ?? null;
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
   const channelWorker = input.getChannelWorkerSnapshot?.() ?? {
@@ -343,13 +343,10 @@ export async function buildDaemonStatusResponse(
       },
       ...(input.getPerfSnapshot ? { perf: input.getPerfSnapshot() } : {}),
       activity: {
-        activePrompts: input.bridge.activePromptCount,
+        activePrompts: input.bridge.activePromptCount ?? 0,
         lastActivityAt:
-          lastActivity !== null
-            ? new Date(lastActivity).toISOString()
-            : null,
-        idleSinceMs:
-          lastActivity !== null ? Date.now() - lastActivity : null,
+          lastActivity !== null ? new Date(lastActivity).toISOString() : null,
+        idleSinceMs: lastActivity !== null ? Date.now() - lastActivity : null,
       },
       process: process.memoryUsage(),
     },
