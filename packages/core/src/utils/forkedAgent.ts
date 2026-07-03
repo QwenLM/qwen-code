@@ -506,7 +506,7 @@ export async function runForkedAgent(
         // functionCall parts instead of text. Log and discard them.
         if (
           preserveTools &&
-          parts.some((p) => (p as Record<string, unknown>).functionCall)
+          parts.some((p) => (p as Record<string, unknown>)['functionCall'])
         ) {
           debugLogger.warn(
             'Cache-path forked query received functionCall with preserveTools; discarding.',
@@ -515,7 +515,7 @@ export async function runForkedAgent(
 
         const text = parts
           .filter((p) => !(p as Record<string, unknown>)['thought'])
-          .filter((p) => !(p as Record<string, unknown>).functionCall)
+          .filter((p) => !(p as Record<string, unknown>)['functionCall'])
           .map((p) => p.text ?? '')
           .join('');
         if (text) fullText += text;
