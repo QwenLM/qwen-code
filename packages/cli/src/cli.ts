@@ -48,7 +48,7 @@ const TOP_LEVEL_HELP_OPTIONS = [
   [
     'fallback-model',
     {
-      type: 'string',
+      type: 'array',
       description:
         'Fallback model(s) for capacity errors, repeatable or comma-separated (max 3)',
     },

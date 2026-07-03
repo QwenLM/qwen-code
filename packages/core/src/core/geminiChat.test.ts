@@ -4907,6 +4907,69 @@ describe('GeminiChat', async () => {
       }
     });
 
+    it('rolls back primary partial tool calls when all fallback entries are skipped', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'test-model',
+          maxRetries: 0,
+        });
+        vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(['test-model']);
+
+        const capacityError = new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        );
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockResolvedValueOnce(
+          (async function* () {
+            yield {
+              candidates: [
+                {
+                  content: {
+                    parts: [
+                      {
+                        functionCall: {
+                          id: 'call_failed_primary_attempt',
+                          name: 'read_file',
+                          args: { path: '/tmp/primary.txt' },
+                        },
+                      },
+                    ],
+                  },
+                },
+              ],
+            } as unknown as GenerateContentResponse;
+            throw capacityError;
+          })(),
+        );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-skipped-fallback-failure',
+        );
+
+        const collecting = (async () => {
+          for await (const _ of stream) {
+            /* consume */
+          }
+        })();
+        const resultPromise =
+          await expect(collecting).rejects.toBe(capacityError);
+        await vi.advanceTimersByTimeAsync(0);
+        await resultPromise;
+        expect(
+          chat
+            .getHistory()
+            .some((entry) => entry.parts?.some((part) => part.functionCall)),
+        ).toBe(false);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
     it('retries retryable transport stream errors and succeeds on a later attempt', async () => {
       vi.useFakeTimers();
       try {

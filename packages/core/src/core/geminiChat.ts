@@ -2811,6 +2811,7 @@ export class GeminiChat {
               }
 
               if (!fallbackSucceeded) {
+                self.popPendingPartialAssistantTurn();
                 debugLogger.warn(
                   '[FALLBACK] All fallback models exhausted. ' +
                     'Throwing last error.',
