@@ -5005,11 +5005,20 @@ export class Config {
   isArtifactEnabled(): boolean {
     // Artifacts are experimental and opt-in. Publishing writes outside the
     // project and opens a browser, so it is limited to interactive, non-SDK
-    // sessions. QWEN_CODE_DISABLE_ARTIFACT hard-disables;
-    // QWEN_CODE_ENABLE_ARTIFACT force-enables (still subject to the
-    // interactive/SDK gate).
+    // sessions. QWEN_CODE_DISABLE_ARTIFACT hard-disables both artifact tools;
+    // QWEN_CODE_ENABLE_ARTIFACT force-enables interactive artifact tooling
+    // here. isRecordArtifactEnabled() also treats it as an opt-in for the
+    // metadata-only daemon record_artifact tool.
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
-    if (this.sdkMode || !this.interactive) return false;
+    if (this.sdkMode) return false;
+    if (!this.interactive) return false;
+    if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
+    return this.artifactEnabled;
+  }
+
+  isRecordArtifactEnabled(): boolean {
+    if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
+    if (this.sdkMode) return false;
     if (process.env['QWEN_CODE_ENABLE_ARTIFACT'] === '1') return true;
     return this.artifactEnabled;
   }
@@ -6121,6 +6130,14 @@ export class Config {
           '../tools/artifact/artifact-tool.js'
         );
         return new ArtifactTool(this);
+      });
+    }
+    if (this.isRecordArtifactEnabled()) {
+      await registerLazy(ToolNames.RECORD_ARTIFACT, async () => {
+        const { RecordArtifactTool } = await import(
+          '../tools/record-artifact.js'
+        );
+        return new RecordArtifactTool();
       });
     }
     if (this.isLspEnabled() && this.getLspClient()) {

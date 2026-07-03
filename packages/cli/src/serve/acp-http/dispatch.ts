@@ -9,6 +9,7 @@ import {
   APPROVAL_MODES,
   type ApprovalMode,
   BTW_MAX_INPUT_LENGTH,
+  createDebugLogger,
   SessionService,
   BuiltinAgentRegistry,
   SubagentError,
@@ -41,6 +42,7 @@ import {
   SessionShellDisabledError,
   WorkspaceMismatchError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
+import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
@@ -66,7 +68,11 @@ import {
 } from '../routes/workspace-setup-github.js';
 import { parseWorkspaceVoiceUpdateParams } from '../routes/workspace-voice.js';
 import { MAX_TRUST_REASON_LENGTH } from '../validation-limits.js';
-import type { WorkspaceRememberTaskLane } from '../workspace-remember.js';
+import {
+  publicErrorMessage,
+  publicErrorStatus,
+  type WorkspaceRememberTaskLane,
+} from '../workspace-remember.js';
 import { extractRememberErrorCode } from '../workspace-remember-errors.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from '../workspace-memory-remember-constants.js';
 import type { DeviceFlowRegistry } from '../auth/device-flow.js';
@@ -124,9 +130,14 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
+const debugLogger = createDebugLogger('ACP_HTTP_DISPATCH');
+
 type PermissionResponse = Parameters<
   HttpAcpBridge['respondToSessionPermission']
 >[2];
+type AddSessionArtifactInput = Parameters<
+  HttpAcpBridge['addSessionArtifact']
+>[1];
 
 const SESSION_SHELL_METHOD = `${QWEN_METHOD_NS}session/shell`;
 const INVALID_PERMISSION_OUTCOME_ERROR =
@@ -160,11 +171,18 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/context_usage`,
   `${QWEN_METHOD_NS}session/tasks`,
   `${QWEN_METHOD_NS}session/lsp`,
+  `${QWEN_METHOD_NS}session/artifacts`,
+  `${QWEN_METHOD_NS}session/artifacts/add`,
+  `${QWEN_METHOD_NS}session/artifacts/remove`,
   // Wave 1: memory
   `${QWEN_METHOD_NS}workspace/memory`,
   `${QWEN_METHOD_NS}workspace/memory/write`,
   `${QWEN_METHOD_NS}workspace/memory/remember`,
   `${QWEN_METHOD_NS}workspace/memory/remember/get`,
+  `${QWEN_METHOD_NS}workspace/memory/forget`,
+  `${QWEN_METHOD_NS}workspace/memory/forget/get`,
+  `${QWEN_METHOD_NS}workspace/memory/dream`,
+  `${QWEN_METHOD_NS}workspace/memory/dream/get`,
   // Wave 1: files
   `${QWEN_METHOD_NS}file/read`,
   `${QWEN_METHOD_NS}file/read_bytes`,
@@ -369,6 +387,36 @@ function parsePermissionResponse(
   return response as PermissionResponse;
 }
 
+function pickSessionArtifactInput(
+  params: Record<string, unknown>,
+): AddSessionArtifactInput {
+  const {
+    title,
+    kind,
+    storage,
+    description,
+    workspacePath,
+    managedId,
+    url,
+    mimeType,
+    sizeBytes,
+    metadata,
+  } = params;
+
+  return {
+    title,
+    kind,
+    storage,
+    description,
+    workspacePath,
+    managedId,
+    url,
+    mimeType,
+    sizeBytes,
+    metadata,
+  } as AddSessionArtifactInput;
+}
+
 /**
  * Map a thrown error to a JSON-RPC error code + a client-safe message.
  * Param-validation errors are echoed (they describe the client's own bad
@@ -462,6 +510,16 @@ function toRpcError(err: unknown): {
       code: RPC.INVALID_PARAMS,
       message: errMsg(err),
       data: { errorKind: 'client_id_required' },
+    };
+  }
+  if (err instanceof SessionArtifactValidationError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: {
+        errorKind: 'artifact_validation_failed',
+        ...(err.field ? { field: err.field } : {}),
+      },
     };
   }
   const name = err instanceof Error ? err.name : '';
@@ -2288,6 +2346,49 @@ export class AcpDispatcher {
           return;
         }
 
+        case `${QWEN_METHOD_NS}session/artifacts`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const result = await this.bridge.getSessionArtifacts(sessionId);
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/artifacts/add`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const result = await this.bridge.addSessionArtifact(
+              sessionId,
+              pickSessionArtifactInput(params),
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/artifacts/remove`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const artifactId = String(params['artifactId'] ?? '');
+            if (!artifactId) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, '`artifactId` is required'),
+                );
+              }
+              return;
+            }
+            const result = await this.bridge.removeSessionArtifact(
+              sessionId,
+              artifactId,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
+          return;
+        }
+
         case `${QWEN_METHOD_NS}workspace/memory`: {
           const result = await collectWorkspaceMemoryStatus(
             this.boundWorkspace,
@@ -2452,24 +2553,15 @@ export class AcpDispatcher {
             const code = extractRememberErrorCode(err);
             if (id !== undefined) {
               conn.sendConn(
-                error(
-                  id,
-                  -32099,
-                  code === 'remember_queue_full'
-                    ? 'Workspace memory remember queue is full.'
-                    : code === 'managed_memory_unavailable'
-                      ? 'Managed memory is unavailable for this daemon workspace'
-                      : 'Workspace memory remember failed.',
-                  {
-                    errorKind: code,
-                    httpStatus:
-                      code === 'remember_queue_full'
-                        ? 429
-                        : code === 'managed_memory_unavailable'
-                          ? 409
-                          : 500,
-                  },
-                ),
+                error(id, -32099, publicErrorMessage(code, 'remember'), {
+                  errorKind: code,
+                  httpStatus: publicErrorStatus(code),
+                }),
+              );
+            } else {
+              debugLogger.warn(
+                'workspace memory remember notification failed:',
+                err,
               );
             }
           }
@@ -2484,12 +2576,187 @@ export class AcpDispatcher {
             }
             return;
           }
-          const task = this.workspaceRememberLane.get(taskId, conn.clientId);
+          const task = this.workspaceRememberLane.get(
+            taskId,
+            conn.clientId,
+            'remember',
+          );
           if (!task) {
             if (id !== undefined) {
               conn.sendConn(
                 error(id, -32004, 'Workspace memory remember task not found', {
                   errorKind: 'remember_task_not_found',
+                  httpStatus: 404,
+                }),
+              );
+            }
+            return;
+          }
+          this.replyConn(conn, id, task);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/memory/forget`: {
+          const query = params['query'];
+          const trimmedQuery = typeof query === 'string' ? query.trim() : '';
+          if (!trimmedQuery) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  '`query` must be a non-empty string',
+                ),
+              );
+            }
+            return;
+          }
+          if (
+            Buffer.byteLength(trimmedQuery, 'utf8') > MAX_REMEMBER_CONTENT_BYTES
+          ) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(
+                  id,
+                  RPC.INVALID_PARAMS,
+                  `\`query\` exceeds the ${MAX_REMEMBER_CONTENT_BYTES}-byte limit`,
+                ),
+              );
+            }
+            return;
+          }
+          try {
+            const available =
+              await this.bridge.isWorkspaceMemoryRememberAvailable();
+            if (!available) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    -32009,
+                    'Managed memory is unavailable for this daemon workspace',
+                    {
+                      errorKind: 'managed_memory_unavailable',
+                      httpStatus: 409,
+                    },
+                  ),
+                );
+              }
+              return;
+            }
+            const task = this.workspaceRememberLane.enqueueForget({
+              query: trimmedQuery,
+              ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
+            });
+            this.replyConn(conn, id, task);
+          } catch (err) {
+            const code = extractRememberErrorCode(err, 'forget_failed');
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, -32099, publicErrorMessage(code, 'forget'), {
+                  errorKind: code,
+                  httpStatus: publicErrorStatus(code),
+                }),
+              );
+            } else {
+              debugLogger.warn(
+                'workspace memory forget notification failed:',
+                err,
+              );
+            }
+          }
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/memory/forget/get`: {
+          const taskId = params['taskId'];
+          if (typeof taskId !== 'string' || taskId.length === 0) {
+            if (id !== undefined) {
+              conn.sendConn(error(id, RPC.INVALID_PARAMS, '`taskId` required'));
+            }
+            return;
+          }
+          const task = this.workspaceRememberLane.get(
+            taskId,
+            conn.clientId,
+            'forget',
+          );
+          if (!task) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, -32004, 'Workspace memory forget task not found', {
+                  errorKind: 'forget_task_not_found',
+                  httpStatus: 404,
+                }),
+              );
+            }
+            return;
+          }
+          this.replyConn(conn, id, task);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/memory/dream`: {
+          try {
+            const available =
+              await this.bridge.isWorkspaceMemoryRememberAvailable();
+            if (!available) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(
+                    id,
+                    -32009,
+                    'Managed memory is unavailable for this daemon workspace',
+                    {
+                      errorKind: 'managed_memory_unavailable',
+                      httpStatus: 409,
+                    },
+                  ),
+                );
+              }
+              return;
+            }
+            const task = this.workspaceRememberLane.enqueueDream({
+              ...(conn.clientId ? { originatorClientId: conn.clientId } : {}),
+            });
+            this.replyConn(conn, id, task);
+          } catch (err) {
+            const code = extractRememberErrorCode(err, 'dream_failed');
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, -32099, publicErrorMessage(code, 'dream'), {
+                  errorKind: code,
+                  httpStatus: publicErrorStatus(code),
+                }),
+              );
+            } else {
+              debugLogger.warn(
+                'workspace memory dream notification failed:',
+                err,
+              );
+            }
+          }
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/memory/dream/get`: {
+          const taskId = params['taskId'];
+          if (typeof taskId !== 'string' || taskId.length === 0) {
+            if (id !== undefined) {
+              conn.sendConn(error(id, RPC.INVALID_PARAMS, '`taskId` required'));
+            }
+            return;
+          }
+          const task = this.workspaceRememberLane.get(
+            taskId,
+            conn.clientId,
+            'dream',
+          );
+          if (!task) {
+            if (id !== undefined) {
+              conn.sendConn(
+                error(id, -32004, 'Workspace memory dream task not found', {
+                  errorKind: 'dream_task_not_found',
                   httpStatus: 404,
                 }),
               );

@@ -81,6 +81,7 @@ describe('Daemon Metrics', () => {
   let recordDaemonPromptDuration: typeof import('./daemon-metrics.js').recordDaemonPromptDuration;
   let recordDaemonBridgeError: typeof import('./daemon-metrics.js').recordDaemonBridgeError;
   let recordDaemonCancel: typeof import('./daemon-metrics.js').recordDaemonCancel;
+  let recordDaemonPipeMessage: typeof import('./daemon-metrics.js').recordDaemonPipeMessage;
 
   beforeEach(async () => {
     vi.resetModules();
@@ -100,6 +101,7 @@ describe('Daemon Metrics', () => {
     recordDaemonPromptDuration = mod.recordDaemonPromptDuration;
     recordDaemonBridgeError = mod.recordDaemonBridgeError;
     recordDaemonCancel = mod.recordDaemonCancel;
+    recordDaemonPipeMessage = mod.recordDaemonPipeMessage;
   });
 
   describe('initializeDaemonMetrics', () => {
@@ -138,6 +140,10 @@ describe('Daemon Metrics', () => {
         'qwen-code.daemon.cancel.count',
         expect.any(Object),
       );
+      expect(mockCreateHistogramFn).toHaveBeenCalledWith(
+        'qwen-code.daemon.pipe.message_bytes',
+        expect.objectContaining({ unit: 'By' }),
+      );
     });
 
     it('does not re-initialize on second call', () => {
@@ -153,6 +159,7 @@ describe('Daemon Metrics', () => {
       recordDaemonHttpRequest(100, 'POST /session/:id/prompt', 200);
       recordDaemonSessionLifecycle('spawn');
       recordDaemonCancel();
+      recordDaemonPipeMessage('inbound', 1024);
       expect(mockCounterAddFn).not.toHaveBeenCalled();
       expect(mockHistogramRecordFn).not.toHaveBeenCalled();
     });
@@ -276,6 +283,17 @@ describe('Daemon Metrics', () => {
       mockCounterAddFn.mockClear();
       recordDaemonCancel();
       expect(mockCounterAddFn).toHaveBeenCalledWith(1);
+    });
+  });
+
+  describe('recordDaemonPipeMessage', () => {
+    it('records pipe message bytes with direction', () => {
+      initializeDaemonMetrics();
+      mockHistogramRecordFn.mockClear();
+      recordDaemonPipeMessage('outbound', 2048);
+      expect(mockHistogramRecordFn).toHaveBeenCalledWith(2048, {
+        direction: 'outbound',
+      });
     });
   });
 

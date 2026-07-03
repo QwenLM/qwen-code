@@ -210,8 +210,22 @@ export {
   recordDaemonPromptDuration,
   recordDaemonBridgeError,
   recordDaemonCancel,
+  recordDaemonPipeMessage,
 } from './daemon-metrics.js';
-export type { DaemonGaugeCallbacks } from './daemon-metrics.js';
+export type {
+  DaemonGaugeCallbacks,
+  DaemonPipeDirection,
+} from './daemon-metrics.js';
+export {
+  startEventLoopLagMonitor,
+  type EventLoopLagMonitor,
+  type EventLoopLagMonitorOptions,
+  type EventLoopLagSnapshot,
+} from './event-loop-lag.js';
+export {
+  registerDaemonEventLoopLagGauge,
+  registerAcpEventLoopLagGauge,
+} from './event-loop-lag-metrics.js';
 export {
   addUserPromptAttributes,
   addSystemPromptAttributes,

@@ -47,6 +47,10 @@
       "types": "./dist/bridgeTypes.d.ts",
       "import": "./dist/bridgeTypes.js"
     },
+    "./sessionArtifacts": {
+      "types": "./dist/sessionArtifacts.d.ts",
+      "import": "./dist/sessionArtifacts.js"
+    },
     "./daemonEventTypes": {
       "types": "./dist/daemonEventTypes.d.ts",
       "import": "./dist/daemonEventTypes.js"
@@ -58,6 +62,10 @@
     "./spawnChannel": {
       "types": "./dist/spawnChannel.d.ts",
       "import": "./dist/spawnChannel.js"
+    },
+    "./ndJsonStream": {
+      "types": "./dist/ndJsonStream.d.ts",
+      "import": "./dist/ndJsonStream.js"
     },
     "./logRedaction": {
       "types": "./dist/logRedaction.d.ts",

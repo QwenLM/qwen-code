@@ -94,6 +94,7 @@ export interface BuildDaemonStatusOptions {
   sessionShellCommandEnabled: boolean;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getPerfSnapshot?: () => DaemonPerfSnapshot;
 }
 
 interface DaemonStatusSection<T> {
@@ -168,7 +169,27 @@ interface DaemonStatusRuntime {
     enabled: boolean;
     rejectedSinceStart: Record<RateLimitTier, number>;
   };
+  perf?: DaemonPerfSnapshot;
   process: NodeJS.MemoryUsage;
+}
+
+export interface DaemonPipeStatsSnapshot {
+  count: number;
+  totalBytes: number;
+  maxBytes: number;
+}
+
+export interface DaemonPerfSnapshot {
+  eventLoop: {
+    meanMs: number;
+    p50Ms: number;
+    p99Ms: number;
+    maxMs: number;
+  };
+  pipe: {
+    inbound: DaemonPipeStatsSnapshot;
+    outbound: DaemonPipeStatsSnapshot;
+  };
 }
 
 export interface DaemonStatusResponse {
@@ -314,6 +335,7 @@ export async function buildDaemonStatusResponse(
         enabled: input.opts.rateLimit === true,
         rejectedSinceStart: rateLimitHits,
       },
+      ...(input.getPerfSnapshot ? { perf: input.getPerfSnapshot() } : {}),
       process: process.memoryUsage(),
     },
     ...(full ? { full } : {}),
