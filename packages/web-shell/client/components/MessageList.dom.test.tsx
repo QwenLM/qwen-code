@@ -128,6 +128,7 @@ function mount(
   ref?: RefObject<MessageListHandle | null>,
   opts: {
     hideSessionTimeline?: boolean;
+    catchingUp?: boolean;
     isResponding?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
   } = {},
@@ -143,6 +144,7 @@ function mount(
           messages={messages}
           pendingApproval={null}
           hideSessionTimeline={opts.hideSessionTimeline}
+          catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
           shellOutputMaxLines={50}
           onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
@@ -152,6 +154,33 @@ function mount(
   });
   mounted.push({ root, container });
   return container;
+}
+
+function renderInto(
+  root: Root,
+  messages: Message[],
+  ref?: RefObject<MessageListHandle | null>,
+  opts: {
+    catchingUp?: boolean;
+    isResponding?: boolean;
+    onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
+  } = {},
+) {
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <MessageList
+          ref={ref}
+          messages={messages}
+          pendingApproval={null}
+          catchingUp={opts.catchingUp}
+          isResponding={opts.isResponding}
+          shellOutputMaxLines={50}
+          onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
+        />
+      </I18nProvider>,
+    );
+  });
 }
 
 const has = (c: HTMLElement, id: string) =>
@@ -412,7 +441,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(isCollapsed(c, 'g1')).toBe(false);
   });
 
-  it('smooth-scrolls the page when a new chat prompt appears', () => {
+  it('smooth-scrolls the page when a new chat prompt appears', async () => {
     const scrollTo = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
       configurable: true,
@@ -427,12 +456,110 @@ describe('MessageList — turn collapse (DOM)', () => {
       value: scrollTo,
     });
 
-    mount([userMsg('u1')]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, [userMsg('u1'), asstMsg('a1')]);
+    renderInto(root, [userMsg('u1'), asstMsg('a1'), userMsg('u2')]);
+    await nextFrame();
 
     expect(scrollTo).toHaveBeenCalledWith({
       top: 1200,
       behavior: 'smooth',
     });
+  });
+
+  it('does not smooth-scroll when initial history already contains a user prompt', () => {
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+
+    mount([userMsg('u1'), asstMsg('a1')]);
+
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('does not smooth-scroll when existing session history loads after an empty render', () => {
+    const scrollTo = vi.fn();
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, []);
+    renderInto(root, [userMsg('u1'), asstMsg('a1')]);
+
+    expect(scrollTop).toBe(1200);
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('snaps to bottom without smooth scrolling when catch-up completes', () => {
+    const scrollTo = vi.fn();
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const messages = [userMsg('u1'), asstMsg('a1')];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, messages, undefined, { catchingUp: true });
+    expect(scrollTop).toBe(0);
+
+    renderInto(root, messages, undefined, { catchingUp: false });
+
+    expect(scrollTop).toBe(1200);
+    expect(scrollTo).not.toHaveBeenCalled();
   });
 
   it('does not treat a user_shell row as a new chat prompt', () => {

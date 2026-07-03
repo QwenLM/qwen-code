@@ -1768,6 +1768,8 @@ export const MessageList = memo(
     const scrollCooldownCount = useRef(0);
     const sessionTimelineFrame = useRef<number | null>(null);
     const lastReportedCanScrollToBottom = useRef<boolean | null>(null);
+    const didMountRef = useRef(false);
+    const didTrackLastUserMsgRef = useRef(false);
     const prevLastUserMsgId = useRef<string | null>(null);
     const prevActiveExecutionKey = useRef<string | null>(null);
     const prevCatchingUp: MutableRefObject<boolean | undefined> =
@@ -2444,23 +2446,36 @@ export const MessageList = memo(
       const lastId = getLastUserMessageId(messages);
       if (catchingUp) {
         prevLastUserMsgId.current = lastId;
+        didTrackLastUserMsgRef.current = true;
         return;
       }
-      if (lastId && lastId !== prevLastUserMsgId.current) {
+      if (!didTrackLastUserMsgRef.current) {
+        prevLastUserMsgId.current = lastId;
+        didTrackLastUserMsgRef.current = true;
+        return;
+      }
+      if (
+        lastId &&
+        prevLastUserMsgId.current !== null &&
+        lastId !== prevLastUserMsgId.current
+      ) {
         setShouldFollow(true);
         // A new prompt supersedes any pending "Show in transcript" scroll.
         pendingScrollRef.current = null;
+        requestAnimationFrame(() => {
+          if (shouldFollow.current) scrollToBottom('smooth');
+        });
       }
       prevLastUserMsgId.current = lastId;
-    }, [messages, catchingUp, setShouldFollow]);
+    }, [messages, catchingUp, scrollToBottom, setShouldFollow]);
 
     // Rule 5: session restore — when catchingUp flips from true → falsy,
     // replay just finished. Scroll to bottom once so the user sees the
     // latest content without the viewport fighting the replay.
-    useEffect(() => {
+    useLayoutEffect(() => {
       if (prevCatchingUp.current && !catchingUp) {
         setShouldFollow(true);
-        requestAnimationFrame(() => scrollToBottom());
+        scrollToBottom('auto');
       }
       prevCatchingUp.current = catchingUp;
     }, [catchingUp, scrollToBottom, setShouldFollow]);
@@ -2644,9 +2659,14 @@ export const MessageList = memo(
       if (shouldFollow.current) {
         const lastId = getLastUserMessageId(messages);
         const isNewUserMessage =
-          lastId !== null && lastId !== prevLastUserMsgId.current;
+          didMountRef.current &&
+          didTrackLastUserMsgRef.current &&
+          lastId !== null &&
+          prevLastUserMsgId.current !== null &&
+          lastId !== prevLastUserMsgId.current;
         scrollToBottom(isNewUserMessage ? 'smooth' : 'auto');
       }
+      didMountRef.current = true;
     }, [totalVirtualSize, messages, totalCount, catchingUp, scrollToBottom]);
 
     useLayoutEffect(() => {
