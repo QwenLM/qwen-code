@@ -28,6 +28,8 @@ export interface AtMentionMenuState {
   loading: boolean;
   itemMode?: 'default' | 'mcpServers' | 'mcpResources';
   mcpServerName?: string;
+  fileDirectory?: string;
+  inputMode?: 'search' | 'context';
 }
 
 type GlobWorkspaceFn = (
@@ -109,7 +111,7 @@ interface RefreshAtMentionMenuOptions {
   userEdited?: boolean;
 }
 
-const AT_PATTERN = /@([\w./:-]*)$/;
+const AT_PATTERN = /@([\p{L}\p{N}_./:-]*)$/u;
 const EMPTY_PROVIDERS: readonly WebShellAtProvider[] = [];
 const SEARCH_DEBOUNCE_MS = 150;
 export const FILE_PROVIDER_ID = 'files';
@@ -151,7 +153,7 @@ function matchesQuery(query: string, ...values: Array<string | undefined>) {
 function directoryInsertText(path: string): string {
   const normalized = normalizeDirectoryPath(path);
   const safePath = sanitizeInsertText(normalized);
-  return normalized === '.' ? '@./ ' : `@${safePath}/ `;
+  return normalized === '.' ? '@./ ' : `@${escapeAtReferenceText(safePath)}/ `;
 }
 
 function buildMcpResourceRef(serverName: string, uri: string): string {
@@ -203,6 +205,23 @@ function splitInsertedReferenceQuery(
     };
   }
   return null;
+}
+
+async function isEnabledMcpServer(
+  actions: AtMentionWorkspaceActions | undefined,
+  serverName: string,
+) {
+  const loadMcpStatus = actions?.loadMcpStatus;
+  if (!loadMcpStatus) return true;
+  try {
+    const status = await loadMcpStatus();
+    return status.servers.some(
+      (server) => server.name === serverName && !server.disabled,
+    );
+  } catch (error) {
+    console.warn('Failed to verify @ MCP resource server status', error);
+    return false;
+  }
 }
 
 function parentDirectoryPath(path: string): string {
@@ -292,7 +311,7 @@ function createFileProvider(
   description: string,
 ): WebShellAtProvider {
   return {
-    id: 'files',
+    id: FILE_PROVIDER_ID,
     label,
     description,
     order: 1,
@@ -341,7 +360,7 @@ function createFileProvider(
                 id: `file:${path}`,
                 label: safeName,
                 description: safePath,
-                insertText: `@${safeInsertPath} `,
+                insertText: `@${escapeAtReferenceText(safeInsertPath)} `,
                 kind: 'insert',
               };
             }),
@@ -369,7 +388,7 @@ function createFileProvider(
           .map((file) => ({
             id: file,
             label: safeDisplayText(file),
-            insertText: `@${file} `,
+            insertText: `@${escapeAtReferenceText(sanitizeInsertText(file))} `,
             kind: 'insert',
           }));
       } catch (error) {
@@ -556,8 +575,12 @@ export function useAtMentionMenu({
     () =>
       allProviders.map((provider) => ({
         id: provider.id,
-        label: provider.label,
-        description: provider.description,
+        label:
+          sanitizeDisplayText(provider.label) ?? safeDisplayText(provider.id),
+        description:
+          provider.description === undefined
+            ? undefined
+            : sanitizeDisplayText(provider.description),
       })),
     [allProviders],
   );
@@ -593,11 +616,13 @@ export function useAtMentionMenu({
         level: 'categories',
         selectedProviderId: undefined,
         selectedIndex: 0,
-        query: current.query,
+        query: '',
         items: [],
         loading: false,
         itemMode: undefined,
         mcpServerName: undefined,
+        fileDirectory: undefined,
+        inputMode: undefined,
       });
       return true;
     }
@@ -618,11 +643,19 @@ export function useAtMentionMenu({
   );
 
   const getPreviousProviderItems = useCallback(
-    (providerId: string, query: string) => {
+    (
+      providerId: string,
+      query: string,
+      baseState: Omit<AtMentionMenuState, 'items' | 'loading'>,
+    ) => {
       const current = stateRef.current;
       if (
         current?.level !== 'items' ||
-        current.selectedProviderId !== providerId
+        current.selectedProviderId !== providerId ||
+        current.query !== query ||
+        current.itemMode !== baseState.itemMode ||
+        current.mcpServerName !== baseState.mcpServerName ||
+        current.fileDirectory !== baseState.fileDirectory
       ) {
         return [];
       }
@@ -659,7 +692,11 @@ export function useAtMentionMenu({
       abortRef.current = abort;
       const requestId = requestIdRef.current + 1;
       requestIdRef.current = requestId;
-      const previousItems = getPreviousProviderItems(providerId, query);
+      const previousItems = getPreviousProviderItems(
+        providerId,
+        query,
+        baseState,
+      );
       setMenu({ ...baseState, items: previousItems, loading: true });
       provider
         .search({ query, signal: abort.signal })
@@ -704,7 +741,11 @@ export function useAtMentionMenu({
       }
       abortRef.current?.abort();
       abortRef.current = null;
-      const previousItems = getPreviousProviderItems(providerId, query);
+      const previousItems = getPreviousProviderItems(
+        providerId,
+        query,
+        baseState,
+      );
       setMenu({ ...baseState, items: previousItems, loading: true });
       searchTimerRef.current = setTimeout(() => {
         searchTimerRef.current = null;
@@ -720,8 +761,12 @@ export function useAtMentionMenu({
       query: string,
       baseState: Omit<AtMentionMenuState, 'items' | 'loading'>,
     ) => {
-      const loadMcpResources = workspaceActionsRef.current?.loadMcpResources;
+      const actions = workspaceActionsRef.current;
+      const loadMcpResources = actions?.loadMcpResources;
       if (!loadMcpResources) {
+        console.warn(
+          `[@mention] loadMcpResources not available for server="${serverName}"`,
+        );
         setMenu({ ...baseState, items: [], loading: false });
         return;
       }
@@ -733,11 +778,18 @@ export function useAtMentionMenu({
       const previousItems =
         stateRef.current?.level === 'items' &&
         stateRef.current.itemMode === 'mcpResources' &&
-        stateRef.current.mcpServerName === serverName
+        stateRef.current.mcpServerName === serverName &&
+        stateRef.current.query === query
           ? stateRef.current.items
           : [];
       setMenu({ ...baseState, items: previousItems, loading: true });
-      loadMcpResources(serverName, { signal: abort.signal })
+      isEnabledMcpServer(actions, serverName)
+        .then((enabled) => {
+          if (!enabled) {
+            return { resources: [] };
+          }
+          return loadMcpResources(serverName, { signal: abort.signal });
+        })
         .then((status) => {
           if (abort.signal.aborted || requestIdRef.current !== requestId) {
             return;
@@ -806,7 +858,8 @@ export function useAtMentionMenu({
       const previousItems =
         stateRef.current?.level === 'items' &&
         stateRef.current.itemMode === 'mcpResources' &&
-        stateRef.current.mcpServerName === serverName
+        stateRef.current.mcpServerName === serverName &&
+        stateRef.current.query === query
           ? stateRef.current.items
           : [];
       setMenu({ ...baseState, items: previousItems, loading: true });
@@ -820,6 +873,7 @@ export function useAtMentionMenu({
 
   const refreshForView = useCallback(
     (view: EditorView | null, options: RefreshAtMentionMenuOptions = {}) => {
+      void options;
       if (disabledRef.current || shellModeRef.current) {
         close();
         return;
@@ -835,76 +889,6 @@ export function useAtMentionMenu({
         current.from === parsed.from &&
         current.selectedProviderId !== undefined;
       if (keepItemsLevel) {
-        const providerId = current.selectedProviderId!;
-        const insertedReference = splitInsertedReferenceQuery(
-          parsed.query,
-          lastSelectedProviderIdRef.current,
-          lastSelectedMcpServerNameRef.current,
-        );
-        const preserveInsertedReferencePanel =
-          !options.userEdited &&
-          current.query === '' &&
-          parsed.query !== '' &&
-          (insertedReference?.providerId === providerId ||
-            lastSelectedProviderIdRef.current === providerId);
-        if (preserveInsertedReferencePanel) {
-          setMenu({
-            ...current,
-            from: parsed.from,
-            to: parsed.to,
-            providers: providerViewsRef.current,
-          });
-          return;
-        }
-        if (
-          providerId === FILE_PROVIDER_ID &&
-          (parsed.query !== current.query ||
-            (options.userEdited && parsed.query === ''))
-        ) {
-          const { dirPath } = splitFileQuery(
-            parsed.query,
-            fileDirectoryRef.current,
-          );
-          fileDirectoryRef.current = dirPath;
-          scheduleLoadItems(providerId, parsed.query, {
-            ...current,
-            from: parsed.from,
-            to: parsed.to,
-            query: parsed.query,
-            selectedIndex: 0,
-            providers: providerViewsRef.current,
-          });
-          return;
-        }
-        if (parsed.query !== current.query) {
-          const baseState = {
-            ...current,
-            from: parsed.from,
-            to: parsed.to,
-            query: parsed.query,
-            selectedIndex: 0,
-            providers: providerViewsRef.current,
-          };
-          if (
-            providerId === MCP_RESOURCES_PROVIDER_ID &&
-            current.itemMode === 'mcpResources' &&
-            current.mcpServerName
-          ) {
-            const resourceQuery = parsed.query.startsWith(
-              `${current.mcpServerName}:`,
-            )
-              ? parsed.query.slice(current.mcpServerName.length + 1)
-              : parsed.query;
-            scheduleLoadMcpResourceItems(
-              current.mcpServerName,
-              resourceQuery,
-              baseState,
-            );
-          } else {
-            scheduleLoadItems(providerId, parsed.query, baseState);
-          }
-          return;
-        }
         setMenu({
           ...current,
           from: parsed.from,
@@ -943,6 +927,8 @@ export function useAtMentionMenu({
               providers: providerViewsRef.current,
               itemMode: 'mcpResources',
               mcpServerName: insertedReference.serverName,
+              fileDirectory: undefined,
+              inputMode: 'context',
             });
             return;
           }
@@ -954,11 +940,13 @@ export function useAtMentionMenu({
             selectedProviderId: insertedReference.providerId,
             selectedIndex: 0,
             providers: providerViewsRef.current,
-            itemMode:
-              insertedReference.providerId === MCP_RESOURCES_PROVIDER_ID
-                ? 'mcpServers'
-                : 'default',
+            itemMode: 'default',
             mcpServerName: undefined,
+            fileDirectory:
+              insertedReference.providerId === FILE_PROVIDER_ID
+                ? fileDirectoryRef.current
+                : undefined,
+            inputMode: 'context',
           });
           return;
         }
@@ -979,6 +967,11 @@ export function useAtMentionMenu({
             providers: providerViewsRef.current,
             itemMode: 'default',
             mcpServerName: undefined,
+            fileDirectory:
+              providerId === FILE_PROVIDER_ID
+                ? fileDirectoryRef.current
+                : undefined,
+            inputMode: 'context',
           });
           return;
         }
@@ -992,6 +985,7 @@ export function useAtMentionMenu({
         providers: filteredProviders,
         items: [],
         loading: false,
+        inputMode: undefined,
       });
     },
     [
@@ -1060,6 +1054,11 @@ export function useAtMentionMenu({
         itemMode:
           provider.id === MCP_RESOURCES_PROVIDER_ID ? 'mcpServers' : 'default',
         mcpServerName: undefined,
+        fileDirectory:
+          provider.id === FILE_PROVIDER_ID
+            ? fileDirectoryRef.current
+            : undefined,
+        inputMode: 'search',
       });
       return true;
     },
@@ -1076,10 +1075,11 @@ export function useAtMentionMenu({
       ) {
         return false;
       }
-      const baseState = {
+      const baseState: Omit<AtMentionMenuState, 'items' | 'loading'> = {
         ...current,
         query,
         selectedIndex: 0,
+        inputMode: 'search',
       };
       if (
         current.selectedProviderId === MCP_RESOURCES_PROVIDER_ID &&
@@ -1108,17 +1108,23 @@ export function useAtMentionMenu({
         selectedIndex: 0,
         itemMode: 'mcpServers',
         mcpServerName: undefined,
+        fileDirectory: undefined,
+        inputMode: 'search',
       });
       return 'items';
     }
     if (current.selectedProviderId === FILE_PROVIDER_ID) {
-      const currentDir = normalizeDirectoryPath(fileDirectoryRef.current);
+      const currentDir = normalizeDirectoryPath(
+        current.fileDirectory ?? fileDirectoryRef.current,
+      );
       if (currentDir !== '.') {
         fileDirectoryRef.current = parentDirectoryPath(currentDir);
         scheduleLoadItems(FILE_PROVIDER_ID, '', {
           ...current,
           query: '',
           selectedIndex: 0,
+          fileDirectory: fileDirectoryRef.current,
+          inputMode: 'search',
         });
         return 'items';
       }
@@ -1132,6 +1138,8 @@ export function useAtMentionMenu({
       loading: false,
       itemMode: undefined,
       mcpServerName: undefined,
+      fileDirectory: undefined,
+      inputMode: undefined,
     });
     clearPendingLoad();
     return 'categories';
@@ -1161,6 +1169,8 @@ export function useAtMentionMenu({
           ...current,
           query: '',
           selectedIndex: 0,
+          fileDirectory: fileDirectoryRef.current,
+          inputMode: 'search',
         });
         return true;
       }
@@ -1176,10 +1186,13 @@ export function useAtMentionMenu({
           selectedIndex: 0,
           itemMode: 'mcpResources',
           mcpServerName: item.serverName,
+          fileDirectory: undefined,
+          inputMode: 'search',
         });
         return true;
       }
-      const insert = item.insertText ?? `@${item.label} `;
+      const insert =
+        item.insertText ?? `@${escapeAtReferenceText(item.label)} `;
       const docLength = view.state.doc.length;
       if (
         current.from < 0 ||

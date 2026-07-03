@@ -175,6 +175,40 @@ describe('useAtMentionMenu', () => {
       selectedProviderId: 'extensions',
       query: '',
     });
+
+    act(() =>
+      latest!.refreshForView(makeView('@ext:revi'), { userEdited: true }),
+    );
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'extensions',
+      query: '',
+    });
+
+    act(() => {
+      latest!.updateSearch('rev');
+    });
+    await runDebounce();
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'extensions',
+      query: 'rev',
+      inputMode: 'search',
+    });
+
+    act(() =>
+      latest!.refreshForView(makeView('@ext:review'), { userEdited: true }),
+    );
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'extensions',
+      query: 'rev',
+      inputMode: 'search',
+    });
   });
 
   it('opens MCP resource items without the inserted ref as search text', async () => {
@@ -236,6 +270,21 @@ describe('useAtMentionMenu', () => {
       mcpServerName: 'docs',
       query: '',
     });
+
+    act(() =>
+      latest!.refreshForView(makeView('@docs:https://example.com/do'), {
+        userEdited: true,
+      }),
+    );
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'mcp-resources',
+      itemMode: 'mcpResources',
+      mcpServerName: 'docs',
+      query: '',
+    });
   });
 
   it('opens file items without the inserted ref as search text', async () => {
@@ -274,6 +323,17 @@ describe('useAtMentionMenu', () => {
     );
 
     act(() => latest!.refreshForView(makeView('@src/foo')));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'files',
+      query: '',
+    });
+
+    act(() =>
+      latest!.refreshForView(makeView('@src/fo'), { userEdited: true }),
+    );
     await runDebounce();
 
     expect(latest!.state).toMatchObject({
@@ -442,7 +502,7 @@ describe('useAtMentionMenu', () => {
         ],
         truncated: false,
       })
-      .mockResolvedValueOnce({
+      .mockResolvedValue({
         kind: 'list',
         path: 'src',
         entries: [],
@@ -465,6 +525,13 @@ describe('useAtMentionMenu', () => {
       level: 'items',
       selectedProviderId: 'files',
       query: '',
+    });
+    act(() => {
+      expect(latest!.backToCategories()).toBe('items');
+    });
+    await runDebounce();
+    expect(listDirectory).toHaveBeenLastCalledWith('.', {
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -504,6 +571,45 @@ describe('useAtMentionMenu', () => {
       selectedProviderId: 'mcp-resources',
       itemMode: 'mcpResources',
       mcpServerName: 'docs',
+    });
+  });
+
+  it('backs from MCP resources to the MCP server list', async () => {
+    vi.useFakeTimers();
+    mount({
+      view: makeView('@'),
+      actions: {
+        loadMcpStatus: vi.fn().mockResolvedValue({
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'docs',
+              disabled: false,
+              resourceCount: 1,
+            },
+          ],
+        }),
+        loadMcpResources: vi.fn().mockResolvedValue({
+          resources: [{ uri: 'res://doc', name: 'Doc' }],
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(2));
+    await runDebounce();
+    act(() => latest!.accept());
+    await runDebounce();
+    act(() => {
+      expect(latest!.backToCategories()).toBe('items');
+    });
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'mcp-resources',
+      itemMode: 'mcpServers',
+      mcpServerName: undefined,
+      items: [],
     });
   });
 
@@ -603,6 +709,27 @@ describe('useAtMentionMenu', () => {
       label: 'Name',
       description: 'Desc',
       detail: 'Detail',
+    });
+  });
+
+  it('sanitizes custom provider category display text', () => {
+    mount({
+      providers: [
+        {
+          id: 'custom',
+          label: '\u001b[31mCustom\u001b[0m\u202E',
+          description: 'Desc\u202E',
+          order: 0,
+          search: vi.fn().mockResolvedValue([]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+
+    expect(latest!.state?.providers[0]).toMatchObject({
+      label: 'Custom',
+      description: 'Desc',
     });
   });
 
@@ -764,6 +891,37 @@ describe('useAtMentionMenu', () => {
     });
   });
 
+  it('escapes parser delimiters in file insert paths', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [
+        {
+          name: 'space name(1)?.md',
+          kind: 'file',
+          ignored: false,
+        },
+      ],
+      truncated: false,
+    });
+    mount({ actions: { listDirectory }, view });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept(1)).toBe(true);
+    });
+
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '@space\\ name\\(1\\)\\?.md ' },
+      selection: { anchor: 23 },
+      scrollIntoView: true,
+    });
+  });
+
   it('inserts MCP resources with parser-safe escaping', async () => {
     vi.useFakeTimers();
     const view = makeView('@');
@@ -885,6 +1043,44 @@ describe('useAtMentionMenu', () => {
       itemMode: 'mcpResources',
       mcpServerName: 'my:server',
       query: '',
+    });
+  });
+
+  it('does not load resources when reopening a disabled MCP server ref', async () => {
+    vi.useFakeTimers();
+    const loadMcpResources = vi.fn().mockResolvedValue({
+      resources: [{ uri: 'res://doc', name: 'Doc' }],
+    });
+    mount({
+      actions: {
+        loadMcpStatus: vi.fn().mockResolvedValue({
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'docs',
+              disabled: true,
+              resourceCount: 1,
+            },
+          ],
+        }),
+        loadMcpResources,
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(2));
+    await runDebounce();
+    act(() => latest!.close());
+    act(() => latest!.refreshForView(makeView('@docs:res://doc')));
+    await runDebounce();
+
+    expect(loadMcpResources).not.toHaveBeenCalled();
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'mcp-resources',
+      itemMode: 'mcpResources',
+      items: [],
+      loading: false,
     });
   });
 });

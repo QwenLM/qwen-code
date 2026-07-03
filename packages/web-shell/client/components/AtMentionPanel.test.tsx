@@ -151,6 +151,32 @@ describe('AtMentionPanel', () => {
     expect(onSelect).toHaveBeenCalledWith(0);
   });
 
+  it('focuses search when explicitly requested', () => {
+    vi.useFakeTimers();
+    mount({ ...itemsMenu(), inputMode: 'search' });
+
+    const input = document.body.querySelector('input')!;
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+
+    expect(document.activeElement).toBe(input);
+    vi.useRealTimers();
+  });
+
+  it('does not focus search when reopened from an inserted reference', () => {
+    vi.useFakeTimers();
+    mount({ ...itemsMenu(), inputMode: 'context' });
+
+    const input = document.body.querySelector('input')!;
+    act(() => {
+      vi.runOnlyPendingTimers();
+    });
+
+    expect(document.activeElement).not.toBe(input);
+    vi.useRealTimers();
+  });
+
   it('lets IME composition keys pass through the item search input', () => {
     const onBack = vi.fn();
     const onAccept = vi.fn();

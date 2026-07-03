@@ -61,6 +61,7 @@ export function AtMentionPanel({
   useEffect(() => {
     if (
       menu.level !== 'items' ||
+      menu.inputMode !== 'search' ||
       document.activeElement === searchInputRef.current
     ) {
       return;
@@ -72,7 +73,7 @@ export function AtMentionPanel({
       window.cancelAnimationFrame(frame);
       window.clearTimeout(timer);
     };
-  }, [menu.level, menu.selectedProviderId]);
+  }, [menu.inputMode, menu.level, menu.selectedProviderId]);
 
   useLayoutEffect(() => {
     const anchor = anchorRef.current;
@@ -282,7 +283,7 @@ export function AtMentionPanel({
           ) : (
             rows.map((row, index) => (
               <button
-                key={`${row.id}:${index}`}
+                key={row.id}
                 ref={(node) => {
                   itemRefs.current[index] = node;
                 }}
