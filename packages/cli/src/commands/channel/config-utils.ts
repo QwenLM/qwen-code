@@ -22,7 +22,7 @@ function resolveOptionalStringField(
   channelName: string,
   rawConfig: Record<string, unknown>,
   field: 'token' | 'clientId' | 'clientSecret',
-  shouldResolveEnvVars: boolean,
+  envResolution: EnvResolution,
 ): string | undefined {
   const value = rawConfig[field];
   if (value === undefined || value === null || value === '') {
@@ -33,7 +33,17 @@ function resolveOptionalStringField(
       `Channel "${channelName}" field "${field}" must be a string.`,
     );
   }
-  return shouldResolveEnvVars ? resolveEnvVars(value) : value;
+  return resolveConfigEnvVar(value, envResolution);
+}
+
+type EnvResolution = boolean | 'available';
+
+function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
+  if (mode === false) return value;
+  if (mode === 'available' && value.startsWith('$')) {
+    return process.env[value.substring(1)] || value;
+  }
+  return resolveEnvVars(value);
 }
 
 /**
@@ -95,7 +105,7 @@ export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
   defaultCwd: string = process.cwd(),
-  options: { resolveEnvVars?: boolean } = {},
+  options: { resolveEnvVars?: EnvResolution } = {},
 ): Promise<ChannelConfig & Record<string, unknown>> {
   if (!rawConfig['type']) {
     throw new Error(`Channel "${name}" is missing required field "type".`);
@@ -111,7 +121,7 @@ export async function parseChannelConfig(
   }
 
   const resolvedRawConfig = { ...rawConfig };
-  const shouldResolveEnvVars = options.resolveEnvVars ?? true;
+  const envResolution = options.resolveEnvVars ?? true;
 
   // Validate plugin-required fields
   for (const field of plugin.requiredConfigFields ?? []) {
@@ -124,30 +134,23 @@ export async function parseChannelConfig(
     if (typeof value !== 'string') {
       throw new Error(`Channel "${name}" field "${field}" must be a string.`);
     }
-    resolvedRawConfig[field] = shouldResolveEnvVars
-      ? resolveEnvVars(value)
-      : value;
+    resolvedRawConfig[field] = resolveConfigEnvVar(value, envResolution);
   }
 
   // Resolve env vars for known credential fields
   const token =
-    resolveOptionalStringField(
-      name,
-      rawConfig,
-      'token',
-      shouldResolveEnvVars,
-    ) ?? '';
+    resolveOptionalStringField(name, rawConfig, 'token', envResolution) ?? '';
   const clientId = resolveOptionalStringField(
     name,
     rawConfig,
     'clientId',
-    shouldResolveEnvVars,
+    envResolution,
   );
   const clientSecret = resolveOptionalStringField(
     name,
     rawConfig,
     'clientSecret',
-    shouldResolveEnvVars,
+    envResolution,
   );
 
   return {

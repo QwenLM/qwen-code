@@ -7,13 +7,15 @@ import {
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
+import { request as httpsRequest } from 'node:https';
+import type { IncomingHttpHeaders } from 'node:http';
 import { randomUUID } from 'node:crypto';
 import { basename, join, resolve, win32, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Buffer } from 'node:buffer';
-import { isIP } from 'node:net';
+import { isIP, type LookupFunction } from 'node:net';
 import { lookup } from 'node:dns/promises';
-import { WSClient } from '@wecom/aibot-node-sdk';
+import { WSClient, decryptFile } from '@wecom/aibot-node-sdk';
 import { ChannelBase, sanitizeLogText } from '@qwen-code/channel-base';
 import type {
   Attachment,
@@ -52,10 +54,6 @@ interface WeComClient {
     mediaType: WeComMediaType,
     mediaId: string,
   ): Promise<unknown>;
-  downloadFile(
-    url: string,
-    aesKey?: string,
-  ): Promise<{ buffer: Buffer; filename?: string }>;
 }
 
 interface WeComLogger {
@@ -129,17 +127,10 @@ export class WeComChannel extends ChannelBase {
         `[WeCom:${this.name}] SDK error: ${sanitizeLogText(String(err), 200)}\n`,
       );
     });
-    const markDisconnected = (reason: string): void => {
-      if (this.client !== client) return;
-      this.client = undefined;
-      if (this.dedupTimer) {
-        clearInterval(this.dedupTimer);
-        this.dedupTimer = undefined;
-      }
-      process.stderr.write(`[WeCom:${this.name}] WebSocket ${reason}.\n`);
-    };
     client.on('disconnected', (reason) =>
-      markDisconnected(formatDisconnectReason(reason)),
+      process.stderr.write(
+        `[WeCom:${this.name}] WebSocket ${formatDisconnectReason(reason)}; waiting for SDK reconnect.\n`,
+      ),
     );
 
     this.client = client;
@@ -279,10 +270,10 @@ export class WeComChannel extends ChannelBase {
           : `(file: ${attachments[0]?.fileName ?? 'file'})`;
       }
       await this.processInbound(envelope);
-      cleanupAttachmentFiles(attachments);
+      scheduleAttachmentCleanup(attachments);
     } catch (err) {
       if (messageId) this.seenMessages.delete(messageId);
-      cleanupAttachmentFiles(attachments);
+      scheduleAttachmentCleanup(attachments);
       throw err;
     }
   }
@@ -291,20 +282,21 @@ export class WeComChannel extends ChannelBase {
     body: Record<string, unknown>,
     attachments: Attachment[] = [],
   ): Promise<Attachment[]> {
-    const client = this.client;
-    if (!client) return [];
-
     const refs = collectInboundMediaRefs(body);
     for (const ref of refs) {
-      if (!(await this.canDownloadAttachment(ref))) continue;
-      const downloaded = await client.downloadFile(ref.url, ref.aesKey);
-      const data = downloaded.buffer;
-      if (data.length > MAX_MEDIA_BYTES) {
+      let downloaded: { buffer: Buffer; filename?: string };
+      try {
+        downloaded = await downloadInboundMedia(ref);
+      } catch (err) {
         process.stderr.write(
-          `[WeCom:${this.name}] skipping oversized ${ref.type} attachment (${data.length} bytes).\n`,
+          `[WeCom:${this.name}] skipping ${ref.type} attachment: ${sanitizeLogText(
+            err instanceof Error ? err.message : String(err),
+            160,
+          )}.\n`,
         );
         continue;
       }
+      const data = downloaded.buffer;
       const fileName = ref.fileName || downloaded.filename;
       if (ref.type === 'image') {
         attachments.push({
@@ -328,53 +320,6 @@ export class WeComChannel extends ChannelBase {
       }
     }
     return attachments;
-  }
-
-  private async canDownloadAttachment(ref: InboundMediaRef): Promise<boolean> {
-    if (!(await isSafeInboundMediaUrl(ref.url))) {
-      process.stderr.write(
-        `[WeCom:${this.name}] skipping ${ref.type} attachment with unsafe media URL.\n`,
-      );
-      return false;
-    }
-    try {
-      const response = await fetch(ref.url, {
-        method: 'GET',
-        redirect: 'manual',
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (response.status >= 300 && response.status < 400) {
-        process.stderr.write(
-          `[WeCom:${this.name}] skipping ${ref.type} attachment with redirect.\n`,
-        );
-        return false;
-      }
-      if (!response.ok) {
-        process.stderr.write(
-          `[WeCom:${this.name}] skipping ${ref.type} attachment after media probe failed.\n`,
-        );
-        return false;
-      }
-      const contentLength = getContentLength(response);
-      if (contentLength !== undefined && contentLength > MAX_MEDIA_BYTES) {
-        process.stderr.write(
-          `[WeCom:${this.name}] skipping oversized ${ref.type} attachment (${contentLength} bytes).\n`,
-        );
-        return false;
-      }
-      if (!(await responseBodyWithinLimit(response))) {
-        process.stderr.write(
-          `[WeCom:${this.name}] skipping oversized ${ref.type} attachment.\n`,
-        );
-        return false;
-      }
-      return true;
-    } catch {
-      process.stderr.write(
-        `[WeCom:${this.name}] skipping ${ref.type} attachment after media metadata check failed.\n`,
-      );
-      return false;
-    }
   }
 
   private cleanupSeenMessages(): void {
@@ -420,15 +365,6 @@ function waitForAuthentication(client: WeComClient): {
         ),
       ),
     );
-    client.on('disconnected', (reason) =>
-      finish(
-        new Error(
-          `WeCom disconnected before authentication: ${formatDisconnectReason(
-            reason,
-          )}`,
-        ),
-      ),
-    );
   });
   return {
     promise,
@@ -464,6 +400,11 @@ function parseWeComConfig(
     throw new Error(`Channel "${name}" requires wsUrl to use wss://.`);
   }
   return wsUrl ? { botId, secret, wsUrl } : { botId, secret };
+}
+
+function scheduleAttachmentCleanup(attachments: Attachment[]): void {
+  if (!attachments.some((attachment) => attachment.filePath)) return;
+  setTimeout(() => cleanupAttachmentFiles(attachments), 60_000).unref?.();
 }
 
 function cleanupAttachmentFiles(attachments: Attachment[]): void {
@@ -731,14 +672,6 @@ function readOutboundMedia(
   return { data: readFileSync(real), fileName: basename(real) };
 }
 
-export function safeRealpath(path: string): string | undefined {
-  try {
-    return realpathSync(path);
-  } catch {
-    return undefined;
-  }
-}
-
 function ensureDirectoryRealpath(path: string): string | undefined {
   try {
     mkdirSync(path, { recursive: true });
@@ -760,33 +693,6 @@ function isInsideDir(filePath: string, dir: string): boolean {
   );
 }
 
-function getContentLength(response: Response): number | undefined {
-  const header = response.headers.get('content-length');
-  if (header === null) return undefined;
-  const size = Number(header);
-  return Number.isFinite(size) && size >= 0 ? size : undefined;
-}
-
-async function responseBodyWithinLimit(response: Response): Promise<boolean> {
-  const reader = response.body?.getReader();
-  if (!reader) return true;
-
-  let total = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) return true;
-      total += value.byteLength;
-      if (total > MAX_MEDIA_BYTES) {
-        await reader.cancel().catch(() => {});
-        return false;
-      }
-    }
-  } finally {
-    reader.releaseLock();
-  }
-}
-
 async function isSafeInboundMediaUrl(rawUrl: string): Promise<boolean> {
   let url: URL;
   try {
@@ -802,22 +708,7 @@ async function isSafeInboundMediaUrl(rawUrl: string): Promise<boolean> {
   }
   if (host.endsWith('.local')) return false;
 
-  const ipVersion = isIP(host);
-  if (ipVersion === 4) {
-    const parts = parseIpv4Parts(host);
-    return parts ? isPublicIpv4(parts) : false;
-  }
-  if (ipVersion === 6) {
-    const embedded = parseEmbeddedIpv4(host);
-    if (embedded) return isPublicIpv4(embedded);
-    return !(
-      host === '::' ||
-      host === '::1' ||
-      host.startsWith('fc') ||
-      host.startsWith('fd') ||
-      host.startsWith('fe80:')
-    );
-  }
+  if (isIP(host)) return isPublicIpAddress(host);
   if (!host.includes('.')) return false;
   try {
     const records = await lookup(host, { all: true });
@@ -828,6 +719,148 @@ async function isSafeInboundMediaUrl(rawUrl: string): Promise<boolean> {
   } catch {
     return false;
   }
+}
+
+async function downloadInboundMedia(
+  ref: InboundMediaRef,
+): Promise<{ buffer: Buffer; filename?: string }> {
+  if (!(await isSafeInboundMediaUrl(ref.url))) {
+    throw new Error('unsafe media URL');
+  }
+  const downloaded = await guardedHttpsDownload(ref.url);
+  return {
+    buffer: ref.aesKey
+      ? decryptFile(downloaded.buffer, ref.aesKey)
+      : downloaded.buffer,
+    ...(ref.fileName || downloaded.filename
+      ? { filename: ref.fileName || downloaded.filename }
+      : {}),
+  };
+}
+
+function guardedHttpsDownload(
+  rawUrl: string,
+): Promise<{ buffer: Buffer; filename?: string }> {
+  return new Promise((resolvePromise, rejectPromise) => {
+    let settled = false;
+    const finish = (
+      err?: Error,
+      value?: { buffer: Buffer; filename?: string },
+    ): void => {
+      if (settled) return;
+      settled = true;
+      if (err) {
+        rejectPromise(err);
+      } else {
+        resolvePromise(value ?? { buffer: Buffer.alloc(0) });
+      }
+    };
+
+    const req = httpsRequest(
+      rawUrl,
+      {
+        method: 'GET',
+        signal: AbortSignal.timeout(10_000),
+        lookup: safePublicLookup,
+      },
+      (res) => {
+        const statusCode = res.statusCode ?? 0;
+        if (statusCode >= 300 && statusCode < 400) {
+          res.resume();
+          finish(new Error('redirected media URL'));
+          return;
+        }
+        if (statusCode < 200 || statusCode >= 300) {
+          res.resume();
+          finish(new Error('media download failed'));
+          return;
+        }
+
+        const contentLength = getHeaderNumber(res.headers, 'content-length');
+        if (contentLength !== undefined && contentLength > MAX_MEDIA_BYTES) {
+          res.resume();
+          finish(new Error(`oversized attachment (${contentLength} bytes)`));
+          return;
+        }
+
+        const chunks: Buffer[] = [];
+        let total = 0;
+        res.on('data', (chunk: Buffer | string) => {
+          const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+          total += buffer.byteLength;
+          if (total > MAX_MEDIA_BYTES) {
+            req.destroy();
+            finish(new Error('oversized attachment'));
+            return;
+          }
+          chunks.push(buffer);
+        });
+        res.on('end', () => {
+          finish(undefined, {
+            buffer: Buffer.concat(chunks),
+            ...parseContentDispositionFileName(res.headers),
+          });
+        });
+        res.on('error', (err: Error) => finish(err));
+      },
+    );
+    req.on('error', (err: Error) => finish(err));
+    req.end();
+  });
+}
+
+const safePublicLookup: LookupFunction = (hostname, _options, callback) => {
+  lookup(hostname, { all: true })
+    .then((records) => {
+      if (
+        records.length === 0 ||
+        records.some((record) => !isPublicIpAddress(record.address))
+      ) {
+        callback(new Error('unsafe resolved media address'), '', 0);
+        return;
+      }
+      const record = records[0]!;
+      callback(null, record.address, record.family);
+    })
+    .catch((err: unknown) =>
+      callback(err instanceof Error ? err : new Error(String(err)), '', 0),
+    );
+};
+
+function getHeaderNumber(
+  headers: IncomingHttpHeaders,
+  name: string,
+): number | undefined {
+  const value = getHeaderValue(headers, name);
+  if (value === undefined) return undefined;
+  const size = Number(value);
+  return Number.isFinite(size) && size >= 0 ? size : undefined;
+}
+
+function getHeaderValue(
+  headers: IncomingHttpHeaders,
+  name: string,
+): string | undefined {
+  const value = headers[name.toLowerCase()];
+  if (Array.isArray(value)) return value[0];
+  return value;
+}
+
+function parseContentDispositionFileName(headers: IncomingHttpHeaders): {
+  filename?: string;
+} {
+  const value = getHeaderValue(headers, 'content-disposition');
+  if (!value) return {};
+  const encoded = value.match(/filename\*=UTF-8''([^;\s]+)/i)?.[1];
+  if (encoded) {
+    try {
+      return { filename: decodeURIComponent(encoded) };
+    } catch {
+      return { filename: encoded };
+    }
+  }
+  const plain = value.match(/filename="?([^";]+)"?/i)?.[1];
+  return plain ? { filename: plain } : {};
 }
 
 function isPublicIpAddress(address: string): boolean {
@@ -963,7 +996,11 @@ function isPublicIpv4(parts: number[]): boolean {
     (a === 100 && b >= 64 && b <= 127) ||
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 168)
+    (a === 192 && b === 0) ||
+    (a === 192 && b === 168) ||
+    (a === 198 && (b === 18 || b === 19 || b === 51)) ||
+    (a === 203 && b === 0) ||
+    a >= 224
   );
 }
 

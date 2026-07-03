@@ -205,7 +205,7 @@ export async function parseConfiguredChannels(
           name,
           rawConfig as Record<string, unknown>,
           opts.defaultCwd,
-          { resolveEnvVars: false },
+          { resolveEnvVars: 'available' },
         ),
       });
     } catch (err) {

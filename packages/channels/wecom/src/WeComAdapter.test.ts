@@ -9,8 +9,67 @@ import type {
 } from '@qwen-code/channel-base';
 
 const mocks = vi.hoisted(() => {
+  type MockHttpResponse = {
+    statusCode: number;
+    headers: Record<string, string>;
+    on(
+      event: string,
+      handler: (value?: Buffer | Error) => void,
+    ): MockHttpResponse;
+    resume: ReturnType<typeof vi.fn>;
+  };
+
   const instances: MockWSClient[] = [];
-  const lookup = vi.fn(async () => [{ address: '203.0.113.10', family: 4 }]);
+  const lookup = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
+  const decryptFile = vi.fn((buffer: Buffer, _aesKey: string) => buffer);
+  const httpResponse = {
+    statusCode: 200,
+    headers: {} as Record<string, string>,
+    body: Buffer.from('downloaded'),
+  };
+  const httpsRequest = vi.fn(
+    (
+      _url: string,
+      _options: unknown,
+      callback: (response: MockHttpResponse) => void,
+    ) => {
+      const handlers = new Map<
+        string,
+        Array<(value?: Buffer | Error) => void>
+      >();
+      const response: MockHttpResponse = {
+        statusCode: httpResponse.statusCode,
+        headers: httpResponse.headers,
+        on(event, handler) {
+          const eventHandlers = handlers.get(event) ?? [];
+          eventHandlers.push(handler);
+          handlers.set(event, eventHandlers);
+          return response;
+        },
+        resume: vi.fn(),
+      };
+      const emit = (event: string, value?: Buffer | Error): void => {
+        for (const handler of handlers.get(event) ?? []) {
+          handler(value);
+        }
+      };
+      const request = {
+        on: vi.fn(() => request),
+        end: vi.fn(() => {
+          queueMicrotask(() => {
+            callback(response);
+            queueMicrotask(() => {
+              emit('data', httpResponse.body);
+              emit('end');
+            });
+          });
+          return request;
+        }),
+        destroy: vi.fn(() => request),
+      };
+      return request;
+    },
+  );
   const state = {
     autoAuthenticate: true,
   };
@@ -60,17 +119,29 @@ const mocks = vi.hoisted(() => {
     }
   }
 
-  return { MockWSClient, instances, lookup, state };
+  return {
+    MockWSClient,
+    instances,
+    lookup,
+    decryptFile,
+    httpResponse,
+    httpsRequest,
+    state,
+  };
 });
 
 vi.mock('@wecom/aibot-node-sdk', () => ({
   WSClient: mocks.MockWSClient,
+  decryptFile: mocks.decryptFile,
 }));
 vi.mock('node:dns/promises', () => ({
   lookup: mocks.lookup,
 }));
+vi.mock('node:https', () => ({
+  request: mocks.httpsRequest,
+}));
 
-import { WeComChannel, safeRealpath } from './WeComAdapter.js';
+import { WeComChannel } from './WeComAdapter.js';
 import { plugin } from './index.js';
 
 type MockWSClient = InstanceType<typeof mocks.MockWSClient>;
@@ -135,12 +206,16 @@ describe('WeComChannel', () => {
   beforeEach(() => {
     mocks.instances.length = 0;
     mocks.state.autoAuthenticate = true;
+    mocks.httpResponse.statusCode = 200;
+    mocks.httpResponse.headers = {};
+    mocks.httpResponse.body = Buffer.from('downloaded');
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => new Response('ok')),
     );
     vi.clearAllMocks();
-    mocks.lookup.mockResolvedValue([{ address: '203.0.113.10', family: 4 }]);
+    mocks.decryptFile.mockImplementation((buffer: Buffer) => buffer);
+    mocks.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
   });
 
   afterEach(() => {
@@ -232,7 +307,7 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('rejects startup when the SDK disconnects before authentication', async () => {
+  it('keeps waiting when the SDK disconnects before authentication', async () => {
     mocks.state.autoAuthenticate = false;
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -243,14 +318,22 @@ describe('WeComChannel', () => {
     const client = lastClient();
     client.emit('disconnected', 'auth failed');
 
-    await expect(connecting).rejects.toThrow(
-      'WeCom disconnected before authentication',
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(client.disconnect).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] WebSocket auth failed; waiting for SDK reconnect.\n',
     );
-    expect(client.disconnect).toHaveBeenCalledTimes(1);
+
+    client.emit('authenticated', {});
+    await connecting;
+
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] Connected via smart bot.\n',
+    );
     stderr.mockRestore();
   });
 
-  it('clears the active SDK client when the websocket disconnects', async () => {
+  it('keeps the active SDK client when the websocket disconnects', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -261,11 +344,13 @@ describe('WeComChannel', () => {
     client.emit('disconnected', 'closed');
     await channel.sendMessage('chat-1', 'hello');
 
-    expect(client.sendMessage).not.toHaveBeenCalled();
-    expect(stderr).toHaveBeenCalledWith('[WeCom:bot] WebSocket closed.\n');
     expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('No active SDK client'),
+      '[WeCom:bot] WebSocket closed; waiting for SDK reconnect.\n',
     );
+    expect(client.sendMessage).toHaveBeenCalledWith('chat-1', {
+      msgtype: 'markdown',
+      markdown: { content: 'hello' },
+    });
     stderr.mockRestore();
   });
 
@@ -328,11 +413,7 @@ describe('WeComChannel', () => {
     );
     await channel.connect();
     const client = lastClient();
-    client.downloadFile = vi.fn(async (url: string) =>
-      url.includes('image')
-        ? { buffer: Buffer.from([0x89, 0x50, 0x4e, 0x47]) }
-        : { buffer: Buffer.from('file-body'), filename: 'downloaded.txt' },
-    );
+    mocks.httpResponse.body = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
 
     client.emit('message.mixed', {
       msgid: 'msg-2',
@@ -370,15 +451,19 @@ describe('WeComChannel', () => {
     });
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(2));
-    expect(client.downloadFile).toHaveBeenCalledWith(
+    expect(mocks.httpsRequest).toHaveBeenCalledWith(
       'https://example.invalid/image',
-      'k1',
+      expect.objectContaining({ method: 'GET' }),
+      expect.any(Function),
     );
-    expect(client.downloadFile).toHaveBeenCalledWith(
+    expect(mocks.httpsRequest).toHaveBeenCalledWith(
       'https://example.invalid/file',
-      'k2',
+      expect.objectContaining({ method: 'GET' }),
+      expect.any(Function),
     );
-    expect(client.downloadFile).toHaveBeenCalledTimes(2);
+    expect(mocks.httpsRequest).toHaveBeenCalledTimes(2);
+    expect(mocks.decryptFile).toHaveBeenCalledWith(expect.any(Buffer), 'k1');
+    expect(mocks.decryptFile).toHaveBeenCalledWith(expect.any(Buffer), 'k2');
     const mixed = channel.envelopes[0]!;
     expect(mixed.chatId).toBe('group-1');
     expect(mixed.isGroup).toBe(true);
@@ -395,7 +480,7 @@ describe('WeComChannel', () => {
     expect(file.attachments?.[0]?.type).toBe('file');
     expect(file.attachments?.[0]?.fileName).toBe('report.pdf');
     expect(file.attachments?.[0]?.filePath).toContain('report.pdf');
-    expect(existsSync(file.attachments?.[0]?.filePath ?? '')).toBe(false);
+    expect(existsSync(file.attachments?.[0]?.filePath ?? '')).toBe(true);
   });
 
   it('honors explicit group mention metadata when present', async () => {
@@ -491,6 +576,7 @@ describe('WeComChannel', () => {
 
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(channel.envelopes).toHaveLength(0);
   });
 
@@ -576,6 +662,7 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('unsafe media URL'),
@@ -603,8 +690,8 @@ describe('WeComChannel', () => {
     });
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
-    expect(fetch).not.toHaveBeenCalled();
     expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('unsafe media URL'),
     );
@@ -635,8 +722,8 @@ describe('WeComChannel', () => {
     }
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(4));
-    expect(fetch).not.toHaveBeenCalled();
     expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('unsafe media URL'),
     );
@@ -663,8 +750,8 @@ describe('WeComChannel', () => {
     });
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
-    expect(fetch).not.toHaveBeenCalled();
     expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('unsafe media URL'),
     );
@@ -697,8 +784,8 @@ describe('WeComChannel', () => {
     expect(mocks.lookup).toHaveBeenCalledWith('metadata.example.com', {
       all: true,
     });
-    expect(fetch).not.toHaveBeenCalled();
     expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('unsafe media URL'),
     );
@@ -709,12 +796,10 @@ describe('WeComChannel', () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(null, {
-        status: 302,
-        headers: { location: 'http://169.254.169.254/latest/meta-data/' },
-      }),
-    );
+    mocks.httpResponse.statusCode = 302;
+    mocks.httpResponse.headers = {
+      location: 'http://169.254.169.254/latest/meta-data/',
+    };
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
     const client = lastClient();
@@ -731,14 +816,17 @@ describe('WeComChannel', () => {
     });
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
-    expect(fetch).toHaveBeenCalledWith('https://example.invalid/redirect', {
-      method: 'GET',
-      redirect: 'manual',
-      signal: expect.any(AbortSignal),
-    });
+    expect(mocks.httpsRequest).toHaveBeenCalledWith(
+      'https://example.invalid/redirect',
+      expect.objectContaining({
+        method: 'GET',
+        signal: expect.any(AbortSignal),
+      }),
+      expect.any(Function),
+    );
     expect(client.downloadFile).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('attachment with redirect'),
+      expect.stringContaining('redirected media URL'),
     );
     stderr.mockRestore();
   });
@@ -750,11 +838,9 @@ describe('WeComChannel', () => {
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
     const client = lastClient();
-    vi.mocked(fetch).mockResolvedValueOnce(
-      new Response(null, {
-        headers: { 'content-length': String(20 * 1024 * 1024 + 1) },
-      }),
-    );
+    mocks.httpResponse.headers = {
+      'content-length': String(20 * 1024 * 1024 + 1),
+    };
 
     client.emit('message.image', {
       msgid: 'msg-large-image',
@@ -767,8 +853,9 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
     expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('skipping oversized image attachment'),
+      expect.stringContaining('oversized attachment'),
     );
     expect(stderr).not.toHaveBeenCalledWith(
       expect.stringContaining('https://example.invalid/large-image'),
@@ -807,6 +894,7 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
   });
 
   it('sends markdown text and local media through the SDK', async () => {
@@ -1032,10 +1120,6 @@ describe('WeComChannel', () => {
       expect.stringContaining('outside allowed outbound directory'),
     );
     stderr.mockRestore();
-  });
-
-  it('ignores missing optional media allowlist directories', () => {
-    expect(safeRealpath('/definitely/missing/wecom-dir')).toBe(undefined);
   });
 
   it('registers the wecom plugin with botId and secret fields', () => {

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseConfiguredChannels } from './runtime.js';
 
 vi.mock('./channel-registry.js', () => ({
@@ -10,6 +10,10 @@ vi.mock('./channel-registry.js', () => ({
 }));
 
 describe('parseConfiguredChannels', () => {
+  afterEach(() => {
+    delete process.env['TEST_CHANNEL_TOKEN'];
+  });
+
   it('throws a clear error when a selected channel is missing config', async () => {
     await expect(
       parseConfiguredChannels({}, ['telegram'], { defaultCwd: '/workspace' }),
@@ -55,5 +59,22 @@ describe('parseConfiguredChannels', () => {
     );
 
     expect(parsed[0]?.config.token).toBe('$TOKEN_LITERAL_VALUE');
+  });
+
+  it('resolves channel credentials from environment loaded after settings', async () => {
+    process.env['TEST_CHANNEL_TOKEN'] = 'token-from-env';
+
+    const parsed = await parseConfiguredChannels(
+      {
+        telegram: {
+          type: 'telegram',
+          token: '$TEST_CHANNEL_TOKEN',
+        },
+      },
+      ['telegram'],
+      { defaultCwd: '/workspace' },
+    );
+
+    expect(parsed[0]?.config.token).toBe('token-from-env');
   });
 });
