@@ -1029,7 +1029,7 @@ describe('EchartsFullDataBlock', () => {
     );
     await flushChart();
 
-    expect(container.textContent).toContain('数据集图表');
+    expect(container.textContent).toContain('图表加载中');
     expect(container.textContent).toContain('图表运行时不可用。');
     expect(
       container.querySelector('button[aria-label="显示图表"]'),
