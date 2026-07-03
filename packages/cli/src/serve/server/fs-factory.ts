@@ -7,6 +7,7 @@
 import * as path from 'node:path';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import { isWithinRoot } from '@qwen-code/qwen-code-core';
 import {
   canonicalizeWorkspaces,
   createWorkspaceFileSystemFactory,
@@ -100,20 +101,9 @@ export function resolveBoundWorkspacesFromIdeEnv(
   if (primary === undefined) return [];
   if (
     envCanonical.length > 0 &&
-    !envCanonical.some(
-      (workspace) => workspace === primary || isPathInside(workspace, primary),
-    )
+    !envCanonical.some((workspace) => isWithinRoot(primary, workspace))
   ) {
     return [primary];
   }
   return workspaces;
-}
-
-function isPathInside(root: string, candidate: string): boolean {
-  const relative = path.relative(root, candidate);
-  return (
-    relative.length > 0 &&
-    !relative.startsWith('..') &&
-    !path.isAbsolute(relative)
-  );
 }
