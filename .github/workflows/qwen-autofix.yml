@@ -455,6 +455,7 @@ jobs:
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           DRY_RUN: '${{ inputs.dry_run }}'
+          EVENT_NAME: '${{ github.event_name }}'
         run: |-
           if [[ ! -s "${WORKDIR}/decision.json" ]] || ! jq -e . "${WORKDIR}/decision.json" > /dev/null; then
             echo "❌ Assessment produced no valid decision.json"
@@ -474,6 +475,26 @@ jobs:
             echo "❌ Assessment selected issue #${GO} which is not in the candidate list"
             echo "go_issue=" >> "${GITHUB_OUTPUT}"
             exit 0
+          fi
+
+          if [[ -n "${GO}" && "${DRY_RUN}" != "true" && "${EVENT_NAME}" != 'workflow_dispatch' ]]; then
+            if ! live_issue_json="$(gh issue view "${GO}" --repo "${REPO}" --json labels,state)"; then
+              echo "❌ Failed to re-validate live labels for issue #${GO}"
+              echo "go_issue=" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            if [[ "$(jq -r '.state // ""' <<< "${live_issue_json}")" != 'OPEN' ]]; then
+              echo "⏭️ Selected issue #${GO} is no longer open; skipping."
+              echo "go_issue=" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
+            if ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}" --arg approved "${AUTOFIX_APPROVED_LABEL}" \
+              '(.labels // []) | map(.name) as $labels | (($labels | index($ready)) and ($labels | index($approved)))' \
+              <<< "${live_issue_json}" > /dev/null; then
+              echo "⏭️ Selected issue #${GO} no longer has both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL}; skipping."
+              echo "go_issue=" >> "${GITHUB_OUTPUT}"
+              exit 0
+            fi
           fi
 
           echo "go_issue=${GO}" >> "${GITHUB_OUTPUT}"
@@ -774,11 +795,11 @@ jobs:
           elif [[ "${PUBLISH_OUTCOME}" == 'failure' ]]; then
             REASON='the issue will be eligible for a future automated attempt.'
             DETAIL='The agent produced and verified a fix, but publishing the PR failed. Check the Publish PR step logs for the CI_DEV_BOT_PAT actor, git push, PR creation, or PR comment error.'
-            LABEL_ARGS=(--remove-label 'autofix/in-progress')
+            LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label "${AUTOFIX_APPROVED_LABEL}")
           else
             REASON='the issue will be eligible for a future automated attempt.'
             DETAIL='The run failed before producing a verified fix.'
-            LABEL_ARGS=(--remove-label 'autofix/in-progress')
+            LABEL_ARGS=(--remove-label 'autofix/in-progress' --add-label "${AUTOFIX_APPROVED_LABEL}")
           fi
           gh issue edit "${ISSUE}" --repo "${REPO}" "${LABEL_ARGS[@]}" || true
           gh issue comment "${ISSUE}" --repo "${REPO}" --body "🤖 Withdrawing the claim above — the automated fix attempt did not succeed; ${REASON}

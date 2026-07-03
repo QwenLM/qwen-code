@@ -38,6 +38,10 @@ const assessCandidatesStep =
   workflow.match(
     /- name: 'Assess candidates'[\s\S]*?(?=\n[ ]{6}- name: 'Read decision')/,
   )?.[0] ?? '';
+const readDecisionStep =
+  workflow.match(
+    /- name: 'Read decision'[\s\S]*?(?=\n[ ]{6}- name: 'Claim issue')/,
+  )?.[0] ?? '';
 const developFixStep =
   workflow.match(
     /- name: 'Develop fix'[\s\S]*?(?=\n[ ]{6}- name: 'Verification gate')/,
@@ -186,6 +190,30 @@ describe('qwen-autofix workflow', () => {
       '--add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}"',
     );
     expect(releaseWorkflow).toContain('--label "${AUTOFIX_APPROVED_LABEL}"');
+    expect(releaseWorkflow).toContain(
+      'gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${GH_REPO}"',
+    );
+  });
+
+  it('revalidates approval labels immediately before claiming an issue', () => {
+    expect(readDecisionStep).toContain(
+      "EVENT_NAME: '${{ github.event_name }}'",
+    );
+    expect(readDecisionStep).toContain(
+      'gh issue view "${GO}" --repo "${REPO}" --json labels,state',
+    );
+    expect(readDecisionStep).toContain(
+      '($labels | index($ready)) and ($labels | index($approved))',
+    );
+    expect(readDecisionStep).toContain(
+      'no longer has both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL}',
+    );
+  });
+
+  it('restores approval when transient autofix failures withdraw a claim', () => {
+    expect(withdrawClaimStep).toContain(
+      'LABEL_ARGS=(--remove-label \'autofix/in-progress\' --add-label "${AUTOFIX_APPROVED_LABEL}")',
+    );
   });
 
   it('keeps publish credential failures diagnosable', () => {
