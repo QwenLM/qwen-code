@@ -683,6 +683,17 @@ function SlashCommandPanel({
   } as CSSProperties;
 
   let lastSection: string | undefined;
+  const sectionCounts = new Map<string, number>();
+  if (menu.kind === 'command') {
+    for (const item of menu.items) {
+      if (item.section) {
+        sectionCounts.set(
+          item.section,
+          (sectionCounts.get(item.section) ?? 0) + 1,
+        );
+      }
+    }
+  }
 
   if (!anchorRect) return null;
 
@@ -729,7 +740,14 @@ function SlashCommandPanel({
                   {showSection && (
                     <>
                       {index > 0 && <div className={styles.slashSection} />}
-                      <div className={styles.slashSectionHeader}>{section}</div>
+                      <div className={styles.slashSectionHeader}>
+                        <span>{section}</span>
+                        {section && sectionCounts.get(section) ? (
+                          <span className={styles.slashSectionCount}>
+                            {sectionCounts.get(section)}
+                          </span>
+                        ) : null}
+                      </div>
                     </>
                   )}
                   <button

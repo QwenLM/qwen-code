@@ -178,6 +178,82 @@ describe('getSlashCommandCompletionResult', () => {
     ]);
   });
 
+  it('fuzzy-ranks top-level commands for an abbreviated query', () => {
+    const commands: CommandInfo[] = [
+      { name: 'model', description: 'Switch model', source: 'builtin-command' },
+      {
+        name: 'memory',
+        description: 'Manage memory',
+        source: 'builtin-command',
+      },
+      {
+        name: 'agent-reproduce-feature',
+        description: 'Reproduce a feature',
+        source: 'skill-dir-command',
+      },
+    ];
+
+    const mdl = getSlashCommandCompletionResult(
+      '/mdl',
+      4,
+      commands,
+      [],
+      'en',
+      getTranslator('en'),
+    );
+    expect(mdl?.items[0]?.label).toBe('/model');
+
+    const arf = getSlashCommandCompletionResult(
+      '/arf',
+      4,
+      commands,
+      [],
+      'en',
+      getTranslator('en'),
+    );
+    expect(arf?.items.map((item) => item.label)).toContain(
+      '/agent-reproduce-feature',
+    );
+  });
+
+  it('drops section headers while searching but keeps them while browsing', () => {
+    const commands: CommandInfo[] = [
+      {
+        name: 'clear',
+        description: 'Clear the screen',
+        source: 'builtin-command',
+      },
+      {
+        name: 'demo:ping',
+        description: 'Project command',
+        source: 'skill-dir-command',
+      },
+    ];
+
+    const browsing = getSlashCommandCompletionResult(
+      '/',
+      1,
+      commands,
+      [],
+      'en',
+      getTranslator('en'),
+    );
+    expect(browsing?.items.every((item) => Boolean(item.section))).toBe(true);
+
+    const searching = getSlashCommandCompletionResult(
+      '/c',
+      2,
+      commands,
+      [],
+      'en',
+      getTranslator('en'),
+    );
+    expect(searching?.items.map((item) => item.label)).toEqual(['/clear']);
+    expect(searching?.items.every((item) => item.section === undefined)).toBe(
+      true,
+    );
+  });
+
   it('honors panel category order and filtered commands', () => {
     const commands: CommandInfo[] = [
       {

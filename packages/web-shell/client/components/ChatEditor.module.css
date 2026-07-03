@@ -258,12 +258,24 @@
 }
 
 .slashSectionHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
   padding: 4px 8px 2px;
   color: var(--muted-foreground);
   font-size: 11px;
   font-weight: 500;
   letter-spacing: 0.02em;
   user-select: none;
+}
+
+.slashSectionCount {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
 }
 
 .slashItem {
