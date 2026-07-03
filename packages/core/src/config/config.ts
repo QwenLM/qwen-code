@@ -91,7 +91,7 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
-import { invalidateCollectedSkillEntriesCache } from '../tools/skill-utils.js';
+import { invalidateCollectedSkillEntriesCache } from '../tools/skill-cache-registry.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import {
   type AutoModeDenialState,

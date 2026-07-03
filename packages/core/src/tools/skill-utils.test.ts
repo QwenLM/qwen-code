@@ -8,8 +8,8 @@ import { beforeEach, describe, it, expect, vi, afterEach } from 'vitest';
 import {
   applySkillAllowedTools,
   collectAvailableSkillEntries,
-  invalidateCollectedSkillEntriesCache,
 } from './skill-utils.js';
+import { invalidateCollectedSkillEntriesCache } from './skill-cache-registry.js';
 import type { PermissionManager } from '../permissions/permission-manager.js';
 import type { Config } from '../config/config.js';
 import type { SkillManager } from '../skills/skill-manager.js';
@@ -303,5 +303,84 @@ describe('collectAvailableSkillEntries cache', () => {
     // Each config triggered its own listSkills() call.
     const listSkillsMock = sm.listSkills as ReturnType<typeof vi.fn>;
     expect(listSkillsMock).toHaveBeenCalledTimes(2);
+  });
+
+  it('pendingConditionalSkillNames reflects inactive path-gated skills', async () => {
+    // The cache must correctly track conditional (path-gated) skills that are
+    // not yet activated. The filter logic uses `paths`, `isSkillActive`, and
+    // `getDisabledSkillNames` — a regression in any boolean would silently
+    // produce wrong pending names in the cached result.
+    const sm = createMockSkillManager();
+    const cfg = createMockConfig();
+    const listSkillsMock = sm.listSkills as ReturnType<typeof vi.fn>;
+
+    const activeGated = {
+      name: 'active-gated',
+      description: 'Already activated path-gated skill',
+      paths: ['src/**/*.ts'],
+      level: 'project' as const,
+      filePath: '/tmp/skills/active-gated',
+      body: '# Active Gated',
+      disableModelInvocation: false,
+    };
+    const pendingGated = {
+      name: 'pending-gated',
+      description: 'Not yet activated path-gated skill',
+      paths: ['docs/**/*.md'],
+      level: 'project' as const,
+      filePath: '/tmp/skills/pending-gated',
+      body: '# Pending Gated',
+      disableModelInvocation: false,
+    };
+    const disabledGated = {
+      name: 'disabled-gated',
+      description: 'User-disabled path-gated skill',
+      paths: ['scripts/**/*.py'],
+      level: 'project' as const,
+      filePath: '/tmp/skills/disabled-gated',
+      body: '# Disabled Gated',
+      disableModelInvocation: false,
+    };
+
+    // activeGated is already activated, pendingGated is not, disabledGated is disabled
+    vi.mocked(sm.isSkillActive).mockImplementation(
+      (s) => s.name === 'active-gated',
+    );
+    const disabledSpy = vi.mocked(cfg.getDisabledSkillNames);
+    disabledSpy.mockReturnValue(new Set(['disabled-gated']));
+
+    listSkillsMock.mockResolvedValue([
+      activeGated,
+      pendingGated,
+      disabledGated,
+    ]);
+
+    const result = await collectAvailableSkillEntries(sm, cfg);
+
+    expect(result.pendingConditionalSkillNames).toBeDefined();
+    // Only pendingGated should be in pending — activeGated is already
+    // activated, disabledGated is user-disabled.
+    expect(result.pendingConditionalSkillNames).toEqual(
+      new Set(['pending-gated']),
+    );
+
+    // Cache hit: same instances should return same object with same set.
+    const hitResult = await collectAvailableSkillEntries(sm, cfg);
+    expect(hitResult.pendingConditionalSkillNames).toBe(
+      result.pendingConditionalSkillNames,
+    );
+
+    // After invalidation with different data, pending set should update.
+    invalidateCollectedSkillEntriesCache();
+    vi.mocked(sm.isSkillActive).mockReturnValue(false);
+    listSkillsMock.mockResolvedValue([
+      activeGated,
+      pendingGated,
+      disabledGated,
+    ]);
+    const resetResult = await collectAvailableSkillEntries(sm, cfg);
+    expect(resetResult.pendingConditionalSkillNames).toEqual(
+      new Set(['active-gated', 'pending-gated']),
+    );
   });
 });

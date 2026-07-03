@@ -48,7 +48,7 @@ import {
   type CommandHookConfig,
   type HttpHookConfig,
 } from '../hooks/types.js';
-import { invalidateCollectedSkillEntriesCache } from '../tools/skill-utils.js';
+import { invalidateCollectedSkillEntriesCache } from '../tools/skill-cache-registry.js';
 
 const debugLogger = createDebugLogger('SKILL_MANAGER');
 const SKILLS_CONFIG_DIR = 'skills';

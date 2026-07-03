@@ -16,9 +16,9 @@ import type { ToolResult } from './tools.js';
 import { partToString } from '../utils/partUtils.js';
 import {
   collectAvailableSkillEntries,
-  invalidateCollectedSkillEntriesCache,
   renderAvailableSkillsBlock,
 } from './skill-utils.js';
+import { invalidateCollectedSkillEntriesCache } from './skill-cache-registry.js';
 
 // Type for accessing protected methods in tests
 type SkillToolWithProtectedMethods = SkillTool & {
