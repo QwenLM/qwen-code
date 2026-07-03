@@ -1121,6 +1121,50 @@ describe('restoreQQState validation filters', () => {
     ).restoreQQState();
     expect(result).toBe(false);
   });
+
+  it('returns false on non-object JSON (number)', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue('42');
+
+    const ch = makeChannel();
+    const result = (
+      ch as unknown as { restoreQQState: () => boolean }
+    ).restoreQQState();
+    expect(result).toBe(false);
+  });
+
+  it('returns false on non-object JSON (string)', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue('"state"');
+
+    const ch = makeChannel();
+    const result = (
+      ch as unknown as { restoreQQState: () => boolean }
+    ).restoreQQState();
+    expect(result).toBe(false);
+  });
+
+  it('returns false on non-object JSON (array)', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue('[1,2,3]');
+
+    const ch = makeChannel();
+    const result = (
+      ch as unknown as { restoreQQState: () => boolean }
+    ).restoreQQState();
+    expect(result).toBe(false);
+  });
+
+  it('returns false on null JSON', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    vi.mocked(readFileSync).mockReturnValue('null');
+
+    const ch = makeChannel();
+    const result = (
+      ch as unknown as { restoreQQState: () => boolean }
+    ).restoreQQState();
+    expect(result).toBe(false);
+  });
 });
 
 describe('atomic state persistence', () => {
@@ -1207,5 +1251,28 @@ describe('atomic state persistence', () => {
 
     expect(chp.saveTimer).not.toBeNull();
     expect(chp.saveTimer?.hasRef()).toBe(false);
+  });
+
+  it('does not write state when disposed after timer is scheduled', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as {
+      saveQQState: () => void;
+      saveTimer: ReturnType<typeof setTimeout> | null;
+    };
+
+    // Schedule a save
+    chp.saveQQState();
+    expect(chp.saveTimer).not.toBeNull();
+
+    // Mark disposed before the timer fires
+    (ch as unknown as { disposed: boolean }).disposed = true;
+
+    // Advance time past debounce interval
+    vi.advanceTimersByTime(600);
+
+    // The callback should have returned early due to disposed check
+    expect(writeFileSync).not.toHaveBeenCalled();
+    vi.useRealTimers();
   });
 });

@@ -208,8 +208,12 @@ export class QQChannel extends ChannelBase {
       try {
         await this.fetchToken();
         await this.connectGateway();
-        // Register beforeExit hook for abnormal exit (SIGKILL, OOM, crash) — the
-        // unref'd debounce timer may have 500ms of unflushed state at exit.
+        // Register beforeExit hook so the unref'd debounce timer's unflushed
+        // state is persisted when the event loop drains naturally. Does NOT
+        // fire for SIGKILL, OOM kills, or uncaughtException.
+        if (this.beforeExitHook) {
+          process.off('beforeExit', this.beforeExitHook);
+        }
         this.beforeExitHook = () => this.flushQQState();
         process.on('beforeExit', this.beforeExitHook);
         return;
@@ -392,7 +396,7 @@ export class QQChannel extends ChannelBase {
     if (this.disposed) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
-      const tmpPath = this.qqStatePath + '.tmp';
+      if (this.disposed) return;
       try {
         writeFileSync(
           tmpPath,
@@ -458,6 +462,12 @@ export class QQChannel extends ChannelBase {
     try {
       if (!existsSync(this.qqStatePath)) return false;
       const raw = JSON.parse(readFileSync(this.qqStatePath, 'utf-8'));
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+        process.stderr.write(
+          `[QQ:${this.name}] Invalid QQ state file (not an object), ignoring\n`,
+        );
+        return false;
+      }
       if (raw.chatTypeMap && Array.isArray(raw.chatTypeMap)) {
         const rawCT = raw.chatTypeMap as Array<[string, unknown]>;
         // Validate: only accept 'c2c' | 'group' values
