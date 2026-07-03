@@ -61,6 +61,7 @@ export class LspServerManager {
   private serverConfigHashes: Map<string, string> = new Map();
   /** Serializes hot-reload reconcile calls so stop/start operations do not race. */
   private reconcileQueue: Promise<unknown> = Promise.resolve();
+  private stoppingAll = false;
   private requireTrustedWorkspace: boolean;
   private workspaceRoot: string;
 
@@ -129,12 +130,17 @@ export class LspServerManager {
    * still able to start a new process.
    */
   async stopAll(): Promise<void> {
+    this.stoppingAll = true;
     const stop = async () => {
-      for (const [name, handle] of Array.from(this.serverHandles)) {
-        await this.stopServer(name, handle);
+      try {
+        for (const [name, handle] of Array.from(this.serverHandles)) {
+          await this.stopServer(name, handle);
+        }
+        this.serverHandles.clear();
+        this.serverConfigHashes.clear();
+      } finally {
+        this.stoppingAll = false;
       }
-      this.serverHandles.clear();
-      this.serverConfigHashes.clear();
     };
     const next = this.reconcileQueue.then(stop, stop);
     this.reconcileQueue = next.catch(() => undefined);
@@ -604,7 +610,11 @@ export class LspServerManager {
 
   private enqueueCrashRestart(name: string, handle: LspServerHandle): void {
     const restart = async () => {
-      if (this.serverHandles.get(name) !== handle || handle.stopRequested) {
+      if (
+        this.stoppingAll ||
+        this.serverHandles.get(name) !== handle ||
+        handle.stopRequested
+      ) {
         return;
       }
       this.resetHandle(handle);

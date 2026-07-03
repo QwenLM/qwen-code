@@ -486,15 +486,24 @@ describe('NativeLspService', () => {
       { requireTrustedWorkspace: true },
     );
     const stopAll = vi.fn(async () => {});
-    (service as unknown as { serverManager: unknown }).serverManager = {
+    const internals = service as unknown as {
+      serverManager: unknown;
+      openedDocuments: Map<string, Set<string>>;
+      lastConnections: Map<string, unknown>;
+    };
+    internals.serverManager = {
       getHandles: () => new Map([['tsserver', {}]]),
       stopAll,
     };
+    internals.openedDocuments.set('tsserver', new Set(['file:///a.ts']));
+    internals.lastConnections.set('tsserver', {});
 
     const result = await service.reinitialize();
 
     expect(stopAll).toHaveBeenCalledOnce();
     expect(result.reconcile.removed).toEqual(['tsserver']);
+    expect(internals.openedDocuments.has('tsserver')).toBe(false);
+    expect(internals.lastConnections.has('tsserver')).toBe(false);
   });
 
   test('reinitialize skips all user-configured servers in untrusted workspaces', async () => {

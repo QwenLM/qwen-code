@@ -687,6 +687,68 @@ describe('LspServerManager', () => {
     expect(manager.getHandles().get('clangd')?.status).toBe('READY');
   });
 
+  it('does not restart a crashed server while stopping all servers', async () => {
+    const manager = createTrustedManager();
+    let exitHandler: ((code: number | null) => void) | undefined;
+    const process = createMockProcess();
+    process.once = vi.fn(
+      (event: string, handler: (code: number | null) => void) => {
+        if (event === 'exit') {
+          exitHandler = handler;
+        }
+        return process;
+      },
+    );
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    ).mockResolvedValue(true);
+    const createLspConnection = vi
+      .spyOn(
+        manager as unknown as {
+          createLspConnection: (
+            config: LspServerConfig,
+          ) => Promise<LspConnectionResult>;
+        },
+        'createLspConnection',
+      )
+      .mockResolvedValue({
+        connection: createMockConnection(),
+        process: process as unknown as ChildProcess,
+      } as unknown as LspConnectionResult);
+    vi.spyOn(
+      manager as unknown as {
+        initializeLspServer: () => Promise<void>;
+      },
+      'initializeLspServer',
+    ).mockResolvedValue(undefined);
+    const config = { ...serverConfig, restartOnCrash: true };
+
+    manager.setServerConfigs([config]);
+    await manager.startAll();
+    expect(exitHandler).toBeDefined();
+
+    exitHandler?.(1);
+    await manager.stopAll();
+
+    expect(createLspConnection).toHaveBeenCalledOnce();
+    expect(manager.getHandles().size).toBe(0);
+  });
+
   it('retries the same config after a crash without restartOnCrash', async () => {
     const manager = createTrustedManager();
     let exitHandler: ((code: number | null) => void) | undefined;
