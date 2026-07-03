@@ -1050,6 +1050,8 @@ describe('restoreQQState validation filters', () => {
           ['c', -1],
           ['d', 'string'],
           ['e', null],
+          ['f', 3.14],
+          ['g', Infinity],
         ],
       }),
     );
@@ -1065,6 +1067,8 @@ describe('restoreQQState validation filters', () => {
     expect(msgSeqMap.has('c')).toBe(false);
     expect(msgSeqMap.has('d')).toBe(false);
     expect(msgSeqMap.has('e')).toBe(false);
+    expect(msgSeqMap.has('f')).toBe(false);
+    expect(msgSeqMap.has('g')).toBe(false);
   });
 
   it('filters non-safe-integer msgSeqMap values (fractional, overflow, Infinity)', () => {
@@ -1192,5 +1196,18 @@ describe('atomic state persistence', () => {
     const writeCalls = vi.mocked(writeFileSync).mock.calls;
     expect(writeCalls.length).toBeGreaterThanOrEqual(1);
     expect(writeCalls[0][2]).toEqual({ mode: 0o600 });
+  });
+
+  it('saveQQState sets debounced unref timer', () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as {
+      saveQQState: () => void;
+      saveTimer: ReturnType<typeof setTimeout> | null;
+    };
+
+    chp.saveQQState();
+
+    expect(chp.saveTimer).not.toBeNull();
+    expect(chp.saveTimer?.hasRef()).toBe(false);
   });
 });

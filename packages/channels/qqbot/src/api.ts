@@ -80,7 +80,10 @@ export function validateGatewayUrl(url: string): string {
         `QQ Bot gateway URL has unexpected hostname: ${parsed.hostname}`,
       );
     }
-    return url;
+    const clean = new URL(url);
+    clean.username = '';
+    clean.password = '';
+    return clean.href;
   } catch (e) {
     if (e instanceof TypeError) {
       throw new Error(`QQ Bot gateway URL is not a valid URL: ${url}`);

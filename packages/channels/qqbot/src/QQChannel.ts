@@ -214,8 +214,12 @@ export class QQChannel extends ChannelBase {
           );
           await this.sleep(2000);
         } else {
+          // Final attempt: wrap the connection error with sanitized text.
+          // The sanitizeLogText path is exercised by the existing connect gateway
+          // retry tests in send.test.ts (gateway reconnect timer block).
           throw new Error(
             sanitizeLogText(e instanceof Error ? e.message : String(e), 200),
+            { cause: e },
           );
         }
       }
@@ -434,12 +438,16 @@ export class QQChannel extends ChannelBase {
       if (!existsSync(this.qqStatePath)) return false;
       const raw = JSON.parse(readFileSync(this.qqStatePath, 'utf-8'));
       if (raw.chatTypeMap) {
+        const rawCT = raw.chatTypeMap as Array<[string, unknown]>;
         // Validate: only accept 'c2c' | 'group' values
         this.chatTypeMap = new Map(
-          (raw.chatTypeMap as Array<[string, unknown]>).filter(
-            ([, v]) => v === 'c2c' || v === 'group',
-          ),
+          rawCT.filter(([, v]) => v === 'c2c' || v === 'group'),
         ) as Map<string, 'c2c' | 'group'>;
+        const dropped = rawCT.length - this.chatTypeMap.size;
+        if (dropped > 0)
+          process.stderr.write(
+            `[QQ:${this.name}] Dropped ${dropped} invalid chatTypeMap entries during restore\n`,
+          );
       }
       if (raw.replyMsgId) {
         // Validate: entries must be strings ≤ 128 chars
@@ -450,13 +458,19 @@ export class QQChannel extends ChannelBase {
         ) as Map<string, string>;
       }
       if (raw.msgSeqMap) {
+        const rawMS = raw.msgSeqMap as Array<[string, unknown]>;
         // Validate: entries must be non-negative safe integers
         this.msgSeqMap = new Map(
-          (raw.msgSeqMap as Array<[string, unknown]>).filter(
+          rawMS.filter(
             ([, v]) =>
               typeof v === 'number' && Number.isSafeInteger(v) && v >= 0,
           ),
         ) as Map<string, number>;
+        const dropped = rawMS.length - this.msgSeqMap.size;
+        if (dropped > 0)
+          process.stderr.write(
+            `[QQ:${this.name}] Dropped ${dropped} invalid msgSeqMap entries during restore\n`,
+          );
       }
       return true;
     } catch (e) {

@@ -252,6 +252,14 @@ describe('validateGatewayUrl', () => {
       'not a valid URL',
     );
   });
+
+  it('strips userinfo from valid wss URL with embedded credentials', () => {
+    const url = 'wss://user:password@gateway.qq.com/ws';
+    const result = validateGatewayUrl(url);
+    expect(result).toBe('wss://gateway.qq.com/ws');
+    expect(result).not.toContain('user');
+    expect(result).not.toContain('password');
+  });
 });
 
 describe('fetchGatewayUrl + validateGatewayUrl integration', () => {
