@@ -165,6 +165,35 @@ describe('createDaemonSessionActions', () => {
     expect(pendingSessionLoadRef.current?.sessionId).toBe('session-b');
   });
 
+  it('clears transcript loading when a session switch fails', async () => {
+    vi.useFakeTimers();
+    try {
+      const existingSession = createMockSession('session-a');
+      const { actions, getConnection } = createActionsHarness({
+        connection: { status: 'connected', sessionId: 'session-a' },
+        session: existingSession,
+      });
+
+      const loadPromise = actions.loadSession('session-b');
+      expect(getConnection()).toMatchObject({
+        status: 'connecting',
+        sessionId: 'session-b',
+        loadingTranscript: true,
+      });
+
+      vi.advanceTimersByTime(30_000);
+
+      await expect(loadPromise).rejects.toThrow('Session load timed out');
+      expect(getConnection()).toMatchObject({
+        sessionId: 'session-b',
+        loadingTranscript: undefined,
+        catchingUp: undefined,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('creates a detached session when the ref and connection do not match', async () => {
     const existingSession = createMockSession('session-a');
     const nextSession = createMockSession('session-b');

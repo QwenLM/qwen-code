@@ -1657,38 +1657,43 @@ function joinClassNames(
 
 const EMPTY_SESSION_TIMELINE_ENTRIES: SessionTimelineEntry[] = [];
 
-function LoadingTranscriptSkeleton() {
+function LoadingTranscriptSkeleton({ label }: { label: string }) {
   return (
-    <div
-      className={styles.loadingSkeleton}
-      data-testid="message-list-loading-skeleton"
-      aria-hidden="true"
-    >
-      <div className={styles.loadingSkeletonUserRow}>
-        <div className={styles.loadingSkeletonUserBubble}>
-          <span className={styles.loadingSkeletonLineWide} />
-          <span className={styles.loadingSkeletonLineShort} />
+    <>
+      <div role="status" aria-live="polite" className={styles.srOnly}>
+        {label}
+      </div>
+      <div
+        className={styles.loadingSkeleton}
+        data-testid="message-list-loading-skeleton"
+        aria-hidden="true"
+      >
+        <div className={styles.loadingSkeletonUserRow}>
+          <div className={styles.loadingSkeletonUserBubble}>
+            <span className={styles.loadingSkeletonLineWide} />
+            <span className={styles.loadingSkeletonLineShort} />
+          </div>
+        </div>
+        <div className={styles.loadingSkeletonAssistantRow}>
+          <div className={styles.loadingSkeletonAssistantBlock}>
+            <span className={styles.loadingSkeletonLineMedium} />
+            <span className={styles.loadingSkeletonLineWide} />
+            <span className={styles.loadingSkeletonLineNarrow} />
+          </div>
+        </div>
+        <div className={styles.loadingSkeletonUserRow}>
+          <div className={styles.loadingSkeletonUserBubbleCompact}>
+            <span className={styles.loadingSkeletonLineMedium} />
+          </div>
+        </div>
+        <div className={styles.loadingSkeletonAssistantRow}>
+          <div className={styles.loadingSkeletonAssistantBlock}>
+            <span className={styles.loadingSkeletonLineWide} />
+            <span className={styles.loadingSkeletonLineMedium} />
+          </div>
         </div>
       </div>
-      <div className={styles.loadingSkeletonAssistantRow}>
-        <div className={styles.loadingSkeletonAssistantBlock}>
-          <span className={styles.loadingSkeletonLineMedium} />
-          <span className={styles.loadingSkeletonLineWide} />
-          <span className={styles.loadingSkeletonLineNarrow} />
-        </div>
-      </div>
-      <div className={styles.loadingSkeletonUserRow}>
-        <div className={styles.loadingSkeletonUserBubbleCompact}>
-          <span className={styles.loadingSkeletonLineMedium} />
-        </div>
-      </div>
-      <div className={styles.loadingSkeletonAssistantRow}>
-        <div className={styles.loadingSkeletonAssistantBlock}>
-          <span className={styles.loadingSkeletonLineWide} />
-          <span className={styles.loadingSkeletonLineMedium} />
-        </div>
-      </div>
-    </div>
+    </>
   );
 }
 
@@ -1717,6 +1722,7 @@ export const MessageList = memo(
     },
     ref,
   ) {
+    const { t } = useI18n();
     const compactMode = useContext(CompactModeContext);
     const mergedMessages = useMemo(
       () =>
@@ -2721,7 +2727,9 @@ export const MessageList = memo(
         className={styles.list}
         onClickCapture={handleDisclosureClickCapture}
       >
-        {showLoadingSkeleton && <LoadingTranscriptSkeleton />}
+        {showLoadingSkeleton && (
+          <LoadingTranscriptSkeleton label={t('editor.sessionLoading')} />
+        )}
         <SessionTimeline
           entries={sessionTimelineEntries}
           currentTurnId={currentTimelineTurnId}

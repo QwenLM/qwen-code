@@ -501,6 +501,9 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(
       c.querySelector('[data-testid="message-list-loading-skeleton"]'),
     ).not.toBeNull();
+    expect(c.querySelector('[role="status"]')?.textContent).toBe(
+      'Session is still loading. Try again in a moment.',
+    );
   });
 
   it('shows the transcript skeleton while loading transcript with existing messages', () => {
@@ -618,6 +621,40 @@ describe('MessageList — turn collapse (DOM)', () => {
     await nextFrame();
 
     expect(scrollTop).toBe(1200);
+    expect(scrollTo).not.toHaveBeenCalledWith({
+      top: 1200,
+      behavior: 'smooth',
+    });
+  });
+
+  it('does not smooth-scroll when a user prompt is already followed by an assistant row', async () => {
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, [userMsg('u1'), asstMsg('a1')]);
+    renderInto(root, [
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ]);
+    await nextFrame();
+
     expect(scrollTo).not.toHaveBeenCalledWith({
       top: 1200,
       behavior: 'smooth',

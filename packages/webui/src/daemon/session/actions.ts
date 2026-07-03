@@ -230,7 +230,16 @@ export function createDaemonSessionActions({
     setRestoreMode(mode);
     setRestoreSessionId(sessionId);
     setRestoreSessionNonce((nonce) => nonce + 1);
-    return loadPromise;
+    return loadPromise.catch((error: unknown) => {
+      if (!isAbortError(error)) {
+        setConnection((current) => ({
+          ...current,
+          loadingTranscript: undefined,
+          catchingUp: undefined,
+        }));
+      }
+      throw error;
+    });
   }
 
   return {
