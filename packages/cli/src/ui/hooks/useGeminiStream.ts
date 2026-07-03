@@ -1280,8 +1280,12 @@ export const useGeminiStream = (
       //
       //  - `while`, not `if`: a single throttled update can append many lines, so
       //    keep committing until the remainder fits.
-      //  - `findLastSafeSplitPoint`: never cut inside a fenced code block (which
-      //    would commit a half-open ``` to scrollback permanently).
+      //  - Commit ONLY at a blank-line block boundary so a table / list / code
+      //    block is never cut into a headerless continuation (which would render
+      //    as raw "| ... |" text). A table that is still streaming (no trailing
+      //    blank line yet) stays pending — bounded in view by MarkdownDisplay's
+      //    clamp — until it is complete, then commits whole.
+      //  - `findLastSafeSplitPoint`: also never cut inside a fenced code block.
       //  - Conservative fallback when the content-area height is not yet known
       //    (ref is 0 before the first render populates it): derive from
       //    terminalHeight so a short terminal does not use an over-large budget.
@@ -1303,8 +1307,21 @@ export const useGeminiStream = (
           tableClampRows,
         );
         if (!clipped) break;
-        const target = charIndexAfterLine(newGeminiMessageBuffer, keptLines);
-        if (target <= 0) break; // cannot split (e.g. one oversized line)
+        // Back up to the last blank line within the kept prefix — the only place
+        // it is safe to end a committed chunk without orphaning a block.
+        let boundaryLine = -1;
+        for (let k = Math.min(keptLines, bufferLines.length) - 1; k >= 0; k--) {
+          if (bufferLines[k]!.trim() === '') {
+            boundaryLine = k;
+            break;
+          }
+        }
+        if (boundaryLine < 0) break; // no block boundary yet → keep pending
+        const target = charIndexAfterLine(
+          newGeminiMessageBuffer,
+          boundaryLine + 1,
+        );
+        if (target <= 0) break;
         const splitPoint = findLastSafeSplitPoint(
           newGeminiMessageBuffer,
           target,
