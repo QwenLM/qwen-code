@@ -710,35 +710,43 @@ export async function buildAvailableCommandsSnapshot(
     'acp',
     settings,
   );
+  const disabledSkillNames = config.getDisabledSkillNames();
 
-  const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
-    const acceptsInput =
-      cmd.acceptsInput ??
-      (cmd.kind !== CommandKind.BUILT_IN ||
-        cmd.completion != null ||
-        cmd.argumentHint != null ||
-        (cmd.subCommands != null && cmd.subCommands.length > 0));
-    return {
-      name: cmd.name,
-      description: cmd.description,
-      input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
-      _meta: {
-        argumentHint: cmd.argumentHint,
-        source: cmd.source,
-        sourceLabel: cmd.sourceLabel,
-        supportedModes: getEffectiveSupportedModes(cmd),
-        subcommands: getCommandSubcommandNames(cmd),
-        modelInvocable: cmd.modelInvocable === true,
-        // Carry aliases so a channel consumer (which only sees the wire snapshot,
-        // not the command registry) can recognize an aliased command and avoid
-        // tagging it. _meta is ACP's extension point; omitted when there are none
-        // so command entries without aliases stay byte-identical on the wire.
-        ...(cmd.altNames && cmd.altNames.length > 0
-          ? { altNames: cmd.altNames }
-          : {}),
-      },
-    };
+  const visibleSlashCommands = slashCommands.filter((cmd) => {
+    if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
+    return !disabledSkillNames.has(cmd.skillDetail.name.toLowerCase());
   });
+
+  const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
+    (cmd) => {
+      const acceptsInput =
+        cmd.acceptsInput ??
+        (cmd.kind !== CommandKind.BUILT_IN ||
+          cmd.completion != null ||
+          cmd.argumentHint != null ||
+          (cmd.subCommands != null && cmd.subCommands.length > 0));
+      return {
+        name: cmd.name,
+        description: cmd.description,
+        input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
+        _meta: {
+          argumentHint: cmd.argumentHint,
+          source: cmd.source,
+          sourceLabel: cmd.sourceLabel,
+          supportedModes: getEffectiveSupportedModes(cmd),
+          subcommands: getCommandSubcommandNames(cmd),
+          modelInvocable: cmd.modelInvocable === true,
+          // Carry aliases so a channel consumer (which only sees the wire snapshot,
+          // not the command registry) can recognize an aliased command and avoid
+          // tagging it. _meta is ACP's extension point; omitted when there are none
+          // so command entries without aliases stay byte-identical on the wire.
+          ...(cmd.altNames && cmd.altNames.length > 0
+            ? { altNames: cmd.altNames }
+            : {}),
+        },
+      };
+    },
+  );
 
   let availableSkills: string[] | undefined;
   const skillDetailsByName = new Map<
@@ -748,7 +756,9 @@ export async function buildAvailableCommandsSnapshot(
   try {
     const skillManager = config.getSkillManager();
     if (skillManager) {
-      const skills = await skillManager.listSkills();
+      const skills = (await skillManager.listSkills()).filter(
+        (skill) => !disabledSkillNames.has(skill.name.toLowerCase()),
+      );
       availableSkills = skills.map((skill) => skill.name);
       for (const skill of skills) {
         skillDetailsByName.set(skill.name, {
@@ -765,8 +775,11 @@ export async function buildAvailableCommandsSnapshot(
     debugLogger.error('Error loading available skills:', error);
   }
 
-  for (const command of slashCommands) {
+  for (const command of visibleSlashCommands) {
     if (command.kind !== CommandKind.SKILL || !command.skillDetail) {
+      continue;
+    }
+    if (disabledSkillNames.has(command.skillDetail.name.toLowerCase())) {
       continue;
     }
     const existing = skillDetailsByName.get(command.skillDetail.name);
