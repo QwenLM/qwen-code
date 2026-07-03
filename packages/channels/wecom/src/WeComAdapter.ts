@@ -8,7 +8,7 @@ import {
 import { randomUUID } from 'node:crypto';
 import { basename, join, resolve, win32, posix } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { Buffer } from 'node:buffer';
+import { Buffer } from 'node:buffer';
 import { WSClient } from '@wecom/aibot-node-sdk';
 import { ChannelBase, sanitizeLogText } from '@qwen-code/channel-base';
 import type {
@@ -76,6 +76,7 @@ const MESSAGE_EVENTS = [
 
 const DEDUP_TTL_MS = 5 * 60 * 1000;
 const MAX_OUTBOUND_MEDIA_BYTES = 20 * 1024 * 1024;
+const MARKDOWN_CHUNK_BYTES = 3800;
 
 export class WeComChannel extends ChannelBase {
   private readonly wecom: WeComConfig;
@@ -142,7 +143,8 @@ export class WeComChannel extends ChannelBase {
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
-    if (!this.client) {
+    const client = this.client;
+    if (!client) {
       process.stderr.write(
         `[WeCom:${this.name}] No active SDK client, cannot send.\n`,
       );
@@ -150,10 +152,10 @@ export class WeComChannel extends ChannelBase {
     }
 
     const { cleanedText, media } = parseOutboundMediaMarkers(text);
-    if (cleanedText) {
-      await this.client.sendMessage(chatId, {
+    for (const chunk of splitMarkdownChunks(cleanedText)) {
+      await client.sendMessage(chatId, {
         msgtype: 'markdown',
-        markdown: { content: cleanedText },
+        markdown: { content: chunk },
       });
     }
 
@@ -164,16 +166,19 @@ export class WeComChannel extends ChannelBase {
         );
         continue;
       }
-      const file = readOutboundMedia(item.path);
-      const upload = await this.client.uploadMedia(file.data, {
+      const file = readOutboundMedia(item.path, this.config.cwd);
+      const upload = await client.uploadMedia(file.data, {
         type: item.type,
         filename: file.fileName,
       });
       const mediaId = extractMediaId(upload);
       if (!mediaId) {
-        throw new Error('WeCom media upload failed: missing media_id');
+        process.stderr.write(
+          `[WeCom:${this.name}] upload returned no media_id, skipping.\n`,
+        );
+        continue;
       }
-      await this.client.sendMediaMessage(chatId, item.type, mediaId);
+      await client.sendMediaMessage(chatId, item.type, mediaId);
     }
   }
 
@@ -472,11 +477,48 @@ function isWeComMediaType(value: string | undefined): value is WeComMediaType {
   );
 }
 
-function readOutboundMedia(rawPath: string): {
+function splitMarkdownChunks(text: string): string[] {
+  if (!text) return [];
+
+  const chunks: string[] = [];
+  let current = '';
+  for (const line of text.split('\n')) {
+    const candidate = current ? `${current}\n${line}` : line;
+    if (Buffer.byteLength(candidate, 'utf8') <= MARKDOWN_CHUNK_BYTES) {
+      current = candidate;
+      continue;
+    }
+
+    if (current) {
+      chunks.push(current);
+      current = '';
+    }
+
+    let slice = '';
+    for (const char of line) {
+      const next = slice + char;
+      if (Buffer.byteLength(next, 'utf8') > MARKDOWN_CHUNK_BYTES) {
+        if (slice) chunks.push(slice);
+        slice = char;
+      } else {
+        slice = next;
+      }
+    }
+    current = slice;
+  }
+
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+function readOutboundMedia(
+  rawPath: string,
+  cwd: string,
+): {
   data: Buffer;
   fileName: string;
 } {
-  const resolved = resolve(rawPath);
+  const resolved = resolve(cwd, rawPath);
   const real = realpathSync(resolved);
   const stat = statSync(real);
   if (!stat.isFile()) throw new Error(`Not a regular file: ${real}`);

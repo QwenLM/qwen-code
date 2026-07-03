@@ -370,6 +370,102 @@ describe('WeComChannel', () => {
     );
   });
 
+  it('splits long markdown responses before sending', async () => {
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    await channel.sendMessage('chat-1', 'a'.repeat(3900));
+
+    expect(client.sendMessage).toHaveBeenCalledTimes(2);
+    const first = client.sendMessage.mock.calls[0]?.[1] as {
+      markdown: { content: string };
+    };
+    const second = client.sendMessage.mock.calls[1]?.[1] as {
+      markdown: { content: string };
+    };
+    expect(Buffer.byteLength(first.markdown.content, 'utf8')).toBeLessThan(
+      4096,
+    );
+    expect(Buffer.byteLength(second.markdown.content, 'utf8')).toBeLessThan(
+      4096,
+    );
+    expect(first.markdown.content + second.markdown.content).toBe(
+      'a'.repeat(3900),
+    );
+  });
+
+  it('resolves relative outbound image paths from channel cwd', async () => {
+    const parent = join(tmpdir(), 'channel-files');
+    mkdirSync(parent, { recursive: true });
+    const dir = mkdtempSync(join(parent, 'wecom-test-'));
+    writeFileSync(join(dir, 'out.png'), Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ cwd: dir }),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    await channel.sendMessage('chat-1', '[IMAGE: out.png]');
+
+    expect(client.uploadMedia).toHaveBeenCalledWith(expect.any(Buffer), {
+      type: 'image',
+      filename: 'out.png',
+    });
+    expect(client.sendMediaMessage).toHaveBeenCalledWith(
+      'chat-1',
+      'image',
+      'media-1',
+    );
+  });
+
+  it('continues sending later media when one upload returns no media id', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const parent = join(tmpdir(), 'channel-files');
+    mkdirSync(parent, { recursive: true });
+    const dir = mkdtempSync(join(parent, 'wecom-test-'));
+    writeFileSync(
+      join(dir, 'first.png'),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    );
+    writeFileSync(
+      join(dir, 'second.png'),
+      Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+    );
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ cwd: dir }),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+    client.uploadMedia = vi
+      .fn()
+      .mockResolvedValueOnce({})
+      .mockResolvedValueOnce({ media_id: 'media-2' });
+
+    await channel.sendMessage(
+      'chat-1',
+      '[IMAGE: first.png]\n[IMAGE: second.png]',
+    );
+
+    expect(client.uploadMedia).toHaveBeenCalledTimes(2);
+    expect(client.sendMediaMessage).toHaveBeenCalledTimes(1);
+    expect(client.sendMediaMessage).toHaveBeenCalledWith(
+      'chat-1',
+      'image',
+      'media-2',
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('upload returned no media_id'),
+    );
+    stderr.mockRestore();
+  });
+
   it('does not upload arbitrary files from non-image media markers', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
