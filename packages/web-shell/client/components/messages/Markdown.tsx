@@ -90,10 +90,13 @@ const SUPPORTED_LANGUAGES = new Set([
   'diff',
 ]);
 
-// Common fence aliases → Shiki's canonical language id. Without this, blocks
-// tagged ```ts / ```js / ```py fall through to the unhighlighted "text" path
-// even though Shiki supports them under their full names.
+// Common fence aliases → Shiki's canonical language id. This keeps shorthand
+// tags like ```ts and punctuation tags like ```c++ highlighted under the
+// language ids Shiki actually supports.
 const LANGUAGE_ALIASES: Record<string, string> = {
+  'c++': 'cpp',
+  'c#': 'csharp',
+  'f#': 'fsharp',
   ts: 'typescript',
   js: 'javascript',
   py: 'python',

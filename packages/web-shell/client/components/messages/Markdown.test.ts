@@ -265,6 +265,9 @@ describe('resolveFenceLanguage', () => {
     expect(resolveFenceLanguage('ts').resolvedLang).toBe('typescript');
     expect(resolveFenceLanguage('js').resolvedLang).toBe('javascript');
     expect(resolveFenceLanguage('py').resolvedLang).toBe('python');
+    expect(resolveFenceLanguage('c++').resolvedLang).toBe('cpp');
+    expect(resolveFenceLanguage('c#').resolvedLang).toBe('csharp');
+    expect(resolveFenceLanguage('f#').resolvedLang).toBe('fsharp');
     expect(resolveFenceLanguage('sh').resolvedLang).toBe('bash');
     expect(resolveFenceLanguage('yml').resolvedLang).toBe('yaml');
     expect(resolveFenceLanguage('golang').resolvedLang).toBe('go');
@@ -462,6 +465,41 @@ describe('Markdown custom code block rendering', () => {
     );
     expect(container.querySelector('pre code')?.textContent).toContain(
       'const x = 1;',
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('passes punctuation language aliases to host renderers', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() => undefined);
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content: '```c++\nstd::cout << "hello";\n```',
+            source: 'assistant',
+          }),
+        ),
+      );
+    });
+
+    expect(renderCodeBlock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        language: 'c++',
+        resolvedLanguage: 'cpp',
+      }),
+    );
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      'std::cout << "hello";',
     );
 
     await act(async () => {
