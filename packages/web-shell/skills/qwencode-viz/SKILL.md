@@ -34,7 +34,7 @@ Emit one fenced code block whose language tag is exactly `echarts-fulldata`.
 The block body must be **one valid JSON object** that can be parsed directly with
 `JSON.parse`. That object is the Apache ECharts option.
 
-To support chart/table toggles, the option must be dataset-backed:
+To support chart/data view toggles, the option must be dataset-backed:
 
 - Put the complete tabular data in `dataset.source`.
 - Prefer `dataset.dimensions` to declare stable column order.

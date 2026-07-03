@@ -37,3 +37,16 @@ export type {
   WebShellSkillInfo,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
+export {
+  ECHARTS_FULLDATA_LANGUAGE,
+  EchartsFullDataBlock,
+  createEchartsFullDataRenderer,
+} from './components/messages/EchartsFullDataBlock';
+export type {
+  EchartsFullDataBlockProps,
+  EchartsFullDataOption,
+  EchartsFullDataRendererOptions,
+  EchartsInstance,
+  EchartsRuntime,
+  EchartsRuntimeLoader,
+} from './components/messages/EchartsFullDataBlock';

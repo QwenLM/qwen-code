@@ -106,8 +106,23 @@ export function App() {
 ## 可选图表 Skill
 
 `WebShell` 支持宿主通过 `customization.markdown.renderCodeBlock` 接管特定
-fenced code block 的渲染。图表类场景可以注册 `echarts-fulldata` renderer，并
-按需安装本包提供的可选 skill 模板：
+fenced code block 的渲染。图表类场景可以注册内置的
+`echarts-fulldata` renderer，并按需安装本包提供的可选 skill 模板：
+
+```tsx
+import { createEchartsFullDataRenderer } from '@qwen-code/web-shell';
+
+<WebShellWithProviders
+  markdown={{
+    renderCodeBlock: createEchartsFullDataRenderer({
+      loadEcharts: () => window.echarts,
+    }),
+  }}
+/>;
+```
+
+renderer 会把 `echarts-fulldata` code block 替换为图表卡片，并内置图表/数据
+icon 切换；ECharts runtime 由宿主通过 `loadEcharts` 提供。
 
 ```text
 packages/web-shell/skills/qwencode-viz/SKILL.md
@@ -118,10 +133,9 @@ packages/web-shell/skills/qwencode-viz/SKILL.md
 skills 来源中。
 
 `echarts-fulldata` 的 block body 是纯 JSON ECharts option，并通过
-`dataset.source` 承载完整表格数据：宿主可直接用 option 渲染 ECharts，也可从
-`dataset.source` / `dataset.dimensions` 提供表格视图或图表/表格切换。宿主应使用
-`JSON.parse` 解析，不能用 `eval`、`new Function` 或 script injection 执行模型
-生成内容。
+`dataset.source` 承载完整表格数据：renderer 直接用 option 渲染 ECharts，并从
+`dataset.source` / `dataset.dimensions` 提供数据视图。宿主应使用 `JSON.parse`
+解析，不能用 `eval`、`new Function` 或 script injection 执行模型生成内容。
 
 ## 架构说明
 
