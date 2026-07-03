@@ -889,6 +889,77 @@ describe('gateway reconnect timer', () => {
   });
 });
 
+describe('connect() sanitized-error on final retry', () => {
+  function makeChannel(): QQChannelInstance {
+    return new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('sanitizes error message containing newlines and control chars in final retry throw', async () => {
+    vi.useFakeTimers();
+
+    // fetchToken succeeds each attempt
+    mockFetchAccessToken.mockResolvedValue({
+      accessToken: 'tok',
+      expiresIn: 7200,
+    });
+    // fetchGatewayUrl always fails with dangerous text — exercised 3× by
+    // the 3-attempt connect loop
+    mockFetchGatewayUrl.mockRejectedValue(
+      new Error('wss://evil\nhost\x00leaked\tsecret'),
+    );
+    // Suppress noisy stderr writes from the retry log lines
+    const stderrSpy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const ch = makeChannel();
+    const connectPromise = (
+      ch as unknown as { connect: () => Promise<void> }
+    ).connect.call(ch);
+
+    // Advance past the two retry sleeps in the connect loop
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(2000);
+
+    await expect(connectPromise).rejects.toThrow();
+
+    try {
+      await connectPromise;
+    } catch (e) {
+      const msg = (e as Error).message;
+      // The message must have been sanitized: no raw newlines, no NUL, no tab
+      expect(msg).not.toContain('\n');
+      expect(msg).not.toContain('\0');
+      expect(msg).not.toContain('\t');
+      // The original dangerous fragments must not appear verbatim
+      expect(msg).not.toContain('evil');
+      expect(msg).not.toContain('leaked');
+      expect(msg).not.toContain('secret');
+    }
+
+    stderrSpy.mockRestore();
+  });
+});
+
 describe('restoreQQState validation filters', () => {
   function makeChannel(): QQChannelInstance {
     return new QQChannel(
@@ -994,6 +1065,38 @@ describe('restoreQQState validation filters', () => {
     expect(msgSeqMap.has('c')).toBe(false);
     expect(msgSeqMap.has('d')).toBe(false);
     expect(msgSeqMap.has('e')).toBe(false);
+  });
+
+  it('filters non-safe-integer msgSeqMap values (fractional, overflow, Infinity)', () => {
+    vi.mocked(existsSync).mockReturnValue(true);
+    // Number.MAX_SAFE_INTEGER + 1 = 9007199254740992 — loses precision
+    // 1e999 evaluates to Infinity in JavaScript — not a safe integer
+    vi.mocked(readFileSync).mockReturnValue(
+      JSON.stringify({
+        msgSeqMap: [
+          ['a', 1.5],
+          ['b', Number.MAX_SAFE_INTEGER + 1],
+          ['c', Infinity],
+          ['d', 1e999],
+          ['e', 42],
+          ['f', 0],
+        ],
+      }),
+    );
+
+    const ch = makeChannel();
+    (ch as unknown as { restoreQQState: () => boolean }).restoreQQState();
+
+    const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
+      .msgSeqMap;
+    expect(msgSeqMap.size).toBe(2);
+    expect(msgSeqMap.get('e')).toBe(42);
+    expect(msgSeqMap.get('f')).toBe(0);
+    // Edge cases must ALL be filtered by Number.isSafeInteger
+    expect(msgSeqMap.has('a')).toBe(false);
+    expect(msgSeqMap.has('b')).toBe(false);
+    expect(msgSeqMap.has('c')).toBe(false);
+    expect(msgSeqMap.has('d')).toBe(false);
   });
 
   it('returns false and does not throw on corrupt JSON', () => {
