@@ -1899,7 +1899,7 @@ describe('AgentTool', () => {
       );
     });
 
-    it('should not inject hook_context when additionalContext is undefined', async () => {
+    it('should inject hook_context as empty string when additionalContext is undefined', async () => {
       const mockStartOutput = {
         getAdditionalContext: vi.fn().mockReturnValue(undefined),
       };
@@ -1918,9 +1918,12 @@ describe('AgentTool', () => {
       ).createInvocation(params);
       await invocation.execute();
 
+      // hook_context is always set (to empty string) so ${hook_context} in
+      // systemPrompt does not throw even when hook returns no additional context.
+      expect(mockContextState.set).toHaveBeenCalledWith('hook_context', '');
       expect(mockContextState.set).not.toHaveBeenCalledWith(
         'hook_context',
-        expect.anything(),
+        expect.stringMatching(/.+/),
       );
     });
 
@@ -1947,7 +1950,7 @@ describe('AgentTool', () => {
       expect(display.status).toBe('completed');
     });
 
-    it('should skip hooks when hookSystem is not available', async () => {
+    it('should set hook_context to empty string even when hookSystem is not available', async () => {
       (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
         .fn()
         .mockReturnValue(undefined);
@@ -1964,6 +1967,8 @@ describe('AgentTool', () => {
       const result = await invocation.execute();
 
       expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
+      // hook_context is always set so ${hook_context} in systemPrompt does not throw.
+      expect(mockContextState.set).toHaveBeenCalledWith('hook_context', '');
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('Task completed successfully');
     });

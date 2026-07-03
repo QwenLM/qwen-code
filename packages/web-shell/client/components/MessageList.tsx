@@ -1650,8 +1650,10 @@ function joinClassNames(
   return result || undefined;
 }
 
-export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
-  function MessageList(
+const EMPTY_SESSION_TIMELINE_ENTRIES: SessionTimelineEntry[] = [];
+
+export const MessageList = memo(
+  forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
       pendingApproval,
@@ -1686,19 +1688,25 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       () => groupParallelAgents(mergedMessages),
       [mergedMessages],
     );
-    const sessionTimelineSignature =
-      getSessionTimelineSignature(mergedMessages);
+    const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
+      useState(false);
     const sessionTimelineCache = useRef<{
       signature: string;
       entries: SessionTimelineEntry[];
     } | null>(null);
-    if (sessionTimelineCache.current?.signature !== sessionTimelineSignature) {
-      sessionTimelineCache.current = {
-        signature: sessionTimelineSignature,
-        entries: getSessionTimelineEntries(mergedMessages),
-      };
-    }
-    const sessionTimelineEntries = sessionTimelineCache.current.entries;
+    // Signature + entries are O(transcript text); only pay for them while the
+    // rail can actually show (container >= 1160px — never on mobile).
+    const sessionTimelineEntries = useMemo(() => {
+      if (!isSessionTimelineVisible) return EMPTY_SESSION_TIMELINE_ENTRIES;
+      const signature = getSessionTimelineSignature(mergedMessages);
+      if (sessionTimelineCache.current?.signature !== signature) {
+        sessionTimelineCache.current = {
+          signature,
+          entries: getSessionTimelineEntries(mergedMessages),
+        };
+      }
+      return sessionTimelineCache.current.entries;
+    }, [isSessionTimelineVisible, mergedMessages]);
     const sessionTimelineEntryIndexById = useMemo(
       () =>
         new Map(
@@ -1824,13 +1832,11 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       [visibleItems],
     );
 
-    const [isSessionTimelineVisible, setIsSessionTimelineVisible] =
-      useState(false);
     const hasEnoughSessionTimelineEntries =
       sessionTimelineEntries.length >= SESSION_TIMELINE_MIN_VISIBLE_ENTRIES;
 
     useLayoutEffect(() => {
-      if (hideSessionTimeline || !hasEnoughSessionTimelineEntries) {
+      if (hideSessionTimeline) {
         setIsSessionTimelineVisible((prev) => (prev ? false : prev));
         return;
       }
@@ -1851,7 +1857,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
       const observer = new ResizeObserver(updateVisibility);
       observer.observe(el);
       return () => observer.disconnect();
-    }, [hasEnoughSessionTimelineEntries, hideSessionTimeline]);
+    }, [hideSessionTimeline]);
 
     // ── Scroll-follow state ──────────────────────────────────────────────
     //
@@ -2657,7 +2663,7 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
           entries={sessionTimelineEntries}
           currentTurnId={currentTimelineTurnId}
           currentRange={sessionTimelineRange}
-          hidden={!isSessionTimelineVisible}
+          hidden={!isSessionTimelineVisible || !hasEnoughSessionTimelineEntries}
           onSelect={scrollToMessage}
         />
         {useVirtualScroll ? (
@@ -2706,5 +2712,5 @@ export const MessageList = forwardRef<MessageListHandle, MessageListProps>(
         )}
       </div>
     );
-  },
+  }),
 );
