@@ -173,6 +173,10 @@ export type {
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
 export type {
+  RecordArtifactTool,
+  RecordArtifactParams,
+} from './tools/record-artifact.js';
+export type {
   ArtifactPublisher,
   PublishArtifactInput,
   PublishedArtifact,
@@ -542,11 +546,13 @@ export {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  firePostToolBatchHook,
   type NotificationHookResult,
   type PermissionRequestHookResult,
   type PreToolUseHookResult,
   type PostToolUseHookResult,
   type PostToolUseFailureHookResult,
+  type PostToolBatchHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
 

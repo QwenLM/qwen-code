@@ -169,4 +169,14 @@ describe('Workflow anti-recursion guard', () => {
     );
     expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.WORKFLOW)).toBe(true);
   });
+
+  it('artifact tools are in EXCLUDED_TOOLS_FOR_SUBAGENTS', async () => {
+    const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.ARTIFACT)).toBe(true);
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.RECORD_ARTIFACT)).toBe(
+      true,
+    );
+  });
 });

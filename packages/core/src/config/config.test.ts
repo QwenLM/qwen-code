@@ -1924,6 +1924,49 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
     });
 
+    it('does not register artifact tools when artifacts are disabled', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).not.toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers both artifact tools when artifacts are enabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        artifactEnabled: true,
+        interactive: true,
+        sdkMode: false,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers only record_artifact for daemon artifact metadata', async () => {
+      const config = new Config({
+        ...baseParams,
+        artifactEnabled: true,
+        interactive: false,
+        sdkMode: false,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
     describe('isArtifactEnabled', () => {
       const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
       const originalDisable = process.env['QWEN_CODE_DISABLE_ARTIFACT'];
@@ -1987,7 +2030,7 @@ describe('Server Config (config.ts)', () => {
         expect(config.isArtifactEnabled()).toBe(false);
       });
 
-      it('stays disabled outside interactive mode even when force-enabled', () => {
+      it('keeps the Artifact tool disabled for daemon CLI env enablement', () => {
         process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
 
         const config = new Config({
@@ -1997,6 +2040,19 @@ describe('Server Config (config.ts)', () => {
         });
 
         expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
+      });
+
+      it('lets daemon sessions record metadata from settings without publishing', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: true,
+          interactive: false,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
       });
 
       it('lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use', () => {
