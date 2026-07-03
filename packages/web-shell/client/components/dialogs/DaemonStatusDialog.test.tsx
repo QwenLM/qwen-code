@@ -164,13 +164,13 @@ const { DaemonStatusDialog } = await import('./DaemonStatusDialog');
 let container: HTMLDivElement | null = null;
 let root: Root | null = null;
 
-function mount() {
+function mount(language: 'en' | 'zh-CN' = 'en') {
   container = document.createElement('div');
   document.body.appendChild(container);
   root = createRoot(container);
   act(() => {
     root!.render(
-      <I18nProvider language="en">
+      <I18nProvider language={language}>
         <DaemonStatusDialog />
       </I18nProvider>,
     );
@@ -225,6 +225,31 @@ describe('DaemonStatusDialog', () => {
     // loaded full diagnostic is failing.
     expect(topBadgeText()).toBe('Error');
     expect(text).toContain('preflight failed: node version too old');
+  });
+
+  it('translates workspace section status badges, including "unavailable"', () => {
+    fullState = {
+      report: {
+        ...fullReport,
+        full: {
+          ...fullReport.full,
+          workspace: {
+            preflight: {
+              status: 'unavailable',
+              durationMs: 5,
+              error: { kind: 'timeout', message: 'timed out' },
+            },
+          },
+        },
+      },
+      loading: false,
+      error: undefined,
+    };
+    mount('zh-CN');
+    const text = container!.textContent ?? '';
+    // The section badge is translated ("不可用"), not the raw wire value.
+    expect(text).toContain('不可用');
+    expect(text).not.toContain('unavailable');
   });
 
   it('fetches both summary and full detail and renders diagnostics with no toggle', () => {

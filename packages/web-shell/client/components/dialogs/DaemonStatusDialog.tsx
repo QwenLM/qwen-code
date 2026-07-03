@@ -79,12 +79,13 @@ function WorkspaceSectionRow({
   name: string;
   section: DaemonStatusReportSection;
 }) {
+  const { t } = useI18n();
   const summaryEntries = Object.entries(section.summary ?? {});
   return (
     <div className={styles.workspaceRow}>
       <div className={styles.workspaceRowHead}>
         <span className={`${styles.badge} ${levelClass(section.status)}`}>
-          {section.status}
+          {t(`daemon.level.${section.status}`)}
         </span>
         <span className={styles.workspaceName}>{name}</span>
         <span className={styles.workspaceDuration}>
