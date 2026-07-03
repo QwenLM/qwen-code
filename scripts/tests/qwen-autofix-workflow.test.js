@@ -44,6 +44,10 @@ const triageAndAddressStep =
   workflow.match(
     /- name: 'Triage and address'[\s\S]*?(?=\n[ ]{6}- name: 'Verification gate')/,
   )?.[0] ?? '';
+const prepareBranchAndFeedbackStep =
+  workflow.match(
+    /- name: 'Prepare branch and feedback'[\s\S]*?(?=\n[ ]{6}- name: 'Triage and address')/,
+  )?.[0] ?? '';
 const resetAutofixWorkspaceSteps =
   workflow.match(
     /- name: 'Reset autofix workspace'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
@@ -256,6 +260,26 @@ describe('qwen-autofix workflow', () => {
   it('surfaces assessment failures instead of turning them into green no-ops', () => {
     expect(assessCandidatesStep.length).toBeGreaterThan(0);
     expect(assessCandidatesStep).not.toContain('continue-on-error: true');
+  });
+
+  it('clears tracked build output before switching to a review PR branch', () => {
+    expect(prepareBranchAndFeedbackStep.length).toBeGreaterThan(0);
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'Restoring tracked build output before switching to the PR branch.',
+    );
+    expect(prepareBranchAndFeedbackStep).toContain(
+      'git restore --source=HEAD --staged --worktree .',
+    );
+    expect(
+      prepareBranchAndFeedbackStep.indexOf(
+        'git restore --source=HEAD --staged --worktree .',
+      ),
+    ).toBeLessThan(
+      prepareBranchAndFeedbackStep.indexOf(
+        'git checkout -B "${BRANCH}" "origin/${BRANCH}"',
+      ),
+    );
+    expect(prepareBranchAndFeedbackStep).not.toContain('git clean');
   });
 
   it('clears persistent autofix workdirs before using self-hosted runners', () => {
