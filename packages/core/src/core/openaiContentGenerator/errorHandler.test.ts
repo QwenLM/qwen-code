@@ -101,6 +101,48 @@ describe('EnhancedErrorHandler', () => {
       );
     });
 
+    it('prefers top-level request ids before parsed provider details', () => {
+      const apiError = Object.assign(new Error('API failure'), {
+        requestID: 'req-top-level',
+        request_id: 'req-snake-case',
+        response_id: 'resp-id',
+        status: 500,
+      });
+
+      expect(() => {
+        errorHandler.handle(apiError, mockContext, mockRequest);
+      }).toThrow(apiError);
+
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        expect.any(String),
+        expect.objectContaining({
+          requestId: 'req-top-level',
+          statusCode: 500,
+        }),
+      );
+    });
+
+    it('skips empty request ids and falls back to later request id fields', () => {
+      const apiError = Object.assign(new Error('API failure'), {
+        requestID: '',
+        request_id: '',
+        response_id: 'resp-id',
+      });
+
+      expect(() => {
+        errorHandler.handle(apiError, mockContext, mockRequest);
+      }).toThrow(apiError);
+
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        expect.any(String),
+        expect.objectContaining({
+          requestId: 'resp-id',
+        }),
+      );
+    });
+
     it('should throw enhanced error message for timeout errors', () => {
       const timeoutError = new Error('Request timeout');
 

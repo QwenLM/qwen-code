@@ -121,13 +121,12 @@ export class EnhancedErrorHandler implements ErrorHandler {
   ): ApiErrorDiagnostics {
     const details = getRateLimitErrorDetails(error);
     const requestId = this.getRequestId(error) ?? details.requestId;
+    const statusCode = getErrorStatus(error);
     return {
       model: context.model,
       durationMs: Date.now() - context.startTime,
       errorType: getErrorType(error),
-      ...(getErrorStatus(error) !== undefined
-        ? { statusCode: getErrorStatus(error) }
-        : {}),
+      ...(statusCode !== undefined ? { statusCode } : {}),
       ...(details.providerCode !== undefined
         ? { providerCode: details.providerCode }
         : {}),

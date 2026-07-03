@@ -43,7 +43,7 @@ describe('debugLogger', () => {
 
   const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
 
-  beforeEach(() => {
+  beforeEach(async () => {
     process.env['QWEN_DEBUG_LOG_FILE'] = '1';
     Storage.setRuntimeBaseDir(null);
     vi.clearAllMocks();
@@ -51,6 +51,9 @@ describe('debugLogger', () => {
     vi.setSystemTime(new Date('2026-01-24T10:30:00.000Z'));
     resetDebugLoggingState();
     setDebugLogSession(mockSession);
+    await vi.runAllTimersAsync();
+    resetDebugLoggingState();
+    vi.clearAllMocks();
     vi.mocked(getTraceContext).mockReturnValue(null);
   });
 
@@ -324,6 +327,13 @@ describe('debugLogger', () => {
       await vi.runAllTimersAsync();
 
       expect(fs.symlink).not.toHaveBeenCalled();
+      expect(fs.appendFile).toHaveBeenCalledWith(
+        Storage.getDebugLogPath('log-to-span-sink-test'),
+        expect.stringContaining(
+          '[DEBUG] [DEBUG_LOG] Skipping latest debug log alias for non-UUID session id: log-to-span-sink-test',
+        ),
+        'utf8',
+      );
     });
 
     it('does not create symlink when session is cleared', async () => {
