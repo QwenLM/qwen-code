@@ -70,7 +70,9 @@ async function main() {
   const latest = await fetchLatestGhcrSemver();
   const fallbackImage = `ghcr.io/${GHCR_REPOSITORY}:${latest}`;
   if (fallbackImage === requestedImage) {
-    throw new Error(`Requested sandbox image failed to pull: ${requestedImage}`);
+    throw new Error(
+      `Requested sandbox image failed to pull: ${requestedImage}`,
+    );
   }
 
   console.warn(
