@@ -1481,6 +1481,21 @@ export class GeminiChat {
     this.pendingPartialAssistantRecord = null;
   }
 
+  private popPendingPartialAssistantTurn(): void {
+    const idx = this.pendingPartialAssistantTurnIndex;
+    if (idx === null) return;
+    if (this.history.length > idx && this.history[idx]?.role === 'model') {
+      this.history.splice(idx, 1);
+    } else {
+      debugLogger.warn(
+        `[PARTIAL_POP] Splice skipped: idx=${idx}, ` +
+          `historyLength=${this.history.length}, ` +
+          `roleAtIdx=${this.history[idx]?.role ?? 'undefined'}`,
+      );
+    }
+    this.clearPendingPartialState();
+  }
+
   /**
    * Creates a new GeminiChat instance.
    *
@@ -2135,54 +2150,6 @@ export class GeminiChat {
           } catch (error) {
             lastError = error;
 
-            // If `processStreamResponse` persisted a partial assistant turn
-            // (mid-stream error after a `functionCall` was already
-            // yielded), every retry-and-continue path below must drop
-            // that turn first; otherwise the retry's response lands as
-            // a second consecutive model turn with an orphan tool_use
-            // (the wedge — see the canonical note above
-            // `ORPHAN_TOOL_USE_REPAIR_REASON`). Paths that `break`
-            // (unretryable) keep the partial.
-            const popPartialIfPushed = () => {
-              const idx = self.pendingPartialAssistantTurnIndex;
-              if (idx === null) return;
-              if (
-                self.history.length > idx &&
-                self.history[idx]?.role === 'model'
-              ) {
-                self.history.splice(idx, 1);
-              } else {
-                // Marker was set but the entry it pointed at is gone or
-                // is no longer a `model` turn. Today this can't happen:
-                // every history-mutation path (clearHistory, addHistory,
-                // setHistory, truncateHistory, stripThoughtsFromHistory,
-                // stripOrphanedUserEntriesFromHistory) calls
-                // clearPendingPartialState() in lockstep, so the marker
-                // is null whenever the index basis is invalidated.
-                // Logging the mismatch makes the invariant observable —
-                // without this, a future caller that mutates history
-                // without resetting the marker would silently leave a
-                // stale partial in `this.history` (popPartialIfPushed
-                // skipping the splice) AND the field-level invariant
-                // that "marker non-null ⇒ a real partial sits at idx"
-                // would be quietly violated. With the warn, anyone
-                // investigating a stale-partial wedge sees a log line
-                // pointing straight at the offending caller.
-                debugLogger.warn(
-                  `[PARTIAL_POP] Splice skipped: idx=${idx}, ` +
-                    `historyLength=${self.history.length}, ` +
-                    `roleAtIdx=${self.history[idx]?.role ?? 'undefined'}`,
-                );
-              }
-              // Drop both markers in lockstep — the deferred chat-
-              // recording record must be discarded alongside the
-              // in-memory splice so the JSONL transcript also drops the
-              // failed attempt. See the field-level comment on
-              // `pendingPartialAssistantRecord` for the failure mode
-              // this prevents.
-              self.clearPendingPartialState();
-            };
-
             // Handle rate-limit / throttling errors returned as stream content.
             // These arrive as StreamContentError with finish_reason="error_finish"
             // from the pipeline, containing the throttling message in the content.
@@ -2210,7 +2177,7 @@ export class GeminiChat {
                 // Discard any partial assistant turn from the failed attempt
                 // before scheduling the retry, so a stale partial does not leak
                 // into history or the JSONL transcript.
-                popPartialIfPushed();
+                self.popPendingPartialAssistantTurn();
                 rateLimitRetryCount++;
                 const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
                   ...RATE_LIMIT_RETRY_OPTIONS,
@@ -2270,7 +2237,7 @@ export class GeminiChat {
               transportStreamRetryCount <
                 TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
             ) {
-              popPartialIfPushed();
+              self.popPendingPartialAssistantTurn();
               transportStreamRetryCount++;
               const delayMs =
                 TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
@@ -2340,7 +2307,7 @@ export class GeminiChat {
                     // cleared the marker. Kept for uniformity with the
                     // other retry branches in case a future in-place
                     // tryCompress stops resetting it.
-                    popPartialIfPushed();
+                    self.popPendingPartialAssistantTurn();
                     requestContents =
                       self.getRequestHistory(currentUserContent);
                     debugLogger.info(
@@ -2412,7 +2379,7 @@ export class GeminiChat {
               isTransientStreamError &&
               invalidStreamRetryCount < INVALID_STREAM_RETRY_CONFIG.maxRetries
             ) {
-              popPartialIfPushed();
+              self.popPendingPartialAssistantTurn();
               invalidStreamRetryCount++;
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
@@ -2455,7 +2422,7 @@ export class GeminiChat {
             const isContentError = error instanceof InvalidStreamError;
             if (isContentError) {
               if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
-                popPartialIfPushed();
+                self.popPendingPartialAssistantTurn();
                 logContentRetry(
                   self.config,
                   new ContentRetryEvent(
@@ -2696,14 +2663,14 @@ export class GeminiChat {
           // - Fallback is only for capacity/availability errors (429/503/529/5xx),
           //   not for auth/billing/client errors.
           const fallbackModels = self.config.getModelFallbacks();
-          const lastErrorClassification = classifyRetryError(lastError, {
+          let currentErrorClassification = classifyRetryError(lastError, {
             authType: cgConfig?.authType,
             extraRetryErrorCodes,
           });
 
           if (
             fallbackModels.length > 0 &&
-            isFallbackEligible(lastErrorClassification) &&
+            isFallbackEligible(currentErrorClassification) &&
             !isUnattendedMode()
           ) {
             let fallbackSucceeded = false;
@@ -2726,8 +2693,8 @@ export class GeminiChat {
 
               debugLogger.warn(
                 `[FALLBACK] Primary model "${currentModel}" exhausted retries ` +
-                  `(reason: ${lastErrorClassification.reason}, ` +
-                  `status: ${lastErrorClassification.statusCode ?? 'unknown'}). ` +
+                  `(reason: ${currentErrorClassification.reason}, ` +
+                  `status: ${currentErrorClassification.statusCode ?? 'unknown'}). ` +
                   `Switching to fallback model "${fallbackModelId}" ` +
                   `(${fallbackIndex}/${fallbackModels.length}).`,
               );
@@ -2761,7 +2728,7 @@ export class GeminiChat {
                 info: {
                   fromModel: currentModel,
                   toModel: resolvedFallbackModel,
-                  errorCode: lastErrorClassification.statusCode,
+                  errorCode: currentErrorClassification.statusCode,
                   fallbackIndex,
                 },
               };
@@ -2770,24 +2737,17 @@ export class GeminiChat {
               self.clearPendingPartialState();
 
               // Run the fallback model with its own retry loop.
-              // Use a fresh stream-level retry budget: the fallback model's
-              // retryWithBackoff (inside makeApiCallWithFallbackGenerator)
-              // handles HTTP-level retries, and we run the stream-level rate
-              // limit + transport retry loop here for the fallback model.
               try {
-                const fallbackStream =
-                  await self.makeApiCallWithFallbackGenerator(
-                    resolvedFallbackModel,
-                    requestContents,
-                    params,
-                    prompt_id,
-                    fallbackGenerator,
-                    fallbackRetryAuthType,
-                    fallbackRetryErrorCodes,
-                  );
-
-                for await (const chunk of fallbackStream) {
-                  yield { type: StreamEventType.CHUNK, value: chunk };
+                for await (const event of self.makeFallbackStreamWithRetries(
+                  resolvedFallbackModel,
+                  requestContents,
+                  params,
+                  prompt_id,
+                  fallbackGenerator,
+                  fallbackRetryAuthType,
+                  fallbackRetryErrorCodes,
+                )) {
+                  yield event;
                 }
 
                 // Fallback succeeded
@@ -2818,6 +2778,7 @@ export class GeminiChat {
 
                 lastError = fallbackError;
                 currentModel = resolvedFallbackModel;
+                currentErrorClassification = fallbackClassification;
 
                 // Only continue to next fallback if this error is also
                 // fallback-eligible. Auth/client errors should fail immediately.
@@ -2828,6 +2789,9 @@ export class GeminiChat {
                       `Stopping fallback chain.`,
                   );
                   break;
+                }
+                if (fallbackIndex < fallbackModels.length) {
+                  self.popPendingPartialAssistantTurn();
                 }
               }
             }
@@ -2935,6 +2899,195 @@ export class GeminiChat {
     });
 
     return this.processStreamResponse(model, streamResponse);
+  }
+
+  private async *makeFallbackStreamWithRetries(
+    model: string,
+    requestContents: Content[],
+    params: SendMessageParameters,
+    prompt_id: string,
+    contentGenerator: ContentGenerator,
+    retryAuthType?: string,
+    retryErrorCodes?: readonly number[],
+  ): AsyncGenerator<StreamEvent> {
+    let lastError: unknown = new Error('Fallback request failed.');
+    let rateLimitRetryCount = 0;
+    let invalidStreamRetryCount = 0;
+    let transportStreamRetryCount = 0;
+    let suppressNextRetryEvent = false;
+
+    for (
+      let attempt = 0;
+      attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts;
+      attempt++
+    ) {
+      let streamYieldedChunk = false;
+      try {
+        if (suppressNextRetryEvent) {
+          suppressNextRetryEvent = false;
+        } else if (
+          attempt > 0 ||
+          rateLimitRetryCount > 0 ||
+          invalidStreamRetryCount > 0 ||
+          transportStreamRetryCount > 0
+        ) {
+          yield { type: StreamEventType.RETRY };
+        }
+
+        const stream = await this.makeApiCallWithFallbackGenerator(
+          model,
+          requestContents,
+          params,
+          prompt_id,
+          contentGenerator,
+          retryAuthType,
+          retryErrorCodes,
+        );
+
+        for await (const chunk of stream) {
+          streamYieldedChunk = true;
+          yield { type: StreamEventType.CHUNK, value: chunk };
+        }
+        return;
+      } catch (error) {
+        lastError = error;
+        const classification = classifyRetryError(error, {
+          authType: retryAuthType,
+          extraRetryErrorCodes: retryErrorCodes,
+        });
+
+        if (isRateLimitError(error, retryErrorCodes)) {
+          const maxRateLimitRetries = RATE_LIMIT_RETRY_OPTIONS.maxRetries;
+          const details = getRateLimitErrorDetails(error);
+          const diagnosticFields = {
+            classificationDiagnosis: classification.diagnosis,
+            errorKind: classification.kind,
+            classificationReason: classification.reason,
+            ...details,
+          };
+
+          if (rateLimitRetryCount < maxRateLimitRetries) {
+            this.popPendingPartialAssistantTurn();
+            rateLimitRetryCount++;
+            const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
+              ...RATE_LIMIT_RETRY_OPTIONS,
+              error,
+            });
+            const message = parseAndFormatApiError(
+              error instanceof Error ? error.message : String(error),
+            );
+            debugLogger.warn('Rate limit retry scheduled', {
+              retryPath: 'fallback-stream',
+              retryDecision: 'retry',
+              attempt: rateLimitRetryCount,
+              maxRetries: maxRateLimitRetries,
+              retryDelayMs: delayMs,
+              ...diagnosticFields,
+            });
+            const { promise: delayPromise, skip } = delay(
+              delayMs,
+              params.config?.abortSignal,
+            );
+            yield {
+              type: StreamEventType.RETRY,
+              retryInfo: {
+                message,
+                attempt: rateLimitRetryCount,
+                maxRetries: maxRateLimitRetries,
+                delayMs,
+                skipDelay: skip,
+              },
+            };
+            attempt--;
+            await delayPromise;
+            continue;
+          }
+
+          debugLogger.warn('Rate limit retry exhausted', {
+            retryPath: 'fallback-stream',
+            retryDecision: 'exhausted',
+            attempts: rateLimitRetryCount,
+            maxRetries: maxRateLimitRetries,
+            ...diagnosticFields,
+          });
+        }
+
+        const isRetryableStreamTransportError =
+          classification.kind === 'transport' &&
+          classification.transportCode !== undefined &&
+          RETRYABLE_STREAM_TRANSPORT_CODES.has(classification.transportCode);
+        if (
+          isRetryableStreamTransportError &&
+          !streamYieldedChunk &&
+          transportStreamRetryCount < TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
+        ) {
+          this.popPendingPartialAssistantTurn();
+          transportStreamRetryCount++;
+          const delayMs =
+            TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
+            transportStreamRetryCount;
+          debugLogger.warn('Transport stream retry scheduled', {
+            retryPath: 'fallback-stream',
+            retryDecision: 'retry',
+            attempt: transportStreamRetryCount,
+            maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
+            retryDelayMs: delayMs,
+            errorKind: classification.kind,
+            transportCode: classification.transportCode,
+          });
+          yield { type: StreamEventType.RETRY };
+          suppressNextRetryEvent = true;
+          attempt--;
+          await delay(delayMs, params.config?.abortSignal).promise;
+          continue;
+        }
+        if (isRetryableStreamTransportError) {
+          debugLogger.warn('Transport stream retry not taken', {
+            retryPath: 'fallback-stream',
+            retryDecision: streamYieldedChunk
+              ? 'skipped_after_chunk'
+              : 'exhausted',
+            attempts: transportStreamRetryCount,
+            maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
+            errorKind: classification.kind,
+            transportCode: classification.transportCode,
+          });
+        }
+
+        if (
+          error instanceof InvalidStreamError &&
+          invalidStreamRetryCount < INVALID_STREAM_RETRY_CONFIG.maxRetries
+        ) {
+          this.popPendingPartialAssistantTurn();
+          invalidStreamRetryCount++;
+          const delayMs =
+            INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
+            invalidStreamRetryCount;
+          debugLogger.warn(
+            `Invalid stream [${error.type}] ` +
+              `(retry ${invalidStreamRetryCount}/${INVALID_STREAM_RETRY_CONFIG.maxRetries}). ` +
+              `Waiting ${delayMs / 1000}s before retrying...`,
+          );
+          logContentRetry(
+            this.config,
+            new ContentRetryEvent(
+              invalidStreamRetryCount - 1,
+              error.type,
+              delayMs,
+              model,
+            ),
+          );
+          yield { type: StreamEventType.RETRY };
+          attempt--;
+          await delay(delayMs, params.config?.abortSignal).promise;
+          continue;
+        }
+
+        throw error;
+      }
+    }
+
+    throw lastError;
   }
 
   /**

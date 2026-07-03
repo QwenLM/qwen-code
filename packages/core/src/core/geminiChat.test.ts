@@ -172,6 +172,7 @@ describe('GeminiChat', async () => {
       }),
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
       getBaseLlmClient: vi.fn().mockReturnValue(undefined),
+      getModelFallbacks: vi.fn().mockReturnValue([]),
       getChatCompression: vi.fn().mockReturnValue(undefined),
       getAutoCompactThreshold: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
@@ -4689,6 +4690,125 @@ describe('GeminiChat', async () => {
         expect(history.some((h) => h.parts?.some((p) => p.functionCall))).toBe(
           false,
         );
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('retries fallback stream errors and rolls back fallback partial tool calls', async () => {
+      vi.useFakeTimers();
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'test-model',
+          maxRetries: 0,
+        });
+        vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+          'fallback-model',
+        ]);
+
+        const fallbackGenerateContentStream = vi.fn();
+        const fallbackContentGenerator = {
+          generateContent: vi.fn(),
+          generateContentStream: fallbackGenerateContentStream,
+          countTokens: vi.fn(),
+          embedContent: vi.fn(),
+          batchEmbedContents: vi.fn(),
+          useSummarizedThinking: vi.fn().mockReturnValue(false),
+        } as unknown as ContentGenerator;
+        const resolveForModel = vi.fn().mockResolvedValue({
+          contentGenerator: fallbackContentGenerator,
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'fallback-model',
+        });
+        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+          resolveForModel,
+        } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+
+        const tpmError = new StreamContentError(
+          '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+        );
+        vi.mocked(
+          mockContentGenerator.generateContentStream,
+        ).mockResolvedValueOnce(
+          (async function* () {
+            throw tpmError;
+
+            yield {} as GenerateContentResponse;
+          })(),
+        );
+        fallbackGenerateContentStream
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [
+                        {
+                          functionCall: {
+                            id: 'call_failed_fallback_attempt',
+                            name: 'read_file',
+                            args: { path: '/tmp/fallback.txt' },
+                          },
+                        },
+                      ],
+                    },
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+              throw tpmError;
+            })(),
+          )
+          .mockResolvedValueOnce(
+            (async function* () {
+              yield {
+                candidates: [
+                  {
+                    content: {
+                      parts: [{ text: 'Fallback recovered after retry' }],
+                    },
+                    finishReason: 'STOP',
+                  },
+                ],
+              } as unknown as GenerateContentResponse;
+            })(),
+          );
+
+        const stream = await chat.sendMessageStream(
+          'test-model',
+          { message: 'test' },
+          'prompt-fallback-stream-retry',
+        );
+        const events = await collectStreamWithFakeTimers(stream, 120_000);
+
+        expect(resolveForModel).toHaveBeenCalledWith('fallback-model', {
+          failClosed: true,
+        });
+        expect(fallbackGenerateContentStream).toHaveBeenCalledTimes(2);
+        expect(
+          events.some((event) => event.type === StreamEventType.MODEL_FALLBACK),
+        ).toBe(true);
+        expect(
+          events.some(
+            (event) =>
+              event.type === StreamEventType.CHUNK &&
+              event.value.candidates?.[0]?.content?.parts?.[0]?.text ===
+                'Fallback recovered after retry',
+          ),
+        ).toBe(true);
+
+        const history = chat.getHistory();
+        expect(history.length).toBe(2);
+        expect(history[0]!.role).toBe('user');
+        expect(history[1]!.role).toBe('model');
+        expect(history[1]!.parts!.find((part) => part.text)?.text).toBe(
+          'Fallback recovered after retry',
+        );
+        expect(
+          history.some((entry) => entry.parts?.some((p) => p.functionCall)),
+        ).toBe(false);
       } finally {
         vi.useRealTimers();
       }
