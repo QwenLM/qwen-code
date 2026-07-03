@@ -31,6 +31,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   LoopTickResult,
+  ToolArtifact,
   VisionBridgeResult,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -171,6 +172,7 @@ import {
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildExtensionMentionContext,
   EXTENSION_CONTEXT_BUDGET,
@@ -3978,7 +3980,6 @@ export class Session implements SessionContext {
         parts.push(await recordSkippedToolCall(remainingCall, message));
       }
     };
-
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by
     // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
@@ -5011,6 +5012,11 @@ export class Session implements SessionContext {
               ? 'error'
               : 'success';
           const succeeded = status === 'success';
+          const responseError = toolResult.error
+            ? new Error(toolResult.error.message)
+            : aborted
+              ? new Error('Tool execution was cancelled')
+              : undefined;
 
           // Fire PostToolUse hook on successful execution (aligned with core path)
           if (
@@ -5053,6 +5059,12 @@ export class Session implements SessionContext {
               const contextPart = { text: postHookResult.additionalContext };
               responseParts.push(contextPart);
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUse',
+              toolName,
+              toolCallId: callId,
+              artifacts: postHookResult.artifacts,
+            });
           } else if (
             hooksEnabledForTool &&
             messageBusForTool &&
@@ -5078,6 +5090,12 @@ export class Session implements SessionContext {
                 `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
               );
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUseFailure',
+              toolName,
+              toolCallId: callId,
+              artifacts: failureHookResult.artifacts,
+            });
           }
 
           // Handle TodoWriteTool: extract todos and send plan update
@@ -5096,20 +5114,15 @@ export class Session implements SessionContext {
             // Still log and return function response for LLM
           } else {
             // Normal tool handling: emit result using ToolCallEmitter
-            const error = toolResult.error
-              ? new Error(toolResult.error.message)
-              : aborted
-                ? new Error('Tool execution was cancelled')
-                : undefined;
-
             await this.toolCallEmitter.emitResult({
               callId,
               toolName,
               args,
               message: responseParts,
               resultDisplay: toolResult.returnDisplay,
-              error,
+              error: responseError,
               success: succeeded,
+              artifacts: toolResult.artifacts,
             });
           }
 
@@ -5185,6 +5198,12 @@ export class Session implements SessionContext {
                 `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
               );
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUseFailure',
+              toolName,
+              toolCallId: callId,
+              artifacts: failureHookResult.artifacts,
+            });
           }
 
           // Use ToolCallEmitter for error handling
@@ -5221,8 +5240,9 @@ export class Session implements SessionContext {
               error,
             );
 
+          const responseParts = errorResponse(error);
           return {
-            parts: errorResponse(error),
+            parts: responseParts,
             stopAfterPermissionCancel: nestedPermissionCancelled,
             loopDetected,
           };
@@ -5663,6 +5683,35 @@ export class Session implements SessionContext {
   debug(msg: string): void {
     if (this.config.getDebugMode()) {
       debugLogger.warn(msg);
+    }
+  }
+
+  private async emitHookArtifactsNotification(args: {
+    hookEventName: 'PostToolUse' | 'PostToolUseFailure';
+    toolName?: string;
+    toolCallId?: string;
+    artifacts?: ToolArtifact[];
+  }): Promise<void> {
+    if (!args.artifacts || args.artifacts.length === 0) {
+      return;
+    }
+
+    try {
+      await this.client.extNotification('qwen/notify/session/artifact-event', {
+        v: 1,
+        sessionId: this.sessionId,
+        source: 'hook',
+        hookEventName: args.hookEventName,
+        toolName: args.toolName,
+        toolCallId: args.toolCallId,
+        artifacts: args.artifacts,
+      });
+    } catch (error) {
+      writeStderrLine(
+        `Hook artifact notification dropped for ${args.toolName ?? args.hookEventName}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 

@@ -214,6 +214,14 @@ export function WebShellSidebar({
   const currentSessionId = connection.sessionId;
   const projectName =
     getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
+  const qwenCodeVersion = connection.capabilities?.qwenCodeVersion || '';
+  // Numeric releases render as "v1.2.3"; a non-semver fallback such as
+  // "unknown" is shown as-is so we never produce a bogus "vunknown".
+  const versionLabel = qwenCodeVersion
+    ? /^\d/.test(qwenCodeVersion)
+      ? `v${qwenCodeVersion}`
+      : qwenCodeVersion
+    : '';
   const sidebarStyle = {
     '--web-shell-sidebar-width': `${sidebarWidth}px`,
   } as CSSProperties;
@@ -940,6 +948,11 @@ export function WebShellSidebar({
           </span>
           {!collapsed && <span>{t('sidebar.settings')}</span>}
         </button>
+        {!collapsed && versionLabel && (
+          <span className={styles.version} title={`Qwen Code ${versionLabel}`}>
+            {versionLabel}
+          </span>
+        )}
         {!mobileOpen && (
           <button
             className={styles.collapseButton}

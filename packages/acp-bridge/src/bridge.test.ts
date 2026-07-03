@@ -105,6 +105,84 @@ describe('createAcpSessionBridge', () => {
     );
   });
 
+  it('sanitizes client artifact provenance fields', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Client link',
+          url: 'https://example.com/client',
+          toolName: 'artifact',
+          hookEventName: 'PostToolUse',
+          toolCallId: 'call-forged',
+          clientId: 'forged-client',
+        },
+        { clientId: session.clientId },
+      );
+
+      const snapshot = await bridge.getSessionArtifacts(session.sessionId);
+      expect(snapshot.artifacts).toMatchObject([
+        {
+          title: 'Client link',
+          source: 'client',
+          clientId: session.clientId,
+        },
+      ]);
+      expect(snapshot.artifacts[0]).not.toHaveProperty('toolName');
+      expect(snapshot.artifacts[0]).not.toHaveProperty('hookEventName');
+      expect(snapshot.artifacts[0]).not.toHaveProperty('toolCallId');
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('keeps client artifacts owned by the issuing client', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      const created = await bridge.addSessionArtifact(
+        first.sessionId,
+        {
+          title: 'Client link',
+          url: 'https://example.com/client',
+        },
+        { clientId: first.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+
+      await expect(
+        bridge.removeSessionArtifact(first.sessionId, artifactId, {
+          clientId: second.clientId,
+        }),
+      ).resolves.toMatchObject({ changes: [] });
+      await expect(
+        bridge.removeSessionArtifact(first.sessionId, artifactId),
+      ).resolves.toMatchObject({ changes: [] });
+      await expect(
+        bridge.getSessionArtifacts(first.sessionId),
+      ).resolves.toMatchObject({
+        artifacts: [{ id: artifactId, clientId: first.clientId }],
+      });
+
+      await expect(
+        bridge.removeSessionArtifact(first.sessionId, artifactId, {
+          clientId: first.clientId,
+        }),
+      ).resolves.toMatchObject({
+        changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('uses bridge telemetry for channel/session/prompt dispatch and prompt metadata injection', async () => {
     const handle = makeChannel();
     const operations: string[] = [];
