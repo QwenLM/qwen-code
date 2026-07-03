@@ -67,7 +67,6 @@ import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import {
-  buildAddedMcpToolsReminder,
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
@@ -201,11 +200,6 @@ vi.mock('../utils/environmentContext', async (importOriginal) => {
       ],
       [],
     ]),
-    buildAddedMcpToolsReminder: vi.fn((tools: Array<{ name: string }>) =>
-      tools.length === 0
-        ? null
-        : `<system-reminder>\nadded: ${tools.map((tool) => tool.name).join(', ')}\n</system-reminder>`,
-    ),
     buildChangedMcpToolsReminder: vi.fn(
       (
         tools: Array<{ name: string }>,
@@ -1385,23 +1379,26 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(setSystemInstructionSpy).not.toHaveBeenCalled();
       expect(vi.mocked(getCoreSystemPrompt)).not.toHaveBeenCalled();
-      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
 
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([
-        {
-          name: 'mcp__addition-server__add',
-          description: 'Add two numbers',
-          serverName: 'addition-server',
-        },
-      ]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [
+          {
+            name: 'mcp__addition-server__add',
+            description: 'Add two numbers',
+            serverName: 'addition-server',
+          },
+        ],
+        [],
+      );
       expect(addHistorySpy).toHaveBeenCalledWith({
         role: 'user',
         parts: [
           {
-            text: '<system-reminder>\nadded: mcp__addition-server__add\n</system-reminder>',
+            text: '<system-reminder>\nchanged mcp: added=mcp__addition-server__add removed=\n</system-reminder>',
           },
         ],
       });
@@ -1427,7 +1424,6 @@ describe('Gemini Client (client.ts)', () => {
 
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
       expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
     });
@@ -1454,9 +1450,10 @@ describe('Gemini Client (client.ts)', () => {
 
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([
-        { name: 'mcp__server__beta', description: 'b', serverName: 'server' },
-      ]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [{ name: 'mcp__server__beta', description: 'b', serverName: 'server' }],
+        [],
+      );
       expect(addHistorySpy).toHaveBeenCalledTimes(1);
     });
 
@@ -1476,12 +1473,12 @@ describe('Gemini Client (client.ts)', () => {
       reg.getDeferredToolSummary.mockReturnValue([tool]);
       await client.setTools();
       await runTurn();
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([tool]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith([tool], []);
 
       // Server disconnects: removeMcpToolsByServer() drops it from the
       // deferred set. queueAddedMcpToolsReminder must prune the stale
       // announced name here.
-      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
       reg.getDeferredToolSummary.mockReturnValue([]);
       await client.setTools();
       await runTurn();
@@ -1489,11 +1486,11 @@ describe('Gemini Client (client.ts)', () => {
       // Server reconnects with the same tool. Without the prune the name
       // would still be in announcedDeferredToolNames and be skipped, so
       // the user would never get a "new tools available" reminder.
-      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
       reg.getDeferredToolSummary.mockReturnValue([tool]);
       await client.setTools();
       await runTurn();
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([tool]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith([tool], []);
     });
 
     it('announces removed MCP deferred tools after disconnect', async () => {
@@ -1603,12 +1600,12 @@ describe('Gemini Client (client.ts)', () => {
       await client.setTools();
       await runTurn();
       addHistorySpy.mockClear();
-      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
 
       await client.setTools();
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
     });
 
@@ -1631,23 +1628,26 @@ describe('Gemini Client (client.ts)', () => {
       await client.setTools();
       await runTurn(SendMessageType.ToolResult);
 
-      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
 
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([
-        {
-          name: 'mcp__addition-server__add',
-          description: 'Add two numbers',
-          serverName: 'addition-server',
-        },
-      ]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [
+          {
+            name: 'mcp__addition-server__add',
+            description: 'Add two numbers',
+            serverName: 'addition-server',
+          },
+        ],
+        [],
+      );
       expect(addHistorySpy).toHaveBeenCalledWith({
         role: 'user',
         parts: [
           {
-            text: '<system-reminder>\nadded: mcp__addition-server__add\n</system-reminder>',
+            text: '<system-reminder>\nchanged mcp: added=mcp__addition-server__add removed=\n</system-reminder>',
           },
         ],
       });
@@ -8268,8 +8268,16 @@ Other open files:
       setHistory: vi.fn(),
     };
 
-    /* eslint-disable @typescript-eslint/no-explicit-any */
-    const priv = () => client as any;
+    const priv = () =>
+      client as unknown as {
+        chat: typeof mockChat;
+        announcedSkillReminderKeys: Set<string>;
+        skillRemindersInitialized: boolean;
+        drainSkillAndCommandReminders(): Promise<void>;
+        seedSkillReminderDedupFromSnapshot(
+          entries: AvailableSkillEntry[],
+        ): void;
+      };
 
     async function drain() {
       await priv().drainSkillAndCommandReminders();
@@ -8284,7 +8292,7 @@ Other open files:
       );
       const toolReg = mockConfig.getToolRegistry();
       vi.mocked(toolReg!.getTool).mockImplementation((name: string) =>
-        name === ToolNames.SKILL ? ({} as any) : undefined,
+        name === ToolNames.SKILL ? ({} as never) : undefined,
       );
       priv().chat = mockChat;
       priv().announcedSkillReminderKeys = new Set();
@@ -8645,7 +8653,6 @@ Other open files:
       expect(addedContent.parts[0].text).toContain('skill-new');
       expect(addedContent.parts[0].text).not.toContain('desc-skill-inline');
     });
-    /* eslint-enable @typescript-eslint/no-explicit-any */
   });
 
   describe('#5147 shutdown gate', () => {
@@ -8725,13 +8732,17 @@ Other open files:
   });
 
   describe('drainAgentReminders', () => {
-    /* eslint-disable @typescript-eslint/no-explicit-any */
-    const priv = () => client as any;
+    const priv = () =>
+      client as unknown as {
+        announcedAgentReminderNames: Set<string>;
+        agentRemindersInitialized: boolean;
+        drainAgentReminders(): Promise<void>;
+      };
 
     beforeEach(() => {
       const toolReg = mockConfig.getToolRegistry();
       vi.mocked(toolReg!.getTool).mockImplementation((name: string) =>
-        name === ToolNames.AGENT ? ({} as any) : undefined,
+        name === ToolNames.AGENT ? ({} as never) : undefined,
       );
       priv().announcedAgentReminderNames = new Set(['old-agent']);
       priv().agentRemindersInitialized = true;

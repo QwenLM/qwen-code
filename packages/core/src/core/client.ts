@@ -94,14 +94,13 @@ import {
 // Utilities
 import {
   formatDateForContext,
-  buildAddedMcpToolsReminder,
   buildChangedAgentsReminder,
   buildChangedMcpToolsReminder,
   buildChangedSkillsReminder,
-  buildAddedSkillsReminder,
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  type AgentAvailabilityEntry,
 } from '../utils/environmentContext.js';
 import {
   collectAvailableSkillEntries,
@@ -995,10 +994,10 @@ export class GeminiClient {
 
     const addedMcpTools = Array.from(this.pendingAddedMcpTools.values());
     const removedMcpToolNames = Array.from(this.pendingRemovedMcpToolNames);
-    const reminder =
-      removedMcpToolNames.length > 0
-        ? buildChangedMcpToolsReminder(addedMcpTools, removedMcpToolNames)
-        : buildAddedMcpToolsReminder(addedMcpTools);
+    const reminder = buildChangedMcpToolsReminder(
+      addedMcpTools,
+      removedMcpToolNames,
+    );
 
     if (!reminder) {
       return;
@@ -1111,10 +1110,7 @@ export class GeminiClient {
     if (newEntries.length === 0 && removedNames.length === 0) {
       return;
     }
-    const reminder =
-      removedNames.length > 0
-        ? buildChangedSkillsReminder(newEntries, removedNames)
-        : buildAddedSkillsReminder(newEntries);
+    const reminder = buildChangedSkillsReminder(newEntries, removedNames);
     if (!reminder) {
       return;
     }
@@ -1135,7 +1131,7 @@ export class GeminiClient {
       return;
     }
 
-    let agents: Array<{ name: string; description: string }>;
+    let agents: AgentAvailabilityEntry[];
     try {
       agents = await this.config.getSubagentManager().listSubagents();
     } catch (error) {
@@ -1144,7 +1140,7 @@ export class GeminiClient {
     }
 
     const currentByName = new Map(agents.map((agent) => [agent.name, agent]));
-    const addedAgents: Array<{ name: string; description: string }> = [];
+    const addedAgents: AgentAvailabilityEntry[] = [];
     const removedAgentNames: string[] = [];
 
     for (const name of this.announcedAgentReminderNames) {
