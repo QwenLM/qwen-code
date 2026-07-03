@@ -1063,6 +1063,21 @@ names only; clients must not expect skill bodies or paths over this route.
       "outputFile": "/tmp/agent-1.jsonl",
       "isBackgrounded": true,
       "subagentType": "reviewer"
+    },
+    {
+      "kind": "agent",
+      "id": "agent-2",
+      "label": "general-purpose: run the failing test",
+      "description": "run the failing test",
+      "status": "running",
+      "startTime": 1699999999500,
+      "runtimeMs": 500,
+      "outputFile": "/tmp/agent-2.jsonl",
+      "isBackgrounded": false,
+      "subagentType": "general-purpose",
+      "parentAgentId": "agent-1",
+      "parentName": "reviewer",
+      "depth": 1
     }
   ]
 }
@@ -1073,6 +1088,15 @@ prompt and can be queried while the session is streaming. The response only
 contains whitelisted metadata from the agent, shell, and monitor task
 registries; controllers, timers, offsets, pending messages, and raw registry
 objects are never exposed.
+
+Agent tasks spawned by another sub-agent (nested sub-agents, bounded by
+`maxSubagentDepth`) carry three optional lineage fields: `parentAgentId` (the
+spawning agent task's `id`), `parentName` (the spawning agent's
+`subagentType`, captured at registration so it survives the parent's eviction
+from the registry), and `depth` (0-based launch depth; 0 = spawned by the
+top-level session). Agents launched by the top-level session omit
+`parentAgentId` and `parentName`; clients should treat all three fields as
+optional and fall back to a flat list when they are absent.
 
 ### `GET /session/:id/lsp`
 

@@ -440,6 +440,77 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
+  it('forwards artifact helpers through DaemonClient with the bound clientId', async () => {
+    const listEnvelope = {
+      v: 1 as const,
+      sessionId: 's-1',
+      artifacts: [],
+      generatedAt: '2026-07-01T00:00:00.000Z',
+      limits: { maxArtifacts: 200 },
+    };
+    const mutationResult = {
+      v: 1 as const,
+      sessionId: 's-1',
+      changes: [],
+    };
+    const { fetch, calls } = recordingFetch((req) => {
+      if (
+        req.method === 'GET' &&
+        req.url === 'http://daemon/session/s-1/artifacts'
+      ) {
+        return jsonResponse(200, listEnvelope);
+      }
+      if (
+        req.method === 'POST' &&
+        req.url === 'http://daemon/session/s-1/artifacts'
+      ) {
+        return jsonResponse(200, mutationResult);
+      }
+      if (
+        req.method === 'DELETE' &&
+        req.url === 'http://daemon/session/s-1/artifacts/artifact-1'
+      ) {
+        return jsonResponse(200, mutationResult);
+      }
+      return jsonResponse(500, {
+        error: `unexpected ${req.method} ${req.url}`,
+      });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.artifacts()).resolves.toEqual(listEnvelope);
+    await expect(
+      session.addArtifact({
+        title: 'Client report',
+        url: 'https://example.com/report',
+      }),
+    ).resolves.toEqual(mutationResult);
+    await expect(session.removeArtifact('artifact-1')).resolves.toEqual(
+      mutationResult,
+    );
+
+    expect(calls.map((call) => call.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
+      'client-1',
+    ]);
+    expect(calls[1]?.body).toBe(
+      JSON.stringify({
+        title: 'Client report',
+        url: 'https://example.com/report',
+      }),
+    );
+  });
+
   it('forwards recap through DaemonClient with the bound clientId and signal', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(200, {

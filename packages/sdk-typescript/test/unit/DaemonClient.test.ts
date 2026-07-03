@@ -184,6 +184,93 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('session artifacts', () => {
+    it('lists session artifacts with an encoded session id', async () => {
+      const envelope = {
+        v: 1 as const,
+        sessionId: 'session/1',
+        artifacts: [],
+        generatedAt: '2026-07-01T00:00:00.000Z',
+        limits: { maxArtifacts: 200 },
+      };
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, envelope),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.listSessionArtifacts('session/1', 'client-1'),
+      ).resolves.toEqual(envelope);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/session%2F1/artifacts',
+        method: 'GET',
+        headers: {
+          'x-qwen-client-id': 'client-1',
+        },
+        body: null,
+      });
+    });
+
+    it('adds session artifacts with client identity and JSON body', async () => {
+      const result = {
+        v: 1 as const,
+        sessionId: 'session/1',
+        changes: [
+          {
+            action: 'created' as const,
+            artifactId: 'artifact-1',
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const artifact = {
+        title: 'Client report',
+        url: 'https://example.com/report',
+      };
+
+      await expect(
+        client.addSessionArtifact('session/1', artifact, 'client-1'),
+      ).resolves.toEqual(result);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/session%2F1/artifacts',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-qwen-client-id': 'client-1',
+        },
+        body: JSON.stringify(artifact),
+      });
+    });
+
+    it('removes session artifacts with encoded ids and client identity', async () => {
+      const result = {
+        v: 1 as const,
+        sessionId: 'session/1',
+        changes: [
+          {
+            action: 'removed' as const,
+            artifactId: 'artifact/1',
+          },
+        ],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.removeSessionArtifact('session/1', 'artifact/1', 'client-1'),
+      ).resolves.toEqual(result);
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/session%2F1/artifacts/artifact%2F1',
+        method: 'DELETE',
+        headers: {
+          'x-qwen-client-id': 'client-1',
+        },
+        body: null,
+      });
+    });
+  });
+
   describe('workspace file helpers', () => {
     it('validates daemon content hashes with the daemon regex', () => {
       expect(isDaemonContentHash(`sha256:${'a'.repeat(64)}`)).toBe(true);
@@ -3510,6 +3597,102 @@ describe('DaemonClient', () => {
       expect(calls[0]).toMatchObject({
         method: 'GET',
         url: 'http://daemon/workspace/memory/remember/remember%2Fa%20b',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+    });
+
+    it('POSTs /workspace/memory/forget and forwards client id', async () => {
+      const reply = {
+        taskId: 'forget-1',
+        status: 'queued' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.forgetWorkspaceMemory('old preference', {
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/forget');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        query: 'old preference',
+      });
+    });
+
+    it('GETs /workspace/memory/forget/:taskId', async () => {
+      const reply = {
+        taskId: 'forget/a b',
+        status: 'completed' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:01.000Z',
+        result: {
+          summary: 'forgot',
+          removedEntries: [],
+          touchedTopics: ['project' as const],
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getWorkspaceMemoryForgetTask('forget/a b', {
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/memory/forget/forget%2Fa%20b',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+    });
+
+    it('POSTs /workspace/memory/dream and forwards client id', async () => {
+      const reply = {
+        taskId: 'dream-1',
+        status: 'queued' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.dreamWorkspaceMemory({ clientId: 'client-7' }),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/dream');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('GETs /workspace/memory/dream/:taskId', async () => {
+      const reply = {
+        taskId: 'dream/a b',
+        status: 'completed' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:01.000Z',
+        result: {
+          summary: 'dreamed',
+          touchedTopics: ['project' as const],
+          dedupedEntries: 1,
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getWorkspaceMemoryDreamTask('dream/a b', {
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/memory/dream/dream%2Fa%20b',
       });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
     });

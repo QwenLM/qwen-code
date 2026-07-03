@@ -115,6 +115,19 @@ describe('cronTasksFile', () => {
       await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
     });
 
+    it('throws for non-finite timestamps', async () => {
+      // JSON.parse turns -1e999 into -Infinity — typeof number, but it
+      // poisons date math downstream (new Date(-Infinity).toISOString()
+      // throws mid-load). Must be rejected like any other corrupt field.
+      const raw = (createdAt: string, lastFiredAt: string) =>
+        `[{"id":"t1","cron":"* * * * *","prompt":"p","recurring":true,` +
+        `"createdAt":${createdAt},"lastFiredAt":${lastFiredAt}}]`;
+      await seedTasksFile(tmpDir, raw('-1e999', 'null'));
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+      await seedTasksFile(tmpDir, raw(`${Date.now()}`, '1e999'));
+      await expect(readCronTasks(tmpDir)).rejects.toThrow(/Invalid task entry/);
+    });
+
     it('reads valid tasks', async () => {
       const task = makeTask();
       await seedTasksFile(tmpDir, JSON.stringify([task]));

@@ -179,6 +179,48 @@ describe('ToolCallEmitter', () => {
       );
     });
 
+    it('emits structured artifacts without a wire trust marker', async () => {
+      await emitter.emitResult({
+        toolName: ToolNames.ARTIFACT,
+        callId: 'call-artifact',
+        success: true,
+        message: createMockMessage('Published'),
+        artifacts: [
+          {
+            kind: 'html',
+            storage: 'published',
+            title: 'Dashboard',
+            url: 'file:///tmp/dashboard.html',
+            managedId: 'managed-1',
+          },
+        ],
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-artifact',
+          status: 'completed',
+          _meta: expect.objectContaining({
+            toolName: ToolNames.ARTIFACT,
+            artifacts: [
+              expect.objectContaining({
+                title: 'Dashboard',
+                storage: 'published',
+              }),
+            ],
+          }),
+        }),
+      );
+      expect(
+        (
+          sendUpdateSpy.mock.calls[0]?.[0] as {
+            _meta?: Record<string, unknown>;
+          }
+        )._meta,
+      ).not.toHaveProperty('artifactsTrustedPublisher');
+    });
+
     it('should emit tool_call_update with failed status on failure', async () => {
       await emitter.emitResult({
         toolName: 'test_tool',
@@ -200,6 +242,35 @@ describe('ToolCallEmitter', () => {
         ],
         _meta: { toolName: 'test_tool', provenance: 'builtin' },
       });
+    });
+
+    it('emits structured artifacts from failed tool results', async () => {
+      await emitter.emitResult({
+        toolName: ToolNames.RECORD_ARTIFACT,
+        callId: 'call-failed-artifact',
+        success: false,
+        message: [],
+        error: new Error('record failed'),
+        artifacts: [
+          { title: 'Failure report', url: 'https://example.com/drop' },
+        ],
+      });
+
+      expect(sendUpdateSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-failed-artifact',
+          status: 'failed',
+          _meta: expect.objectContaining({
+            artifacts: [
+              expect.objectContaining({
+                title: 'Failure report',
+                url: 'https://example.com/drop',
+              }),
+            ],
+          }),
+        }),
+      );
     });
 
     it('should handle diff display format', async () => {
