@@ -265,9 +265,6 @@ describe('resolveFenceLanguage', () => {
     expect(resolveFenceLanguage('ts').resolvedLang).toBe('typescript');
     expect(resolveFenceLanguage('js').resolvedLang).toBe('javascript');
     expect(resolveFenceLanguage('py').resolvedLang).toBe('python');
-    expect(resolveFenceLanguage('c++').resolvedLang).toBe('cpp');
-    expect(resolveFenceLanguage('c#').resolvedLang).toBe('csharp');
-    expect(resolveFenceLanguage('f#').resolvedLang).toBe('fsharp');
     expect(resolveFenceLanguage('sh').resolvedLang).toBe('bash');
     expect(resolveFenceLanguage('yml').resolvedLang).toBe('yaml');
     expect(resolveFenceLanguage('golang').resolvedLang).toBe('go');
@@ -465,41 +462,6 @@ describe('Markdown custom code block rendering', () => {
     );
     expect(container.querySelector('pre code')?.textContent).toContain(
       'const x = 1;',
-    );
-
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
-  });
-
-  it('passes c++ aliases to host renderers', async () => {
-    const container = document.createElement('div');
-    document.body.appendChild(container);
-    const root = createRoot(container);
-    const renderCodeBlock = vi.fn(() => undefined);
-
-    await act(async () => {
-      root.render(
-        createElement(
-          WebShellCustomizationProvider,
-          { value: { markdown: { renderCodeBlock } } },
-          createElement(Markdown, {
-            content: '```c++\nstd::cout << "hello";\n```',
-            source: 'assistant',
-          }),
-        ),
-      );
-    });
-
-    expect(renderCodeBlock).toHaveBeenCalledWith(
-      expect.objectContaining({
-        language: 'c++',
-        resolvedLanguage: 'cpp',
-      }),
-    );
-    expect(container.querySelector('pre code')?.textContent).toContain(
-      'std::cout << "hello";',
     );
 
     await act(async () => {
@@ -1033,6 +995,39 @@ describe('Markdown custom code block rendering', () => {
     expect(
       container.querySelector('[data-custom-code-component="true"]'),
     ).not.toBeNull();
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('applies transformMarkdown customization before rendering', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const transformMarkdown = vi.fn((content: string) =>
+      content.replace('raw chart', 'transformed chart'),
+    );
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { transformMarkdown } } },
+          createElement(Markdown, {
+            content: '**raw chart**',
+            source: 'assistant',
+          }),
+        ),
+      );
+    });
+
+    expect(transformMarkdown).toHaveBeenCalledWith('**raw chart**', {
+      source: 'assistant',
+    });
+    expect(container.textContent).toContain('transformed chart');
+    expect(container.textContent).not.toContain('raw chart');
 
     await act(async () => {
       root.unmount();

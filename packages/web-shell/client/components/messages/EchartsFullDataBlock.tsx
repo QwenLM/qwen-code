@@ -33,7 +33,7 @@ export interface EchartsFullDataOption {
 }
 
 export interface EchartsInstance {
-  setOption(option: EchartsFullDataOption): void;
+  setOption(option: EchartsFullDataOption, opts?: { notMerge?: boolean }): void;
   resize(): void;
   dispose(): void;
 }
@@ -321,6 +321,7 @@ function sanitizeOptionValue(value: unknown, path: string[] = []): unknown {
   if (isObject(value)) {
     const sanitized: EchartsObject = {};
     for (const [key, entry] of Object.entries(value)) {
+      if (key === '__proto__') continue;
       if (UNSAFE_OPTION_KEYS.has(key)) continue;
       if (key === 'formatter' && path.includes('tooltip')) continue;
 
@@ -1442,7 +1443,7 @@ export function EchartsFullDataBlock({
         }
 
         if (requestId !== renderRequestRef.current) return;
-        chart.setOption(chartOption);
+        chart.setOption(chartOption, { notMerge: true });
         if (removeResizeRef.current === noop && chartRef.current) {
           const onResize = () => chartInstanceRef.current?.resize();
           const observer =

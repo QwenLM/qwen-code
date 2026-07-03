@@ -203,6 +203,9 @@ describe('EchartsFullDataBlock', () => {
 
     expect(runtime.init).toHaveBeenCalledOnce();
     expect(runtime.init).toHaveBeenCalledWith(expect.any(HTMLElement), 'dark');
+    expect(setOption).toHaveBeenCalledWith(expect.any(Object), {
+      notMerge: true,
+    });
     const renderedOption = setOption.mock.calls[0]?.[0] as
       | EchartsFullDataOption
       | undefined;
@@ -489,6 +492,41 @@ describe('EchartsFullDataBlock', () => {
         },
       }),
     );
+  });
+
+  it('reports ref resolver rejections inside the chart card', async () => {
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        version: 1,
+        data: {
+          kind: 'ref',
+          ref: 'artifact://chart-data/missing',
+          format: 'json',
+          dimensions: ['day', 'orders'],
+        },
+        option: {
+          series: [{ type: 'line', encode: { x: 'day', y: 'orders' } }],
+        },
+      }),
+      loadEcharts: () => runtime,
+      resolveDataRef: () => Promise.reject(new Error('missing artifact')),
+    });
+    await flushChart();
+
+    expect(container.textContent).toContain(
+      'Chart data reference could not be resolved: missing artifact',
+    );
+    expect(container.querySelector('pre code')).toBeNull();
+    expect(setOption).not.toHaveBeenCalled();
   });
 
   it('ignores stale ref resolutions after the chart code changes', async () => {
@@ -1258,6 +1296,32 @@ describe('EchartsFullDataBlock', () => {
   });
 
   it('sanitizes unsafe chart option fields before calling ECharts', async () => {
+    const unsafeSeriesEntry: Record<string, unknown> = {
+      type: 'line',
+      datasetIndex: 1,
+      data: [120, 999],
+      href: 'javascript:alert(1)',
+      id: 'data:text/html,<svg onload=alert(1)>',
+      name: '<a'.repeat(32),
+      encode: { x: 'day', y: 'orders' },
+      itemStyle: {
+        image: 'https://example.test/marker.png',
+      },
+      renderItem: 'javascript:alert(1)',
+      src: 'https://example.test/marker.png',
+      symbol: 'image://https://example.test/marker.png',
+      tooltip: {
+        appendToBody: true,
+        enterable: true,
+        formatter: '<img src=x onerror=alert(1)>',
+        renderMode: 'html',
+      },
+    };
+    Object.defineProperty(unsafeSeriesEntry, '__proto__', {
+      value: { polluted: true },
+      enumerable: true,
+    });
+
     const option: EchartsFullDataOption = {
       dataset: [
         {
@@ -1280,29 +1344,7 @@ describe('EchartsFullDataBlock', () => {
       },
       xAxis: { type: 'category', data: ['Mon', 'Tue'] },
       yAxis: { type: 'value' },
-      series: [
-        {
-          type: 'line',
-          datasetIndex: 1,
-          data: [120, 999],
-          href: 'javascript:alert(1)',
-          id: 'data:text/html,<svg onload=alert(1)>',
-          name: '<a'.repeat(32),
-          encode: { x: 'day', y: 'orders' },
-          itemStyle: {
-            image: 'https://example.test/marker.png',
-          },
-          renderItem: 'javascript:alert(1)',
-          src: 'https://example.test/marker.png',
-          symbol: 'image://https://example.test/marker.png',
-          tooltip: {
-            appendToBody: true,
-            enterable: true,
-            formatter: '<img src=x onerror=alert(1)>',
-            renderMode: 'html',
-          },
-        },
-      ],
+      series: [unsafeSeriesEntry],
     };
     const setOption = vi.fn();
     const runtime: EchartsRuntime = {
@@ -1343,6 +1385,7 @@ describe('EchartsFullDataBlock', () => {
         id?: unknown;
         itemStyle?: { image?: unknown };
         name?: string;
+        polluted?: boolean;
         renderItem?: unknown;
         src?: unknown;
         symbol?: string;
@@ -1375,6 +1418,10 @@ describe('EchartsFullDataBlock', () => {
     expect(renderedOption.series?.[0]?.id).toBeUndefined();
     expect(renderedOption.series?.[0]?.itemStyle?.image).toBeUndefined();
     expect(renderedOption.series?.[0]?.name).toBeUndefined();
+    expect(renderedOption.series?.[0]?.polluted).toBeUndefined();
+    expect(Object.getPrototypeOf(renderedOption.series?.[0])).toBe(
+      Object.prototype,
+    );
     expect(renderedOption.series?.[0]?.renderItem).toBeUndefined();
     expect(renderedOption.series?.[0]?.src).toBeUndefined();
     expect(renderedOption.series?.[0]?.symbol).toBe('circle');

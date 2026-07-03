@@ -94,9 +94,6 @@ const SUPPORTED_LANGUAGES = new Set([
 // tagged ```ts / ```js / ```py fall through to the unhighlighted "text" path
 // even though Shiki supports them under their full names.
 const LANGUAGE_ALIASES: Record<string, string> = {
-  'c++': 'cpp',
-  'c#': 'csharp',
-  'f#': 'fsharp',
   ts: 'typescript',
   js: 'javascript',
   py: 'python',
