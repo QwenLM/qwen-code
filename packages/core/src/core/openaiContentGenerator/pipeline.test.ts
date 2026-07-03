@@ -1108,6 +1108,47 @@ describe('ContentGenerationPipeline', () => {
       expect(apiCall.enable_thinking).toBeUndefined();
     });
 
+    it('disables qwen thinking via chat_template_kwargs on a non-DashScope endpoint (vLLM/SGLang)', async () => {
+      // Self-hosted OpenAI-compatible servers render the chat template
+      // server-side and read the thinking switch from `chat_template_kwargs`,
+      // silently ignoring a top-level `enable_thinking`. A qwen model on such
+      // an endpoint must therefore get the switch nested, not top-level.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://llm.example.com/v1',
+        model: 'Qwen3.6-27B',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'Qwen3.6-27B',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.chat_template_kwargs).toEqual({ enable_thinking: false });
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
     it('does NOT emit enable_thinking on a non-qwen model routed through DashScope', async () => {
       // DashScope's compatible-mode endpoint routes multiple model families
       // (qwen3, GLM, DeepSeek). Hostname alone is not enough — GLM uses
