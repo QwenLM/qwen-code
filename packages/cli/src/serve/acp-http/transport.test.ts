@@ -17,6 +17,7 @@ import type {
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -351,6 +352,51 @@ class FakeBridge {
       inProgressServers: 0,
       notStartedServers: 0,
       servers: [{ name: 'typescript', status: 'READY', languages: ['ts'] }],
+    };
+  }
+  lastAddedArtifact:
+    | {
+        sessionId: string;
+        artifact: Parameters<HttpAcpBridge['addSessionArtifact']>[1];
+        context: Parameters<HttpAcpBridge['addSessionArtifact']>[2];
+      }
+    | undefined;
+  lastArtifactListSessionId: string | undefined;
+  lastRemovedArtifact:
+    | {
+        sessionId: string;
+        artifactId: string;
+        context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2];
+      }
+    | undefined;
+  async getSessionArtifacts(sessionId: string) {
+    this.lastArtifactListSessionId = sessionId;
+    return {
+      v: 1,
+      sessionId,
+      artifacts: [],
+      generatedAt: new Date().toISOString(),
+      limits: { maxArtifacts: 200 },
+    };
+  }
+  async addSessionArtifact(
+    sessionId: string,
+    artifact: Parameters<HttpAcpBridge['addSessionArtifact']>[1],
+    context: Parameters<HttpAcpBridge['addSessionArtifact']>[2],
+  ) {
+    this.lastAddedArtifact = { sessionId, artifact, context };
+    return { v: 1, sessionId, changes: [] };
+  }
+  async removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2],
+  ) {
+    this.lastRemovedArtifact = { sessionId, artifactId, context };
+    return {
+      v: 1,
+      sessionId,
+      changes: [{ action: 'removed' as const, artifactId, reason: 'explicit' }],
     };
   }
   async getWorkspaceToolsStatus() {
@@ -5446,6 +5492,331 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           readyServers: 1,
           servers: [{ name: 'typescript', status: 'READY' }],
         },
+      });
+    });
+
+    it('_qwen/session/artifacts returns the session artifact snapshot', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/artifacts',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          v: 1,
+          sessionId: 'sess-1',
+          artifacts: [],
+          limits: { maxArtifacts: 200 },
+        },
+      });
+      expect(bridge.lastArtifactListSessionId).toBe('sess-1');
+    });
+
+    it('_qwen/session/artifacts/add forwards only public artifact fields', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/artifacts/add',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Lineage',
+          kind: 'link',
+          storage: 'external_url',
+          url: 'https://example.test/lineage',
+          metadata: { table: 'fact_orders' },
+          source: 'tool',
+          trustedPublisher: true,
+          clientId: 'forged-client',
+          toolName: 'forged-tool',
+          hookEventName: 'forged-hook',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { v: 1, sessionId: 'sess-1', changes: [] },
+      });
+      expect(bridge.lastAddedArtifact?.sessionId).toBe('sess-1');
+      expect(bridge.lastAddedArtifact?.artifact).toMatchObject({
+        title: 'Lineage',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.test/lineage',
+        metadata: { table: 'fact_orders' },
+      });
+      const artifact = bridge.lastAddedArtifact?.artifact as
+        | Record<string, unknown>
+        | undefined;
+      expect(artifact).not.toHaveProperty('sessionId');
+      expect(artifact).not.toHaveProperty('source');
+      expect(artifact).not.toHaveProperty('trustedPublisher');
+      expect(artifact).not.toHaveProperty('clientId');
+      expect(artifact).not.toHaveProperty('toolName');
+      expect(artifact).not.toHaveProperty('hookEventName');
+    });
+
+    it('_qwen/session/artifacts/add maps artifact validation errors to invalid params', async () => {
+      bridge.addSessionArtifact = async () => {
+        throw new SessionArtifactValidationError(
+          'url must use http or https',
+          'url',
+        );
+      };
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/artifacts/add',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Bad URL',
+          url: 'file:///tmp/report.html',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          data: { errorKind: 'artifact_validation_failed', field: 'url' },
+        },
+      });
+    });
+
+    it('_qwen/session/artifacts/remove forwards artifact id', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/artifacts/remove',
+        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          v: 1,
+          sessionId: 'sess-1',
+          changes: [
+            {
+              action: 'removed',
+              artifactId: 'artifact-1',
+              reason: 'explicit',
+            },
+          ],
+        },
+      });
+      expect(bridge.lastRemovedArtifact).toMatchObject({
+        sessionId: 'sess-1',
+        artifactId: 'artifact-1',
+      });
+    });
+
+    it('_qwen/session/artifacts/remove rejects missing artifact id', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 60,
+        method: '_qwen/session/artifacts/remove',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          message: '`artifactId` is required',
+        },
+      });
+      expect(bridge.lastRemovedArtifact).toBeUndefined();
+    });
+
+    it('_qwen/session/artifacts/add holds the archive gate while mutating', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440131';
+        await writeStoredSession(sessionId);
+        let addStarted!: () => void;
+        let releaseAdd!: () => void;
+        const addStartedPromise = new Promise<void>((resolve) => {
+          addStarted = resolve;
+        });
+        const addReleasedPromise = new Promise<void>((resolve) => {
+          releaseAdd = resolve;
+        });
+        bridge.addSessionArtifact = async (sessionId, artifact, context) => {
+          bridge.lastAddedArtifact = { sessionId, artifact, context };
+          addStarted();
+          await addReleasedPromise;
+          return { v: 1, sessionId, changes: [] };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/load',
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 99 });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 60,
+          method: '_qwen/session/artifacts/add',
+          params: {
+            sessionId,
+            title: 'Lineage',
+            url: 'https://example.test/lineage',
+          },
+        });
+        await addStartedPromise;
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 61,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 61,
+          error: {
+            code: -32603,
+            data: { errorKind: 'session_archiving', sessionId },
+          },
+        });
+
+        releaseAdd();
+        expect(await reader.next()).toMatchObject({
+          id: 60,
+          result: { v: 1, sessionId, changes: [] },
+        });
+        reader.close();
+      });
+    });
+
+    it('_qwen/session/artifacts/remove holds the archive gate while mutating', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440132';
+        await writeStoredSession(sessionId);
+        let removeStarted!: () => void;
+        let releaseRemove!: () => void;
+        const removeStartedPromise = new Promise<void>((resolve) => {
+          removeStarted = resolve;
+        });
+        const removeReleasedPromise = new Promise<void>((resolve) => {
+          releaseRemove = resolve;
+        });
+        bridge.removeSessionArtifact = async (
+          sessionId,
+          artifactId,
+          context,
+        ) => {
+          bridge.lastRemovedArtifact = { sessionId, artifactId, context };
+          removeStarted();
+          await removeReleasedPromise;
+          return {
+            v: 1,
+            sessionId,
+            changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+          };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/load',
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 99 });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 62,
+          method: '_qwen/session/artifacts/remove',
+          params: { sessionId, artifactId: 'artifact-1' },
+        });
+        await removeStartedPromise;
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 63,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 63,
+          error: {
+            code: -32603,
+            data: { errorKind: 'session_archiving', sessionId },
+          },
+        });
+
+        releaseRemove();
+        expect(await reader.next()).toMatchObject({
+          id: 62,
+          result: {
+            v: 1,
+            sessionId,
+            changes: [
+              {
+                action: 'removed',
+                artifactId: 'artifact-1',
+                reason: 'explicit',
+              },
+            ],
+          },
+        });
+        reader.close();
       });
     });
 

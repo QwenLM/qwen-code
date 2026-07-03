@@ -781,7 +781,7 @@ export class ContentGenerationPipeline {
       ? new StreamingToolCallParser()
       : undefined;
     const responseParsingOptions =
-      this.config.provider.getResponseParsingOptions?.(effectiveModel);
+      this.config.provider.getResponseParsingOptions?.();
     const taggedThinkingParser =
       isStreaming && responseParsingOptions?.taggedThinkingTags
         ? new TaggedThinkingParser()

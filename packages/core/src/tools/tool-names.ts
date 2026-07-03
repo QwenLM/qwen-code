@@ -61,6 +61,7 @@ export const ToolNames = {
   // `get_app_state` / `perform_secondary_action` that no longer exist.
   WORKFLOW: 'workflow',
   ARTIFACT: 'artifact',
+  RECORD_ARTIFACT: 'record_artifact',
 } as const;
 
 /**
@@ -107,6 +108,7 @@ export const ToolDisplayNames = {
   // computer_use__* display names are not enumerated here (see ToolNames).
   WORKFLOW: 'Workflow',
   ARTIFACT: 'Artifact',
+  RECORD_ARTIFACT: 'RecordArtifact',
 } as const;
 
 // Migration from old tool names to new tool names
