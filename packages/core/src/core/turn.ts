@@ -578,6 +578,7 @@ export class Turn {
         'Error when talking to API',
         contextForReport,
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
       const status =
         typeof error === 'object' &&

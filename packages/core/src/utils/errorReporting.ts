@@ -11,8 +11,12 @@ const debugLogger = createDebugLogger('ERROR_REPORT');
 
 interface ErrorReportData {
   error: { message: string; stack?: string } | { message: string };
-  contextSummary?: ContextSummary;
+  contextSummary?: unknown;
   additionalInfo?: Record<string, unknown>;
+}
+
+interface ReportErrorOptions {
+  contextAlreadySummarized?: boolean;
 }
 
 type ContextSummary =
@@ -45,6 +49,7 @@ export async function reportError(
   baseMessage: string,
   context?: Content[] | Record<string, unknown> | unknown[],
   type = 'general',
+  options?: ReportErrorOptions,
 ): Promise<void> {
   let errorToReport: { message: string; stack?: string };
   if (error instanceof Error) {
@@ -64,7 +69,9 @@ export async function reportError(
   const reportContent: ErrorReportData = { error: errorToReport };
 
   if (context) {
-    reportContent.contextSummary = summarizeContext(context);
+    reportContent.contextSummary = options?.contextAlreadySummarized
+      ? context
+      : summarizeContext(context);
   }
 
   const reportLabel = `${baseMessage} [${type}]`;

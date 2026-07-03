@@ -70,6 +70,23 @@ describe('reportError', () => {
     expect(report).toContain('"itemCount": 1');
   });
 
+  it('preserves explicitly summarized context', async () => {
+    const error = new Error('API failed');
+    const context = {
+      history: { rawLength: 12, tail: [] },
+      request: { partCount: 1, textPreview: 'safe preview' },
+    };
+
+    await reportError(error, 'Error when talking to API', context, 'turn', {
+      contextAlreadySummarized: true,
+    });
+
+    const report = String(debugLoggerSpy.error.mock.calls[0]?.[1]);
+    expect(report).toContain('"rawLength": 12');
+    expect(report).toContain('"textPreview": "safe preview"');
+    expect(report).not.toContain('"keys"');
+  });
+
   it('should handle errors that are plain objects with a message property', async () => {
     const error = { message: 'Test plain object error' };
     const baseMessage = 'Another error.';
