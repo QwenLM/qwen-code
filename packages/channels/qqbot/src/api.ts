@@ -55,9 +55,14 @@ export async function fetchAccessToken(
 }
 
 /**
- * Validate the WebSocket Gateway URL to prevent SSRF.
+ * Validate the WebSocket Gateway URL to enforce TLS.
  * - Enforces wss:// protocol (hard boundary — throws on non-wss).
  * - Logs a stderr warning for unexpected hostnames (advisory only).
+ *
+ * The real security value is blocking a ws:// cleartext downgrade that would
+ * leak the bot token in the IDENTIFY frame. Since data.url comes from QQ's
+ * authenticated TLS /gateway endpoint, exploitability is low — this is
+ * defense-in-depth, not true SSRF prevention.
  */
 export function validateGatewayUrl(url: string): string {
   try {
