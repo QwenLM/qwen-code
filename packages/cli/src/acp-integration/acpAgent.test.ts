@@ -135,6 +135,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     AGENT: 'agent',
   },
   FORK_SUBAGENT_TYPE: 'fork',
+  IMAGE_CAPABILITY: Object.freeze({
+    autoRoutesToVisionBridge: true,
+    capsImageSize: true,
+    maxImagesPerTurn: 4,
+  }),
   ALL_PROVIDERS: [
     {
       id: 'deepseek',
@@ -1224,6 +1229,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         mcpCapabilities: {
           sse: true,
           http: true,
+        },
+        _meta: {
+          imageCapability: {
+            autoRoutesToVisionBridge: true,
+            capsImageSize: true,
+            maxImagesPerTurn: 4,
+          },
         },
       },
     });

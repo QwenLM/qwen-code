@@ -979,6 +979,20 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
   });
 
+  it('initialize advertises image capability at _meta.imageCapability', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { imageCapability: Record<string, unknown> };
+      };
+    };
+    expect(result.agentCapabilities._meta.imageCapability).toEqual({
+      autoRoutesToVisionBridge: true,
+      capsImageSize: true,
+      maxImagesPerTurn: 4,
+    });
+  });
+
   it('initialize advertises _qwen/workspace/permissions methods', async () => {
     const { body } = await initializeRaw();
     const result = body['result'] as {
