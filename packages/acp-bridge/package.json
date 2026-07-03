@@ -63,6 +63,10 @@
       "types": "./dist/spawnChannel.d.ts",
       "import": "./dist/spawnChannel.js"
     },
+    "./ndJsonStream": {
+      "types": "./dist/ndJsonStream.d.ts",
+      "import": "./dist/ndJsonStream.js"
+    },
     "./logRedaction": {
       "types": "./dist/logRedaction.d.ts",
       "import": "./dist/logRedaction.js"
