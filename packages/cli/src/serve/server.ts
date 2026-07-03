@@ -520,10 +520,10 @@ export function createServeApp(
 
   if (!healthDemoRoutes.exposeHealthPreAuth) {
     // Non-loopback OR loopback with `--require-auth`: register
-    // `/health` and `/demo` AFTER `bearerAuth` so probes must carry
-    // the token. Otherwise unauthenticated callers can ping any
-    // reachable address:port to confirm a daemon exists (and `/demo`
-    // leaks the full API surface).
+    // `/health`, `/demo`, and `/dashboard` AFTER `bearerAuth` so
+    // probes must carry the token. Otherwise unauthenticated callers
+    // can ping any reachable address:port to confirm a daemon exists
+    // (and `/demo`/`/dashboard` leak the full API surface).
     healthDemoRoutes.register(app);
   }
 

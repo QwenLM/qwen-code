@@ -68,7 +68,7 @@ function resolveTier(method: string, path: string): RateLimitTier | null {
   if (method === 'OPTIONS') return null;
   if (
     (method === 'GET' || method === 'HEAD') &&
-    (p === '/health' || p === '/demo')
+    (p === '/health' || p === '/demo' || p === '/dashboard')
   )
     return null;
   if (

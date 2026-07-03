@@ -7,6 +7,7 @@
 import type { Application, Request, Response } from 'express';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { AcpSessionBridge } from '../acp-session-bridge.js';
+import { getDashboardHtml } from '../dashboard.js';
 import { getDemoHtml } from '../demo.js';
 import { isLoopbackBind } from '../loopback-binds.js';
 import type { RateLimiterInstance } from '../rate-limit.js';
@@ -34,9 +35,10 @@ export function createHealthDemoRoutes(
   // On loopback binds, registered BEFORE bearerAuth so browsers can
   // reach the page via address-bar navigation (which cannot attach
   // Authorization headers). On non-loopback binds, registered AFTER
-  // bearerAuth — an unauthenticated `/demo` on a public interface
-  // would leak the full API surface (route enumeration + interactive
-  // console), far more than `/health`'s `{"status":"ok"}`.
+  // bearerAuth — an unauthenticated `/demo` or `/dashboard` on a
+  // public interface would leak the full API surface (route
+  // enumeration + interactive console), far more than `/health`'s
+  // `{"status":"ok"}`.
   // X-Frame-Options: DENY + CSP frame-ancestors 'none' prevent
   // clickjacking — a malicious site embedding the demo in an iframe
   // could trick a user into performing daemon actions via transparent
@@ -56,6 +58,24 @@ export function createHealthDemoRoutes(
         `qwen serve: /demo render failed: ${err instanceof Error ? err.message : String(err)}`,
       );
       res.status(500).json({ error: 'Failed to render demo page' });
+    }
+  };
+
+  const dashboardHandler = (_req: Request, res: Response) => {
+    try {
+      res
+        .type('html')
+        .set('X-Frame-Options', 'DENY')
+        .set(
+          'Content-Security-Policy',
+          "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'; frame-ancestors 'none'",
+        )
+        .send(getDashboardHtml());
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: /dashboard render failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      res.status(500).json({ error: 'Failed to render dashboard page' });
     }
   };
 
@@ -126,6 +146,7 @@ export function createHealthDemoRoutes(
     register(app: Application): void {
       app.get('/health', healthHandler);
       app.get('/demo', demoHandler);
+      app.get('/dashboard', dashboardHandler);
     },
   };
 }

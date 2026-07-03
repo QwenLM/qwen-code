@@ -12679,6 +12679,83 @@ describe('GET /demo', () => {
   });
 });
 
+describe('GET /dashboard', () => {
+  it('returns 200 with text/html content type on loopback', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/dashboard')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+    expect(res.text).toContain('Dashboard');
+    expect(res.text).toContain('<!DOCTYPE html>');
+  });
+
+  it('is accessible without bearer token on loopback even when --token is set', async () => {
+    const app = createServeApp({ ...baseOpts, token: 'secret' }, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/dashboard')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+  });
+
+  it('requires bearer token on non-loopback (401 without token)', async () => {
+    const app = createServeApp(
+      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app)
+      .get('/dashboard')
+      .set('Host', '0.0.0.0:4170');
+    expect(res.status).toBe(401);
+  });
+
+  it('is accessible on non-loopback with valid bearer token', async () => {
+    const app = createServeApp(
+      { ...baseOpts, hostname: '0.0.0.0', token: 'secret' },
+      () => 4170,
+      { bridge: fakeBridge() },
+    );
+    const res = await request(app)
+      .get('/dashboard')
+      .set('Host', '0.0.0.0:4170')
+      .set('Authorization', 'Bearer secret');
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toMatch(/text\/html/);
+  });
+
+  it('is guarded by CORS (rejects cross-origin requests)', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/dashboard')
+      .set('Host', `127.0.0.1:${baseOpts.port}`)
+      .set('Origin', 'https://evil.example.com');
+    expect(res.status).toBe(403);
+  });
+
+  it('sets anti-clickjacking headers (X-Frame-Options + CSP)', async () => {
+    const app = createServeApp(baseOpts, () => 4170, {
+      bridge: fakeBridge(),
+    });
+    const res = await request(app)
+      .get('/dashboard')
+      .set('Host', `127.0.0.1:${baseOpts.port}`);
+    expect(res.status).toBe(200);
+    expect(res.headers['x-frame-options']).toBe('DENY');
+    expect(res.headers['content-security-policy']).toContain(
+      "frame-ancestors 'none'",
+    );
+  });
+});
+
 describe('same-origin Origin-stripping middleware', () => {
   it('strips loopback Origin header matching daemon port', async () => {
     const app = createServeApp(baseOpts, () => 4170, {

@@ -60,6 +60,7 @@ import {
 } from './components/messages/AgentsMessage';
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
+import { DashboardDialog } from './components/dialogs/DashboardDialog';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
@@ -1147,6 +1148,7 @@ export function App({
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
   const [showSettingsDialog, setShowSettingsDialog] = useState(false);
+  const [showDashboardDialog, setShowDashboardDialog] = useState(false);
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
@@ -1354,6 +1356,7 @@ export function App({
     mcpDialogMessage !== null ||
     agentsDialogMode !== null ||
     showSettingsDialog ||
+    showDashboardDialog ||
     showMemoryDialog ||
     showAuthDialog;
   const interactionBlocked = dialogOpen;
@@ -2641,6 +2644,10 @@ export function App({
             setShowSettingsDialog(true);
             return true;
           }
+          if (cmd === 'dashboard') {
+            setShowDashboardDialog(true);
+            return true;
+          }
           if (cmd === 'context') {
             const contextArg = text.slice(match[0].length).trim().toLowerCase();
             if (
@@ -3591,6 +3598,15 @@ export function App({
               />
             </DialogShell>
           )}
+          {showDashboardDialog && (
+            <DialogShell
+              title={t('dashboard.title')}
+              size="xl"
+              onClose={() => setShowDashboardDialog(false)}
+            >
+              <DashboardDialog />
+            </DialogShell>
+          )}
           {showMemoryDialog && (
             <DialogShell
               title={t('memory.menu')}
@@ -3745,6 +3761,10 @@ export function App({
                   onOpenSettings={() => {
                     closeMobileDrawer();
                     setShowSettingsDialog(true);
+                  }}
+                  onOpenDashboard={() => {
+                    closeMobileDrawer();
+                    setShowDashboardDialog(true);
                   }}
                   onNewSession={createNewSession}
                   onLoadSession={loadSidebarSession}

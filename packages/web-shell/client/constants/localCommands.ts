@@ -108,6 +108,7 @@ export function getLocalCommands(t: Translate): CommandInfo[] {
       argumentHint: '<session-id>',
     },
     { name: 'settings', description: t('local.settings') },
+    { name: 'dashboard', description: t('local.dashboard') },
     {
       name: 'extensions',
       description: t('local.extensions'),

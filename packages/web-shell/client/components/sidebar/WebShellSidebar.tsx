@@ -33,6 +33,7 @@ interface WebShellSidebarProps {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
+  onOpenDashboard?: () => void;
   onNewSession: () => Promise<boolean> | boolean;
   onLoadSession: (sessionId: string) => Promise<void> | void;
   onError: (error: unknown, fallback: string) => void;
@@ -136,6 +137,17 @@ function IconSettings() {
   );
 }
 
+function IconDashboard() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="3" width="7" height="9" rx="1" />
+      <rect x="14" y="3" width="7" height="5" rx="1" />
+      <rect x="14" y="12" width="7" height="9" rx="1" />
+      <rect x="3" y="16" width="7" height="5" rx="1" />
+    </svg>
+  );
+}
+
 function IconRename() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -173,6 +185,7 @@ export function WebShellSidebar({
   collapsed,
   onCollapsedChange,
   onOpenSettings,
+  onOpenDashboard,
   onNewSession,
   onLoadSession,
   onError,
@@ -928,6 +941,20 @@ export function WebShellSidebar({
       </div>
 
       <div className={styles.footer}>
+        {onOpenDashboard && (
+          <button
+            className={styles.footerButton}
+            type="button"
+            title={t('sidebar.dashboard')}
+            aria-label={t('sidebar.dashboard')}
+            onClick={onOpenDashboard}
+          >
+            <span className={`${styles.navIcon} ${styles.settingsIcon}`}>
+              <IconDashboard />
+            </span>
+            {!collapsed && <span>{t('sidebar.dashboard')}</span>}
+          </button>
+        )}
         <button
           className={styles.footerButton}
           type="button"
