@@ -104,6 +104,8 @@ export class QQChannel extends ChannelBase {
   private msgSeqMap: Map<string, number> = new Map();
   /** Periodic cleanup timer for expired replyMsgId entries. */
   private replyMsgIdCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  /** 5-minute TTL for replyMsgId entries and seenMessages dedup. */
+  private static readonly REPLY_MSG_ID_TTL_MS = 300_000;
 
   /** Path to persisted QQ routing state: chatTypeMap, replyMsgId, msgSeqMap. */
   private readonly qqStatePath: string;
@@ -209,7 +211,9 @@ export class QQChannel extends ChannelBase {
     // Look up reply context with TTL check
     const entry = this.replyMsgId.get(chatId);
     const msgId =
-      entry && Date.now() - entry.timestamp < 300_000 ? entry.msgId : undefined;
+      entry && Date.now() - entry.timestamp < QQChannel.REPLY_MSG_ID_TTL_MS
+        ? entry.msgId
+        : undefined;
     if (entry && !msgId) {
       process.stderr.write(
         `[QQ:${this.name}] replyMsgId entry expired for ${sanitizeLogText(chatId, 64)}, reply context expired, sending without msg_id\n`,
@@ -320,7 +324,7 @@ export class QQChannel extends ChannelBase {
         this.msgSeqMap.set(msgId, nextSeq - 1);
         this.saveQQState();
       }
-      if (String(e).includes('429')) {
+      if (e instanceof Error && /429/.test(e.message)) {
         process.stderr.write(
           `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on all send attempts for ${sanitizeLogText(chatId, 64)}\n`,
         );
@@ -647,7 +651,7 @@ export class QQChannel extends ChannelBase {
    */
   private setReplyMsgId(chatId: string, msgId: string): void {
     const oldEntry = this.replyMsgId.get(chatId);
-    if (oldEntry) {
+    if (oldEntry && oldEntry.msgId !== msgId) {
       this.msgSeqMap.delete(oldEntry.msgId);
     }
     this.replyMsgId.set(chatId, { msgId, timestamp: Date.now() });
@@ -662,13 +666,16 @@ export class QQChannel extends ChannelBase {
   private startReplyMsgIdCleanup(): void {
     this.stopReplyMsgIdCleanup();
     this.replyMsgIdCleanupTimer = setInterval(() => {
-      const cutoff = Date.now() - 300_000;
+      const cutoff = Date.now() - QQChannel.REPLY_MSG_ID_TTL_MS;
+      let dirty = false;
       for (const [chatId, entry] of this.replyMsgId) {
         if (entry.timestamp < cutoff) {
           this.msgSeqMap.delete(entry.msgId);
           this.replyMsgId.delete(chatId);
+          dirty = true;
         }
       }
+      if (dirty) this.saveQQState();
     }, 60_000);
     this.replyMsgIdCleanupTimer.unref();
   }
@@ -1091,7 +1098,7 @@ export class QQChannel extends ChannelBase {
     // Evict entries older than 5 minutes
     if (!this.seenCleanupTimer) {
       this.seenCleanupTimer = setInterval(() => {
-        const cutoff = Date.now() - 300_000;
+        const cutoff = Date.now() - QQChannel.REPLY_MSG_ID_TTL_MS;
         for (const [id, ts] of this.seenMessages) {
           if (ts < cutoff) this.seenMessages.delete(id);
         }

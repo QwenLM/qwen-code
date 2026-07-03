@@ -579,6 +579,15 @@ describe('sendMessage', () => {
     );
   });
 
+  it('logs and returns when plain-text fallback also fails', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    mockSendQQMessage
+      .mockResolvedValueOnce(mockResponse(false, 500))
+      .mockResolvedValueOnce(mockResponse(false, 500));
+    await ch.sendMessage('test-chat-id', 'hello');
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+  });
+
   it('returns early when disposed', async () => {
     const ch = makeChannel({ disposed: true, chatType: 'c2c' });
     await ch.sendMessage('test-chat-id', 'hello');
@@ -767,6 +776,12 @@ describe('sendMessage', () => {
     const body = callArgs[3] as Record<string, unknown>;
     expect(body['msg_id']).toBeUndefined();
     expect(body['msg_seq']).toBeUndefined();
+    // Verify expired entries were cleaned from maps
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMap = chp['replyMsgId'] as Map<string, unknown>;
+    const seqMap = chp['msgSeqMap'] as Map<string, unknown>;
+    expect(replyMap.has('test-chat-id')).toBe(false);
+    expect(seqMap.has('msg-old')).toBe(false);
   });
 
   it('increments msg_seq on consecutive sendMessage calls', async () => {
@@ -1459,5 +1474,98 @@ describe('atomic state persistence', () => {
     // The callback should have returned early due to disposed check
     expect(writeFileSync).not.toHaveBeenCalled();
     vi.useRealTimers();
+  });
+});
+
+describe('replyMsgId cleanup timer', () => {
+  function makeChannel(): QQChannelInstance {
+    const ch = new QQChannel(
+      'test-bot',
+      {
+        type: 'qq',
+        token: '',
+        senderPolicy: 'open' as const,
+        allowedUsers: [],
+        sessionScope: 'user' as const,
+        cwd: '/tmp',
+        groupPolicy: 'disabled' as const,
+        groups: {},
+        appID: 'test-app-id',
+        appSecret: 'test-secret',
+      },
+      {} as unknown as ChannelAgentBridge,
+    );
+    return ch;
+  }
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it('evicts expired replyMsgId entries and persists cleanup', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    const saveSpy = vi.spyOn(chp as { saveQQState: () => void }, 'saveQQState');
+
+    // Seed expired entry (6 min old)
+    replyMsgId.set('chat-old', {
+      msgId: 'msg-old',
+      timestamp: Date.now() - 360_000,
+    });
+    msgSeqMap.set('msg-old', 5);
+    // Seed fresh entry (1 min old)
+    replyMsgId.set('chat-fresh', {
+      msgId: 'msg-fresh',
+      timestamp: Date.now() - 60_000,
+    });
+    msgSeqMap.set('msg-fresh', 2);
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    // Expired entries removed
+    expect(replyMsgId.has('chat-old')).toBe(false);
+    expect(msgSeqMap.has('msg-old')).toBe(false);
+    // Fresh entries remain
+    expect(replyMsgId.has('chat-fresh')).toBe(true);
+    expect(replyMsgId.get('chat-fresh')!.msgId).toBe('msg-fresh');
+    expect(msgSeqMap.get('msg-fresh')).toBe(2);
+    // Cleanup was persisted
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+
+    saveSpy.mockRestore();
+    ch.disconnect();
+  });
+
+  it('does not call saveQQState when no entries are evicted', () => {
+    vi.useFakeTimers();
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const replyMsgId = chp['replyMsgId'] as Map<
+      string,
+      { msgId: string; timestamp: number }
+    >;
+    const saveSpy = vi.spyOn(chp as { saveQQState: () => void }, 'saveQQState');
+
+    // Only fresh entries
+    replyMsgId.set('chat-fresh', {
+      msgId: 'msg-fresh',
+      timestamp: Date.now() - 60_000,
+    });
+
+    (chp['startReplyMsgIdCleanup'] as () => void).call(ch);
+    vi.advanceTimersByTime(60_000);
+
+    expect(replyMsgId.has('chat-fresh')).toBe(true);
+    expect(saveSpy).not.toHaveBeenCalled();
+
+    saveSpy.mockRestore();
+    ch.disconnect();
   });
 });
