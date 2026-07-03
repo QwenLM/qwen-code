@@ -41,7 +41,7 @@ const CREDENTIAL_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   },
   // GitHub / GitLab / Slack tokens.
   // Includes github_pat_ (fine-grained PATs) and ghu_ (app user tokens).
-  // Slack tokens use hyphens as separators: xoxb-NNN-NNN-alphanum.
+  // Slack tokens use hyphens as separators.
   // The [b]/[p] classes avoid embedding Slack token prefixes that vsce flags.
   {
     pattern:
