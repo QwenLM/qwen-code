@@ -118,6 +118,8 @@ export const MCP_RESOURCES_PROVIDER_ID = 'mcp-resources';
 const ESC = String.fromCharCode(27);
 const ANSI_RE = new RegExp(`${ESC}(?:[@-Z\\-_]|\\[[0-?]*[ -/]*[@-~])`, 'g');
 const BIDI_CONTROL_RE = /[\u200E\u200F\u061C\u2066-\u2069\u202A-\u202E]/g;
+const SAFE_DISPLAY_FALLBACK = '[invalid]';
+const AT_REFERENCE_SPECIAL_CHARS = /[ \t()[\]{};!?\\,]/g;
 
 function joinWorkspacePath(dirPath: string, name: string): string {
   if (dirPath === '.' || dirPath === '') return name;
@@ -155,15 +157,34 @@ function buildMcpResourceRef(serverName: string, uri: string): string {
   return `${serverName}:${uri}`;
 }
 
+function escapeAtReferenceText(ref: string): string {
+  return ref.replace(AT_REFERENCE_SPECIAL_CHARS, '\\$&').replace(/\.$/, '\\.');
+}
+
+function mcpResourceInsertText(serverName: string, uri: string): string {
+  return `@${escapeAtReferenceText(buildMcpResourceRef(serverName, uri))} `;
+}
+
 function splitInsertedReferenceQuery(
   query: string,
   lastSelectedProviderId: string | null,
+  lastSelectedMcpServerName: string | null,
 ): {
   providerId: string;
   serverName?: string;
 } | null {
   if (query.startsWith('ext:')) {
     return { providerId: EXTENSIONS_PROVIDER_ID };
+  }
+  if (
+    lastSelectedProviderId === MCP_RESOURCES_PROVIDER_ID &&
+    lastSelectedMcpServerName &&
+    query.startsWith(`${lastSelectedMcpServerName}:`)
+  ) {
+    return {
+      providerId: MCP_RESOURCES_PROVIDER_ID,
+      serverName: lastSelectedMcpServerName,
+    };
   }
   const separatorIndex = query.indexOf(':');
   if (
@@ -231,10 +252,15 @@ export function sanitizeDisplayText(raw: string): string | undefined {
   return stripped.length > 0 ? stripped : undefined;
 }
 
+function safeDisplayText(raw: string | undefined): string {
+  if (raw === undefined) return SAFE_DISPLAY_FALLBACK;
+  return sanitizeDisplayText(raw) ?? SAFE_DISPLAY_FALLBACK;
+}
+
 function sanitizeAtMentionItem(item: AtMentionItem): AtMentionItem {
   return {
     ...item,
-    label: sanitizeDisplayText(item.label) ?? item.id,
+    label: sanitizeDisplayText(item.label) ?? safeDisplayText(item.id),
     description:
       item.description === undefined
         ? undefined
@@ -281,10 +307,10 @@ function createFileProvider(
             kind: 'insert',
           };
           return [
-            currentDirectoryItem,
+            ...(entryQuery ? [] : [currentDirectoryItem]),
             ...entries.map((entry): AtMentionItem => {
               const path = joinWorkspacePath(dirPath, entry.name);
-              const safeName = sanitizeDisplayText(entry.name) ?? entry.name;
+              const safeName = safeDisplayText(entry.name);
               const safePath = sanitizeDisplayText(path);
               if (entry.kind === 'directory') {
                 return {
@@ -303,7 +329,7 @@ function createFileProvider(
                 kind: 'insert',
               };
             }),
-          ].slice(0, 51);
+          ].slice(0, entryQuery ? 50 : 51);
         } catch (error) {
           if (!signal.aborted) {
             console.warn('Failed to load @ file suggestions', error);
@@ -326,7 +352,7 @@ function createFileProvider(
           .filter((file) => file !== '.')
           .map((file) => ({
             id: file,
-            label: sanitizeDisplayText(file) ?? file,
+            label: safeDisplayText(file),
             insertText: `@${file} `,
             kind: 'insert',
           }));
@@ -428,7 +454,7 @@ function createMcpResourcesProvider(
                 : `${server.resourceCount}`;
             return {
               id: `mcp-server:${server.name}`,
-              label: sanitizeDisplayText(server.name) ?? server.name,
+              label: safeDisplayText(server.name),
               description:
                 count === undefined
                   ? sanitizeDisplayText(server.description ?? '')
@@ -478,6 +504,7 @@ export function useAtMentionMenu({
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileDirectoryRef = useRef('.');
   const lastSelectedProviderIdRef = useRef<string | null>(null);
+  const lastSelectedMcpServerNameRef = useRef<string | null>(null);
 
   const allProviders = useMemo(() => {
     const builtinProviders = [
@@ -605,6 +632,9 @@ export function useAtMentionMenu({
         (item) => item.id === providerId,
       );
       if (!provider) {
+        console.warn(
+          `[@mention] provider="${providerId}" not found (may have been removed)`,
+        );
         setMenu(null);
         return;
       }
@@ -701,16 +731,15 @@ export function useAtMentionMenu({
               const label =
                 sanitizeDisplayText(resource.title ?? '') ??
                 sanitizeDisplayText(resource.name ?? '') ??
-                sanitizeDisplayText(resource.uri) ??
-                resource.uri;
+                safeDisplayText(resource.uri);
               return {
                 id: `mcp-resource:${serverName}:${resource.uri}`,
                 label,
                 description:
                   sanitizeDisplayText(resource.description ?? '') ??
-                  resource.mimeType,
-                detail: sanitizeDisplayText(resource.uri) ?? resource.uri,
-                insertText: `@${buildMcpResourceRef(serverName, resource.uri)} `,
+                  sanitizeDisplayText(resource.mimeType ?? ''),
+                detail: safeDisplayText(resource.uri),
+                insertText: mcpResourceInsertText(serverName, resource.uri),
                 kind: 'insert',
               };
             })
@@ -825,9 +854,14 @@ export function useAtMentionMenu({
             current.itemMode === 'mcpResources' &&
             current.mcpServerName
           ) {
+            const resourceQuery = parsed.query.startsWith(
+              `${current.mcpServerName}:`,
+            )
+              ? parsed.query.slice(current.mcpServerName.length + 1)
+              : parsed.query;
             scheduleLoadMcpResourceItems(
               current.mcpServerName,
-              parsed.query,
+              resourceQuery,
               baseState,
             );
           } else {
@@ -850,6 +884,7 @@ export function useAtMentionMenu({
         const insertedReference = splitInsertedReferenceQuery(
           parsed.query,
           lastSelectedProviderIdRef.current,
+          lastSelectedMcpServerNameRef.current,
         );
         if (
           insertedReference &&
@@ -861,6 +896,7 @@ export function useAtMentionMenu({
             insertedReference.providerId === MCP_RESOURCES_PROVIDER_ID &&
             insertedReference.serverName
           ) {
+            lastSelectedMcpServerNameRef.current = insertedReference.serverName;
             scheduleLoadMcpResourceItems(insertedReference.serverName, '', {
               from: parsed.from,
               to: parsed.to,
@@ -1100,6 +1136,7 @@ export function useAtMentionMenu({
         item.kind === 'mcp-server' &&
         item.serverName
       ) {
+        lastSelectedMcpServerNameRef.current = item.serverName;
         scheduleLoadMcpResourceItems(item.serverName, '', {
           ...current,
           query: '',
@@ -1117,7 +1154,7 @@ export function useAtMentionMenu({
         current.to > docLength
       ) {
         close();
-        return false;
+        return true;
       }
       view.dispatch({
         changes: { from: current.from, to: current.to, insert },

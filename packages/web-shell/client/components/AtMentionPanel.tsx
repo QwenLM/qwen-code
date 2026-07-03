@@ -96,13 +96,24 @@ export function AtMentionPanel({
     const updatePosition = () => {
       const rect = anchor.getBoundingClientRect();
       const panelWidth = panelRef.current?.offsetWidth ?? 360;
-      setAnchorRect({
+      const next = {
         left: Math.max(
           12,
           Math.min(rect.left + 16, window.innerWidth - panelWidth - 12),
         ),
         bottom: window.innerHeight - rect.top + 8,
         width: rect.width,
+      };
+      setAnchorRect((prev) => {
+        if (
+          prev &&
+          prev.left === next.left &&
+          prev.bottom === next.bottom &&
+          prev.width === next.width
+        ) {
+          return prev;
+        }
+        return next;
       });
     };
 
@@ -144,8 +155,12 @@ export function AtMentionPanel({
   );
   const panelTitle =
     menu.itemMode === 'mcpResources' && menu.mcpServerName
-      ? (sanitizeDisplayText(menu.mcpServerName) ?? menu.mcpServerName)
+      ? (sanitizeDisplayText(menu.mcpServerName) ?? '[invalid]')
       : (selectedProvider?.label ?? '');
+  const listboxLabel =
+    menu.level === 'items'
+      ? (selectedProvider?.label ?? t('at.menu'))
+      : t('at.menu');
 
   return createPortal(
     <div className={styles.atPortalLayer} style={themeVars}>
@@ -160,12 +175,8 @@ export function AtMentionPanel({
             '--at-anchor-width': `${anchorRect.width}px`,
           } as CSSProperties
         }
-        role="listbox"
-        aria-label={
-          menu.level === 'items'
-            ? (selectedProvider?.label ?? t('at.menu'))
-            : t('at.menu')
-        }
+        role="dialog"
+        aria-label={listboxLabel}
         onMouseDown={(event) => {
           if (event.target instanceof HTMLInputElement) return;
           event.preventDefault();
@@ -200,6 +211,12 @@ export function AtMentionPanel({
               onClick={(event) => event.stopPropagation()}
               onChange={(event) => onSearch(event.currentTarget.value)}
               onKeyDown={(event) => {
+                if (
+                  event.nativeEvent.isComposing ||
+                  event.nativeEvent.keyCode === 229
+                ) {
+                  return;
+                }
                 if (event.key === 'Escape') {
                   event.preventDefault();
                   event.stopPropagation();
@@ -233,7 +250,11 @@ export function AtMentionPanel({
             />
           </div>
         )}
-        <div className={styles.atList}>
+        <div
+          className={styles.atList}
+          role={rows.length > 0 ? 'listbox' : undefined}
+          aria-label={rows.length > 0 ? listboxLabel : undefined}
+        >
           {menu.loading && rows.length === 0 ? (
             <div className={styles.atEmpty}>{t('common.loading')}</div>
           ) : rows.length === 0 ? (

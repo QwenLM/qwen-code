@@ -106,6 +106,11 @@ describe('AtMentionPanel', () => {
 
     expect(
       document.body
+        .querySelector('[role="dialog"]')
+        ?.getAttribute('aria-label'),
+    ).toBe('Reference menu');
+    expect(
+      document.body
         .querySelector('[role="listbox"]')
         ?.getAttribute('aria-label'),
     ).toBe('Reference menu');
@@ -138,6 +143,33 @@ describe('AtMentionPanel', () => {
     expect(onAccept).toHaveBeenCalledTimes(2);
     expect(onBack).toHaveBeenCalledOnce();
     expect(onSelect).toHaveBeenCalledWith(0);
+  });
+
+  it('lets IME composition keys pass through the item search input', () => {
+    const onBack = vi.fn();
+    const onAccept = vi.fn();
+    const onSelect = vi.fn();
+    mount(itemsMenu(), { onBack, onAccept, onSelect });
+
+    const input = document.body.querySelector('input')!;
+    const enterEvent = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      bubbles: true,
+    });
+    Object.defineProperty(enterEvent, 'isComposing', { value: true });
+    const arrowEvent = new KeyboardEvent('keydown', {
+      key: 'ArrowDown',
+      bubbles: true,
+    });
+    Object.defineProperty(arrowEvent, 'keyCode', { value: 229 });
+    act(() => {
+      input.dispatchEvent(enterEvent);
+      input.dispatchEvent(arrowEvent);
+    });
+
+    expect(onAccept).not.toHaveBeenCalled();
+    expect(onBack).not.toHaveBeenCalled();
+    expect(onSelect).not.toHaveBeenCalled();
   });
 
   it('activates panel buttons from click events', () => {

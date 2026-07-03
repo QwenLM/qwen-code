@@ -500,7 +500,7 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.enterCategory(0));
     await runDebounce();
     act(() => {
-      expect(latest!.accept()).toBe(false);
+      expect(latest!.accept()).toBe(true);
     });
 
     expect(view.dispatch).not.toHaveBeenCalled();
@@ -572,6 +572,222 @@ describe('useAtMentionMenu', () => {
       label: 'Name',
       description: 'Desc',
       detail: 'Detail',
+    });
+  });
+
+  it('uses a safe label fallback when display text strips to empty', async () => {
+    vi.useFakeTimers();
+    mount({
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search: vi.fn().mockResolvedValue([
+            {
+              id: 'safe-id',
+              label: '\u202E',
+            },
+          ]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+
+    expect(latest!.state?.items[0]?.label).toBe('safe-id');
+  });
+
+  it('selects valid indices and rejects out-of-range indices', async () => {
+    vi.useFakeTimers();
+    mount({
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search: vi.fn().mockResolvedValue([
+            { id: 'first', label: 'First' },
+            { id: 'second', label: 'Second' },
+          ]),
+        },
+      ],
+    });
+
+    expect(latest!.select(0)).toBe(false);
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => {
+      expect(latest!.select(-1)).toBe(false);
+      expect(latest!.select(99)).toBe(false);
+      expect(latest!.select(1)).toBe(true);
+    });
+    expect(latest!.state?.selectedIndex).toBe(1);
+
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => {
+      expect(latest!.select(1)).toBe(true);
+    });
+    expect(latest!.state?.selectedIndex).toBe(1);
+  });
+
+  it('prefers the first matching file over the current-directory item', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [
+        {
+          name: 'README.md',
+          kind: 'file',
+          ignored: false,
+        },
+      ],
+      truncated: false,
+    });
+    mount({ actions: { listDirectory }, view });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => latest!.updateSearch('read'));
+    await runDebounce();
+
+    expect(latest!.state?.items[0]?.label).toBe('README.md');
+    act(() => {
+      expect(latest!.accept()).toBe(true);
+    });
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '@README.md ' },
+      selection: { anchor: 11 },
+      scrollIntoView: true,
+    });
+  });
+
+  it('inserts MCP resources with parser-safe escaping', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    const loadMcpResources = vi.fn().mockResolvedValue({
+      resources: [
+        {
+          uri: 'res://doc?version=1 path@x.',
+          name: 'Doc',
+        },
+      ],
+    });
+    mount({
+      view,
+      actions: {
+        loadMcpStatus: vi.fn().mockResolvedValue({
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'docs',
+              disabled: false,
+              resourceCount: 1,
+            },
+          ],
+        }),
+        loadMcpResources,
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(2));
+    await runDebounce();
+    act(() => latest!.accept());
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept()).toBe(true);
+    });
+
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: {
+        from: 0,
+        to: 1,
+        insert: '@docs:res://doc\\?version=1\\ path@x\\. ',
+      },
+      selection: { anchor: 37 },
+      scrollIntoView: true,
+    });
+  });
+
+  it('sanitizes MCP resource mime type fallbacks', async () => {
+    vi.useFakeTimers();
+    mount({
+      view: makeView('@'),
+      actions: {
+        loadMcpStatus: vi.fn().mockResolvedValue({
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'docs',
+              disabled: false,
+              resourceCount: 1,
+            },
+          ],
+        }),
+        loadMcpResources: vi.fn().mockResolvedValue({
+          resources: [
+            {
+              uri: 'res://doc',
+              name: 'Doc',
+              mimeType: 'text/plain\u202E',
+            },
+          ],
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(2));
+    await runDebounce();
+    act(() => latest!.accept());
+    await runDebounce();
+
+    expect(latest!.state?.items[0]?.description).toBe('text/plain');
+  });
+
+  it('reopens MCP resources with the last selected colon-containing server name', async () => {
+    vi.useFakeTimers();
+    const loadMcpResources = vi.fn().mockResolvedValue({ resources: [] });
+    mount({
+      view: makeView('@'),
+      actions: {
+        loadMcpStatus: vi.fn().mockResolvedValue({
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'my:server',
+              disabled: false,
+              resourceCount: 1,
+            },
+          ],
+        }),
+        loadMcpResources,
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(2));
+    await runDebounce();
+    act(() => latest!.accept());
+    await runDebounce();
+    act(() => latest!.close());
+    act(() => latest!.refreshForView(makeView('@my:server:res://doc')));
+    await runDebounce();
+
+    expect(loadMcpResources).toHaveBeenLastCalledWith('my:server', {
+      signal: expect.any(AbortSignal),
+    });
+    expect(latest!.state).toMatchObject({
+      selectedProviderId: 'mcp-resources',
+      itemMode: 'mcpResources',
+      mcpServerName: 'my:server',
+      query: '',
     });
   });
 });
