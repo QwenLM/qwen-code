@@ -367,6 +367,23 @@ function DaemonStatusDialogInner() {
             label={t('daemon.runtime.activeSessions')}
             value={runtime.sessions.active}
           />
+          {/* Activity counters (daemons predating this omit the sub-object). */}
+          {runtime.activity && (
+            <>
+              <Row
+                label={t('daemon.runtime.activePrompts')}
+                value={runtime.activity.activePrompts}
+              />
+              <Row
+                label={t('daemon.runtime.idle')}
+                value={
+                  runtime.activity.idleSinceMs === null
+                    ? t('daemon.runtime.noActivity')
+                    : formatDurationMs(runtime.activity.idleSinceMs)
+                }
+              />
+            </>
+          )}
           <Row
             label={t('daemon.runtime.pendingPermissions')}
             value={runtime.permissions.pending}

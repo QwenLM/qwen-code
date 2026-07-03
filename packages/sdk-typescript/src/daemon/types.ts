@@ -271,6 +271,16 @@ export interface DaemonStatusReport {
       enabled: boolean;
       rejectedSinceStart: Record<string, number>;
     };
+    /**
+     * Prompt/session activity counters. Optional because this is additive to
+     * v=1; daemons predating it omit the sub-object. `lastActivityAt`/
+     * `idleSinceMs` are null when the daemon has seen no activity yet.
+     */
+    activity?: {
+      activePrompts: number;
+      lastActivityAt: string | null;
+      idleSinceMs: number | null;
+    };
     process: {
       rss: number;
       heapTotal: number;

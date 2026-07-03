@@ -634,6 +634,58 @@ describe('DaemonStatusDialog', () => {
     expect(text).not.toContain('Loading diagnostics');
   });
 
+  it('renders runtime.activity counters when the daemon reports them', () => {
+    summaryState = {
+      report: {
+        ...summaryReport,
+        runtime: {
+          ...summaryReport.runtime,
+          activity: {
+            activePrompts: 2,
+            lastActivityAt: '2026-07-03T07:59:00.000Z',
+            idleSinceMs: 65_000,
+          },
+        },
+      },
+      loading: false,
+      error: undefined,
+    };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('Active prompts');
+    expect(text).toContain('2');
+    expect(text).toContain('Idle for');
+    expect(text).toContain('1m 5s'); // formatDurationMs(65000)
+  });
+
+  it('shows "no activity yet" when idleSinceMs is null', () => {
+    summaryState = {
+      report: {
+        ...summaryReport,
+        runtime: {
+          ...summaryReport.runtime,
+          activity: {
+            activePrompts: 0,
+            lastActivityAt: null,
+            idleSinceMs: null,
+          },
+        },
+      },
+      loading: false,
+      error: undefined,
+    };
+    fullState = { report: undefined, loading: true, error: undefined };
+    mount();
+    expect(container!.textContent ?? '').toContain('no activity yet');
+  });
+
+  it('omits the activity rows for a daemon that predates runtime.activity', () => {
+    // The default fixture has no runtime.activity — the section must not render.
+    mount();
+    expect(container!.textContent ?? '').not.toContain('Active prompts');
+  });
+
   it('suppresses the toolbar banner when the summary is absent but the full fallback provides data', () => {
     summaryState = {
       report: undefined,
