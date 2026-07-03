@@ -300,18 +300,30 @@ describe('debugLogger', () => {
 
   describe('latest debug log symlink', () => {
     const expectedLatestPath = path.join(Storage.getGlobalDebugDir(), 'latest');
+    const uuidSession: DebugLogSession = {
+      getSessionId: () => '92ec0176-d354-4147-848b-5cd2d80609c4',
+    };
 
     it('creates a symlink to the current session log file', async () => {
       resetDebugLoggingState();
-      setDebugLogSession(mockSession);
+      setDebugLogSession(uuidSession);
 
       await vi.runAllTimersAsync();
 
       expect(fs.unlink).toHaveBeenCalledWith(expectedLatestPath);
       expect(fs.symlink).toHaveBeenCalledWith(
-        'test-session-123.txt',
+        '92ec0176-d354-4147-848b-5cd2d80609c4.txt',
         expectedLatestPath,
       );
+    });
+
+    it('does not point latest at non-session debug logs', async () => {
+      resetDebugLoggingState();
+      setDebugLogSession({ getSessionId: () => 'log-to-span-sink-test' });
+
+      await vi.runAllTimersAsync();
+
+      expect(fs.symlink).not.toHaveBeenCalled();
     });
 
     it('does not create symlink when session is cleared', async () => {
@@ -328,7 +340,7 @@ describe('debugLogger', () => {
       resetDebugLoggingState();
       vi.mocked(fs.symlink).mockRejectedValueOnce(new Error('EPERM'));
 
-      setDebugLogSession(mockSession);
+      setDebugLogSession(uuidSession);
 
       await vi.runAllTimersAsync();
 
@@ -339,7 +351,7 @@ describe('debugLogger', () => {
       process.env['QWEN_DEBUG_LOG_FILE'] = '0';
       vi.clearAllMocks();
       resetDebugLoggingState();
-      setDebugLogSession(mockSession);
+      setDebugLogSession(uuidSession);
 
       await vi.runAllTimersAsync();
 

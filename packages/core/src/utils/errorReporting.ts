@@ -11,8 +11,26 @@ const debugLogger = createDebugLogger('ERROR_REPORT');
 
 interface ErrorReportData {
   error: { message: string; stack?: string } | { message: string };
-  context?: unknown;
+  contextSummary?: ContextSummary;
   additionalInfo?: Record<string, unknown>;
+}
+
+type ContextSummary =
+  | { kind: 'array'; itemCount: number }
+  | { kind: 'object'; keys: string[] }
+  | { kind: string };
+
+function summarizeContext(context: unknown): ContextSummary {
+  if (Array.isArray(context)) {
+    return { kind: 'array', itemCount: context.length };
+  }
+  if (context && typeof context === 'object') {
+    return {
+      kind: 'object',
+      keys: Object.keys(context).slice(0, 20),
+    };
+  }
+  return { kind: typeof context };
 }
 
 /**
@@ -46,7 +64,7 @@ export async function reportError(
   const reportContent: ErrorReportData = { error: errorToReport };
 
   if (context) {
-    reportContent.context = context;
+    reportContent.contextSummary = summarizeContext(context);
   }
 
   const reportLabel = `${baseMessage} [${type}]`;

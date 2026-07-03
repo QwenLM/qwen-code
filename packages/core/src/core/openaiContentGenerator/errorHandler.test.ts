@@ -9,6 +9,16 @@ import type { GenerateContentParameters } from '@google/genai';
 import { EnhancedErrorHandler } from './errorHandler.js';
 import type { RequestContext } from './types.js';
 
+const debugLoggerSpy = vi.hoisted(() => ({
+  error: vi.fn(),
+}));
+
+vi.mock('../../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    error: debugLoggerSpy.error,
+  }),
+}));
+
 describe('EnhancedErrorHandler', () => {
   const fixedNow = 10_000;
   let errorHandler: EnhancedErrorHandler;
@@ -16,6 +26,7 @@ describe('EnhancedErrorHandler', () => {
   let mockRequest: GenerateContentParameters;
 
   beforeEach(() => {
+    debugLoggerSpy.error.mockReset();
     vi.spyOn(Date, 'now').mockReturnValue(fixedNow);
     mockContext = {
       model: 'test-model',
@@ -57,6 +68,37 @@ describe('EnhancedErrorHandler', () => {
       expect(() => {
         errorHandler.handle(originalError, mockContext, mockRequest);
       }).toThrow(originalError);
+    });
+
+    it('logs structured API diagnostics without request contents', () => {
+      const apiError = Object.assign(
+        new Error(
+          'event:error\n:HTTP_STATUS/429\ndata:{"request_id":"req-123","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}',
+        ),
+        { type: 'rate_limit_error' },
+      );
+
+      expect(() => {
+        errorHandler.handle(apiError, mockContext, mockRequest);
+      }).toThrow(apiError);
+
+      expect(debugLoggerSpy.error).toHaveBeenCalledWith(
+        'OpenAI API Error:',
+        expect.any(String),
+        {
+          durationMs: 5000,
+          errorType: 'rate_limit_error',
+          model: 'test-model',
+          providerCode: 'Throttling.AllocationQuota',
+          providerMessage: 'Allocated quota exceeded',
+          requestId: 'req-123',
+          statusCode: 429,
+          transport: 'sse',
+        },
+      );
+      expect(JSON.stringify(debugLoggerSpy.error.mock.calls[0])).not.toContain(
+        'test prompt',
+      );
     });
 
     it('should throw enhanced error message for timeout errors', () => {
