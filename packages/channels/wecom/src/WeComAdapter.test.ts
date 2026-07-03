@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -141,6 +141,14 @@ describe('WeComChannel', () => {
     expect(
       () => new WeComChannel('bot', makeConfig({ secret: '' }), makeBridge()),
     ).toThrow('requires botId and secret');
+    expect(
+      () =>
+        new WeComChannel(
+          'bot',
+          makeConfig({ wsUrl: 'ws://example.invalid/ws' }),
+          makeBridge(),
+        ),
+    ).toThrow('requires wsUrl to use wss://');
   });
 
   it('supports proactive sends', () => {
@@ -353,6 +361,7 @@ describe('WeComChannel', () => {
     expect(file.attachments?.[0]?.type).toBe('file');
     expect(file.attachments?.[0]?.fileName).toBe('report.pdf');
     expect(file.attachments?.[0]?.filePath).toContain('report.pdf');
+    expect(existsSync(file.attachments?.[0]?.filePath ?? '')).toBe(false);
   });
 
   it('honors explicit group mention metadata when present', async () => {
@@ -438,6 +447,35 @@ describe('WeComChannel', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(client.downloadFile).not.toHaveBeenCalled();
     expect(channel.envelopes).toHaveLength(0);
+  });
+
+  it('drops malformed group messages without falling back to sender chat', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel(
+      'bot',
+      makeConfig({ groupPolicy: 'open', groups: { '*': {} } }),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.text', {
+      msgid: 'msg-missing-chat',
+      msgtype: 'text',
+      chattype: 'group',
+      from: { userid: 'bob' },
+      text: { content: '@bot inspect' },
+      mentions: [{ userid: 'bot-id' }],
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(channel.envelopes).toHaveLength(0);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('missing chatId'),
+    );
+    stderr.mockRestore();
   });
 
   it('rolls back message dedup when preflight work fails', async () => {

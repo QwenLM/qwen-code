@@ -1,4 +1,5 @@
 import {
+  lstatSync,
   mkdirSync,
   readFileSync,
   realpathSync,
@@ -224,8 +225,16 @@ export class WeComChannel extends ChannelBase {
     const senderId = getString(from, 'userid') || '';
     const senderName = getString(from, 'name') || senderId || 'Unknown';
     const isGroup = getString(body, 'chattype') === 'group';
-    const chatId = getString(body, 'chatid') || senderId;
-    if (!chatId || !senderId) return;
+    const rawChatId = getString(body, 'chatid');
+    const chatId = isGroup ? rawChatId : rawChatId || senderId;
+    if (!chatId || !senderId) {
+      process.stderr.write(
+        `[WeCom:${this.name}] dropping message ${
+          messageId || '(no id)'
+        }: missing ${!senderId ? 'senderId' : 'chatId'}.\n`,
+      );
+      return;
+    }
 
     const text = extractText(body);
     const explicitMention = getExplicitMention(body, this.wecom.botId);
@@ -255,16 +264,10 @@ export class WeComChannel extends ChannelBase {
           : `(file: ${attachments[0]?.fileName ?? 'file'})`;
       }
       await this.processInbound(envelope);
+      cleanupAttachmentFiles(attachments);
     } catch (err) {
       if (messageId) this.seenMessages.delete(messageId);
-      for (const attachment of attachments) {
-        if (!attachment.filePath) continue;
-        try {
-          unlinkSync(attachment.filePath);
-        } catch {
-          // Best effort cleanup only.
-        }
-      }
+      cleanupAttachmentFiles(attachments);
       throw err;
     }
   }
@@ -442,7 +445,21 @@ function parseWeComConfig(
     throw new Error(`Channel "${name}" requires botId and secret for WeCom.`);
   }
   const wsUrl = readOptionalString(config, 'wsUrl');
+  if (wsUrl && !isSecureWebSocketUrl(wsUrl)) {
+    throw new Error(`Channel "${name}" requires wsUrl to use wss://.`);
+  }
   return wsUrl ? { botId, secret, wsUrl } : { botId, secret };
+}
+
+function cleanupAttachmentFiles(attachments: Attachment[]): void {
+  for (const attachment of attachments) {
+    if (!attachment.filePath) continue;
+    try {
+      unlinkSync(attachment.filePath);
+    } catch {
+      // Best effort cleanup only.
+    }
+  }
 }
 
 function readRequiredString(
@@ -459,6 +476,14 @@ function readOptionalString(
 ): string | undefined {
   const value = config[key];
   return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+}
+
+function isSecureWebSocketUrl(value: string): boolean {
+  try {
+    return new URL(value).protocol === 'wss:';
+  } catch {
+    return false;
+  }
 }
 
 function createWeComLogger(name: string): WeComLogger {
@@ -693,6 +718,8 @@ export function safeRealpath(path: string): string | undefined {
 function ensureDirectoryRealpath(path: string): string | undefined {
   try {
     mkdirSync(path, { recursive: true });
+    const stat = lstatSync(path);
+    if (!stat.isDirectory() || stat.isSymbolicLink()) return undefined;
     return realpathSync(path);
   } catch {
     return undefined;
