@@ -4,6 +4,7 @@ export type { ComposerToolbarAction } from './components/ChatEditor';
 export type { ToastTone } from './components/ToastHost';
 export type { WebShellLanguage } from './i18n';
 export type {
+  CodeBlockRenderer,
   MarkdownContentSource,
   MarkdownRenderContext,
   MarkdownTableMode,
@@ -27,6 +28,7 @@ export type {
   WebShellFooterRenderInfo,
   FooterRenderer,
   LoadingPhrasesResolver,
+  WebShellCodeBlockRenderInfo,
   WebShellTaskInfo,
   WebShellAgentTask,
   WebShellShellTask,

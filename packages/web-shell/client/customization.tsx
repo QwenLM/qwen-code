@@ -15,11 +15,26 @@ export interface MarkdownRenderContext {
   source: MarkdownContentSource;
 }
 
+export interface WebShellCodeBlockRenderInfo {
+  /** Raw fenced-code language from the markdown class name. */
+  language: string;
+  className?: string;
+  code: string;
+  isStreaming: boolean;
+  source: MarkdownContentSource;
+  theme: 'dark' | 'light';
+}
+
+export type CodeBlockRenderer = (
+  info: WebShellCodeBlockRenderInfo,
+) => ReactNode | undefined;
+
 export interface WebShellMarkdownCustomization {
   transformMarkdown?: (
     markdown: string,
     context: MarkdownRenderContext,
   ) => string;
+  renderCodeBlock?: CodeBlockRenderer;
   components?: Components;
   remarkPlugins?: Options['remarkPlugins'];
   rehypePlugins?: Options['rehypePlugins'];

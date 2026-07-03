@@ -290,8 +290,9 @@ function CodeBlock({
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const match = className?.match(/language-(\w+)/);
-  const { label, lang, resolvedLang } = resolveFenceLanguage(match?.[1]);
+  const { label, lang, resolvedLang } = resolveFenceLanguage(
+    extractRawFenceLanguage(className),
+  );
   const code = String(children).replace(/\n$/, '');
   const shikiTheme =
     appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
@@ -410,6 +411,10 @@ function CodeBlock({
   );
 }
 
+function extractRawFenceLanguage(className: string | undefined): string {
+  return className?.match(/(?:^|\s)language-([^\s]+)/)?.[1] ?? '';
+}
+
 function InlineCode({ children }: { children: ReactNode }) {
   return <code className={styles.inlineCode}>{children}</code>;
 }
@@ -461,6 +466,9 @@ class EnhancedMarkdownTableBoundary extends Component<
 // the same CodeBlock instance across the streaming→settled transition
 // (preserving its highlighted `html` state) instead of remounting it.
 const IsStreamingContext = createContext(false);
+const MarkdownSourceContext = createContext<MarkdownContentSource | undefined>(
+  undefined,
+);
 
 function MarkdownCode({
   className,
@@ -470,14 +478,30 @@ function MarkdownCode({
   children?: ReactNode;
 }) {
   const isStreaming = useContext(IsStreamingContext);
+  const source = useContext(MarkdownSourceContext);
+  const appTheme = useTheme();
+  const { markdown } = useWebShellCustomization();
   const isBlock =
     className?.startsWith('language-') ||
     (typeof children === 'string' && children.includes('\n'));
 
   if (isBlock) {
+    const code = String(children).replace(/\n$/, '');
+    const custom = source
+      ? markdown?.renderCodeBlock?.({
+          language: extractRawFenceLanguage(className),
+          className,
+          code,
+          isStreaming,
+          source,
+          theme: appTheme,
+        })
+      : undefined;
+    if (custom !== undefined) return custom;
+
     return (
       <CodeBlock className={className} isStreaming={isStreaming}>
-        {String(children)}
+        {code}
       </CodeBlock>
     );
   }
@@ -592,13 +616,15 @@ export const Markdown = memo(function Markdown({
       data-markdown-source={source}
     >
       <IsStreamingContext.Provider value={!!isStreaming}>
-        <ReactMarkdown
-          remarkPlugins={remarkPlugins}
-          rehypePlugins={rehypePlugins}
-          components={renderedComponents}
-        >
-          {renderedContent}
-        </ReactMarkdown>
+        <MarkdownSourceContext.Provider value={source}>
+          <ReactMarkdown
+            remarkPlugins={remarkPlugins}
+            rehypePlugins={rehypePlugins}
+            components={renderedComponents}
+          >
+            {renderedContent}
+          </ReactMarkdown>
+        </MarkdownSourceContext.Provider>
       </IsStreamingContext.Provider>
     </div>
   );

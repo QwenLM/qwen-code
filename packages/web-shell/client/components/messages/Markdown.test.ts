@@ -4,8 +4,12 @@
 import { act, createElement, type ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { WebShellCustomizationProvider } from '../../customization';
+import {
+  WebShellCustomizationProvider,
+  type WebShellCodeBlockRenderInfo,
+} from '../../customization';
 import { I18nProvider } from '../../i18n';
+import { ThemeProvider } from '../../themeContext';
 import * as EnhancedTableModule from './EnhancedMarkdownTable';
 import {
   MAX_HIGHLIGHT_LINE_CHARS,
@@ -326,6 +330,98 @@ describe('Markdown mermaid rendering', () => {
     expect(container.textContent).toContain('mermaid');
     expect(container.textContent).toContain('graph TD');
     expect(container.textContent).not.toContain('mermaid.rendering');
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+});
+
+describe('Markdown custom code block rendering', () => {
+  it('lets host renderers replace assistant fenced code blocks', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn((info: WebShellCodeBlockRenderInfo) => {
+      if (info.language !== 'echarts-fulldata') return undefined;
+      return createElement(
+        'div',
+        { 'data-chart-theme': info.theme },
+        `${info.source}:${info.isStreaming}:${info.code}`,
+      );
+    });
+
+    await act(async () => {
+      root.render(
+        createElement(
+          ThemeProvider,
+          { value: 'light' },
+          createElement(
+            WebShellCustomizationProvider,
+            { value: { markdown: { renderCodeBlock } } },
+            createElement(Markdown, {
+              content: '```echarts-fulldata\nconst option = {};\n```',
+              source: 'assistant',
+              isStreaming: true,
+            }),
+          ),
+        ),
+      );
+    });
+
+    expect(renderCodeBlock).toHaveBeenCalledWith({
+      language: 'echarts-fulldata',
+      className: 'language-echarts-fulldata',
+      code: 'const option = {};',
+      isStreaming: true,
+      source: 'assistant',
+      theme: 'light',
+    });
+    expect(
+      container.querySelector('[data-chart-theme="light"]'),
+    ).not.toBeNull();
+    expect(container.textContent).toContain(
+      'assistant:true:const option = {};',
+    );
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
+  it('falls back to the default code block when the host renderer declines', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() => undefined);
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content: '```custom-chart\nconst option = {};\n```',
+            source: 'assistant',
+            isStreaming: false,
+          }),
+        ),
+      );
+    });
+
+    expect(renderCodeBlock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        language: 'custom-chart',
+        className: 'language-custom-chart',
+        code: 'const option = {};',
+      }),
+    );
+    expect(container.textContent).toContain('custom-chart');
+    expect(container.querySelector('pre code')?.textContent).toContain(
+      'const option = {};',
+    );
 
     await act(async () => {
       root.unmount();

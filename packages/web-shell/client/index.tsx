@@ -108,6 +108,7 @@ export type {
 } from './utils/commandDisplay';
 export type { ComposerToolbarAction } from './components/ChatEditor';
 export type {
+  CodeBlockRenderer,
   MarkdownContentSource,
   MarkdownTableMode,
   MarkdownRenderContext,
@@ -121,6 +122,7 @@ export type {
   WebShellComposerToolbarRightRenderInfo,
   WelcomeFooterRenderer,
   WelcomeHeaderRenderer,
+  WebShellCodeBlockRenderInfo,
   WebShellMarkdownCustomization,
 } from './customization';
 export type { WelcomeHeaderProps } from './components/WelcomeHeader';
