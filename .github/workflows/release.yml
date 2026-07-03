@@ -611,6 +611,7 @@ jobs:
           DETAILS_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           BUG_LABEL: 'type/bug'
           READY_FOR_AGENT_LABEL: 'status/ready-for-agent'
+          AUTOFIX_APPROVED_LABEL: 'autofix/approved'
           PREPARE_RESULT: '${{ needs.prepare.result }}'
           QUALITY_RESULT: '${{ needs.quality.result }}'
           INTEGRATION_NONE_RESULT: '${{ needs.integration_none.result }}'
@@ -691,8 +692,8 @@ jobs:
               # Ensure the fallback labels are present so that, if the dispatch
               # below fails, the scheduled ready-for-agent scan can still find it.
               gh issue edit "${issue_number}" --repo "${GH_REPO}" \
-                --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL}" \
-                || echo "::warning::Failed to ensure ${BUG_LABEL}/${READY_FOR_AGENT_LABEL} on issue #${issue_number}."
+                --add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}" \
+                || echo "::warning::Failed to ensure ${BUG_LABEL}/${READY_FOR_AGENT_LABEL}/${AUTOFIX_APPROVED_LABEL} on issue #${issue_number}."
             fi
           fi
 
@@ -701,7 +702,8 @@ jobs:
               --title "Release Failed for ${RELEASE_TAG} on $(date -u +'%Y-%m-%d')" \
               --body-file "${body_file}" \
               --label "${BUG_LABEL}" \
-              --label "${READY_FOR_AGENT_LABEL}")"
+              --label "${READY_FOR_AGENT_LABEL}" \
+              --label "${AUTOFIX_APPROVED_LABEL}")"
             issue_number="${issue_url##*/}"
           fi
 
