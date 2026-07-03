@@ -1145,6 +1145,12 @@ const EN: Messages = {
   'tasks.detail.toolCallCount': 'Tool calls',
   'tasks.detail.tokens': (v) => `${v?.count ?? 0} tokens`,
   'tasks.detail.toolCalls': (v) => `${v?.count ?? 0} tool calls`,
+  'tasks.detail.nesting': 'Nesting',
+  'tasks.detail.nestingValue': (v) =>
+    `Level ${v?.level ?? '?'} · from ${v?.parent ?? '?'}`,
+  'tasks.detail.nestingLevel': (v) => `Level ${v?.level ?? '?'}`,
+  'tasks.row.from': (v) => `from ${v?.parent ?? '?'}`,
+  'tasks.row.nested': 'nested',
   'tips.items':
     'Type / to see all available commands.|Use @ to reference file paths.|Press Esc to cancel an in-flight request.|Use Shift+Enter for a newline.|Press ↑↓ to browse message history.',
   'tools.available': 'Available tools:',
@@ -2316,6 +2322,12 @@ const ZH: Messages = {
   'tasks.detail.toolCallCount': '工具数量',
   'tasks.detail.tokens': (v) => `${v?.count ?? 0} tokens`,
   'tasks.detail.toolCalls': (v) => `${v?.count ?? 0} 次工具调用`,
+  'tasks.detail.nesting': '嵌套',
+  'tasks.detail.nestingValue': (v) =>
+    `第 ${v?.level ?? '?'} 层 · 来自 ${v?.parent ?? '?'}`,
+  'tasks.detail.nestingLevel': (v) => `第 ${v?.level ?? '?'} 层`,
+  'tasks.row.from': (v) => `来自 ${v?.parent ?? '?'}`,
+  'tasks.row.nested': '嵌套',
   'tips.items':
     '输入 / 查看所有可用命令。|使用 @ 引用文件路径。|按 Esc 取消正在进行的请求。|使用 Shift+Enter 换行。|按 ↑↓ 浏览历史消息。',
   'tools.available': '可用工具:',
