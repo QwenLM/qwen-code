@@ -169,42 +169,9 @@ jobs:
         run: |-
           profile=full
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
-            changed_files="${RUNNER_TEMP}/changed-files.txt"
-            if gh pr diff "${PR_NUMBER}" --repo "${GITHUB_REPOSITORY}" --name-only > "${changed_files}"; then
-              has_files=false
-              docs_only=true
-              github_ci_only=true
-              shopt -s nocasematch
-
-              is_docs_only_file() {
-                case "$1" in
-                  *.md|*.mdx|README|README.*|CHANGELOG|CHANGELOG.*|CONTRIBUTING|CONTRIBUTING.*|CODE_OF_CONDUCT|CODE_OF_CONDUCT.*|SECURITY|SECURITY.*|SUPPORT|SUPPORT.*|LICENSE|LICENSE.*|NOTICE|NOTICE.*)
-                    return 0
-                    ;;
-                  *)
-                    return 1
-                    ;;
-                esac
-              }
-
-              while IFS= read -r file || [[ -n "${file}" ]]; do
-                [[ -z "${file}" ]] && continue
-                has_files=true
-                if ! is_docs_only_file "${file}"; then
-                  docs_only=false
-                fi
-                case "${file}" in
-                  .github/scripts/pr-safety-precheck.mjs|.github/scripts/pr-safety-precheck.test.mjs|.github/workflows/qwen-pr-safety-precheck.yml) ;;
-                  *) github_ci_only=false ;;
-                esac
-              done < "${changed_files}"
-              shopt -u nocasematch
-
-              if [[ "${has_files}" == "true" && "${docs_only}" == "true" ]]; then
-                profile=docs_only
-              elif [[ "${has_files}" == "true" && "${github_ci_only}" == "true" ]]; then
-                profile=github_ci_only
-              fi
+            changed_files="${RUNNER_TEMP}/changed-files.jsonl"
+            if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[] | {filename, status, previous_filename}' > "${changed_files}"; then
+              profile="$(node .github/scripts/ci/classify-profile.mjs "${changed_files}")"
             else
               echo "::warning::Unable to list PR changed files; running full CI."
             fi
@@ -221,10 +188,10 @@ jobs:
         timeout-minutes: 5
         run: |-
           # Keep this path dependency-free; script formatting is checked when those files hit full CI.
-          node --test .github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/classify-profile.test.mjs
           node scripts/lint.js --setup
           node scripts/lint.js --actionlint
           node scripts/lint.js --yamllint
+          node --test .github/scripts/pr-safety-precheck.test.mjs .github/scripts/ci/classify-profile.test.mjs
 
       # Self-hosted can't reach nodejs.org reliably; reuse the machine's Node.
       - name: 'Set up Node.js 22.x (hosted)'

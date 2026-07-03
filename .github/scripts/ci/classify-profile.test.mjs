@@ -9,6 +9,10 @@ import {
 test('uses docs_only for markdown-only changes', () => {
   assert.equal(
     classifyChangedFiles(['README.md', 'docs/usage.md', '.qwen/design/foo.md']),
+    'full',
+  );
+  assert.equal(
+    classifyChangedFiles(['README.md', 'docs/usage.md']),
     'docs_only',
   );
 });
@@ -31,6 +35,36 @@ test('uses github_ci_only for each allowed GitHub CI helper file', () => {
   for (const file of GITHUB_CI_ONLY_FILES) {
     assert.equal(classifyChangedFiles([file]), 'github_ci_only');
   }
+});
+
+test('falls back to full for case-mismatched GitHub CI helper paths', () => {
+  assert.equal(
+    classifyChangedFiles(['.GITHUB/SCRIPTS/PR-SAFETY-PRECHECK.MJS']),
+    'full',
+  );
+});
+
+test('classifies renamed files using both old and new paths', () => {
+  assert.equal(
+    classifyChangedFiles([
+      {
+        filename: 'docs/new.md',
+        previous_filename: 'packages/core/src/runtime.ts',
+        status: 'renamed',
+      },
+    ]),
+    'full',
+  );
+  assert.equal(
+    classifyChangedFiles([
+      {
+        filename: 'docs/new.md',
+        previous_filename: 'docs/old.md',
+        status: 'renamed',
+      },
+    ]),
+    'docs_only',
+  );
 });
 
 test('falls back to full when changed files are unavailable', () => {
@@ -66,4 +100,12 @@ test('falls back to full for classifier changes', () => {
     classifyChangedFiles(['.github/scripts/ci/classify-profile.test.mjs']),
     'full',
   );
+});
+
+test('falls back to full for runtime markdown assets and instruction files', () => {
+  assert.equal(
+    classifyChangedFiles(['packages/core/src/skills/bundled/foo/SKILL.md']),
+    'full',
+  );
+  assert.equal(classifyChangedFiles(['AGENTS.md']), 'full');
 });

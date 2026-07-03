@@ -14,27 +14,70 @@ export const GITHUB_CI_ONLY_FILES = new Set([
 ]);
 
 function isDocsOnlyFile(file) {
+  const normalized = file.replace(/\\/g, '/');
   return (
-    /\.(?:md|mdx)$/i.test(file) ||
+    /^docs\/.+\.(?:md|mdx)$/i.test(normalized) ||
     /^(?:README|CHANGELOG|CONTRIBUTING|CODE_OF_CONDUCT|SECURITY|SUPPORT|LICENSE|NOTICE)(?:\..*)?$/i.test(
-      file,
+      normalized,
     )
   );
+}
+
+function classifyPath(file) {
+  if (isDocsOnlyFile(file)) return CI_PROFILES.DOCS_ONLY;
+  if (GITHUB_CI_ONLY_FILES.has(file)) return CI_PROFILES.GITHUB_CI_ONLY;
+  return CI_PROFILES.FULL;
+}
+
+function classifyFileEntry(entry) {
+  if (typeof entry === 'string') return classifyPath(entry);
+
+  const filename = entry?.filename;
+  if (!filename) return CI_PROFILES.FULL;
+
+  const profile = classifyPath(filename);
+  if (entry.status !== 'renamed') return profile;
+
+  const previousProfile = entry.previous_filename
+    ? classifyPath(entry.previous_filename)
+    : CI_PROFILES.FULL;
+  return previousProfile === profile ? profile : CI_PROFILES.FULL;
 }
 
 export function classifyChangedFiles(files) {
   const changedFiles = files.filter(Boolean);
   if (changedFiles.length === 0) return CI_PROFILES.FULL;
 
-  if (changedFiles.every(isDocsOnlyFile)) {
+  if (
+    changedFiles.every(
+      (entry) => classifyFileEntry(entry) === CI_PROFILES.DOCS_ONLY,
+    )
+  ) {
     return CI_PROFILES.DOCS_ONLY;
   }
 
-  if (changedFiles.every((file) => GITHUB_CI_ONLY_FILES.has(file))) {
+  if (
+    changedFiles.every(
+      (entry) => classifyFileEntry(entry) === CI_PROFILES.GITHUB_CI_ONLY,
+    )
+  ) {
     return CI_PROFILES.GITHUB_CI_ONLY;
   }
 
   return CI_PROFILES.FULL;
+}
+
+function parseChangedFiles(text) {
+  return text
+    .split(/\r?\n/)
+    .filter(Boolean)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return line;
+      }
+    });
 }
 
 function main() {
@@ -45,7 +88,7 @@ function main() {
   }
 
   try {
-    const files = readFileSync(filePath, 'utf8').split(/\r?\n/);
+    const files = parseChangedFiles(readFileSync(filePath, 'utf8'));
     console.log(classifyChangedFiles(files));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
