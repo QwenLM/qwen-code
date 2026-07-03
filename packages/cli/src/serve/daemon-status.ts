@@ -514,13 +514,33 @@ function pushRuntimeIssues(
         ? `code=${channelWorker.exitCode ?? 'null'}`
         : undefined,
       channelWorker.signal ? `signal=${channelWorker.signal}` : undefined,
+      channelWorker.restartCount !== undefined
+        ? `restarts=${channelWorker.restartCount}`
+        : undefined,
+      channelWorker.lastExitAt
+        ? `lastExitAt=${channelWorker.lastExitAt}`
+        : undefined,
+      channelWorker.lastRestartAt
+        ? `lastRestartAt=${channelWorker.lastRestartAt}`
+        : undefined,
+      channelWorker.nextRestartAt
+        ? `nextRestartAt=${channelWorker.nextRestartAt}`
+        : undefined,
+      channelWorker.lastHeartbeatAt
+        ? `lastHeartbeatAt=${channelWorker.lastHeartbeatAt}`
+        : undefined,
+      channelWorker.staleHeartbeatAt
+        ? `staleHeartbeatAt=${channelWorker.staleHeartbeatAt}`
+        : undefined,
     ].filter(Boolean);
     const details =
       detailParts.length > 0 ? ` (${detailParts.join(', ')})` : '';
     const error = channelWorker.error ? `: ${channelWorker.error}` : '';
+    const isPermanentFailure =
+      channelWorker.state === 'failed' && !channelWorker.nextRestartAt;
     issues.push({
       code: 'channel_worker_exited',
-      severity: 'warning',
+      severity: isPermanentFailure ? 'error' : 'warning',
       message: `Channel worker is ${channelWorker.state}${details}${error}.`,
       section: 'runtime.channelWorker',
     });

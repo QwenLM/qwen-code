@@ -19,6 +19,7 @@ import {
 } from './agent-transcript.js';
 import { AgentTerminateMode } from './runtime/agent-types.js';
 import { AgentEventEmitter } from './runtime/agent-events.js';
+import { getCurrentAgentDepth } from './runtime/agent-context.js';
 import { AgentHeadless } from './runtime/agent-headless.js';
 import {
   FORK_DEFAULT_MAX_TURNS,
@@ -44,7 +45,17 @@ describe('BackgroundAgentResumeService', () => {
     });
   });
 
-  function createService(options: { stopHookBlockingCap?: number } = {}) {
+  function createService(
+    options: {
+      stopHookBlockingCap?: number;
+      hookSystem?:
+        | {
+            fireSubagentStartEvent: ReturnType<typeof vi.fn>;
+            fireSubagentStopEvent: ReturnType<typeof vi.fn>;
+          }
+        | undefined;
+    } = {},
+  ) {
     const subagentManager = {
       loadSubagent: vi.fn(async (name: string) =>
         name === 'researcher'
@@ -56,10 +67,13 @@ describe('BackgroundAgentResumeService', () => {
       ),
       createAgentHeadless: vi.fn(),
     };
-    const hookSystem = {
-      fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
-      fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
-    };
+    const hookSystem =
+      options.hookSystem !== undefined
+        ? options.hookSystem
+        : {
+            fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+            fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+          };
     // Stub registry exposed on both `parent.getToolRegistry()` and the
     // override built by `createApprovalModeOverride` (which now rebuilds
     // the tool registry on the resumed agent's Config so bound tools
@@ -471,6 +485,84 @@ describe('BackgroundAgentResumeService', () => {
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
+  });
+
+  it('sets hook_context to empty string when no hook system is configured', async () => {
+    const sessionId = 'session-no-hook';
+    const agentId = 'agent-no-hook';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume without hooks',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume without hooks' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume without hooks',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume without hooks',
+      outputFile,
+      metaPath,
+    });
+
+    const execute = vi.fn(
+      async (_context: { get: (key: string) => unknown }) => undefined,
+    );
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager } = createService({
+      hookSystem: undefined,
+    });
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    expect(execute).toHaveBeenCalledTimes(1);
+    const contextArg = execute.mock.calls[0]![0] as {
+      get: (key: string) => unknown;
+    };
+    expect(contextArg.get('hook_context')).toBe('');
   });
 
   it('returns only model-visible subagent output when resumed background agents complete', async () => {
@@ -1058,6 +1150,10 @@ describe('BackgroundAgentResumeService', () => {
         model: 'agent-model',
         maxSessionTurns: 7,
         maxToolCalls: 11,
+        // Deliberately out of range: the resume path must re-normalize
+        // persisted values with Config semantics (clamp to 1–100), so a
+        // malformed or tampered sidecar cannot bypass the nesting cap.
+        maxSubagentDepth: 5000,
       },
     });
     fs.writeFileSync(
@@ -1120,7 +1216,175 @@ describe('BackgroundAgentResumeService', () => {
     expect(overriddenConfig.getModel()).toBe('agent-model');
     expect(overriddenConfig.getMaxSessionTurns()).toBe(7);
     expect(overriddenConfig.getMaxToolCalls()).toBe(11);
+    expect(overriddenConfig.getMaxSubagentDepth()).toBe(100);
   }, 20000);
+
+  it.each([
+    // Out-of-range values clamp with Config semantics.
+    { persisted: 5000, expected: 100 },
+    // This codebase never writes null, but the sidecar is a plain JSON
+    // file — a malformed or hand-edited copy can carry it; it must fall
+    // back to the default, not leak through the getter override.
+    { persisted: null as unknown as number, expected: 5 },
+  ])(
+    'normalizes persisted maxSubagentDepth $persisted to $expected on resume',
+    async ({ persisted, expected }) => {
+      const sessionId = `session-depth-norm-${expected}`;
+      const agentId = `agent-depth-norm-${expected}`;
+      const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+      const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+      writeAgentMeta(metaPath, {
+        agentId,
+        agentType: 'researcher',
+        description: 'Resume with persisted depth cap',
+        parentSessionId: sessionId,
+        parentAgentId: null,
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'running',
+        subagentName: 'researcher',
+        persistedCliFlags: { maxSubagentDepth: persisted },
+      });
+      fs.writeFileSync(
+        outputFile,
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Resume' }] },
+        }) + '\n',
+        'utf8',
+      );
+
+      registry.register({
+        agentId,
+        description: 'Resume with persisted depth cap',
+        subagentType: 'researcher',
+        status: 'paused',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        prompt: 'Resume with persisted depth cap',
+        outputFile,
+        metaPath,
+        isBackgrounded: true,
+      });
+
+      const createAgentHeadless = vi.fn().mockResolvedValue({
+        subagent: {
+          execute: vi.fn(async () => undefined),
+          setExternalMessageProvider: vi.fn(),
+          getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+          getExecutionSummary: () => ({
+            totalTokens: 0,
+            outputTokens: 0,
+            totalDurationMs: 0,
+          }),
+          getTerminateMode: () => AgentTerminateMode.GOAL,
+          getFinalText: () => 'done',
+        },
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
+
+      const { service, subagentManager } = createService();
+      subagentManager.createAgentHeadless = createAgentHeadless;
+
+      const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+      expect(resumed).toBeDefined();
+      expect(createAgentHeadless).toHaveBeenCalledTimes(1);
+      const [, overriddenConfig] = createAgentHeadless.mock.calls[0]!;
+      expect(overriddenConfig.getMaxSubagentDepth()).toBe(expected);
+    },
+    20000,
+  );
+
+  it.each([
+    // Resume happens from a top-level frame (depth would recompute to 0);
+    // the persisted meta.depth must be pinned via the runWithAgentContext
+    // depthOverride, or a resumed nested agent would regain spawn capacity.
+    { persisted: 2, expected: 2 },
+    // The sidecar is untrusted input: a tampered negative depth must fail
+    // closed to the depth ceiling (no spawn capacity), not pin the frame
+    // at a level that passes canSpawnNestedAgent() for every cap.
+    { persisted: -50, expected: 100 },
+  ])(
+    'restores persisted launch depth $persisted as $expected on resume',
+    async ({ persisted, expected }) => {
+      const sessionId = `session-depth-${expected}`;
+      const agentId = `agent-depth-${expected}`;
+      const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+      const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+      writeAgentMeta(metaPath, {
+        agentId,
+        agentType: 'researcher',
+        description: 'Resume nested agent',
+        parentSessionId: sessionId,
+        parentAgentId: 'agent-parent',
+        createdAt: '2026-04-20T00:00:00.000Z',
+        status: 'running',
+        subagentName: 'researcher',
+        depth: persisted,
+      });
+      fs.writeFileSync(
+        outputFile,
+        JSON.stringify({
+          uuid: 'u1',
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-04-20T00:00:00.000Z',
+          type: 'user',
+          message: { role: 'user', parts: [{ text: 'Resume nested agent' }] },
+        }) + '\n',
+        'utf8',
+      );
+
+      registry.register({
+        agentId,
+        description: 'Resume nested agent',
+        subagentType: 'researcher',
+        status: 'paused',
+        startTime: Date.now(),
+        abortController: new AbortController(),
+        prompt: 'Resume nested agent',
+        outputFile,
+        metaPath,
+        isBackgrounded: true,
+      });
+
+      let observedDepth = -1;
+      const createAgentHeadless = vi.fn().mockResolvedValue({
+        subagent: {
+          execute: vi.fn(async () => {
+            observedDepth = getCurrentAgentDepth();
+          }),
+          setExternalMessageProvider: vi.fn(),
+          getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+          getExecutionSummary: () => ({
+            totalTokens: 0,
+            outputTokens: 0,
+            totalDurationMs: 0,
+          }),
+          getTerminateMode: () => AgentTerminateMode.GOAL,
+          getFinalText: () => 'done',
+        },
+        dispose: vi.fn().mockResolvedValue(undefined),
+      });
+
+      const { service, subagentManager } = createService();
+      subagentManager.createAgentHeadless = createAgentHeadless;
+
+      const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+      expect(resumed).toBeDefined();
+      await vi.waitFor(() => {
+        expect(observedDepth).toBe(expected);
+      });
+    },
+    20000,
+  );
 
   it('coalesces concurrent resume calls into a single running agent', async () => {
     const sessionId = 'session-double';

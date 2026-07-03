@@ -32,6 +32,7 @@ import {
   existsSync,
   mkdirSync,
   renameSync,
+  unlinkSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { OpCode, Intent } from './types.js';
@@ -137,6 +138,8 @@ export class QQChannel extends ChannelBase {
   private lastHeartbeatAck: number = 0;
   /** Debounce timer for saveQQState to avoid blocking event loop. */
   private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  /** beforeExit hook to flush state when the event loop drains naturally. Does NOT fire for SIGKILL, OOM kills, or uncaughtException. */
+  private beforeExitHook: (() => void) | null = null;
   /** Timer for reconnectWithRetry fallback (unref'd so it doesn't block exit). */
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   /** Guard against parallel reconnectWithRetry chains from stale close events. */
@@ -351,16 +354,30 @@ export class QQChannel extends ChannelBase {
       try {
         await this.fetchToken();
         await this.connectGateway();
+        // Register beforeExit hook so the unref'd debounce timer's unflushed
+        // state is persisted when the event loop drains naturally. Does NOT
+        // fire for SIGKILL, OOM kills, or uncaughtException.
+        if (this.beforeExitHook) {
+          process.off('beforeExit', this.beforeExitHook);
+        }
+        this.beforeExitHook = () => this.flushQQState();
+        process.on('beforeExit', this.beforeExitHook);
         return;
       } catch (e: unknown) {
         if (attempt < 2) {
           const msg = e instanceof Error ? e.message : String(e);
           process.stderr.write(
-            `[QQ:${this.name}] Connect attempt ${attempt + 1} failed: ${msg}, retrying...\n`,
+            `[QQ:${this.name}] Connect attempt ${attempt + 1} failed: ${sanitizeLogText(msg, 200)}, retrying...\n`,
           );
           await this.sleep(2000);
         } else {
-          throw e;
+          // Final attempt: wrap the connection error with sanitized text.
+          // The sanitizeLogText path is exercised by the existing connect gateway
+          // retry tests in send.test.ts (gateway reconnect timer block).
+          throw new Error(
+            sanitizeLogText(e instanceof Error ? e.message : String(e), 200),
+            { cause: e },
+          );
         }
       }
     }
@@ -411,7 +428,7 @@ export class QQChannel extends ChannelBase {
         if (!resp.ok && useMarkdown) {
           const errBody = await resp.text().catch(() => '');
           process.stderr.write(
-            `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${errBody.slice(0, 100)}), retrying as plain text\n`,
+            `[QQ:${this.name}] Markdown rejected (HTTP ${resp.status}: ${sanitizeLogText(errBody, 200)}), retrying as plain text\n`,
           );
           const plainBody: Record<string, unknown> = {
             content: chunk,
@@ -432,13 +449,15 @@ export class QQChannel extends ChannelBase {
         if (!resp.ok) {
           const errBody = await resp.text().catch(() => '');
           process.stderr.write(
-            `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${body['msg_seq'] ?? '-'}): ${errBody.slice(0, 200)}\n`,
+            `[QQ:${this.name}] Send HTTP ${resp.status} (msg_seq=${body['msg_seq'] ?? '-'}): ${sanitizeLogText(errBody, 200)}\n`,
           );
           break;
         }
         if (msgId) this.msgSeqMap.set(msgId, nextSeq);
       } catch (e) {
-        process.stderr.write(`[QQ:${this.name}] Send error: ${e}\n`);
+        process.stderr.write(
+          `[QQ:${this.name}] Send error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+        );
         break;
       }
     }
@@ -493,6 +512,10 @@ export class QQChannel extends ChannelBase {
       this.cronBuffer.clear();
     }
     this.cronRetryCount.clear();
+    if (this.beforeExitHook) {
+      process.off('beforeExit', this.beforeExitHook);
+      this.beforeExitHook = null;
+    }
     this.flushQQState();
     this.backupGlobalSessions();
     if (this.ws) {
@@ -543,16 +566,28 @@ export class QQChannel extends ChannelBase {
 
   /** Debounced state persistence with atomic write. */
   private saveQQState(): void {
+    // NOTE: guarded here; flushQQState() is intentionally NOT — disconnect()
+    // sets disposed=true *before* calling it, so it must still write final state.
+    if (this.disposed) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
+    const tmpPath = this.qqStatePath + '.tmp';
     this.saveTimer = setTimeout(() => {
+      if (this.disposed) return;
       try {
-        const tmpPath = this.qqStatePath + '.tmp';
         writeFileSync(tmpPath, this.serializeQQState(), { mode: 0o600 });
         renameSync(tmpPath, this.qqStatePath);
-      } catch {
-        /* best-effort */
+      } catch (e) {
+        try {
+          unlinkSync(tmpPath);
+        } catch {
+          /* best-effort */
+        }
+        process.stderr.write(
+          `[QQ:${this.name}] saveQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+        );
       }
     }, 500);
+    this.saveTimer.unref();
   }
 
   /**
@@ -593,64 +628,129 @@ export class QQChannel extends ChannelBase {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
+    const tmpPath = this.qqStatePath + '.tmp';
     try {
-      const tmpPath = this.qqStatePath + '.tmp';
       writeFileSync(tmpPath, this.serializeQQState(), { mode: 0o600 });
       renameSync(tmpPath, this.qqStatePath);
-    } catch {
-      /* best-effort */
+    } catch (e) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        /* best-effort */
+      }
+      process.stderr.write(
+        `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      );
     }
   }
 
   /**
    * Restore QQ routing state from disk.
-   * Trusts persisted JSON — if the file is corrupt, entries with undefined
-   * values may appear, which is acceptable for a rare edge case.
+   * Validates and filters every entry on restore — corrupt or unexpected
+   * entries (e.g. unknown chat types, oversized replyMsgIds, negative seqs)
+   * are silently dropped so they don't propagate into runtime routing.
    */
   private restoreQQState(): boolean {
     try {
       if (!existsSync(this.qqStatePath)) return false;
       const raw = JSON.parse(readFileSync(this.qqStatePath, 'utf-8'));
-      if (raw.chatTypeMap) {
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+        process.stderr.write(
+          `[QQ:${this.name}] Invalid QQ state file (not an object), ignoring\n`,
+        );
+        return false;
+      }
+      if (raw.chatTypeMap && Array.isArray(raw.chatTypeMap)) {
+        const rawCT = raw.chatTypeMap as Array<[string, unknown]>;
+        // Validate: only accept 'c2c' | 'group' values
         this.chatTypeMap = new Map(
-          (raw.chatTypeMap as Array<[string, unknown]>).filter(
-            ([, v]) => v === 'c2c' || v === 'group',
+          rawCT.filter(
+            ([k, v]) =>
+              typeof k === 'string' &&
+              k.length <= 256 &&
+              (v === 'c2c' || v === 'group'),
           ),
         ) as Map<string, 'c2c' | 'group'>;
+        const dropped = rawCT.length - this.chatTypeMap.size;
+        if (dropped > 0)
+          process.stderr.write(
+            `[QQ:${this.name}] Dropped ${dropped} invalid chatTypeMap entries during restore\n`,
+          );
       }
-      if (raw.replyMsgId) {
+      if (raw.replyMsgId && Array.isArray(raw.replyMsgId)) {
+        const rawRM = raw.replyMsgId as Array<[string, unknown]>;
+        // Validate: entries must be strings ≤ 128 chars
         this.replyMsgId = new Map(
-          (raw.replyMsgId as Array<[string, unknown]>).map(([k, v]) => [
-            k,
-            typeof v === 'string' ? v : (v as { msgId: string }).msgId,
-          ]),
-        );
-      }
-      if (raw.msgSeqMap) {
-        this.msgSeqMap = new Map(
-          (raw.msgSeqMap as Array<[string, unknown]>).filter(
-            ([, v]) => typeof v === 'number' && v >= 0,
-          ),
-        ) as Map<string, number>;
-      }
-      if (raw.groupActiveMsgEnabled) {
-        this.groupActiveMsgEnabled = new Map(
-          (raw.groupActiveMsgEnabled as Array<[string, unknown]>).filter(
-            ([, v]) => typeof v === 'boolean',
-          ),
-        ) as Map<string, boolean>;
-      }
-      if (raw.botOpenIdByGroup) {
-        this.botOpenIdByGroup = new Map(
-          (raw.botOpenIdByGroup as Array<[string, unknown]>).filter(
-            ([, v]) => typeof v === 'string' && /^[A-F0-9]{32}$/i.test(v),
+          rawRM.filter(
+            ([k, v]) =>
+              typeof k === 'string' &&
+              k.length <= 256 &&
+              typeof v === 'string' &&
+              v.length <= 128,
           ),
         ) as Map<string, string>;
+        const dropped = rawRM.length - this.replyMsgId.size;
+        if (dropped > 0)
+          process.stderr.write(
+            `[QQ:${this.name}] Dropped ${dropped} invalid replyMsgId entries during restore\n`,
+          );
+      }
+      if (raw.msgSeqMap && Array.isArray(raw.msgSeqMap)) {
+        const rawMS = raw.msgSeqMap as Array<[string, unknown]>;
+        // Validate: entries must be non-negative safe integers
+        this.msgSeqMap = new Map(
+          rawMS.filter(
+            ([k, v]) =>
+              typeof k === 'string' &&
+              k.length <= 256 &&
+              typeof v === 'number' &&
+              Number.isSafeInteger(v) &&
+              v >= 0,
+          ),
+        ) as Map<string, number>;
+        const dropped = rawMS.length - this.msgSeqMap.size;
+        if (dropped > 0)
+          process.stderr.write(
+            `[QQ:${this.name}] Dropped ${dropped} invalid msgSeqMap entries during restore\n`,
+          );
+      }
+      if (raw.groupActiveMsgEnabled && Array.isArray(raw.groupActiveMsgEnabled)) {
+        const rawGA = raw.groupActiveMsgEnabled as Array<[string, unknown]>;
+        this.groupActiveMsgEnabled = new Map(
+          rawGA.filter(
+            ([k, v]) =>
+              typeof k === 'string' &&
+              k.length <= 256 &&
+              typeof v === 'boolean',
+          ),
+        ) as Map<string, boolean>;
+        const dropped = rawGA.length - this.groupActiveMsgEnabled.size;
+        if (dropped > 0)
+          process.stderr.write(
+            `[QQ:${this.name}] Dropped ${dropped} invalid groupActiveMsgEnabled entries during restore\n`,
+          );
+      }
+      if (raw.botOpenIdByGroup && Array.isArray(raw.botOpenIdByGroup)) {
+        const rawBO = raw.botOpenIdByGroup as Array<[string, unknown]>;
+        this.botOpenIdByGroup = new Map(
+          rawBO.filter(
+            ([k, v]) =>
+              typeof k === 'string' &&
+              k.length <= 256 &&
+              typeof v === 'string' &&
+              /^[A-F0-9]{32}$/i.test(v),
+          ),
+        ) as Map<string, string>;
+        const dropped = rawBO.length - this.botOpenIdByGroup.size;
+        if (dropped > 0)
+          process.stderr.write(
+            `[QQ:${this.name}] Dropped ${dropped} invalid botOpenIdByGroup entries during restore\n`,
+          );
       }
       return true;
     } catch (e) {
       process.stderr.write(
-        `[QQ:${this.name}] Failed to restore QQ state: ${e instanceof Error ? e.message : String(e)}\n`,
+        `[QQ:${this.name}] Failed to restore QQ state: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
       );
       return false;
     }
@@ -779,7 +879,7 @@ export class QQChannel extends ChannelBase {
         this.fetchToken().catch((e) => {
           if (this.disposed) return;
           process.stderr.write(
-            `[QQ:${this.name}] Token refresh failed: ${e}, retrying in 60s\n`,
+            `[QQ:${this.name}] Token refresh failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, retrying in 60s\n`,
           );
           this.scheduleTokenRefreshRetry();
         });
@@ -794,7 +894,7 @@ export class QQChannel extends ChannelBase {
       this.fetchToken().catch((e) => {
         if (this.disposed) return;
         process.stderr.write(
-          `[QQ:${this.name}] Token refresh failed: ${e}, retrying in 60s\n`,
+          `[QQ:${this.name}] Token refresh failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}, retrying in 60s\n`,
         );
         this.scheduleTokenRefreshRetry();
       });
@@ -841,7 +941,7 @@ export class QQChannel extends ChannelBase {
         this.handleGatewayMessage(msg, resolve);
       } catch (e) {
         process.stderr.write(
-          `[QQ:${this.name}] Malformed gateway message: ${e instanceof Error ? e.message : String(e)}\n`,
+          `[QQ:${this.name}] Malformed gateway message: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
         );
       }
     });
@@ -906,7 +1006,9 @@ export class QQChannel extends ChannelBase {
     });
 
     this.ws.on('error', (e: Error) => {
-      process.stderr.write(`[QQ:${this.name}] WebSocket error: ${e.message}\n`);
+      process.stderr.write(
+        `[QQ:${this.name}] WebSocket error: ${sanitizeLogText(e.message, 200)}\n`,
+      );
       if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
         reject(e);
       }
@@ -1126,7 +1228,7 @@ export class QQChannel extends ChannelBase {
         const msg = e instanceof Error ? e.message : String(e);
         const backoff = Math.min(1000 * 2 ** (attempt + 1), 30000);
         process.stderr.write(
-          `[QQ:${this.name}] RC: ${msg} (retry in ${backoff}ms, attempt ${attempt + 1}/${maxGwRetries})\n`,
+          `[QQ:${this.name}] RC: ${sanitizeLogText(msg, 200)} (retry in ${backoff}ms, attempt ${attempt + 1}/${maxGwRetries})\n`,
         );
         if (attempt < maxGwRetries - 1) await this.sleep(backoff);
       }
@@ -1378,7 +1480,9 @@ export class QQChannel extends ChannelBase {
       isReplyToBot: finalIsAtBot,
       ...(isSlash ? {} : { alreadyPrefixed: true as const }),
     }).catch((e) =>
-      process.stderr.write(`[QQ:${this.name}] Group handler error: ${e}\n`),
+      process.stderr.write(
+        `[QQ:${this.name}] Group handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      ),
     );
   }
   private handleGroupAll(event: QQGroupMessageEvent): void {

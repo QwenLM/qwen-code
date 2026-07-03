@@ -6,7 +6,6 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import * as Diff from 'diff';
 import type {
   ToolCallConfirmationDetails,
   ToolEditConfirmationDetails,
@@ -29,7 +28,7 @@ import {
   detectLineEnding,
 } from '../services/fileSystemService.js';
 import type { LineEnding } from '../services/fileSystemService.js';
-import { DEFAULT_DIFF_OPTIONS, getDiffStat } from './diffOptions.js';
+import { createPatchSmart, getDiffStat } from './diffOptions.js';
 import { checkPriorRead, StructuredToolError } from './priorReadEnforcement.js';
 import { ReadFileTool } from './read-file.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
@@ -431,13 +430,12 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
     }
 
     const fileName = path.basename(this.params.file_path);
-    const fileDiff = Diff.createPatch(
+    const fileDiff = createPatchSmart(
       fileName,
       editData.currentContent ?? '',
       editData.newContent,
       'Current',
       'Proposed',
-      DEFAULT_DIFF_OPTIONS,
     );
     const confirmationDetails: ToolEditConfirmationDetails = {
       type: 'edit',
@@ -667,13 +665,12 @@ class EditToolInvocation implements ToolInvocation<EditToolParams, ToolResult> {
         editData.newContent,
       );
 
-      const fileDiff = Diff.createPatch(
+      const fileDiff = createPatchSmart(
         fileName,
-        editData.currentContent ?? '', // Should not be null here if not isNewFile
+        editData.currentContent ?? '',
         editData.newContent,
         'Current',
         'Proposed',
-        DEFAULT_DIFF_OPTIONS,
       );
       const displayResult = {
         fileDiff,

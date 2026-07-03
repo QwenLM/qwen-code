@@ -176,11 +176,9 @@ export function ExtensionsDialog() {
   }, [checking, extensions.length, loading, t]);
 
   return (
-    <div className={dp('resume-picker', 'resume-picker-in-shell')}>
-      <div className={dp('resume-picker-search', 'extensions-toolbar')}>
-        <span className={dp('resume-picker-search-hint')}>
-          {message || summary}
-        </span>
+    <div className={dp('picker', 'picker-in-shell')}>
+      <div className={dp('picker-search', 'extensions-toolbar')}>
+        <span className={dp('picker-search-hint')}>{message || summary}</span>
         <button
           type="button"
           className={dp('dialog-inline-button')}
@@ -191,11 +189,11 @@ export function ExtensionsDialog() {
         </button>
       </div>
 
-      <div className={dp('resume-picker-sep')} />
+      <div className={dp('picker-sep')} />
 
-      <div className={dp('resume-picker-list')}>
+      <div className={dp('picker-list')}>
         {!loading && extensions.length === 0 && (
-          <div className={dp('resume-picker-empty')}>
+          <div className={dp('picker-empty')}>
             {t('extensions.manage.empty')}
           </div>
         )}
@@ -207,8 +205,8 @@ export function ExtensionsDialog() {
             <div
               key={extension.id || extension.name}
               className={dp(
-                'resume-picker-item',
-                'resume-picker-session-item',
+                'picker-item',
+                'picker-session-item',
                 'tools-picker-item',
                 expanded ? 'selected' : undefined,
                 expanded ? 'tools-picker-item-expanded' : undefined,
@@ -223,10 +221,10 @@ export function ExtensionsDialog() {
                 }}
               >
                 <span className={dp('tools-item-icon')} aria-hidden="true" />
-                <span className={dp('resume-picker-item-title')}>
+                <span className={dp('picker-item-title')}>
                   {extensionTitle(extension)}
                 </span>
-                <span className={dp('resume-picker-item-badge')}>
+                <span className={dp('picker-item-badge')}>
                   v{extension.version}
                 </span>
                 <span

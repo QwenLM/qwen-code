@@ -10,9 +10,10 @@ import {
   type SlashCommand,
   type SlashCommandActionReturn,
 } from './types.js';
-import { MessageType, type HistoryItemSkillsList } from '../types.js';
+import { MessageType } from '../types.js';
 import { t } from '../../i18n/index.js';
 import { normalizeSkillPriority } from '@qwen-code/qwen-code-core';
+import { levelLabel } from '../utils/skill-level-label.js';
 
 export const skillsCommand: SlashCommand = {
   name: 'skills',
@@ -33,14 +34,21 @@ export const skillsCommand: SlashCommand = {
     // is the single entry for browsing, search, toggle, and skill launch.
     const skillManager = context.services.config?.getSkillManager();
     if (!skillManager) {
-      context.ui.addItem(
-        {
-          type: MessageType.ERROR,
-          text: t('Could not retrieve skill manager.'),
-        },
-        Date.now(),
-      );
-      return;
+      if (context.executionMode === 'interactive') {
+        context.ui.addItem(
+          {
+            type: MessageType.ERROR,
+            text: t('Could not retrieve skill manager.'),
+          },
+          Date.now(),
+        );
+        return;
+      }
+      return {
+        type: 'message' as const,
+        messageType: 'error' as const,
+        content: t('Could not retrieve skill manager.'),
+      };
     }
 
     if (context.executionMode === 'interactive') {
@@ -63,7 +71,7 @@ export const skillsCommand: SlashCommand = {
       (s) => !disabled.has(s.name.toLowerCase()),
     );
     if (visibleSkills.length === 0) {
-      const text =
+      const content =
         skills.length > 0 && userInvocableSkills.length === 0
           ? t('All skills are marked as non-user-invocable.')
           : userInvocableSkills.length === 0
@@ -71,24 +79,32 @@ export const skillsCommand: SlashCommand = {
             : t(
                 'All available skills are disabled. Edit ~/.qwen/settings.json or .qwen/settings.json (skills.disabled) to re-enable.',
               );
-      context.ui.addItem(
-        {
-          type: MessageType.INFO,
-          text,
-        },
-        Date.now(),
-      );
-      return;
+      return {
+        type: 'message' as const,
+        messageType: 'info' as const,
+        content,
+      };
     }
     const sortedSkills = [...visibleSkills].sort(
       (a, b) =>
         normalizeSkillPriority(b.priority) -
           normalizeSkillPriority(a.priority) || a.name.localeCompare(b.name),
     );
-    const skillsListItem: HistoryItemSkillsList = {
-      type: MessageType.SKILLS_LIST,
-      skills: sortedSkills.map((skill) => ({ name: skill.name })),
+    const sanitize = (text: string, max: number): string => {
+      const oneLine = text.replace(/[\r\n]+/g, ' ').trim();
+      return oneLine.length <= max
+        ? oneLine
+        : `${oneLine.slice(0, Math.max(0, max - 1))}…`;
     };
-    context.ui.addItem(skillsListItem, Date.now());
+    const lines = sortedSkills.map(
+      (s) =>
+        `  - ${s.name}${s.description ? `  ${sanitize(s.description, 80)}` : ''}` +
+        `${s.level ? `  (${levelLabel(s.level)})` : ''}`,
+    );
+    return {
+      type: 'message' as const,
+      messageType: 'info' as const,
+      content: `${t('Available skills:')}\n\n${lines.join('\n')}`,
+    };
   },
 };

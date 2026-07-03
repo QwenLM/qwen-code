@@ -8,12 +8,16 @@ import {
   telegramFormat,
   splitHtmlForTelegram,
 } from 'telegram-markdown-formatter';
-import { ChannelBase } from '@qwen-code/channel-base';
+import {
+  ChannelBase,
+  isTerminalTaskLifecycleType,
+} from '@qwen-code/channel-base';
 import type {
-  ChannelConfig,
-  ChannelBaseOptions,
-  Envelope,
   ChannelAgentBridge,
+  ChannelBaseOptions,
+  ChannelConfig,
+  ChannelTaskLifecycleEvent,
+  Envelope,
   SessionTarget,
 } from '@qwen-code/channel-base';
 
@@ -275,24 +279,66 @@ export class TelegramChannel extends ChannelBase {
 
   /** Per-chat typing interval — repeats every 4s since Telegram expires it after 5s. */
   private typingIntervals = new Map<string, ReturnType<typeof setInterval>>();
+  private activeTypingSessions = new Map<string, Set<string>>();
 
-  protected override onPromptStart(chatId: string): void {
-    // Clear any stale interval (shouldn't happen, but safe)
-    const existing = this.typingIntervals.get(chatId);
-    if (existing) clearInterval(existing);
-
-    const sendTyping = () =>
-      this.bot.api.sendChatAction(chatId, 'typing').catch(() => {});
-    sendTyping();
-    this.typingIntervals.set(chatId, setInterval(sendTyping, 4000));
+  private sendTyping(chatId: string): void {
+    try {
+      void this.bot.api.sendChatAction(chatId, 'typing').catch(() => {});
+    } catch {
+      // Best-effort typing indicator.
+    }
   }
 
-  protected override onPromptEnd(chatId: string): void {
-    const interval = this.typingIntervals.get(chatId);
-    if (interval) {
-      clearInterval(interval);
-      this.typingIntervals.delete(chatId);
+  private startTyping(chatId: string, sessionId = chatId): void {
+    const sessions = this.activeTypingSessions.get(chatId) ?? new Set();
+    sessions.add(sessionId);
+    this.activeTypingSessions.set(chatId, sessions);
+    if (this.typingIntervals.has(chatId)) return;
+    this.sendTyping(chatId);
+    this.typingIntervals.set(
+      chatId,
+      setInterval(() => this.sendTyping(chatId), 4000),
+    );
+  }
+
+  private stopTyping(chatId: string, sessionId = chatId): void {
+    const sessions = this.activeTypingSessions.get(chatId);
+    if (sessions) {
+      sessions.delete(sessionId);
+      if (sessions.size > 0) return;
+      this.activeTypingSessions.delete(chatId);
     }
+    const interval = this.typingIntervals.get(chatId);
+    if (!interval) return;
+    clearInterval(interval);
+    this.typingIntervals.delete(chatId);
+  }
+
+  protected override onTaskLifecycle(event: ChannelTaskLifecycleEvent): void {
+    if (event.type === 'started') {
+      this.startTyping(event.chatId, event.sessionId);
+      return;
+    }
+    if (isTerminalTaskLifecycleType(event.type)) {
+      this.stopTyping(event.chatId, event.sessionId);
+    }
+  }
+
+  protected override onPromptStart(chatId: string, sessionId?: string): void {
+    this.startTyping(chatId, sessionId);
+  }
+
+  protected override onPromptEnd(chatId: string, sessionId?: string): void {
+    this.stopTyping(chatId, sessionId);
+  }
+
+  override onSessionDied(sessionId: string): void {
+    for (const [chatId, sessions] of this.activeTypingSessions) {
+      if (sessions.has(sessionId)) {
+        this.stopTyping(chatId, sessionId);
+      }
+    }
+    super.onSessionDied(sessionId);
   }
 
   async sendMessage(chatId: string, text: string): Promise<void> {
@@ -338,6 +384,7 @@ export class TelegramChannel extends ChannelBase {
       clearInterval(interval);
     }
     this.typingIntervals.clear();
+    this.activeTypingSessions.clear();
     this.bot.stop();
   }
 

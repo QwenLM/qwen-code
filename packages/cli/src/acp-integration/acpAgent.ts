@@ -132,7 +132,6 @@ import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
 import * as fs from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
@@ -158,6 +157,7 @@ import {
   loadCliConfig,
 } from '../config/config.js';
 import { extractRememberErrorCode } from '../serve/workspace-remember-errors.js';
+import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
@@ -217,7 +217,6 @@ import {
   type ServeWorkspaceProviderModel,
   type ServeWorkspaceProviderStatus,
   type ServeWorkspaceProvidersStatus,
-  type ServeWorkspaceSkillStatus,
   type ServeWorkspaceSkillsStatus,
   type ServeWorkspaceToolStatus,
   type ServeWorkspaceToolsStatus,
@@ -2616,11 +2615,36 @@ class QwenAgent implements Agent {
     }
   }
 
-  private async closeStoredSession(sessionId: string): Promise<void> {
+  private async closeStoredSession(
+    sessionId: string,
+    opts?: { requireFlush?: boolean },
+  ): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
       return;
+    }
+
+    const requireFlush = opts?.requireFlush === true;
+    const flushRecording = async (): Promise<unknown> => {
+      try {
+        await session.getConfig().getChatRecordingService()?.flush();
+        return undefined;
+      } catch (err) {
+        debugLogger.debug(
+          `Session ${sessionId} chat recording flush during close failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return err;
+      }
+    };
+
+    if (requireFlush) {
+      const preCancelFlushError = await flushRecording();
+      if (preCancelFlushError !== undefined) {
+        throw preCancelFlushError;
+      }
     }
 
     try {
@@ -2631,6 +2655,11 @@ class QwenAgent implements Agent {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+    }
+
+    const flushError = await flushRecording();
+    if (flushError !== undefined && requireFlush) {
+      throw flushError;
     }
 
     try {
@@ -3862,27 +3891,13 @@ class QwenAgent implements Agent {
     }
 
     try {
+      const disabled = config.getDisabledSkillNames();
       const skills = await skillManager.listSkills();
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
         initialized: true,
-        skills: skills.map((skill): ServeWorkspaceSkillStatus => {
-          const modelInvocable = skill.disableModelInvocation !== true;
-          return {
-            kind: 'skill',
-            status: modelInvocable ? 'ok' : 'disabled',
-            name: skill.name,
-            description: skill.description,
-            level: skill.level,
-            modelInvocable,
-            ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
-            ...(skill.model ? { model: skill.model } : {}),
-            ...(skill.extensionName
-              ? { extensionName: skill.extensionName }
-              : {}),
-          };
-        }),
+        skills: skills.map((skill) => mapSkillConfigToStatus(skill, disabled)),
       };
     } catch (error) {
       return {
@@ -5874,7 +5889,9 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        await this.closeStoredSession(sessionId);
+        await this.closeStoredSession(sessionId, {
+          requireFlush: params['requireFlush'] === true,
+        });
         return { sessionId, closed: true };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
@@ -7560,16 +7577,8 @@ class QwenAgent implements Agent {
       }
     }
 
-    // CDP tunnel (Plan C, #5626): auto-register chrome-devtools-mcp when the
-    // daemon forwarded the tunnel flag, so the agent can drive the real browser.
-    const cdpTunnelMcp = buildCdpTunnelMcpServer();
-    // Don't clobber a `chrome-devtools` server the user configured themselves —
-    // their explicit session config wins over the tunnel auto-wire.
-    if (cdpTunnelMcp && !sessionMcpServers['chrome-devtools']) {
-      sessionMcpServers['chrome-devtools'] = cdpTunnelMcp;
-    }
-
     const settings = this.settings.merged;
+
     const argvForSession = {
       ...this.argv,
       ...(resume ? { resume: sessionId } : { sessionId }),
@@ -7678,16 +7687,23 @@ class QwenAgent implements Agent {
       // (the daemon only adds SDK-type runtime servers for client MCP).
       sendSdkMcpMessage: this.buildClientMcpSender(),
     });
-    // Same reasoning as the top-level runAcpAgent path: ACP feeds session
-    // messages to the model immediately, so we cannot return a Config whose
-    // MCP discovery is still in flight.
-    await config.waitForMcpReady();
-    // Surface MCP failures to stderr — mirrors `runAcpAgent` (lines 95-107)
-    // and the other non-interactive entry points (`gemini.tsx`,
-    // `session.ts`). Without this, per-session ACP configs that lose MCP
-    // servers fall back to built-in-tools-only with no user-visible
-    // indication. Defensive against tests that pass a stubbed Config
-    // without `getFailedMcpServerNames`.
+    // ACP sessions served to WebUI clients are interactive: MCP tools can
+    // arrive progressively, but session creation/loading must not wait for a
+    // slow or wedged server discovery.
+    void this.surfaceMcpFailuresWhenReady(config);
+    return config;
+  }
+
+  private async surfaceMcpFailuresWhenReady(config: Config): Promise<void> {
+    try {
+      await config.waitForMcpReady();
+    } catch (err) {
+      debugLogger.error(
+        `MCP discovery readiness failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+
     const failedMcpServers =
       typeof config.getFailedMcpServerNames === 'function'
         ? config.getFailedMcpServerNames()
@@ -7698,7 +7714,6 @@ class QwenAgent implements Agent {
           `Continuing with built-in tools and any servers that did connect.\n`,
       );
     }
-    return config;
   }
 
   private async ensureAuthenticated(config: Config): Promise<void> {
@@ -7944,75 +7959,4 @@ function diffSettingsKeys(
     }
   }
   return changed;
-}
-
-/**
- * CDP tunnel auto-wiring (Plan C, issue #5626).
- *
- * Builds the `chrome-devtools` session MCP server entry when the daemon runs
- * with the CDP-tunnel flag. The daemon forwards `QWEN_SERVE_CDP_TUNNEL_OVER_WS`
- * + `QWEN_SERVE_CDP_TUNNEL_PORT` into this child's env; we point the patched
- * chrome-devtools-mcp at the daemon's `/cdp` endpoint.
- *
- * Returns `undefined` when the flag is off, the port is missing/invalid, or
- * chrome-devtools-mcp can't be resolved. `trust` is left unset so the tools
- * default to 'ask' — no silent auto-approval of browser control.
- */
-export function buildCdpTunnelMcpServer(): MCPServerConfig | undefined {
-  if (process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] !== '1') return undefined;
-  // Auth-gated `/cdp`: the daemon requires a bearer token on the tunnel, but
-  // this ACP child can't inherit QWEN_SERVER_TOKEN (the spawn path scrubs it)
-  // and chrome-devtools-mcp is launched with `--wsEndpoint` only — it has no way
-  // to send `--wsHeaders` auth. Auto-registering the browser tools here would
-  // surface tools that can't connect, so skip with a clear diagnostic instead.
-  if (process.env['QWEN_SERVE_CDP_TUNNEL_AUTH_REQUIRED'] === '1') {
-    process.stderr.write(
-      'qwen serve: browser tools (chrome-devtools-mcp) disabled — the /cdp ' +
-        'tunnel requires bearer auth, which is not yet supported for the ' +
-        'auto-registered browser MCP server.\n',
-    );
-    return undefined;
-  }
-  const port = Number(process.env['QWEN_SERVE_CDP_TUNNEL_PORT']);
-  if (!Number.isInteger(port) || port <= 0) {
-    // Don't disable the browser tools silently — the most common cause is an
-    // ephemeral `--port 0` daemon, whose real port is bound too late to thread
-    // into this child's (frozen) env. Tell the operator how to enable them.
-    process.stderr.write(
-      'qwen serve: browser tools (chrome-devtools-mcp) disabled — no valid ' +
-        `/cdp tunnel port (QWEN_SERVE_CDP_TUNNEL_PORT=${
-          process.env['QWEN_SERVE_CDP_TUNNEL_PORT'] ?? '<unset>'
-        }). Start the daemon with a fixed --port (ephemeral --port 0 is not ` +
-        'supported for the CDP tunnel).\n',
-    );
-    return undefined;
-  }
-  try {
-    const requireFromHere = createRequire(import.meta.url);
-    const pkgJsonPath = requireFromHere.resolve(
-      'chrome-devtools-mcp/package.json',
-    );
-    const pkg = requireFromHere('chrome-devtools-mcp/package.json') as {
-      bin?: string | Record<string, string>;
-    };
-    const binRel =
-      typeof pkg.bin === 'string' ? pkg.bin : Object.values(pkg.bin ?? {})[0];
-    if (!binRel) return undefined;
-    const pkgDir = path.dirname(pkgJsonPath);
-    const binPath = path.resolve(pkgDir, binRel);
-    // Containment: refuse to execute a bin path that escapes the package dir
-    // (a malformed/hostile `bin` field with `../` segments).
-    const binRelToPkg = path.relative(pkgDir, binPath);
-    if (binRelToPkg.startsWith('..') || path.isAbsolute(binRelToPkg)) {
-      return undefined;
-    }
-    return new MCPServerConfig(process.execPath, [
-      binPath,
-      '--wsEndpoint',
-      `ws://127.0.0.1:${port}/cdp`,
-    ]);
-  } catch {
-    // chrome-devtools-mcp not installed in this build — skip auto-wiring.
-    return undefined;
-  }
 }

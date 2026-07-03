@@ -21,6 +21,7 @@ import type {
   InputModalities,
 } from '../core/contentGenerator.js';
 import type { ContentGeneratorConfigSources } from '../core/contentGenerator.js';
+import type { ReasoningEffort } from '../core/reasoning-effort.js';
 import type { MCPOAuthConfig } from '../mcp/oauth-provider.js';
 import type { ShellExecutionConfig } from '../services/shellExecutionService.js';
 import type { VisionBridgeModelSelection } from '../services/visionBridge/vision-bridge-service.js';
@@ -52,7 +53,11 @@ import {
 } from '../services/fileSystemService.js';
 import { GitWorktreeService } from '../services/gitWorktreeService.js';
 import { cleanupStaleAgentWorktrees } from '../services/worktreeCleanup.js';
-import { CronScheduler } from '../services/cronScheduler.js';
+import {
+  CronScheduler,
+  DEFAULT_RECURRING_MAX_AGE_DAYS,
+  normalizeRecurringMaxAge,
+} from '../services/cronScheduler.js';
 import {
   MemoryPressureMonitor,
   DEFAULT_PRESSURE_CONFIG,
@@ -78,6 +83,7 @@ import type {
 } from '../tools/artifact/publisher.js';
 import type { LspClient, LspStatusSnapshot } from '../lsp/types.js';
 import type { InstructionLoadReason } from '../hooks/types.js';
+import { ApprovalMode } from './approval-mode.js';
 
 // Other modules
 import { ideContextStore } from '../ide/ideContext.js';
@@ -215,6 +221,27 @@ import {
 import { resolveModelId } from '../utils/modelId.js';
 import type { ClaudeMarketplaceConfig } from '../extension/claude-converter.js';
 
+export function parseVisionModelSetting(setting: string | undefined):
+  | {
+      selector: string;
+      baseUrl?: string;
+    }
+  | undefined {
+  if (!setting) return undefined;
+  const nullIdx = setting.indexOf('\0');
+  if (nullIdx < 0) return { selector: setting };
+  const selector = setting.slice(0, nullIdx);
+  if (!selector) return undefined;
+  return {
+    selector,
+    baseUrl: setting.slice(nullIdx + 1) || undefined,
+  };
+}
+
+function formatVisionModelSettingForLog(setting: string): string {
+  return setting.replace(/\0/g, '\\0');
+}
+
 // Re-export types
 export type { AnyToolInvocation, FileFilteringOptions, MCPOAuthConfig };
 export {
@@ -224,15 +251,7 @@ export {
 
 export type ModelInvocableCommandExecutorResult = string | { error: string };
 
-export enum ApprovalMode {
-  PLAN = 'plan',
-  DEFAULT = 'default',
-  AUTO_EDIT = 'auto-edit',
-  AUTO = 'auto',
-  YOLO = 'yolo',
-}
-
-export const APPROVAL_MODES = Object.values(ApprovalMode);
+export { ApprovalMode, APPROVAL_MODES } from './approval-mode.js';
 
 /**
  * Thrown by `Config.setApprovalMode` when the requested mode would grant
@@ -339,6 +358,12 @@ export interface AutoModeSettings {
   };
   /** Environment / context lines injected into the classifier's system prompt. */
   environment?: string[];
+  /**
+   * When true, ALL shell commands are routed through the auto-mode
+   * classifier, including read-only commands that would otherwise be
+   * auto-approved. Default false.
+   */
+  classifyAllShell?: boolean;
 }
 
 export interface AccessibilitySettings {
@@ -731,6 +756,7 @@ export class MCPServerConfig {
      * `new MCPServerConfig(...)` call sites. See issue #4615.
      */
     readonly scope?: McpServerScope,
+    readonly alwaysLoadTools?: boolean,
   ) {}
 }
 
@@ -907,6 +933,15 @@ export interface ConfigParameters {
   outputLanguageFilePath?: string;
   maxSessionTurns?: number;
   /**
+   * Maximum number of nested sub-agent levels (1-based). `1` reproduces the
+   * pre-nesting behavior — level-1 sub-agents exist but cannot themselves
+   * spawn sub-agents. The default `5` lets a sub-agent spawn sub-agents up to
+   * five levels deep. Values `< 1` are clamped to `1`. This governs *nesting*
+   * only; it never disables sub-agents. Teammates, forks, and
+   * workflow-spawned agents are excluded from nesting in v1.
+   */
+  maxSubagentDepth?: number;
+  /**
    * Wall-clock budget for an unattended run, in seconds. `-1` (default)
    * means no limit. Enforced by the CLI's non-interactive run loop
    * see `RunBudgetEnforcer` in `packages/cli/src/utils/runBudget.ts`.
@@ -923,6 +958,11 @@ export interface ConfigParameters {
   sessionTokenLimit?: number;
   experimentalZedIntegration?: boolean;
   cronEnabled?: boolean;
+  /**
+   * Days a recurring cron job lives before auto-expiring. `0` disables
+   * expiry. Unset or invalid falls back to the 7-day default.
+   */
+  cronRecurringMaxAgeDays?: number;
   agentTeamEnabled?: boolean;
   workflowsEnabled?: boolean;
   artifactEnabled?: boolean;
@@ -956,6 +996,13 @@ export interface ConfigParameters {
    */
   cliAllowedMcpServerNames?: string[];
   excludedMcpServers?: string[];
+  /**
+   * Idle timeout in milliseconds for MCP tool calls. If the MCP server does
+   * not produce any response or progress update within this time, the call
+   * is aborted. Default: 300000 (5 minutes). Can be overridden via
+   * QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.
+   */
+  mcpToolIdleTimeoutMs?: number;
   /**
    * Names of project-scoped (`.mcp.json`) servers that are NOT yet approved
    * (pending or rejected). These are loaded so they can be listed, but the
@@ -1178,6 +1225,31 @@ function loadMemoryPressureConfig(): MemoryPressureConfig {
   return config;
 }
 
+/** Default sub-agent nesting cap (1-based levels). */
+export const DEFAULT_MAX_SUBAGENT_DEPTH = 5;
+/** Ceiling for the nesting cap — catches typos the way maxToolCalls' does. */
+export const MAX_SUBAGENT_DEPTH_LIMIT = 100;
+
+/**
+ * Normalizes a maxSubagentDepth value: absent or non-finite values fall back
+ * to the default (NaN would silently block all nesting, Infinity — e.g.
+ * JSON `1e309` — would unbound the recursion cap), and finite values floor
+ * and clamp to the 1–{@link MAX_SUBAGENT_DEPTH_LIMIT} range. Values below 1
+ * clamp up so the knob never disables sub-agents outright — it only bounds
+ * nesting.
+ *
+ * Shared by the Config constructor and the resume path that restores
+ * persisted launch flags, so a malformed or tampered agent sidecar cannot
+ * bypass the nesting cap.
+ */
+export function normalizeMaxSubagentDepth(
+  value: number | null | undefined,
+): number {
+  return value == null || !Number.isFinite(value)
+    ? DEFAULT_MAX_SUBAGENT_DEPTH
+    : Math.min(MAX_SUBAGENT_DEPTH_LIMIT, Math.max(1, Math.floor(value)));
+}
+
 function readMemoryPressureRatioEnv(envName: string, fallback: number): number {
   const raw = process.env[envName];
   if (!raw) {
@@ -1259,6 +1331,40 @@ function resolveSensitiveSpanAttributeMaxLength(
   }
 
   return value;
+}
+
+/**
+ * Resolves the recurring cron max age (in days) once at Config
+ * construction — the setting declares `requiresRestart`, so re-reading
+ * the environment per call could let the tool description, tool output,
+ * and scheduler each report a different expiry if the env var changed
+ * mid-session. The QWEN_CODE_CRON_MAX_AGE_DAYS environment variable
+ * overrides the settings value (convenient for cloud/container
+ * deployments). `normalizeRecurringMaxAge` owns the `0 → Infinity`
+ * (no expiry) contract shared with the CronScheduler constructor.
+ * Negative or unparseable values fall back to the 7-day default with a
+ * console warning — debug file logging is usually off in the daemon
+ * deployments this knob targets, and the misconfiguration would
+ * otherwise surface only as "jobs stopped firing after 7 days".
+ */
+function resolveCronRecurringMaxAgeDays(setting: number | undefined): number {
+  const env = process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+  const fromEnv = env !== undefined && env.trim() !== '';
+  const raw = fromEnv ? Number(env) : setting;
+  if (raw === undefined || !Number.isFinite(raw) || raw < 0) {
+    if (raw !== undefined) {
+      // eslint-disable-next-line no-console -- operator-facing misconfiguration breadcrumb; debug file logging is usually off in daemon deployments
+      console.warn(
+        (fromEnv
+          ? `QWEN_CODE_CRON_MAX_AGE_DAYS="${env}" is invalid`
+          : `cronRecurringMaxAgeDays=${setting} is invalid`) +
+          `; recurring cron jobs will expire after the ` +
+          `${DEFAULT_RECURRING_MAX_AGE_DAYS}-day default.`,
+      );
+    }
+    return DEFAULT_RECURRING_MAX_AGE_DAYS;
+  }
+  return normalizeRecurringMaxAge(raw, DEFAULT_RECURRING_MAX_AGE_DAYS);
 }
 
 export class Config {
@@ -1386,6 +1492,7 @@ export class Config {
   private readonly cliAllowedMcpServerNames?: string[];
   private excludedMcpServers?: string[];
   private pendingMcpServers?: string[];
+  private readonly mcpToolIdleTimeoutMs: number;
   /**
    * Guards against concurrent MCP reconcile passes (hot-reload watcher vs.
    * `/reload`). `SettingsWatcher` serializes its own listeners, but `/reload`
@@ -1448,6 +1555,7 @@ export class Config {
   private ideMode: boolean;
 
   private readonly maxSessionTurns: number;
+  private readonly maxSubagentDepth: number;
   private readonly maxWallTimeSeconds: number;
   private readonly maxToolCalls: number;
   private readonly clearContextOnIdle: ClearContextOnIdleSettings;
@@ -1459,6 +1567,9 @@ export class Config {
   private runtimeStatusEnabled = false;
   private readonly experimentalZedIntegration: boolean = false;
   private readonly cronEnabled: boolean = true;
+  /** Recurring cron max age in days, resolved once at construction
+   * (the setting declares `requiresRestart`); `Infinity` = no expiry. */
+  private readonly cronRecurringMaxAgeDays: number;
   private readonly agentTeamEnabled: boolean = false;
   private readonly artifactEnabled: boolean = false;
   private readonly artifactAutoOpen: boolean = true;
@@ -1611,6 +1722,11 @@ export class Config {
     this.cliAllowedMcpServerNames = params.cliAllowedMcpServerNames;
     this.excludedMcpServers = params.excludedMcpServers;
     this.pendingMcpServers = params.pendingMcpServers;
+    const envTimeout = process.env['QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS'];
+    const parsedEnv = envTimeout !== undefined ? Number(envTimeout) : NaN;
+    this.mcpToolIdleTimeoutMs =
+      params.mcpToolIdleTimeoutMs ??
+      (Number.isFinite(parsedEnv) && parsedEnv >= 0 ? parsedEnv : 300000); // 5 minutes default
     this.sessionSubagents = params.sessionSubagents ?? [];
     this.sdkMode = params.sdkMode ?? false;
     this.userMemory = params.userMemory ?? '';
@@ -1670,6 +1786,7 @@ export class Config {
     this.fileDiscoveryService = params.fileDiscoveryService ?? null;
     this.bugCommand = params.bugCommand;
     this.maxSessionTurns = params.maxSessionTurns ?? -1;
+    this.maxSubagentDepth = normalizeMaxSubagentDepth(params.maxSubagentDepth);
     this.maxWallTimeSeconds = params.maxWallTimeSeconds ?? -1;
     this.maxToolCalls = params.maxToolCalls ?? -1;
     const clearContextOnIdle = params.clearContextOnIdle;
@@ -1688,6 +1805,9 @@ export class Config {
     this.experimentalZedIntegration =
       params.experimentalZedIntegration ?? false;
     this.cronEnabled = params.cronEnabled ?? true;
+    this.cronRecurringMaxAgeDays = resolveCronRecurringMaxAgeDays(
+      params.cronRecurringMaxAgeDays,
+    );
     this.agentTeamEnabled = params.agentTeamEnabled ?? false;
     this.artifactEnabled = params.artifactEnabled ?? false;
     this.artifactAutoOpen = params.artifactAutoOpen ?? true;
@@ -2642,6 +2762,20 @@ export class Config {
    * Refresh authentication and rebuild ContentGenerator.
    */
   async refreshAuth(authMethod: AuthType, isInitialAuth?: boolean) {
+    // The global reasoning effort (settings.model.reasoningEffort, seeded into
+    // the generation config by the CLI) is NOT a provider field, but
+    // syncAfterAuthRefresh → applyResolvedModelDefaults overwrites every
+    // MODEL_GENERATION_CONFIG_FIELDS entry — including `reasoning` — with the
+    // provider preset's value (undefined for reasoning). Capture the effort
+    // before the sync wipes it and re-apply it after the config is rebuilt, so
+    // /effort survives an auth refresh, including the initial one at startup.
+    // `reasoning` is `false | { effort?, ... } | undefined`; the truthy check
+    // already excludes both `false` and `undefined`.
+    const priorReasoning = this.modelsConfig.getGenerationConfig().reasoning;
+    const priorReasoningEffort = priorReasoning
+      ? priorReasoning.effort
+      : undefined;
+
     // Sync modelsConfig state for this auth refresh
     const modelId = this.modelsConfig.getModel();
     this.modelsConfig.syncAfterAuthRefresh(authMethod, modelId);
@@ -2668,6 +2802,11 @@ export class Config {
     // Only assign to instance properties after successful initialization
     this.contentGeneratorConfig = newContentGeneratorConfig;
     this.contentGeneratorConfigSources = sources;
+
+    // Re-apply the user's reasoning effort that the provider sync above wiped.
+    if (priorReasoningEffort) {
+      this.setReasoningEffort(priorReasoningEffort);
+    }
 
     // Initialize BaseLlmClient now that the ContentGenerator is available
     this.baseLlmClient = new BaseLlmClient(this.contentGenerator, this);
@@ -3007,6 +3146,63 @@ export class Config {
   }
 
   /**
+   * Read the active reasoning-effort tier from the live content-generator
+   * config. Returns undefined when thinking is disabled (`reasoning: false`) or
+   * no tier is set (the model/provider default applies).
+   */
+  getReasoningEffort(): ReasoningEffort | undefined {
+    const reasoning = this.getContentGeneratorConfig()?.reasoning;
+    // `!reasoning` already covers both `false` and `undefined` (both falsy).
+    if (!reasoning) {
+      return undefined;
+    }
+    return reasoning.effort;
+  }
+
+  /**
+   * Update the reasoning-effort tier at runtime (e.g. `/effort high`). The
+   * request pipeline reads `reasoning.effort` per request, so mutating the live
+   * config in place takes effect on the next turn without an auth refresh.
+   * Provider adapters clamp the tier to what the active model supports. Pass
+   * undefined to clear the override and fall back to the model/provider default.
+   *
+   * No-op when thinking is explicitly disabled (`reasoning: false`) so effort
+   * cannot silently re-enable it.
+   */
+  setReasoningEffort(effort: ReasoningEffort | undefined): void {
+    const applyEffort = (
+      cfg: { reasoning?: ContentGeneratorConfig['reasoning'] } | undefined,
+    ): void => {
+      if (!cfg || cfg.reasoning === false) {
+        return;
+      }
+      const next: { effort?: ReasoningEffort; budget_tokens?: number } = {
+        ...(cfg.reasoning ?? {}),
+      };
+      if (effort) {
+        next.effort = effort;
+      } else {
+        delete next.effort;
+      }
+      // Clearing the last key (e.g. setReasoningEffort(undefined) with no
+      // sibling budget_tokens) collapses `reasoning` back to undefined rather
+      // than leaving an empty `{}` — an empty object is truthy, so downstream
+      // `if (cfg.reasoning)` checks would treat reasoning as active and the
+      // pipeline would emit `reasoning: {}` as wire noise.
+      cfg.reasoning = Object.keys(next).length > 0 ? next : undefined;
+    };
+    // The main session and a runtime (sub-agent) content generator may hold
+    // distinct config objects; update whichever the request path reads.
+    applyEffort(this.contentGeneratorConfig);
+    const runtimeCfg = getRuntimeContentGenerator()?.contentGeneratorConfig;
+    if (runtimeCfg && runtimeCfg !== this.contentGeneratorConfig) {
+      applyEffort(runtimeCfg);
+    }
+    // Keep the rebuildable source in sync so a later refreshAuth keeps the tier.
+    applyEffort(this.modelsConfig?.getGenerationConfig());
+  }
+
+  /**
    * Whether `model` is the same entry as the current primary model — matched on
    * the provider identity (auth type, and baseUrl when both carry one), not just
    * the bare id. The vision bridge must never route at the primary (it's the
@@ -3043,18 +3239,26 @@ export class Config {
     | VisionBridgeModelSelection
     | undefined {
     if (!this.visionModel) return undefined;
+    const visionModelForLog = formatVisionModelSettingForLog(this.visionModel);
+    const parsedSetting = parseVisionModelSetting(this.visionModel);
+    if (!parsedSetting) {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' could not be parsed; falling back to auto-select`,
+      );
+      return undefined;
+    }
     let selector;
     try {
-      selector = resolveModelId(this.visionModel);
+      selector = resolveModelId(parsedSetting.selector);
     } catch {
       this.debugLogger.warn(
-        `vision model pin '${this.visionModel}' could not be parsed; falling back to auto-select`,
+        `vision model pin '${visionModelForLog}' could not be parsed; falling back to auto-select`,
       );
       return undefined;
     }
     if (!selector) {
       this.debugLogger.warn(
-        `vision model pin '${this.visionModel}' resolved to no selector; falling back to auto-select`,
+        `vision model pin '${visionModelForLog}' resolved to no selector; falling back to auto-select`,
       );
       return undefined;
     }
@@ -3064,24 +3268,34 @@ export class Config {
     // the primary entry itself (the text-only model the bridge works around) —
     // via the provider-aware identity check so a cross-provider namesake stays
     // eligible.
-    const match = this.getAllConfiguredModels().find(
+    const matches = this.getAllConfiguredModels().filter(
       (m) =>
         m.id === selector.modelId &&
         (!selector.authType || m.authType === selector.authType) &&
+        (!parsedSetting.baseUrl || m.baseUrl === parsedSetting.baseUrl) &&
         !m.fastOnly &&
         !m.voiceOnly &&
         !this.isCurrentPrimaryModel(m),
     );
+    if (!parsedSetting.baseUrl && matches.length > 1) {
+      this.debugLogger.warn(
+        `vision model pin '${visionModelForLog}' matched multiple configured endpoints; falling back to auto-select`,
+      );
+      return undefined;
+    }
+    const match = matches[0];
     if (!match) {
       this.debugLogger.warn(
-        `vision model pin '${this.visionModel}' did not match a usable configured model ` +
+        `vision model pin '${visionModelForLog}' did not match a usable configured model ` +
           `(removed, mistyped, fast/voice-only, or the primary itself); falling back to auto-select`,
       );
       return undefined;
     }
     return {
-      id: this.visionModel,
-      ...(match.baseUrl && { baseUrl: match.baseUrl }),
+      id: parsedSetting.selector,
+      ...((parsedSetting.baseUrl ?? match.baseUrl) && {
+        baseUrl: parsedSetting.baseUrl ?? match.baseUrl,
+      }),
     };
   }
 
@@ -3136,6 +3350,13 @@ export class Config {
       return;
     }
 
+    // Reasoning effort is a global, model-independent preference (set via
+    // /effort). Capture it before the rebuild and re-apply after, so switching
+    // models never silently drops the user's chosen effort — neither the
+    // hot-update path (which copies a fixed field set, not `reasoning`) nor the
+    // full refresh path (which rebuilds the config from scratch).
+    const priorReasoningEffort = this.getReasoningEffort();
+
     // Keep full history (including thought parts) on model switch.
     // Some OpenAI-compatible reasoning models (e.g. DeepSeek) require
     // reasoning_content to be preserved across turns.
@@ -3160,6 +3381,11 @@ export class Config {
       );
 
       // Hot-update fields (qwen-oauth models share the same auth + client).
+      // Deliberately does NOT copy `reasoning`: it is a global, model-independent
+      // preference captured in `priorReasoningEffort` above and re-applied via
+      // setReasoningEffort() below. Do not add `reasoning` here — that would
+      // overwrite the live tier with the new model's default and make the
+      // restore a no-op.
       this.contentGeneratorConfig.model = config.model;
       this.contentGeneratorConfig.samplingParams = config.samplingParams;
       this.contentGeneratorConfig.contextWindowSize = config.contextWindowSize;
@@ -3200,11 +3426,25 @@ export class Config {
         this.contentGeneratorConfigSources['toolResultContentFormat'] =
           sources['toolResultContentFormat'];
       }
+      if (priorReasoningEffort) {
+        this.setReasoningEffort(priorReasoningEffort);
+      }
       return;
     }
 
-    // Full refresh path
+    // Full refresh path. `refreshAuth` re-applies the reasoning effort it
+    // captures, but on a model *switch* that capture is already stale: the
+    // preceding switchModel() ran applyResolvedModelDefaults(), which overwrote
+    // modelsConfig's `reasoning` with the new model's preset (undefined for most
+    // models), BEFORE this callback fires. So refreshAuth reads `undefined` and
+    // cannot restore the tier. Re-apply here from `priorReasoningEffort`, which
+    // we captured off the still-intact live contentGeneratorConfig above. This is
+    // a no-op when the new model disables thinking (`reasoning: false`), since
+    // setReasoningEffort() skips that case and never silently re-enables it.
     await this.refreshAuth(authType);
+    if (priorReasoningEffort) {
+      this.setReasoningEffort(priorReasoningEffort);
+    }
   }
 
   /**
@@ -3262,6 +3502,10 @@ export class Config {
 
   getMaxSessionTurns(): number {
     return this.maxSessionTurns;
+  }
+
+  getMaxSubagentDepth(): number {
+    return this.maxSubagentDepth;
   }
 
   getMaxWallTimeSeconds(): number {
@@ -3822,6 +4066,10 @@ export class Config {
 
   setExcludedMcpServers(excluded: string[]): void {
     this.excludedMcpServers = excluded;
+  }
+
+  getMcpToolIdleTimeoutMs(): number {
+    return this.mcpToolIdleTimeoutMs;
   }
 
   isMcpServerDisabled(serverName: string): boolean {
@@ -4725,9 +4973,22 @@ export class Config {
 
   getCronScheduler(): CronScheduler {
     if (!this.cronScheduler) {
-      this.cronScheduler = new CronScheduler(this.getProjectRoot());
+      this.cronScheduler = new CronScheduler(
+        this.getProjectRoot(),
+        this.getCronRecurringMaxAgeDays() * 24 * 60 * 60 * 1000,
+      );
     }
     return this.cronScheduler;
+  }
+
+  /**
+   * Days a recurring cron job lives before auto-expiring; `Infinity`
+   * means no expiry. Resolved once at construction (see
+   * `resolveCronRecurringMaxAgeDays`) so mid-session env changes cannot
+   * make the tool description, tool output, and scheduler disagree.
+   */
+  getCronRecurringMaxAgeDays(): number {
+    return this.cronRecurringMaxAgeDays;
   }
 
   isCronEnabled(): boolean {
@@ -5909,6 +6170,12 @@ export class Config {
       await registerLazy(ToolNames.TEAM_DELETE, async () => {
         const { TeamDeleteTool } = await import('../tools/team-delete.js');
         return new TeamDeleteTool(this);
+      });
+      await registerLazy(ToolNames.TEAM_PLAN_APPROVAL, async () => {
+        const { TeamPlanApprovalTool } = await import(
+          '../tools/team-plan-approval.js'
+        );
+        return new TeamPlanApprovalTool(this);
       });
       await registerLazy(ToolNames.TASK_CREATE, async () => {
         const { TaskCreateTool } = await import('../tools/task-create.js');
