@@ -42,8 +42,10 @@ const CREDENTIAL_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   // GitHub / GitLab / Slack tokens.
   // Includes github_pat_ (fine-grained PATs) and ghu_ (app user tokens).
   // Slack tokens use hyphens as separators: xoxb-NNN-NNN-alphanum.
+  // The [b]/[p] classes avoid embedding Slack token prefixes that vsce flags.
   {
-    pattern: /(?:ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|xox[b]-|xox[p]-)[a-zA-Z0-9_-]{20,}/g,
+    pattern:
+      /(?:ghp_|gho_|ghs_|ghu_|github_pat_|glpat-|xox[b]-|xox[p]-)[a-zA-Z0-9_-]{20,}/g,
     replacement: REDACTED,
   },
   // AWS access key IDs (permanent AKIA + temporary STS ASIA)
@@ -53,8 +55,7 @@ const CREDENTIAL_PATTERNS: Array<{ pattern: RegExp; replacement: string }> = [
   },
   // Key=value assignments for simple secret names (token=, secret=, etc.)
   {
-    pattern:
-      /((?:api[_-]?key|token|secret|password|pwd)[_-]?[=:]\s*)\S{10,}/gi,
+    pattern: /((?:api[_-]?key|token|secret|password|pwd)[_-]?[=:]\s*)\S{10,}/gi,
     replacement: `$1${REDACTED}`,
   },
   // Compound env-var keys ending in _KEY, _TOKEN, _SECRET, or _PASSWORD
