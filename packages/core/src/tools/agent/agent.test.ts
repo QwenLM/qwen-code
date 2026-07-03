@@ -405,6 +405,37 @@ describe('AgentTool', () => {
       expect(parameters.properties.name?.description).toContain('active team');
     });
 
+    it('exposes plan_mode_required only when teams are enabled', async () => {
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
+
+      const teamAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const schema = teamAgentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          plan_mode_required?: {
+            description?: string;
+          };
+        };
+      };
+      expect(parameters.properties.plan_mode_required?.description).toContain(
+        'named teammate',
+      );
+
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(false);
+      const ordinaryAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const ordinarySchema = ordinaryAgentTool.schema;
+      const ordinaryParameters = ordinarySchema.parametersJsonSchema as {
+        properties: {
+          plan_mode_required?: unknown;
+        };
+      };
+      expect(ordinaryParameters.properties.plan_mode_required).toBeUndefined();
+    });
+
     it('should generate schema without enum when no subagents available', async () => {
       vi.mocked(mockSubagentManager.listSubagents).mockResolvedValue([]);
 
@@ -521,6 +552,41 @@ describe('AgentTool', () => {
         }),
       ).toMatch(/fork/i);
     });
+
+    it('rejects plan_mode_required without a named teammate', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          plan_mode_required: true,
+        }),
+      ).toMatch(/named teammate/i);
+    });
+
+    it('rejects plan_mode_required when no team is active', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'planner',
+          plan_mode_required: true,
+        }),
+      ).toMatch(/active team/i);
+    });
+
+    it('accepts plan_mode_required for a named teammate in an active team', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'planner',
+          plan_mode_required: true,
+        }),
+      ).toBeNull();
+    });
   });
 
   // Round-7 regression guard: agent isolation must refuse when the
@@ -621,6 +687,51 @@ describe('AgentTool', () => {
       expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
         'file-search',
       );
+    });
+
+    it('passes plan_mode_required through to TeamManager for named teammates', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Plan implementation',
+        prompt: 'Investigate and propose a plan',
+        subagent_type: 'file-search',
+        name: 'planner',
+        plan_mode_required: true,
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(spawnTeammate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'planner',
+          planModeRequired: true,
+        }),
+      );
+    });
+
+    it('rejects plan_mode_required direct execution from a subagent context', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Plan implementation',
+        prompt: 'Investigate and propose a plan',
+        name: 'planner',
+        plan_mode_required: true,
+      });
+
+      const result = await runWithAgentContext('child-agent', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('from the team leader');
+      expect(spawnTeammate).not.toHaveBeenCalled();
     });
   });
 
@@ -1788,7 +1899,7 @@ describe('AgentTool', () => {
       );
     });
 
-    it('should not inject hook_context when additionalContext is undefined', async () => {
+    it('should inject hook_context as empty string when additionalContext is undefined', async () => {
       const mockStartOutput = {
         getAdditionalContext: vi.fn().mockReturnValue(undefined),
       };
@@ -1807,9 +1918,12 @@ describe('AgentTool', () => {
       ).createInvocation(params);
       await invocation.execute();
 
+      // hook_context is always set (to empty string) so ${hook_context} in
+      // systemPrompt does not throw even when hook returns no additional context.
+      expect(mockContextState.set).toHaveBeenCalledWith('hook_context', '');
       expect(mockContextState.set).not.toHaveBeenCalledWith(
         'hook_context',
-        expect.anything(),
+        expect.stringMatching(/.+/),
       );
     });
 
@@ -1836,7 +1950,7 @@ describe('AgentTool', () => {
       expect(display.status).toBe('completed');
     });
 
-    it('should skip hooks when hookSystem is not available', async () => {
+    it('should set hook_context to empty string even when hookSystem is not available', async () => {
       (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
         .fn()
         .mockReturnValue(undefined);
@@ -1853,6 +1967,8 @@ describe('AgentTool', () => {
       const result = await invocation.execute();
 
       expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
+      // hook_context is always set so ${hook_context} in systemPrompt does not throw.
+      expect(mockContextState.set).toHaveBeenCalledWith('hook_context', '');
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('Task completed successfully');
     });

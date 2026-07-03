@@ -158,7 +158,7 @@ export function registerToolCallDispatch(
     if (target) {
       const channel = channels.get(target.channelName);
       if (channel) {
-        channel.onToolCall(target.chatId, event);
+        channel.dispatchToolCall(event);
       }
     }
   });

@@ -5,7 +5,7 @@
   width: 100%;
   border-bottom: 1px solid color-mix(in srgb, var(--border) 58%, transparent);
   padding-bottom: 10px;
-  margin-bottom: 5px;
+  padding-top: 10px;
   font-size: 12px;
   line-height: 1.2;
   color: var(--muted-foreground);

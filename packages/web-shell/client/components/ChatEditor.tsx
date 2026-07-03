@@ -43,6 +43,16 @@ export type ComposerToolbarAction =
   | 'widthMode'
   | 'voice';
 
+const ACTIVE_TOOLBAR_ACTIONS = [
+  'approvalMode',
+  'model',
+  'widthMode',
+  'voice',
+] as const satisfies readonly ComposerToolbarAction[];
+const ACTIVE_TOOLBAR_ACTION_SET = new Set<ComposerToolbarAction>(
+  ACTIVE_TOOLBAR_ACTIONS,
+);
+
 interface ChatEditorProps {
   onSubmit: (
     text: string,
@@ -52,6 +62,7 @@ interface ChatEditorProps {
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
   isRunning?: boolean;
+  isPreparing?: boolean;
   /** First Esc armed a cancel — the send button shows an "Esc to stop" hint. */
   cancelArmed?: boolean;
   disabled?: boolean;
@@ -136,6 +147,15 @@ const CHAT_EDITOR_THEME = {
   },
 };
 
+function isTouchLikeDevice(): boolean {
+  if (typeof window === 'undefined') return false;
+  return (
+    (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0) ||
+    (typeof window.matchMedia === 'function' &&
+      window.matchMedia('(hover: none), (pointer: coarse)').matches)
+  );
+}
+
 const SLASH_PANEL_THEME_VARS = [
   '--chat-editor-accent-color',
   '--accent',
@@ -172,6 +192,10 @@ function SendIcon() {
 
 function StopIcon() {
   return <span className={styles.stopIcon} aria-hidden="true" />;
+}
+
+function LoadingIcon() {
+  return <span className={styles.loadingIcon} aria-hidden="true" />;
 }
 
 function QuickActionsIcon() {
@@ -851,6 +875,7 @@ export const ChatEditor = memo(
       onToggleShortcuts,
       onCancel,
       isRunning = false,
+      isPreparing = false,
       cancelArmed = false,
       disabled = false,
       placeholderText = 'Type a message...',
@@ -906,6 +931,7 @@ export const ChatEditor = memo(
     const {
       renderComposerToolbarStart: ToolbarStart,
       renderComposerToolbarEnd: ToolbarEnd,
+      renderComposerToolbarRight: ToolbarRight,
     } = useWebShellCustomization();
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
@@ -913,6 +939,7 @@ export const ChatEditor = memo(
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+    const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
     const modeBtnRef = useRef<HTMLButtonElement>(null);
@@ -921,6 +948,19 @@ export const ChatEditor = memo(
     const slashMenu = core.slashMenu;
     const closeSlashMenu = core.closeSlashMenu;
     const editorViewRef = core.viewRef;
+
+    useEffect(() => {
+      if (typeof window === 'undefined' || !window.matchMedia) return;
+      const media = window.matchMedia('(hover: none), (pointer: coarse)');
+      const update = () => setShowQuickActions(isTouchLikeDevice());
+      update();
+      media.addEventListener('change', update);
+      return () => media.removeEventListener('change', update);
+    }, []);
+
+    useEffect(() => {
+      if (!showQuickActions) setQuickActionsOpen(false);
+    }, [showQuickActions]);
 
     useEffect(() => {
       if (!slashMenu) return;
@@ -981,10 +1021,13 @@ export const ChatEditor = memo(
         })),
       [t],
     );
-    const visibleActionSet = useMemo(
-      () => (visibleToolbarActions ? new Set(visibleToolbarActions) : null),
-      [visibleToolbarActions],
-    );
+    const visibleActionSet = useMemo(() => {
+      if (!visibleToolbarActions) return null;
+      const activeActions = visibleToolbarActions.filter((action) =>
+        ACTIVE_TOOLBAR_ACTION_SET.has(action),
+      );
+      return new Set(activeActions);
+    }, [visibleToolbarActions]);
     const showToolbarAction = (action: ComposerToolbarAction) => {
       if (!visibleActionSet) return true;
       return visibleActionSet.has(action);
@@ -1218,7 +1261,7 @@ export const ChatEditor = memo(
     const showCancelButton = isRunning && !core.hasContent;
 
     return (
-      <div className={styles.editorShell}>
+      <div className={styles.editorShell} data-composer>
         <div
           ref={containerRef}
           className={styles.container}
@@ -1455,37 +1498,7 @@ export const ChatEditor = memo(
                 </div>
               </div>
               <div className={styles.toolbarRight}>
-                {showToolbarAction('commands') && (
-                  <button
-                    className={styles.toolBtn}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setQuickActionsOpen(false);
-                      core.insertText('/');
-                    }}
-                    aria-label={t('editor.hintCommands')}
-                    title={t('editor.hintCommands')}
-                    data-tooltip={t('editor.hintCommands')}
-                  >
-                    <span className={styles.toolBtnIcon}>/</span>
-                  </button>
-                )}
-                {showToolbarAction('files') && (
-                  <button
-                    className={styles.toolBtn}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setQuickActionsOpen(false);
-                      core.insertText('@');
-                    }}
-                    aria-label={t('editor.hintFiles')}
-                    title={t('editor.hintFiles')}
-                    data-tooltip={t('editor.hintFiles')}
-                  >
-                    <span className={styles.toolBtnIcon}>@</span>
-                  </button>
-                )}
-                {quickActions.length > 0 && (
+                {showQuickActions && quickActions.length > 0 && (
                   <button
                     className={`${styles.toolBtn} ${styles.quickActionsBtn}`}
                     onClick={(e) => {
@@ -1504,6 +1517,17 @@ export const ChatEditor = memo(
                       <QuickActionsIcon />
                     </span>
                   </button>
+                )}
+                {ToolbarRight && (
+                  <div className={styles.toolbarRightCustom}>
+                    <ToolbarRight
+                      disabled={disabled}
+                      isRunning={isRunning}
+                      currentMode={currentMode}
+                      currentModel={currentModel}
+                      sessionName={sessionName}
+                    />
+                  </div>
                 )}
                 {showChatWidthToggle &&
                   widthToggleFits &&
@@ -1551,17 +1575,24 @@ export const ChatEditor = memo(
                 )}
                 <button
                   className={
-                    showCancelButton
-                      ? `${styles.sendBtn} ${styles.sendBtnRunning}`
+                    isPreparing || showCancelButton
+                      ? `${styles.sendBtn} ${styles.sendBtnRunning}${
+                          cancelArmed ? ` ${styles.sendBtnArmed}` : ''
+                        }`
                       : styles.sendBtn
                   }
                   disabled={
-                    showCancelButton
-                      ? !onCancel
-                      : core.disabled || !core.hasContent
+                    isPreparing
+                      ? true
+                      : showCancelButton
+                        ? !onCancel
+                        : core.disabled || !core.hasContent
                   }
                   onClick={(e) => {
                     e.stopPropagation();
+                    if (isPreparing) {
+                      return;
+                    }
                     if (showCancelButton) {
                       onCancel?.();
                       return;
@@ -1569,10 +1600,33 @@ export const ChatEditor = memo(
                     core.submitText();
                   }}
                   aria-label={
-                    showCancelButton ? t('stream.cancel') : t('editor.send')
+                    isPreparing
+                      ? t('common.loading')
+                      : showCancelButton
+                        ? cancelArmed
+                          ? t('stream.cancelArmed')
+                          : t('stream.cancel')
+                        : t('editor.send')
+                  }
+                  title={
+                    isRunning && cancelArmed
+                      ? t('stream.cancelArmed')
+                      : undefined
                   }
                 >
-                  {showCancelButton ? <StopIcon /> : <SendIcon />}
+                  {isPreparing ? (
+                    <LoadingIcon />
+                  ) : showCancelButton ? (
+                    cancelArmed ? (
+                      <span className={styles.escLabel} aria-hidden="true">
+                        Esc
+                      </span>
+                    ) : (
+                      <StopIcon />
+                    )
+                  ) : (
+                    <SendIcon />
+                  )}
                 </button>
                 <span
                   role="status"
@@ -1585,7 +1639,7 @@ export const ChatEditor = memo(
             </div>
           </div>
         </div>
-        {quickActionsOpen && quickActions.length > 0 && (
+        {showQuickActions && quickActionsOpen && quickActions.length > 0 && (
           <QuickActionsPanel
             actions={quickActions}
             onRun={runQuickAction}

@@ -127,6 +127,22 @@ export interface ServeOptions {
    */
   enableSessionShell?: boolean;
   /**
+   * Path to a PEM certificate file. When both `tlsCert` and `tlsKey`
+   * are set, the daemon serves over HTTPS (`https.createServer`) instead
+   * of plain HTTP. Both must be provided together. The main motivation is
+   * mobile/cross-device access: browsers only expose secure-context APIs
+   * (`getUserMedia` for voice input, WebRTC) over HTTPS or `localhost`, so
+   * a LAN IP like `192.168.x.x` needs TLS. Scope is TLS termination only —
+   * no auto-generation, no ACME. TLS is orthogonal to the bearer-token
+   * auth layer; both still apply on non-loopback binds.
+   */
+  tlsCert?: string;
+  /**
+   * Path to a PEM private key file. See `tlsCert` — both must be set
+   * together to enable HTTPS.
+   */
+  tlsKey?: string;
+  /**
    * Serve the built Web Shell SPA at the daemon root (default true). Set
    * false (the CLI's `--no-web`) for an API-only daemon. No effect when the
    * Web Shell assets aren't present in the build.
@@ -208,23 +224,20 @@ export interface ServeOptions {
   /** Rate limit window duration in ms (default 60000). Requires --rate-limit. */
   rateLimitWindowMs?: number;
   /**
-   * Opt-in: accept client-hosted MCP servers over the daemon WS (issue #5626,
+   * Accept client-hosted MCP servers over the daemon WS (issue #5626,
    * Phase 2 "reverse tool channel"). When enabled, a connected WS client may
    * send `mcp_register` / `mcp_message` / `mcp_unregister` frames so the
    * daemon's agent can call tools that execute in the client (e.g. the Chrome
-   * extension's browser tools). Off by default — the public contract is still
-   * settling, so the `client_mcp_over_ws` capability tag and the WS frame
-   * handling stay gated behind explicit operator opt-in.
+   * extension's browser tools). `runQwenServe` only enables this when a caller
+   * or environment variable opts in.
    */
   clientMcpOverWs?: boolean;
   /**
-   * Opt-in: tunnel raw CDP to a real browser tab over the reverse `/acp` WS
-   * (Plan C "CDP tunnel", issue #5626). When enabled, a loopback puppeteer
-   * client (chrome-devtools-mcp) can connect to a new `/cdp` WebSocket and
-   * drive ONE real tab via the extension's `chrome.debugger`, reusing the
-   * ready-made chrome-devtools-mcp toolset. Off by default — the public
-   * contract is still settling, so the `cdp_tunnel_over_ws` capability tag and
-   * the `/cdp` endpoint stay gated behind explicit operator opt-in.
+   * Tunnel raw CDP to a real browser tab over the reverse `/acp` WS
+   * (Plan C "CDP tunnel", issue #5626). When enabled, a loopback CDP client can
+   * connect to a new `/cdp` WebSocket and drive ONE real tab via the extension's
+   * `chrome.debugger`, reusing browser automation tools. `runQwenServe` enables this for
+   * Chrome extension origins or explicit env opt-in; callers may pass `false`.
    */
   cdpTunnelOverWs?: boolean;
   /** Forward the experimental LSP opt-in to spawned ACP children. */

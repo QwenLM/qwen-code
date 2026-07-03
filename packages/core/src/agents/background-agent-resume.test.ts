@@ -44,7 +44,17 @@ describe('BackgroundAgentResumeService', () => {
     });
   });
 
-  function createService(options: { stopHookBlockingCap?: number } = {}) {
+  function createService(
+    options: {
+      stopHookBlockingCap?: number;
+      hookSystem?:
+        | {
+            fireSubagentStartEvent: ReturnType<typeof vi.fn>;
+            fireSubagentStopEvent: ReturnType<typeof vi.fn>;
+          }
+        | undefined;
+    } = {},
+  ) {
     const subagentManager = {
       loadSubagent: vi.fn(async (name: string) =>
         name === 'researcher'
@@ -56,10 +66,13 @@ describe('BackgroundAgentResumeService', () => {
       ),
       createAgentHeadless: vi.fn(),
     };
-    const hookSystem = {
-      fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
-      fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
-    };
+    const hookSystem =
+      options.hookSystem !== undefined
+        ? options.hookSystem
+        : {
+            fireSubagentStartEvent: vi.fn().mockResolvedValue(undefined),
+            fireSubagentStopEvent: vi.fn().mockResolvedValue(undefined),
+          };
     // Stub registry exposed on both `parent.getToolRegistry()` and the
     // override built by `createApprovalModeOverride` (which now rebuilds
     // the tool registry on the resumed agent's Config so bound tools
@@ -471,6 +484,84 @@ describe('BackgroundAgentResumeService', () => {
     await vi.waitFor(() => {
       expect(registry.get(agentId)?.status).toBe('completed');
     });
+  });
+
+  it('sets hook_context to empty string when no hook system is configured', async () => {
+    const sessionId = 'session-no-hook';
+    const agentId = 'agent-no-hook';
+    const metaPath = getAgentMetaPath(tempDir, sessionId, agentId);
+    const outputFile = getAgentJsonlPath(tempDir, sessionId, agentId);
+
+    writeAgentMeta(metaPath, {
+      agentId,
+      agentType: 'researcher',
+      description: 'Resume without hooks',
+      parentSessionId: sessionId,
+      parentAgentId: null,
+      createdAt: '2026-04-20T00:00:00.000Z',
+      status: 'running',
+      subagentName: 'researcher',
+      resolvedApprovalMode: 'auto-edit',
+    });
+
+    fs.writeFileSync(
+      outputFile,
+      JSON.stringify({
+        uuid: 'u1',
+        parentUuid: null,
+        sessionId,
+        timestamp: '2026-04-20T00:00:00.000Z',
+        type: 'user',
+        message: { role: 'user', parts: [{ text: 'Resume without hooks' }] },
+      }) + '\n',
+      'utf8',
+    );
+
+    registry.register({
+      agentId,
+      description: 'Resume without hooks',
+      subagentType: 'researcher',
+      isBackgrounded: true,
+      status: 'paused',
+      startTime: Date.now(),
+      abortController: new AbortController(),
+      prompt: 'Resume without hooks',
+      outputFile,
+      metaPath,
+    });
+
+    const execute = vi.fn(
+      async (_context: { get: (key: string) => unknown }) => undefined,
+    );
+    const subagent = {
+      execute,
+      setExternalMessageProvider: vi.fn(),
+      getCore: () => ({ getEventEmitter: () => new AgentEventEmitter() }),
+      getExecutionSummary: () => ({
+        totalTokens: 0,
+        outputTokens: 0,
+        totalDurationMs: 0,
+      }),
+      getTerminateMode: () => AgentTerminateMode.GOAL,
+      getFinalText: () => 'done',
+    };
+
+    const { service, subagentManager } = createService({
+      hookSystem: undefined,
+    });
+    subagentManager.createAgentHeadless.mockResolvedValue({
+      subagent,
+      dispose: vi.fn().mockResolvedValue(undefined),
+    });
+
+    const resumed = await service.resumeBackgroundAgent(agentId, 'continue');
+
+    expect(resumed).toBeDefined();
+    expect(execute).toHaveBeenCalledTimes(1);
+    const contextArg = execute.mock.calls[0]![0] as {
+      get: (key: string) => unknown;
+    };
+    expect(contextArg.get('hook_context')).toBe('');
   });
 
   it('returns only model-visible subagent output when resumed background agents complete', async () => {

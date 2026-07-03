@@ -276,7 +276,7 @@ export class LoopTickResolver {
 
     const tildeified = tildeifyPath(homeLoopPath);
     if (tildeified !== homeLoopPath) {
-      return tildeified;
+      return tildeified.replace(/\\/g, '/');
     }
     // Outside $HOME: tildeifyPath was a no-op. When $QWEN_HOME relocated the
     // global dir (homeQwenDir is its resolved value), report the literal env-var

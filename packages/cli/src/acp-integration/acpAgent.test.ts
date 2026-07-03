@@ -293,6 +293,9 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     updatedModelProviders: {},
   }),
   unregisterGoalHook: vi.fn(),
+  uiTelemetryService: {
+    removeSession: vi.fn(),
+  },
   runManagedRememberByAgent: mockRunManagedRememberByAgent,
   clearCachedCredentialFile: vi.fn(),
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
@@ -5884,11 +5887,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
   it('per-session newSession surfaces MCP failures to stderr (round-7 fix: was silent before)', async () => {
     // Round-7 regression: `QwenAgent.initializeConfig()` (per-session ACP
-    // path) calls `waitForMcpReady()` but the round-4 fix only added the
-    // failure warning to the top-level `runAcpAgent` path. Per-session
-    // configs with failed MCP servers silently fell back to built-in
-    // tools with zero user-visible indication, despite the inline comment
-    // claiming "Same reasoning as the top-level runAcpAgent path."
+    // path) reports MCP failures after readiness settles. Per-session configs
+    // with failed MCP servers must not fall back to built-in tools silently.
     const innerConfig = await setupSessionMocks('session-failed-mcp');
     (
       innerConfig as unknown as { getFailedMcpServerNames: () => string[] }
@@ -5917,16 +5917,46 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     // The warning must list both failed servers and mention "Warning:"
     // exactly like the top-level path and the other non-interactive
     // entry points (`gemini.tsx`, `session.ts`).
-    const matchingWrite = stderrWrite.mock.calls.find(
-      ([msg]) =>
-        typeof msg === 'string' &&
-        msg.includes('Warning: MCP server(s) failed to start') &&
-        msg.includes('broken-server-a') &&
-        msg.includes('broken-server-b'),
-    );
-    expect(matchingWrite).toBeDefined();
+    await vi.waitFor(() => {
+      const matchingWrite = stderrWrite.mock.calls.find(
+        ([msg]) =>
+          typeof msg === 'string' &&
+          msg.includes('Warning: MCP server(s) failed to start') &&
+          msg.includes('broken-server-a') &&
+          msg.includes('broken-server-b'),
+      );
+      expect(matchingWrite).toBeDefined();
+    });
 
     stderrWrite.mockRestore();
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('per-session newSession does not wait for MCP readiness', async () => {
+    const innerConfig = await setupSessionMocks('session-mcp-hangs');
+    innerConfig.waitForMcpReady = vi.fn(
+      () => new Promise<void>(() => {}),
+    ) as typeof innerConfig.waitForMcpReady;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.newSession({ cwd: '/tmp', mcpServers: [] }),
+    ).resolves.toMatchObject({ sessionId: 'session-mcp-hangs' });
+    expect(innerConfig.waitForMcpReady).toHaveBeenCalledTimes(1);
+
     mockConnectionState.resolve();
     await agentPromise;
   });
@@ -6204,6 +6234,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     | ((conn: AgentSideConnectionLike) => AgentLike)
     | undefined;
   let mockConfig: Config;
+  let liveCancelPendingPrompt: ReturnType<typeof vi.fn>;
 
   // Live session sessionId is whatever `getSessionId()` on the inner config
   // returns; matches the existing test scaffolding.
@@ -6213,6 +6244,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
     vi.clearAllMocks();
     mockConnectionState.reset();
     capturedAgentFactory = undefined;
+    liveCancelPendingPrompt = vi.fn().mockResolvedValue(undefined);
 
     vi.mocked(AgentSideConnection).mockImplementation((factory: unknown) => {
       capturedAgentFactory = factory as typeof capturedAgentFactory;
@@ -6274,6 +6306,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDisableAllHooks: vi.fn().mockReturnValue(true),
       hasHooksForEvent: vi.fn().mockReturnValue(false),
+      getToolRegistry: vi.fn().mockReturnValue(undefined),
       getChatRecordingService: vi.fn().mockReturnValue(recording),
     };
   }
@@ -6298,6 +6331,7 @@ describe('QwenAgent extMethod renameSession routing', () => {
         ({
           getId: vi.fn().mockReturnValue(liveSessionId),
           getConfig: vi.fn().mockReturnValue(innerConfig),
+          cancelPendingPrompt: liveCancelPendingPrompt,
           sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
           replayHistory: vi.fn().mockResolvedValue(undefined),
           installRewriter: vi.fn(),
@@ -6404,6 +6438,58 @@ describe('QwenAgent extMethod renameSession routing', () => {
     // queued earlier failure to the caller.
     expect(recording.flush).toHaveBeenCalledOnce();
     expect(result).toEqual({ success: false });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('keeps the live session open when strict session close flush fails', async () => {
+    const recording = makeRecordingService();
+    recording.flush.mockRejectedValueOnce(new Error('flush failed'));
+    const innerConfig = makeLiveSessionInnerConfig(recording);
+    const toolRegistry = { stop: vi.fn().mockResolvedValue(undefined) };
+    innerConfig.getToolRegistry.mockReturnValue(toolRegistry);
+    const { agent, agentPromise } = await bootAgent(innerConfig);
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: true,
+      }),
+    ).rejects.toThrow('flush failed');
+    expect(
+      (
+        agent as unknown as {
+          getActiveSessions: () => Array<{ getId: () => string }>;
+        }
+      )
+        .getActiveSessions()
+        .map((session) => session.getId()),
+    ).toContain(liveSessionId);
+    expect(recording.flush).toHaveBeenCalledOnce();
+    expect(liveCancelPendingPrompt).not.toHaveBeenCalled();
+    expect(toolRegistry.stop).not.toHaveBeenCalled();
+
+    await expect(
+      agent.extMethod('qwen/control/session/close', {
+        sessionId: liveSessionId,
+        requireFlush: true,
+      }),
+    ).resolves.toEqual({ sessionId: liveSessionId, closed: true });
+    expect(recording.flush).toHaveBeenCalledTimes(3);
+    expect(liveCancelPendingPrompt).toHaveBeenCalledOnce();
+    expect(toolRegistry.stop).toHaveBeenCalledOnce();
+    expect(
+      (
+        agent as unknown as {
+          getActiveSessions: () => Array<{ getId: () => string }>;
+        }
+      )
+        .getActiveSessions()
+        .map((session) => session.getId()),
+    ).not.toContain(liveSessionId);
 
     mockConnectionState.resolve();
     await agentPromise;

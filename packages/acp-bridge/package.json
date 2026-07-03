@@ -1,6 +1,6 @@
 {
   "name": "@qwen-code/acp-bridge",
-  "version": "0.19.3",
+  "version": "0.19.5",
   "description": "Shared ACP bridge core (createHttpAcpBridge factory, BridgeClient, defaultSpawnChannelFactory, BridgeFileSystem injection seam) + primitives (EventBus, AcpChannel, in-memory channel, PermissionMediator interface) used by qwen serve, channels, IDE, TUI, and remote-control adapters.",
   "repository": {
     "type": "git",
@@ -58,6 +58,10 @@
     "./spawnChannel": {
       "types": "./dist/spawnChannel.d.ts",
       "import": "./dist/spawnChannel.js"
+    },
+    "./logRedaction": {
+      "types": "./dist/logRedaction.d.ts",
+      "import": "./dist/logRedaction.js"
     },
     "./bridgeClient": {
       "types": "./dist/bridgeClient.d.ts",
