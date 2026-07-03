@@ -11,6 +11,8 @@ type DatasetCell = string | number | boolean | null;
 type DatasetRow = Record<string, DatasetCell> | DatasetCell[];
 type DatasetSource = DatasetRow[];
 type DatasetDimension = string | { name?: string };
+type EchartsObject = Record<string, unknown>;
+type ChartTheme = 'dark' | 'light';
 
 interface EchartsDataset {
   dimensions?: DatasetDimension[];
@@ -41,7 +43,7 @@ export interface EchartsFullDataBlockProps {
   option?: EchartsFullDataOption;
   parseError?: string;
   isStreaming?: boolean;
-  theme: 'dark' | 'light';
+  theme: ChartTheme;
   loadEcharts?: EchartsRuntimeLoader;
 }
 
@@ -49,12 +51,361 @@ export interface EchartsFullDataRendererOptions {
   loadEcharts?: EchartsRuntimeLoader;
 }
 
+const CHART_THEME = {
+  light: {
+    background: '#ffffff',
+    foreground: '#343434',
+    muted: '#838d95',
+    border: '#e0e6f1',
+    axisLine: '#5d666f',
+    axisPointer: '#7c8a96',
+    tooltipBackground: '#ffffff',
+    tooltipShadow: '0 8px 24px rgba(15,23,42,0.12)',
+    primary: '#6250f9',
+    palette: [
+      '#6250F9',
+      '#33AFA9',
+      '#AB7BFF',
+      '#5F99F9',
+      '#A9AFFF',
+      '#60CCC5',
+      '#C2A5FF',
+      '#8EB8FE',
+      '#E0E3FE',
+      '#98E3DD',
+      '#E8E1FA',
+      '#D7E6FF',
+    ],
+  },
+  dark: {
+    background: '#0d0d0d',
+    foreground: '#f4f7ff',
+    muted: '#9aa3b7',
+    border: 'rgba(129,145,209,0.24)',
+    axisLine: '#657086',
+    axisPointer: '#8a98b3',
+    tooltipBackground: '#161616',
+    tooltipShadow: '0 10px 28px rgba(0,0,0,0.34)',
+    primary: '#8aa0ff',
+    palette: [
+      '#8AA0FF',
+      '#60CCC5',
+      '#C2A5FF',
+      '#5F99F9',
+      '#A9AFFF',
+      '#33AFA9',
+      '#AB7BFF',
+      '#8EB8FE',
+      '#E0E3FE',
+      '#98E3DD',
+      '#E8E1FA',
+      '#D7E6FF',
+    ],
+  },
+} satisfies Record<ChartTheme, Record<string, unknown> & { palette: string[] }>;
+
+function isObject(value: unknown): value is EchartsObject {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function mergeDefaults(defaults: EchartsObject, value: unknown): EchartsObject {
+  if (!isObject(value)) return { ...defaults };
+  const merged: EchartsObject = { ...defaults, ...value };
+  for (const key of Object.keys(defaults)) {
+    if (isObject(defaults[key]) && isObject(value[key])) {
+      merged[key] = mergeDefaults(defaults[key] as EchartsObject, value[key]);
+    }
+  }
+  return merged;
+}
+
+function styleComponent(value: unknown, defaults: EchartsObject): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) =>
+      isObject(entry) ? mergeDefaults(defaults, entry) : entry,
+    );
+  }
+  if (isObject(value)) return mergeDefaults(defaults, value);
+  return value == null ? { ...defaults } : value;
+}
+
+function styleExistingObject(value: unknown, defaults: EchartsObject): unknown {
+  return isObject(value) ? mergeDefaults(defaults, value) : value;
+}
+
+function styleAxis(
+  value: unknown,
+  getDefaults: (index: number) => EchartsObject,
+): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry, index) =>
+      isObject(entry) ? mergeDefaults(getDefaults(index), entry) : entry,
+    );
+  }
+  if (isObject(value)) return mergeDefaults(getDefaults(0), value);
+  return value;
+}
+
+function getSeriesList(series: unknown): EchartsObject[] {
+  if (Array.isArray(series)) return series.filter(isObject);
+  return isObject(series) ? [series] : [];
+}
+
+function getTooltipTrigger(option: EchartsFullDataOption): 'axis' | 'item' {
+  const hasAxis = 'xAxis' in option || 'yAxis' in option;
+  if (!hasAxis) return 'item';
+  const series = getSeriesList(option.series);
+  const itemOnlyTypes = new Set(['pie', 'funnel', 'gauge', 'radar', 'treemap']);
+  if (
+    series.length > 0 &&
+    series.every((entry) => itemOnlyTypes.has(String(entry.type)))
+  ) {
+    return 'item';
+  }
+  return 'axis';
+}
+
+function styleSeriesEntry(
+  series: EchartsObject,
+  tokens: (typeof CHART_THEME)[ChartTheme],
+): EchartsObject {
+  const type = typeof series.type === 'string' ? series.type : undefined;
+  let defaults: EchartsObject = {
+    emphasis: {
+      focus: 'series',
+      itemStyle: {
+        borderColor: tokens.background,
+        borderWidth: 2,
+      },
+    },
+    labelLayout: {
+      hideOverlap: true,
+    },
+  };
+
+  if (type === 'line') {
+    defaults = mergeDefaults(defaults, {
+      lineStyle: {
+        width: 2,
+      },
+      itemStyle: {
+        borderWidth: 1,
+      },
+      symbol: 'circle',
+      symbolSize: 4,
+    });
+  } else if (type === 'bar') {
+    defaults = mergeDefaults(defaults, {
+      barCategoryGap: '48%',
+      barMaxWidth: 42,
+      itemStyle: {
+        borderRadius: [3, 3, 0, 0],
+      },
+    });
+  } else if (type === 'pie') {
+    defaults = mergeDefaults(defaults, {
+      itemStyle: {
+        borderColor: tokens.background,
+        borderWidth: 2,
+      },
+    });
+  }
+
+  const styled = mergeDefaults(defaults, series);
+  const annotationLabel = {
+    color: tokens.foreground,
+    fontSize: 12,
+    textBorderColor: tokens.background,
+    textBorderWidth: 2,
+  };
+
+  if (isObject(series.label)) {
+    styled.label = styleExistingObject(series.label, {
+      color: tokens.foreground,
+      fontSize: 12,
+      textBorderColor: tokens.background,
+      textBorderWidth: 2,
+    });
+  }
+  if (isObject(series.markPoint)) {
+    styled.markPoint = styleExistingObject(series.markPoint, {
+      itemStyle: {
+        borderColor: tokens.background,
+        borderWidth: 1,
+      },
+      label: annotationLabel,
+    });
+  }
+  if (isObject(series.markLine)) {
+    styled.markLine = styleExistingObject(series.markLine, {
+      label: {
+        ...annotationLabel,
+        color: tokens.muted,
+      },
+      lineStyle: {
+        color: tokens.primary,
+        type: 'dashed',
+        width: 1.5,
+      },
+      symbol: ['none', 'none'],
+    });
+  }
+
+  return styled;
+}
+
+function styleSeries(
+  value: unknown,
+  tokens: (typeof CHART_THEME)[ChartTheme],
+): unknown {
+  if (Array.isArray(value)) {
+    return value.map((entry) =>
+      isObject(entry) ? styleSeriesEntry(entry, tokens) : entry,
+    );
+  }
+  return isObject(value) ? styleSeriesEntry(value, tokens) : value;
+}
+
+function applyDefaultChartStyle(
+  option: EchartsFullDataOption,
+  theme: ChartTheme,
+): EchartsFullDataOption {
+  const tokens = CHART_THEME[theme];
+  const styled: EchartsFullDataOption = { ...option };
+
+  styled.backgroundColor = option.backgroundColor ?? tokens.background;
+  styled.color = option.color ?? tokens.palette;
+  styled.textStyle = styleComponent(option.textStyle, {
+    color: tokens.foreground,
+    fontFamily:
+      "'pingfang SC', 'helvetica neue', arial, 'hiragino sans gb', 'microsoft yahei ui', 'microsoft yahei', sans-serif",
+  });
+  styled.grid = styleComponent(option.grid, {
+    top: 24,
+    right: 36,
+    bottom: 48,
+    left: 24,
+    containLabel: true,
+  });
+  styled.tooltip = styleComponent(option.tooltip, {
+    trigger: getTooltipTrigger(option),
+    confine: true,
+    enterable: true,
+    backgroundColor: tokens.tooltipBackground,
+    borderColor: tokens.border,
+    borderWidth: 1,
+    padding: [8, 10],
+    textStyle: {
+      color: tokens.foreground,
+      fontSize: 12,
+    },
+    axisPointer: {
+      lineStyle: {
+        color: tokens.axisPointer,
+        width: 1,
+      },
+      crossStyle: {
+        color: tokens.axisPointer,
+        width: 1,
+      },
+    },
+    extraCssText: `border-radius:6px;box-shadow:${tokens.tooltipShadow};max-height:300px;overflow:auto;white-space:pre-wrap;`,
+  });
+  styled.legend = styleComponent(option.legend, {
+    type: 'scroll',
+    bottom: 8,
+    padding: [4, 16],
+    textStyle: {
+      color: tokens.muted,
+      fontSize: 12,
+    },
+    pageIconColor: tokens.primary,
+    pageIconInactiveColor: tokens.border,
+    pageTextStyle: {
+      color: tokens.muted,
+    },
+  });
+
+  if ('xAxis' in option) {
+    styled.xAxis = styleAxis(option.xAxis, () => ({
+      axisLine: {
+        show: true,
+        lineStyle: {
+          color: tokens.axisLine,
+        },
+      },
+      axisTick: {
+        show: true,
+        lineStyle: {
+          color: tokens.axisLine,
+        },
+      },
+      axisLabel: {
+        color: tokens.muted,
+        fontSize: 12,
+        hideOverlap: true,
+      },
+      splitLine: {
+        show: false,
+        lineStyle: {
+          color: tokens.border,
+        },
+      },
+      nameTextStyle: {
+        color: tokens.muted,
+      },
+    }));
+  }
+
+  if ('yAxis' in option) {
+    styled.yAxis = styleAxis(option.yAxis, (index) => ({
+      alignTicks: true,
+      axisLine: {
+        show: false,
+        lineStyle: {
+          color: tokens.axisLine,
+        },
+      },
+      axisTick: {
+        show: false,
+        lineStyle: {
+          color: tokens.axisLine,
+        },
+      },
+      axisLabel: {
+        color: tokens.muted,
+        fontSize: 12,
+        hideOverlap: true,
+      },
+      splitLine: {
+        show: index === 0,
+        lineStyle: {
+          color: tokens.border,
+        },
+      },
+      nameGap: 12,
+      nameTextStyle: {
+        color: tokens.muted,
+        align: index === 0 ? 'left' : 'right',
+      },
+    }));
+  }
+
+  if ('series' in option) {
+    styled.series = styleSeries(option.series, tokens);
+  }
+
+  return styled;
+}
+
 function cloneOptionForChart(
   option: EchartsFullDataOption,
+  theme: ChartTheme,
 ): EchartsFullDataOption {
   const cloned = JSON.parse(JSON.stringify(option)) as EchartsFullDataOption;
-  delete cloned.title;
-  return cloned;
+  const styled = applyDefaultChartStyle(cloned, theme);
+  delete styled.title;
+  return styled;
 }
 
 function getPrimaryDataset(
@@ -252,8 +603,8 @@ export function EchartsFullDataBlock({
     Promise.resolve(loadEcharts())
       .then((runtime) => {
         if (disposed || !chartRef.current) return;
-        chart = runtime.init(chartRef.current, theme);
-        chart.setOption(cloneOptionForChart(option));
+        chart = runtime.init(chartRef.current);
+        chart.setOption(cloneOptionForChart(option, theme));
       })
       .catch((error: unknown) => {
         if (disposed) return;
@@ -276,7 +627,9 @@ export function EchartsFullDataBlock({
   return (
     <section className={styles.card} data-testid="echarts-fulldata-rendered">
       <div className={styles.toolbar}>
-        <h2 className={styles.title}>{title}</h2>
+        <div className={styles.title} title={title}>
+          {title}
+        </div>
         {!parseError && (
           <div className={styles.toggle} aria-label="View mode">
             <button

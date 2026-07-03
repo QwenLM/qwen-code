@@ -1,22 +1,23 @@
 .card {
-  margin: 8px 0;
+  margin: 10px 0;
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
-  border: 0.5px solid var(--border);
-  border-radius: 4px;
-  background: var(--background);
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  border-radius: 8px;
+  background: var(--card, var(--background));
+  box-shadow: 0 8px 22px rgb(15 23 42 / 5%);
 }
 
 .toolbar {
   display: flex;
-  min-height: 40px;
+  min-height: 44px;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  padding: 0 12px;
-  background: var(--subtle-bg);
-  border-bottom: 0.5px solid var(--border);
+  padding: 0 10px 0 14px;
+  background: color-mix(in srgb, var(--subtle-bg) 68%, var(--background));
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
 }
 
 .title {
@@ -35,22 +36,29 @@
 .toggle {
   display: inline-grid;
   flex: 0 0 auto;
-  grid-template-columns: repeat(2, 32px);
+  grid-template-columns: repeat(2, 30px);
+  gap: 2px;
+  padding: 2px;
   overflow: hidden;
-  border: 0.5px solid var(--border);
-  border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+  border-radius: 6px;
+  background: var(--background);
 }
 
 .toggleButton {
   display: grid;
-  width: 32px;
-  height: 28px;
+  width: 30px;
+  height: 26px;
   place-items: center;
   padding: 0;
   border: 0;
+  border-radius: 4px;
   background: transparent;
   color: var(--muted-foreground);
   cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    color 0.16s ease;
 }
 
 .toggleButton:hover {
@@ -59,8 +67,8 @@
 }
 
 .toggleButton[aria-pressed='true'] {
-  background: var(--accent);
-  color: var(--foreground);
+  background: var(--agent-blue-500, #0033ff);
+  color: #ffffff;
 }
 
 .toggleButton svg {
@@ -76,9 +84,11 @@
 }
 
 .chartSurface {
-  height: 360px;
-  min-height: 240px;
-  width: 100%;
+  height: 370px;
+  min-height: 260px;
+  width: calc(100% - 20px);
+  margin: 0 10px 8px;
+  background: var(--background);
 }
 
 .state {
@@ -99,7 +109,7 @@
   width: 22px;
   height: 22px;
   border: 2px solid var(--border);
-  border-top-color: var(--foreground);
+  border-top-color: var(--agent-blue-500, #0033ff);
   border-radius: 999px;
   animation: spin 0.8s linear infinite;
 }
@@ -112,26 +122,44 @@
 
 .tableWrap {
   min-height: 240px;
+  max-height: min(60vh, 520px);
   overflow: auto;
-  background: var(--background);
+  background: var(--card, var(--background));
+  scrollbar-color: var(--border) transparent;
 }
 
 .table {
-  width: 100%;
-  border-collapse: collapse;
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
   font-size: 13px;
 }
 
 .table th,
 .table td {
-  padding: 10px 12px;
-  border-bottom: 0.5px solid var(--border);
+  padding: 9px 12px;
+  border-right: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
   text-align: left;
   vertical-align: top;
 }
 
+.table th:last-child,
+.table td:last-child {
+  border-right: 0;
+}
+
 .table th {
-  color: var(--muted-foreground);
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in srgb, var(--subtle-bg) 68%, var(--background));
+  color: var(--foreground);
   font-size: 12px;
   font-weight: 600;
+}
+
+.table td {
+  color: color-mix(in srgb, var(--foreground) 90%, var(--muted-foreground));
 }

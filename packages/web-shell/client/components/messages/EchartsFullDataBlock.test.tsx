@@ -75,9 +75,31 @@ describe('EchartsFullDataBlock', () => {
     });
 
     expect(runtime.init).toHaveBeenCalledOnce();
-    expect(setOption).toHaveBeenCalledWith(
+    expect(runtime.init).toHaveBeenCalledWith(expect.any(HTMLElement));
+    const renderedOption = setOption.mock.calls[0]?.[0] as
+      | EchartsFullDataOption
+      | undefined;
+    expect(renderedOption).toEqual(
       expect.not.objectContaining({ title: expect.anything() }),
     );
+    expect(renderedOption).toEqual(
+      expect.objectContaining({
+        backgroundColor: '#0d0d0d',
+        color: expect.arrayContaining(['#8AA0FF', '#60CCC5']),
+        grid: expect.objectContaining({ containLabel: true }),
+      }),
+    );
+    expect(renderedOption?.xAxis).toEqual(
+      expect.objectContaining({
+        axisLabel: expect.objectContaining({ color: '#9aa3b7' }),
+      }),
+    );
+    expect(renderedOption?.series).toEqual([
+      expect.objectContaining({
+        barMaxWidth: 42,
+        itemStyle: expect.objectContaining({ borderRadius: [3, 3, 0, 0] }),
+      }),
+    ]);
     expect(container.textContent).toContain('Weekly orders');
     expect(container.textContent).not.toContain('echarts-fulldata');
 
