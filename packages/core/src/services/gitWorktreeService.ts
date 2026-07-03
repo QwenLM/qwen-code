@@ -1558,8 +1558,6 @@ export class GitWorktreeService {
     if (!hooksPath) return;
 
     const worktreeGit = simpleGit(worktreePath, {
-      // @ts-expect-error — allowUnsafeHooksPath is supported at runtime but
-      // not yet declared in simple-git@3.28.0 type definitions.
       unsafe: { allowUnsafeHooksPath: true },
     });
     let existing = '';

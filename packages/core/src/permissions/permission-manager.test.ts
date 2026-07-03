@@ -1079,6 +1079,125 @@ describe('matchesRule', () => {
       ),
     ).toBe(false); // specifier mismatch
   });
+
+  it('parseRule does not extract key:value for MCP tools (backward compat)', async () => {
+    const r = parseRule('mcp__server__tool(server_name:myserver)');
+    expect(r.toolName).toBe('mcp__server__tool');
+    expect(r.specifier).toBe('server_name:myserver');
+    expect(r.toolParamMatchers).toBeUndefined();
+  });
+
+  it('matchesRule supports partial wildcard patterns', async () => {
+    const rule = parseRule('Agent(model:op*)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opus',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'opera',
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          model: 'sonnet',
+        },
+      ),
+    ).toBe(false);
+  });
+
+  it('matchesRule handles multi-wildcard patterns without ReDoS', async () => {
+    const rule = parseRule('Agent(prompt:*x*x*x*x*x*y)');
+    // This should not hang (ReDoS) and should return false for non-matching input
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          prompt: 'a'.repeat(1000),
+        },
+      ),
+    ).toBe(false);
+    // Should match when pattern is present
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          prompt: 'xaxaxaxaxay',
+        },
+      ),
+    ).toBe(true);
+  });
+
+  it('matchesRule coerces number values to string for matching', async () => {
+    const rule = parseRule('Agent(count:42)');
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          count: 42,
+        },
+      ),
+    ).toBe(true);
+    expect(
+      matchesRule(
+        rule,
+        'agent',
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+        {
+          count: 43,
+        },
+      ),
+    ).toBe(false);
+  });
 });
 
 // ─── PermissionManager ──────────────────────────────────────────────────────
@@ -2365,6 +2484,90 @@ describe('buildPermissionRules', () => {
         toolName: 'mcp__puppeteer__navigate',
       });
       expect(rules).toEqual(['mcp__puppeteer__navigate']);
+    });
+  });
+
+  describe('with toolParams (stable param serialization)', () => {
+    it('serializes stable params (model, subagent_type) for Agent', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        specifier: 'coder',
+        toolParams: {
+          subagent_type: 'coder',
+          model: 'opus',
+          prompt: 'Fix the bug',
+        },
+      });
+      // prompt is not serialized (not in stableParamKeys)
+      // subagent_type is skipped because it matches specifier
+      expect(rules).toEqual(['Agent(coder,model:opus)']);
+    });
+
+    it('does not serialize volatile params like prompt or query', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        toolParams: {
+          model: 'sonnet',
+          prompt: 'Some long prompt that should not be persisted',
+        },
+      });
+      expect(rules).toEqual(['Agent(model:sonnet)']);
+      // Verify prompt is NOT in the rule string
+      expect(rules[0]).not.toContain('prompt');
+    });
+
+    it('does not serialize sensitive params (no secret leakage)', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        toolParams: {
+          model: 'opus',
+          api_key: 'sk-secret-123',
+          token: 'bearer-xyz',
+        },
+      });
+      // api_key and token are not in stableParamKeys, so not serialized
+      expect(rules).toEqual(['Agent(model:opus)']);
+      expect(rules[0]).not.toContain('secret');
+      expect(rules[0]).not.toContain('bearer');
+    });
+
+    it('generates bare MCP tool name without specifier or params', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'mcp__chrome__navigate',
+        toolParams: {
+          server_name: 'chrome',
+          url: 'https://example.com',
+        },
+      });
+      // MCP tools get bare name — specifier rejection in matchesRule
+      // would make any specifier-carrying rule a dead entry
+      expect(rules).toEqual(['mcp__chrome__navigate']);
+    });
+
+    it('round-trips Agent rule with stable params through parseRule', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        specifier: 'coder',
+        toolParams: { subagent_type: 'coder', model: 'opus' },
+      });
+      expect(rules).toEqual(['Agent(coder,model:opus)']);
+
+      // Parse the generated rule back
+      const parsed = parseRule(rules[0]!);
+      expect(parsed.toolName).toBe('agent');
+      expect(parsed.specifier).toBe('coder');
+      expect(parsed.toolParamMatchers).toEqual([
+        { key: 'model', valuePattern: 'opus' },
+      ]);
+    });
+
+    it('handles number values in toolParams', async () => {
+      const rules = buildPermissionRules({
+        toolName: 'agent',
+        toolParams: { model: 'opus', count: 42 },
+      });
+      // count is not in stableParamKeys, so not serialized
+      expect(rules).toEqual(['Agent(model:opus)']);
     });
   });
 });

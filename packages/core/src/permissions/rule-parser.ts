@@ -301,7 +301,11 @@ export function parseRule(raw: string): PermissionRule {
     | Array<{ key: string; valuePattern: string }>
     | undefined;
 
-  if (specifierKind === 'literal' && rawSpecifier.includes(':')) {
+  if (
+    specifierKind === 'literal' &&
+    !canonicalName.startsWith('mcp__') &&
+    rawSpecifier.includes(':')
+  ) {
     const parts = rawSpecifier.split(',').map((p) => p.trim());
     const plainParts: string[] = [];
     const matchers: Array<{ key: string; valuePattern: string }> = [];
@@ -502,6 +506,14 @@ export function buildPermissionRules(ctx: PermissionCheckContext): string[] {
 
     case 'literal':
     default: {
+      // MCP tool names already encode server + tool identity.
+      // Don't add specifiers or params — matchesRule rejects MCP rules
+      // with specifiers, and existing MCP rules in user configs should
+      // remain backward compatible.
+      if (canonicalName.startsWith('mcp__')) {
+        return [displayName];
+      }
+
       const parts: string[] = [];
       if (ctx.specifier) parts.push(ctx.specifier);
       // Only serialize stable, identity-bearing params — not volatile content
@@ -810,6 +822,11 @@ export function matchesCommandPattern(
  * shell-specific semantics (no prefix+space matching, no variable stripping).
  * Supports `*` as wildcard for any substring.
  */
+/**
+ * Match a glob pattern against a value using linear-time greedy matching.
+ * `*` matches any substring (including empty). No regex involved — avoids
+ * ReDoS risk from catastrophic backtracking on multi-wildcard patterns.
+ */
 function matchesParamValuePattern(pattern: string, value: string): boolean {
   if (pattern === '*') {
     return true;
@@ -817,19 +834,39 @@ function matchesParamValuePattern(pattern: string, value: string): boolean {
   if (!pattern.includes('*')) {
     return value === pattern;
   }
-  // Convert glob pattern to regex: escape special chars, replace * with .*
-  const regexStr =
-    '^' +
-    pattern
-      .split('*')
-      .map((part) => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
-      .join('.*') +
-    '$';
-  try {
-    return new RegExp(regexStr, 's').test(value);
-  } catch {
-    return value === pattern;
+
+  const segments = pattern.split('*');
+  let pos = 0;
+
+  // First segment must match at the start
+  if (segments[0]!.length > 0) {
+    if (!value.startsWith(segments[0]!)) {
+      return false;
+    }
+    pos = segments[0]!.length;
   }
+
+  // Middle segments: find next occurrence greedily
+  for (let i = 1; i < segments.length - 1; i++) {
+    const seg = segments[i]!;
+    if (seg.length === 0) continue;
+    const idx = value.indexOf(seg, pos);
+    if (idx === -1) {
+      return false;
+    }
+    pos = idx + seg.length;
+  }
+
+  // Last segment must match at the end
+  const last = segments[segments.length - 1]!;
+  if (last.length > 0) {
+    if (value.length - pos < last.length) {
+      return false;
+    }
+    return value.endsWith(last);
+  }
+
+  return true;
 }
 
 /**
