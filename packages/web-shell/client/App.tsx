@@ -97,6 +97,12 @@ import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
+import {
+  decodeVisionModelForPicker,
+  encodeFastModelForSetting,
+  encodeVisionModelForSetting,
+  extractBareModelId,
+} from './utils/modelEncoding';
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
@@ -1662,7 +1668,8 @@ export function App({
     const value = workspaceSettings.find(
       (setting) => setting.key === 'visionModel',
     )?.values.effective;
-    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    return decodeVisionModelForPicker(value.trim());
   })();
   const shellOutputMaxLines = resolveShellOutputMaxLines(workspaceSettings);
   const [compactMode, setCompactMode] = useState(false);
@@ -3318,7 +3325,10 @@ export function App({
         blockLocalCommandDuringTurn();
         return;
       }
-      sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
+      // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
+      // Core's resolveFastModelSelector() expects `authType:modelId`.
+      const encoded = encodeFastModelForSetting(modelId);
+      sendPrompt(`/model --fast ${encoded}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
     },
@@ -3327,7 +3337,10 @@ export function App({
 
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
-      setWorkspaceSetting('workspace', 'voiceModel', modelId).catch(
+      // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
+      // Voice model resolution expects bare model IDs (not authType:modelId).
+      const bareModelId = extractBareModelId(modelId);
+      setWorkspaceSetting('workspace', 'voiceModel', bareModelId).catch(
         (error: unknown) => reportError(error, t('model.setVoice')),
       );
     },
@@ -3338,13 +3351,27 @@ export function App({
     (modelId: string) => {
       // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
       // Core's resolveVisionModelSelection() expects `authType:modelId`.
-      const match = modelId.match(/^(.+)\(([^()]+)\)$/);
-      const encoded = match ? `${match[2]}:${match[1]}` : modelId;
+      const encoded = encodeVisionModelForSetting(modelId);
       setWorkspaceSetting('workspace', 'visionModel', encoded).catch(
         (error: unknown) => reportError(error, t('model.setVision')),
       );
     },
     [reportError, setWorkspaceSetting, t],
+  );
+
+  const modelHandlers: Record<ModelDialogMode, (id: string) => void> = useMemo(
+    () => ({
+      main: handleModelSelect,
+      fast: handleFastModelSelect,
+      voice: handleVoiceModelSelect,
+      vision: handleVisionModelSelect,
+    }),
+    [
+      handleModelSelect,
+      handleFastModelSelect,
+      handleVoiceModelSelect,
+      handleVisionModelSelect,
+    ],
   );
 
   const commands = useMemo(() => {
@@ -3496,16 +3523,9 @@ export function App({
                       : undefined
                 }
                 onSelect={(modelId) => {
-                  const handlers: Record<
-                    ModelDialogMode,
-                    (id: string) => void
-                  > = {
-                    main: handleModelSelect,
-                    fast: handleFastModelSelect,
-                    voice: handleVoiceModelSelect,
-                    vision: handleVisionModelSelect,
-                  };
-                  handlers[modelDialogMode ?? 'main'](modelId);
+                  if (modelDialogMode) {
+                    modelHandlers[modelDialogMode](modelId);
+                  }
                   setModelDialogMode(null);
                 }}
               />
