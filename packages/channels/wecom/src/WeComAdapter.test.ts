@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type {
   ChannelAgentBridge,
   ChannelConfig,
@@ -88,7 +88,7 @@ function makeBridge(): ChannelAgentBridge {
 class TestWeComChannel extends WeComChannel {
   readonly envelopes: Envelope[] = [];
 
-  override async handleInbound(envelope: Envelope): Promise<void> {
+  protected override async processInbound(envelope: Envelope): Promise<void> {
     this.envelopes.push(envelope);
   }
 }
@@ -102,7 +102,17 @@ function lastClient(): MockWSClient {
 describe('WeComChannel', () => {
   beforeEach(() => {
     mocks.instances.length = 0;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        async () => new Response(null, { headers: { 'content-length': '10' } }),
+      ),
+    );
     vi.clearAllMocks();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
   });
 
   it('requires botId and secret', () => {
@@ -153,6 +163,25 @@ describe('WeComChannel', () => {
     expect(stderr).toHaveBeenCalledWith('[WeCom:bot] SDK warn event.\n');
     expect(stderr).not.toHaveBeenCalledWith(
       expect.stringContaining('https://example.invalid/file'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('clears the active SDK client when the websocket closes', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('close', {});
+    await channel.sendMessage('chat-1', 'hello');
+
+    expect(client.sendMessage).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith('[WeCom:bot] WebSocket closed.\n');
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('No active SDK client'),
     );
     stderr.mockRestore();
   });
@@ -351,6 +380,34 @@ describe('WeComChannel', () => {
     expect(channel.envelopes).toHaveLength(0);
   });
 
+  it('does not download attachments from unsafe media URLs', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-unsafe-image',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://169.254.169.254/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
   it('skips inbound attachments that exceed the media size cap', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -358,9 +415,11 @@ describe('WeComChannel', () => {
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
     const client = lastClient();
-    client.downloadFile = vi.fn(async () => ({
-      buffer: Buffer.alloc(20 * 1024 * 1024 + 1),
-    }));
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(null, {
+        headers: { 'content-length': String(20 * 1024 * 1024 + 1) },
+      }),
+    );
 
     client.emit('message.image', {
       msgid: 'msg-large-image',
@@ -372,6 +431,7 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(client.downloadFile).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('skipping oversized image attachment'),
     );

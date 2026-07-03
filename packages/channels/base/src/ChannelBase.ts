@@ -2169,6 +2169,10 @@ export abstract class ChannelBase {
   async handleInbound(envelope: Envelope): Promise<void> {
     if (!(await this.preflightInbound(envelope))) return;
 
+    await this.processInbound(envelope);
+  }
+
+  protected async processInbound(envelope: Envelope): Promise<void> {
     // 3. Slash command handling — before session/agent routing
     const parsed = this.parseCommand(envelope.text);
     if (parsed) {

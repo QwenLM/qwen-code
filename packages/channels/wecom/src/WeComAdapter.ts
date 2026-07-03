@@ -10,6 +10,7 @@ import { randomUUID } from 'node:crypto';
 import { basename, join, resolve, win32, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Buffer } from 'node:buffer';
+import { isIP } from 'node:net';
 import { WSClient } from '@wecom/aibot-node-sdk';
 import { ChannelBase, sanitizeLogText } from '@qwen-code/channel-base';
 import type {
@@ -125,14 +126,26 @@ export class WeComChannel extends ChannelBase {
         `[WeCom:${this.name}] SDK error: ${sanitizeLogText(String(err), 200)}\n`,
       );
     });
+    const markDisconnected = (reason: string): void => {
+      if (this.client !== client) return;
+      this.client = undefined;
+      if (this.dedupTimer) {
+        clearInterval(this.dedupTimer);
+        this.dedupTimer = undefined;
+      }
+      process.stderr.write(`[WeCom:${this.name}] WebSocket ${reason}.\n`);
+    };
+    client.on('close', () => markDisconnected('closed'));
+    client.on('disconnect', () => markDisconnected('disconnected'));
 
+    this.client = client;
     try {
       await client.connect();
     } catch (err) {
+      if (this.client === client) this.client = undefined;
       client.disconnect();
       throw err;
     }
-    this.client = client;
     this.dedupTimer = setInterval(() => this.cleanupSeenMessages(), 60_000);
     process.stderr.write(`[WeCom:${this.name}] Connected via smart bot.\n`);
   }
@@ -143,8 +156,9 @@ export class WeComChannel extends ChannelBase {
       this.dedupTimer = undefined;
     }
     this.seenMessages.clear();
-    this.client?.disconnect();
+    const client = this.client;
     this.client = undefined;
+    client?.disconnect();
     process.stderr.write(`[WeCom:${this.name}] Disconnected.\n`);
   }
 
@@ -235,7 +249,7 @@ export class WeComChannel extends ChannelBase {
           ? '(image)'
           : `(file: ${attachments[0]?.fileName ?? 'file'})`;
       }
-      await this.handleInbound(envelope);
+      await this.processInbound(envelope);
     } catch (err) {
       if (messageId) this.seenMessages.delete(messageId);
       for (const attachment of attachments) {
@@ -259,6 +273,7 @@ export class WeComChannel extends ChannelBase {
     const refs = collectInboundMediaRefs(body);
     const attachments: Attachment[] = [];
     for (const ref of refs) {
+      if (!(await this.canDownloadAttachment(ref))) continue;
       const downloaded = await client.downloadFile(ref.url, ref.aesKey);
       const data = downloaded.buffer;
       if (data.length > MAX_MEDIA_BYTES) {
@@ -290,6 +305,46 @@ export class WeComChannel extends ChannelBase {
       }
     }
     return attachments;
+  }
+
+  private async canDownloadAttachment(ref: InboundMediaRef): Promise<boolean> {
+    if (!isSafeInboundMediaUrl(ref.url)) {
+      process.stderr.write(
+        `[WeCom:${this.name}] skipping ${ref.type} attachment with unsafe media URL.\n`,
+      );
+      return false;
+    }
+    try {
+      const response = await fetch(ref.url, {
+        method: 'HEAD',
+        signal: AbortSignal.timeout(10_000),
+      });
+      const contentLengthHeader = response.headers.get('content-length');
+      const contentLength =
+        contentLengthHeader === null ? Number.NaN : Number(contentLengthHeader);
+      if (
+        !response.ok ||
+        !Number.isFinite(contentLength) ||
+        contentLength < 0
+      ) {
+        process.stderr.write(
+          `[WeCom:${this.name}] skipping ${ref.type} attachment without verified content length.\n`,
+        );
+        return false;
+      }
+      if (contentLength > MAX_MEDIA_BYTES) {
+        process.stderr.write(
+          `[WeCom:${this.name}] skipping oversized ${ref.type} attachment (${contentLength} bytes).\n`,
+        );
+        return false;
+      }
+      return true;
+    } catch {
+      process.stderr.write(
+        `[WeCom:${this.name}] skipping ${ref.type} attachment after media metadata check failed.\n`,
+      );
+      return false;
+    }
   }
 
   private cleanupSeenMessages(): void {
@@ -542,11 +597,9 @@ function readOutboundMedia(
     throw new Error(`Media file too large: ${stat.size} bytes`);
   }
 
-  const channelFilesDir = join(tmpdir(), 'channel-files');
-  mkdirSync(channelFilesDir, { recursive: true });
   const allowedDirs = [
-    safeRealpath(channelFilesDir),
-    safeRealpath('/tmp/channel-files'),
+    ensureDirectoryRealpath(join(tmpdir(), 'channel-files')),
+    ensureDirectoryRealpath('/tmp/channel-files'),
   ].filter((dir): dir is string => Boolean(dir));
   if (!allowedDirs.some((dir) => isInsideDir(real, dir))) {
     throw new Error(`Media path outside allowed outbound directory: ${real}`);
@@ -562,6 +615,15 @@ export function safeRealpath(path: string): string | undefined {
   }
 }
 
+function ensureDirectoryRealpath(path: string): string | undefined {
+  try {
+    mkdirSync(path, { recursive: true });
+    return realpathSync(path);
+  } catch {
+    return undefined;
+  }
+}
+
 function isInsideDir(filePath: string, dir: string): boolean {
   const windowsStyle = /^[a-zA-Z]:[\\/]/.test(filePath);
   const pathImpl = windowsStyle ? win32 : posix;
@@ -570,6 +632,46 @@ function isInsideDir(filePath: string, dir: string): boolean {
     relative === '' ||
     (!relative.startsWith('..') && !pathImpl.isAbsolute(relative))
   );
+}
+
+function isSafeInboundMediaUrl(rawUrl: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(rawUrl);
+  } catch {
+    return false;
+  }
+  if (url.protocol !== 'https:') return false;
+
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host || host === 'localhost' || host.endsWith('.localhost')) {
+    return false;
+  }
+  if (host.endsWith('.local')) return false;
+
+  const ipVersion = isIP(host);
+  if (ipVersion === 4) {
+    const parts = host.split('.').map((part) => Number(part));
+    const [a = 0, b = 0] = parts;
+    return !(
+      a === 0 ||
+      a === 10 ||
+      a === 127 ||
+      (a === 169 && b === 254) ||
+      (a === 172 && b >= 16 && b <= 31) ||
+      (a === 192 && b === 168)
+    );
+  }
+  if (ipVersion === 6) {
+    return !(
+      host === '::1' ||
+      host.startsWith('fc') ||
+      host.startsWith('fd') ||
+      host.startsWith('fe80:')
+    );
+  }
+  if (!host.includes('.')) return false;
+  return true;
 }
 
 function extractMediaId(value: unknown): string | undefined {
