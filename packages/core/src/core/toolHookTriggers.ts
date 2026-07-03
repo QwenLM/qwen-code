@@ -286,17 +286,18 @@ export async function firePostToolUseHook(
       response.output,
     ) as PostToolUseHookOutput;
 
+    const additionalContext = postToolOutput.getAdditionalContext();
+    const artifacts = postToolOutput.getArtifacts();
+
     // Check if execution should stop
     if (postToolOutput.shouldStopExecution()) {
       return {
         shouldStop: true,
         stopReason: postToolOutput.getEffectiveReason(),
+        ...(additionalContext !== undefined ? { additionalContext } : {}),
+        ...(artifacts.length > 0 ? { artifacts } : {}),
       };
     }
-
-    // Get additional context
-    const additionalContext = postToolOutput.getAdditionalContext();
-    const artifacts = postToolOutput.getArtifacts();
 
     return {
       shouldStop: false,

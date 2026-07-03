@@ -405,6 +405,9 @@ function validateMetadata(
     ) {
       return '"metadata" values must be primitive';
     }
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      return '"metadata" numbers must be finite';
+    }
     if (
       typeof value === 'string' &&
       (hasControlCharacter(value) || hasUnsafeDisplayPayload(value))

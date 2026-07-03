@@ -304,7 +304,9 @@ export function isToolArtifactLike(value: unknown): value is ToolArtifact {
     isOptionalString(artifact, 'url') &&
     isOptionalString(artifact, 'mimeType') &&
     (artifact['sizeBytes'] === undefined ||
-      typeof artifact['sizeBytes'] === 'number') &&
+      (typeof artifact['sizeBytes'] === 'number' &&
+        Number.isSafeInteger(artifact['sizeBytes']) &&
+        artifact['sizeBytes'] >= 0)) &&
     (artifact['metadata'] === undefined ||
       isToolArtifactMetadataLike(artifact['metadata']))
   );

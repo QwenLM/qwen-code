@@ -169,4 +169,15 @@ describe('isToolArtifactLike', () => {
       }),
     ).toBe(false);
   });
+
+  it('rejects artifact sizes the daemon store would drop', () => {
+    for (const sizeBytes of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+      expect(
+        isToolArtifactLike({
+          title: 'Report',
+          sizeBytes,
+        }),
+      ).toBe(false);
+    }
+  });
 });

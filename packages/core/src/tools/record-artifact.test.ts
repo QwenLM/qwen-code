@@ -153,6 +153,16 @@ describe('RecordArtifactTool', () => {
         metadata: { value: 'x'.repeat(4096) },
       }),
     ).toThrow(/metadata/);
+
+    for (const value of [Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        tool.build({
+          title: 'Non-finite metadata',
+          url: 'https://example.com/resource',
+          metadata: { value },
+        }),
+      ).toThrow(/metadata/);
+    }
   });
 
   it('rejects invalid artifact sizes before reporting success', () => {

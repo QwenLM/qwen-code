@@ -491,17 +491,12 @@ export class SessionArtifactStore {
       }
       artifact.lastStatAt = options.now ?? Date.now();
     } catch (error) {
-      if (options.onError === 'preserve') {
-        return;
-      }
       writeStderrLine(
         `[artifacts] session=${this.sessionId} action=status_refresh_failed artifactId=${artifact.id} reason=${JSON.stringify(
           error instanceof Error ? error.message : String(error),
         )}`,
       );
-      artifact.status = 'missing';
-      artifact.sizeBytes = undefined;
-      artifact.lastStatAt = options.now ?? Date.now();
+      return;
     }
   }
 
@@ -666,9 +661,10 @@ function mergeArtifact(
       ? (incoming.managedId ?? existing.managedId)
       : existing.managedId,
     url: publishedUpdate ? (incoming.url ?? existing.url) : existing.url,
-    workspacePath: publishedUpdate
-      ? undefined
-      : (existing.workspacePath ?? incoming.workspacePath),
+    workspacePath:
+      publishedUpdate || existing.storage === 'published'
+        ? undefined
+        : (existing.workspacePath ?? incoming.workspacePath),
     mimeType: publishedUpdate
       ? (incoming.mimeType ?? existing.mimeType)
       : existing.mimeType,
@@ -678,9 +674,10 @@ function mergeArtifact(
     retentionSource: existing.retentionSource,
     trustedPublisher: existing.trustedPublisher || incoming.trustedPublisher,
     clientRetained: existing.clientRetained || incoming.clientRetained,
-    lastStatAt: publishedUpdate
-      ? undefined
-      : (incoming.lastStatAt ?? existing.lastStatAt),
+    lastStatAt:
+      publishedUpdate || existing.storage === 'published'
+        ? undefined
+        : (incoming.lastStatAt ?? existing.lastStatAt),
     updatedAt: existing.updatedAt,
   };
 

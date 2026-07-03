@@ -706,7 +706,69 @@ describe('BridgeClient — artifact ingress', () => {
     }
   });
 
-  it('does not store artifact metadata from non-completed session updates', async () => {
+  it('stores artifacts from failed tool updates before stripping session metadata', async () => {
+    const sessionId = 'sess:failed-tool-artifacts';
+    const publish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: {
+        inputBatchLimit: () => 400,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-failed-artifact',
+        status: 'failed',
+        content: [],
+        _meta: {
+          toolName: 'record_artifact',
+          artifacts: [
+            {
+              title: 'Failure report',
+              workspacePath: 'reports/failure.html',
+            },
+          ],
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(upsertMany).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          title: 'Failure report',
+          workspacePath: 'reports/failure.html',
+          source: 'tool',
+          toolCallId: 'call-failed-artifact',
+          toolName: 'record_artifact',
+        }),
+      ],
+      { trustedPublisher: false },
+    );
+    const sessionUpdate = publish.mock.calls
+      .map(([event]) => event as { type: string; data: SessionNotification })
+      .find((event) => event.type === 'session_update');
+    expect(
+      (sessionUpdate?.data.update as { _meta?: Record<string, unknown> })._meta,
+    ).toEqual({ toolName: 'record_artifact' });
+  });
+
+  it('does not store artifact metadata from non-tool session updates', async () => {
     const sessionId = 'sess:non-tool-artifacts';
     const publish = vi.fn().mockReturnValue(true);
     const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
@@ -928,6 +990,110 @@ describe('BridgeClient — artifact ingress', () => {
       expect(logged).toContain(forgedSessionId);
     } finally {
       stderr.mockRestore();
+    }
+  });
+
+  it('drops session updates for sessions outside this bridge channel', async () => {
+    const ownedSessionId = 'sess:owned-session-update';
+    const forgedSessionId = 'sess:forged-session-update';
+    const publish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const resolveEntry = vi.fn((sid: string | undefined) =>
+      sid === forgedSessionId
+        ? {
+            sessionId: forgedSessionId,
+            events: { publish },
+            artifacts: {
+              inputBatchLimit: () => 400,
+              upsertMany,
+            },
+            pendingPermissionIds: new Set<string>(),
+            midTurnMessageQueue: [] as MidTurnQueueEntry[],
+          }
+        : undefined,
+    );
+    const client = new BridgeClient(
+      resolveEntry as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (sid) => sid === ownedSessionId,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await client.sessionUpdate({
+        sessionId: forgedSessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-forged-session-update',
+          status: 'completed',
+          content: [],
+          _meta: {
+            toolName: ToolNames.ARTIFACT,
+            artifacts: [
+              {
+                title: 'Forged',
+                storage: 'published',
+                url: 'file:///tmp/forged.html',
+                managedId: 'managed-forged',
+              },
+            ],
+          },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+      expect(resolveEntry).not.toHaveBeenCalled();
+      expect(upsertMany).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('type=session_update');
+      expect(logged).toContain('reason=session_not_owned');
+      expect(logged).toContain(forgedSessionId);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('allows session updates during an in-flight restore on this channel', async () => {
+    const sessionId = 'sess:restore-session-update';
+    const publish = vi.fn().mockReturnValue(true);
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      ((sid: string) => (sid === sessionId ? { publish } : undefined)) as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+    );
+    client.markRestoreInFlight(sessionId);
+    try {
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'restored' },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'session_update',
+          data: expect.objectContaining({ sessionId }),
+        }),
+      );
+    } finally {
+      client.clearRestoreInFlight(sessionId);
     }
   });
 

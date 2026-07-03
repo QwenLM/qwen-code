@@ -152,7 +152,9 @@ function extractSessionUpdateArtifacts(
   };
   if (
     update.sessionUpdate !== 'tool_call_update' ||
-    update.status !== 'completed'
+    (update.status !== 'completed' &&
+      update.status !== 'failed' &&
+      update.status !== 'cancelled')
   ) {
     return [];
   }
@@ -564,6 +566,15 @@ export class BridgeClient implements Client {
   }
 
   async sessionUpdate(params: SessionNotification): Promise<void> {
+    if (
+      !this.ownsSession(params.sessionId) &&
+      !this.inFlightRestoreIds.has(params.sessionId)
+    ) {
+      writeStderrLine(
+        `[demux] session=${params.sessionId} type=session_update action=dropped reason=session_not_owned`,
+      );
+      return;
+    }
     const entry = this.resolveEntry(params.sessionId);
     const events =
       entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);

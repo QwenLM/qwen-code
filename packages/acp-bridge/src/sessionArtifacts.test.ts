@@ -361,6 +361,66 @@ describe('SessionArtifactStore', () => {
     expect((await store.list()).artifacts).toHaveLength(1);
   });
 
+  it('keeps published artifacts detached when their original workspace path is recorded again', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's2-published-rerecord-workspace',
+      workspaceCwd: workspace,
+    });
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifactPath = path.join(workspace, 'reports/dashboard.html');
+    const artifactUrl = pathToFileURL(artifactPath).href;
+    await fs.writeFile(artifactPath, 'hello');
+
+    const created = await store.upsertMany(
+      [{ title: 'Draft', workspacePath: 'reports/dashboard.html' }],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [
+        {
+          title: 'Published dashboard',
+          storage: 'published',
+          managedId: managedIdForWorkspacePath('reports/dashboard.html'),
+          url: artifactUrl,
+          mimeType: 'text/html',
+        },
+      ],
+      { strict: true, trustedPublisher: true },
+    );
+
+    const repeated = await store.upsertMany(
+      [{ title: 'Draft again', workspacePath: 'reports/dashboard.html' }],
+      { strict: true },
+    );
+
+    expect(repeated.changes).toEqual([]);
+    const artifact = (await store.list()).artifacts[0];
+    expect(artifact).toMatchObject({
+      id: created.changes[0]?.artifactId,
+      storage: 'published',
+      status: 'available',
+      url: artifactUrl,
+    });
+    expect(artifact).not.toHaveProperty('workspacePath');
+
+    await fs.rm(artifactPath);
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    try {
+      await expect(store.list()).resolves.toMatchObject({
+        artifacts: [
+          expect.objectContaining({
+            id: created.changes[0]?.artifactId,
+            storage: 'published',
+            status: 'available',
+          }),
+        ],
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('accepts trusted published file urls outside the workspace', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's2-published-file-url',
@@ -1381,7 +1441,7 @@ describe('SessionArtifactStore', () => {
     }
   });
 
-  it('marks workspace artifacts missing when list refresh hits an fs error', async () => {
+  it('preserves workspace artifact status when list refresh hits a transient fs error', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's7-list-refresh-error',
       workspaceCwd: workspace,
@@ -1404,8 +1464,7 @@ describe('SessionArtifactStore', () => {
 
     try {
       const artifact = (await store.list()).artifacts[0];
-      expect(artifact).toMatchObject({ status: 'missing' });
-      expect(artifact).not.toHaveProperty('sizeBytes');
+      expect(artifact).toMatchObject({ status: 'available', sizeBytes: 5 });
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('status_refresh_failed');
       expect(logged).toContain('permission denied');
