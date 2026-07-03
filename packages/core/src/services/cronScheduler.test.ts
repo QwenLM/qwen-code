@@ -326,9 +326,9 @@ describe('CronScheduler', () => {
     });
 
     it('treats a zero max age as never expiring, matching the config layer', () => {
-      // Config maps the `0` setting to Infinity before constructing; the
-      // constructor must agree so a direct caller passing 0 gets disabled
-      // expiry, not a silent 7-day default.
+      // normalizeRecurringMaxAge owns the `0 → Infinity` contract for
+      // both the config layer and this constructor, so a direct caller
+      // passing 0 gets disabled expiry, not a silent 7-day default.
       const custom = new CronScheduler(null, 0);
       try {
         const job = custom.create('*/1 * * * *', 'zero means never', true);

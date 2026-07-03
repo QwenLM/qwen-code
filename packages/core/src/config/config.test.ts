@@ -602,11 +602,13 @@ describe('Server Config (config.ts)', () => {
       ).toBe(7);
     });
 
-    it('warns on the console once per instance for an invalid value', () => {
+    it('warns on the console once at construction for an invalid value', () => {
       process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = 'not-a-number';
       const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
       try {
         const config = new Config(baseParams);
+        // The warning fires during construction, before any getter call,
+        // and repeated getter calls do not re-emit it.
         expect(config.getCronRecurringMaxAgeDays()).toBe(7);
         expect(config.getCronRecurringMaxAgeDays()).toBe(7);
         const cronWarnings = warnSpy.mock.calls.filter((call) =>
@@ -616,6 +618,15 @@ describe('Server Config (config.ts)', () => {
       } finally {
         warnSpy.mockRestore();
       }
+    });
+
+    it('resolves once at construction, ignoring later env changes (requiresRestart)', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '90';
+      const config = new Config(baseParams);
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '3';
+      expect(config.getCronRecurringMaxAgeDays()).toBe(90);
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(config.getCronRecurringMaxAgeDays()).toBe(90);
     });
   });
 

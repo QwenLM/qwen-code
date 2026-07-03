@@ -34,6 +34,19 @@ export const DEFAULT_RECURRING_MAX_AGE_DAYS = 7;
 // instance (see the constructor); Infinity disables expiry.
 const DEFAULT_RECURRING_MAX_AGE_MS =
   DEFAULT_RECURRING_MAX_AGE_DAYS * 24 * 60 * 60 * 1000;
+
+/** Single owner of the recurring-expiry contract, shared with the config
+ * layer: `0` and `Infinity` both disable expiry, positive values pass
+ * through, and negative or NaN input falls back to `fallback`.
+ * Unit-agnostic — the config layer normalizes days, the scheduler
+ * constructor milliseconds. */
+export function normalizeRecurringMaxAge(
+  value: number,
+  fallback: number,
+): number {
+  if (value === 0) return Infinity;
+  return value > 0 ? value : fallback;
+}
 // Recurring: up to 10% of period, capped at 15 minutes.
 const MAX_RECURRING_JITTER_MS = 15 * 60 * 1000;
 // One-shot: up to 90s early for jobs landing on :00 or :30.
@@ -254,21 +267,19 @@ export class CronScheduler {
   /** `projectRoot` anchors durable storage; without it only session-only
    * jobs work. Production constructs via `Config.getCronScheduler()`,
    * which always supplies it (and the configured `recurringMaxAgeMs`).
-   * `0` and `Infinity` both mean "never expire" — matching the config
-   * layer, where the `0` setting maps to Infinity — so a direct caller
-   * passing `0` gets disabled expiry, not the default. Negative or NaN
-   * input falls back to the 7-day default rather than expiring
-   * everything at birth. */
+   * `normalizeRecurringMaxAge` owns the expiry contract for both this
+   * constructor and the config layer: `0` and `Infinity` both mean
+   * "never expire" — so a direct caller passing `0` gets disabled
+   * expiry, not the default — while negative or NaN input falls back to
+   * the 7-day default rather than expiring everything at birth. */
   constructor(
     private readonly projectRoot: string | null = null,
     recurringMaxAgeMs: number = DEFAULT_RECURRING_MAX_AGE_MS,
   ) {
-    this.recurringMaxAgeMs =
-      recurringMaxAgeMs === 0
-        ? Infinity
-        : recurringMaxAgeMs > 0
-          ? recurringMaxAgeMs
-          : DEFAULT_RECURRING_MAX_AGE_MS;
+    this.recurringMaxAgeMs = normalizeRecurringMaxAge(
+      recurringMaxAgeMs,
+      DEFAULT_RECURRING_MAX_AGE_MS,
+    );
   }
 
   /**
