@@ -1,4 +1,4 @@
-import { useCallback, useEffect, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import {
   useDaemonStatus,
   type DaemonStatusReport,
@@ -188,9 +188,17 @@ export function DaemonStatusDialog() {
   const summaryReload = summary.reload;
   const fullReload = full.reload;
 
+  // Skip a tick if the previous poll is still outstanding: useDaemonResource
+  // discards stale completions but does not abort, and the client timeout is
+  // 30s, so a degraded daemon could otherwise accumulate overlapping calls.
+  const summaryPollInFlightRef = useRef(false);
   useEffect(() => {
     const timer = window.setInterval(() => {
-      void summaryReload();
+      if (summaryPollInFlightRef.current) return;
+      summaryPollInFlightRef.current = true;
+      void summaryReload().finally(() => {
+        summaryPollInFlightRef.current = false;
+      });
     }, REFRESH_INTERVAL_MS);
     return () => window.clearInterval(timer);
   }, [summaryReload]);
@@ -219,6 +227,14 @@ export function DaemonStatusDialog() {
     );
   }
 
+  // The daemon only appends workspace/preflight/MCP issues (and rolls them into
+  // `status`) for detail=full, so the summary can read "ok" with an empty issue
+  // list while a loaded full report is failing. Drive the badge and issue list
+  // off the full report whenever it is available; keep the live counters on the
+  // summary. The rollup then refreshes on open/manual rather than every 5s,
+  // which only ever over-reports (safe) between full fetches.
+  const rollupReport = fullReport ?? report;
+
   const { daemon, runtime, security, limits, capabilities } = report;
   const acp = runtime.transport.acp;
   const rateRejected = Object.values(
@@ -230,8 +246,8 @@ export function DaemonStatusDialog() {
   return (
     <div className={styles.dialog}>
       <div className={styles.toolbar}>
-        <span className={`${styles.badge} ${levelClass(report.status)}`}>
-          {t(`daemon.level.${report.status}`)}
+        <span className={`${styles.badge} ${levelClass(rollupReport.status)}`}>
+          {t(`daemon.level.${rollupReport.status}`)}
         </span>
         <span className={styles.updatedAt}>
           {t('daemon.updatedAt', {
@@ -253,9 +269,9 @@ export function DaemonStatusDialog() {
         </div>
       </div>
 
-      {report.issues.length > 0 && (
+      {rollupReport.issues.length > 0 && (
         <Card title={t('daemon.issues.title')}>
-          {report.issues.map((issue, index) => (
+          {rollupReport.issues.map((issue, index) => (
             <div key={`${issue.code}-${index}`} className={styles.issueRow}>
               <span
                 className={`${styles.badge} ${

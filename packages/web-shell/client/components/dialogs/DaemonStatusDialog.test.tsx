@@ -77,6 +77,18 @@ const summaryReport = {
 const fullReport = {
   ...summaryReport,
   detail: 'full',
+  // The daemon rolls workspace/preflight problems into status + issues only for
+  // detail=full, so the full report is strictly more severe than the summary.
+  status: 'error',
+  issues: [
+    ...summaryReport.issues,
+    {
+      code: 'preflight_error',
+      severity: 'error',
+      section: 'workspace.preflight',
+      message: 'preflight failed: node version too old',
+    },
+  ],
   full: {
     sessions: [
       {
@@ -165,12 +177,24 @@ function mount() {
   });
 }
 
+// The toolbar status badge is the first span whose text is a level label; it
+// renders before the issues card, so `find` returns the top badge.
+function topBadgeText(): string | undefined {
+  return Array.from(container!.querySelectorAll('span'))
+    .map((s) => s.textContent?.trim() ?? '')
+    .find(
+      (label) => label === 'OK' || label === 'Warning' || label === 'Error',
+    );
+}
+
 beforeEach(() => {
   summaryState = { report: summaryReport, loading: false, error: undefined };
   fullState = { report: fullReport, loading: false, error: undefined };
   seenDetails.length = 0;
-  summaryReload.mockClear();
-  fullReload.mockClear();
+  summaryReload.mockReset();
+  summaryReload.mockImplementation(async () => undefined);
+  fullReload.mockReset();
+  fullReload.mockImplementation(async () => undefined);
 });
 
 afterEach(() => {
@@ -182,10 +206,10 @@ afterEach(() => {
 });
 
 describe('DaemonStatusDialog', () => {
-  it('renders the summary report with status badge, issues, and counters', () => {
+  it('renders live summary counters with the full-detail rollup badge', () => {
     mount();
     const text = container!.textContent ?? '';
-    expect(text).toContain('Warning');
+    // Live counters come from the summary response.
     expect(text).toContain(
       '2 permission requests are waiting for a client response',
     );
@@ -196,6 +220,11 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('daemon_status');
     // rate-limit rejects are summed across tiers (37 + 4)
     expect(text).toContain('41');
+    // The badge + issues reflect the full rollup (error + preflight), not the
+    // summary (warning) — otherwise the dialog would read "OK/Warning" while a
+    // loaded full diagnostic is failing.
+    expect(topBadgeText()).toBe('Error');
+    expect(text).toContain('preflight failed: node version too old');
   });
 
   it('fetches both summary and full detail and renders diagnostics with no toggle', () => {
@@ -216,21 +245,52 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('Workspace Diagnostics');
   });
 
-  it('auto-refresh reloads only the cheap summary, never the full report', () => {
+  it('auto-refresh reloads only the cheap summary, never the full report', async () => {
     vi.useFakeTimers();
     mount();
     expect(summaryReload).not.toHaveBeenCalled();
-    expect(fullReload).not.toHaveBeenCalled();
-    act(() => {
-      vi.advanceTimersByTime(5_000);
-    });
-    expect(summaryReload).toHaveBeenCalledTimes(1);
-    act(() => {
-      vi.advanceTimersByTime(10_000);
-    });
-    expect(summaryReload).toHaveBeenCalledTimes(3);
+    // Advance one interval at a time, flushing the in-flight `.finally` between
+    // ticks so the guard is clear for the next tick.
+    for (let tick = 1; tick <= 3; tick++) {
+      await act(async () => {
+        vi.advanceTimersByTime(5_000);
+        await Promise.resolve();
+      });
+      expect(summaryReload).toHaveBeenCalledTimes(tick);
+    }
     // The expensive detail path is never hit by the interval.
     expect(fullReload).not.toHaveBeenCalled();
+  });
+
+  it('skips a poll tick while the previous summary reload is still in flight', async () => {
+    vi.useFakeTimers();
+    let release: () => void = () => {};
+    summaryReload.mockImplementationOnce(
+      () =>
+        new Promise<undefined>((resolve) => {
+          release = () => resolve(undefined);
+        }),
+    );
+    mount();
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+      await Promise.resolve();
+    });
+    expect(summaryReload).toHaveBeenCalledTimes(1); // first tick, still pending
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+      await Promise.resolve();
+    });
+    expect(summaryReload).toHaveBeenCalledTimes(1); // coalesced away while pending
+    await act(async () => {
+      release();
+      await Promise.resolve();
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+      await Promise.resolve();
+    });
+    expect(summaryReload).toHaveBeenCalledTimes(2); // fires again once free
   });
 
   it('manual refresh reloads both summary and full', () => {
@@ -257,7 +317,7 @@ describe('DaemonStatusDialog', () => {
     expect(fullReload).not.toHaveBeenCalled();
   });
 
-  it('renders summary cards while the diagnostics are still loading', () => {
+  it('falls back to the summary rollup badge while diagnostics are still loading', () => {
     fullState = { report: undefined, loading: true, error: undefined };
     mount();
     const text = container!.textContent ?? '';
@@ -266,6 +326,10 @@ describe('DaemonStatusDialog', () => {
     // ...while the detail sections show a loading placeholder.
     expect(text).toContain('Loading diagnostics');
     expect(text).not.toContain('Workspace Diagnostics');
+    // Before the full report lands the badge reflects the summary rollup, and
+    // the full-only preflight issue is not shown yet.
+    expect(topBadgeText()).toBe('Warning');
+    expect(text).not.toContain('preflight failed: node version too old');
   });
 
   it('shows the load error when no report is available', () => {

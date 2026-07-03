@@ -228,10 +228,24 @@ export interface DaemonStatusReport {
     sessions: { active: number };
     permissions: { pending: number; policy: string };
     channel: { live: boolean };
+    // Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
+    // widened to string to avoid coupling the wire type to the daemon's unions.
     channelWorker: {
       enabled: boolean;
       state: string;
-      channels: Array<Record<string, unknown>>;
+      channels: string[];
+      requestedChannels?: string[];
+      pid?: number;
+      startedAt?: string;
+      exitCode?: number | null;
+      signal?: string | null;
+      error?: string;
+      restartCount?: number;
+      lastExitAt?: string;
+      lastRestartAt?: string;
+      nextRestartAt?: string;
+      lastHeartbeatAt?: string;
+      staleHeartbeatAt?: string;
     };
     transport: {
       restSseActive: number;
