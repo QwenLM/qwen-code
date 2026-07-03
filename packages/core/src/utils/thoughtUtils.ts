@@ -27,6 +27,10 @@ export function createOpenAIReasoningThoughtPart(text: string): Part {
   return part;
 }
 
+/**
+ * @remarks The marker is stored on the original Part object and does not
+ * survive cloning, spreading, or JSON serialization.
+ */
 export function isOpenAIReasoningThoughtPart(part: Part): boolean {
   return Boolean(
     (part as OpenAIReasoningThoughtPart)[OPENAI_REASONING_THOUGHT_MARKER],

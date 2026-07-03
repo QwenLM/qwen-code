@@ -4366,12 +4366,15 @@ describe('OpenAIContentConverter', () => {
         context,
       );
 
+      const finalParts = finalChunk.candidates?.[0]?.content?.parts;
+
       expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+      expect(finalParts).toEqual([
         { text: 'separate reasoning channel', thought: true },
         { text: 'final ' },
         { text: 'answer' },
       ]);
+      expect(isOpenAIReasoningThoughtPart(finalParts?.[0] as Part)).toBe(true);
     });
 
     it('should flush reasoning-only chunks when tagged streaming content has no thinking tags', () => {
