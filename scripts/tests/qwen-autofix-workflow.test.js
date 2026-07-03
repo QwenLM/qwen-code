@@ -348,6 +348,10 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain('start_openai_proxy');
       expect(step).toContain('node .github/scripts/openai-proxy.mjs');
       expect(step).toContain('OPENAI_API_KEY=qwen-loopback-proxy');
+      expect(step).toContain(
+        'NO_PROXY="127.0.0.1,localhost,::1${NO_PROXY:+,${NO_PROXY}}"',
+      );
+      expect(step).toContain('no_proxy="${NO_PROXY}"');
       expect(step).toContain('unset QWEN_UPSTREAM_OPENAI_API_KEY');
       expect(step).toContain('unset QWEN_UPSTREAM_OPENAI_BASE_URL');
     }

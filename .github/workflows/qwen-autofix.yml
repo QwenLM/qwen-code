@@ -450,6 +450,8 @@ jobs:
             unset QWEN_UPSTREAM_OPENAI_BASE_URL
             export OPENAI_API_KEY=qwen-loopback-proxy
             export OPENAI_BASE_URL="${local_openai_base_url}"
+            export NO_PROXY="127.0.0.1,localhost,::1${NO_PROXY:+,${NO_PROXY}}"
+            export no_proxy="${NO_PROXY}"
             echo "openai_proxy=enabled (${OPENAI_BASE_URL})"
           }
 
@@ -624,8 +626,6 @@ jobs:
             exit without committing. An honest abort is better than a wrong
             fix.
         run: |-
-          BRANCH="autofix/issue-${ISSUE}"
-
           start_openai_proxy() {
             local proxy_info local_openai_base_url
             proxy_info="$(mktemp "${RUNNER_TEMP:-/tmp}/qwen-openai-proxy.XXXXXX")"
@@ -652,6 +652,8 @@ jobs:
             unset QWEN_UPSTREAM_OPENAI_BASE_URL
             export OPENAI_API_KEY=qwen-loopback-proxy
             export OPENAI_BASE_URL="${local_openai_base_url}"
+            export NO_PROXY="127.0.0.1,localhost,::1${NO_PROXY:+,${NO_PROXY}}"
+            export no_proxy="${NO_PROXY}"
             echo "openai_proxy=enabled (${OPENAI_BASE_URL})"
           }
 
@@ -1254,6 +1256,8 @@ jobs:
             unset QWEN_UPSTREAM_OPENAI_BASE_URL
             export OPENAI_API_KEY=qwen-loopback-proxy
             export OPENAI_BASE_URL="${local_openai_base_url}"
+            export NO_PROXY="127.0.0.1,localhost,::1${NO_PROXY:+,${NO_PROXY}}"
+            export no_proxy="${NO_PROXY}"
             echo "openai_proxy=enabled (${OPENAI_BASE_URL})"
           }
 
