@@ -268,6 +268,45 @@ describe('EchartsFullDataBlock', () => {
     ]);
   });
 
+  it('preserves array-row columns for unnamed object dimensions', async () => {
+    const option: EchartsFullDataOption = {
+      title: { text: 'Weekly orders' },
+      dataset: {
+        dimensions: [{}, { name: 'orders' }],
+        source: [['Mon', 120]],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 0, y: 1 } }],
+    };
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption: vi.fn(),
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await render(
+      <EchartsFullDataBlock
+        option={option}
+        theme="dark"
+        loadEcharts={() => runtime}
+      />,
+    );
+    await flushChart();
+    await act(async () => {
+      container.querySelectorAll('button')[1]?.click();
+    });
+
+    const headerTexts = Array.from(container.querySelectorAll('th')).map(
+      (cell) => cell.textContent?.trim() ?? '',
+    );
+    expect(headerTexts[1]).toContain('0');
+    expect(headerTexts[2]).toContain('orders');
+    expect(getDataRows(container)).toEqual([['Mon', '120']]);
+  });
+
   it('keeps the parsed option stable across parent rerenders with unchanged code', async () => {
     const code = JSON.stringify({
       title: { text: 'Weekly orders' },
@@ -364,6 +403,103 @@ describe('EchartsFullDataBlock', () => {
     expect(cloneCount).toBe(1);
     expect(runtime.init).toHaveBeenCalledTimes(2);
     expect(setOption).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not recreate the chart when the loader prop identity changes', async () => {
+    const option: EchartsFullDataOption = {
+      title: { text: 'Weekly orders' },
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [{ day: 'Mon', orders: 120 }],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+    };
+    const dispose = vi.fn();
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose,
+      })),
+    };
+    const tree = (nonce: number) => (
+      <I18nProvider language="en">
+        <div data-nonce={nonce}>
+          <EchartsFullDataBlock
+            option={option}
+            theme="dark"
+            loadEcharts={() => runtime}
+          />
+        </div>
+      </I18nProvider>
+    );
+
+    const { rerender } = await mount(tree(1));
+    await flushChart();
+    await rerender(tree(2));
+    await flushChart();
+
+    expect(runtime.init).toHaveBeenCalledOnce();
+    expect(setOption).toHaveBeenCalledOnce();
+    expect(dispose).not.toHaveBeenCalled();
+  });
+
+  it('restyles the existing chart when the theme changes', async () => {
+    const plainOption: EchartsFullDataOption = {
+      title: { text: 'Weekly orders' },
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [{ day: 'Mon', orders: 120 }],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+    };
+    let cloneCount = 0;
+    const option = {
+      ...plainOption,
+      toJSON: () => {
+        cloneCount += 1;
+        return plainOption;
+      },
+    } as EchartsFullDataOption & { toJSON: () => EchartsFullDataOption };
+    const dispose = vi.fn();
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose,
+      })),
+    };
+    const tree = (theme: 'dark' | 'light') => (
+      <I18nProvider language="en">
+        <EchartsFullDataBlock
+          option={option}
+          theme={theme}
+          loadEcharts={() => runtime}
+        />
+      </I18nProvider>
+    );
+
+    const { rerender } = await mount(tree('dark'));
+    await flushChart();
+    await rerender(tree('light'));
+    await flushChart();
+
+    expect(cloneCount).toBe(1);
+    expect(runtime.init).toHaveBeenCalledOnce();
+    expect(dispose).not.toHaveBeenCalled();
+    expect(setOption).toHaveBeenCalledTimes(2);
+    expect(setOption.mock.calls[0]?.[0]).toEqual(
+      expect.objectContaining({ backgroundColor: '#0d0d0d' }),
+    );
+    expect(setOption.mock.calls[1]?.[0]).toEqual(
+      expect.objectContaining({ backgroundColor: '#ffffff' }),
+    );
   });
 
   it('shows loading while the chart runtime loader is pending', async () => {
@@ -632,7 +768,7 @@ describe('EchartsFullDataBlock', () => {
     const option: EchartsFullDataOption = {
       dataset: {
         dimensions: ['day', 'orders'],
-        source: [{ day: 'Mon', orders: 120 }],
+        source: [{ day: '<img src=x onerror=alert(1)>', orders: 120 }],
         transform: { type: 'filter' },
       } as EchartsFullDataOption['dataset'],
       graphic: { type: 'text', style: { text: '<img src=x>' } },
@@ -648,6 +784,12 @@ describe('EchartsFullDataBlock', () => {
           name: '<a'.repeat(32),
           encode: { x: 'day', y: 'orders' },
           symbol: 'image://https://example.test/marker.png',
+          tooltip: {
+            appendToBody: true,
+            enterable: true,
+            formatter: '<img src=x onerror=alert(1)>',
+            renderMode: 'html',
+          },
         },
       ],
     };
@@ -670,7 +812,10 @@ describe('EchartsFullDataBlock', () => {
     await flushChart();
 
     const renderedOption = setOption.mock.calls[0]?.[0] as {
-      dataset?: { transform?: unknown };
+      dataset?: {
+        source?: Array<Record<string, unknown>>;
+        transform?: unknown;
+      };
       graphic?: unknown;
       tooltip?: {
         formatter?: unknown;
@@ -678,10 +823,21 @@ describe('EchartsFullDataBlock', () => {
         renderMode?: string;
         enterable?: boolean;
       };
-      series?: Array<{ name?: string; symbol?: string }>;
+      series?: Array<{
+        name?: string;
+        symbol?: string;
+        tooltip?: {
+          appendToBody?: boolean;
+          confine?: boolean;
+          enterable?: boolean;
+          formatter?: unknown;
+          renderMode?: string;
+        };
+      }>;
     };
     expect(renderedOption.graphic).toBeUndefined();
     expect(renderedOption.dataset?.transform).toBeUndefined();
+    expect(renderedOption.dataset?.source?.[0]?.day).toBe('');
     expect(renderedOption.tooltip?.formatter).toBeUndefined();
     expect(renderedOption.tooltip?.extraCssText).not.toContain('https://');
     expect(renderedOption.tooltip).toEqual(
@@ -692,6 +848,15 @@ describe('EchartsFullDataBlock', () => {
     );
     expect(renderedOption.series?.[0]?.name).toBeUndefined();
     expect(renderedOption.series?.[0]?.symbol).toBe('circle');
+    expect(renderedOption.series?.[0]?.tooltip?.formatter).toBeUndefined();
+    expect(renderedOption.series?.[0]?.tooltip).toEqual(
+      expect.objectContaining({
+        appendToBody: false,
+        confine: true,
+        enterable: false,
+        renderMode: 'richText',
+      }),
+    );
   });
 
   it('ignores malformed title array entries', async () => {

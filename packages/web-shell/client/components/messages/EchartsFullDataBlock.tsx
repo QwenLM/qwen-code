@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   CodeBlockRenderer,
   WebShellCodeBlockRenderInfo,
@@ -125,6 +125,7 @@ const MAX_CHART_CODE_LENGTH = 500_000;
 const MAX_OPTION_DEPTH = 40;
 const MAX_DATA_ROWS = 2_000;
 const MAX_DATA_CELLS = 40_000;
+const noop = () => {};
 
 const SAFE_TOP_LEVEL_OPTION_KEYS = new Set([
   'angleAxis',
@@ -208,6 +209,10 @@ function forceTooltipSafety(value: unknown, safeExtraCssText: string): unknown {
   return force(value);
 }
 
+function getSafeTooltipCss(tokens: (typeof CHART_THEME)[ChartTheme]): string {
+  return `border-radius:6px;box-shadow:${tokens.tooltipShadow};max-height:300px;overflow:auto;white-space:pre-wrap;`;
+}
+
 function styleExistingObject(value: unknown, defaults: EchartsObject): unknown {
   return isObject(value) ? mergeDefaults(defaults, value) : value;
 }
@@ -257,6 +262,24 @@ function isUnsafeString(value: string): boolean {
   );
 }
 
+function sanitizeDatasetCell(value: unknown): DatasetCell {
+  if (typeof value === 'string') return isUnsafeString(value) ? '' : value;
+  if (typeof value === 'number' && Number.isFinite(value)) return value;
+  if (typeof value === 'boolean' || value === null) return value;
+  return '';
+}
+
+function sanitizeDatasetRow(row: unknown): DatasetRow | undefined {
+  if (Array.isArray(row)) return row.map(sanitizeDatasetCell);
+  if (!isObject(row)) return undefined;
+
+  const sanitized: Record<string, DatasetCell> = {};
+  for (const [key, value] of Object.entries(row)) {
+    sanitized[key] = sanitizeDatasetCell(value);
+  }
+  return sanitized;
+}
+
 function sanitizeOptionValue(value: unknown, path: string[] = []): unknown {
   if (Array.isArray(value)) {
     return value
@@ -291,9 +314,9 @@ function sanitizeDatasetValue(value: unknown): unknown {
       );
     }
     if (Array.isArray(entry.source)) {
-      dataset.source = entry.source.filter(
-        (row): row is DatasetRow => Array.isArray(row) || isObject(row),
-      );
+      dataset.source = entry.source
+        .map(sanitizeDatasetRow)
+        .filter((row): row is DatasetRow => !!row);
     }
     return dataset;
   };
@@ -451,6 +474,19 @@ function styleSeriesEntry(
   }
 
   const styled = mergeDefaults(defaults, series);
+  const safeTooltipCss = getSafeTooltipCss(tokens);
+  if ('tooltip' in series) {
+    styled.tooltip = forceTooltipSafety(
+      styleComponent(series.tooltip, {
+        appendToBody: false,
+        confine: true,
+        enterable: false,
+        extraCssText: safeTooltipCss,
+        renderMode: 'richText',
+      }),
+      safeTooltipCss,
+    );
+  }
   const annotationLabel = {
     color: tokens.foreground,
     fontSize: 12,
@@ -526,7 +562,7 @@ function applyDefaultChartStyle(
     left: 24,
     containLabel: true,
   });
-  const safeTooltipCss = `border-radius:6px;box-shadow:${tokens.tooltipShadow};max-height:300px;overflow:auto;white-space:pre-wrap;`;
+  const safeTooltipCss = getSafeTooltipCss(tokens);
   styled.tooltip = forceTooltipSafety(
     styleComponent(option.tooltip, {
       trigger: getTooltipTrigger(option),
@@ -642,14 +678,19 @@ function applyDefaultChartStyle(
   return styled;
 }
 
-function cloneOptionForChart(
+function cloneAndSanitizeOptionForChart(
   option: EchartsFullDataOption,
-  theme: ChartTheme,
 ): EchartsFullDataOption {
   const cloned = JSON.parse(JSON.stringify(option)) as EchartsFullDataOption;
   const normalized = normalizeObjectDatasetFormatters(cloned);
-  const sanitized = sanitizeOptionForChart(normalized);
-  const styled = applyDefaultChartStyle(sanitized, theme);
+  return sanitizeOptionForChart(normalized);
+}
+
+function styleOptionForChart(
+  option: EchartsFullDataOption,
+  theme: ChartTheme,
+): EchartsFullDataOption {
+  const styled = applyDefaultChartStyle(option, theme);
   delete styled.title;
   return styled;
 }
@@ -685,11 +726,12 @@ function normalizeDimensions(
   dimensions: DatasetDimension[] | undefined,
 ): string[] {
   if (!Array.isArray(dimensions)) return [];
-  return dimensions
-    .map((dimension) =>
-      typeof dimension === 'string' ? dimension : dimension.name,
-    )
-    .filter((dimension): dimension is string => !!dimension);
+  return dimensions.map((dimension, index) => {
+    if (typeof dimension === 'string') return dimension;
+    return typeof dimension.name === 'string' && dimension.name
+      ? dimension.name
+      : String(index);
+  });
 }
 
 function getColumns(option: EchartsFullDataOption | undefined): string[] {
@@ -950,26 +992,58 @@ export function EchartsFullDataBlock({
   loadEcharts,
 }: EchartsFullDataBlockProps) {
   const chartRef = useRef<HTMLDivElement>(null);
+  const chartInstanceRef = useRef<EchartsInstance | undefined>(undefined);
+  const removeResizeRef = useRef<() => void>(noop);
+  const loadEchartsRef = useRef(loadEcharts);
+  const renderRequestRef = useRef(0);
+  const themeRef = useRef(theme);
   const [mode, setMode] = useState<'chart' | 'data'>('chart');
   const [chartError, setChartError] = useState<string | null>(null);
   const [chartReady, setChartReady] = useState(false);
   const rows = useMemo(() => getRows(option), [option]);
   const columns = useMemo(() => getColumns(option), [option]);
-  const { chartOption, chartOptionError } = useMemo(() => {
+  const { sanitizedOption, chartOptionError } = useMemo(() => {
     if (!option || parseError) return {};
     try {
-      return { chartOption: cloneOptionForChart(option, theme) };
+      return { sanitizedOption: cloneAndSanitizeOptionForChart(option) };
     } catch (error) {
       return { chartOptionError: error };
     }
-  }, [option, parseError, theme]);
+  }, [option, parseError]);
+  const chartOption = useMemo(
+    () =>
+      sanitizedOption ? styleOptionForChart(sanitizedOption, theme) : undefined,
+    [sanitizedOption, theme],
+  );
+  const hasLoadEcharts = !!loadEcharts;
+  loadEchartsRef.current = loadEcharts;
+  themeRef.current = theme;
+
+  const disposeChart = useCallback(() => {
+    removeResizeRef.current();
+    removeResizeRef.current = noop;
+    chartInstanceRef.current?.dispose();
+    chartInstanceRef.current = undefined;
+  }, []);
+
+  useEffect(
+    () => () => {
+      renderRequestRef.current += 1;
+      disposeChart();
+    },
+    [disposeChart],
+  );
 
   useEffect(() => {
     if (mode !== 'chart' || parseError || (!chartOption && !chartOptionError)) {
+      renderRequestRef.current += 1;
+      disposeChart();
       setChartReady(false);
       return;
     }
+    const requestId = (renderRequestRef.current += 1);
     if (chartOptionError) {
+      disposeChart();
       setChartReady(false);
       console.error(
         '[web-shell] echarts-fulldata render failed:',
@@ -983,69 +1057,70 @@ export function EchartsFullDataBlock({
       return;
     }
     if (!chartOption) {
+      disposeChart();
       setChartReady(false);
       return;
     }
-    if (!loadEcharts) {
+    if (!hasLoadEcharts) {
+      disposeChart();
       setChartReady(false);
       setChartError('Chart runtime is unavailable.');
       return;
     }
 
-    let disposed = false;
-    let chart: EchartsInstance | undefined;
-    let removeResize = () => {};
     setChartError(null);
-    setChartReady(false);
-    if (!chartRef.current) return;
+    if (!chartInstanceRef.current) setChartReady(false);
 
-    Promise.resolve()
-      .then(loadEcharts)
-      .then((runtime) => {
-        if (disposed || !chartRef.current) return;
-        const nextChart = runtime.init(chartRef.current, theme);
-        try {
-          nextChart.setOption(chartOption);
-        } catch (error) {
-          nextChart.dispose();
-          throw error;
-        }
-        if (disposed) {
-          nextChart.dispose();
-          return;
+    const renderChart = async () => {
+      try {
+        let chart = chartInstanceRef.current;
+        if (!chart) {
+          const loadRuntime = loadEchartsRef.current;
+          if (!loadRuntime || !chartRef.current) return;
+          const runtime = await Promise.resolve().then(loadRuntime);
+          if (requestId !== renderRequestRef.current || !chartRef.current) {
+            return;
+          }
+          chart = runtime.init(chartRef.current, themeRef.current);
+          chartInstanceRef.current = chart;
         }
 
-        chart = nextChart;
-        const onResize = () => chart?.resize();
-        const observer =
-          typeof ResizeObserver === 'undefined'
-            ? undefined
-            : new ResizeObserver(onResize);
-        observer?.observe(chartRef.current);
-        window.addEventListener('resize', onResize);
-        removeResize = () => {
-          observer?.disconnect();
-          window.removeEventListener('resize', onResize);
-        };
+        if (requestId !== renderRequestRef.current) return;
+        chart.setOption(chartOption);
+        if (removeResizeRef.current === noop && chartRef.current) {
+          const onResize = () => chartInstanceRef.current?.resize();
+          const observer =
+            typeof ResizeObserver === 'undefined'
+              ? undefined
+              : new ResizeObserver(onResize);
+          observer?.observe(chartRef.current);
+          window.addEventListener('resize', onResize);
+          removeResizeRef.current = () => {
+            observer?.disconnect();
+            window.removeEventListener('resize', onResize);
+          };
+        }
         setChartReady(true);
-      })
-      .catch((error: unknown) => {
-        if (disposed) return;
+      } catch (error) {
+        if (requestId !== renderRequestRef.current) return;
         console.error('[web-shell] echarts-fulldata render failed:', error);
-        chart?.dispose();
-        chart = undefined;
+        disposeChart();
         setChartReady(false);
         setChartError(
           error instanceof Error ? error.message : 'Chart render failed.',
         );
-      });
-
-    return () => {
-      disposed = true;
-      removeResize();
-      chart?.dispose();
+      }
     };
-  }, [chartOption, chartOptionError, loadEcharts, mode, parseError, theme]);
+
+    void renderChart();
+  }, [
+    chartOption,
+    chartOptionError,
+    disposeChart,
+    hasLoadEcharts,
+    mode,
+    parseError,
+  ]);
 
   const title = getTitle(option);
 
