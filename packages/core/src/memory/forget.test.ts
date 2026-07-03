@@ -132,4 +132,58 @@ describe('selectManagedAutoMemoryForgetCandidates', () => {
       await fs.rm(tempDir, { recursive: true, force: true });
     }
   });
+
+  it('removes only the selected entry index when summaries are duplicated', async () => {
+    const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'forget-index-'));
+    try {
+      const projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      const memoryFile = path.join(tempDir, 'memory.md');
+      await fs.writeFile(
+        memoryFile,
+        [
+          '---',
+          'title: Duplicate memory',
+          '---',
+          '',
+          '# Project Memory',
+          '',
+          '- Duplicate summary',
+          '  - Why: first reason',
+          '- Duplicate summary',
+          '  - Why: second reason',
+          '',
+        ].join('\n'),
+        'utf-8',
+      );
+
+      const result = await forgetManagedAutoMemoryMatches(
+        projectRoot,
+        [
+          {
+            topic: 'project',
+            summary: 'Duplicate summary',
+            filePath: memoryFile,
+            entryIndex: 1,
+          },
+        ],
+        new Date('2026-07-03T00:00:00.000Z'),
+      );
+
+      expect(result.removedEntries).toEqual([
+        {
+          topic: 'project',
+          summary: 'Duplicate summary',
+          filePath: memoryFile,
+          entryIndex: 1,
+        },
+      ]);
+      const updated = await fs.readFile(memoryFile, 'utf-8');
+      expect(updated).toContain('Duplicate summary');
+      expect(updated).toContain('first reason');
+      expect(updated).not.toContain('second reason');
+    } finally {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });

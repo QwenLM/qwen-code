@@ -9,6 +9,7 @@ import { createDebugLogger } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
   AcpSessionBridge,
+  BridgeAutoMemoryTopic,
   BridgeWorkspaceMemoryDreamResult,
   BridgeWorkspaceMemoryForgetResult,
   BridgeWorkspaceMemoryRememberContextMode,
@@ -74,6 +75,16 @@ function nowIso(): string {
 
 function createMemoryTaskId(kind: WorkspaceMemoryTaskRecord['kind']): string {
   return `${kind}-${randomUUID()}`;
+}
+
+function touchedScopesFromTopics(
+  topics: BridgeAutoMemoryTopic[],
+): Array<'user' | 'project'> {
+  const scopes = new Set<'user' | 'project'>();
+  for (const topic of topics) {
+    scopes.add(topic === 'user' || topic === 'feedback' ? 'user' : 'project');
+  }
+  return [...scopes];
 }
 
 function cloneTask(
@@ -161,15 +172,18 @@ function publicErrorStatus(code: string): number {
 export class WorkspaceRememberTaskLane {
   private static readonly MAX_TASKS = 1000;
   private static readonly MAX_PENDING = 16;
+  private static readonly MAX_NON_REMEMBER_PENDING = 8;
   private readonly tasks = new Map<string, WorkspaceMemoryTaskRecord>();
   private tail: Promise<void> = Promise.resolve();
 
   constructor(private readonly bridge: AcpSessionBridge) {}
 
-  private pendingCount(): number {
+  private pendingCount(kind?: WorkspaceMemoryTaskRecord['kind']): number {
     let count = 0;
     for (const task of this.tasks.values()) {
-      if (task.status === 'queued' || task.status === 'running') count++;
+      if (task.status !== 'queued' && task.status !== 'running') continue;
+      if (kind && task.kind !== kind) continue;
+      count++;
     }
     return count;
   }
@@ -184,8 +198,17 @@ export class WorkspaceRememberTaskLane {
     }
   }
 
-  private assertCapacity(): void {
+  private assertCapacity(kind: WorkspaceMemoryTaskRecord['kind']): void {
     if (this.pendingCount() >= WorkspaceRememberTaskLane.MAX_PENDING) {
+      throw Object.assign(new Error('Workspace memory task queue is full'), {
+        code: 'remember_queue_full',
+      });
+    }
+    if (
+      kind !== 'remember' &&
+      this.pendingCount('forget') + this.pendingCount('dream') >=
+        WorkspaceRememberTaskLane.MAX_NON_REMEMBER_PENDING
+    ) {
       throw Object.assign(new Error('Workspace memory task queue is full'), {
         code: 'remember_queue_full',
       });
@@ -239,7 +262,7 @@ export class WorkspaceRememberTaskLane {
     contextMode: BridgeWorkspaceMemoryRememberContextMode;
     originatorClientId?: string;
   }): WorkspaceMemoryRememberTaskSnapshot {
-    this.assertCapacity();
+    this.assertCapacity('remember');
     const task: WorkspaceMemoryTaskRecord = {
       kind: 'remember',
       taskId: createMemoryTaskId('remember'),
@@ -300,7 +323,7 @@ export class WorkspaceRememberTaskLane {
     query: string;
     originatorClientId?: string;
   }): WorkspaceMemoryForgetTaskSnapshot {
-    this.assertCapacity();
+    this.assertCapacity('forget');
     const task: WorkspaceMemoryTaskRecord = {
       kind: 'forget',
       taskId: createMemoryTaskId('forget'),
@@ -346,8 +369,7 @@ export class WorkspaceRememberTaskLane {
         this.publishManagedMemoryChanged({
           source: 'workspace_memory_forget',
           taskId: task.taskId,
-          touchedScopes:
-            task.result.touchedTopics.length > 0 ? ['project'] : [],
+          touchedScopes: touchedScopesFromTopics(task.result.touchedTopics),
           ...(params.originatorClientId
             ? { originatorClientId: params.originatorClientId }
             : {}),
@@ -361,7 +383,7 @@ export class WorkspaceRememberTaskLane {
   enqueueDream(params: {
     originatorClientId?: string;
   }): WorkspaceMemoryDreamTaskSnapshot {
-    this.assertCapacity();
+    this.assertCapacity('dream');
     const task: WorkspaceMemoryTaskRecord = {
       kind: 'dream',
       taskId: createMemoryTaskId('dream'),
@@ -405,8 +427,7 @@ export class WorkspaceRememberTaskLane {
         this.publishManagedMemoryChanged({
           source: 'workspace_memory_dream',
           taskId: task.taskId,
-          touchedScopes:
-            task.result.touchedTopics.length > 0 ? ['project'] : [],
+          touchedScopes: touchedScopesFromTopics(task.result.touchedTopics),
           ...(params.originatorClientId
             ? { originatorClientId: params.originatorClientId }
             : {}),
@@ -575,6 +596,15 @@ export function mountWorkspaceMemoryRememberRoutes(
       if (!trimmedQuery) {
         res.status(400).json({
           error: '`query` must be a non-empty string',
+          code: 'invalid_query',
+        });
+        return;
+      }
+      if (
+        Buffer.byteLength(trimmedQuery, 'utf8') > MAX_REMEMBER_CONTENT_BYTES
+      ) {
+        res.status(400).json({
+          error: `\`query\` exceeds the ${MAX_REMEMBER_CONTENT_BYTES}-byte limit`,
           code: 'invalid_query',
         });
         return;

@@ -12,6 +12,7 @@ import { runSideQuery } from '../utils/sideQuery.js';
 import {
   buildAutoMemoryEntrySearchText,
   getAutoMemoryBodyHeading,
+  type ManagedAutoMemoryEntry,
   parseAutoMemoryEntries,
   renderAutoMemoryBody,
 } from './entries.js';
@@ -25,6 +26,7 @@ export interface AutoMemoryForgetMatch {
   topic: AutoMemoryType;
   summary: string;
   filePath: string;
+  entryIndex?: number;
 }
 
 export interface AutoMemoryForgetResult {
@@ -42,6 +44,7 @@ export interface AutoMemoryForgetSelectionResult {
 
 interface IndexedForgetCandidate extends AutoMemoryForgetMatch {
   id: string;
+  entryIndex: number;
   why?: string;
   howToApply?: string;
 }
@@ -87,6 +90,7 @@ async function listIndexedForgetCandidates(
         topic: doc.type,
         summary: entry.summary,
         filePath: doc.filePath,
+        entryIndex: i,
         why: entry.why,
         howToApply: entry.howToApply,
       });
@@ -169,7 +173,12 @@ async function selectByModel(
   const matches = candidates
     .filter((candidate) => selectedIds.has(candidate.id))
     .slice(0, limit)
-    .map(({ topic, summary, filePath }) => ({ topic, summary, filePath }));
+    .map(({ topic, summary, filePath, entryIndex }) => ({
+      topic,
+      summary,
+      filePath,
+      entryIndex,
+    }));
 
   return {
     matches,
@@ -190,7 +199,12 @@ function selectByHeuristic(
       buildAutoMemoryEntrySearchText(candidate).includes(queryLower),
     )
     .slice(0, limit)
-    .map(({ topic, summary, filePath }) => ({ topic, summary, filePath }));
+    .map(({ topic, summary, filePath, entryIndex }) => ({
+      topic,
+      summary,
+      filePath,
+      entryIndex,
+    }));
 
   return {
     matches,
@@ -303,12 +317,44 @@ export async function forgetManagedAutoMemoryMatches(
 
       const [, frontmatter, rawBody] = fmMatch;
       const allEntries = parseAutoMemoryEntries(rawBody.trim());
-      const matchedSummaries = new Set(
-        fileMatches.map((m) => m.summary.toLowerCase()),
-      );
-      const kept = allEntries.filter(
-        (e) => !matchedSummaries.has(e.summary.toLowerCase()),
-      );
+      const matchesByIndex = new Map<number, AutoMemoryForgetMatch>();
+      for (const match of fileMatches) {
+        if (
+          Number.isInteger(match.entryIndex) &&
+          match.entryIndex! >= 0 &&
+          match.entryIndex! < allEntries.length
+        ) {
+          matchesByIndex.set(match.entryIndex!, match);
+        }
+      }
+      let removedFileEntries: AutoMemoryForgetMatch[];
+      let kept: ManagedAutoMemoryEntry[];
+      if (matchesByIndex.size > 0) {
+        removedFileEntries = [...matchesByIndex.entries()]
+          .sort(([a], [b]) => a - b)
+          .map(([, match]) => match);
+        kept = allEntries.filter((_entry, index) => !matchesByIndex.has(index));
+      } else {
+        const remainingBySummary = new Map<string, number>();
+        for (const match of fileMatches) {
+          const key = match.summary.toLowerCase();
+          remainingBySummary.set(key, (remainingBySummary.get(key) ?? 0) + 1);
+        }
+        kept = allEntries.filter((entry) => {
+          const key = entry.summary.toLowerCase();
+          const remaining = remainingBySummary.get(key) ?? 0;
+          if (remaining === 0) return true;
+          remainingBySummary.set(key, remaining - 1);
+          return false;
+        });
+        removedFileEntries = fileMatches.slice(
+          0,
+          allEntries.length - kept.length,
+        );
+      }
+      if (removedFileEntries.length === 0) {
+        continue;
+      }
 
       if (kept.length === 0) {
         options.abortSignal?.throwIfAborted();
@@ -324,10 +370,8 @@ export async function forgetManagedAutoMemoryMatches(
         );
       }
 
-      // Record the entries that were actually removed (by summary match count).
-      const removedCount = allEntries.length - kept.length;
-      removedEntries.push(...fileMatches.slice(0, removedCount));
-      for (const m of fileMatches.slice(0, removedCount)) {
+      removedEntries.push(...removedFileEntries);
+      for (const m of removedFileEntries) {
         touchedTopics.add(m.topic);
       }
     } catch (err) {

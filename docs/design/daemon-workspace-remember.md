@@ -194,9 +194,9 @@ and removes them without creating a session.
 }
 ```
 
-| Field   | Type     | Required | Description                             |
-| ------- | -------- | -------- | --------------------------------------- |
-| `query` | `string` | yes      | Natural-language description to forget. |
+| Field   | Type     | Required | Description                                                             |
+| ------- | -------- | -------- | ----------------------------------------------------------------------- |
+| `query` | `string` | yes      | Natural-language description to forget. Max 64 KiB (UTF-8 byte length). |
 
 The initial response is `202 Accepted` with a `forget-...` task id. Poll
 `GET /workspace/memory/forget/:taskId` until terminal.
@@ -280,7 +280,8 @@ unknown or unauthorized task ids.
 
 The lane stores up to **1000 tasks** total (terminal tasks evicted FIFO when the
 cap is reached). At most **16 tasks** may be pending (queued + running) at any
-time.
+time. Forget and dream tasks share a smaller **8 pending task** cap so bursty
+manual maintenance cannot consume every slot needed by automatic remember work.
 
 ---
 
@@ -415,7 +416,7 @@ envelope so the event bus can route it to the originating client.
 | ---------------------------- | ------------------- | ------------------------------------------------------ |
 | `invalid_content`            | HTTP route          | Content missing, empty, or exceeds 64 KiB              |
 | `invalid_context_mode`       | HTTP route          | contextMode not `"workspace"` or `"clean"`             |
-| `invalid_query`              | HTTP route          | Forget query missing or empty                          |
+| `invalid_query`              | HTTP route          | Forget query missing, empty, or exceeds 64 KiB         |
 | `invalid_client_id`          | HTTP route          | Client-Id header not in bridge's known set             |
 | `managed_memory_unavailable` | Bridge / ACP child  | Workspace not configured for managed memory            |
 | `remember_queue_full`        | Task lane           | 16 pending tasks limit reached                         |

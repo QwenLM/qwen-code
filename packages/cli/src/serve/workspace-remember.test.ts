@@ -292,7 +292,22 @@ describe('workspace memory remember routes', () => {
   });
 
   it('queues and completes a hidden workspace forget task', async () => {
-    const bridge = buildBridgeStub({ knownIds: ['client-1'] });
+    const bridge = buildBridgeStub({
+      knownIds: ['client-1'],
+      forgetImpl: vi.fn(
+        async (): Promise<BridgeWorkspaceMemoryForgetResult> => ({
+          summary: 'forgot',
+          removedEntries: [
+            {
+              topic: 'user',
+              summary: 'old preference',
+              filePath: '/mem/user/user.md',
+            },
+          ],
+          touchedTopics: ['user', 'reference'],
+        }),
+      ),
+    });
     const app = buildApp(bridge);
 
     const post = await request(app)
@@ -315,12 +330,12 @@ describe('workspace memory remember routes', () => {
       status: 'completed',
       result: {
         summary: 'forgot',
-        touchedTopics: ['project'],
+        touchedTopics: ['user', 'reference'],
         removedEntries: [
           {
-            topic: 'project',
+            topic: 'user',
             summary: 'old preference',
-            filePath: '/mem/project/project.md',
+            filePath: '/mem/user/user.md',
           },
         ],
       },
@@ -333,13 +348,22 @@ describe('workspace memory remember routes', () => {
         scope: 'managed',
         source: 'workspace_memory_forget',
         taskId,
-        touchedScopes: ['project'],
+        touchedScopes: ['user', 'project'],
       },
     });
   });
 
   it('queues and completes a hidden workspace dream task', async () => {
-    const bridge = buildBridgeStub({ knownIds: ['client-1'] });
+    const bridge = buildBridgeStub({
+      knownIds: ['client-1'],
+      dreamImpl: vi.fn(
+        async (): Promise<BridgeWorkspaceMemoryDreamResult> => ({
+          summary: 'dreamed',
+          touchedTopics: ['feedback', 'project'],
+          dedupedEntries: 1,
+        }),
+      ),
+    });
     const app = buildApp(bridge);
 
     const post = await request(app)
@@ -362,7 +386,7 @@ describe('workspace memory remember routes', () => {
       status: 'completed',
       result: {
         summary: 'dreamed',
-        touchedTopics: ['project'],
+        touchedTopics: ['feedback', 'project'],
         dedupedEntries: 1,
       },
     });
@@ -373,7 +397,7 @@ describe('workspace memory remember routes', () => {
         scope: 'managed',
         source: 'workspace_memory_dream',
         taskId,
-        touchedScopes: ['project'],
+        touchedScopes: ['user', 'project'],
       },
     });
   });
@@ -433,6 +457,11 @@ describe('workspace memory remember routes', () => {
     await request(app)
       .post('/workspace/memory/forget')
       .send({ query: '   ' })
+      .expect(400)
+      .expect((res) => expect(res.body.code).toBe('invalid_query'));
+    await request(app)
+      .post('/workspace/memory/forget')
+      .send({ query: 'x'.repeat(MAX_REMEMBER_CONTENT_BYTES + 1) })
       .expect(400)
       .expect((res) => expect(res.body.code).toBe('invalid_query'));
     await request(app)
@@ -548,6 +577,32 @@ describe('workspace memory remember routes', () => {
     pending.resolve({
       filesTouched: [],
       touchedScopes: [],
+    });
+  });
+
+  it('reserves queue capacity for remember tasks when forget and dream burst', async () => {
+    const pendingForget = deferred<BridgeWorkspaceMemoryForgetResult>();
+    const bridge = buildBridgeStub({
+      forgetImpl: vi.fn(() => pendingForget.promise),
+    });
+    const app = buildApp(bridge);
+
+    for (let i = 0; i < 8; i++) {
+      await request(app)
+        .post('/workspace/memory/forget')
+        .send({ query: `forget ${i}` })
+        .expect(202);
+    }
+
+    await request(app).post('/workspace/memory/dream').send({}).expect(429);
+    await request(app)
+      .post('/workspace/memory/remember')
+      .send({ content: 'remember still has capacity' })
+      .expect(202);
+
+    pendingForget.resolve({
+      removedEntries: [],
+      touchedTopics: [],
     });
   });
 
