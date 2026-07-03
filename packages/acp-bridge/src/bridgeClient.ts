@@ -477,6 +477,7 @@ export class BridgeClient implements Client {
      * `methodNotFound` (no client-hosted server can exist without it).
      */
     private readonly clientMcpSender?: ClientMcpMessageSender,
+    private readonly ownsSession: (sessionId: string) => boolean = () => true,
   ) {}
 
   async requestPermission(
@@ -939,6 +940,12 @@ export class BridgeClient implements Client {
     if (typeof sessionId !== 'string' || !Array.isArray(rawArtifacts)) {
       writeStderrLine(
         `[demux] session=${typeof sessionId === 'string' ? sessionId : '<missing>'} type=artifact_event action=dropped reason=malformed`,
+      );
+      return;
+    }
+    if (!this.ownsSession(sessionId)) {
+      writeStderrLine(
+        `[demux] session=${sessionId} type=artifact_event action=dropped reason=session_not_owned`,
       );
       return;
     }

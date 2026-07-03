@@ -1349,6 +1349,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         },
         async () => await channelFactory(boundWorkspace, childEnvOverrides),
       );
+      const sessionIds = new Set<string>();
       const client = new BridgeClient(
         // BfFut: ACP today carries a sessionId on every per-session
         // notification / request, so the no-sessionId branch is
@@ -1403,6 +1404,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // Mode A) never host a client MCP server, so the method stays
         // unreachable.
         opts.clientMcpSender,
+        (sessionId) => sessionIds.has(sessionId),
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
@@ -1420,7 +1422,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         channel,
         connection,
         client,
-        sessionIds: new Set(),
+        sessionIds,
         pendingRestoreIds: new Set(),
         sessionSpawnsInFlight: 0,
         workspaceControlInFlight: 0,

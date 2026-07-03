@@ -212,12 +212,7 @@ export class RecordArtifactTool extends BaseDeclarativeTool<
       }
     }
     if (params.managedId) {
-      const managedIdError = validateString(
-        params.managedId,
-        'managedId',
-        200,
-        true,
-      );
+      const managedIdError = validateManagedId(params.managedId);
       if (managedIdError) {
         return managedIdError;
       }
@@ -291,6 +286,24 @@ function validateString(
   }
   if (isDisplayField(field) && hasUnsafeDisplayPayload(trimmed)) {
     return `"${field}" contains unsafe markup`;
+  }
+  return null;
+}
+
+function validateManagedId(value: string): string | null {
+  const trimmed = value.trim();
+  const stringError = validateString(trimmed, 'managedId', 200, true);
+  if (stringError) {
+    return stringError;
+  }
+  if (
+    trimmed.includes('/') ||
+    trimmed.includes('\\') ||
+    trimmed.includes('..') ||
+    path.isAbsolute(trimmed) ||
+    path.win32.isAbsolute(trimmed)
+  ) {
+    return '"managedId" must be an opaque managed resource id';
   }
   return null;
 }

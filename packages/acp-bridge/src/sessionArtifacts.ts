@@ -355,7 +355,7 @@ export class SessionArtifactStore {
     const workspacePath = input.workspacePath
       ? normalizeWorkspacePath(input.workspacePath, this.workspaceCwd)
       : undefined;
-    const managedId = normalizeString(input.managedId, 'managedId', 200, false);
+    const managedId = normalizeManagedId(input.managedId);
     const rawStorage = input.storage;
     const storage = inferStorage(rawStorage, {
       workspacePath,
@@ -1114,6 +1114,24 @@ function normalizeString(
     );
   }
   return trimmed;
+}
+
+function normalizeManagedId(value: unknown): string | undefined {
+  const managedId = normalizeString(value, 'managedId', 200, false);
+  if (!managedId) return undefined;
+  if (
+    managedId.includes('/') ||
+    managedId.includes('\\') ||
+    managedId.includes('..') ||
+    path.isAbsolute(managedId) ||
+    path.win32.isAbsolute(managedId)
+  ) {
+    throw new SessionArtifactValidationError(
+      'managedId must be an opaque managed resource id',
+      'managedId',
+    );
+  }
+  return managedId;
 }
 
 function isDisplayField(field: string): boolean {

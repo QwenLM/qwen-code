@@ -866,6 +866,14 @@ describe('SessionArtifactStore', () => {
       ),
     ).rejects.toMatchObject({ field: 'managedId' });
 
+    for (const managedId of ['../secret', 'folder/item', 'folder\\item']) {
+      await expect(
+        store.upsertMany([{ title: 'Managed path', managedId }], {
+          strict: true,
+        }),
+      ).rejects.toMatchObject({ field: 'managedId' });
+    }
+
     await expect(
       store.upsertMany(
         [

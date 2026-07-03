@@ -118,6 +118,19 @@ describe('RecordArtifactTool', () => {
     ).toThrow(/http or https/);
   });
 
+  it('rejects path-like managed ids before reporting success', () => {
+    const tool = new RecordArtifactTool();
+
+    for (const managedId of ['../secret', 'folder/item', 'folder\\item']) {
+      expect(() =>
+        tool.build({
+          title: 'Managed path',
+          managedId,
+        }),
+      ).toThrow(/opaque managed resource id/);
+    }
+  });
+
   it('rejects storage values that do not match the locator', () => {
     const tool = new RecordArtifactTool();
 

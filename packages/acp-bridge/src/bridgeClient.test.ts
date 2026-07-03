@@ -880,6 +880,57 @@ describe('BridgeClient — artifact ingress', () => {
     }
   });
 
+  it('drops artifact events for sessions outside this bridge channel', async () => {
+    const ownedSessionId = 'sess:owned-artifacts';
+    const forgedSessionId = 'sess:forged-artifacts';
+    const publish = vi.fn().mockReturnValue(true);
+    const resolveEntry = vi.fn((sid: string | undefined) =>
+      sid === forgedSessionId
+        ? {
+            sessionId: forgedSessionId,
+            events: { publish },
+            artifacts: {
+              inputBatchLimit: () => 400,
+              upsertMany: vi.fn().mockResolvedValue({ changes: [] }),
+            },
+            pendingPermissionIds: new Set<string>(),
+            midTurnMessageQueue: [] as MidTurnQueueEntry[],
+          }
+        : undefined,
+    );
+    const client = new BridgeClient(
+      resolveEntry as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (sid) => sid === ownedSessionId,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        client.extNotification('qwen/notify/session/artifact-event', {
+          sessionId: forgedSessionId,
+          artifacts: [{ title: 'Forged', url: 'https://example.com/forged' }],
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(resolveEntry).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('reason=session_not_owned');
+      expect(logged).toContain(forgedSessionId);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('logs and drops artifact events when store ingestion fails', async () => {
     const sessionId = 'sess:artifact-error';
     const publish = vi.fn().mockReturnValue(true);
