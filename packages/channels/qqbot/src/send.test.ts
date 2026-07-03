@@ -542,6 +542,12 @@ describe('sendMessage', () => {
 
   it('retries as active message when markdown passive reply is rejected', async () => {
     const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-001' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-001', 0);
+
+    const saveSpy = vi.spyOn(chp as { saveQQState: () => void }, 'saveQQState');
+
     mockSendQQMessage
       .mockResolvedValueOnce(mockResponse(false, 400, 'markdown unsupported'))
       .mockResolvedValueOnce(mockResponse(true));
@@ -568,6 +574,13 @@ describe('sendMessage', () => {
       'test-token',
       { content: '**bold**', msg_type: 0, msg_id: 'msg-001', msg_seq: 1 },
     );
+
+    // Post-success state: sequence reflects successful send (not rolled back)
+    expect(msgSeqMap.get('msg-001')).toBe(1);
+    // saveQQState was called to persist
+    expect(saveSpy).toHaveBeenCalled();
+
+    saveSpy.mockRestore();
   });
 
   it('does plain-text fallback when markdown fails without msgId', async () => {
@@ -906,6 +919,78 @@ describe('sendMessage', () => {
 
     expect(msgSeqMap.get('msg-new')).toBe(0);
     expect(saveSpy).toHaveBeenCalled();
+  });
+  it('returns early without sending when text is <noreply>', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    await ch.sendMessage('test-chat-id', '<noreply>');
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('returns early for <noreply> with leading/trailing whitespace', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    await ch.sendMessage('test-chat-id', '  <noreply>  ');
+
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('writes stderr when <noreply> is suppressed', async () => {
+    const ch = makeChannel({ chatType: 'c2c' });
+    const writes: string[] = [];
+    const spy = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation((chunk: unknown) => {
+        writes.push(String(chunk));
+        return true;
+      });
+
+    await ch.sendMessage('test-chat-id', '<noreply>');
+
+    spy.mockRestore();
+    expect(writes.some((w) => w.includes('<noreply> skipped'))).toBe(true);
+  });
+
+  it('does not mutate msgSeqMap or replyMsgId on <noreply> suppression', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-001' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-001', 3);
+
+    await ch.sendMessage('test-chat-id', '<noreply>');
+
+    // msgSeqMap should be unchanged
+    expect(msgSeqMap.get('msg-001')).toBe(3);
+    // replyMsgId should still be present
+    const replyMsgId = chp['replyMsgId'] as Map<string, unknown>;
+    expect(replyMsgId.has('test-chat-id')).toBe(true);
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('stops at 429 on first markdown attempt and rolls back msgSeqMap', async () => {
+    const ch = makeChannel({ chatType: 'c2c', replyMsgId: 'msg-429-1st' });
+    const chp = ch as unknown as Record<string, unknown>;
+    const msgSeqMap = chp['msgSeqMap'] as Map<string, number>;
+    msgSeqMap.set('msg-429-1st', 0);
+
+    const saveSpy = vi.spyOn(chp as { saveQQState: () => void }, 'saveQQState');
+
+    mockSendQQMessage.mockResolvedValueOnce(mockResponse(false, 429));
+
+    await ch.sendMessage('test-chat-id', '**bold**');
+
+    // No second call — 429 bails immediately
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    // First call had msg_seq=1 (0 + 1)
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect(body['msg_seq']).toBe(1);
+    expect(body['msg_id']).toBe('msg-429-1st');
+
+    // msgSeqMap rolled back from 1 to 0
+    expect(msgSeqMap.get('msg-429-1st')).toBe(0);
+    // saveQQState was called to persist the rollback
+    expect(saveSpy).toHaveBeenCalled();
+
+    saveSpy.mockRestore();
   });
 });
 

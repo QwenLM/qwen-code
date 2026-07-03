@@ -220,6 +220,7 @@ export class QQChannel extends ChannelBase {
       );
       this.msgSeqMap.delete(entry.msgId);
       this.replyMsgId.delete(chatId);
+      this.saveQQState();
     }
 
     let nextSeq = 0;
@@ -255,7 +256,10 @@ export class QQChannel extends ChannelBase {
           process.stderr.write(
             `[QQ:${this.name}] MESSAGE DROPPED: rate-limited (429) on markdown attempt for ${sanitizeLogText(chatId, 64)}\n`,
           );
-          if (msgId) this.saveQQState();
+          if (msgId) {
+            this.msgSeqMap.set(msgId, nextSeq - 1);
+            this.saveQQState();
+          }
           return;
         }
 
