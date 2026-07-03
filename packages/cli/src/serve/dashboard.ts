@@ -80,10 +80,14 @@ export function getDashboardHtml(): string {
 
 <div class="header">
   <h1>Qwen Serve</h1>
-  <span class="badge">Dashboard</span>
+  <span class="badge" id="badgeText">Dashboard</span>
   <span class="dot dot-gray" id="statusDot"></span>
   <span class="uptime" id="uptimeText"></span>
   <div class="header-right">
+    <div class="toggle" id="langToggle">
+      <button class="btn active" data-lang="en">EN</button>
+      <button class="btn" data-lang="zh">中文</button>
+    </div>
     <div class="toggle" id="detailToggle">
       <button class="btn active" data-detail="summary">Summary</button>
       <button class="btn" data-detail="full">Full</button>
@@ -110,10 +114,68 @@ export function getDashboardHtml(): string {
 
 <script>
 (function() {
+  var I18N = {
+    en: {
+      badge: 'Dashboard', loading: 'Loading...', refresh: 'Refresh', updated: 'Updated',
+      issues: 'Issues', daemon: 'Daemon', runtime: 'Runtime', security: 'Security',
+      limits: 'Limits', capabilities: 'Capabilities', sessions: 'Sessions',
+      workspaceStatus: 'Workspace Status', acpConnections: 'ACP Connections', auth: 'Auth',
+      pid: 'PID', uptime: 'Uptime', mode: 'Mode', workspace: 'Workspace', version: 'Version',
+      daemonId: 'Daemon ID', startedAt: 'Started at', startupTime: 'Startup time', preheat: 'Preheat',
+      logPath: 'Log path', permPending: 'Permissions pending', permPolicy: 'Permission policy',
+      channel: 'Channel', live: 'live', down: 'down', channelWorker: 'Channel Worker',
+      state: 'State', channels: 'Channels', restarts: 'Restarts', none: 'none',
+      transport: 'Transport', restSse: 'REST SSE active', acpConns: 'ACP connections',
+      acpStreams: 'ACP streams', pendingReqs: 'Pending client reqs', disabled: 'disabled',
+      rateLimit: 'Rate Limiting', enabled: 'Enabled', rejected: 'Rejected',
+      yes: 'yes', no: 'no', unlimited: 'unlimited',
+      processMem: 'Process Memory', rss: 'RSS', heapUsed: 'Heap used', heapTotal: 'Heap total',
+      maxSessions: 'Max sessions', maxPending: 'Max pending prompts',
+      listenerMax: 'Listener max connections', eventRing: 'Event ring size',
+      promptDeadline: 'Prompt deadline', writerIdle: 'Writer idle timeout',
+      channelIdle: 'Channel idle timeout', sessionIdle: 'Session idle timeout',
+      acpCap: 'ACP connection cap', protocol: 'Protocol',
+      sessionId: 'Session ID', name: 'Name', clients: 'Clients', prompts: 'Prompts',
+      active: 'Active', model: 'Model', noSessions: 'No active sessions',
+      noConnections: 'No active connections',
+      deviceProviders: 'Device flow providers', pendingFlows: 'Pending device flows',
+      fetchFailed: 'Fetch failed',
+    },
+    zh: {
+      badge: '仪表盘', loading: '加载中...', refresh: '刷新', updated: '已更新',
+      issues: '问题', daemon: '守护进程', runtime: '运行时', security: '安全',
+      limits: '限制', capabilities: '能力', sessions: '会话',
+      workspaceStatus: '工作区状态', acpConnections: 'ACP 连接', auth: '认证',
+      pid: 'PID', uptime: '运行时间', mode: '模式', workspace: '工作区', version: '版本',
+      daemonId: '守护进程 ID', startedAt: '启动时间', startupTime: '启动耗时', preheat: '预热',
+      logPath: '日志路径', permPending: '待处理权限', permPolicy: '权限策略',
+      channel: '通道', live: '在线', down: '离线', channelWorker: '通道 Worker',
+      state: '状态', channels: '通道', restarts: '重启次数', none: '无',
+      transport: '传输', restSse: 'REST SSE 活跃', acpConns: 'ACP 连接数',
+      acpStreams: 'ACP 流', pendingReqs: '待处理客户端请求', disabled: '已禁用',
+      rateLimit: '速率限制', enabled: '已启用', rejected: '已拒绝',
+      yes: '是', no: '否', unlimited: '无限制',
+      processMem: '进程内存', rss: 'RSS', heapUsed: '堆已用', heapTotal: '堆总量',
+      maxSessions: '最大会话数', maxPending: '最大待处理提示数',
+      listenerMax: '监听器最大连接数', eventRing: '事件环大小',
+      promptDeadline: '提示超时', writerIdle: '写入空闲超时',
+      channelIdle: '通道空闲超时', sessionIdle: '会话空闲超时',
+      acpCap: 'ACP 连接上限', protocol: '协议',
+      sessionId: '会话 ID', name: '名称', clients: '客户端', prompts: '提示',
+      active: '活跃', model: '模型', noSessions: '无活跃会话',
+      noConnections: '无活跃连接',
+      deviceProviders: '设备流提供商', pendingFlows: '待处理设备流',
+      fetchFailed: '请求失败',
+    }
+  };
+
+  var lang = sessionStorage.getItem('dashboard_lang') || 'en';
+  var t = I18N[lang] || I18N.en;
   let detail = sessionStorage.getItem('dashboard_detail') || 'summary';
   let interval = parseInt(sessionStorage.getItem('dashboard_interval') || '10000', 10);
   let timer = null;
   let fetching = false;
+  let lastData = null;
 
   const content = document.getElementById('content');
   const statusDot = document.getElementById('statusDot');
@@ -121,6 +183,28 @@ export function getDashboardHtml(): string {
   const lastUpdated = document.getElementById('lastUpdated');
   const tokenInput = document.getElementById('tokenInput');
   const intervalSelect = document.getElementById('intervalSelect');
+  const badgeText = document.getElementById('badgeText');
+
+  function switchLang(newLang) {
+    lang = newLang;
+    t = I18N[lang] || I18N.en;
+    sessionStorage.setItem('dashboard_lang', lang);
+    badgeText.textContent = t.badge;
+    document.getElementById('btnRefresh').textContent = t.refresh;
+    if (lastData) render(lastData);
+    else content.innerHTML = '<div class="loading">' + t.loading + '</div>';
+  }
+
+  // Lang toggle
+  var langBtns = document.querySelectorAll('#langToggle .btn');
+  langBtns.forEach(function(btn) {
+    if (btn.dataset.lang === lang) btn.classList.add('active');
+    else btn.classList.remove('active');
+    btn.addEventListener('click', function() {
+      langBtns.forEach(function(b) { b.classList.toggle('active', b === btn); });
+      switchLang(btn.dataset.lang);
+    });
+  });
 
   const savedToken = sessionStorage.getItem('dashboard_token') || '';
   if (savedToken) tokenInput.value = savedToken;
@@ -148,6 +232,10 @@ export function getDashboardHtml(): string {
       fetchStatus();
     });
   });
+
+  // Init lang text
+  badgeText.textContent = t.badge;
+  document.getElementById('btnRefresh').textContent = t.refresh;
 
   function authHeaders() {
     const token = tokenInput.value.trim();
@@ -195,7 +283,7 @@ export function getDashboardHtml(): string {
   }
 
   function boolChip(val, label) {
-    return '<span class="chip ' + (val ? 'chip-ok' : 'chip-off') + '">' + esc(label) + ': ' + (val ? 'yes' : 'no') + '</span> ';
+    return '<span class="chip ' + (val ? 'chip-ok' : 'chip-off') + '">' + esc(label) + ': ' + (val ? t.yes : t.no) + '</span> ';
   }
 
   function capacityBar(current, max) {
@@ -211,7 +299,7 @@ export function getDashboardHtml(): string {
 
   function renderIssues(issues) {
     if (!issues || issues.length === 0) return '';
-    let html = '<div class="card"><div class="card-header">Issues (' + issues.length + ')</div><div class="card-body">';
+    let html = '<div class="card"><div class="card-header">' + t.issues + ' (' + issues.length + ')</div><div class="card-body">';
     for (const issue of issues) {
       const cls = issue.severity === 'error' ? 'chip-err' : 'chip-warn';
       html += '<div class="issue"><span class="issue-code chip ' + cls + '">' + esc(issue.code) + '</span><span>' + esc(issue.message) + '</span></div>';
@@ -220,57 +308,55 @@ export function getDashboardHtml(): string {
   }
 
   function renderDaemon(d) {
-    let html = '<div class="card"><div class="card-header">Daemon</div><div class="card-body"><dl class="kv">';
-    html += kvPair('PID', d.pid);
-    html += kvPair('Uptime', fmtUptime(d.uptimeMs));
-    html += kvPair('Mode', d.mode);
-    html += kvPair('Workspace', d.workspaceCwd);
-    if (d.qwenCodeVersion) html += kvPair('Version', d.qwenCodeVersion);
-    if (d.daemonId) html += kvPair('Daemon ID', d.daemonId);
+    let html = '<div class="card"><div class="card-header">' + t.daemon + '</div><div class="card-body"><dl class="kv">';
+    html += kvPair(t.pid, d.pid);
+    html += kvPair(t.uptime, fmtUptime(d.uptimeMs));
+    html += kvPair(t.mode, d.mode);
+    html += kvPair(t.workspace, d.workspaceCwd);
+    if (d.qwenCodeVersion) html += kvPair(t.version, d.qwenCodeVersion);
+    if (d.daemonId) html += kvPair(t.daemonId, d.daemonId);
     if (d.startup) {
-      html += kvPair('Started at', fmtTime(d.startup.processStartedAt));
-      if (d.startup.processToListenMs !== undefined) html += kvPair('Startup time', d.startup.processToListenMs + 'ms');
-      html += kvPair('Preheat', d.startup.preheat.status + (d.startup.preheat.durationMs !== undefined ? ' (' + d.startup.preheat.durationMs + 'ms)' : ''));
+      html += kvPair(t.startedAt, fmtTime(d.startup.processStartedAt));
+      if (d.startup.processToListenMs !== undefined) html += kvPair(t.startupTime, d.startup.processToListenMs + 'ms');
+      html += kvPair(t.preheat, d.startup.preheat.status + (d.startup.preheat.durationMs !== undefined ? ' (' + d.startup.preheat.durationMs + 'ms)' : ''));
     }
-    if (d.logPath) html += kvPair('Log path', d.logPath);
+    if (d.logPath) html += kvPair(t.logPath, d.logPath);
     return html + '</dl></div></div>';
   }
 
   function renderRuntime(r, limits) {
-    let html = '<div class="card"><div class="card-header">Runtime</div><div class="card-body">';
-    if (r.loading) html += '<div class="chip chip-warn">Loading...</div>';
+    let html = '<div class="card"><div class="card-header">' + t.runtime + '</div><div class="card-body">';
+    if (r.loading) html += '<div class="chip chip-warn">' + t.loading + '</div>';
     if (r.error) html += '<div class="chip chip-err">' + esc(r.error) + '</div>';
 
     html += '<dl class="kv">';
-    html += kvPair('Sessions', r.sessions.active + (limits.maxSessions ? ' / ' + limits.maxSessions : ''));
+    html += kvPair(t.sessions, r.sessions.active + (limits.maxSessions ? ' / ' + limits.maxSessions : ''));
     html += '</dl>';
     if (limits.maxSessions) html += capacityBar(r.sessions.active, limits.maxSessions);
 
     html += '<dl class="kv" style="margin-top:8px">';
-    html += kvPair('Permissions pending', r.permissions.pending);
-    html += kvPair('Permission policy', r.permissions.policy);
-    html += '<dt>Channel</dt><dd><span class="dot ' + (r.channel.live ? 'dot-ok' : 'dot-err') + '"></span> ' + (r.channel.live ? 'live' : 'down') + '</dd>';
+    html += kvPair(t.permPending, r.permissions.pending);
+    html += kvPair(t.permPolicy, r.permissions.policy);
+    html += '<dt>' + t.channel + '</dt><dd><span class="dot ' + (r.channel.live ? 'dot-ok' : 'dot-err') + '"></span> ' + (r.channel.live ? t.live : t.down) + '</dd>';
     html += '</dl>';
 
-    // Channel worker
     if (r.channelWorker && r.channelWorker.enabled) {
-      html += '<div class="sub-section"><div class="sub-title">Channel Worker</div><dl class="kv">';
-      html += kvPair('State', r.channelWorker.state);
-      if (r.channelWorker.pid !== undefined) html += kvPair('PID', r.channelWorker.pid);
-      if (r.channelWorker.channels) html += kvPair('Channels', r.channelWorker.channels.join(', ') || 'none');
-      if (r.channelWorker.restartCount !== undefined) html += kvPair('Restarts', r.channelWorker.restartCount);
+      html += '<div class="sub-section"><div class="sub-title">' + t.channelWorker + '</div><dl class="kv">';
+      html += kvPair(t.state, r.channelWorker.state);
+      if (r.channelWorker.pid !== undefined) html += kvPair(t.pid, r.channelWorker.pid);
+      if (r.channelWorker.channels) html += kvPair(t.channels, r.channelWorker.channels.join(', ') || t.none);
+      if (r.channelWorker.restartCount !== undefined) html += kvPair(t.restarts, r.channelWorker.restartCount);
       html += '</dl></div>';
     }
 
-    // Transport
-    html += '<div class="sub-section"><div class="sub-title">Transport</div><dl class="kv">';
-    html += kvPair('REST SSE active', r.transport.restSseActive);
+    html += '<div class="sub-section"><div class="sub-title">' + t.transport + '</div><dl class="kv">';
+    html += kvPair(t.restSse, r.transport.restSseActive);
     if (r.transport.acp.enabled) {
-      html += kvPair('ACP connections', r.transport.acp.connections);
-      html += kvPair('ACP streams', 'conn=' + r.transport.acp.connectionStreams + ' sess=' + r.transport.acp.sessionStreams + ' sse=' + r.transport.acp.sseStreams + ' ws=' + r.transport.acp.wsStreams);
-      html += kvPair('Pending client reqs', r.transport.acp.pendingClientRequests);
+      html += kvPair(t.acpConns, r.transport.acp.connections);
+      html += kvPair(t.acpStreams, 'conn=' + r.transport.acp.connectionStreams + ' sess=' + r.transport.acp.sessionStreams + ' sse=' + r.transport.acp.sseStreams + ' ws=' + r.transport.acp.wsStreams);
+      html += kvPair(t.pendingReqs, r.transport.acp.pendingClientRequests);
     } else {
-      html += kvPair('ACP', 'disabled');
+      html += kvPair('ACP', t.disabled);
     }
     html += '</dl>';
     if (r.transport.acp.enabled && limits.acpConnectionCap) {
@@ -278,27 +364,25 @@ export function getDashboardHtml(): string {
     }
     html += '</div>';
 
-    // Rate limit
-    html += '<div class="sub-section"><div class="sub-title">Rate Limiting</div><dl class="kv">';
-    html += kvPair('Enabled', r.rateLimit.enabled ? 'yes' : 'no');
+    html += '<div class="sub-section"><div class="sub-title">' + t.rateLimit + '</div><dl class="kv">';
+    html += kvPair(t.enabled, r.rateLimit.enabled ? t.yes : t.no);
     if (r.rateLimit.enabled) {
       const h = r.rateLimit.rejectedSinceStart;
-      html += kvPair('Rejected', 'prompt=' + (h.prompt||0) + ' mutation=' + (h.mutation||0) + ' read=' + (h.read||0));
+      html += kvPair(t.rejected, 'prompt=' + (h.prompt||0) + ' mutation=' + (h.mutation||0) + ' read=' + (h.read||0));
     }
     html += '</dl></div>';
 
-    // Memory
-    html += '<div class="sub-section"><div class="sub-title">Process Memory</div><dl class="kv">';
-    html += kvPair('RSS', fmtBytes(r.process.rss));
-    html += kvPair('Heap used', fmtBytes(r.process.heapUsed));
-    html += kvPair('Heap total', fmtBytes(r.process.heapTotal));
+    html += '<div class="sub-section"><div class="sub-title">' + t.processMem + '</div><dl class="kv">';
+    html += kvPair(t.rss, fmtBytes(r.process.rss));
+    html += kvPair(t.heapUsed, fmtBytes(r.process.heapUsed));
+    html += kvPair(t.heapTotal, fmtBytes(r.process.heapTotal));
     html += '</dl></div>';
 
     return html + '</div></div>';
   }
 
   function renderSecurity(s) {
-    let html = '<div class="card"><div class="card-header">Security</div><div class="card-body">';
+    let html = '<div class="card"><div class="card-header">' + t.security + '</div><div class="card-body">';
     html += boolChip(s.tokenConfigured, 'token');
     html += boolChip(s.requireAuth, 'requireAuth');
     html += boolChip(s.loopbackBind, 'loopback');
@@ -308,28 +392,28 @@ export function getDashboardHtml(): string {
   }
 
   function renderLimits(l) {
-    let html = '<div class="card"><div class="card-header">Limits</div><div class="card-body"><dl class="kv">';
+    let html = '<div class="card"><div class="card-header">' + t.limits + '</div><div class="card-body"><dl class="kv">';
     const entries = [
-      ['Max sessions', l.maxSessions],
-      ['Max pending prompts', l.maxPendingPromptsPerSession],
-      ['Listener max connections', l.listenerMaxConnections],
-      ['Event ring size', l.eventRingSize],
-      ['Prompt deadline', l.promptDeadlineMs !== null ? l.promptDeadlineMs + 'ms' : null],
-      ['Writer idle timeout', l.writerIdleTimeoutMs !== null ? l.writerIdleTimeoutMs + 'ms' : null],
-      ['Channel idle timeout', l.channelIdleTimeoutMs + 'ms'],
-      ['Session idle timeout', l.sessionIdleTimeoutMs + 'ms'],
-      ['ACP connection cap', l.acpConnectionCap],
+      [t.maxSessions, l.maxSessions],
+      [t.maxPending, l.maxPendingPromptsPerSession],
+      [t.listenerMax, l.listenerMaxConnections],
+      [t.eventRing, l.eventRingSize],
+      [t.promptDeadline, l.promptDeadlineMs !== null ? l.promptDeadlineMs + 'ms' : null],
+      [t.writerIdle, l.writerIdleTimeoutMs !== null ? l.writerIdleTimeoutMs + 'ms' : null],
+      [t.channelIdle, l.channelIdleTimeoutMs + 'ms'],
+      [t.sessionIdle, l.sessionIdleTimeoutMs + 'ms'],
+      [t.acpCap, l.acpConnectionCap],
     ];
     for (const [label, val] of entries) {
-      html += kvPair(label, val !== null && val !== undefined ? val : 'unlimited');
+      html += kvPair(label, val !== null && val !== undefined ? val : t.unlimited);
     }
     return html + '</dl></div></div>';
   }
 
   function renderCapabilities(c) {
-    let html = '<div class="card"><div class="card-header">Capabilities</div><div class="card-body">';
+    let html = '<div class="card"><div class="card-header">' + t.capabilities + '</div><div class="card-body">';
     html += '<dl class="kv">';
-    html += kvPair('Protocol', c.protocolVersions.current);
+    html += kvPair(t.protocol, c.protocolVersions.current);
     html += '</dl>';
     if (c.features && c.features.length > 0) {
       html += '<div style="margin-top:8px">';
@@ -343,10 +427,10 @@ export function getDashboardHtml(): string {
 
   function renderSessions(sessions) {
     if (!sessions || sessions.length === 0) {
-      return '<div class="card"><div class="card-header">Sessions (0)</div><div class="card-body"><span style="color:var(--text2)">No active sessions</span></div></div>';
+      return '<div class="card"><div class="card-header">' + t.sessions + ' (0)</div><div class="card-body"><span style="color:var(--text2)">' + t.noSessions + '</span></div></div>';
     }
-    let html = '<div class="card"><div class="card-header">Sessions (' + sessions.length + ')</div><div class="card-body"><table>';
-    html += '<tr><th>Session ID</th><th>Name</th><th>Clients</th><th>Prompts</th><th>Active</th><th>Model</th></tr>';
+    let html = '<div class="card"><div class="card-header">' + t.sessions + ' (' + sessions.length + ')</div><div class="card-body"><table>';
+    html += '<tr><th>' + t.sessionId + '</th><th>' + t.name + '</th><th>' + t.clients + '</th><th>' + t.prompts + '</th><th>' + t.active + '</th><th>' + t.model + '</th></tr>';
     for (const s of sessions) {
       const shortId = s.sessionId.length > 12 ? s.sessionId.slice(0, 12) + '...' : s.sessionId;
       html += '<tr>';
@@ -354,7 +438,7 @@ export function getDashboardHtml(): string {
       html += '<td>' + esc(s.displayName || '-') + '</td>';
       html += '<td>' + s.clientCount + '</td>';
       html += '<td>' + s.pendingPromptCount + '</td>';
-      html += '<td><span class="chip ' + (s.hasActivePrompt ? 'chip-ok' : 'chip-off') + '">' + (s.hasActivePrompt ? 'yes' : 'no') + '</span></td>';
+      html += '<td><span class="chip ' + (s.hasActivePrompt ? 'chip-ok' : 'chip-off') + '">' + (s.hasActivePrompt ? t.yes : t.no) + '</span></td>';
       html += '<td>' + esc(s.currentModelId || '-') + '</td>';
       html += '</tr>';
     }
@@ -362,7 +446,7 @@ export function getDashboardHtml(): string {
   }
 
   function renderWorkspace(ws) {
-    let html = '<div class="card"><div class="card-header">Workspace Status</div>';
+    let html = '<div class="card"><div class="card-header">' + t.workspaceStatus + '</div>';
     const sections = Object.entries(ws);
     for (const [name, sec] of sections) {
       const dotCls = statusDotClass(sec.status);
@@ -393,14 +477,15 @@ export function getDashboardHtml(): string {
 
   function renderAcpConnections(conns) {
     if (!conns || conns.length === 0) {
-      return '<div class="card"><div class="card-header">ACP Connections (0)</div><div class="card-body"><span style="color:var(--text2)">No active connections</span></div></div>';
+      return '<div class="card"><div class="card-header">' + t.acpConnections + ' (0)</div><div class="card-body"><span style="color:var(--text2)">' + t.noConnections + '</span></div></div>';
     }
-    let html = '<div class="card"><div class="card-header">ACP Connections (' + conns.length + ')</div><div class="card-body"><pre>';
+    let html = '<div class="card"><div class="card-header">' + t.acpConnections + ' (' + conns.length + ')</div><div class="card-body"><pre>';
     html += esc(JSON.stringify(conns, null, 2));
     return html + '</pre></div></div>';
   }
 
   function render(data) {
+    lastData = data;
     statusDot.className = 'dot ' + statusDotClass(data.status);
     uptimeText.textContent = fmtUptime(data.daemon.uptimeMs);
     if (data.daemon.qwenCodeVersion) {
@@ -420,9 +505,9 @@ export function getDashboardHtml(): string {
       if (data.full.workspace) html += renderWorkspace(data.full.workspace);
       html += renderAcpConnections(data.full.acpConnections);
       if (data.full.auth) {
-        html += '<div class="card"><div class="card-header">Auth</div><div class="card-body"><dl class="kv">';
-        html += kvPair('Device flow providers', (data.full.auth.supportedDeviceFlowProviders || []).join(', ') || 'none');
-        html += kvPair('Pending device flows', data.full.auth.pendingDeviceFlowCount);
+        html += '<div class="card"><div class="card-header">' + t.auth + '</div><div class="card-body"><dl class="kv">';
+        html += kvPair(t.deviceProviders, (data.full.auth.supportedDeviceFlowProviders || []).join(', ') || t.none);
+        html += kvPair(t.pendingFlows, data.full.auth.pendingDeviceFlowCount);
         html += '</dl></div></div>';
       }
     }
@@ -448,9 +533,9 @@ export function getDashboardHtml(): string {
       }
       const data = await res.json();
       render(data);
-      lastUpdated.textContent = 'Updated ' + new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      lastUpdated.textContent = t.updated + ' ' + new Date().toLocaleTimeString('en-US', { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
     } catch (err) {
-      content.innerHTML = '<div class="err-banner">Fetch failed: ' + esc(err.message) + '</div>';
+      content.innerHTML = '<div class="err-banner">' + t.fetchFailed + ': ' + esc(err.message) + '</div>';
       statusDot.className = 'dot dot-err';
     } finally {
       fetching = false;
