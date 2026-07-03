@@ -370,6 +370,8 @@ export class QQChannel extends ChannelBase {
 
   /** Debounced state persistence to avoid blocking event loop. */
   private saveQQState(): void {
+    // NOTE: guarded here; flushQQState() is intentionally NOT — disconnect()
+    // sets disposed=true *before* calling it, so it must still write final state.
     if (this.disposed) return;
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
@@ -421,9 +423,9 @@ export class QQChannel extends ChannelBase {
 
   /**
    * Restore QQ routing state from disk.
-   * Trusts persisted JSON — if the file is corrupt, new Map() may create
-   * entries with undefined values, causing get()===undefined to fall through
-   * to default routing (C2C). This is acceptable for a rare edge case.
+   * Validates and filters every entry on restore — corrupt or unexpected
+   * entries (e.g. unknown chat types, oversized replyMsgIds, negative seqs)
+   * are silently dropped so they don't propagate into runtime routing.
    */
   private restoreQQState(): boolean {
     try {
