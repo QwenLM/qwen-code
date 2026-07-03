@@ -337,8 +337,15 @@ function extractText(body: Record<string, unknown>): string {
     return items
       .map((item) => {
         const record = asRecord(item);
-        if (!record || getString(record, 'msgtype') !== 'text') return '';
-        return getString(getRecord(record, 'text'), 'content');
+        if (!record) return '';
+        const itemType = getString(record, 'msgtype');
+        if (itemType === 'text') {
+          return getString(getRecord(record, 'text'), 'content');
+        }
+        if (itemType === 'voice') {
+          return getString(getRecord(record, 'voice'), 'content');
+        }
+        return '';
       })
       .filter(Boolean)
       .join('\n')

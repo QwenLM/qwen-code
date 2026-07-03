@@ -196,6 +196,7 @@ describe('WeComChannel', () => {
       mixed: {
         msg_item: [
           { msgtype: 'text', text: { content: '@bot inspect this' } },
+          { msgtype: 'voice', voice: { content: 'voice transcript' } },
           {
             msgtype: 'image',
             image: { url: 'https://example.invalid/image', aeskey: 'k1' },
@@ -232,7 +233,7 @@ describe('WeComChannel', () => {
     const mixed = channel.envelopes[0]!;
     expect(mixed.chatId).toBe('group-1');
     expect(mixed.isGroup).toBe(true);
-    expect(mixed.text).toBe('@bot inspect this');
+    expect(mixed.text).toBe('@bot inspect this\nvoice transcript');
     expect(mixed.referencedText).toBe('previous voice text');
     expect(mixed.attachments?.[0]).toMatchObject({
       type: 'image',
