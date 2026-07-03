@@ -25,6 +25,20 @@ export function latestSemverTag(tags) {
     .at(-1);
 }
 
+export function validateRequestedImage(image) {
+  const requestedImage = image?.trim();
+  if (
+    !requestedImage ||
+    requestedImage === 'undefined' ||
+    requestedImage === 'null'
+  ) {
+    throw new Error(
+      'package.json config.sandboxImageUri must be set to a sandbox image.',
+    );
+  }
+  return requestedImage;
+}
+
 async function fetchLatestGhcrSemver() {
   const tokenResponse = await fetch(
     `https://ghcr.io/token?service=ghcr.io&scope=repository:${GHCR_REPOSITORY}:pull`,
@@ -101,10 +115,7 @@ function exportImage(image) {
 }
 
 async function main() {
-  const requestedImage = process.argv[2];
-  if (!requestedImage) {
-    throw new Error('Usage: resolve-sandbox-image.mjs <image>');
-  }
+  const requestedImage = validateRequestedImage(process.argv[2]);
 
   const command = process.env.SANDBOX_COMMAND || 'docker';
   if (await pullImage(command, requestedImage)) {
