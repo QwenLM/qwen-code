@@ -848,17 +848,19 @@ describe('ToolSearchTool', () => {
     // First search uses keyword path (which calls loadAndReturnSchemas →
     // revealDeferredTool); confirm registry agrees.
     expect(registry.isDeferredToolRevealed('slack_send_message')).toBe(true);
+    // refreshStartupContextReminder() is intentionally skipped to preserve
+    // KV-cache — deferred-tools lives at the tail of the system-reminder.
     const geminiClient = config.getGeminiClient() as unknown as {
       refreshStartupContextReminder: ReturnType<typeof vi.fn>;
     };
-    expect(geminiClient.refreshStartupContextReminder).toHaveBeenCalledTimes(1);
+    expect(geminiClient.refreshStartupContextReminder).toHaveBeenCalledTimes(0);
 
     // Second: same keyword search now finds nothing (tool excluded).
     const second = await tool
       .build({ query: 'slack' })
       .execute(new AbortController().signal);
     expect(String(second.llmContent)).toContain('No tools found matching');
-    expect(geminiClient.refreshStartupContextReminder).toHaveBeenCalledTimes(1);
+    expect(geminiClient.refreshStartupContextReminder).toHaveBeenCalledTimes(0);
   });
 
   it('returns an error result when setTools() throws — model must NOT see schemas as ready', async () => {

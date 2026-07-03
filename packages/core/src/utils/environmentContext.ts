@@ -402,13 +402,15 @@ export async function getInitialChatHistory(
     ? await buildAvailableSkillsReminder(config)
     : null;
 
+  // Stable sections FIRST → KV-cache preserved on partial updates.
+  // Deferred tools LAST → changes only affect the tail of the prefix.
   const reminderParts = [
-    includeDeferredToolsReminder
-      ? buildDeferredToolsReminder(toolRegistry)
-      : null,
     buildMcpServerInstructionsReminder(toolRegistry),
     skillsResult?.reminder ?? null,
     startupReminder,
+    includeDeferredToolsReminder
+      ? buildDeferredToolsReminder(toolRegistry)
+      : null,
   ]
     .filter((text): text is string => text !== null)
     .map((text) => ({ text }));

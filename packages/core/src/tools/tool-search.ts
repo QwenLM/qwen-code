@@ -377,21 +377,12 @@ class ToolSearchInvocation extends BaseToolInvocation<
           );
         }
 
-        if (!setToolsError) {
-          try {
-            await geminiClient.refreshStartupContextReminder();
-          } catch (err) {
-            const refreshError =
-              err instanceof Error ? err.message : String(err);
-            debugLogger.warn(
-              'refreshStartupContextReminder() failed after revealing deferred tools:',
-              err,
-            );
-            process.stderr.write(
-              `[ToolSearch] refreshStartupContextReminder() failed after revealing deferred tools: ${refreshError}\n`,
-            );
-          }
-        }
+        // NOTE: refreshStartupContextReminder() intentionally skipped.
+        // The deferred-tools section is now at the end of the system-reminder
+        // (stable sections first). Skipping the refresh preserves the
+        // LLM server's KV-cache for the stable prefix — the tools are already
+        // available via setTools(), so a stale reminder is cosmetic, not
+        // functional. Re-evaluate if deferred-tools moves back to the front.
       }
 
       if (setToolsError) {
