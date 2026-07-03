@@ -170,6 +170,11 @@ interface DaemonStatusRuntime {
     rejectedSinceStart: Record<RateLimitTier, number>;
   };
   perf?: DaemonPerfSnapshot;
+  activity: {
+    activePrompts: number;
+    lastActivityAt: string | null;
+    idleSinceMs: number | null;
+  };
   process: NodeJS.MemoryUsage;
 }
 
@@ -239,6 +244,7 @@ export async function buildDaemonStatusResponse(
   input: BuildDaemonStatusOptions,
 ): Promise<DaemonStatusResponse> {
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
+  const lastActivity = input.bridge.lastActivityAt;
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
   const channelWorker = input.getChannelWorkerSnapshot?.() ?? {
@@ -336,6 +342,15 @@ export async function buildDaemonStatusResponse(
         rejectedSinceStart: rateLimitHits,
       },
       ...(input.getPerfSnapshot ? { perf: input.getPerfSnapshot() } : {}),
+      activity: {
+        activePrompts: input.bridge.activePromptCount,
+        lastActivityAt:
+          lastActivity !== null
+            ? new Date(lastActivity).toISOString()
+            : null,
+        idleSinceMs:
+          lastActivity !== null ? Date.now() - lastActivity : null,
+      },
       process: process.memoryUsage(),
     },
     ...(full ? { full } : {}),

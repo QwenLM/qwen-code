@@ -399,6 +399,34 @@ describe('buildDaemonStatusResponse', () => {
 
     expect(response.runtime).not.toHaveProperty('perf');
   });
+
+  it('includes activity fields in runtime', async () => {
+    vi.useFakeTimers({ now: 1719990005000 });
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        activePromptCount: 3,
+        lastActivityAt: 1719990000000,
+      }),
+    );
+    expect(response.runtime.activity).toEqual({
+      activePrompts: 3,
+      lastActivityAt: '2024-07-03T07:00:00.000Z',
+      idleSinceMs: 5000,
+    });
+  });
+
+  it('reports null activity when daemon has never been active', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ activePromptCount: 0, lastActivityAt: null }),
+    );
+    expect(response.runtime.activity).toEqual({
+      activePrompts: 0,
+      lastActivityAt: null,
+      idleSinceMs: null,
+    });
+  });
 });
 
 interface MakeOptionsInput {
@@ -418,6 +446,8 @@ interface MakeOptionsInput {
       outbound: { count: number; totalBytes: number; maxBytes: number };
     };
   };
+  activePromptCount?: number;
+  lastActivityAt?: number | null;
 }
 
 function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
@@ -431,6 +461,8 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     getDaemonStatusSnapshot: () => input.bridgeSnapshot ?? BASE_BRIDGE_SNAPSHOT,
     getWorkspaceToolsStatus: async () =>
       input.toolsStatus ?? okStatus({ tools: [] }),
+    activePromptCount: input.activePromptCount ?? 0,
+    lastActivityAt: input.lastActivityAt ?? null,
   } as unknown as AcpSessionBridge;
   const workspace = {
     getWorkspaceMcpStatus: async () =>
