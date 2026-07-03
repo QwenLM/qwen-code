@@ -8,6 +8,7 @@ import { readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
+const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
 const sandboxImageResolverScript = readFileSync(
   '.github/scripts/resolve-sandbox-image.mjs',
   'utf8',
@@ -342,7 +343,10 @@ describe('qwen-autofix workflow', () => {
     for (const step of qwenSteps) {
       expect(step.length).toBeGreaterThan(0);
       expect(step).toContain(
-        "OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}'",
+        "OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'",
+      );
+      expect(step).toContain(
+        'AUTOFIX_OPENAI_API_KEY secret is required for Qwen Autofix.',
       );
       expect(step).toContain(
         "OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'",
@@ -354,6 +358,13 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain('openai-proxy.mjs');
       expect(step).not.toContain('qwen-loopback-proxy');
     }
+    expect(assessCandidatesStep).not.toContain(
+      'run_shell_command(gh issue view)',
+    );
+    expect(assessCandidatesStep).not.toContain('run_shell_command(gh search)');
+    expect(workflow).not.toContain(
+      "OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY || secrets.OPENAI_API_KEY }}'",
+    );
     expect(workflow).not.toContain('proxy_script="$(mktemp');
     expect(workflow).not.toContain('cat > "${proxy_script}"');
   });
@@ -365,12 +376,25 @@ describe('qwen-autofix workflow', () => {
     expect(sandboxImageResolverScript).toContain(
       'https://ghcr.io/v2/${GHCR_REPOSITORY}/tags/list?n=1000',
     );
+    expect(sandboxImageResolverScript).toContain(
+      'signal: AbortSignal.timeout(FETCH_TIMEOUT_MS)',
+    );
+    expect(sandboxImageResolverScript).toContain(
+      'GHCR returned at least 1000 tags',
+    );
     expect(sandboxImageResolverScript).toContain('latestSemverTag(tags)');
     expect(sandboxImageResolverScript).toContain(
       "spawn(command, ['pull', image]",
     );
+    expect(sandboxImageResolverScript).toContain('Timed out pulling ${image}');
     expect(sandboxImageResolverScript).toContain(
-      'Falling back from ${requestedImage} to latest GHCR semver ${fallbackImage}',
+      "Failed to start '${command} pull ${image}'",
+    );
+    expect(sandboxImageResolverScript).toContain(
+      '::warning::Falling back from ${requestedImage} to latest GHCR semver ${fallbackImage}',
+    );
+    expect(ciWorkflow).toContain(
+      '.github/scripts/resolve-sandbox-image.test.mjs',
     );
     expect(workflow).not.toContain('.github/scripts/openai-proxy.mjs');
   });
