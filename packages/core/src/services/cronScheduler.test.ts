@@ -291,6 +291,65 @@ describe('CronScheduler', () => {
       expect(fired).toHaveLength(1);
     });
 
+    it('honors a configured recurring max age', () => {
+      const oneDayMs = 24 * 60 * 60 * 1000;
+      const custom = new CronScheduler(null, oneDayMs);
+      try {
+        const job = custom.create('*/1 * * * *', 'short-lived', true);
+        expect(job.expiresAt - job.createdAt).toBe(oneDayMs);
+
+        const fired: CronJob[] = [];
+        custom.start((j) => fired.push(j));
+        custom.tick(new Date(job.expiresAt + 1000));
+        expect(fired).toHaveLength(1);
+        expect(custom.list()).toHaveLength(0);
+      } finally {
+        custom.destroy();
+      }
+    });
+
+    it('never expires recurring jobs when max age is Infinity', () => {
+      const custom = new CronScheduler(null, Infinity);
+      try {
+        const job = custom.create('*/1 * * * *', 'immortal', true);
+        expect(job.expiresAt).toBe(Infinity);
+
+        const fired: CronJob[] = [];
+        custom.start((j) => fired.push(j));
+        // Well past the 7-day default — still recurring, not removed.
+        custom.tick(new Date(job.createdAt + 30 * 24 * 60 * 60 * 1000));
+        expect(fired).toHaveLength(1);
+        expect(custom.list()).toHaveLength(1);
+      } finally {
+        custom.destroy();
+      }
+    });
+
+    it('treats a zero max age as never expiring, matching the config layer', () => {
+      // normalizeRecurringMaxAge owns the `0 → Infinity` contract for
+      // both the config layer and this constructor, so a direct caller
+      // passing 0 gets disabled expiry, not a silent 7-day default.
+      const custom = new CronScheduler(null, 0);
+      try {
+        const job = custom.create('*/1 * * * *', 'zero means never', true);
+        expect(job.expiresAt).toBe(Infinity);
+      } finally {
+        custom.destroy();
+      }
+    });
+
+    it('falls back to the default max age on invalid input', () => {
+      for (const bad of [-5, NaN]) {
+        const custom = new CronScheduler(null, bad);
+        try {
+          const job = custom.create('*/1 * * * *', 'guarded', true);
+          expect(job.expiresAt - job.createdAt).toBe(7 * 24 * 60 * 60 * 1000);
+        } finally {
+          custom.destroy();
+        }
+      }
+    });
+
     it('fires in next minute after first fire', () => {
       const fired: CronJob[] = [];
       scheduler.start((job) => fired.push(job));
@@ -913,6 +972,70 @@ describe('CronScheduler', () => {
         JSON.stringify({ pid: process.pid, sessionId: 'other-session' }),
       );
     }
+
+    it('survives a tasks file with a non-finite createdAt', async () => {
+      // JSON -1e999 parses to -Infinity. With a finite lastFiredAt the
+      // entry reads as an overdue, already-aged recurring task — the path
+      // that formats createdAt into the retroactive-expiry warning. The
+      // read layer must reject it (fix-or-delete contract) so enableDurable
+      // completes instead of throwing RangeError mid-load, and the file
+      // must be left on disk for the user to repair.
+      const raw =
+        `[{"id":"poison","cron":"* * * * *","prompt":"p","recurring":true,` +
+        `"createdAt":-1e999,"lastFiredAt":${Date.now() - 120_000}}]`;
+      const filePath = getCronFilePath(tmpDir);
+      await fs.mkdir(path.dirname(filePath), { recursive: true });
+      await fs.writeFile(filePath, raw);
+
+      await expect(scheduler.enableDurable('session-1')).resolves.not.toThrow();
+      expect(scheduler.list()).toHaveLength(0);
+      expect(await fs.readFile(filePath, 'utf-8')).toBe(raw);
+    });
+
+    it('applies a configured max age to durable tasks restored from disk', async () => {
+      // The reload path is the one that matters for configurability: a
+      // regression that ignores the passed max age here would silently
+      // revert every restored task to 7-day expiry after a restart.
+      const twoDaysMs = 2 * 24 * 60 * 60 * 1000;
+      const custom = new CronScheduler(tmpDir, twoDaysMs);
+      try {
+        // lastFiredAt now: not overdue, so no catch-up/final delivery races.
+        await writeCronTasks(tmpDir, [
+          { ...diskTask('shortlived'), lastFiredAt: Date.now() },
+        ]);
+        await custom.enableDurable('session-1');
+
+        const job = custom.list().find((j) => j.id === 'shortlived');
+        expect(job).toBeDefined();
+        expect(job!.expiresAt - job!.createdAt).toBe(twoDaysMs);
+      } finally {
+        custom.destroy();
+      }
+    });
+
+    it('restores durable tasks without expiry when max age is disabled', async () => {
+      const custom = new CronScheduler(tmpDir, Infinity);
+      try {
+        // Created well past the 7-day default: with expiry disabled the
+        // task must be restored as a live job, not aged out into a final
+        // fire + delete.
+        await writeCronTasks(tmpDir, [
+          {
+            ...diskTask('immortal'),
+            createdAt: Date.now() - 30 * 24 * 60 * 60 * 1000,
+            lastFiredAt: Date.now(),
+          },
+        ]);
+        await custom.enableDurable('session-1');
+
+        const job = custom.list().find((j) => j.id === 'immortal');
+        expect(job).toBeDefined();
+        expect(job!.expiresAt).toBe(Infinity);
+        expect(await readCronTasks(tmpDir)).toHaveLength(1);
+      } finally {
+        custom.destroy();
+      }
+    });
 
     it('owner fires durable tasks loaded from disk and persists lastFiredAt', async () => {
       await writeCronTasks(tmpDir, [diskTask('disktask')]);

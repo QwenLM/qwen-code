@@ -5,7 +5,7 @@
  *
  * CDP browser-level emulation layer for the Plan C "CDP tunnel" (issue #5626).
  *
- * A puppeteer client (chrome-devtools-mcp) connects to the daemon's `/cdp`
+ * A CDP client connects to the daemon's `/cdp`
  * WebSocket expecting a browser-level CDP endpoint, but behind the tunnel is a
  * single real tab driven via `chrome.debugger` (page-level only). This class
  * synthesizes the missing browser-level topology so puppeteer connects and gets
@@ -166,7 +166,7 @@ export class CdpBrowserEmulator {
           });
         default:
           // TODO(#5626): return SERVER_ERROR once the emulator covers every
-          // browser-level command chrome-devtools-mcp sends. Until then the
+          // browser-level command a CDP client sends. Until then the
           // empty-result ack keeps puppeteer from hanging on optional commands;
           // surface the unknown ones so the coverage gap stays visible.
           this.cb.log?.(

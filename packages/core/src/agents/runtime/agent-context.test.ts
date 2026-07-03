@@ -6,13 +6,19 @@
 
 import { describe, expect, it } from 'vitest';
 import {
+  canSpawnNestedAgent,
+  childLaunchDepth,
   getCurrentAgentDepth,
   getCurrentAgentId,
   getRuntimeContentGenerator,
+  isTopLevelSession,
   runWithAgentContext,
   runWithRuntimeContentGenerator,
+  spawnBlockReason,
   type RuntimeContentGeneratorView,
 } from './agent-context.js';
+import { runWithTeammateIdentity } from '../team/identity.js';
+import { runInForkContext } from '../../tools/agent/fork-subagent.js';
 import {
   AuthType,
   type ContentGenerator,
@@ -200,15 +206,92 @@ describe('agent-context (depth) — #3731 Phase 3', () => {
     });
   });
 
-  it('callers do not pass depth — it is computed from parent frame only', async () => {
-    // Defensive: confirm `runWithAgentContext`'s signature still takes
-    // only (agentId, fn). Phase 3 depth tracking must remain a
-    // caller-invisible internal concern.
-    await runWithAgentContext('outer', async () => {
-      const before = getCurrentAgentDepth();
-      // No way to pass depth in — the helper computes it.
-      await runWithAgentContext('inner', async () => {
-        expect(getCurrentAgentDepth()).toBe(before + 1);
+  it('depthOverride pins the depth for background/foreground resume', async () => {
+    // Resume runs from a top-level frame; without the override a resumed
+    // nested agent would recompute to depth 0 and regain spawn capacity.
+    // Passing the persisted launch depth restores the original level, and a
+    // child frame still auto-increments from the restored value.
+    await runWithAgentContext(
+      'resumed',
+      async () => {
+        expect(getCurrentAgentDepth()).toBe(3);
+        await runWithAgentContext('child', async () => {
+          expect(getCurrentAgentDepth()).toBe(4);
+        });
+      },
+      3,
+    );
+  });
+});
+
+describe('agent-context (nesting predicates)', () => {
+  it('isTopLevelSession: true outside any frame, false inside one', async () => {
+    expect(isTopLevelSession()).toBe(true);
+    await runWithAgentContext('sub', async () => {
+      expect(isTopLevelSession()).toBe(false);
+    });
+    expect(isTopLevelSession()).toBe(true);
+  });
+
+  it('childLaunchDepth: 0 from the top level, parent depth + 1 inside frames', async () => {
+    expect(childLaunchDepth()).toBe(0);
+    await runWithAgentContext('lvl1', async () => {
+      expect(childLaunchDepth()).toBe(1);
+      await runWithAgentContext('lvl2', async () => {
+        expect(childLaunchDepth()).toBe(2);
+      });
+    });
+  });
+
+  it('canSpawnNestedAgent: child level (1-based) must not exceed maxDepth', async () => {
+    // Top level: the child would be a level-1 agent — allowed at max 1.
+    expect(canSpawnNestedAgent(1)).toBe(true);
+    await runWithAgentContext('lvl1', async () => {
+      // Inside a level-1 agent: the child would be level 2.
+      expect(canSpawnNestedAgent(1)).toBe(false);
+      expect(canSpawnNestedAgent(2)).toBe(true);
+      await runWithAgentContext('lvl2', async () => {
+        // Inside a level-2 agent: the child would be level 3.
+        expect(canSpawnNestedAgent(2)).toBe(false);
+        expect(canSpawnNestedAgent(3)).toBe(true);
+      });
+    });
+  });
+
+  it('canSpawnNestedAgent respects a depthOverride-pinned frame', async () => {
+    // A resumed agent pinned at depth 4 must not spawn at max 5 (child would
+    // be level 6) even though the resume itself runs from the top level.
+    await runWithAgentContext(
+      'resumed',
+      async () => {
+        expect(canSpawnNestedAgent(5)).toBe(false);
+        expect(canSpawnNestedAgent(6)).toBe(true);
+      },
+      4,
+    );
+  });
+
+  it('spawnBlockReason: depth wins first, then teammate, then fork, else null', async () => {
+    expect(spawnBlockReason(5)).toBeNull();
+    await runWithAgentContext('lvl1', async () => {
+      expect(spawnBlockReason(5)).toBeNull();
+      expect(spawnBlockReason(1)).toBe('depth');
+      await runWithTeammateIdentity(
+        {
+          agentId: 'scribe@demo',
+          agentName: 'scribe',
+          teamName: 'demo',
+          isTeamLead: false,
+        },
+        async () => {
+          expect(spawnBlockReason(5)).toBe('teammate');
+          // A teammate at leaf depth reports depth — the reason order is
+          // execute()'s guard order, keeping the user-facing message stable.
+          expect(spawnBlockReason(1)).toBe('depth');
+        },
+      );
+      await runInForkContext(async () => {
+        expect(spawnBlockReason(5)).toBe('fork');
       });
     });
   });

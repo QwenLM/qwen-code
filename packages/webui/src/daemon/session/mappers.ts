@@ -11,6 +11,7 @@ import type {
   DaemonSessionContextStatus,
   DaemonSessionSupportedCommandsStatus,
   DaemonWorkspaceProvidersStatus,
+  DaemonWorkspaceSkillsStatus,
 } from '@qwen-code/sdk/daemon';
 import type {
   DaemonCommandInfo,
@@ -25,12 +26,14 @@ export function mapProviderStatus(
 ): {
   models: DaemonModelInfo[];
   currentModel?: string;
+  currentMode?: string;
   contextWindow?: number;
 } {
   if (!status) return { models: [] };
   const seen = new Set<string>();
   const models: DaemonModelInfo[] = [];
   let currentModel = preferredCurrentModel ?? status.current?.modelId;
+  const currentMode = status.approvalMode;
   let contextWindow: number | undefined;
 
   for (const provider of status.providers) {
@@ -68,7 +71,7 @@ export function mapProviderStatus(
     }
   }
 
-  return { models, currentModel, contextWindow };
+  return { models, currentModel, currentMode, contextWindow };
 }
 
 export function mapSessionContextModels(
@@ -156,6 +159,47 @@ export function mapSupportedCommands(
   return {
     commands: mergeCommands(commands, skillCommands),
     skills: status.availableSkills,
+  };
+}
+
+/**
+ * Maps the session-less `/workspace/skills` status into slash-command entries.
+ *
+ * Session creation is deferred until the first prompt, so before any session
+ * exists the only way to populate skill-backed slash commands (e.g. `/review`)
+ * is this workspace-level status, which the daemon answers from `Config`'s
+ * SkillManager without a live session. The shape mirrors the skills portion of
+ * {@link mapSupportedCommands} so the deferred bootstrap and the post-attach
+ * snapshot stay consistent — except workspace status carries real descriptions
+ * and argument hints, which we surface here.
+ */
+export function mapWorkspaceSkills(
+  status: DaemonWorkspaceSkillsStatus | undefined,
+): {
+  commands: DaemonCommandInfo[];
+  skills: string[];
+} {
+  if (!status) return { commands: [], skills: [] };
+
+  const availableSkills = status.skills.filter(
+    (skill) => skill.status === 'ok',
+  );
+
+  const commands = availableSkills.map((skill) => ({
+    name: skill.name,
+    description: skill.description || '',
+    ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
+    raw: {
+      name: skill.name,
+      description: skill.description || '',
+      input: skill.argumentHint ? { hint: skill.argumentHint } : null,
+      _meta: { source: 'skill' },
+    } satisfies DaemonAvailableCommand,
+  }));
+
+  return {
+    commands,
+    skills: availableSkills.map((skill) => skill.name),
   };
 }
 
