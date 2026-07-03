@@ -125,6 +125,9 @@ describe('AtMentionPanel', () => {
         new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
       );
       input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Tab', bubbles: true }),
+      );
+      input.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }),
       );
       input.dispatchEvent(
@@ -132,9 +135,24 @@ describe('AtMentionPanel', () => {
       );
     });
 
-    expect(onAccept).toHaveBeenCalledOnce();
+    expect(onAccept).toHaveBeenCalledTimes(2);
     expect(onBack).toHaveBeenCalledOnce();
     expect(onSelect).toHaveBeenCalledWith(0);
+  });
+
+  it('activates panel buttons from click events', () => {
+    const onBack = vi.fn();
+    const onAccept = vi.fn();
+    mount(itemsMenu(), { onBack, onAccept });
+
+    const buttons = document.body.querySelectorAll('button');
+    act(() => {
+      buttons[0]?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      buttons[1]?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(onBack).toHaveBeenCalledOnce();
+    expect(onAccept).toHaveBeenCalledWith(0);
   });
 
   it('shows loading state', () => {

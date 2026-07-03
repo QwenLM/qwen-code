@@ -180,6 +180,10 @@ export function AtMentionPanel({
                 onMouseDown={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
+                }}
+                onClick={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
                   onBack();
                 }}
               >
@@ -201,6 +205,16 @@ export function AtMentionPanel({
                   event.stopPropagation();
                   onBack();
                 } else if (event.key === 'Enter') {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  onAccept();
+                } else if (
+                  event.key === 'Tab' &&
+                  !event.shiftKey &&
+                  !event.altKey &&
+                  !event.ctrlKey &&
+                  !event.metaKey
+                ) {
                   event.preventDefault();
                   event.stopPropagation();
                   onAccept();
@@ -239,6 +253,10 @@ export function AtMentionPanel({
                 } ${row.description ? '' : styles.atItemSingleLine}`}
                 onMouseEnter={() => onSelect(index)}
                 onMouseDown={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                }}
+                onClick={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
                   onAccept(index);
