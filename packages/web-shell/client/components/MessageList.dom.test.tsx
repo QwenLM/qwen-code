@@ -128,6 +128,7 @@ function mount(
   ref?: RefObject<MessageListHandle | null>,
   opts: {
     hideSessionTimeline?: boolean;
+    loadingTranscript?: boolean;
     catchingUp?: boolean;
     isResponding?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
@@ -144,6 +145,7 @@ function mount(
           messages={messages}
           pendingApproval={null}
           hideSessionTimeline={opts.hideSessionTimeline}
+          loadingTranscript={opts.loadingTranscript}
           catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
           shellOutputMaxLines={50}
@@ -161,6 +163,7 @@ function renderInto(
   messages: Message[],
   ref?: RefObject<MessageListHandle | null>,
   opts: {
+    loadingTranscript?: boolean;
     catchingUp?: boolean;
     isResponding?: boolean;
     onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
@@ -173,6 +176,7 @@ function renderInto(
           ref={ref}
           messages={messages}
           pendingApproval={null}
+          loadingTranscript={opts.loadingTranscript}
           catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
           shellOutputMaxLines={50}
@@ -489,6 +493,32 @@ describe('MessageList — turn collapse (DOM)', () => {
     mount([userMsg('u1'), asstMsg('a1')]);
 
     expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('shows a transcript skeleton while loading transcript', () => {
+    const c = mount([], undefined, { loadingTranscript: true });
+
+    expect(
+      c.querySelector('[data-testid="message-list-loading-skeleton"]'),
+    ).not.toBeNull();
+  });
+
+  it('shows the transcript skeleton while loading transcript with existing messages', () => {
+    const c = mount([userMsg('u1')], undefined, {
+      loadingTranscript: true,
+    });
+
+    expect(
+      c.querySelector('[data-testid="message-list-loading-skeleton"]'),
+    ).not.toBeNull();
+  });
+
+  it('does not show the transcript skeleton outside transcript loading', () => {
+    const idle = mount([]);
+
+    expect(
+      idle.querySelector('[data-testid="message-list-loading-skeleton"]'),
+    ).toBeNull();
   });
 
   it('does not smooth-scroll when existing session history loads after an empty render', () => {

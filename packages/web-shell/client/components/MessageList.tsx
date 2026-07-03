@@ -36,6 +36,7 @@ interface MessageListProps {
   pendingApproval: PermissionRequest | null;
   /** Run /context detail, exactly like typing it (context-usage panels). */
   onShowContextDetail?: () => void;
+  loadingTranscript?: boolean;
   catchingUp?: boolean;
   /**
    * True while the agent is still answering. The newest turn then stays
@@ -1652,12 +1653,48 @@ function joinClassNames(
 
 const EMPTY_SESSION_TIMELINE_ENTRIES: SessionTimelineEntry[] = [];
 
+function LoadingTranscriptSkeleton() {
+  return (
+    <div
+      className={styles.loadingSkeleton}
+      data-testid="message-list-loading-skeleton"
+      aria-hidden="true"
+    >
+      <div className={styles.loadingSkeletonUserRow}>
+        <div className={styles.loadingSkeletonUserBubble}>
+          <span className={styles.loadingSkeletonLineWide} />
+          <span className={styles.loadingSkeletonLineShort} />
+        </div>
+      </div>
+      <div className={styles.loadingSkeletonAssistantRow}>
+        <div className={styles.loadingSkeletonAssistantBlock}>
+          <span className={styles.loadingSkeletonLineMedium} />
+          <span className={styles.loadingSkeletonLineWide} />
+          <span className={styles.loadingSkeletonLineNarrow} />
+        </div>
+      </div>
+      <div className={styles.loadingSkeletonUserRow}>
+        <div className={styles.loadingSkeletonUserBubbleCompact}>
+          <span className={styles.loadingSkeletonLineMedium} />
+        </div>
+      </div>
+      <div className={styles.loadingSkeletonAssistantRow}>
+        <div className={styles.loadingSkeletonAssistantBlock}>
+          <span className={styles.loadingSkeletonLineWide} />
+          <span className={styles.loadingSkeletonLineMedium} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export const MessageList = memo(
   forwardRef<MessageListHandle, MessageListProps>(function MessageList(
     {
       messages,
       pendingApproval,
       onShowContextDetail,
+      loadingTranscript,
       catchingUp,
       isResponding = false,
       activeTurnStartedAt,
@@ -1908,6 +1945,7 @@ export const MessageList = memo(
     // ─────────────────────────────────────────────────────────────────────
 
     const hasTailContent = tailContent !== undefined && tailContent !== null;
+    const showLoadingSkeleton = Boolean(loadingTranscript);
     const hasHeader = !!welcomeHeader;
     const headerOffset = hasHeader ? 1 : 0;
     const tailContentIndex = headerOffset + visibleItems.length;
@@ -2679,6 +2717,7 @@ export const MessageList = memo(
         className={styles.list}
         onClickCapture={handleDisclosureClickCapture}
       >
+        {showLoadingSkeleton && <LoadingTranscriptSkeleton />}
         <SessionTimeline
           entries={sessionTimelineEntries}
           currentTurnId={currentTimelineTurnId}

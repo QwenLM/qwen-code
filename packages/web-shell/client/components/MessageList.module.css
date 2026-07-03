@@ -30,6 +30,92 @@
   transition: width 320ms ease;
 }
 
+.loadingSkeleton {
+  display: flex;
+  flex-direction: column;
+  gap: 28px;
+  padding: 18px 0 36px;
+  pointer-events: none;
+}
+
+.loadingSkeletonUserRow {
+  display: flex;
+  justify-content: flex-end;
+  width: 100%;
+}
+
+.loadingSkeletonAssistantRow {
+  display: flex;
+  justify-content: flex-start;
+  width: 100%;
+}
+
+.loadingSkeletonUserBubble,
+.loadingSkeletonUserBubbleCompact {
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+  width: min(62%, 520px);
+  padding: 12px 14px;
+  border-radius: 6px;
+  background: var(--accent);
+}
+
+.loadingSkeletonUserBubbleCompact {
+  width: min(46%, 360px);
+}
+
+.loadingSkeletonAssistantBlock {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(72%, 640px);
+  padding: 3px 0;
+}
+
+.loadingSkeletonLineWide,
+.loadingSkeletonLineMedium,
+.loadingSkeletonLineShort,
+.loadingSkeletonLineNarrow {
+  display: block;
+  height: 16px;
+  border-radius: 4px;
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--muted-foreground) 10%, transparent) 25%,
+    color-mix(in srgb, var(--muted-foreground) 24%, transparent) 37%,
+    color-mix(in srgb, var(--muted-foreground) 10%, transparent) 63%
+  );
+  background-size: 400% 100%;
+  animation: loadingSkeletonShimmer 1.4s ease infinite;
+}
+
+.loadingSkeletonLineWide {
+  width: 100%;
+}
+
+.loadingSkeletonLineMedium {
+  width: 72%;
+}
+
+.loadingSkeletonLineShort {
+  width: 48%;
+}
+
+.loadingSkeletonLineNarrow {
+  width: 58%;
+}
+
+@keyframes loadingSkeletonShimmer {
+  0% {
+    background-position: 100% 50%;
+  }
+
+  100% {
+    background-position: 0 50%;
+  }
+}
+
 .rowFlash {
   border-radius: 8px;
   animation: row-flash 1.6s ease-out;

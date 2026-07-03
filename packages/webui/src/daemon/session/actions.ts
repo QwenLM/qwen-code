@@ -90,6 +90,7 @@ export function getConnectionAfterSessionClear(
   return {
     ...next,
     status: 'connected',
+    loadingTranscript: undefined,
     catchingUp: undefined,
     error: undefined,
   };
@@ -206,9 +207,8 @@ export function createDaemonSessionActions({
     resetCurrentSessionActivePrompt();
     setConnection((current) => ({
       ...current,
-      status: 'connecting',
       error: undefined,
-      catchingUp: true,
+      loadingTranscript: true,
     }));
     setPromptStatus('idle');
     settledPromptsRef.current.clear();
@@ -230,6 +230,7 @@ export function createDaemonSessionActions({
           ...current,
           status: 'disconnected',
           error: message,
+          loadingTranscript: undefined,
           catchingUp: undefined,
         }));
       }

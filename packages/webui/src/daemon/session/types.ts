@@ -72,6 +72,8 @@ export interface DaemonConnectionState {
   supportedCommands?: DaemonSessionSupportedCommandsStatus;
   context?: DaemonSessionContextStatus;
   capabilities?: DaemonCapabilities;
+  /** True while the current session transcript is being loaded. */
+  loadingTranscript?: boolean;
   /** True while replaying buffered events after a reconnect. */
   catchingUp?: boolean;
   error?: string;

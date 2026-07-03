@@ -484,6 +484,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const requestClientId = clientId
               ? clientIdRef.current
               : getStableClientId(undefined, targetSessionId);
+            if (targetSessionId) {
+              setConnection((current) => ({
+                ...current,
+                sessionId: targetSessionId,
+                error: undefined,
+                loadingTranscript: true,
+              }));
+            }
             const nextSession = restoreSessionId
               ? await restoreMethod(
                   client,
@@ -831,6 +839,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             supportedCommands: supportedCommands ?? current.supportedCommands,
             context: context ?? current.context,
             capabilities: capabilities ?? current.capabilities,
+            loadingTranscript: undefined,
             catchingUp:
               // Replay already injected above — keep the cleared flag rather
               // than re-arming it (nothing before SSE would clear it again).
@@ -1234,6 +1243,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               status: 'disconnected',
               sessionId: undefined,
               error: message,
+              loadingTranscript: undefined,
               catchingUp: undefined,
             }));
             return;
@@ -1263,6 +1273,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ...current,
             status: 'disconnected',
             error: message,
+            loadingTranscript: undefined,
           }));
         }
 
@@ -1271,6 +1282,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
+            loadingTranscript: undefined,
             catchingUp: undefined,
           }));
           return;
@@ -1470,7 +1482,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     if (sessionId === currentSessionId) return;
 
     const request = sessionId
-      ? actions.loadSession(sessionId, { deferTranscriptReset: true })
+      ? actions.loadSession(sessionId)
       : currentSessionId
         ? actions.clearSession()
         : undefined;

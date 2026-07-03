@@ -25,6 +25,7 @@ describe('getConnectionAfterSessionClear', () => {
         skills: ['old-skill'],
         supportedCommands: supportedCommandsStatus('session-a'),
         context: contextStatus('session-a'),
+        loadingTranscript: true,
         catchingUp: true,
         error: 'old error',
       } as DaemonConnectionState,
@@ -34,6 +35,7 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).toMatchObject({
       status: 'connected',
       workspaceCwd: '/workspace',
+      loadingTranscript: undefined,
       catchingUp: undefined,
       error: undefined,
     });
@@ -60,6 +62,7 @@ describe('getConnectionAfterSessionClear', () => {
         skills: ['new-skill'],
         supportedCommands: supportedCommandsStatus('session-b', 'new-command'),
         context: contextStatus('session-b'),
+        loadingTranscript: true,
         catchingUp: true,
         error: 'old error',
       } as DaemonConnectionState,
@@ -77,6 +80,7 @@ describe('getConnectionAfterSessionClear', () => {
       skills: ['new-skill'],
       supportedCommands: supportedCommandsStatus('session-b', 'new-command'),
       context: contextStatus('session-b'),
+      loadingTranscript: undefined,
       catchingUp: undefined,
       error: undefined,
     });
