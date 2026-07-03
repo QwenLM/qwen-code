@@ -171,7 +171,10 @@ jobs:
           if [[ "${GITHUB_EVENT_NAME}" == "pull_request" && -n "${PR_NUMBER}" ]]; then
             changed_files="${RUNNER_TEMP}/changed-files.jsonl"
             if gh api --paginate "repos/${GITHUB_REPOSITORY}/pulls/${PR_NUMBER}/files" --jq '.[] | {filename, status, previous_filename}' > "${changed_files}"; then
-              profile="$(node .github/scripts/ci/classify-profile.mjs "${changed_files}")"
+              if ! profile="$(node .github/scripts/ci/classify-profile.mjs "${changed_files}")"; then
+                echo "::error::CI profile classifier exited non-zero; running full CI."
+                profile=full
+              fi
             else
               echo "::warning::Unable to list PR changed files; running full CI."
             fi
