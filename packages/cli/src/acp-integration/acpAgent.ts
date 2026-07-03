@@ -64,6 +64,7 @@ import {
   runManagedAutoMemoryDream,
   runManagedRememberByAgent,
   matchesAnyServerPattern,
+  IMAGE_CAPABILITY,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -2808,6 +2809,9 @@ class QwenAgent implements Agent {
         mcpCapabilities: {
           sse: true,
           http: true,
+        },
+        _meta: {
+          imageCapability: IMAGE_CAPABILITY,
         },
       },
     };

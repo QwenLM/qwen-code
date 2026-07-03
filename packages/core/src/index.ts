@@ -215,6 +215,7 @@ export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
 export * from './services/gitWorktreeService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/image-part-utils.js';
+export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
