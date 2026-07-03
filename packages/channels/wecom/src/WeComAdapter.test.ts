@@ -13,10 +13,7 @@ const mocks = vi.hoisted(() => {
 
   class MockWSClient {
     readonly options: Record<string, unknown>;
-    readonly handlers = new Map<
-      string,
-      Array<(payload: unknown) => void>
-    >();
+    readonly handlers = new Map<string, Array<(payload: unknown) => void>>();
     connect = vi.fn(async () => {});
     disconnect = vi.fn();
     sendMessage = vi.fn(async () => ({ headers: { req_id: 'req-1' } }));
@@ -53,7 +50,7 @@ vi.mock('@wecom/aibot-node-sdk', () => ({
   WSClient: mocks.MockWSClient,
 }));
 
-import { WeComChannel } from './WeComAdapter.js';
+import { WeComChannel, safeRealpath } from './WeComAdapter.js';
 import { plugin } from './index.js';
 
 type MockWSClient = InstanceType<typeof mocks.MockWSClient>;
@@ -232,6 +229,97 @@ describe('WeComChannel', () => {
     expect(file.attachments?.[0]?.filePath).toContain('report.pdf');
   });
 
+  it('honors explicit group mention metadata when present', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.text', {
+      msgid: 'msg-unmentioned',
+      msgtype: 'text',
+      chattype: 'group',
+      chatid: 'group-1',
+      from: { userid: 'bob' },
+      text: { content: 'background' },
+      mentions: [{ userid: 'other-bot' }],
+    });
+    client.emit('message.text', {
+      msgid: 'msg-mentioned',
+      msgtype: 'text',
+      chattype: 'group',
+      chatid: 'group-1',
+      from: { userid: 'bob' },
+      text: { content: '@bot inspect' },
+      mentions: [{ userid: 'bot-id' }],
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(2));
+    expect(channel.envelopes.map((envelope) => envelope.isMentioned)).toEqual([
+      false,
+      true,
+    ]);
+  });
+
+  it('skips inbound attachments that exceed the media size cap', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+    client.downloadFile = vi.fn(async () => ({
+      buffer: Buffer.alloc(20 * 1024 * 1024 + 1),
+    }));
+
+    client.emit('message.image', {
+      msgid: 'msg-large-image',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://example.invalid/large-image', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('skipping oversized attachment'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('limits quote recursion when collecting inbound attachments', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.text', {
+      msgid: 'msg-deep-quote',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: 'hello' },
+      quote: {
+        msgtype: 'text',
+        quote: {
+          msgtype: 'text',
+          quote: {
+            msgtype: 'text',
+            quote: {
+              msgtype: 'text',
+              quote: {
+                msgtype: 'image',
+                image: { url: 'https://example.invalid/deep-image' },
+              },
+            },
+          },
+        },
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(client.downloadFile).not.toHaveBeenCalled();
+  });
+
   it('sends markdown text and local media through the SDK', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'wecom-test-'));
     const imagePath = join(dir, 'out.png');
@@ -263,6 +351,10 @@ describe('WeComChannel', () => {
       'image',
       'media-1',
     );
+  });
+
+  it('ignores missing optional media allowlist directories', () => {
+    expect(safeRealpath('/definitely/missing/wecom-dir')).toBe(undefined);
   });
 
   it('registers the wecom plugin with botId and secret fields', () => {

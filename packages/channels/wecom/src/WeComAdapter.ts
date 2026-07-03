@@ -177,15 +177,17 @@ export class WeComChannel extends ChannelBase {
     const chatId = getString(body, 'chatid') || senderId;
     if (!chatId || !senderId) return;
 
+    const text = extractText(body);
+    const explicitMention = getExplicitMention(body, this.wecom.botId);
     const envelope: Envelope = {
       channelName: this.name,
       senderId,
       senderName,
       chatId,
-      text: extractText(body),
+      text,
       messageId,
       isGroup,
-      isMentioned: true,
+      isMentioned: !isGroup || (explicitMention ?? true),
       isReplyToBot: false,
       referencedText: extractQuoteText(body),
     };
@@ -218,6 +220,15 @@ export class WeComChannel extends ChannelBase {
     for (const ref of refs) {
       const downloaded = await client.downloadFile(ref.url, ref.aesKey);
       const data = downloaded.buffer;
+      if (data.length > MAX_OUTBOUND_MEDIA_BYTES) {
+        process.stderr.write(
+          `[WeCom:${this.name}] skipping oversized attachment (${data.length} bytes): ${sanitizeLogText(
+            ref.url,
+            200,
+          )}\n`,
+        );
+        continue;
+      }
       const fileName = ref.fileName || downloaded.filename;
       if (ref.type === 'image') {
         attachments.push({
@@ -334,7 +345,10 @@ interface InboundMediaRef {
 
 function collectInboundMediaRefs(
   body: Record<string, unknown>,
+  depth = 0,
 ): InboundMediaRef[] {
+  if (depth > 3) return [];
+
   const refs: InboundMediaRef[] = [];
   const add = (type: WeComMediaType, source: Record<string, unknown>): void => {
     const url = getString(source, 'url');
@@ -363,7 +377,7 @@ function collectInboundMediaRefs(
   add('video', getRecord(body, 'video') ?? {});
 
   const quote = getRecord(body, 'quote');
-  if (quote) refs.push(...collectInboundMediaRefs(quote));
+  if (quote) refs.push(...collectInboundMediaRefs(quote, depth + 1));
 
   return refs;
 }
@@ -434,14 +448,22 @@ function readOutboundMedia(
   }
 
   const allowedDirs = [
-    realpathSync(tmpdir()),
-    realpathSync(resolve(cwd)),
-    realpathSync('/tmp/'),
-  ];
+    safeRealpath(tmpdir()),
+    safeRealpath(resolve(cwd)),
+    safeRealpath('/tmp/'),
+  ].filter((dir): dir is string => Boolean(dir));
   if (!allowedDirs.some((dir) => isInsideDir(real, dir))) {
     throw new Error(`Media path outside allowed directories: ${real}`);
   }
   return { data: readFileSync(real), fileName: basename(real) };
+}
+
+export function safeRealpath(path: string): string | undefined {
+  try {
+    return realpathSync(path);
+  } catch {
+    return undefined;
+  }
 }
 
 function isInsideDir(filePath: string, dir: string): boolean {
@@ -537,4 +559,57 @@ function getString(
 ): string {
   const raw = value?.[key];
   return typeof raw === 'string' ? raw : '';
+}
+
+function getBoolean(
+  value: Record<string, unknown> | undefined,
+  key: string,
+): boolean | undefined {
+  const raw = value?.[key];
+  return typeof raw === 'boolean' ? raw : undefined;
+}
+
+function getExplicitMention(
+  body: Record<string, unknown>,
+  botId: string,
+): boolean | undefined {
+  const explicitBoolean =
+    getBoolean(body, 'isMentioned') ??
+    getBoolean(body, 'isInAtList') ??
+    getBoolean(body, 'is_in_at_list');
+  if (explicitBoolean !== undefined) return explicitBoolean;
+
+  const mentions = collectMentionValues(body);
+  if (!mentions.length) return undefined;
+
+  return mentions.some(
+    (mention) => mention === botId || mention === '@all' || mention === 'all',
+  );
+}
+
+function collectMentionValues(body: Record<string, unknown>): string[] {
+  const values: string[] = [];
+  for (const key of [
+    'mentions',
+    'mentioned_list',
+    'mentionedList',
+    'at_list',
+    'atList',
+    'at_userids',
+    'atUserIds',
+  ]) {
+    for (const item of getArray(body, key)) {
+      if (typeof item === 'string') {
+        values.push(item);
+        continue;
+      }
+      const record = asRecord(item);
+      if (!record) continue;
+      for (const itemKey of ['userid', 'userId', 'id', 'open_id', 'openId']) {
+        const value = getString(record, itemKey);
+        if (value) values.push(value);
+      }
+    }
+  }
+  return values;
 }
