@@ -571,7 +571,7 @@ describe('DaemonStatusDialog', () => {
     );
   });
 
-  it('contains a malformed daemon response instead of crashing the shell', () => {
+  it('contains a malformed daemon response and surfaces the render error', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     // channelWorker is required by the wire type, but an older daemon could
     // omit it; the inner render would throw on `.enabled` without the boundary.
@@ -585,10 +585,67 @@ describe('DaemonStatusDialog', () => {
     };
     fullState = { report: undefined, loading: false, error: undefined };
     mount();
-    // The error boundary fallback renders instead of the throw escaping.
-    expect(container!.textContent ?? '').toContain(
-      'Failed to load daemon status',
-    );
+    const text = container!.textContent ?? '';
+    // The outer boundary fallback renders instead of the throw escaping, and
+    // the function-form fallback surfaces the actual render error.
+    expect(text).toContain('Failed to load daemon status');
+    expect(text).toContain('enabled'); // the TypeError message is included
     errorSpy.mockRestore();
+  });
+
+  it('contains a detail-section crash without losing the summary cards', () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    // A malformed detail=full payload (auth omitted) throws inside FullDetail.
+    summaryState = { report: summaryReport, loading: false, error: undefined };
+    fullState = {
+      report: {
+        ...fullReport,
+        full: {
+          sessions: [],
+          workspace: {},
+          acpConnections: [],
+          auth: undefined,
+        },
+      },
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    const text = container!.textContent ?? '';
+    // Summary cards stay live; only the detail region shows its own fallback.
+    expect(text).toContain('4242');
+    expect(text).toContain('Failed to load diagnostics');
+    // The whole-dialog (outer) fallback did NOT trigger.
+    expect(text).not.toContain('Failed to load daemon status');
+    errorSpy.mockRestore();
+  });
+
+  it('shows a failed state when the full fetch resolves without a full section', () => {
+    summaryState = { report: summaryReport, loading: false, error: undefined };
+    // Fetch resolved (no error, not loading) but the daemon omitted `full`.
+    fullState = {
+      report: { ...summaryReport },
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    const text = container!.textContent ?? '';
+    expect(text).toContain('Failed to load diagnostics');
+    expect(text).not.toContain('Loading diagnostics');
+  });
+
+  it('suppresses the toolbar banner when the summary is absent but the full fallback provides data', () => {
+    summaryState = {
+      report: undefined,
+      loading: false,
+      error: new Error('summary poll down'),
+    };
+    fullState = { report: fullReport, loading: false, error: undefined };
+    mount();
+    const text = container!.textContent ?? '';
+    // Cards render from the full fallback...
+    expect(text).toContain('4242');
+    // ...so the toolbar must not claim the dashboard failed to load.
+    expect(text).not.toContain('Failed to load daemon status');
   });
 });

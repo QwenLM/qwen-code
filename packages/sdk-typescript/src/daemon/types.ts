@@ -192,11 +192,19 @@ export interface DaemonStatusReport {
     uptimeMs: number;
     mode: DaemonMode;
     workspaceCwd: string;
+    /** Startup timing/preheat snapshot; `preheat.status` is widened to string. */
+    startup?: {
+      processStartedAt: string;
+      listenerReadyAt?: string;
+      processToListenMs?: number;
+      runQwenServeToListenMs?: number;
+      preheat: { status: string; durationMs?: number; error?: string };
+    };
     qwenCodeVersion?: string;
     daemonId?: string;
     /** Present only in `detail=full` responses. */
     logPath?: string;
-  } & Record<string, unknown>;
+  };
   security: {
     tokenConfigured: boolean;
     requireAuth: boolean;

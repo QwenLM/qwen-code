@@ -277,11 +277,13 @@ function DaemonStatusDialogInner() {
             time: new Date(report.generatedAt).toLocaleTimeString(),
           })}
         </span>
-        {/* Only flag a stale toolbar when the summary — which owns the visible
-            counters and timestamp — failed to refresh. A failed full fetch is
-            surfaced on its own in the diagnostics section below, so it must not
-            make an otherwise-healthy summary read as broken. */}
-        {summary.error && (
+        {/* Flag the toolbar only when the summary that owns the visible
+            counters/timestamp is the failing, stale source: it errored AND
+            still has (now-stale) data on screen. When the summary never loaded
+            and the cards are rendering from the full fallback, or when only the
+            full fetch failed (surfaced in the diagnostics section), the banner
+            would misrepresent an otherwise-usable dashboard. */}
+        {summary.error && summary.report && (
           <span className={styles.refreshError}>{t('daemon.loadFailed')}</span>
         )}
         <div className={styles.toolbarActions}>
@@ -530,33 +532,51 @@ function DaemonStatusDialogInner() {
         </Card>
       </div>
 
-      {fullReport?.full ? (
-        <FullDetail report={fullReport} />
-      ) : full.error ? (
-        <div className={styles.empty}>
-          {t('daemon.details.failed')}: {full.error.message}
-        </div>
-      ) : (
-        <div className={styles.empty}>{t('daemon.details.loading')}</div>
-      )}
+      {/* Contain a crash in the detail sections (e.g. a partial detail=full
+          payload) to this region so the healthy summary cards above stay live,
+          rather than letting the outer boundary replace the whole dialog. */}
+      <ErrorBoundary
+        label="daemon-status-detail"
+        fallback={
+          <div className={styles.empty}>{t('daemon.details.failed')}</div>
+        }
+      >
+        {fullReport?.full ? (
+          <FullDetail report={fullReport} />
+        ) : full.loading ? (
+          <div className={styles.empty}>{t('daemon.details.loading')}</div>
+        ) : full.error ? (
+          <div className={styles.empty}>
+            {t('daemon.details.failed')}: {full.error.message}
+          </div>
+        ) : (
+          // Fetch resolved but the daemon omitted the `full` section — don't
+          // hang on the loading placeholder forever.
+          <div className={styles.empty}>{t('daemon.details.failed')}</div>
+        )}
+      </ErrorBoundary>
     </div>
   );
 }
 
 // A malformed or partial daemon response — most likely exactly when the daemon
 // is sick and this dashboard is most needed — must not white-screen the whole
-// web shell. Contain any render throw to the dialog. resetKeys clears the
-// fallback on the next open so a transient bad payload recovers.
+// web shell. Contain any render throw to the dialog; the function-form fallback
+// surfaces the actual render error (distinct from a network failure). Because
+// the parent only mounts the dialog while open, closing and re-opening remounts
+// the boundary, so a transient bad payload recovers on the next open.
 export function DaemonStatusDialog() {
   const { t } = useI18n();
   return (
     <ErrorBoundary
       label="daemon-status"
-      fallback={
+      fallback={(error) => (
         <div className={styles.dialog}>
-          <div className={styles.empty}>{t('daemon.loadFailed')}</div>
+          <div className={styles.empty}>
+            {t('daemon.loadFailed')}: {error.message}
+          </div>
         </div>
-      }
+      )}
     >
       <DaemonStatusDialogInner />
     </ErrorBoundary>
