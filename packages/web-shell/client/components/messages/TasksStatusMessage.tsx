@@ -1,8 +1,15 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   DaemonSessionTasksStatus,
   DaemonSessionTaskStatus,
 } from '@qwen-code/sdk/daemon';
+import {
+  computeAgentTreeInfo,
+  computeUserBlockingIds,
+  reorderChildrenUnderParents,
+  TREE_INDENT_MAX_LEVELS,
+  type AgentTreeInfo,
+} from './agentForest';
 import { useActions } from '@qwen-code/webui/daemon-react-sdk';
 import { useDelayedGlobalKeyDown } from '../../hooks/useDelayedGlobalKeyDown';
 import { useI18n } from '../../i18n';
@@ -60,6 +67,19 @@ function sortTasks(
     if (aActive) return b.startTime - a.startTime;
     return (b.endTime ?? b.startTime) - (a.endTime ?? a.startTime);
   });
+}
+
+/**
+ * Display order for the panel: active-first sort, then each nested agent
+ * grouped under its parent as a tree. The reorder is a post-pass so a tree
+ * spanning the active/terminal buckets stays contiguous at whichever
+ * position its root earned. Every `setTasks` site must use this (not bare
+ * `sortTasks`) — selection is index-based, so list order IS the contract.
+ */
+function arrangeTasks(
+  tasks: DaemonSessionTaskStatus[],
+): DaemonSessionTaskStatus[] {
+  return reorderChildrenUnderParents(sortTasks(tasks));
 }
 
 function formatTokenCount(tokens: number): string {
@@ -139,10 +159,15 @@ function ChevronIcon({ expanded }: { expanded: boolean }) {
   );
 }
 
-function rowLabel(task: DaemonSessionTaskStatus): string {
+function rowLabel(task: DaemonSessionTaskStatus, blocking: boolean): string {
   switch (task.kind) {
     case 'agent':
-      return task.isBackgrounded ? task.label : `[blocking] ${task.label}`;
+      // `blocking` comes from computeUserBlockingIds — an agent is tagged
+      // only when its entire ancestor chain is foreground up to the
+      // top-level session (cancelling it would end the user's turn), not
+      // merely for being a foreground entry (a foreground child awaited by
+      // a background parent blocks that parent, not the user).
+      return blocking ? `[blocking] ${task.label}` : task.label;
     case 'shell':
       return `[shell] ${task.command}`;
     case 'monitor':
@@ -212,7 +237,9 @@ export function TasksStatusMessage({
 }) {
   const { t } = useI18n();
   const actions = useActions();
-  const [tasks, setTasks] = useState(() => sortTasks(message.snapshot.tasks));
+  const [tasks, setTasks] = useState(() =>
+    arrangeTasks(message.snapshot.tasks),
+  );
   const [isOpen, setIsOpen] = useState(true);
   const [step, setStep] = useState<TasksPanelStep>('list');
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -231,6 +258,12 @@ export function TasksStatusMessage({
     tasks.length === 0 ? 0 : Math.min(selectedIndex, tasks.length - 1);
   const selectedTask = tasks[clampedSelectedIndex] ?? null;
 
+  // Tree metadata is computed on the full task list (not the windowed
+  // slice) so a row's indent doesn't shift when the window scrolls past
+  // its parent.
+  const treeInfo = useMemo(() => computeAgentTreeInfo(tasks), [tasks]);
+  const blockingIds = useMemo(() => computeUserBlockingIds(tasks), [tasks]);
+
   useEffect(() => {
     if (!isOpen) return;
     const refresh = () => {
@@ -239,7 +272,7 @@ export function TasksStatusMessage({
       actions
         .getTasks()
         .then((snapshot) => {
-          setTasks(sortTasks(snapshot.tasks));
+          setTasks(arrangeTasks(snapshot.tasks));
           setRefreshError(false);
         })
         .catch((error: unknown) => {
@@ -320,8 +353,14 @@ export function TasksStatusMessage({
       const isRunning = task.status === 'running';
       const isAbandonable = task.kind === 'agent' && task.status === 'paused';
       if (!isRunning && !isAbandonable) return;
-      const isForegroundAgent = task.kind === 'agent' && !task.isBackgrounded;
-      if (isForegroundAgent && pendingCancelId !== task.id) {
+      // Two-step confirm only when cancelling would end the USER's turn —
+      // the same chain-aware verdict as the `[blocking]` row prefix. A
+      // foreground child awaited by a *background* parent unblocks that
+      // parent, not the user, so it cancels on the first press like any
+      // background entry. Mirrors BackgroundTasksDialog's cancel gate.
+      const isUserBlockingAgent =
+        task.kind === 'agent' && blockingIds.has(task.id);
+      if (isUserBlockingAgent && pendingCancelId !== task.id) {
         setPendingCancelId(task.id);
         return;
       }
@@ -334,7 +373,7 @@ export function TasksStatusMessage({
           return;
         }
         const snapshot = await actions.getTasks();
-        setTasks(sortTasks(snapshot.tasks));
+        setTasks(arrangeTasks(snapshot.tasks));
         setActionError(null);
       } catch (error: unknown) {
         console.warn('[web-shell] failed to cancel task:', error);
@@ -343,7 +382,7 @@ export function TasksStatusMessage({
         setBusy(false);
       }
     },
-    [actions, busy, pendingCancelId, t],
+    [actions, busy, blockingIds, pendingCancelId, t],
   );
 
   useDelayedGlobalKeyDown(
@@ -540,6 +579,23 @@ export function TasksStatusMessage({
             const taskStatusLabel = statusLabel(task.status, t);
             const expanded = embedded && selected && step === 'detail';
             const showSelected = embedded ? expanded : selected;
+            const tree: AgentTreeInfo | undefined =
+              task.kind === 'agent' ? treeInfo.get(task.id) : undefined;
+            // Indent clamps so deep trees don't starve the label column;
+            // the detail view's nesting line carries the exact depth.
+            const indentLevels = Math.min(
+              tree?.visibleDepth ?? 0,
+              TREE_INDENT_MAX_LEVELS,
+            );
+            // The ↳ marker is kept even for orphans (parent already gone,
+            // depth back at 0) so "this was a nested agent" stays legible.
+            const nestedMarker =
+              task.kind === 'agent' && task.parentAgentId != null;
+            const orphanNote = tree?.orphaned
+              ? task.kind === 'agent' && task.parentName
+                ? t('tasks.row.from', { parent: task.parentName })
+                : t('tasks.row.nested')
+              : null;
             return (
               <div
                 key={task.id}
@@ -567,7 +623,27 @@ export function TasksStatusMessage({
                   {embedded && (
                     <span className={styles.taskIcon} aria-hidden="true" />
                   )}
-                  <span className={styles.nameCell}>{rowLabel(task)}</span>
+                  <span
+                    className={styles.nameCell}
+                    style={
+                      indentLevels > 0
+                        ? { paddingLeft: `${indentLevels * 16}px` }
+                        : undefined
+                    }
+                  >
+                    {nestedMarker && (
+                      <span className={styles.treeMarker} aria-hidden="true">
+                        {'↳ '}
+                      </span>
+                    )}
+                    {rowLabel(task, blockingIds.has(task.id))}
+                    {orphanNote && (
+                      <span className={styles.orphanNote}>
+                        {' · '}
+                        {orphanNote}
+                      </span>
+                    )}
+                  </span>
                   <span className={`${styles.status} ${stClass}`}>
                     {taskStatusLabel}
                   </span>
@@ -817,6 +893,25 @@ function TaskDetail({
 
       {task.kind === 'agent' && task.subagentType && (
         <DetailField label={t('tasks.detail.type')} value={task.subagentType} />
+      )}
+
+      {task.kind === 'agent' && (task.depth ?? 0) > 0 && (
+        <DetailField
+          label={t('tasks.detail.nesting')}
+          value={
+            // User-facing level = launch depth + 1 (depth 0 = spawned by
+            // the top-level session). Unlike the row indent, this is the
+            // absolute launch level, unaffected by departed ancestors.
+            task.parentName
+              ? t('tasks.detail.nestingValue', {
+                  level: (task.depth ?? 0) + 1,
+                  parent: task.parentName,
+                })
+              : t('tasks.detail.nestingLevel', {
+                  level: (task.depth ?? 0) + 1,
+                })
+          }
+        />
       )}
 
       {task.kind === 'agent' &&

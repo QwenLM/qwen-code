@@ -15,6 +15,7 @@ import type {
 import type { DaemonLogger } from '../daemon-logger.js';
 import {
   buildDaemonStatusResponse,
+  type DaemonPerfSnapshot,
   type DaemonStartupSnapshot,
   parseDaemonStatusDetail,
 } from '../daemon-status.js';
@@ -42,6 +43,7 @@ interface RegisterDaemonStatusRoutesDeps {
   deviceFlowRegistry: DeviceFlowRegistry;
   sessionShellCommandEnabled: boolean;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getPerfSnapshot?: () => DaemonPerfSnapshot;
 }
 
 export function registerDaemonStatusRoutes(
@@ -76,6 +78,7 @@ export function registerDaemonStatusRoutes(
           deviceFlowRegistry: deps.deviceFlowRegistry,
           sessionShellCommandEnabled: deps.sessionShellCommandEnabled,
           getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
+          getPerfSnapshot: deps.getPerfSnapshot,
         }),
       );
     } catch (err) {

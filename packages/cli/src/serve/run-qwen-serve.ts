@@ -77,6 +77,7 @@ import {
   parseDaemonStatusDetail,
   positiveFiniteOrNull,
   type DaemonStatusIssue,
+  type DaemonPerfSnapshot,
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
@@ -1858,6 +1859,9 @@ export async function runQwenServe(
   let runtimeApp: Application | undefined;
   let runtimeAppForCleanup: Application | undefined;
   let bridgeRef: AcpSessionBridge | undefined = deps.bridge;
+  let daemonEventLoopMonitor:
+    | ReturnType<CoreRuntime['startEventLoopLagMonitor']>
+    | undefined;
   let runtimeStartupError: string | undefined;
   let runtimeStarting: Promise<void> | undefined;
   let markRuntimeReady!: () => void;
@@ -1872,6 +1876,10 @@ export async function runQwenServe(
     markRuntimeFailed = reject;
   });
   void runtimeReady.catch(() => {});
+  const disposeDaemonEventLoopMonitor = (): void => {
+    daemonEventLoopMonitor?.dispose();
+    daemonEventLoopMonitor = undefined;
+  };
   let channelWorker: ChannelWorkerSupervisor =
     createDisabledChannelWorkerSupervisor();
   const getChannelWorkerSnapshot = () => channelWorker.snapshot();
@@ -1973,6 +1981,30 @@ export async function runQwenServe(
       ),
     );
     core.initializeDaemonMetrics();
+    daemonEventLoopMonitor?.dispose();
+    daemonEventLoopMonitor = core.startEventLoopLagMonitor({
+      onNewMaxStall: (maxMs) => {
+        daemonLog.warn('daemon event loop stall detected', { maxMs });
+      },
+    });
+    const currentDaemonEventLoopMonitor = daemonEventLoopMonitor;
+    core.registerDaemonEventLoopLagGauge(() =>
+      currentDaemonEventLoopMonitor.snapshot(),
+    );
+    const pipeStats: DaemonPerfSnapshot['pipe'] = {
+      inbound: { count: 0, totalBytes: 0, maxBytes: 0 },
+      outbound: { count: 0, totalBytes: 0, maxBytes: 0 },
+    };
+    const recordPipeMessage = (
+      direction: keyof DaemonPerfSnapshot['pipe'],
+      bytes: number,
+    ): void => {
+      const stats = pipeStats[direction];
+      stats.count += 1;
+      stats.totalBytes += bytes;
+      stats.maxBytes = Math.max(stats.maxBytes, bytes);
+      core.recordDaemonPipeMessage(direction, bytes);
+    };
     const daemonTelemetry = core.createDaemonBridgeTelemetry();
     daemonTelemetry.metrics = {
       sessionLifecycle(action) {
@@ -2028,6 +2060,10 @@ export async function runQwenServe(
     });
     const channelFactory = runtime.createSpawnChannelFactory({
       onDiagnosticLine: diagnosticSink,
+      pipeHooks: {
+        onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
+        onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
+      },
       ...(opts.experimentalLsp === true
         ? { extraArgs: ['--experimental-lsp'] }
         : {}),
@@ -2206,6 +2242,13 @@ export async function runQwenServe(
       fsFactory,
       daemonLog,
       getChannelWorkerSnapshot,
+      getPerfSnapshot: () => ({
+        eventLoop: currentDaemonEventLoopMonitor.snapshot(),
+        pipe: {
+          inbound: { ...pipeStats.inbound },
+          outbound: { ...pipeStats.outbound },
+        },
+      }),
       workspace: workspaceService,
       // Reverse tool channel (#5626): the SAME registry wired into `bridge` above,
       // so the WS provider and the child-answering bridge share one sender map.
@@ -2576,6 +2619,7 @@ export async function runQwenServe(
         writeStderrLine(`qwen serve: runtime startup failed: ${message}`);
         daemonLog.error('runtime startup failed', error);
         await stopChannelWorkerAfterFailedStartup();
+        disposeDaemonEventLoopMonitor();
         removeCurrentServePidfile();
         await shutdownBridgeAfterFailedStartup(bridgeForCleanup ?? bridgeRef);
         markRuntimeFailed(error);
@@ -2884,6 +2928,7 @@ export async function runQwenServe(
                   rl.setDraining(true);
                   rl.dispose();
                 }
+                disposeDaemonEventLoopMonitor();
                 // The worker owns daemon-backed sessions; disconnect it before
                 // tearing down the ACP bridge it is attached to.
                 await channelWorker.stop().catch((err) => {
