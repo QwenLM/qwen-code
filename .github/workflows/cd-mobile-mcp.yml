@@ -1,0 +1,67 @@
+name: 'CD: mobile-mcp'
+
+on:
+  push:
+    tags: ['mobile-mcp-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to publish (without v prefix, e.g. 0.1.0)'
+        required: true
+      dry_run:
+        description: 'Dry run (build only, no publish)'
+        required: false
+        type: 'boolean'
+        default: true
+
+permissions:
+  contents: 'read'
+  id-token: 'write'
+
+jobs:
+  build-and-publish:
+    runs-on: 'ubuntu-latest'
+    steps:
+      - uses: 'actions/checkout@v4'
+
+      - uses: 'actions/setup-node@v5'
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: 'Determine version'
+        id: 'version'
+        run: |
+          if [[ "$GITHUB_REF" == refs/tags/mobile-mcp-v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/mobile-mcp-v}"
+          else
+            VERSION="${{ inputs.version }}"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: 'Install dependencies'
+        working-directory: 'packages/mobile-mcp'
+        run: 'npm ci --ignore-scripts'
+
+      - name: 'Lint'
+        working-directory: 'packages/mobile-mcp'
+        run: 'npm run lint'
+
+      - name: 'Set version'
+        working-directory: 'packages/mobile-mcp'
+        run: 'npm version "${{ steps.version.outputs.version }}" --no-git-tag-version'
+
+      - name: 'Build'
+        working-directory: 'packages/mobile-mcp'
+        run: 'npm run build'
+
+      - name: 'Test'
+        working-directory: 'packages/mobile-mcp'
+        run: 'npx playwright test test/coord-norm.test.ts'
+
+      - name: 'Publish'
+        if: '${{ !inputs.dry_run }}'
+        working-directory: 'packages/mobile-mcp'
+        run: 'npm publish --access public --provenance'
+        env:
+          NODE_AUTH_TOKEN: '${{ secrets.NPM_TOKEN }}'
