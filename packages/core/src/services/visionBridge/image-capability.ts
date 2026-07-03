@@ -17,9 +17,9 @@
 import { VISION_BRIDGE_MAX_IMAGES } from './vision-bridge-constants.js';
 
 export const IMAGE_CAPABILITY = Object.freeze({
-  /** Main model lacks vision → auto-route to same-provider vision model. */
+  /** Auto-routing is supported when a same-provider vision model is available. */
   autoRoutesToVisionBridge: true,
-  /** Images exceeding the size limit are silently dropped. */
+  /** Images exceeding the size limit are dropped and counted in omittedCount. */
   capsImageSize: true,
   /** Informational — max images processed per turn (mirrors VISION_BRIDGE_MAX_IMAGES). */
   maxImagesPerTurn: VISION_BRIDGE_MAX_IMAGES,
