@@ -112,15 +112,10 @@ export function atCompletionSource(
       mcpServers: createSection(sectionLabels.mcpServers, 2),
     };
 
-    const bareAt = prefix.length === 0;
-    const extensionPreview = bareAt ? 4 : extensions.length;
-    const filePreview = bareAt ? 3 : files.length;
-    const mcpPreview = bareAt ? 4 : mcpServers.length;
-
     return {
       from: atPos,
       options: [
-        ...extensions.slice(0, extensionPreview).map(
+        ...extensions.map(
           (ext) =>
             ({
               label: ext.name,
@@ -133,7 +128,7 @@ export function atCompletionSource(
               atReferenceValue: ext.name,
             }) satisfies AtReferenceCompletion,
         ),
-        ...files.slice(0, filePreview).map(
+        ...files.map(
           (f) =>
             ({
               label: f,
@@ -144,7 +139,7 @@ export function atCompletionSource(
               atReferenceValue: f,
             }) satisfies AtReferenceCompletion,
         ),
-        ...mcpServers.slice(0, mcpPreview).map(
+        ...mcpServers.map(
           (server) =>
             ({
               label: server.name,

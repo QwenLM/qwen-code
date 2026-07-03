@@ -1348,6 +1348,34 @@ describe('handleAtCommand', () => {
       expect(result.filesRead).toContain('myserver:res://doc');
     });
 
+    it('preserves @mcp:<uri> as a resource ref when a server is named mcp', async () => {
+      const readMcpResource = vi.fn().mockResolvedValue({
+        contents: [{ uri: 'res://doc', text: 'RESOURCE BODY' }],
+      });
+      const config = {
+        ...mockConfig,
+        getMcpServers: () => ({ mcp: {}, demo: {} }),
+        getToolRegistry: () => ({ readMcpResource }),
+      } as unknown as Config;
+
+      const result = await handleAtCommand({
+        query: 'Use @mcp:res://doc now',
+        config,
+        onDebugMessage: mockOnDebugMessage,
+        messageId: 606,
+        signal: abortController.signal,
+      });
+
+      expect(readMcpResource).toHaveBeenCalledWith('mcp', 'res://doc', {
+        signal: abortController.signal,
+      });
+      const parts = result.processedQuery as Array<{ text?: string }>;
+      const text = parts.map((part) => part.text ?? '').join('\n');
+      expect(text).toContain('Use @mcp:res://doc now');
+      expect(text).toContain('RESOURCE BODY');
+      expect(text).not.toContain('--- MCP Server: demo ---');
+    });
+
     it('injects both a @file and a @server:uri resource, surfacing both tool cards', async () => {
       const fileContent = 'FILE BODY';
       const filePath = await createTestFile(

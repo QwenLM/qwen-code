@@ -137,9 +137,9 @@ const TOOLTIP_STYLES = `
   height: 14px;
   flex: 0 0 auto;
   margin-right: 10px;
-  background-position: center;
-  background-repeat: no-repeat;
-  background-size: contain;
+  background: currentColor;
+  mask: var(--composer-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li:hover {
@@ -575,8 +575,8 @@ class ComposerTagWidget extends WidgetType {
     if (iconUrl) {
       const icon = document.createElement('span');
       icon.style.cssText =
-        'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:center / contain no-repeat;';
-      icon.style.backgroundImage = `url("${iconUrl}")`;
+        'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:currentColor;mask:var(--composer-tag-icon-url) center / contain no-repeat;-webkit-mask:var(--composer-tag-icon-url) center / contain no-repeat;';
+      icon.style.setProperty('--composer-tag-icon-url', `url("${iconUrl}")`);
       chip.appendChild(icon);
     }
 
@@ -1813,7 +1813,10 @@ export function useComposerCore(
                 if (!iconUrl) return null;
                 const icon = document.createElement('span');
                 icon.className = 'cm-at-ref-completion-icon';
-                icon.style.backgroundImage = `url("${iconUrl}")`;
+                icon.style.setProperty(
+                  '--composer-tag-icon-url',
+                  `url("${iconUrl}")`,
+                );
                 return icon;
               },
               position: 20,

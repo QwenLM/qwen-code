@@ -402,9 +402,9 @@
   height: 12px;
   flex: 0 0 auto;
   margin-left: 7px;
-  background-position: center;
-  background-repeat: no-repeat;
-  background-size: contain;
+  background: currentColor;
+  mask: var(--composer-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
 }
 
 .tagLabel,

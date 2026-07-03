@@ -942,6 +942,7 @@ describe('useAtCompletion', () => {
       });
       const values = result.current.suggestions.map((s) => s.value);
       expect(values).toContain('file.txt');
+      expect(values).not.toContain('mcp:myserver');
       expect(values).not.toContain('myserver:');
     });
 

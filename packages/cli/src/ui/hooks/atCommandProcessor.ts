@@ -266,6 +266,18 @@ export async function resolveAtCommandQuery({
       continue;
     }
 
+    // MCP resource reference (`@server:uri`): detected BEFORE filesystem
+    // resolution so a resource URI containing ':' / '//' isn't mistaken for
+    // a path. Only matches when `server` is a configured MCP server; all
+    // other `@...` tokens fall through to the filesystem logic untouched.
+    const resourceRef = parseMcpResourceRef(pathName, mcpServerNames);
+    if (resourceRef) {
+      mcpResourceRefs.push({ originalAtPath, ...resourceRef });
+      // Keep `@server:uri` verbatim in the text sent to the model.
+      atPathToResolvedSpecMap.set(originalAtPath, pathName);
+      continue;
+    }
+
     const mcpServerRef = parseMcpServerRef(pathName);
     if (mcpServerRef) {
       const matched = matchMcpServerByRef(
@@ -291,18 +303,6 @@ export async function resolveAtCommandQuery({
         `MCP server "${mcpServerRef.name}" not found among configured MCP servers. ` +
           `Available: ${Object.keys(config.getMcpServers() || {}).join(', ') || '(none)'}`,
       );
-      continue;
-    }
-
-    // MCP resource reference (`@server:uri`): detected BEFORE filesystem
-    // resolution so a resource URI containing ':' / '//' isn't mistaken for
-    // a path. Only matches when `server` is a configured MCP server; all
-    // other `@...` tokens fall through to the filesystem logic untouched.
-    const resourceRef = parseMcpResourceRef(pathName, mcpServerNames);
-    if (resourceRef) {
-      mcpResourceRefs.push({ originalAtPath, ...resourceRef });
-      // Keep `@server:uri` verbatim in the text sent to the model.
-      atPathToResolvedSpecMap.set(originalAtPath, pathName);
       continue;
     }
 
