@@ -567,7 +567,13 @@ describe('DaemonWorkspaceProvider', () => {
       v: 1,
       detail: 'full',
       status: 'warning',
-      issues: [{ code: 'pending_permissions', severity: 'warning' }],
+      issues: [
+        {
+          code: 'pending_permissions',
+          severity: 'warning',
+          message: '2 pending permissions',
+        },
+      ],
     };
     sdkMocks.daemonStatus.mockResolvedValueOnce(report);
     let actions: DaemonWorkspaceActions | undefined;

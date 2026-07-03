@@ -189,13 +189,14 @@ export function DaemonStatusDialog() {
   const summaryReload = summary.reload;
   const fullReload = full.reload;
 
-  // Skip a tick if the previous poll is still outstanding: useDaemonResource
-  // discards stale completions but does not abort, and the client timeout is
-  // 30s, so a degraded daemon could otherwise accumulate overlapping calls.
+  // Skip a tick when the tab is backgrounded (matching the sidebar poll) or
+  // when the previous poll is still outstanding: useDaemonResource discards
+  // stale completions but does not abort, and the client timeout is 30s, so a
+  // degraded daemon could otherwise accumulate overlapping calls.
   const summaryPollInFlightRef = useRef(false);
   useEffect(() => {
     const timer = window.setInterval(() => {
-      if (summaryPollInFlightRef.current) return;
+      if (document.hidden || summaryPollInFlightRef.current) return;
       summaryPollInFlightRef.current = true;
       void summaryReload().finally(() => {
         summaryPollInFlightRef.current = false;

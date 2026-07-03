@@ -318,6 +318,31 @@ describe('DaemonStatusDialog', () => {
     expect(summaryReload).toHaveBeenCalledTimes(2); // fires again once free
   });
 
+  it('does not poll while the tab is backgrounded', async () => {
+    vi.useFakeTimers();
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => true,
+    });
+    mount();
+    await act(async () => {
+      vi.advanceTimersByTime(15_000);
+      await Promise.resolve();
+    });
+    expect(summaryReload).not.toHaveBeenCalled();
+    // Bring the tab back to the foreground; polling resumes.
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => false,
+    });
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+      await Promise.resolve();
+    });
+    expect(summaryReload).toHaveBeenCalledTimes(1);
+    Reflect.deleteProperty(document, 'hidden');
+  });
+
   it('manual refresh reloads both summary and full', () => {
     mount();
     const refreshButton = Array.from(
