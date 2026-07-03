@@ -4894,8 +4894,9 @@ export class Config {
     // Artifacts are experimental and opt-in. Publishing writes outside the
     // project and opens a browser, so it is limited to interactive, non-SDK
     // sessions. QWEN_CODE_DISABLE_ARTIFACT hard-disables both artifact tools;
-    // QWEN_CODE_ENABLE_ARTIFACT only force-enables the metadata-only
-    // record_artifact tool for non-SDK daemon sessions.
+    // QWEN_CODE_ENABLE_ARTIFACT force-enables interactive artifact tooling
+    // here. isRecordArtifactEnabled() also treats it as an opt-in for the
+    // metadata-only daemon record_artifact tool.
     if (process.env['QWEN_CODE_DISABLE_ARTIFACT'] === '1') return false;
     if (this.sdkMode) return false;
     if (!this.interactive) return false;
