@@ -24,12 +24,14 @@ import {
   existsSync,
   symlinkSync,
   mkdirSync,
+  readFileSync,
 } from 'node:fs';
 import { tmpdir, platform } from 'node:os';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const root = join(__dirname, '..');
 const cliPackageDir = join(root, 'packages', 'cli');
+const pkg = JSON.parse(readFileSync(join(root, 'package.json'), 'utf-8'));
 
 // Ensure qc-helper bundled skill can find user docs in dev mode.
 // In dev, import.meta.url resolves to the source tree, so the bundled skill
@@ -102,7 +104,10 @@ const importFlag = `--import ${pathToFileURL(registerPath).href}`;
 const env = {
   ...process.env,
   DEV: 'true',
-  CLI_VERSION: 'dev',
+  // Report the real package version (like scripts/start.js) so the UI shows
+  // e.g. "v0.19.4" instead of "dev". DEV=true / NODE_ENV=development remain the
+  // signals that distinguish a dev build.
+  CLI_VERSION: pkg.version,
   NODE_ENV: 'development',
   NODE_OPTIONS: `${existingNodeOptions} --expose-gc ${importFlag}`.trim(),
 };

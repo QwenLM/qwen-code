@@ -5,6 +5,9 @@
  */
 
 import { describe, it, expect, vi, afterEach } from 'vitest';
+import * as fsp from 'node:fs/promises';
+import * as os from 'node:os';
+import * as path from 'node:path';
 
 const mockWriteStderrLine = vi.hoisted(() => vi.fn());
 vi.mock('../utils/stdioHelpers.js', () => ({
@@ -61,6 +64,47 @@ describe('createWorkspaceSkillsStatusProvider', () => {
     // Non-fatal failures are logged to the daemon's stderr.
     expect(mockWriteStderrLine).toHaveBeenCalledTimes(1);
     expect(mockWriteStderrLine.mock.calls[0][0]).toContain('boom');
+  });
+
+  it('marks skills disabled in workspace settings', async () => {
+    vi.spyOn(SkillManager.prototype, 'listSkills').mockResolvedValueOnce([
+      {
+        name: 'enabled',
+        description: 'Enabled skill',
+        body: 'Visible',
+        filePath: '/skills/enabled/SKILL.md',
+        level: 'project',
+      },
+      {
+        name: 'disabled',
+        description: 'Disabled skill',
+        body: 'Hidden',
+        filePath: '/skills/disabled/SKILL.md',
+        level: 'project',
+      },
+    ]);
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-skills-disabled-'),
+    );
+    await fsp.mkdir(path.join(workspace, '.qwen'), { recursive: true });
+    await fsp.writeFile(
+      path.join(workspace, '.qwen', 'settings.json'),
+      JSON.stringify({ skills: { disabled: ['disabled'] } }),
+    );
+    const provider = createWorkspaceSkillsStatusProvider();
+
+    const status = await provider(workspace);
+
+    expect(status.skills).toMatchObject([
+      {
+        name: 'enabled',
+        status: 'ok',
+      },
+      {
+        name: 'disabled',
+        status: 'disabled',
+      },
+    ]);
   });
 
   it('reuses one SkillManager per workspace across calls', async () => {

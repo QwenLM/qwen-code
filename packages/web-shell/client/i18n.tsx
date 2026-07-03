@@ -384,6 +384,7 @@ const EN: Messages = {
   'editor.send': 'Send message',
   'editor.connectionDisconnected':
     'Connection interrupted. Please try again after it reconnects.',
+  'editor.sessionLoading': 'Session is still loading. Try again in a moment.',
   'editor.processing': 'Processing. New messages will be queued.',
   'editor.searchHint': 'ctrl+r next · tab accept · enter send · esc cancel',
   'editor.searchLabel': 'reverse-i-search:',
@@ -962,6 +963,7 @@ const EN: Messages = {
   'model.select': 'Select Model',
   'model.setFast': 'Set Fast Model',
   'model.setVoice': 'Set Voice Model',
+  'model.setVision': 'Set Vision Model',
   'model.switch': 'Switch Model',
   'model.unknown': 'unknown',
   'resume.current': 'current',
@@ -1144,6 +1146,12 @@ const EN: Messages = {
   'tasks.detail.toolCallCount': 'Tool calls',
   'tasks.detail.tokens': (v) => `${v?.count ?? 0} tokens`,
   'tasks.detail.toolCalls': (v) => `${v?.count ?? 0} tool calls`,
+  'tasks.detail.nesting': 'Nesting',
+  'tasks.detail.nestingValue': (v) =>
+    `Level ${v?.level ?? '?'} · from ${v?.parent ?? '?'}`,
+  'tasks.detail.nestingLevel': (v) => `Level ${v?.level ?? '?'}`,
+  'tasks.row.from': (v) => `from ${v?.parent ?? '?'}`,
+  'tasks.row.nested': 'nested',
   'tips.items':
     'Type / to see all available commands.|Use @ to reference file paths.|Press Esc to cancel an in-flight request.|Use Shift+Enter for a newline.|Press ↑↓ to browse message history.',
   'tools.available': 'Available tools:',
@@ -1598,6 +1606,7 @@ const ZH: Messages = {
   'editor.shellPlaceholder': '请输入终端命令',
   'editor.send': '发送消息',
   'editor.connectionDisconnected': '连接已中断，请在恢复后重试。',
+  'editor.sessionLoading': '会话正在加载，请稍后再发送。',
   'editor.processing': '处理中。新消息会进入队列。',
   'editor.searchHint': 'ctrl+r 下一条 · tab 采纳 · enter 发送 · esc 取消',
   'editor.searchLabel': '历史搜索：',
@@ -2143,6 +2152,7 @@ const ZH: Messages = {
   'model.select': '选择模型',
   'model.setFast': '设置 Fast Model',
   'model.setVoice': '设置语音模型',
+  'model.setVision': '设置视觉模型',
   'model.switch': '切换模型',
   'model.unknown': '未知',
   'resume.current': '当前',
@@ -2314,6 +2324,12 @@ const ZH: Messages = {
   'tasks.detail.toolCallCount': '工具数量',
   'tasks.detail.tokens': (v) => `${v?.count ?? 0} tokens`,
   'tasks.detail.toolCalls': (v) => `${v?.count ?? 0} 次工具调用`,
+  'tasks.detail.nesting': '嵌套',
+  'tasks.detail.nestingValue': (v) =>
+    `第 ${v?.level ?? '?'} 层 · 来自 ${v?.parent ?? '?'}`,
+  'tasks.detail.nestingLevel': (v) => `第 ${v?.level ?? '?'} 层`,
+  'tasks.row.from': (v) => `来自 ${v?.parent ?? '?'}`,
+  'tasks.row.nested': '嵌套',
   'tips.items':
     '输入 / 查看所有可用命令。|使用 @ 引用文件路径。|按 Esc 取消正在进行的请求。|使用 Shift+Enter 换行。|按 ↑↓ 浏览历史消息。',
   'tools.available': '可用工具:',

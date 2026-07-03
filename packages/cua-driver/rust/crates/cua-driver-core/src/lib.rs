@@ -12,6 +12,7 @@
 
 pub const RESPONSIBILITY_DISCLAIMED_ENV: &str = "CUA_DRIVER_RS_RESPONSIBILITY_DISCLAIMED";
 
+pub mod capture_mode;
 pub mod cdp;
 pub mod coord_norm;
 pub mod element_cache;
@@ -35,6 +36,7 @@ pub mod socket_io;
 pub mod text_sanitize;
 pub mod tool;
 pub mod tool_args;
+pub mod tool_schema;
 pub mod video;
 pub mod video_ffmpeg;
 

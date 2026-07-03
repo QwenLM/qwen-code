@@ -235,6 +235,112 @@ export interface SessionMetadataResult {
   displayName?: string;
 }
 
+type OpenStringUnion<T extends string> = T | (string & {});
+
+/** Known artifact kinds mirrored from the daemon/core contract. */
+export type KnownDaemonSessionArtifactKind =
+  | 'file'
+  | 'link'
+  | 'html'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'pdf'
+  | 'notebook'
+  | 'other';
+
+export type DaemonSessionArtifactKind =
+  OpenStringUnion<KnownDaemonSessionArtifactKind>;
+
+export type KnownDaemonSessionArtifactStorage =
+  | 'workspace'
+  | 'external_url'
+  | 'managed'
+  | 'published';
+
+export type DaemonSessionArtifactStorage =
+  OpenStringUnion<KnownDaemonSessionArtifactStorage>;
+
+export type KnownDaemonSessionArtifactSource = 'tool' | 'hook' | 'client';
+
+export type DaemonSessionArtifactSource =
+  OpenStringUnion<KnownDaemonSessionArtifactSource>;
+
+export type KnownDaemonSessionArtifactStatus = 'available' | 'missing';
+
+export type DaemonSessionArtifactStatus =
+  OpenStringUnion<KnownDaemonSessionArtifactStatus>;
+
+export interface DaemonSessionArtifactInput {
+  kind?: KnownDaemonSessionArtifactKind;
+  storage?: Exclude<KnownDaemonSessionArtifactStorage, 'published'>;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
+}
+
+export interface DaemonSessionArtifact {
+  id: string;
+  kind: DaemonSessionArtifactKind;
+  storage: DaemonSessionArtifactStorage;
+  source: DaemonSessionArtifactSource;
+  status: DaemonSessionArtifactStatus;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
+  clientRetained: boolean;
+  createdAt: string;
+  updatedAt: string;
+  toolCallId?: string;
+  toolName?: string;
+  hookEventName?: string;
+  clientId?: string;
+}
+
+export type KnownDaemonSessionArtifactChangeAction =
+  | 'created'
+  | 'updated'
+  | 'removed';
+export type DaemonSessionArtifactChangeAction =
+  OpenStringUnion<KnownDaemonSessionArtifactChangeAction>;
+
+export type KnownDaemonSessionArtifactRemovalReason = 'eviction' | 'explicit';
+export type DaemonSessionArtifactRemovalReason =
+  OpenStringUnion<KnownDaemonSessionArtifactRemovalReason>;
+
+export interface DaemonSessionArtifactChange {
+  action: DaemonSessionArtifactChangeAction;
+  artifactId: string;
+  artifact?: DaemonSessionArtifact;
+  reason?: DaemonSessionArtifactRemovalReason;
+}
+
+export interface DaemonSessionArtifactsEnvelope {
+  v: 1;
+  sessionId: string;
+  artifacts: DaemonSessionArtifact[];
+  generatedAt: string;
+  limits: {
+    maxArtifacts: number;
+  };
+}
+
+export interface DaemonSessionArtifactMutationResult {
+  v: 1;
+  sessionId: string;
+  changes: DaemonSessionArtifactChange[];
+}
+
 export type DaemonStatus =
   | 'ok'
   | 'warning'
@@ -981,6 +1087,21 @@ export interface DaemonSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /**
+   * `id` of the agent task that spawned this one. Absent for agents
+   * launched by the top-level session. Sub-agents may spawn sub-agents
+   * (bounded by `maxSubagentDepth`); clients render the roster as a tree
+   * by correlating this against sibling `id`s.
+   */
+  parentAgentId?: string;
+  /**
+   * Display name (`subagentType`) of the spawning agent, captured at
+   * registration time so it survives the parent's eviction from the
+   * registry. Display-only.
+   */
+  parentName?: string;
+  /** Launch depth (0-based; 0 = spawned by the top-level session). */
+  depth?: number;
 }
 
 export interface DaemonSessionShellTaskStatus {

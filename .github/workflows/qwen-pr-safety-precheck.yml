@@ -30,35 +30,57 @@ jobs:
           ref: '${{ github.event.repository.default_branch }}'
           sparse-checkout: '.github/scripts/pr-safety-precheck.mjs'
 
+      - name: 'Check PR author permission'
+        id: 'author_permission'
+        env:
+          GH_TOKEN: '${{ secrets.CI_BOT_PAT || github.token }}'
+          PR_AUTHOR: '${{ github.event.pull_request.user.login }}'
+        run: |-
+          set -euo pipefail
+          permission="$(
+            gh api "repos/${GITHUB_REPOSITORY}/collaborators/${PR_AUTHOR}/permission" \
+              --jq '.permission' 2>/dev/null || true
+          )"
+          echo "Author '${PR_AUTHOR}' permission='${permission:-<empty>}'"
+          case "$permission" in
+            admin|maintain|write) trusted_author=true ;;
+            *) trusted_author=false ;;
+          esac
+          echo "trusted_author=$trusted_author" >> "$GITHUB_OUTPUT"
+
       - name: 'Collect PR precheck input'
         env:
           GH_TOKEN: '${{ github.token }}'
           HEAD_SHA: '${{ github.event.pull_request.head.sha }}'
           PR_NUMBER: '${{ github.event.pull_request.number }}'
+          TRUSTED_AUTHOR: '${{ steps.author_permission.outputs.trusted_author }}'
         run: |-
           set -euo pipefail
+          if [ "$TRUSTED_AUTHOR" = "true" ]; then
+            printf '{"headRefOid":"%s","title":"","body":""}\n' "$HEAD_SHA" \
+              > "$RUNNER_TEMP/pr-precheck.json"
+            : > "$RUNNER_TEMP/pr-precheck.diff"
+            exit 0
+          fi
+
           if ! gh pr view "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
-            --json title,body,headRefOid,files \
+            --json title,body,headRefOid \
             > "$RUNNER_TEMP/pr-precheck.json"; then
-            printf '{"headRefOid":"%s","title":"","body":"","files":null}\n' "$HEAD_SHA" \
+            printf '{"headRefOid":"%s","title":"","body":""}\n' "$HEAD_SHA" \
               > "$RUNNER_TEMP/pr-precheck.json"
           fi
 
-          max_diff_bytes=$((256 * 1024 + 1))
-          set +e
+          max_diff_bytes=$((2 * 1024 * 1024))
+          set +o pipefail
           gh pr diff "$PR_NUMBER" \
             --repo "$GITHUB_REPOSITORY" \
             --patch \
             | head -c "$max_diff_bytes" > "$RUNNER_TEMP/pr-precheck.diff"
-          pipe_status=("${PIPESTATUS[@]}")
-          diff_status="${pipe_status[0]}"
-          head_status="${pipe_status[1]}"
-          set -e
-          diff_bytes="$(wc -c < "$RUNNER_TEMP/pr-precheck.diff" | tr -d ' ')"
-          if [ "$head_status" -ne 0 ] ||
-             { [ "$diff_status" -ne 0 ] &&
-               { [ "$diff_status" -ne 141 ] || [ "$diff_bytes" -lt "$max_diff_bytes" ]; }; }; then
+          diff_status=${PIPESTATUS[0]}
+          set -o pipefail
+          if [ "$diff_status" -ne 0 ] && [ "$diff_status" -ne 141 ]; then
+            echo "PR diff unavailable; precheck will fail closed." >&2
             : > "$RUNNER_TEMP/pr-precheck.diff"
           fi
 
@@ -68,6 +90,7 @@ jobs:
           node .github/scripts/pr-safety-precheck.mjs \
             --pr "$RUNNER_TEMP/pr-precheck.json" \
             --diff "$RUNNER_TEMP/pr-precheck.diff" \
+            --trusted-author "${{ steps.author_permission.outputs.trusted_author }}" \
             --comment "$RUNNER_TEMP/pr-precheck-comment.md"
 
       - name: 'Upsert manual approval comment'
