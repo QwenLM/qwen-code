@@ -101,6 +101,58 @@ describe('startSpeculation', () => {
   });
 });
 
+describe('generatePipelinedSuggestion preserveTools', () => {
+  it('passes preserveTools: true to runForkedAgent', async () => {
+    const config = {
+      getApprovalMode: vi.fn().mockReturnValue(ApprovalMode.DEFAULT),
+      getCwd: vi.fn().mockReturnValue(process.cwd()),
+      getFastModel: vi.fn().mockReturnValue(undefined),
+      getToolRegistry: vi.fn().mockReturnValue({
+        ensureTool: vi.fn().mockResolvedValue({
+          build: vi.fn().mockReturnValue({
+            execute: vi.fn().mockResolvedValue({
+              llmContent: '',
+              returnDisplay: '',
+            }),
+          }),
+        }),
+      }),
+    } as unknown as Config;
+
+    forkedAgentMocks.runForkedAgent.mockResolvedValue({
+      jsonResult: { suggestion: 'next step' },
+    });
+
+    // Model returns text-only — no tool calls — so speculation completes
+    // and triggers generatePipelinedSuggestion.
+    forkedAgentMocks.sendMessageStream.mockImplementation(async function* () {
+      yield {
+        type: 'chunk',
+        value: {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'done' }],
+              },
+            },
+          ],
+        },
+      };
+    });
+
+    const state = await startSpeculation(config, 'do something');
+    await vi.waitFor(() => {
+      expect(state.status).toBe('completed');
+    });
+
+    expect(forkedAgentMocks.runForkedAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ preserveTools: true }),
+    );
+
+    await abortSpeculation(state);
+  });
+});
+
 describe('ensureToolResultPairing', () => {
   it('returns empty array unchanged', () => {
     expect(ensureToolResultPairing([])).toEqual([]);
