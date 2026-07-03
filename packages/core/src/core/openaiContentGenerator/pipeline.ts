@@ -599,7 +599,15 @@ export class ContentGenerationPipeline {
           // actually stop emitting <think> when reasoning is disabled — e.g.
           // the auto-mode permission classifier's short structured-output
           // calls, which otherwise spend their small token budget on thinking
-          // and fail closed.
+          // and fail closed. Servers that don't recognise `chat_template_kwargs`
+          // ignore the unknown field, so the switch is a harmless no-op there.
+          //
+          // Drop any top-level `enable_thinking` a provider preset injected via
+          // extra_body (provider-config.ts emits it for models configured with
+          // `enableThinking: true`): leaving it would contradict the
+          // `chat_template_kwargs` opt-out on servers that honour both, and
+          // keeps this path from leaking the qwen-specific field top-level.
+          delete typed['enable_thinking'];
           const existing = (typed['chat_template_kwargs'] ?? {}) as Record<
             string,
             unknown
