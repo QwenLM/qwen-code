@@ -326,6 +326,11 @@ Response shape:
         "inbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 },
         "outbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 }
       }
+    },
+    "activity": {
+      "activePrompts": 0,
+      "lastActivityAt": null,
+      "idleSinceMs": null
     }
   }
 }
@@ -345,6 +350,8 @@ the short window after the listener is ready but before the full runtime is
 mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
 runtime mount fails, it reports `daemon_runtime_failed` while non-status
 runtime routes return `503`.
+
+`runtime.activity` reports daemon-wide prompt activity. `activePrompts` counts sessions with an in-flight prompt. `lastActivityAt` is the ISO 8601 timestamp of the last prompt start/end or session spawn; `null` when the daemon has never processed any activity since boot. `idleSinceMs` is computed from `lastActivityAt` at response generation time.
 
 `runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
 not the channel-adapter worker. Daemon-managed channels use
