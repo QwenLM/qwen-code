@@ -652,7 +652,7 @@ export abstract class BaseJsonOutputAdapter {
         this.emitSystemMessage('model_fallback', {
           fromModel: event.fromModel,
           toModel: event.toModel,
-          errorCode: event.errorCode,
+          statusCode: event.statusCode,
           fallbackIndex: event.fallbackIndex,
         });
         break;

@@ -92,7 +92,7 @@ export type ServerGeminiModelFallbackEvent = {
   /** The model the system is switching to. */
   toModel: string;
   /** HTTP status code that triggered the fallback (e.g. 429, 503, 529). */
-  errorCode?: number;
+  statusCode?: number;
   /** 1-based index of the fallback in the configured chain. */
   fallbackIndex: number;
 };
@@ -495,7 +495,7 @@ export class Turn {
             type: GeminiEventType.ModelFallback,
             fromModel: streamEvent.info.fromModel,
             toModel: streamEvent.info.toModel,
-            errorCode: streamEvent.info.errorCode,
+            statusCode: streamEvent.info.statusCode,
             fallbackIndex: streamEvent.info.fallbackIndex,
           };
           continue;

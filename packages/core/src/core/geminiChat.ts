@@ -18,7 +18,11 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from '@google/genai';
-import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
+import {
+  retryWithBackoff,
+  isUnattendedMode,
+  type HeartbeatInfo,
+} from '../utils/retry.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
@@ -264,7 +268,7 @@ export interface ModelFallbackInfo {
   /** The model the system is switching to. */
   toModel: string;
   /** HTTP status code that triggered the fallback (e.g. 429, 503, 529). */
-  errorCode?: number;
+  statusCode?: number;
   /** 1-based index of the fallback in the configured fallback chain. */
   fallbackIndex: number;
 }
@@ -2663,144 +2667,147 @@ export class GeminiChat {
           // - Fallback is only for capacity/availability errors (429/503/529/5xx),
           //   not for auth/billing/client errors.
           const fallbackModels = self.config.getModelFallbacks();
-          let currentErrorClassification = classifyRetryError(lastError, {
-            authType: cgConfig?.authType,
-            extraRetryErrorCodes,
-          });
 
-          if (
-            fallbackModels.length > 0 &&
-            isFallbackEligible(currentErrorClassification) &&
-            !isUnattendedMode()
-          ) {
-            let fallbackSucceeded = false;
-            let fallbackIndex = 0;
-            let currentModel = model;
+          if (fallbackModels.length > 0 && !isUnattendedMode()) {
+            let currentErrorClassification = classifyRetryError(lastError, {
+              authType: cgConfig?.authType,
+              extraRetryErrorCodes,
+            });
 
-            for (const fallbackModelId of fallbackModels) {
-              fallbackIndex++;
-              // Skip fallback models that match the current/primary model
-              if (
-                fallbackModelId === model ||
-                fallbackModelId === currentModel
-              ) {
-                debugLogger.warn(
-                  `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
-                    `same as current model.`,
-                );
-                continue;
-              }
+            if (isFallbackEligible(currentErrorClassification)) {
+              let fallbackSucceeded = false;
+              let fallbackIndex = 0;
+              let currentModel = model;
 
-              debugLogger.warn(
-                `[FALLBACK] Primary model "${currentModel}" exhausted retries ` +
-                  `(reason: ${currentErrorClassification.reason}, ` +
-                  `status: ${currentErrorClassification.statusCode ?? 'unknown'}). ` +
-                  `Switching to fallback model "${fallbackModelId}" ` +
-                  `(${fallbackIndex}/${fallbackModels.length}).`,
-              );
-
-              // Resolve the fallback model's content generator
-              let fallbackGenerator: ContentGenerator;
-              let fallbackRetryAuthType: string | undefined;
-              let fallbackRetryErrorCodes: readonly number[] | undefined;
-              let resolvedFallbackModel: string;
-              try {
-                const resolved = await self.config
-                  .getBaseLlmClient()
-                  .resolveForModel(fallbackModelId, { failClosed: true });
-                fallbackGenerator = resolved.contentGenerator;
-                fallbackRetryAuthType = resolved.retryAuthType;
-                fallbackRetryErrorCodes = resolved.retryErrorCodes;
-                resolvedFallbackModel = resolved.model;
-              } catch (resolveError) {
-                debugLogger.warn(
-                  `[FALLBACK] Failed to resolve fallback model ` +
-                    `"${fallbackModelId}": ` +
-                    `${resolveError instanceof Error ? resolveError.message : String(resolveError)}. ` +
-                    `Skipping to next fallback.`,
-                );
-                continue;
-              }
-
-              // Emit fallback event so the UI can notify the user
-              yield {
-                type: StreamEventType.MODEL_FALLBACK,
-                info: {
-                  fromModel: currentModel,
-                  toModel: resolvedFallbackModel,
-                  errorCode: currentErrorClassification.statusCode,
-                  fallbackIndex,
-                },
-              };
-
-              // Clear any partial state from the failed attempt
-              self.clearPendingPartialState();
-
-              // Run the fallback model with its own retry loop.
-              try {
-                for await (const event of self.makeFallbackStreamWithRetries(
-                  resolvedFallbackModel,
-                  requestContents,
-                  params,
-                  prompt_id,
-                  fallbackGenerator,
-                  fallbackRetryAuthType,
-                  fallbackRetryErrorCodes,
-                )) {
-                  yield event;
+              for (const fallbackModelId of fallbackModels) {
+                fallbackIndex++;
+                // Skip fallback models that match the current/primary model
+                if (
+                  fallbackModelId === model ||
+                  fallbackModelId === currentModel
+                ) {
+                  debugLogger.warn(
+                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
+                      `same as current model.`,
+                  );
+                  continue;
                 }
 
-                // Fallback succeeded
-                lastError = null;
-                fallbackSucceeded = true;
-                debugLogger.info(
-                  `[FALLBACK] Successfully completed request with ` +
-                    `fallback model "${resolvedFallbackModel}".`,
-                );
-                break;
-              } catch (fallbackError) {
-                // Classify the fallback error to decide whether to continue
-                // to the next fallback or give up
-                const fallbackClassification = classifyRetryError(
-                  fallbackError,
-                  {
-                    authType: fallbackRetryAuthType,
-                    extraRetryErrorCodes: fallbackRetryErrorCodes,
-                  },
-                );
-
                 debugLogger.warn(
-                  `[FALLBACK] Fallback model "${resolvedFallbackModel}" also ` +
-                    `failed (reason: ${fallbackClassification.reason}, ` +
-                    `status: ${fallbackClassification.statusCode ?? 'unknown'}). ` +
-                    `${fallbackIndex < fallbackModels.length ? 'Trying next fallback.' : 'No more fallbacks.'}`,
+                  `[FALLBACK] Primary model "${currentModel}" exhausted retries ` +
+                    `(reason: ${currentErrorClassification.reason}, ` +
+                    `status: ${currentErrorClassification.statusCode ?? 'unknown'}). ` +
+                    `Switching to fallback model "${fallbackModelId}" ` +
+                    `(${fallbackIndex}/${fallbackModels.length}).`,
                 );
 
-                lastError = fallbackError;
-                currentModel = resolvedFallbackModel;
-                currentErrorClassification = fallbackClassification;
-
-                // Only continue to next fallback if this error is also
-                // fallback-eligible. Auth/client errors should fail immediately.
-                if (!isFallbackEligible(fallbackClassification)) {
+                // Resolve the fallback model's content generator
+                let fallbackGenerator: ContentGenerator;
+                let fallbackRetryAuthType: string | undefined;
+                let fallbackRetryErrorCodes: readonly number[] | undefined;
+                let resolvedFallbackModel: string;
+                try {
+                  const resolved = await self.config
+                    .getBaseLlmClient()
+                    .resolveForModel(fallbackModelId, { failClosed: true });
+                  fallbackGenerator = resolved.contentGenerator;
+                  fallbackRetryAuthType = resolved.retryAuthType;
+                  fallbackRetryErrorCodes = resolved.retryErrorCodes;
+                  resolvedFallbackModel = resolved.model;
+                } catch (resolveError) {
+                  if (isAbortError(resolveError)) throw resolveError;
                   debugLogger.warn(
-                    `[FALLBACK] Error from "${resolvedFallbackModel}" is not ` +
-                      `fallback-eligible (${fallbackClassification.reason}). ` +
-                      `Stopping fallback chain.`,
+                    `[FALLBACK] Failed to resolve fallback model ` +
+                      `"${fallbackModelId}": ` +
+                      `${resolveError instanceof Error ? resolveError.message : String(resolveError)}. ` +
+                      `Skipping to next fallback.`,
+                  );
+                  continue;
+                }
+
+                // Emit fallback event so the UI can notify the user
+                yield {
+                  type: StreamEventType.MODEL_FALLBACK,
+                  info: {
+                    fromModel: currentModel,
+                    toModel: resolvedFallbackModel,
+                    statusCode: currentErrorClassification.statusCode,
+                    fallbackIndex,
+                  },
+                };
+
+                // Remove the partial assistant turn from history before the
+                // fallback model starts producing its own response.
+                self.popPendingPartialAssistantTurn();
+
+                // Run the fallback model with its own retry loop.
+                try {
+                  for await (const event of self.makeFallbackStreamWithRetries(
+                    resolvedFallbackModel,
+                    requestContents,
+                    params,
+                    prompt_id,
+                    fallbackGenerator,
+                    fallbackRetryAuthType,
+                    fallbackRetryErrorCodes,
+                  )) {
+                    yield event;
+                  }
+
+                  // Fallback succeeded
+                  lastError = null;
+                  fallbackSucceeded = true;
+                  debugLogger.info(
+                    `[FALLBACK] Successfully completed request with ` +
+                      `fallback model "${resolvedFallbackModel}".`,
                   );
                   break;
-                }
-                if (fallbackIndex < fallbackModels.length) {
-                  self.popPendingPartialAssistantTurn();
+                } catch (fallbackError) {
+                  if (isAbortError(fallbackError)) throw fallbackError;
+
+                  // Classify the fallback error to decide whether to continue
+                  // to the next fallback or give up
+                  const fallbackClassification = classifyRetryError(
+                    fallbackError,
+                    {
+                      authType: fallbackRetryAuthType,
+                      extraRetryErrorCodes: fallbackRetryErrorCodes,
+                    },
+                  );
+
+                  debugLogger.warn(
+                    `[FALLBACK] Fallback model "${resolvedFallbackModel}" also ` +
+                      `failed (reason: ${fallbackClassification.reason}, ` +
+                      `status: ${fallbackClassification.statusCode ?? 'unknown'}). ` +
+                      `${fallbackIndex < fallbackModels.length ? 'Trying next fallback.' : 'No more fallbacks.'}`,
+                  );
+
+                  lastError = fallbackError;
+                  currentModel = resolvedFallbackModel;
+                  currentErrorClassification = fallbackClassification;
+
+                  // Only continue to next fallback if this error is also
+                  // fallback-eligible. Auth/client errors should fail immediately.
+                  if (!isFallbackEligible(fallbackClassification)) {
+                    debugLogger.warn(
+                      `[FALLBACK] Error from "${resolvedFallbackModel}" is not ` +
+                        `fallback-eligible (${fallbackClassification.reason}). ` +
+                        `Stopping fallback chain.`,
+                    );
+                    break;
+                  }
+                  if (fallbackIndex < fallbackModels.length) {
+                    self.popPendingPartialAssistantTurn();
+                  }
                 }
               }
-            }
 
-            if (!fallbackSucceeded) {
-              debugLogger.warn(
-                '[FALLBACK] All fallback models exhausted. ' +
-                  'Throwing last error.',
-              );
+              if (!fallbackSucceeded) {
+                debugLogger.warn(
+                  '[FALLBACK] All fallback models exhausted. ' +
+                    'Throwing last error.',
+                );
+              }
             }
           }
 
@@ -2837,14 +2844,30 @@ export class GeminiChat {
     })();
   }
 
+  /**
+   * Makes an API call with retry logic and returns the processed stream.
+   *
+   * When called without `overrides`, uses the session's primary content
+   * generator and provider config (the common path for the main model).
+   * Pass `overrides` to run against a different content generator — used
+   * by the fallback chain to call alternative models without duplicating
+   * the retry wiring.
+   */
   private async makeApiCallAndProcessStream(
     model: string,
     requestContents: Content[],
     params: SendMessageParameters,
     prompt_id: string,
+    overrides?: {
+      contentGenerator: ContentGenerator;
+      retryAuthType?: string;
+      retryErrorCodes?: readonly number[];
+    },
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const generator =
+      overrides?.contentGenerator ?? this.config.getContentGenerator();
     const apiCall = () =>
-      this.config.getContentGenerator().generateContentStream(
+      generator.generateContentStream(
         {
           model,
           contents: requestContents,
@@ -2853,7 +2876,12 @@ export class GeminiChat {
         prompt_id,
       );
     const cgConfig = this.config.getContentGeneratorConfig();
-    const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
+    const authType = overrides?.retryAuthType ?? cgConfig?.authType;
+    const extraRetryErrorCodes =
+      overrides?.retryErrorCodes ?? cgConfig?.retryErrorCodes;
+    // Fallback models never enter persistent retry mode — persistent mode
+    // is the caller's explicit opt-in for the primary model only.
+    const persistentMode = overrides ? false : isUnattendedMode();
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof Error) {
@@ -2873,15 +2901,19 @@ export class GeminiChat {
 
         return false;
       },
-      authType: cgConfig?.authType,
+      authType,
       extraRetryErrorCodes,
-      persistentMode: isUnattendedMode(),
+      persistentMode,
       signal: params.config?.abortSignal,
-      heartbeatFn: (info) => {
-        process.stderr.write(
-          `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
-        );
-      },
+      ...(persistentMode
+        ? {
+            heartbeatFn: (info: HeartbeatInfo) => {
+              process.stderr.write(
+                `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+              );
+            },
+          }
+        : {}),
       onRetry: (info) => {
         logApiRetry(
           this.config,
@@ -2901,6 +2933,9 @@ export class GeminiChat {
     return this.processStreamResponse(model, streamResponse);
   }
 
+  // TODO(#6116): This retry loop mirrors the primary sendMessageStream retry
+  // structure. Refactor both paths to share a single parameterised retry loop
+  // to reduce duplication once the fallback feature stabilises.
   private async *makeFallbackStreamWithRetries(
     model: string,
     requestContents: Content[],
@@ -2934,14 +2969,12 @@ export class GeminiChat {
           yield { type: StreamEventType.RETRY };
         }
 
-        const stream = await this.makeApiCallWithFallbackGenerator(
+        const stream = await this.makeApiCallAndProcessStream(
           model,
           requestContents,
           params,
           prompt_id,
-          contentGenerator,
-          retryAuthType,
-          retryErrorCodes,
+          { contentGenerator, retryAuthType, retryErrorCodes },
         );
 
         for await (const chunk of stream) {
@@ -3088,82 +3121,6 @@ export class GeminiChat {
     }
 
     throw lastError;
-  }
-
-  /**
-   * Variant of {@link makeApiCallAndProcessStream} that uses an explicitly
-   * provided content generator instead of the session's primary generator.
-   * Used by the model fallback chain: each fallback model resolves its own
-   * generator via `resolveForModel`, and this method threads it through
-   * the same retry + stream-processing pipeline.
-   *
-   * @param model - The model ID to use for the API call.
-   * @param requestContents - The conversation history to send.
-   * @param params - SendMessage parameters (config, abort signal, etc.).
-   * @param prompt_id - Prompt ID for telemetry correlation.
-   * @param contentGenerator - The content generator for the fallback model.
-   * @param retryAuthType - Auth type for retry classification.
-   * @param retryErrorCodes - Provider-specific retry error codes.
-   * @returns An async generator yielding processed stream chunks.
-   */
-  private async makeApiCallWithFallbackGenerator(
-    model: string,
-    requestContents: Content[],
-    params: SendMessageParameters,
-    prompt_id: string,
-    contentGenerator: ContentGenerator,
-    retryAuthType?: string,
-    retryErrorCodes?: readonly number[],
-  ): Promise<AsyncGenerator<GenerateContentResponse>> {
-    const apiCall = () =>
-      contentGenerator.generateContentStream(
-        {
-          model,
-          contents: requestContents,
-          config: { ...this.generationConfig, ...params.config },
-        },
-        prompt_id,
-      );
-    const streamResponse = await retryWithBackoff(apiCall, {
-      shouldRetryOnError: (error: unknown) => {
-        if (error instanceof Error) {
-          if (isSchemaDepthError(error.message)) return false;
-          if (isInvalidArgumentError(error.message)) return false;
-        }
-
-        const status = getErrorStatus(error);
-        if (status === 400) return false;
-        if (status === 429) return true;
-        if (status && status >= 500 && status < 600) return true;
-
-        if (isRateLimitError(error, retryErrorCodes)) return true;
-
-        return false;
-      },
-      authType: retryAuthType,
-      extraRetryErrorCodes: retryErrorCodes,
-      // Fallback models do NOT enter persistent retry mode. Persistent mode
-      // is the caller's explicit opt-in for the primary model only; applying
-      // it to every fallback would defeat the purpose of the chain.
-      persistentMode: false,
-      signal: params.config?.abortSignal,
-      onRetry: (info) => {
-        logApiRetry(
-          this.config,
-          new ApiRetryEvent({
-            model,
-            promptId: prompt_id,
-            attemptNumber: info.attempt,
-            error: info.error,
-            statusCode: info.errorStatus,
-            retryDelayMs: info.delayMs,
-            subagentName: subagentNameContext.getStore(),
-          }),
-        );
-      },
-    });
-
-    return this.processStreamResponse(model, streamResponse);
   }
 
   /**
