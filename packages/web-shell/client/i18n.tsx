@@ -1216,6 +1216,9 @@ const EN: Messages = {
     'Frontend-only chat content width. Stored in this browser.',
   'settings.option.ui.chatWidth.1000': 'Regular',
   'settings.option.ui.chatWidth.wide': 'Ultra wide',
+  'settings.label.visionModel': 'Vision Model',
+  'settings.description.visionModel':
+    'Image-capable model used as the vision bridge. Leave empty to auto-select.',
   'welcome.changeModel': '(/model to change)',
   'welcome.defaultModel': 'unknown model',
   'welcome.modeHint': 'Shift+Tab or /approval-mode',
@@ -2456,6 +2459,9 @@ const ZH: Messages = {
   'settings.label.fastModel': '快速模型',
   'settings.description.fastModel':
     '用于生成提示建议和推测执行的模型。留空则使用主模型。较小/更快的模型（例如 qwen3-coder-flash）可以降低延迟和成本。',
+  'settings.label.visionModel': '视觉模型',
+  'settings.description.visionModel':
+    '用于视觉桥接的图像能力模型。留空则自动选择。',
   'settings.label.context.fileFiltering.respectGitIgnore': '遵守 .gitignore',
   'settings.description.context.fileFiltering.respectGitIgnore':
     '搜索时遵守 .gitignore 文件。',
