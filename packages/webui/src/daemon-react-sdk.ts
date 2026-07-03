@@ -100,6 +100,9 @@ export { useDaemonSessions as useSessions } from './daemon/index.js';
 /** Available slash-command skills. */
 export { useDaemonSkills as useSkills } from './daemon/index.js';
 
+/** Consolidated daemon status report (`GET /daemon/status`). */
+export { useDaemonStatusReport as useDaemonStatus } from './daemon/index.js';
+
 /** Registered tools and their configuration. */
 export { useDaemonTools as useTools } from './daemon/index.js';
 
@@ -276,6 +279,18 @@ export type {
 export type {
   /** Session list entry: id, title, timestamps, client count, active prompt flag. */
   DaemonSessionSummary,
+  /** Daemon status report envelope from `GET /daemon/status`. */
+  DaemonStatusReport,
+  /** Status report detail level: `'summary' | 'full'`. */
+  DaemonStatusReportDetail,
+  /** One triage finding in the daemon status rollup. */
+  DaemonStatusReportIssue,
+  /** Overall daemon health rollup: `'ok' | 'warning' | 'error'`. */
+  DaemonStatusReportLevel,
+  /** Per-section workspace diagnostics in a `detail=full` report. */
+  DaemonStatusReportSection,
+  /** Per-session diagnostics row in a `detail=full` report. */
+  DaemonStatusReportSession,
   /** Full agent detail including system prompt, tools, and run config. */
   DaemonWorkspaceAgentDetail,
   /** Agent list entry: name, description, level, model, builtin flag. */

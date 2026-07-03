@@ -66,6 +66,10 @@ export default defineConfig(({ command }) => ({
     proxy: {
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
+      // Daemon status report (`GET /daemon/status`); without this entry the
+      // SPA fallback answers with index.html and the dashboard dialog fails
+      // JSON parsing in dev.
+      '/daemon': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
       '/workspace': daemonProxy,

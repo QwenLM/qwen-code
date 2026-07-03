@@ -48,6 +48,7 @@ function renderSidebar(collapsed: boolean): HTMLElement {
           collapsed={collapsed}
           onCollapsedChange={noop}
           onOpenSettings={noop}
+          onOpenDaemonStatus={noop}
           onNewSession={() => false}
           onLoadSession={noop}
           onError={noop}
