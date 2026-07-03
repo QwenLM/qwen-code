@@ -3988,6 +3988,62 @@ describe('GeminiChat', async () => {
         delete process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
       }
     });
+
+    it('caps reservedOutputTokens at half the context window for small custom windows (issue #6144)', async () => {
+      // Custom local model (unknown to tokenLimits.ts) with a 65,536-token
+      // window and no max_tokens overrides. Without the cap,
+      // effectiveReservedOutput = max(ESCALATED_MAX_TOKENS, 32000) = 64000,
+      // collapsing the input budget to 65536 - 64000 = 1536 tokens: a ~6K
+      // prompt trips the hard-rescue guard, compression NOOPs, and the send
+      // fails with "Context is too large to send safely...". With the cap,
+      // the reservation is floor(65536 / 2) = 32768, thresholds are sane
+      // (hard ≈ 25.9K), and the same prompt sends normally.
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'qwen3coder-64k',
+        contextWindowSize: 65_536,
+      });
+
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: null,
+          info: {
+            originalTokenCount: 6_276,
+            newTokenCount: 6_276,
+            compressionStatus: CompressionStatus.NOOP,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('normal response'),
+      );
+
+      const chatInstance = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      // The reporter's prompt size: far above the collapsed 1,536 hard limit
+      // but well below the capped thresholds (auto ≈ 22.9K).
+      chatInstance.setLastPromptTokenCount(6_276);
+
+      const stream = await chatInstance.sendMessageStream(
+        'qwen3coder-64k',
+        { message: 'hi' },
+        'prompt-small-window-cap',
+      );
+      for await (const _ of stream) {
+        /* consume — must not throw the hard-rescue failure */
+      }
+
+      // Normal auto-path cheap-gate (force=false), NOT hard-tier rescue, and
+      // the capped reservation is what reaches the compression service.
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+      expect(compressSpy.mock.calls[0][1].force).toBe(false);
+      expect(compressSpy.mock.calls[0][1].reservedOutputTokens).toBe(32_768);
+    });
   });
 
   describe('addHistory', () => {

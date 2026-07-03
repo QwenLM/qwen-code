@@ -36,9 +36,8 @@ import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import {
   DEFAULT_TOKEN_LIMIT,
-  ESCALATED_MAX_TOKENS,
+  escalatedOutputTokenLimit,
   parsePositiveIntegerEnvValue,
-  tokenLimit,
 } from './tokenLimits.js';
 
 const debugLogger = createDebugLogger('CLIENT');
@@ -2728,7 +2727,7 @@ export class GeminiClient {
       parsedEnvMaxTokens !== undefined;
     const reservedOutputTokens: number = hasUserMaxTokensOverride
       ? (cgConfig?.samplingParams?.max_tokens ?? parsedEnvMaxTokens ?? 0)
-      : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output'));
+      : escalatedOutputTokenLimit(model, cgConfig?.contextWindowSize);
 
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;

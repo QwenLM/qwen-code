@@ -32,9 +32,8 @@ import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
 import {
   DEFAULT_TOKEN_LIMIT,
-  ESCALATED_MAX_TOKENS,
+  escalatedOutputTokenLimit,
   parsePositiveIntegerEnvValue,
-  tokenLimit,
 } from './tokenLimits.js';
 import { hasCycleInSchema } from '../tools/tools.js';
 import { ToolNames } from '../tools/tool-names.js';
@@ -1792,9 +1791,12 @@ export class GeminiChat {
     //
     // The subagent path sets params.config.maxOutputTokens explicitly; the
     // interactive path leaves it undefined but will escalate to
-    // max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')) on MAX_TOKENS.
+    // escalatedOutputTokenLimit(model, contextWindowSize) on MAX_TOKENS.
     // Pre-reserving that space prevents the dead zone between the adjusted
-    // auto threshold and an unadjusted hard threshold (issue #5950).
+    // auto threshold and an unadjusted hard threshold (issue #5950). The
+    // escalation limit is capped at half the context window so the
+    // reservation cannot collapse the input budget on small custom windows
+    // (issue #6144).
     const cgConfigForThresholds = this.config.getContentGeneratorConfig();
     const parsedEnvMaxTokensForThreshold = parsePositiveIntegerEnvValue(
       process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
@@ -1809,7 +1811,10 @@ export class GeminiChat {
         ? (cgConfigForThresholds?.samplingParams?.max_tokens ??
           parsedEnvMaxTokensForThreshold ??
           0)
-        : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')));
+        : escalatedOutputTokenLimit(
+            model,
+            cgConfigForThresholds?.contextWindowSize,
+          ));
     let currentUserContent: Content | undefined;
     try {
       // The send-lock above is held but the generator's `finally` (which
@@ -2458,13 +2463,15 @@ export class GeminiChat {
         // MAX_TOKENS, retry once at the model's full output limit. This ensures
         // models with large output limits (e.g., 128K for Claude Opus, GPT-5)
         // are fully utilized, while using ESCALATED_MAX_TOKENS (64K) as a floor
-        // for unknown models.
+        // for unknown models — capped at half the context window so the retry
+        // itself cannot overflow small custom windows (issue #6144). Must match
+        // effectiveReservedOutput above, which pre-reserves this space.
         // Placed outside the retry loop so that any errors from the
         // escalated stream propagate directly (not caught by retry logic).
         const requestedMaxOutputTokens = params.config?.maxOutputTokens;
-        const escalatedLimit = Math.max(
-          ESCALATED_MAX_TOKENS,
-          tokenLimit(model, 'output'),
+        const escalatedLimit = escalatedOutputTokenLimit(
+          model,
+          cgConfigForThresholds?.contextWindowSize,
         );
         const shouldEscalateMaxOutputTokens =
           requestedMaxOutputTokens === undefined ||
