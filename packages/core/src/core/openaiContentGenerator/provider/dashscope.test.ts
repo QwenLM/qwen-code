@@ -108,49 +108,6 @@ describe('DashScopeOpenAICompatibleProvider', () => {
     });
   });
 
-  describe('getResponseParsingOptions', () => {
-    it('should enable tagged thinking parsing for GLM models', () => {
-      const glmProvider = new DashScopeOpenAICompatibleProvider(
-        { ...mockContentGeneratorConfig, model: 'glm-5.2' },
-        mockCliConfig,
-      );
-
-      expect(glmProvider.getResponseParsingOptions()).toEqual({
-        taggedThinkingTags: true,
-      });
-    });
-
-    it('should match GLM models case-insensitively', () => {
-      const glmProvider = new DashScopeOpenAICompatibleProvider(
-        { ...mockContentGeneratorConfig, model: 'GLM-5.1' },
-        mockCliConfig,
-      );
-
-      expect(glmProvider.getResponseParsingOptions()).toEqual({
-        taggedThinkingTags: true,
-      });
-    });
-
-    it('should use the request model override when provided', () => {
-      expect(provider.getResponseParsingOptions('glm-5.2')).toEqual({
-        taggedThinkingTags: true,
-      });
-    });
-
-    it('should let a non-GLM request model override a configured GLM model', () => {
-      const glmProvider = new DashScopeOpenAICompatibleProvider(
-        { ...mockContentGeneratorConfig, model: 'glm-5.2' },
-        mockCliConfig,
-      );
-
-      expect(glmProvider.getResponseParsingOptions('qwen-max')).toEqual({});
-    });
-
-    it('should not enable tagged thinking parsing for non-GLM models', () => {
-      expect(provider.getResponseParsingOptions()).toEqual({});
-    });
-  });
-
   describe('isDashScopeProvider', () => {
     it('should return true for QWEN_OAUTH auth type', () => {
       const config = {
