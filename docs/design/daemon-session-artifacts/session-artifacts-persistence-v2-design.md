@@ -316,7 +316,7 @@ session load/replay 时：
 
 恢复时必须重新校验：
 
-- `workspacePath`：仍必须是相对路径，realpath/stat 后不能逃逸当前 workspace。
+- `workspacePath`：仍必须是相对路径，按 restore 时的 workspace root 重新 resolve/realpath/stat，不能逃逸当前 workspace。workspace 重定位后，如果相同相对路径仍存在则可恢复为 `available`；如果文件缺失或新 workspace layout 不一致，则恢复为 `missing`。V2 不做自动 path remapping。
 - `external_url`：只允许 `http:` / `https:`；拒绝 username/password credential；secret-like query/fragment 必须 redacted、降级为 non-openable locator，或整条 artifact 降级/阻断。
 - `published`：可以恢复 `file:` locator，但只能在 trusted publisher manifest 重新校验通过、且目标属于 daemon-managed published storage 时允许。普通 `external_url` 永远不能通过 `file:`。
 - `managedId`：拒绝路径形态、`..`、绝对路径、分隔符。
@@ -426,7 +426,7 @@ Body：
 
 - `mode: "metadata"`：升级为 `restorable`。
 - `mode: "content"`：复制或绑定可控内容，升级为 `pinned`。
-- `ttlDays` 由 daemon 在 pin 时转换为绝对 `expiresAt = now + ttlDays`。
+- `ttlDays` 由 daemon 在 pin 时转换为绝对 `expiresAt = now + ttlDays`。如果提供，必须是正整数，并受默认最大值 365 天约束；超过上限返回 `INVALID_ARGUMENT`。未提供时才表示无固定过期时间。
 - 成功返回 mutation result，并发布 `artifact_changed` / `updated`。
 - 失败返回明确错误，不改变 artifact retention。
 - 对已经 `pinned` 的 artifact，V2 pin API 默认是幂等 no-op：返回当前 artifact，不重新复制内容、不重新计算 hash、不延长 TTL。若未来需要刷新内容或延长 TTL，应设计显式 refresh/extend API；不能让重试请求隐式改变已保存内容或无限延长保留期。
@@ -450,7 +450,7 @@ Body：
 
 - `retention` 可为 `restorable` 或 `ephemeral`，默认 `restorable`。
 - `restorable`：删除 content retention，保留 metadata restore，并写 upsert event。
-- `ephemeral`：删除 content retention，live store 中保留 artifact，但写 remove tombstone 或等价 restore-skip 记录，确保下次 load 不复活。
+- `ephemeral`：删除 content retention，live store 中保留 artifact，但写 remove tombstone，确保下次 load 不复活。V2 不定义单独的 restore-skip journal event；跳过被 tombstone 覆盖的旧 upsert 是 replay 实现细节。
 - 若要从列表移除，仍使用 V1 DELETE。
 
 ### 6.5 Delete artifact
@@ -493,8 +493,8 @@ type ArtifactPrincipal =
 - list：需要 session read 权限。
 - add ephemeral/restorable：需要 session mutate 权限。
 - pin/save content：需要 session mutate 权限，并且必须是显式 REST/SDK call；“用户确认”在 V2 中不表示 agent permission-vote，而是 UI 或 headless client 主动调用 pin/save endpoint。
-- delete metadata：需要 session mutate 权限；如果要保留 per-client ownership，只能用内部 principal 审计，不能用 payload clientId 授权。
-- delete content：需要 session mutate 权限；若 contentRef 被多个 session 引用，只能递减引用计数，不能强删共享内容。
+- delete metadata：需要 session mutate 权限。对于仍在 live store 中、且存在 daemon-resolved creator principal 的 artifact，必须保留 V1 same-principal delete guard；跨 principal 删除只能通过显式 override/admin policy，并写审计日志。restore 后如果没有可验证的 durable creator principal，不能从 public `clientId` 伪造 ownership，只能退化为 session-level mutate 权限并记录 `ownership_unverified` audit。
+- delete content：需要 session mutate 权限、`session_artifacts_content_retention` capability 启用、显式 REST/SDK call，以及 creator-principal match 或显式 override/admin policy；background session/hook 不能直接发起 `deleteContent`。若 contentRef 被多个 session 引用，只能释放当前 artifact 引用，不能强删共享内容。
 
 如果未来需要真正的 `session_owner`，必须先设计 durable per-session capability 或 ACL，不能在本 V2 文档中隐式假设。
 
@@ -572,7 +572,7 @@ daemon-managed artifact storage 必须有明确 root：
 超过 persisted metadata 上限：
 
 - `ephemeral` 本来不写 journal，不计入 persisted metadata quota，只受 live store 上限约束。
-- `restorable` 按确定性顺序裁剪，例如最旧未 pinned，并写 `restore_pruned` tombstone。
+- `restorable` 必须按确定性顺序裁剪并写 `restore_pruned` tombstone：先裁剪未 pinned 的 `restorable` artifact；同级内按 `persistedAt` 升序，缺失时按 journal sequence 升序，最后按 `artifactId` 字典序打破平局。
 - `pinned` metadata 不因 metadata quota 被裁剪，但 content retention 仍受 content quota 约束。
 - 如果 200 个 persisted slots 全部被 `pinned` 占用，没有可裁剪的 `restorable` candidate：
   - 自动/tool artifact 降级为 live-only `ephemeral`，带 `persistenceWarning.code = "metadata_quota_exceeded"`。
@@ -611,6 +611,8 @@ GC trigger：
 - 周期性 timer 可作为兜底，例如每小时一次；实现必须用单实例 lease/lock 避免并发 sweep。
 
 V2 不把 mutable reference-count table 当 source of truth。content reference set 应从 project 内 session artifact journals 的最新 valid snapshot/events 派生；content manifest 只保存 content metadata 和可选的 lastKnownReferenceCount/cache。GC sweep 在后台按 project 扫描并重建引用集合，crash 后下一次 sweep 重新计算。引用未知或扫描失败时必须保守保留 content，不能删除。
+
+orphan content 删除必须有 grace period。默认 grace period 为 1 小时，从 GC sweep 首次确认某个 contentRef 没有任何 journal 引用并在 manifest/cache 中写入 `orphanedAt` 开始计算；下一次 sweep 只有在仍无引用且已超过 grace period 时才删除。新的 journal 引用会清除 `orphanedAt`。该值可以配置，但不能短于一次正常 pin/save 操作和 journal flush 的最长预期窗口。
 
 GC 必须 best-effort，不阻塞 prompt/tool flow。
 
@@ -689,6 +691,12 @@ V2 新增的失败路径必须有 structured logs，格式沿用：
 
 这些日志不替代 API/SSE 中的 `persistenceWarning`，而是用于生产排障。
 
+诊断工具是 content retention 发布门槛之一。实现必须提供 CLI 或 daemon-internal API，例如 `qwen artifact fsck`，用于 dry-run 扫描 project/session artifact journals、content manifests 和 daemon-managed storage：
+
+- 报告 dangling `contentRef`、manifest 缺失、orphan content、snapshot/tombstone 不一致和 restore validation failure。
+- 默认只读；修复模式只能做可验证的安全动作，例如重新生成 snapshot、清除 stale cache marker、标记 orphan content 等待 GC。不能在没有引用集合确认和 grace period 的情况下直接删除内容。
+- 输出结构化结果并计数，至少包含 `fsck_dangling_content_ref`、`fsck_orphan_content`、`fsck_snapshot_invalid`；持续出现的 dangling contentRef 或 snapshot invalid 应触发告警。
+
 ## 9. 实现方案
 
 以下是同一个 V2 design phase 内的实现里程碑。工程上可以按 PR 拆开；对外以 capability 声明实际可用能力。
@@ -740,6 +748,7 @@ V2 新增的失败路径必须有 structured logs，格式沿用：
 - unpin 到 `ephemeral` 后 load 不复活 artifact。
 - DELETE、eviction、unpin-to-ephemeral、`restore_pruned` tombstone append 失败时不会先改变 live state。
 - workspace artifact ingest 和 restore 时文件存在/缺失/symlink escape 三种状态。
+- workspace root 重定位：相同相对路径存在时恢复为 available；缺失或 layout 不一致时恢复为 missing；不做 path remap。
 - pin/save content 时拒绝 symlink、special file、oversized stream、hardlink 异常和 TOCTOU swap。
 - external URL 只恢复 metadata，不发网络请求。
 - secret-bearing URL query/fragment 与 metadata key/value 不写入 JSONL。
@@ -756,6 +765,7 @@ V2 新增的失败路径必须有 structured logs，格式沿用：
 - quota 边界：200 条、201 条 prune、pinned metadata 处理。
 - GC：tombstoned content 有/无跨 session 引用、TTL 过期、session delete 后引用重建、orphan content grace cleanup。
 - authorization：token-holder/principal 审计路径允许和拒绝情况。
+- V1 live same-principal delete guard 保留、cross-principal delete audit、restored artifact ownership_unverified fallback。
 - partial writes：journal 成功但 warning、content manifest 成功但 journal 失败、journal 成功后 restore 能找到 content。
 - JSONL snapshot compaction：threshold 触发、tombstonedIds 保留、post-snapshot replay 有界。
 - corrupt latest snapshot fallback：回退到较旧 valid snapshot 或一次顺序 artifact replay。
@@ -763,6 +773,8 @@ V2 新增的失败路径必须有 structured logs，格式沿用：
 - retention defaults：tool artifact 无显式 retention、client POST `pinned` 被拒绝。
 - replay idempotency：同一 session history replay 两次不会重复 artifact。
 - SDK 旧 client 忽略 optional fields 后仍能展示 V1 artifacts。
+- V2 -> V1 rollback compatibility：旧 daemon 必须能解析或忽略 unknown `system` subtype，不得导致 session load 崩溃；回滚后 artifact persistence 不恢复是可接受降级。如果当前最低支持版本不能保证这一点，V2 writer 必须 capability-gate 到支持 unknown system record 的版本之后。
+- artifact fsck dry-run：dangling contentRef、orphan content、snapshot invalid 和 repair-safe actions。
 
 ## 11. 不建议在 V2 做的事
 
@@ -771,6 +783,7 @@ V2 新增的失败路径必须有 structured logs，格式沿用：
 - 默认复制所有 workspace artifact 内容。
 - 对 external URL 做 reachability poll。
 - 把 `clientId` 作为删除或 pin/save 的授权凭证。
+- 对重定位 workspace 做自动 path remapping。
 - 在 GET 热路径里做大量 fs/network 校验。
 - 把持久化失败变成普通 tool turn 失败。
 - 在没有测量证明需要时引入 sidecar cache。
