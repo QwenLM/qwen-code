@@ -4,7 +4,16 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { existsSync, readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
@@ -37,6 +46,65 @@ function step(section, name) {
     ),
   );
   return match?.[0] ?? '';
+}
+
+function reviewGhWrapper(runStep) {
+  const start = runStep.indexOf('cat > "$proxy_bin/gh" <<\'QWEN_GH_WRAPPER\'');
+  const bodyStart = runStep.indexOf('\n', start) + 1;
+  const end = runStep.indexOf('\n          QWEN_GH_WRAPPER', bodyStart);
+  return runStep.slice(bodyStart, end).replace(/^ {10}/gm, '');
+}
+
+function runReviewGhWrapper(
+  runStep,
+  args,
+  prState,
+  currentHead,
+  expectedHead = 'head-a',
+) {
+  const tempDir = mkdtempSync(path.join(tmpdir(), 'qwen-review-gh-'));
+  try {
+    const wrapperPath = path.join(tempDir, 'gh');
+    const realGhPath = path.join(tempDir, 'real-gh');
+    const ghLogPath = path.join(tempDir, 'gh.log');
+    writeFileSync(wrapperPath, reviewGhWrapper(runStep));
+    writeFileSync(
+      realGhPath,
+      [
+        '#!/usr/bin/env bash',
+        'set -euo pipefail',
+        'if [ "${1:-}" = "pr" ] && [ "${2:-}" = "view" ]; then',
+        '  printf "%s\\t%s\\n" "${FAKE_PR_STATE:-OPEN}" "${FAKE_HEAD_SHA:-head-a}"',
+        '  exit 0',
+        'fi',
+        'printf "%s\\n" "$*" >> "${FAKE_GH_LOG:?}"',
+      ].join('\n'),
+    );
+    writeFileSync(ghLogPath, '');
+    chmodSync(wrapperPath, 0o755);
+    chmodSync(realGhPath, 0o755);
+
+    const result = spawnSync(wrapperPath, args, {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        FAKE_GH_LOG: ghLogPath,
+        FAKE_HEAD_SHA: currentHead,
+        FAKE_PR_STATE: prState,
+        QWEN_CI_REAL_GH: realGhPath,
+        QWEN_CI_REVIEW_EXPECTED_HEAD_SHA: expectedHead,
+        QWEN_CI_REVIEW_PR_NUMBER: '123',
+        QWEN_CI_REVIEW_REPO: 'owner/repo',
+      },
+    });
+
+    return {
+      ...result,
+      ghLog: readFileSync(ghLogPath, 'utf8'),
+    };
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
 }
 
 describe('qwen resolve workflow', () => {
@@ -201,13 +269,104 @@ describe('qwen resolve workflow', () => {
     expect(staleHeadCheck).toContain(
       'EVENT_HEAD_SHA="${{ github.event.pull_request.head.sha }}"',
     );
-    expect(staleHeadCheck).toContain(
-      'CURRENT_HEAD_SHA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq \'.headRefOid\')"',
+    expect(runStep).toContain(
+      'PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq \'[.state, .headRefOid] | @tsv\')"',
+    );
+    expect(runStep).toContain(
+      'IFS=$\'\\t\' read -r PR_STATE CURRENT_HEAD_SHA <<< "$PR_DATA"',
     );
     expect(staleHeadCheck).toContain(
       'Skipping stale review run: event head ${EVENT_HEAD_SHA} is no longer current',
     );
     expect(staleHeadCheck).toContain('exit 0');
+  });
+
+  it('guards PR review publication against closed or stale PRs', () => {
+    const runStep = step(reviewJob, 'Run review');
+    const fallbackStep = step(reviewJob, 'Post fallback comment on failure');
+
+    expect(runStep).toContain('guard_pr_write()');
+    expect(runStep).toContain(
+      'Blocked PR write: PR #${pr_number} is ${state}.',
+    );
+    expect(runStep).toContain(
+      'Blocked PR write: PR #${pr_number} moved from ${expected_head} to ${current_head}.',
+    );
+    expect(runStep).toContain('repos/*/pulls/*/reviews');
+    expect(runStep).toContain('repos/*/pulls/*/comments');
+    expect(runStep).toContain('repos/*/issues/*/comments');
+    expect(runStep).toContain('repos/*/issues/comments/*');
+    expect(runStep).toContain('QWEN_CI_REVIEW_REPO="$REPO"');
+    expect(runStep).toContain('QWEN_CI_REVIEW_PR_NUMBER="$PR_NUMBER"');
+    expect(runStep).toContain(
+      'QWEN_CI_REVIEW_EXPECTED_HEAD_SHA="$EXPECTED_HEAD_SHA"',
+    );
+    expect(runStep).toContain(
+      'echo "expected_head_sha=$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"',
+    );
+    expect(fallbackStep).toContain('EXPECTED_HEAD_SHA:');
+    expect(fallbackStep).toContain(
+      'Skipping fallback comment: PR #${PR_NUMBER} is ${pr_state}.',
+    );
+    expect(fallbackStep).toContain(
+      'Skipping fallback comment: PR #${PR_NUMBER} moved from ${EXPECTED_HEAD_SHA} to ${current_head}.',
+    );
+  });
+
+  it('blocks wrapped gh review writes when the PR is closed or stale', () => {
+    const runStep = step(reviewJob, 'Run review');
+    const closedReview = runReviewGhWrapper(
+      runStep,
+      ['api', 'repos/owner/repo/pulls/123/reviews', '--input', 'review.json'],
+      'CLOSED',
+      'head-a',
+    );
+    expect(closedReview.status).toBe(90);
+    expect(closedReview.stderr).toContain(
+      'Blocked PR write: PR #123 is CLOSED',
+    );
+    expect(closedReview.ghLog).toBe('');
+
+    const staleSummary = runReviewGhWrapper(
+      runStep,
+      [
+        'api',
+        'repos/owner/repo/issues/comments/456',
+        '--method',
+        'PATCH',
+        '--input',
+        'summary.json',
+      ],
+      'OPEN',
+      'head-b',
+    );
+    expect(staleSummary.status).toBe(90);
+    expect(staleSummary.stderr).toContain(
+      'Blocked PR write: PR #123 moved from head-a to head-b',
+    );
+    expect(staleSummary.ghLog).toBe('');
+  });
+
+  it('allows wrapped gh review writes when the PR is still current', () => {
+    const runStep = step(reviewJob, 'Run review');
+    const currentSummary = runReviewGhWrapper(
+      runStep,
+      [
+        'api',
+        'repos/owner/repo/issues/123/comments',
+        '--method',
+        'POST',
+        '--input',
+        'summary.json',
+      ],
+      'OPEN',
+      'head-a',
+    );
+
+    expect(currentSummary.status).toBe(0);
+    expect(currentSummary.ghLog).toContain(
+      'api repos/owner/repo/issues/123/comments --method POST --input summary.json',
+    );
   });
 
   // Whole-file `toContain` cannot tell which job a guard lives on. Slice the
