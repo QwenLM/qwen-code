@@ -618,4 +618,16 @@ describe('isFallbackEligible', () => {
     expect(classification.statusCode).toBe(500);
     expect(isFallbackEligible(classification)).toBe(false);
   });
+
+  it('returns true for provider-level rate-limit without HTTP status', () => {
+    // DashScope-style rate-limit error with a numeric error code but no HTTP
+    // status — matches via extraRetryErrorCodes in isRateLimitError.
+    const error = { error: { code: 1302, message: 'Rate limit exceeded' } };
+    const classification = classifyRetryError(error, {
+      extraRetryErrorCodes: [1302],
+    });
+    expect(classification.kind).toBe('provider');
+    expect(classification.reason).toBe('rate-limit');
+    expect(isFallbackEligible(classification)).toBe(true);
+  });
 });

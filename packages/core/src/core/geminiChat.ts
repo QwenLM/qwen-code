@@ -2699,6 +2699,7 @@ export class GeminiChat {
               let fallbackIndex = 0;
               let currentModel = model;
               const initialFallbackClassification = currentErrorClassification;
+              const primaryError = lastError;
               let resolvedPrimaryModel = model;
               try {
                 resolvedPrimaryModel = (
@@ -2890,12 +2891,14 @@ export class GeminiChat {
               if (!fallbackSucceeded) {
                 self.popPendingPartialAssistantTurn();
                 if (fallbackFailures.length > 0 && lastError) {
+                  // Preserve the original capacity error as the root cause
+                  // so debuggers can trace back to what triggered fallback.
                   lastError = new Error(
                     `Primary model "${model}" failed ` +
                       `(${initialFallbackClassification.reason}); ` +
                       `fallback chain failed after trying: ` +
                       `${fallbackFailures.join(', ')}.`,
-                    { cause: lastError },
+                    { cause: primaryError },
                   );
                 }
                 debugLogger.warn(

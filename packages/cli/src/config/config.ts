@@ -660,7 +660,9 @@ export async function parseArguments(): Promise<CliArgs> {
           description:
             'Fallback model(s) for capacity errors (429/503/529), repeatable or comma-separated (max 3)',
           coerce: (models: string[]) =>
-            models.flatMap((m) => m.split(',').map((s) => s.trim())),
+            models
+              .flatMap((m) => m.split(',').map((s) => s.trim()))
+              .filter(Boolean),
         })
         .option('prompt', {
           alias: 'p',

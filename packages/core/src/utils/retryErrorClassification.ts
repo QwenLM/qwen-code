@@ -312,7 +312,11 @@ const FALLBACK_ELIGIBLE_REASONS = new Set([
  *
  * Returns true when the error reason indicates capacity/availability issues
  * (rate-limit, capacity-overload, server-error) where trying a different
- * model may succeed.
+ * model may succeed. Note: this deliberately covers errors with diagnosis
+ * `'retryable'` (e.g. 429/503 rate-limit) as well as those with the literal
+ * `'fallback-eligible'` diagnosis (529). The check is reason-based, not
+ * diagnosis-based, because same-model retries will already have been
+ * exhausted before this function is consulted.
  *
  * Returns false for:
  * - `fail-fast` diagnosis (auth, billing, quota, client errors)
