@@ -52,16 +52,9 @@ vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
   buildRuntimeFetchOptions: vi.fn(),
 }));
 
-// Mock DASHSCOPE_PROXY_BASE_URL so tests can control its value
-vi.mock('../constants.js', () => ({
-  DEFAULT_TIMEOUT: 120000,
-  DISABLED_REQUEST_TIMEOUT_MS: 2_147_483_647,
-  DEFAULT_MAX_RETRIES: 3,
-  DEFAULT_OPENAI_BASE_URL: 'https://api.openai.com/v1',
-  DEFAULT_DASHSCOPE_BASE_URL:
-    'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  DEFAULT_DEEPSEEK_BASE_URL: 'https://api.deepseek.com/v1',
-  DEFAULT_OPEN_ROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
+// Mock DASHSCOPE_PROXY_BASE_URL so tests can control its value, while
+// delegating every other constant (timeouts, sentinel, resolveRequestTimeout)
+// to the real module so the mock cannot drift from the implementation.
 vi.mock('../constants.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../constants.js')>();
   return {
@@ -71,13 +64,6 @@ vi.mock('../constants.js', async (importOriginal) => {
     },
   };
 });
-    if (timeout === undefined || timeout === null) return 120000;
-    return timeout <= 0 ? 2_147_483_647 : timeout;
-  },
-  get DASHSCOPE_PROXY_BASE_URL() {
-    return process.env['DASHSCOPE_PROXY_BASE_URL'];
-  },
-}));
 
 describe('DashScopeOpenAICompatibleProvider', () => {
   let provider: DashScopeOpenAICompatibleProvider;
