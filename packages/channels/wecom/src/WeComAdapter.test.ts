@@ -559,6 +559,68 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('resets the kick reconnect attempt budget after a successful reconnect', async () => {
+    vi.useFakeTimers();
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+
+    for (let kick = 0; kick < 4; kick += 1) {
+      lastClient().emit('event.disconnected_event', 'kicked');
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.waitFor(() => expect(mocks.instances).toHaveLength(kick + 2));
+      await vi.waitFor(() =>
+        expect(
+          (
+            channel as unknown as {
+              reconnectingAfterKick: boolean;
+            }
+          ).reconnectingAfterKick,
+        ).toBe(false),
+      );
+    }
+
+    channel.disconnect();
+  });
+
+  it('retries failed kick reconnect attempts with exponential backoff', async () => {
+    vi.useFakeTimers();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    mocks.state.connectErrorsRemaining = 2;
+
+    lastClient().emit('event.disconnected_event', 'kicked');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(4));
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('reconnect after server kick attempt 1 failed'),
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('reconnect after server kick attempt 2 failed'),
+    );
+    expect(lastClient().connect).toHaveBeenCalledTimes(1);
+
+    channel.disconnect();
+    stderr.mockRestore();
+  });
+
+  it('stops kick reconnect when the channel disconnects mid-retry', async () => {
+    vi.useFakeTimers();
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+
+    lastClient().emit('event.disconnected_event', 'kicked');
+    channel.disconnect();
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(mocks.instances).toHaveLength(1);
+  });
+
   it('does not clear adapter state when reconnecting after a kick', async () => {
     vi.useFakeTimers();
     const bridge = makeBridge();
@@ -626,6 +688,36 @@ describe('WeComChannel', () => {
 
     await expect(connecting).rejects.toThrow('kicked');
     expect(client.disconnect).toHaveBeenCalled();
+  });
+
+  it('fails pending authentication promptly on SDK errors', async () => {
+    mocks.state.autoAuthenticate = false;
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+
+    const connecting = channel.connect();
+    lastClient().emit('error', new Error('auth failed'));
+
+    await expect(connecting).rejects.toThrow(
+      'WeCom authentication failed: Error: auth failed',
+    );
+    stderr.mockRestore();
+  });
+
+  it('fails pending authentication when the timeout elapses', async () => {
+    vi.useFakeTimers();
+    mocks.state.autoAuthenticate = false;
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+
+    const connecting = channel.connect();
+    const rejection = expect(connecting).rejects.toThrow(
+      'WeCom authentication timed out.',
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    await rejection;
   });
 
   it('removes SDK event handlers on disconnect', async () => {
@@ -2273,6 +2365,59 @@ describe('WeComChannel', () => {
     finishSecond?.();
 
     await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
+  });
+
+  it('removes buffered attachment files when a collect buffer is cleared', async () => {
+    const bridge = makeBridge();
+    (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<string>(() => {}),
+    );
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ dispatchMode: 'collect' }),
+      bridge,
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgid: 'msg-active',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'active.txt',
+      },
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+    client.emit('message.file', {
+      msgid: 'msg-buffered',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'buffered.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(2));
+    const bufferedDir = channelFileDirs().find((dir) =>
+      existsSync(join(dir, 'buffered.txt')),
+    );
+    expect(bufferedDir).toBeDefined();
+
+    client.emit('message.text', {
+      msgid: 'msg-clear',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: '/clear' },
+    });
+
+    await vi.waitFor(() => expect(existsSync(bufferedDir!)).toBe(false));
   });
 
   it('keeps files buffered during a coalesced prompt for the next prompt', async () => {

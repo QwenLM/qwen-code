@@ -664,6 +664,7 @@ export class WeComChannel extends ChannelBase {
         if (this.disconnectGeneration !== disconnectGeneration) return;
         try {
           await this.connect();
+          this.kickReconnectAttempts = 0;
           this.scheduleKickReconnectReset();
           return;
         } catch (err) {
