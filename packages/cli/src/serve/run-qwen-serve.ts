@@ -2082,6 +2082,11 @@ export async function runQwenServe(
         }
         return trustedSecondary;
       });
+    daemonLog.info('daemon workspace roots initialized', {
+      primary: boundWorkspaces[0],
+      secondary: boundWorkspaces.slice(1),
+      ideEnvPresent: !!process.env[IDE_WORKSPACE_PATH_ENV_VAR],
+    });
     const fsFactory = runtime.resolveBridgeFsFactory({
       // Secondary roots share a write-capable factory only after their own
       // folder trust check passes; untrusted secondary roots stay outside.

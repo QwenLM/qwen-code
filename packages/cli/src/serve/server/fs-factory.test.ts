@@ -78,6 +78,15 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
     expect(resolveBoundWorkspacesFromIdeEnv(dirs.primary, '[not json')).toEqual(
       [primary],
     );
+    expect(
+      resolveBoundWorkspacesFromIdeEnv(dirs.primary, JSON.stringify([1, 2, 3])),
+    ).toEqual([primary]);
+    expect(
+      resolveBoundWorkspacesFromIdeEnv(
+        dirs.primary,
+        JSON.stringify(['relative']),
+      ),
+    ).toEqual([primary]);
   });
 
   it('drops env parents without losing sibling roots', async () => {

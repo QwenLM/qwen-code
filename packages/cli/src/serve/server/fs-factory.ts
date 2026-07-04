@@ -118,7 +118,9 @@ function parseIdeWorkspacePathEnv(value: string | undefined): string[] {
       Array.isArray(parsed) &&
       parsed.every((item) => typeof item === 'string')
     ) {
-      return parsed.filter((workspace) => workspace.length > 0);
+      return parsed.filter(
+        (workspace) => workspace.length > 0 && path.isAbsolute(workspace),
+      );
     }
     throw new Error('IDE workspace path JSON must be a string array');
   }
