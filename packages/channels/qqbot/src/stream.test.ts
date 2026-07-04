@@ -809,4 +809,49 @@ describe('error recovery paths', () => {
     // No additional send call
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
   });
+
+  it('disconnect() calls clearTimeout on streamState timers', () => {
+    const ch = makeChannel();
+    vi.spyOn(global, 'clearTimeout');
+
+    onResponseChunk(ch, 'test-chat', 'buffered', 'sess-1');
+    const entry = streamState(ch).get('sess-1');
+    expect(entry!.timer).not.toBeNull();
+
+    const chp = ch as unknown as Record<string, unknown>;
+    (chp['disconnect'] as () => void)();
+
+    expect(clearTimeout).toHaveBeenCalledWith(entry!.timer);
+  });
+
+  it('wasFlushed dedup skips send in onResponseComplete', async () => {
+    const ch = makeChannel();
+    // Reset mock implementation (previous test may have left it rejecting)
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const flushedSessions = chp['flushedSessions'] as Set<string>;
+    flushedSessions.add('sess-1');
+
+    await onResponseComplete(ch, 'test-chat', 'full text', 'sess-1');
+
+    // wasFlushed=true + no streamState => remaining='' => no send
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+
+  it('onToolCall flushingSessions guard prevents send while flushing', () => {
+    const ch = makeChannel();
+    onResponseChunk(ch, 'test-chat', 'tool text', 'sess-1');
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Set<string>;
+    flushingSessions.add('sess-1');
+
+    ch.onToolCall('test-chat', toolCall('sess-1'));
+
+    // Buffer should NOT be cleared (guard prevented the send path)
+    expect(streamState(ch).get('sess-1')!.buffer).toBe('tool text');
+    // sendMessage should NOT have been called
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
 });
