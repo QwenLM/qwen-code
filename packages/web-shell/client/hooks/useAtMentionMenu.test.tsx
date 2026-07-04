@@ -1600,7 +1600,7 @@ describe('useAtMentionMenu', () => {
     });
     act(() => latest!.accept());
     await runDebounce();
-    act(() => latest!.refreshForView(makeView('@my:server:res://doc')));
+    act(() => latest!.refreshForView(makeView('@my\\:server\\:res\\://doc')));
     await runDebounce();
 
     expect(loadMcpResources).toHaveBeenLastCalledWith('my:server', {

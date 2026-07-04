@@ -236,15 +236,16 @@ function splitInsertedReferenceQuery(
   itemQuery: string;
   validateServer?: boolean;
 } | null {
+  const unescapedQuery = unescapeAtReferenceText(query);
   if (
     lastSelectedProviderId === MCP_RESOURCES_PROVIDER_ID &&
     lastSelectedMcpServerName &&
-    query.startsWith(`${lastSelectedMcpServerName}:`)
+    unescapedQuery.startsWith(`${lastSelectedMcpServerName}:`)
   ) {
     return {
       providerId: MCP_RESOURCES_PROVIDER_ID,
       serverName: lastSelectedMcpServerName,
-      itemQuery: query.slice(lastSelectedMcpServerName.length + 1),
+      itemQuery: unescapedQuery.slice(lastSelectedMcpServerName.length + 1),
       validateServer: true,
     };
   }

@@ -1046,7 +1046,7 @@ export function useComposerCore(
     const doc = view.state.doc;
     const to = trigger.from + trigger.text.length;
     if (
-      doc.length >= to &&
+      doc.length === to &&
       doc.sliceString(trigger.from, to) === trigger.text
     ) {
       view.dispatch({
