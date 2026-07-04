@@ -130,6 +130,177 @@ export function requireWorkspaceCwd(caps: DaemonCapabilities): string {
   return caps.workspaceCwd;
 }
 
+/** Detail level accepted by `GET /daemon/status?detail=`. */
+export type DaemonStatusReportDetail = 'summary' | 'full';
+
+/** Overall health rollup of a daemon status report. */
+export type DaemonStatusReportLevel = 'ok' | 'warning' | 'error';
+
+/** One triage finding surfaced by the daemon status rollup. */
+export interface DaemonStatusReportIssue {
+  code: string;
+  severity: 'warning' | 'error';
+  message: string;
+  /** Status section the issue was derived from (e.g. `workspace.mcp`). */
+  section?: string;
+}
+
+/**
+ * One independently-degraded workspace diagnostics section in a
+ * `detail=full` status report (`full.workspace.<name>`). `data` is the raw
+ * section payload (shape varies per section) — render `summary` instead.
+ */
+export interface DaemonStatusReportSection {
+  status: DaemonStatusReportLevel | 'unavailable';
+  durationMs: number;
+  summary?: Record<string, string | number | boolean | null>;
+  data?: unknown;
+  error?: { kind: 'timeout' | 'error'; message: string };
+}
+
+/** Per-session diagnostics row in a `detail=full` status report. */
+export interface DaemonStatusReportSession {
+  sessionId: string;
+  workspaceCwd: string;
+  createdAt: string;
+  displayName?: string;
+  clientCount: number;
+  subscriberCount: number;
+  attachCount: number;
+  pendingPromptCount: number;
+  pendingPermissionCount: number;
+  hasActivePrompt: boolean;
+  lastEventId: number;
+  lastSeenAt?: number;
+  currentModelId?: string;
+  currentApprovalMode?: string;
+}
+
+/**
+ * Status report envelope returned from `GET /daemon/status`. Fields the
+ * daemon may add over time arrive as additive optional members, mirroring
+ * the `DaemonCapabilities` convention.
+ */
+export interface DaemonStatusReport {
+  v: 1;
+  detail: DaemonStatusReportDetail;
+  generatedAt: string;
+  status: DaemonStatusReportLevel;
+  issues: DaemonStatusReportIssue[];
+  daemon: {
+    pid: number;
+    uptimeMs: number;
+    mode: DaemonMode;
+    workspaceCwd: string;
+    /** Startup timing/preheat snapshot; `preheat.status` is widened to string. */
+    startup?: {
+      processStartedAt: string;
+      listenerReadyAt?: string;
+      processToListenMs?: number;
+      runQwenServeToListenMs?: number;
+      preheat: { status: string; durationMs?: number; error?: string };
+    };
+    qwenCodeVersion?: string;
+    daemonId?: string;
+    /** Present only in `detail=full` responses. */
+    logPath?: string;
+  };
+  security: {
+    tokenConfigured: boolean;
+    requireAuth: boolean;
+    loopbackBind: boolean;
+    allowOriginConfigured: boolean;
+    allowOriginMode: string;
+    sessionShellCommandEnabled: boolean;
+  };
+  limits: {
+    maxSessions: number | null;
+    maxPendingPromptsPerSession: number | null;
+    listenerMaxConnections: number | null;
+    eventRingSize: number;
+    promptDeadlineMs: number | null;
+    writerIdleTimeoutMs: number | null;
+    channelIdleTimeoutMs: number;
+    sessionIdleTimeoutMs: number;
+    acpConnectionCap: number | null;
+  };
+  capabilities: {
+    protocolVersions: DaemonProtocolVersions;
+    features: string[];
+  };
+  runtime: {
+    /** Present while the daemon runtime is still starting up. */
+    loading?: boolean;
+    /** Present when the daemon runtime failed to start. */
+    error?: string;
+    sessions: { active: number };
+    permissions: { pending: number; policy: string };
+    channel: { live: boolean };
+    // Mirrors the daemon's ChannelWorkerSnapshot. `state` and `signal` are
+    // widened to string to avoid coupling the wire type to the daemon's unions.
+    channelWorker: {
+      enabled: boolean;
+      state: string;
+      channels: string[];
+      requestedChannels?: string[];
+      pid?: number;
+      startedAt?: string;
+      exitCode?: number | null;
+      signal?: string | null;
+      error?: string;
+      restartCount?: number;
+      lastExitAt?: string;
+      lastRestartAt?: string;
+      nextRestartAt?: string;
+      lastHeartbeatAt?: string;
+      staleHeartbeatAt?: string;
+    };
+    transport: {
+      restSseActive: number;
+      acp: {
+        enabled: boolean;
+        connections: number;
+        connectionStreams: number;
+        sessionStreams: number;
+        sseStreams: number;
+        wsStreams: number;
+        pendingClientRequests: number;
+      };
+    };
+    rateLimit: {
+      enabled: boolean;
+      rejectedSinceStart: Record<string, number>;
+    };
+    /**
+     * Prompt/session activity counters. Optional because this is additive to
+     * v=1; daemons predating it omit the sub-object. `lastActivityAt`/
+     * `idleSinceMs` are null when the daemon has seen no activity yet.
+     */
+    activity?: {
+      activePrompts: number;
+      lastActivityAt: string | null;
+      idleSinceMs: number | null;
+    };
+    process: {
+      rss: number;
+      heapTotal: number;
+      heapUsed: number;
+      external?: number;
+      arrayBuffers?: number;
+    };
+  };
+  /** Present only when requested with `detail=full`. */
+  full?: {
+    sessions: DaemonStatusReportSession[];
+    acpConnections: Array<Record<string, unknown>>;
+    workspace: Record<string, DaemonStatusReportSection>;
+    auth: {
+      supportedDeviceFlowProviders: string[];
+      pendingDeviceFlowCount: number;
+    };
+  };
+}
+
 /** Returned from `POST /session`. */
 export interface DaemonSession {
   sessionId: string;

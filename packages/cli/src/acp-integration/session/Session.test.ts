@@ -454,6 +454,11 @@ describe('Session', () => {
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
+      // Mimics the resolved Config getter: always a number. The daemon-cap
+      // test overrides this with a small value.
+      getMaxToolCallsPerTurn: vi
+        .fn()
+        .mockReturnValue(core.DEFAULT_MAX_TOOL_CALLS_PER_TURN),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
       getBackgroundTaskRegistry: vi
         .fn()
@@ -2954,6 +2959,9 @@ describe('Session', () => {
 
       it('stops an ACP prompt after exceeding the daemon tool-call cap', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        // Pin the cap via the config mock — the daemon halts at whatever the
+        // resolved getter returns.
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
         const functionCalls = Array.from({ length: 102 }, (_, index) => ({
           id: `read_${index}`,
           name: 'read_file',
@@ -7483,6 +7491,32 @@ describe('Session', () => {
       } finally {
         await fs.rm(tempDir, { recursive: true, force: true });
       }
+    });
+
+    it('injects MCP server context for @mcp mentions', async () => {
+      mockConfig.getMcpServers = vi.fn().mockReturnValue({ demo: {} });
+      mockConfig.getPromptRegistry = vi.fn().mockReturnValue({
+        getPromptsByServer: (name: string) => (name === 'demo' ? ['p'] : []),
+      });
+      mockConfig.getResourceRegistry = vi.fn().mockReturnValue({
+        getResourcesByServer: (name: string) =>
+          name === 'demo' ? [{ uri: 'res://1' }] : [],
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'Use @mcp:demo now' }],
+      });
+
+      const message = firstSentMessage();
+      expect(message[0]).toEqual({ text: 'Use @mcp:demo now' });
+      const sentText = textParts(message).join('\n');
+      expect(sentText).toContain('--- MCP Server: demo ---');
+      expect(sentText).toContain('- Resources: 1');
+      expect(sentText).toContain('- Prompts: 1');
     });
 
     it('dedupes repeated extension mentions and skips unknown mentions', async () => {
