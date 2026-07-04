@@ -483,7 +483,8 @@ export function reloadEnvironment(
       if (RELOAD_EXCLUDED_KEYS.has(key)) continue;
       if (PROJECT_ENV_HARDCODED_EXCLUSIONS.includes(key)) continue;
       if (typeof value !== 'string') continue;
-      if (newDotEnvKeys.has(key)) continue;
+      const dotEnvValue = newDotEnvKeys.get(key);
+      if (dotEnvValue !== undefined && dotEnvValue !== '') continue;
       // When .env read failed, use the snapshot as the shadow set so
       // settings.env keys that were previously shadowed by .env don't
       // accidentally overwrite the still-live .env values in process.env.
@@ -525,6 +526,7 @@ export function reloadEnvironment(
   // This unconditional write is necessary because ACP children inherit
   // daemon env without tracking, so the tracking-based guard would miss them.
   for (const [key, value] of newDotEnvKeys) {
+    if (value === '' && newSettingsEnvKeys.has(key)) continue;
     if (process.env[key] !== value) {
       updatedKeys.push(key);
     }

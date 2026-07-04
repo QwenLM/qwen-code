@@ -4792,6 +4792,36 @@ describe('Settings Loading and Merging', () => {
       expect(result.updatedKeys).toEqual(['OPENCODE_GO_API_KEY']);
       expect(result.removedKeys).toEqual([]);
     });
+
+    it('keeps settings.env value during reload when .env value is empty', () => {
+      process.env['RELOAD_EMPTY_DOTENV_VAR'] = 'from_settings';
+      const projectEnvPath = path.resolve(MOCK_WORKSPACE_DIR, '.env');
+
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => projectEnvPath === normalizeFsPath(p),
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          const filePath = normalizeFsPath(p);
+          if (filePath === projectEnvPath) return 'RELOAD_EMPTY_DOTENV_VAR=';
+          return '{}';
+        },
+      );
+
+      const result = reloadEnvironment(
+        { env: { RELOAD_EMPTY_DOTENV_VAR: 'from_settings' } },
+        MOCK_WORKSPACE_DIR,
+      );
+
+      expect(process.env['RELOAD_EMPTY_DOTENV_VAR']).toEqual('from_settings');
+      expect(result.updatedKeys).toEqual([]);
+      expect(result.removedKeys).toEqual([]);
+      delete process.env['RELOAD_EMPTY_DOTENV_VAR'];
+    });
   });
 
   describe('needsMigration', () => {
