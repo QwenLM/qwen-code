@@ -81,7 +81,7 @@ Commands for managing AI tools and models.
 | `/mcp`            | List configured MCP servers and tools                                            | `/mcp`, `/mcp desc`, `/mcp nodesc`, `/mcp schema`                                                         |
 | `/import-config`  | Import MCP servers from Claude configs                                           | `/import-config all`, `/import-config claude-code`, `/import-config claude-desktop --scope user\|project` |
 | `/tools`          | Display currently available tool list                                            | `/tools`, `/tools desc`                                                                                   |
-| `/skills`         | List and run available skills                                                    | `/skills`, `/skills <name>`                                                                               |
+| `/skills`         | Open the Skills panel to browse, search, toggle, and launch skills               | `/skills` (run a skill directly with `/<skill-name>`)                                                     |
 | `/plan`           | Switch to plan mode or exit plan mode                                            | `/plan`, `/plan <task>`, `/plan exit`                                                                     |
 | `/approval-mode`  | Change the tool-approval mode (current session only)                             | `/approval-mode`, `/approval-mode auto-edit`                                                              |
 | → `plan`          | Analysis only, no execution (secure review)                                      | `/approval-mode plan`                                                                                     |

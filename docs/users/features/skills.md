@@ -17,13 +17,13 @@ Agent Skills package expertise into discoverable capabilities. Each Skill consis
 
 Skills are **model-invoked** — the model autonomously decides when to use them based on your request and the Skill's description. This is different from slash commands, which are **user-invoked** (you explicitly type `/command`).
 
-If you want to invoke a Skill explicitly, use the `/skills` slash command:
+If you want to invoke a Skill explicitly, type it as a slash command using the Skill's name:
 
 ```bash
-/skills <skill-name>
+/<skill-name>
 ```
 
-Use autocomplete to browse available Skills and descriptions.
+Start typing `/` to autocomplete and browse available Skills alongside their descriptions. The `/skills` command opens the Skills panel, where you can browse, search, toggle, and launch Skills interactively — running `/skills <skill-name>` just opens the panel (trailing arguments are ignored).
 
 ### Benefits
 
