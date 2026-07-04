@@ -98,6 +98,7 @@ const mocks = vi.hoisted(() => {
   const state = {
     autoAuthenticate: true,
     connectErrorsRemaining: 0,
+    connectNeverSettles: false,
   };
 
   class MockWSClient {
@@ -107,6 +108,9 @@ const mocks = vi.hoisted(() => {
       if (state.connectErrorsRemaining > 0) {
         state.connectErrorsRemaining -= 1;
         return Promise.reject(new Error('connect failed'));
+      }
+      if (state.connectNeverSettles) {
+        return new Promise(() => {});
       }
       if (state.autoAuthenticate) {
         queueMicrotask(() => this.emit('authenticated', {}));
@@ -302,6 +306,7 @@ describe('WeComChannel', () => {
     mocks.httpCalls.length = 0;
     mocks.state.autoAuthenticate = true;
     mocks.state.connectErrorsRemaining = 0;
+    mocks.state.connectNeverSettles = false;
     mocks.httpResponse.statusCode = 200;
     mocks.httpResponse.headers = {};
     mocks.httpResponse.body = Buffer.from('downloaded');
@@ -727,6 +732,22 @@ describe('WeComChannel', () => {
     await vi.advanceTimersByTimeAsync(30_000);
 
     await rejection;
+  });
+
+  it('fails authentication timeout even when SDK connect hangs', async () => {
+    vi.useFakeTimers();
+    mocks.state.autoAuthenticate = false;
+    mocks.state.connectNeverSettles = true;
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+
+    const connecting = channel.connect();
+    const rejection = expect(connecting).rejects.toThrow(
+      'WeCom authentication timed out.',
+    );
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    await rejection;
+    expect(lastClient().disconnect).toHaveBeenCalled();
   });
 
   it('removes SDK event handlers on disconnect', async () => {
@@ -1458,6 +1479,34 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('blocks SIIT IPv4-mapped IPv6 media URLs before probing them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-siit-mapped-ip',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://[::ffff:0:a00:1]/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
   it('blocks IPv6 transition media URLs before probing them', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -2068,6 +2117,24 @@ describe('WeComChannel', () => {
       chattype: 'single',
       from: { userid: 'alice' },
       image: { url: 'https://192.0.2.1/image', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+  });
+
+  it('rejects IPv6 documentation ranges', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-doc-ipv6',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://[2001:db8::1]/image', aeskey: 'k1' },
     });
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));

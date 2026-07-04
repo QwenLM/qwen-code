@@ -194,9 +194,12 @@ export class WeComChannel extends ChannelBase {
     const authentication = waitForAuthentication(client);
     this.authentication = authentication;
     try {
+      authentication.promise.catch(() => {});
       const connected = client.connect();
-      if (isPromiseLike(connected)) await connected;
-      await authentication.promise;
+      const connectedPromise = isPromiseLike(connected)
+        ? Promise.resolve(connected).then(() => {})
+        : Promise.resolve();
+      await Promise.all([connectedPromise, authentication.promise]);
       authenticated = true;
       if (this.connectingClient !== client) {
         throw new Error('WeCom connection was replaced before authentication.');
@@ -1360,6 +1363,7 @@ function isPublicIpAddress(address: string): boolean {
       isLoopback ||
       (first >= 0xfc00 && first <= 0xfdff) ||
       (first >= 0xff00 && first <= 0xffff) ||
+      (first === 0x2001 && groups[1] === 0x0db8) ||
       isIpv6LinkLocalGroup(first)
     );
   }
@@ -1401,6 +1405,14 @@ function parseEmbeddedIpv4(host: string): number[] | undefined {
 
   const groups = expandIpv6Groups(host);
   if (!groups) return undefined;
+  if (
+    groups.slice(0, 4).every((group) => group === 0) &&
+    groups[4] === 0xffff &&
+    groups[5] === 0 &&
+    (groups[6] !== 0 || groups[7] !== 0)
+  ) {
+    return hexGroupsToIpv4(groups[6], groups[7]);
+  }
   if (
     groups.slice(0, 5).every((group) => group === 0) &&
     groups[5] === 0xffff &&
