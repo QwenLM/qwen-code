@@ -37,7 +37,13 @@ const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 
 const noop = () => {};
 
-function renderSidebar(collapsed: boolean): HTMLElement {
+function renderSidebar(
+  collapsed: boolean,
+  overrides: Partial<{
+    onOpenSettings: () => void;
+    onOpenDaemonStatus: () => void;
+  }> = {},
+): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
@@ -48,9 +54,11 @@ function renderSidebar(collapsed: boolean): HTMLElement {
           collapsed={collapsed}
           onCollapsedChange={noop}
           onOpenSettings={noop}
+          onOpenDaemonStatus={noop}
           onNewSession={() => false}
           onLoadSession={noop}
           onError={noop}
+          {...overrides}
         />
       </I18nProvider>,
     );
@@ -97,5 +105,33 @@ describe('WebShellSidebar — version footer', () => {
     mockConnection.capabilities = undefined;
     const container = renderSidebar(false);
     expect(container.textContent ?? '').not.toMatch(/v\d/);
+  });
+});
+
+describe('WebShellSidebar — daemon status entry', () => {
+  it('invokes onOpenDaemonStatus when the footer button is clicked', () => {
+    const onOpenDaemonStatus = vi.fn();
+    const container = renderSidebar(false, { onOpenDaemonStatus });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Daemon Status"]',
+    );
+    expect(button).not.toBeNull();
+    act(() => {
+      button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenDaemonStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it('still exposes the daemon status button when collapsed', () => {
+    const onOpenDaemonStatus = vi.fn();
+    const container = renderSidebar(true, { onOpenDaemonStatus });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Daemon Status"]',
+    );
+    expect(button).not.toBeNull();
+    act(() => {
+      button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(onOpenDaemonStatus).toHaveBeenCalledTimes(1);
   });
 });
