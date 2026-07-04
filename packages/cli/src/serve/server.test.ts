@@ -9570,6 +9570,8 @@ describe('createServeApp', () => {
 
       expect(res.status).toBe(200);
       expect(res.headers['content-type']).toContain('text/html');
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
       expect(res.headers['content-disposition']).toMatch(
         /^attachment; filename="qwen-code-export-.+\.html"$/,
       );
@@ -9596,6 +9598,9 @@ describe('createServeApp', () => {
       expect(res.headers['content-disposition']).toContain(`.${format}"`);
       expect(res.text).toContain(marker);
       expect(res.text).toContain('hello export');
+      if (format === 'json') {
+        expect(res.body.metadata.channel).toBe('daemon');
+      }
     });
 
     it('rejects invalid export format', async () => {

@@ -456,12 +456,15 @@ export function registerSessionRoutes(
             workspaceCwd: boundWorkspace,
             sessionId,
             format,
+            config: { getChannel: () => 'daemon' },
           });
         },
       );
       const filename = result.filename.replace(/["\\\r\n]/g, '_');
       res
         .status(200)
+        .set('Cache-Control', 'no-store')
+        .set('X-Content-Type-Options', 'nosniff')
         .set('Content-Type', result.mimeType)
         .set('Content-Disposition', `attachment; filename="${filename}"`)
         .send(result.content);

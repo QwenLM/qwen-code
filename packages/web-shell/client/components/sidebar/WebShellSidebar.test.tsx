@@ -3,32 +3,37 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
-const { mockConnection, mockActive, mockArchived, renameSessionSpy, mockExportSession } =
-  vi.hoisted(() => {
-    const makeStore = () => ({
-      sessions: [] as MockSession[],
-      loading: false,
-      error: null as unknown,
-      reload: vi.fn(),
-      deleteSession: vi.fn().mockResolvedValue(true),
-      archiveSession: vi.fn().mockResolvedValue(true),
-      unarchiveSession: vi.fn().mockResolvedValue(true),
-    });
-    return {
-      mockConnection: {
-        status: 'connected',
-        sessionId: null as string | null,
-        workspaceCwd: '/tmp/project',
-        capabilities: { qwenCodeVersion: '1.2.3', features: [] as string[] } as
-          | { qwenCodeVersion?: string; features?: string[] }
-          | undefined,
-      },
-      mockActive: makeStore(),
-      mockArchived: makeStore(),
-      renameSessionSpy: vi.fn(),
-      mockExportSession: vi.fn(),
-    };
+const {
+  mockConnection,
+  mockActive,
+  mockArchived,
+  renameSessionSpy,
+  mockExportSession,
+} = vi.hoisted(() => {
+  const makeStore = () => ({
+    sessions: [] as MockSession[],
+    loading: false,
+    error: null as unknown,
+    reload: vi.fn(),
+    deleteSession: vi.fn().mockResolvedValue(true),
+    archiveSession: vi.fn().mockResolvedValue(true),
+    unarchiveSession: vi.fn().mockResolvedValue(true),
   });
+  return {
+    mockConnection: {
+      status: 'connected',
+      sessionId: null as string | null,
+      workspaceCwd: '/tmp/project',
+      capabilities: { qwenCodeVersion: '1.2.3', features: [] as string[] } as
+        | { qwenCodeVersion?: string; features?: string[] }
+        | undefined,
+    },
+    mockActive: makeStore(),
+    mockArchived: makeStore(),
+    renameSessionSpy: vi.fn(),
+    mockExportSession: vi.fn(),
+  };
+});
 
 type MockSession = {
   sessionId: string;
@@ -82,6 +87,7 @@ function renderSidebar(
   overrides: Partial<{
     onOpenSettings: () => void;
     onOpenDaemonStatus: () => void;
+    onLoadSession: (sessionId: string) => Promise<void> | void;
     onError: (error: unknown, message: string) => void;
   }> = {},
 ): HTMLElement {
@@ -109,16 +115,19 @@ function renderSidebar(
 }
 
 beforeEach(() => {
-mockConnection.sessionId = null;
+  mockConnection.sessionId = null;
   mockConnection.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
   for (const store of [mockActive, mockArchived]) {
     store.sessions = [];
     store.loading = false;
     store.error = null;
-    store.reload.mockClear();
-    store.deleteSession.mockClear();
-    store.archiveSession.mockClear();
-    store.unarchiveSession.mockClear();
+    store.reload.mockReset();
+    store.deleteSession.mockReset();
+    store.archiveSession.mockReset();
+    store.unarchiveSession.mockReset();
+    store.deleteSession.mockResolvedValue(true);
+    store.archiveSession.mockResolvedValue(true);
+    store.unarchiveSession.mockResolvedValue(true);
   }
   renameSessionSpy.mockClear();
   mockExportSession.mockReset();
@@ -127,7 +136,7 @@ mockConnection.sessionId = null;
     filename: 'session.html',
     mimeType: 'text/html',
     format: 'html',
-  })
+  });
 });
 
 afterEach(() => {
@@ -213,7 +222,6 @@ async function clickAsync(el: Element | null): Promise<void> {
   });
 }
 
-
 describe('WebShellSidebar — session export', () => {
   it('hides export action when daemon does not advertise session_export', () => {
     mockActive.sessions = [makeSession('session-1')];
@@ -255,6 +263,55 @@ describe('WebShellSidebar — session export', () => {
     expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
     expect(clickSpy).toHaveBeenCalledTimes(1);
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:session-export');
+  });
+
+  it('does not block switching sessions while an export is running', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_export'],
+    };
+    mockActive.sessions = [makeSession('session-1'), makeSession('session-2')];
+    let resolveExport:
+      | ((value: Awaited<ReturnType<typeof mockExportSession>>) => void)
+      | undefined;
+    mockExportSession.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveExport = resolve;
+      }),
+    );
+    const createObjectURL = vi.fn(() => 'blob:session-export');
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL,
+      revokeObjectURL: vi.fn(),
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const onLoadSession = vi.fn();
+    const container = renderSidebar(false, { onLoadSession });
+    const exportButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Export conversation record"]',
+    );
+
+    await act(async () => {
+      exportButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const secondSessionRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((el) => el.textContent?.includes('Session session-2'));
+    click(secondSessionRow ?? null);
+
+    expect(onLoadSession).toHaveBeenCalledWith('session-2');
+
+    await act(async () => {
+      resolveExport?.({
+        content: '<html>export</html>',
+        filename: 'session.html',
+        mimeType: 'text/html',
+        format: 'html',
+      });
+      await Promise.resolve();
+    });
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
   });
 
   it('reports export failures through onError', async () => {

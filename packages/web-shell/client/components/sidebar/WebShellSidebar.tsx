@@ -324,12 +324,19 @@ export function WebShellSidebar({
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
-  const { sessions, loading, error, reload, deleteSession, exportSession, archiveSession } =
-    useSessions({
-      autoLoad: true,
-      pageSize: SIDEBAR_SESSION_PAGE_SIZE,
-      archiveState: 'active',
-    });
+  const {
+    sessions,
+    loading,
+    error,
+    reload,
+    deleteSession,
+    exportSession,
+    archiveSession,
+  } = useSessions({
+    autoLoad: true,
+    pageSize: SIDEBAR_SESSION_PAGE_SIZE,
+    archiveState: 'active',
+  });
   const [archivedExpanded, setArchivedExpanded] = useState(false);
   const {
     sessions: archivedSessions,
@@ -353,6 +360,10 @@ export function WebShellSidebar({
   const [editingName, setEditingName] = useState('');
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const busySessionIdRef = useRef<string | null>(null);
+  const [exportingSessionIds, setExportingSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const exportingSessionIdsRef = useRef<Set<string>>(new Set());
   const creatingSessionRef = useRef(false);
   const [deleteCandidate, setDeleteCandidate] =
     useState<DaemonSessionSummary | null>(null);
@@ -645,12 +656,27 @@ export function WebShellSidebar({
     [currentSessionId],
   );
 
+  const setSessionExporting = useCallback(
+    (sessionId: string, exporting: boolean) => {
+      const next = new Set(exportingSessionIdsRef.current);
+      if (exporting) {
+        next.add(sessionId);
+      } else {
+        next.delete(sessionId);
+      }
+      exportingSessionIdsRef.current = next;
+      setExportingSessionIds(next);
+    },
+    [],
+  );
+
   const handleExportSession = useCallback(
     (session: DaemonSessionSummary) => {
-      if (!canExportSessions || busySessionIdRef.current !== null) return;
       const sessionId = session.sessionId;
-      busySessionIdRef.current = sessionId;
-      setBusySessionId(sessionId);
+      if (!canExportSessions || exportingSessionIdsRef.current.has(sessionId)) {
+        return;
+      }
+      setSessionExporting(sessionId, true);
       void (async () => {
         try {
           const result = await exportSession(sessionId, 'html');
@@ -671,16 +697,11 @@ export function WebShellSidebar({
         } catch (err) {
           onError(err, t('sidebar.exportFailed'));
         } finally {
-          if (busySessionIdRef.current === sessionId) {
-            busySessionIdRef.current = null;
-          }
-          setBusySessionId((current) =>
-            current === sessionId ? null : current,
-          );
+          setSessionExporting(sessionId, false);
         }
       })();
     },
-    [canExportSessions, exportSession, onError, t],
+    [canExportSessions, exportSession, onError, setSessionExporting, t],
   );
 
   const confirmDeleteSession = useCallback(() => {
@@ -905,6 +926,7 @@ export function WebShellSidebar({
       const stamp = session.updatedAt || session.createdAt;
       const time = stamp ? formatRelativeTime(stamp, t) : '';
       const busy = busySessionId === session.sessionId;
+      const exporting = exportingSessionIds.has(session.sessionId);
       const completedUnread =
         !isCurrent && completedUnreadIds.has(session.sessionId);
       const isMenuOpen =
@@ -991,10 +1013,22 @@ export function WebShellSidebar({
                       <button
                         className={styles.sessionActionButton}
                         type="button"
-{canExportSessions && (
+                        disabled={isCurrent}
+                        title={
+                          isCurrent
+                            ? t('sidebar.archiveCurrentDisabled')
+                            : t('sidebar.archive')
+                        }
+                        aria-label={t('sidebar.archive')}
+                        onClick={() => handleArchive(session)}
+                      >
+                        <IconArchive />
+                      </button>
+                      {canExportSessions && (
                         <button
                           className={styles.sessionActionButton}
                           type="button"
+                          disabled={exporting}
                           title={t('sidebar.export')}
                           aria-label={t('sidebar.export')}
                           onClick={() => handleExportSession(session)}
@@ -1003,8 +1037,42 @@ export function WebShellSidebar({
                         </button>
                       )}
                       <button
-                        className={styles.sessionActionButton}
+                        className={cx(
+                          styles.sessionActionButton,
+                          isMenuOpen && styles.sessionActionButtonActive,
+                        )}
                         type="button"
+                        aria-label={t('sidebar.moreActions')}
+                        aria-haspopup="menu"
+                        aria-expanded={isMenuOpen}
+                        title={t('sidebar.moreActions')}
+                        onClick={(event) => openMenu(event, session, false)}
+                      >
+                        <IconMore />
+                      </button>
+                    </div>
+                  </div>
+                </>
+              )}
+            </>
+          )}
+        </div>
+      );
+    });
+  }, [
+    busySessionId,
+    canExportSessions,
+    cancelRename,
+    collapsed,
+    completedUnreadIds,
+    currentSessionId,
+    editingName,
+    editingSessionId,
+    error,
+    exportingSessionIds,
+    filteredSessions,
+    handleArchive,
+    handleExportSession,
     handleLoadSession,
     hideTooltip,
     loading,
