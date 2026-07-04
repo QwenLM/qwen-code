@@ -2733,6 +2733,13 @@ export class GeminiChat {
                   );
                   continue;
                 }
+                if (attemptedFallbackModels.has(fallbackModelId)) {
+                  debugLogger.warn(
+                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
+                      `already attempted.`,
+                  );
+                  continue;
+                }
 
                 // Resolve the fallback model's content generator
                 let fallbackGenerator: ContentGenerator;
@@ -2756,6 +2763,7 @@ export class GeminiChat {
                   fallbackFailures.push(
                     `${fallbackModelId} (resolve-failed: ${resolveErrorMessage})`,
                   );
+                  attemptedFallbackModels.add(fallbackModelId);
                   lastError = resolveError;
                   debugLogger.warn(
                     `[FALLBACK] Failed to resolve fallback model ` +
