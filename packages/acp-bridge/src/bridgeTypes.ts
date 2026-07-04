@@ -14,8 +14,13 @@ import type {
   ResumeSessionResponse,
   SetSessionModelRequest,
   SetSessionModelResponse,
+  SessionUpdate,
 } from '@agentclientprotocol/sdk';
-import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
+import type {
+  BridgeEvent,
+  SessionReplaySnapshot,
+  SubscribeOptions,
+} from './eventBus.js';
 import type { PermissionPolicy } from './permission.js';
 import type {
   SessionArtifactInput,
@@ -117,6 +122,20 @@ export interface BridgeRestoreSessionRequest {
   workspaceCwd: string;
   /** Optional echo of a daemon-issued client id for this session. */
   clientId?: string;
+  /** Internal replay transport for `session/load`; defaults to ACP streaming. */
+  historyReplay?: 'stream' | 'response';
+}
+
+export const LOAD_REPLAY_MODE_META_KEY = 'qwen.session.loadReplayMode';
+export const LOAD_REPLAY_META_KEY = 'qwen.session.loadReplay';
+export const LOAD_REPLAY_BULK_MODE = 'bulk';
+export const LOAD_REPLAY_VERSION = 1 as const;
+
+export interface BridgeLoadReplayEnvelope {
+  v: typeof LOAD_REPLAY_VERSION;
+  updates: SessionUpdate[];
+  partial?: true;
+  replayError?: string;
 }
 
 export type BridgeSessionState = LoadSessionResponse | ResumeSessionResponse;
@@ -124,6 +143,10 @@ export type BridgeSessionState = LoadSessionResponse | ResumeSessionResponse;
 export interface BridgeRestoredSession extends BridgeSession {
   /** ACP state returned by `session/load` / `session/resume`. */
   state: BridgeSessionState;
+  /** True when response-mode history replay aborted after emitting a prefix. */
+  partial?: true;
+  /** Agent-provided replay failure detail when `partial` is true. */
+  replayError?: string;
   /** Compacted events for all completed turns (O(turns) size). */
   compactedReplay?: BridgeEvent[];
   /** Raw events since last turn boundary (current incomplete turn). */
@@ -523,6 +546,14 @@ export interface AcpSessionBridge {
    * start SSE replay so no events are missed.
    */
   getSessionLastEventId(sessionId: string): number;
+
+  /**
+   * Return the current compacted replay snapshot for a loaded session, when
+   * the bridge has a compaction engine configured.
+   */
+  getSessionReplaySnapshot(
+    sessionId: string,
+  ): SessionReplaySnapshot | undefined;
 
   /**
    * Explicitly close a live session. Force-closes even when other clients
