@@ -407,6 +407,22 @@ describe('resolveWithinWorkspace', () => {
     expect((err as { kind: string }).kind).toBe('symlink_escape');
   });
 
+  it('rejects a dangling symlink escape reached through an absolute workspace alias', async () => {
+    const aliasWorkspace = path.join(scratch, 'alias-workspace');
+    await fsp.symlink(workspace, aliasWorkspace, 'dir');
+    const outsideTarget = path.join(scratch, 'outside-not-yet-existing.txt');
+    await fsp.symlink(outsideTarget, path.join(workspace, 'escape'), 'file');
+
+    const err = await resolveWithinWorkspace(
+      path.join(aliasWorkspace, 'escape'),
+      workspace,
+      'write',
+    ).catch((e: unknown) => e);
+
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('symlink_escape');
+  });
+
   it('allows a dangling symlink whose (not-yet-existing) target stays inside workspace', async () => {
     // Symmetric to the escape case: a dangling symlink pointing at
     // a future file INSIDE the workspace is a normal ahead-of-mkdir

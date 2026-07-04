@@ -392,7 +392,18 @@ export async function resolveWithinWorkspace(
             boundCanonicals,
           );
           if (boundCanonical !== undefined) {
-            preResolvedCanonical = canonicalCandidate;
+            const finalPathIsSymlink = await fsp
+              .lstat(absolute)
+              .then((stat) => stat.isSymbolicLink())
+              .catch((lstatErr: NodeJS.ErrnoException) => {
+                if (lstatErr.code === 'ENOENT' || lstatErr.code === 'ENOTDIR') {
+                  return false;
+                }
+                throw lstatErr;
+              });
+            if (!finalPathIsSymlink) {
+              preResolvedCanonical = canonicalCandidate;
+            }
           }
         } catch (innerErr) {
           const innerCode = (innerErr as NodeJS.ErrnoException)?.code;

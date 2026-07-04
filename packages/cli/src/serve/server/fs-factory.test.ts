@@ -113,6 +113,20 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
     );
   });
 
+  it('falls back to the primary workspace when IDE env JSON is malformed', async () => {
+    const scratch = await mkScratch();
+    const primary = path.join(scratch, 'primary');
+    await fsp.mkdir(primary);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+
+    const roots = resolveBoundWorkspacesFromIdeEnv(primary, '[not json');
+
+    expect(roots).toEqual([realpathSync.native(primary)]);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('failed to canonicalize IDE workspace paths'),
+    );
+  });
+
   it('drops nested IDE roots before factory registration', async () => {
     const scratch = await mkScratch();
     const parent = path.join(scratch, 'parent');
