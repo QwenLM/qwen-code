@@ -64,6 +64,7 @@ import {
   runManagedAutoMemoryDream,
   runManagedRememberByAgent,
   matchesAnyServerPattern,
+  IMAGE_CAPABILITY,
   registerAcpEventLoopLagGauge,
   startEventLoopLagMonitor,
 } from '@qwen-code/qwen-code-core';
@@ -2831,6 +2832,9 @@ class QwenAgent implements Agent {
         mcpCapabilities: {
           sse: true,
           http: true,
+        },
+        _meta: {
+          imageCapability: IMAGE_CAPABILITY,
         },
       },
     };
