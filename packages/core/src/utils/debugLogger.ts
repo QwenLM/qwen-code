@@ -152,10 +152,6 @@ function updateLatestDebugLogAlias(sessionId: string): void {
     return;
   }
   if (!SESSION_ID_PATTERN.test(sessionId)) {
-    createDebugLogger('DEBUG_LOG').debug(
-      'Skipping latest debug log alias for non-UUID session id:',
-      sessionId,
-    );
     return;
   }
 

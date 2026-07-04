@@ -70,6 +70,31 @@ describe('reportError', () => {
     expect(report).toContain('"itemCount": 1');
   });
 
+  it('summarizes object context without logging raw request contents', async () => {
+    const error = new Error('API failed');
+    const baseMessage = 'Error generating text content via API.';
+    const context = {
+      requestContents: [
+        {
+          role: 'user',
+          parts: [{ text: 'secret object prompt' }],
+        },
+      ],
+      requestConfig: { apiKey: 'secret-api-key' },
+    };
+
+    await reportError(error, baseMessage, context, 'generateText-api');
+
+    const report = String(debugLoggerSpy.error.mock.calls[0]?.[1]);
+    expect(report).not.toContain('secret object prompt');
+    expect(report).not.toContain('secret-api-key');
+    expect(report).not.toContain('"context"');
+    expect(report).toContain('"contextSummary"');
+    expect(report).toContain('"kind": "object"');
+    expect(report).toContain('"requestContents"');
+    expect(report).toContain('"requestConfig"');
+  });
+
   it('preserves explicitly summarized context', async () => {
     const error = new Error('API failed');
     const context = {

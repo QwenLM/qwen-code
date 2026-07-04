@@ -143,6 +143,19 @@ describe('EnhancedErrorHandler', () => {
       );
     });
 
+    it('throws the original error when provider details have a null error object', () => {
+      const apiError = { error: null, message: 'API failure' };
+      let thrown: unknown;
+
+      try {
+        errorHandler.handle(apiError, mockContext, mockRequest);
+      } catch (error) {
+        thrown = error;
+      }
+
+      expect(thrown).toBe(apiError);
+    });
+
     it('should throw enhanced error message for timeout errors', () => {
       const timeoutError = new Error('Request timeout');
 

@@ -327,13 +327,7 @@ describe('debugLogger', () => {
       await vi.runAllTimersAsync();
 
       expect(fs.symlink).not.toHaveBeenCalled();
-      expect(fs.appendFile).toHaveBeenCalledWith(
-        Storage.getDebugLogPath('log-to-span-sink-test'),
-        expect.stringContaining(
-          '[DEBUG] [DEBUG_LOG] Skipping latest debug log alias for non-UUID session id: log-to-span-sink-test',
-        ),
-        'utf8',
-      );
+      expect(fs.appendFile).not.toHaveBeenCalled();
     });
 
     it('does not create symlink when session is cleared', async () => {
