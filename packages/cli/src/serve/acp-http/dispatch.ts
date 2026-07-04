@@ -1076,6 +1076,7 @@ export class AcpDispatcher {
                     sessionId,
                     workspaceCwd: cwd,
                     clientId: conn.clientId,
+                    historyReplay: 'response',
                   })
                 : await this.bridge.resumeSession({
                     sessionId,
@@ -1121,6 +1122,9 @@ export class AcpDispatcher {
             return;
           }
           conn.getOrCreateSession(sessionId).clientId = restored.clientId;
+          if (method === 'session/load') {
+            conn.markInitialReplayPending(sessionId);
+          }
           conn.ownSession(sessionId);
           // ACP standard: load/resume response includes configOptions + models + modes
           const loadConfigOptions = await this.configOptionsFor(sessionId);
@@ -3700,14 +3704,6 @@ export class AcpDispatcher {
     lastEventId?: number,
   ): Promise<void> {
     try {
-      // `lastEventId` (from the `Last-Event-ID` reconnect header) drives the
-      // EventBus ring replay: events with `id > lastEventId` still buffered
-      // are replayed before live events flow, recovering content frames lost
-      // in a mid-turn proxy gap (§1.8). `undefined` ⇒ live-only, as before.
-      const iterable = this.bridge.subscribeEvents(sessionId, {
-        signal,
-        ...(lastEventId !== undefined ? { lastEventId } : {}),
-      });
       // On resume, `attachSessionStream` defers id-less buffered replies (e.g. a
       // `session/prompt` result produced during the detach gap) so they land
       // AFTER the content chunks that preceded them. Each deferred reply carries
@@ -3735,6 +3731,48 @@ export class AcpDispatcher {
       // deferred replies (anchor guarantee void) instead of stranding them
       // behind an unreachable watermark — the cascading-freeze fix.
       let sawEviction = false;
+      let subscribeFromEventId = lastEventId;
+      if (conn.hasInitialReplayPending(sessionId)) {
+        const snapshot = this.bridge.getSessionReplaySnapshot(sessionId);
+        if (snapshot) {
+          const snapshotEvents = [
+            ...snapshot.compactedTurns,
+            ...snapshot.liveJournal,
+          ].filter((event) => event.type === 'session_update');
+          for (const event of snapshotEvents) {
+            if (signal.aborted) return;
+            if (typeof event.id === 'number' && event.id <= lastDeliveredId) {
+              continue;
+            }
+            conn.touch();
+            this.translateEvent(conn, sessionId, event);
+            if (typeof event.id === 'number') {
+              lastDeliveredId = event.id;
+              conn.releaseDeferredSessionReplies(sessionId, event.id);
+            }
+          }
+          if (signal.aborted) return;
+          lastDeliveredId = Math.max(lastDeliveredId, snapshot.lastEventId);
+          subscribeFromEventId = snapshot.lastEventId;
+        } else {
+          conn.markInitialReplayComplete(sessionId);
+          conn.endReplayDeferral(sessionId, lastDeliveredId, false);
+        }
+      }
+
+      // `lastEventId` (from the `Last-Event-ID` reconnect header) drives the
+      // EventBus ring replay: events with `id > lastEventId` still buffered
+      // are replayed before live events flow, recovering content frames lost
+      // in a mid-turn proxy gap (§1.8). `undefined` ⇒ live-only, as before.
+      // For initial response-mode load replay, snapshot frames are emitted
+      // above and EventBus subscribes from the snapshot high-water mark, so
+      // events published between snapshot read and subscribe are still replayed.
+      const iterable = this.bridge.subscribeEvents(sessionId, {
+        signal,
+        ...(subscribeFromEventId !== undefined
+          ? { lastEventId: subscribeFromEventId }
+          : {}),
+      });
       for await (const event of iterable) {
         if (signal.aborted) break;
         // Count event delivery as connection activity so a long, quiet prompt
@@ -3748,6 +3786,7 @@ export class AcpDispatcher {
         }
         if (event.type === 'replay_complete') {
           conn.endReplayDeferral(sessionId, lastDeliveredId, sawEviction);
+          conn.markInitialReplayComplete(sessionId);
           // Operator breadcrumb for "did resume recover the gap?": one line per
           // resumed stream stating the cursor it resumed from, how far delivery
           // reached, the bus-reported replayed count, and whether the ring had

@@ -15,6 +15,7 @@ import type {
   PromptRequest,
   SetSessionModelRequest,
   SetSessionModelResponse,
+  SessionUpdate,
 } from '@agentclientprotocol/sdk';
 import type { ApprovalMode } from '@qwen-code/qwen-code-core';
 import {
@@ -71,6 +72,12 @@ import {
   InvalidRewindTargetError,
 } from './bridgeErrors.js';
 import { canonicalizeWorkspace } from './workspacePaths.js';
+import {
+  LOAD_REPLAY_BULK_MODE,
+  LOAD_REPLAY_META_KEY,
+  LOAD_REPLAY_MODE_META_KEY,
+  LOAD_REPLAY_VERSION,
+} from './bridgeTypes.js';
 import type {
   BridgeSession,
   BridgeRestoreSessionRequest,
@@ -139,6 +146,58 @@ const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
     return { ...request, _meta: nextMeta };
   },
 };
+
+const KNOWN_SESSION_UPDATE_TYPES = new Set([
+  'user_message_chunk',
+  'agent_message_chunk',
+  'agent_thought_chunk',
+  'tool_call',
+  'tool_call_update',
+  'plan',
+  'available_commands_update',
+  'current_mode_update',
+  'config_option_update',
+  'session_info_update',
+  'usage_update',
+]);
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isBulkReplayUpdate(value: unknown): value is SessionUpdate {
+  if (!isRecord(value)) return false;
+  const updateType = value['sessionUpdate'];
+  return (
+    typeof updateType === 'string' && KNOWN_SESSION_UPDATE_TYPES.has(updateType)
+  );
+}
+
+function extractLoadReplayResponse(state: BridgeSessionState): {
+  state: BridgeSessionState;
+  updates: SessionUpdate[];
+} {
+  const meta = isRecord(state._meta) ? state._meta : undefined;
+  const replay = meta?.[LOAD_REPLAY_META_KEY];
+  if (replay === undefined) return { state, updates: [] };
+  if (!isRecord(replay) || replay['v'] !== LOAD_REPLAY_VERSION) {
+    throw new Error('Invalid qwen.session.loadReplay payload');
+  }
+  const rawUpdates = replay['updates'];
+  if (!Array.isArray(rawUpdates) || !rawUpdates.every(isBulkReplayUpdate)) {
+    throw new Error('Invalid qwen.session.loadReplay updates');
+  }
+
+  const nextMeta = { ...(meta ?? {}) };
+  delete nextMeta[LOAD_REPLAY_META_KEY];
+  const cleanState: BridgeSessionState = { ...state };
+  if (Object.keys(nextMeta).length > 0) {
+    cleanState._meta = nextMeta;
+  } else {
+    delete cleanState._meta;
+  }
+  return { state: cleanState, updates: rawUpdates };
+}
 
 /**
  * Stage 1 HTTP->ACP bridge factory + supporting helpers.
@@ -1353,6 +1412,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
   interface InFlightRestore {
     action: 'load' | 'resume';
+    historyReplay: 'stream' | 'response';
     promise: Promise<BridgeRestoredSession>;
     /**
      * Synchronous reservation slot for callers that coalesce onto this
@@ -2357,6 +2417,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     sessionId: string,
     workspaceCwd: string,
     events = createSessionEventBus(),
+    options: { drainEarlyEvents?: boolean } = {},
   ): SessionEntry => {
     const entry: SessionEntry = {
       sessionId,
@@ -2386,10 +2447,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     byId.set(entry.sessionId, entry);
     touchActivity();
     telemetry.metrics?.sessionLifecycle('spawn');
-    // Drain any guardrail events that fired during this session's
-    // `newSession` handler (before this entry registered) onto the
-    // freshly-created EventBus. Idempotent on unknown sessionIds.
-    ci.client.drainEarlyEvents(entry.sessionId, entry);
+    if (options.drainEarlyEvents !== false) {
+      // Drain any guardrail events that fired during this session's
+      // `newSession` handler (before this entry registered) onto the
+      // freshly-created EventBus. Idempotent on unknown sessionIds.
+      ci.client.drainEarlyEvents(entry.sessionId, entry);
+    }
     return entry;
   };
 
@@ -2524,6 +2587,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       throw new Error('AcpSessionBridge is shutting down');
     }
     const workspaceKey = resolveWorkspaceKey(req.workspaceCwd);
+    const historyReplay =
+      action === 'load' ? (req.historyReplay ?? 'stream') : 'stream';
 
     const existing = byId.get(req.sessionId);
     if (existing) {
@@ -2551,7 +2616,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // a watermark — mixing the two on a shared EventBus would give
       // the resume client unexpected replay data or the load client a
       // missing snapshot. Same-action coalescing is unaffected.
-      if (action !== inFlight.action) {
+      if (
+        action !== inFlight.action ||
+        historyReplay !== inFlight.historyReplay
+      ) {
         throw new RestoreInProgressError(
           req.sessionId,
           inFlight.action,
@@ -2644,6 +2712,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // race-loser case only.
       transportClosed.catch(() => {});
       let state: BridgeSessionState;
+      let replayUpdates: SessionUpdate[] = [];
       try {
         if (action === 'load') {
           state = await Promise.race([
@@ -2657,6 +2726,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 // intentionally has no `mcpServers` field for the
                 // same reason.
                 mcpServers: [],
+                ...(historyReplay === 'response'
+                  ? {
+                      _meta: {
+                        [LOAD_REPLAY_MODE_META_KEY]: LOAD_REPLAY_BULK_MODE,
+                      },
+                    }
+                  : {}),
               }),
               initTimeoutMs,
               'loadSession',
@@ -2676,6 +2752,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             ),
             transportClosed,
           ]);
+        }
+        if (action === 'load' && historyReplay === 'response') {
+          const extracted = extractLoadReplayResponse(state);
+          state = extracted.state;
+          replayUpdates = extracted.updates;
         }
       } catch (err) {
         restoreEvents.close();
@@ -2726,9 +2807,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         req.sessionId,
         workspaceKey,
         restoreEvents,
+        { drainEarlyEvents: replayUpdates.length === 0 },
       );
       entry.restoreState = state;
       seedSnapshotCaches(entry, state);
+      if (replayUpdates.length > 0) {
+        await ci.client.seedSessionUpdates(entry, replayUpdates);
+        ci.client.drainEarlyEvents(entry.sessionId, entry);
+      }
       const clientId = registerClient(entry, req.clientId);
       // Fold synchronous coalesce reservations into the new entry's
       // `attachCount`. By this point all coalescers that beat us must
@@ -2777,7 +2863,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
     });
 
-    inFlightRestores.set(req.sessionId, { action, promise, coalesceState });
+    inFlightRestores.set(req.sessionId, {
+      action,
+      historyReplay,
+      promise,
+      coalesceState,
+    });
     try {
       return await promise;
     } finally {
@@ -3710,6 +3801,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       return entry.events.lastEventId;
+    },
+
+    getSessionReplaySnapshot(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return entry.events.snapshotReplay();
     },
 
     respondToPermission(requestId, response, context) {

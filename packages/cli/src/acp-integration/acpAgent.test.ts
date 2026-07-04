@@ -7290,6 +7290,13 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         getConfig: ReturnType<typeof vi.fn>;
         sendAvailableCommandsUpdate: ReturnType<typeof vi.fn>;
         replayHistory: ReturnType<typeof vi.fn>;
+        primeTurnFromHistory: ReturnType<typeof vi.fn>;
+        cumulativeUsage: {
+          promptTokens: number;
+          cachedTokens: number;
+          candidateTokens: number;
+          apiTimeMs: number;
+        };
         installRewriter: ReturnType<typeof vi.fn>;
         startCronScheduler: ReturnType<typeof vi.fn>;
         dispose: ReturnType<typeof vi.fn>;
@@ -7425,6 +7432,13 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         getConfig: vi.fn().mockReturnValue(innerConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
+        primeTurnFromHistory: vi.fn(),
+        cumulativeUsage: {
+          promptTokens: 7,
+          cachedTokens: 3,
+          candidateTokens: 5,
+          apiTimeMs: 11,
+        },
         installRewriter: vi.fn(),
         startCronScheduler: vi.fn(),
         dispose: vi.fn(),
@@ -7496,6 +7510,70 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
     const recording = lastSessionMock?.getConfig().getChatRecordingService();
     expect(recording?.rebuildTurnBoundaries).toHaveBeenCalledWith(messages);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession can return bulk replay updates without streaming history', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    const innerConfig = bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages,
+      },
+    });
+    const replayUpdate = {
+      sessionUpdate: 'agent_message_chunk',
+      _meta: { timestamp: 4242 },
+    };
+    mockHistoryReplay.mockImplementation(
+      async (
+        context: {
+          config: Config;
+          cumulativeUsage?: unknown;
+          sendUpdate: (update: unknown) => Promise<void>;
+        },
+        history: unknown,
+      ) => {
+        expect(context.config).toBe(innerConfig);
+        expect(context.cumulativeUsage).toBe(lastSessionMock?.cumulativeUsage);
+        expect(history).toBe(messages);
+        await context.sendUpdate(replayUpdate);
+      },
+    );
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+    })) as {
+      _meta?: Record<string, { v: number; updates: unknown[] }>;
+    };
+
+    expect(response._meta?.['qwen.session.loadReplay']).toEqual({
+      v: 1,
+      updates: [replayUpdate],
+    });
+    expect(lastSessionMock?.replayHistory).not.toHaveBeenCalled();
+    expect(lastSessionMock?.primeTurnFromHistory).toHaveBeenCalledWith(
+      messages,
+    );
+    expect(mockHistoryReplay).toHaveBeenCalledTimes(1);
+
+    expect(
+      lastSessionMock!.primeTurnFromHistory.mock.invocationCallOrder[0],
+    ).toBeLessThan(mockHistoryReplay.mock.invocationCallOrder[0]!);
+    expect(mockHistoryReplay.mock.invocationCallOrder[0]!).toBeLessThan(
+      lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
+    );
+    expect(
+      lastSessionMock!.installRewriter.mock.invocationCallOrder[0]!,
+    ).toBeLessThan(
+      lastSessionMock!.startCronScheduler.mock.invocationCallOrder[0]!,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;

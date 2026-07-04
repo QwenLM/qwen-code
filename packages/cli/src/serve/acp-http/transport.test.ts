@@ -16,7 +16,10 @@ import type {
   BridgeSessionSummary,
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
-import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import type {
+  BridgeEvent,
+  SessionReplaySnapshot,
+} from '@qwen-code/acp-bridge/eventBus';
 import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CancelSentinelCollisionError,
@@ -156,6 +159,12 @@ class FakeBridge {
   /** `attached` value loadSession returns (false = spawned-from-disk). */
   loadAttached = true;
   spawnClientId: string | undefined = 'client-1';
+  loadRequests: Array<{
+    sessionId: string;
+    historyReplay?: string;
+    clientId?: string;
+  }> = [];
+  replaySnapshot: SessionReplaySnapshot | undefined;
 
   closedSessions: string[] = [];
 
@@ -175,7 +184,12 @@ class FakeBridge {
 
   loadShouldThrow = false;
 
-  async loadSession(req: { sessionId: string }) {
+  async loadSession(req: {
+    sessionId: string;
+    historyReplay?: string;
+    clientId?: string;
+  }) {
+    this.loadRequests.push(req);
     if (this.loadShouldThrow) throw new Error('load failed');
     if (this.gate) await this.gate;
     return {
@@ -185,6 +199,10 @@ class FakeBridge {
       clientId: 'client-load',
       state: { replayed: true },
     };
+  }
+
+  getSessionReplaySnapshot(_sessionId: string) {
+    return this.replaySnapshot;
   }
 
   async resumeSession(req: { sessionId: string }) {
@@ -2996,6 +3014,239 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sess = await openStream(connId, 'loaded-1');
     expect(sess.status).toBe(200);
     await sess.body?.cancel(); // release the long-lived SSE socket
+  });
+
+  it('session/load uses response-mode and replays the snapshot on initial session stream attach', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 2,
+      compactedTurns: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+      liveJournal: [
+        {
+          v: 1,
+          id: 2,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReply = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    const [reply] = (await loadReply) as Array<{
+      id: number;
+      result: { replayed: boolean; compactedReplay?: unknown };
+    }>;
+    expect(reply).toMatchObject({
+      id: 20,
+      result: { replayed: true },
+    });
+    expect(reply.result).not.toHaveProperty('compactedReplay');
+    expect(bridge.loadRequests).toHaveLength(1);
+    expect(bridge.loadRequests[0]).toMatchObject({
+      sessionId: 'loaded-1',
+      clientId: clientIdForConnection(connId),
+      historyReplay: 'response',
+    });
+
+    const sess = await openStream(connId, 'loaded-1');
+    const framesPromise = takeFrames(sess, 3, 1000);
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    expect(bridge.subscribeCalls[0]).toEqual({
+      sessionId: 'loaded-1',
+      lastEventId: 2,
+    });
+    bridge.queues.get('loaded-1')!.push({
+      type: 'replay_complete',
+      data: { replayedCount: 0 },
+    });
+
+    const frames = (await framesPromise) as Array<{
+      method: string;
+      params: {
+        update?: { sessionUpdate?: string };
+        kind?: string;
+      };
+    }>;
+    expect(frames).toHaveLength(3);
+    expect(frames[0]).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'user_message_chunk' } },
+    });
+    expect(frames[1]).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk' } },
+    });
+    expect(frames[2]).toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'replay_complete' },
+    });
+  });
+
+  it('defers prompt replies until initial load replay completes', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 1,
+      compactedTurns: [],
+      liveJournal: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReply = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    await loadReply;
+
+    const sess = await openStream(connId, 'loaded-1');
+    const framesPromise = takeFrames(sess, 3, 1000);
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 21,
+      method: 'session/prompt',
+      params: {
+        sessionId: 'loaded-1',
+        prompt: [{ type: 'text', text: 'hi' }],
+      },
+    });
+    await new Promise((r) => setTimeout(r, 30));
+    bridge.queues.get('loaded-1')!.push({
+      type: 'replay_complete',
+      data: { replayedCount: 0 },
+    });
+
+    const frames = (await framesPromise) as Array<{
+      id?: number;
+      method?: string;
+      params?: { kind?: string; update?: { sessionUpdate?: string } };
+      result?: { stopReason?: string };
+    }>;
+    expect(frames[0]).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk' } },
+    });
+    expect(frames[1]).toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'replay_complete' },
+    });
+    expect(frames[2]).toMatchObject({
+      id: 21,
+      result: { stopReason: 'end_turn' },
+    });
+  });
+
+  it('continues initial load replay from Last-Event-ID after reconnect', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 2,
+      compactedTurns: [],
+      liveJournal: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+        {
+          v: 1,
+          id: 2,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReply = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    await loadReply;
+
+    const firstStream = await openStream(connId, 'loaded-1');
+    const [firstFrame] = (await takeFrames(firstStream, 1, 1000)) as Array<{
+      method: string;
+      params: { update?: { sessionUpdate?: string } };
+    }>;
+    expect(firstFrame).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'user_message_chunk' } },
+    });
+    const subscribeCountBeforeReconnect = bridge.subscribeCalls.length;
+
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'loaded-1',
+        'last-event-id': '1',
+      },
+    });
+    const framesPromise = takeFrames(resumed, 2, 1000);
+    await waitUntil(
+      () => bridge.subscribeCalls.length > subscribeCountBeforeReconnect,
+    );
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'loaded-1',
+      lastEventId: 2,
+    });
+    bridge.queues.get('loaded-1')!.push({
+      type: 'replay_complete',
+      data: { replayedCount: 0 },
+    });
+
+    const frames = (await framesPromise) as Array<{
+      method: string;
+      params: { kind?: string; update?: { sessionUpdate?: string } };
+    }>;
+    expect(frames[0]).toMatchObject({
+      method: 'session/update',
+      params: { update: { sessionUpdate: 'agent_message_chunk' } },
+    });
+    expect(frames[1]).toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'replay_complete' },
+    });
   });
 
   it('session/resume owns the session + replies state', async () => {
