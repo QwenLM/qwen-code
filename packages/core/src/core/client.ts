@@ -2471,6 +2471,18 @@ export class GeminiClient {
             },
           };
 
+          // A blocking Stop hook (e.g. /goal) feeds a fresh user-role prompt
+          // back to the model, starting a new logical turn — reset per-turn
+          // loop accounting so each continuation gets its own tool-call
+          // budget. Without this, a goal chain accumulates every iteration's
+          // tool calls into one "turn" and trips TURN_TOOL_CALL_CAP after a
+          // handful of healthy iterations. The ACP daemon path already has
+          // these semantics (fresh DaemonToolLoopState per continuation).
+          // Runaway protection is preserved: the cap still bounds each
+          // iteration, and the chain itself is bounded by
+          // stopHookBlockingCap / MAX_GOAL_ITERATIONS.
+          this.loopDetector.reset(prompt_id);
+
           const continueRequest = [{ text: continueReason }];
           const activeGoal = getActiveGoal(this.config.getSessionId());
           const hookTurnBudget = activeGoal ? boundedTurns : boundedTurns - 1;

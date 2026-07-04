@@ -38,6 +38,8 @@ import type {
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
+  DaemonStatusReport,
+  DaemonStatusReportDetail,
   DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   DaemonUpdateAgentRequest,
@@ -673,6 +675,21 @@ export class DaemonClient {
         if (!res.ok) throw await this.failOnError(res, 'GET /capabilities');
         return (await res.json()) as DaemonCapabilities;
       },
+    );
+  }
+
+  /**
+   * Consolidated daemon status report (`GET /daemon/status`). The default
+   * `summary` detail reads cheap in-memory counters; `full` adds per-session,
+   * ACP-connection, auth, and workspace diagnostics sections.
+   */
+  async daemonStatus(
+    detail: DaemonStatusReportDetail = 'summary',
+  ): Promise<DaemonStatusReport> {
+    const query = detail === 'summary' ? '' : `?detail=${detail}`;
+    return await this.jsonRequest<DaemonStatusReport>(
+      `/daemon/status${query}`,
+      'GET /daemon/status',
     );
   }
 

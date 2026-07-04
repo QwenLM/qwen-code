@@ -11,6 +11,7 @@ import type { Suggestion } from '../components/SuggestionsDisplay.js';
 import { MAX_SUGGESTIONS_TO_SHOW } from '../components/SuggestionsDisplay.js';
 import { matchMcpServerPrefix, buildMcpResourceRef } from './mcpResourceRef.js';
 import { getExtensionSuggestions } from './extension-mention-ref.js';
+import { buildMcpServerRef } from '../../utils/mcp-server-mention.js';
 import { t } from '../../i18n/index.js';
 
 /**
@@ -140,23 +141,38 @@ function getGlobalMcpResourceSuggestions(
 }
 
 /**
- * `@<partial>` MCP server discovery. BEFORE any `<server>:` has been typed,
- * surface configured MCP servers that (a) expose at least one resource and
- * (b) whose name starts (case-insensitively) with the partial, so a user who
- * doesn't know a resource URI can drill in without first memorizing the exact
- * server name.
- *
- * Returns `[]` (never `null`): these are PREPENDED to the filesystem results
- * rather than replacing them, so typing `@<partial>` never hides files. The
- * bare `@` trigger (empty partial) is intentionally left as a files-only view
- * — both to keep the common case unchanged and because every name
- * `.startsWith('')`, so an empty partial would otherwise match every server.
- *
- * Each suggestion expands to `@<server>:` and is flagged `isDirectory` so
- * `handleAutocomplete` appends no trailing space, letting completion re-trigger
- * straight into that server's resource list (the `getMcpResourceSuggestions`
- * path above).
+ * `@mcp:<partial>` mention suggestions. Bare `@` stays files-only; otherwise
+ * these are prepended beside file/resource matches without replacing them.
  */
+function getMcpServerMentionSuggestions(
+  config: Config | undefined,
+  pattern: string,
+): Suggestion[] {
+  if (!config) return [];
+  if (config.isTrustedFolder?.() === false) return [];
+  const mcpServers = config.getMcpServers?.() || {};
+  const query = pattern.startsWith('mcp:')
+    ? pattern.slice('mcp:'.length).toLowerCase()
+    : pattern.toLowerCase();
+  return Object.keys(mcpServers)
+    .filter((name) => name.toLowerCase().includes(query))
+    .sort((a, b) => {
+      const aLower = a.toLowerCase();
+      const bLower = b.toLowerCase();
+      const aPrefix = aLower.startsWith(query) ? 0 : 1;
+      const bPrefix = bLower.startsWith(query) ? 0 : 1;
+      if (aPrefix !== bPrefix) return aPrefix - bPrefix;
+      return aLower.localeCompare(bLower);
+    })
+    .map((name) => ({
+      label: buildMcpServerRef(name),
+      value: buildMcpServerRef(name),
+      description: t('MCP server'),
+      isDirectory: false,
+    }))
+    .slice(0, MAX_SUGGESTIONS_TO_SHOW);
+}
+
 function getMcpServerSuggestions(
   config: Config | undefined,
   pattern: string,
@@ -411,6 +427,10 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
       // drill in without knowing a URI) AND resources matched globally by
       // URI/name across all servers. Both computed synchronously and prepended
       // below.
+      const mcpServerMentionSuggestions = getMcpServerMentionSuggestions(
+        config,
+        state.pattern,
+      );
       const serverSuggestions = getMcpServerSuggestions(config, state.pattern);
       const globalResourceSuggestions = getGlobalMcpResourceSuggestions(
         config,
@@ -418,6 +438,7 @@ export function useAtCompletion(props: UseAtCompletionProps): void {
       );
       const mcpSuggestions = [
         ...extensionSuggestions,
+        ...mcpServerMentionSuggestions,
         ...serverSuggestions,
         ...globalResourceSuggestions,
       ];
