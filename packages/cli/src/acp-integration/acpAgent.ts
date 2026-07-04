@@ -143,6 +143,7 @@ import {
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
+import { loadSettingsCached } from '../config/settings-cache.js';
 import {
   buildPermissionSettings,
   normalizePermissionRules,
@@ -2876,7 +2877,7 @@ class QwenAgent implements Agent {
     // creation from picking up whichever workspace loaded last — Session
     // persists model changes through this instance, so a mix-up writes to
     // another workspace's settings.json.
-    const settings = loadSettings(cwd);
+    const settings = loadSettingsCached(cwd);
     this.settings = settings;
     const config = await this.newSessionConfig(cwd, mcpServers, settings);
     await this.ensureAuthenticated(config);
@@ -2899,7 +2900,7 @@ class QwenAgent implements Agent {
     // Load per-request settings BEFORE the existence check: the check must
     // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
     // whichever settings a concurrent handler loaded last.
-    const settings = loadSettings(params.cwd);
+    const settings = loadSettingsCached(params.cwd);
     const exists = await runWithAcpRuntimeOutputDir(
       settings,
       params.cwd,
@@ -2954,7 +2955,7 @@ class QwenAgent implements Agent {
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
     // Same per-request settings discipline as `loadSession`.
-    const settings = loadSettings(params.cwd);
+    const settings = loadSettingsCached(params.cwd);
     const exists = await runWithAcpRuntimeOutputDir(
       settings,
       params.cwd,
