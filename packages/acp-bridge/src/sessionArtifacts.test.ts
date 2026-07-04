@@ -317,6 +317,47 @@ describe('SessionArtifactStore', () => {
     );
   });
 
+  it('bounds sticky ephemeral overrides by the artifact limit', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-sticky-cap',
+      workspaceCwd: workspace,
+      maxArtifacts: 1,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+
+    const first = await store.upsertMany(
+      [{ title: 'First', url: 'https://example.com/first' }],
+      { strict: true },
+    );
+    await store.unpin(first.changes[0]!.artifactId, {
+      retention: 'ephemeral',
+    });
+
+    const second = await store.upsertMany(
+      [{ title: 'Second', url: 'https://example.com/second' }],
+      { strict: true },
+    );
+    const secondId = second.changes[0]!.artifactId;
+
+    await expect(
+      store.unpin(secondId, { retention: 'ephemeral' }),
+    ).rejects.toMatchObject({
+      field: 'retention',
+      message: 'sticky ephemeral artifact limit exceeded',
+    });
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: secondId,
+          retention: 'restorable',
+        }),
+      ],
+    });
+  });
+
   it('downgrades expired pinned content before exposing artifacts', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
     const store = new SessionArtifactStore({
@@ -2275,7 +2316,7 @@ describe('SessionArtifactStore', () => {
     expect(events[50]).toMatchObject({ sequence: 52 });
   });
 
-  it('records durable tombstones in periodic snapshots', async () => {
+  it('compacts explicit tombstones out of periodic snapshots', async () => {
     const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
     const store = new SessionArtifactStore({
       sessionId: 's11-tombstone-snapshot',
@@ -2307,7 +2348,7 @@ describe('SessionArtifactStore', () => {
 
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0]).toMatchObject({
-      tombstonedIds: [deletedId],
+      tombstonedIds: [],
       stickyEphemeralIds: [],
     });
     expect(

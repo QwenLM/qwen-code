@@ -523,6 +523,16 @@ export class SessionArtifactStore {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
       const targetRetention = options.retention ?? 'restorable';
+      if (
+        targetRetention === 'ephemeral' &&
+        !this.stickyEphemeralIds.has(artifactId) &&
+        this.stickyEphemeralIds.size >= this.maxArtifacts
+      ) {
+        throw new SessionArtifactValidationError(
+          'sticky ephemeral artifact limit exceeded',
+          'retention',
+        );
+      }
       const updated: StoredArtifact = {
         ...existing,
         retention: targetRetention,
@@ -850,12 +860,13 @@ export class SessionArtifactStore {
       sequence: ++this.persistenceSeq,
       recordedAt,
       artifacts,
-      tombstonedIds: Array.from(this.tombstonedIds),
+      tombstonedIds: [],
       stickyEphemeralIds: Array.from(this.stickyEphemeralIds),
     };
     try {
       await this.persistence.recordSnapshot(payload);
       this.durableEventsSinceSnapshot = 0;
+      this.tombstonedIds.clear();
     } catch (error) {
       writeStderrLine(
         `[artifacts] session=${this.sessionId} action=snapshot_failed reason=${JSON.stringify(
