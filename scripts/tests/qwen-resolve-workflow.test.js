@@ -192,6 +192,12 @@ describe('qwen resolve workflow', () => {
       : workflow.slice(resolveJobStart, resolveJobStart + 1 + nextJob);
   const reviewJob = job(workflow, 'review-pr');
   const authorizeJob = job(workflow, 'authorize');
+  const precheckJob = job(workflow, 'precheck-pr');
+
+  it('keeps closed PR events from running precheck or authorize jobs', () => {
+    expect(precheckJob).toContain("github.event.action != 'closed'");
+    expect(authorizeJob).toContain("github.event.action != 'closed'");
+  });
 
   it('does not require fork PR authors to have write permission for automatic review', () => {
     const authorizeStep = step(
