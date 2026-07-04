@@ -163,11 +163,6 @@ export function createDaemonChannelBridgeFacade(
     facade.listSessions = bridge.listSessions.bind(bridge);
   }
 
-  if (bridge.registerChannelLoopToolHandler) {
-    facade.registerChannelLoopToolHandler =
-      bridge.registerChannelLoopToolHandler.bind(bridge);
-  }
-
   return facade;
 }
 

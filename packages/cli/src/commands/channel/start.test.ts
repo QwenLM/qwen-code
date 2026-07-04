@@ -210,6 +210,7 @@ beforeEach(() => {
   delete process.env['https_proxy'];
   delete process.env['HTTP_PROXY'];
   delete process.env['http_proxy'];
+  delete process.env['QWEN_CODE_DISABLE_CRON'];
 });
 
 describe('resolveProxy', () => {
@@ -369,6 +370,31 @@ describe('startCommand.handler', () => {
       | ChannelBaseOptions
       | undefined;
     expect(() => options?.loopController?.validateCron('0 0 31 2 *')).toThrow();
+  });
+
+  it('does not expose channel loops when cron is disabled', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    process.env['QWEN_CODE_DISABLE_CRON'] = '1';
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+      delete process.env['QWEN_CODE_DISABLE_CRON'];
+    }
+
+    const options = mockCreateChannel.mock.calls[0]?.[3] as
+      | ChannelBaseOptions
+      | undefined;
+    expect(options?.loopController).toBeUndefined();
+    expect(mockChannelLoopStore).not.toHaveBeenCalled();
+    expect(mockChannelLoopScheduler).not.toHaveBeenCalled();
   });
 
   it('cleans up a single channel when pidfile creation races', async () => {

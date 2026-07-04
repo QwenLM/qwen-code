@@ -35,7 +35,7 @@ describe('AcpBridge', () => {
     expect(bridge.channelLoopMcpRegistered).toBe(true);
   });
 
-  it('does not wrap a missing MCP response for notifications', async () => {
+  it('returns an internal payload for MCP notifications', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
       cwd: '/tmp',
@@ -50,7 +50,9 @@ describe('AcpBridge', () => {
         payload: { jsonrpc: '2.0', method: 'notifications/initialized' },
         sessionId: 's-1',
       }),
-    ).resolves.toStrictEqual({});
+    ).resolves.toStrictEqual({
+      payload: { jsonrpc: '2.0', id: 0, result: {} },
+    });
   });
 
   it('rejects channel loop tool calls when no handler matches the session', () => {
