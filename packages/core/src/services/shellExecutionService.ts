@@ -13,7 +13,7 @@ import os from 'node:os';
 import type { IPty } from '@lydell/node-pty';
 import { getCachedEncodingForBuffer } from '../utils/systemEncoding.js';
 import { isBinary } from '../utils/textUtils.js';
-import { getShellConfiguration } from '../utils/shell-utils.js';
+import { getShellConfiguration, type ShellType } from '../utils/shell-utils.js';
 import pkg from '@xterm/headless';
 import {
   serializeTerminalToObject,
@@ -105,9 +105,11 @@ export function getShellAbortReasonKind(
  * the system codepage.
  *
  * - PowerShell: uses `[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;`
- * - cmd.exe: uses `chcp 65001 >nul &`
+ * - cmd.exe: uses `{SystemRoot}\System32\chcp.com 65001 >nul 2>nul &`
  */
-function applyUtf8Prefix(command: string, shell: string): string {
+const CHCP = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\chcp.com`;
+
+function applyUtf8Prefix(command: string, shell: ShellType): string {
   if (os.platform() === 'win32') {
     if (shell === 'powershell') {
       return (
@@ -115,9 +117,8 @@ function applyUtf8Prefix(command: string, shell: string): string {
       );
     }
     if (shell === 'cmd') {
-      // Resolve in JS with fallback (defense-in-depth, matches WINDOWS_TASKKILL pattern, see #5873)
-      const systemRoot = process.env['SystemRoot'] || 'C:\\Windows';
-      return `${systemRoot}\\System32\\chcp.com 65001 >nul 2>nul & ${command}`;
+      // Resolved at module-load time (defense-in-depth, matches WINDOWS_TASKKILL pattern, see #5873)
+      return `${CHCP} 65001 >nul 2>nul & ${command}`;
     }
   }
   return command;

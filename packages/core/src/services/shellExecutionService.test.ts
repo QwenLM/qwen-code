@@ -1851,6 +1851,7 @@ describe('ShellExecutionService', () => {
 
     it('should normalize PATH-like env keys on Windows for pty execution', async () => {
       mockPlatform.mockReturnValue('win32');
+      vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
       mockGetShellConfiguration.mockReturnValue({
         executable: 'cmd.exe',
         argsPrefix: ['/d', '/s', '/c'],
