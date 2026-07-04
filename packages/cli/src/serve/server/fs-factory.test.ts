@@ -104,4 +104,20 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
       ),
     ).toEqual([realpathSync.native(primary), realpathSync.native(sibling)]);
   });
+
+  it('drops nested non-primary roots', async () => {
+    const scratch = await mkScratch();
+    const primary = path.join(scratch, 'primary');
+    const parent = path.join(scratch, 'parent');
+    const child = path.join(parent, 'child');
+    await fsp.mkdir(primary, { recursive: true });
+    await fsp.mkdir(child, { recursive: true });
+
+    expect(
+      resolveBoundWorkspacesFromIdeEnv(
+        primary,
+        [primary, parent, child].join(path.delimiter),
+      ),
+    ).toEqual([realpathSync.native(primary), realpathSync.native(parent)]);
+  });
 });

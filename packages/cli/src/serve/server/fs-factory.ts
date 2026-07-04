@@ -80,19 +80,28 @@ export function resolveBoundWorkspacesFromIdeEnv(
   primaryWorkspace: string,
   ideWorkspacePath = process.env[IDE_WORKSPACE_PATH_ENV_VAR],
 ): string[] {
-  let primary: string | undefined;
+  let primary: string;
+  try {
+    const canonicalPrimary = canonicalizeWorkspaces([primaryWorkspace])[0];
+    if (canonicalPrimary === undefined) return [];
+    primary = canonicalPrimary;
+  } catch (err) {
+    writeStderrLine(
+      `qwen serve: failed to canonicalize primary workspace path, using raw primary: ${err}`,
+    );
+    return [primaryWorkspace];
+  }
+
   let envCanonicals: string[];
   try {
     const envWorkspaces = parseIdeWorkspacePathEnv(ideWorkspacePath);
-    primary = canonicalizeWorkspaces([primaryWorkspace])[0];
     envCanonicals = canonicalizeWorkspaces(envWorkspaces);
   } catch (err) {
     writeStderrLine(
       `qwen serve: failed to canonicalize IDE workspace paths, using primary only: ${err}`,
     );
-    return canonicalizeWorkspaces([primaryWorkspace]);
+    return [primary];
   }
-  if (primary === undefined) return [];
   if (
     envCanonicals.length > 0 &&
     !envCanonicals.some(
@@ -113,16 +122,20 @@ export function resolveBoundWorkspacesFromIdeEnv(
 function parseIdeWorkspacePathEnv(value: string | undefined): string[] {
   if (value === undefined || value.length === 0) return [];
   if (value.trimStart().startsWith('[')) {
-    const parsed = JSON.parse(value) as unknown;
-    if (
-      Array.isArray(parsed) &&
-      parsed.every((item) => typeof item === 'string')
-    ) {
-      return parsed.filter(
-        (workspace) => workspace.length > 0 && path.isAbsolute(workspace),
-      );
+    try {
+      const parsed = JSON.parse(value) as unknown;
+      if (
+        Array.isArray(parsed) &&
+        parsed.every((item) => typeof item === 'string')
+      ) {
+        return parsed.filter(
+          (workspace) => workspace.length > 0 && path.isAbsolute(workspace),
+        );
+      }
+      throw new Error('IDE workspace path JSON must be a string array');
+    } catch {
+      // Fall through to the legacy delimiter parser below.
     }
-    throw new Error('IDE workspace path JSON must be a string array');
   }
   return value
     .split(path.delimiter)

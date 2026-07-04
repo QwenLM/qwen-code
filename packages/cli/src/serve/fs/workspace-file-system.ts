@@ -33,7 +33,7 @@ import {
   type AuditPublisher,
   createAuditPublisher,
 } from './audit.js';
-import { FsError, wrapAsFsError } from './errors.js';
+import { FsError, wrapAsFsError, type FsErrorKind } from './errors.js';
 import {
   canonicalizeWorkspaces,
   resolveWithinWorkspace,
@@ -710,7 +710,9 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       const seenCanonicals = new Set<string>();
       const max = opts.maxResults ?? Number.POSITIVE_INFINITY;
       let escapedCount = 0;
-      let lastGlobError: unknown;
+      let permissionErrorCount = 0;
+      let transientErrorCount = 0;
+      const globErrors: unknown[] = [];
       let sawSuccessfulRoot = false;
       for (const searchRoot of searchRoots) {
         if (out.length >= max) break;
@@ -724,7 +726,14 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             ignore: ['**/node_modules/**', '**/.git/**'],
           });
         } catch (err) {
-          lastGlobError = err;
+          globErrors.push(err);
+          this.deps.audit.recordDenied(this.deps.ctx, {
+            intent: 'glob',
+            input: pattern,
+            errorKind: errorKindForRealpathFailure(err),
+            hint: `glob failed for workspace root: ${errorCode(err) ?? 'unknown error'}`,
+            pattern,
+          });
           continue;
         }
         sawSuccessfulRoot = true;
@@ -740,8 +749,15 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           let canonical: string;
           try {
             canonical = await fsp.realpath(absolute);
-          } catch {
-            escapedCount += 1;
+          } catch (err) {
+            const code = errorCode(err);
+            if (code === 'ENOENT' || code === 'ELOOP') {
+              escapedCount += 1;
+            } else if (code === 'EACCES' || code === 'EPERM') {
+              permissionErrorCount += 1;
+            } else {
+              transientErrorCount += 1;
+            }
             continue;
           }
           const inAnyWorkspace = this.deps.workspaces.some((workspace) =>
@@ -776,14 +792,36 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           out.push(canonical as ResolvedPath);
         }
       }
-      if (!sawSuccessfulRoot && lastGlobError !== undefined)
-        throw lastGlobError;
+      if (!sawSuccessfulRoot && globErrors.length > 0) {
+        throw new AggregateError(
+          globErrors,
+          'glob failed for all workspace roots',
+        );
+      }
       if (escapedCount > 0) {
         this.deps.audit.recordDenied(this.deps.ctx, {
           intent: 'glob',
           input: pattern,
           errorKind: 'symlink_escape',
           hint: `glob filtered ${escapedCount} hit(s) that resolved outside workspace`,
+          pattern,
+        });
+      }
+      if (permissionErrorCount > 0) {
+        this.deps.audit.recordDenied(this.deps.ctx, {
+          intent: 'glob',
+          input: pattern,
+          errorKind: 'permission_denied',
+          hint: `glob skipped ${permissionErrorCount} hit(s) due to EACCES/EPERM`,
+          pattern,
+        });
+      }
+      if (transientErrorCount > 0) {
+        this.deps.audit.recordDenied(this.deps.ctx, {
+          intent: 'glob',
+          input: pattern,
+          errorKind: 'io_error',
+          hint: `glob skipped ${transientErrorCount} hit(s) due to transient I/O errors`,
           pattern,
         });
       }
@@ -2061,6 +2099,17 @@ function kindFromStatLike(s: {
   if (s.isDirectory()) return 'directory';
   if (s.isFile()) return 'file';
   return 'other';
+}
+
+function errorCode(err: unknown): string | undefined {
+  return (err as NodeJS.ErrnoException)?.code;
+}
+
+function errorKindForRealpathFailure(err: unknown): FsErrorKind {
+  const code = errorCode(err);
+  if (code === 'EACCES' || code === 'EPERM') return 'permission_denied';
+  if (code === 'ENOENT' || code === 'ELOOP') return 'symlink_escape';
+  return 'io_error';
 }
 
 function buildWriteMeta(

@@ -1231,6 +1231,43 @@ describe('WorkspaceFileSystem - glob escape audit', () => {
     expect((denied!.data as { pattern?: string }).pattern).toBe('*.ts');
   });
 
+  it('classifies glob realpath permission failures separately', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'inside.ts'), 'x');
+    await fsp.writeFile(path.join(h.workspace, 'blocked.ts'), 'y');
+
+    const originalRealpath = fsp.realpath.bind(fsp);
+    const realpathSpy = vi.spyOn(fsp, 'realpath').mockImplementation((async (
+      ...args: Parameters<typeof fsp.realpath>
+    ) => {
+      if (String(args[0]).endsWith(`${path.sep}blocked.ts`)) {
+        const err = new Error('blocked') as NodeJS.ErrnoException;
+        err.code = 'EACCES';
+        throw err;
+      }
+      return originalRealpath(...args);
+    }) as typeof fsp.realpath);
+
+    try {
+      const hits = await h.fs.glob('*.ts');
+      expect(hits.map((p) => path.basename(p))).toEqual(['inside.ts']);
+    } finally {
+      realpathSpy.mockRestore();
+    }
+
+    const permissionDenied = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { errorKind: string }).errorKind === 'permission_denied',
+    );
+    const symlinkEscape = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { errorKind: string }).errorKind === 'symlink_escape',
+    );
+    expect(permissionDenied).toBeDefined();
+    expect(symlinkEscape).toBeUndefined();
+  });
+
   it('records fs.access with workspace-hashed pathHash and pattern field on glob success (raw-paths mode)', async () => {
     await fsp.writeFile(path.join(h.workspace, 'one.ts'), 'a');
     await h.fs.glob('*.ts');
