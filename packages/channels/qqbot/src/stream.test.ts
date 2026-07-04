@@ -949,7 +949,10 @@ describe('idleFlush guard re-schedule (#5)', () => {
     // Another idleFlush fires but flushingSessions guard blocks
     const chp = ch as unknown as Record<string, unknown>;
     const prevTimer = st.timer;
-    (chp['idleFlush'] as (sid: string, rid: number) => void)('sess-1', chp['_reconnectId'] as number);
+    (chp['idleFlush'] as (sid: string, rid: number) => void)(
+      'sess-1',
+      chp['_reconnectId'] as number,
+    );
 
     // A new timer should have been set for re-schedule
     expect(st.timer).not.toBeNull();
@@ -1001,7 +1004,6 @@ describe('in-flight send + new chunk + onResponseComplete (#4)', () => {
     expect(streamState(ch).has('sess-1')).toBe(true);
     expect(streamState(ch).get('sess-1')!.buffer).toBe(' part2');
     expect(streamState(ch).get('sess-1')!.timer).not.toBeNull();
-
   });
 });
 
@@ -1081,9 +1083,6 @@ describe('identity guard (#3, #6)', () => {
     const newState = streamState(ch).get('sess-1');
     expect(newState).toBeDefined();
     expect(newState!.buffer).toBe('new session');
-
-    const chp = ch as unknown as Record<string, unknown>;
-    const flushedSessions = chp['flushedSessions'] as Set<string>;
 
     // Now resolve the OLD send
     resolveSend!(mockResponse(true));
