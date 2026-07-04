@@ -217,6 +217,11 @@ function unescapeAtReferenceText(ref: string): string {
   return ref.replace(/\\(.)/g, '$1');
 }
 
+function isSafeTextChar(char: string): boolean {
+  const code = char.charCodeAt(0);
+  return code > 0x1f && code !== 0x7f && (code < 0x80 || code > 0x9f);
+}
+
 function mcpResourceInsertText(serverName: string, uri: string): string {
   return `@${escapeAtReferenceText(
     buildMcpResourceRef(
@@ -369,6 +374,9 @@ export function sanitizeDisplayText(raw: string): string | undefined {
   const stripped = raw
     .replace(ANSI_RE, '')
     .replace(BIDI_CONTROL_RE, '')
+    .split('')
+    .filter(isSafeTextChar)
+    .join('')
     .replace(/\s+/g, ' ')
     .trim();
   return stripped.length > 0 ? stripped : undefined;
@@ -379,10 +387,7 @@ function sanitizeInsertText(raw: string): string {
     .replace(ANSI_RE, '')
     .replace(BIDI_CONTROL_RE, '')
     .split('')
-    .filter((char) => {
-      const code = char.charCodeAt(0);
-      return code > 0x1f && code !== 0x7f;
-    })
+    .filter(isSafeTextChar)
     .join('');
   return stripped.length > 0 ? stripped : SAFE_DISPLAY_FALLBACK;
 }
@@ -1025,7 +1030,13 @@ export function useAtMentionMenu({
         : Promise.resolve(true);
       enabledPromise
         .then((enabled) => {
-          if (!enabled || abort.signal.aborted) {
+          if (abort.signal.aborted) {
+            return { resources: [] };
+          }
+          if (!enabled) {
+            console.warn('[@mention] MCP server disabled or not found', {
+              serverName,
+            });
             return { resources: [] };
           }
           return getCached(

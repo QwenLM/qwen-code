@@ -130,7 +130,7 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state).toBeNull();
   });
 
-  it('strips ANSI and BiDi controls from extension display text', async () => {
+  it('strips ANSI, BiDi, and control characters from extension display text', async () => {
     vi.useFakeTimers();
     mount({
       view: makeView('@'),
@@ -139,7 +139,7 @@ describe('useAtMentionMenu', () => {
           extensions: [
             {
               name: 'review',
-              displayName: '\u001b[31mReview\u001b[0m\u202Etxt',
+              displayName: '\u001b[31mReview\u001b[0m\u202E\u0085txt\u0007中文',
               description: 'safe',
               isActive: true,
             },
@@ -152,7 +152,7 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.enterCategory(1));
     await runDebounce();
 
-    expect(latest!.state?.items[0]?.description).toBe('Reviewtxt');
+    expect(latest!.state?.items[0]?.description).toBe('Reviewtxt中文');
   });
 
   it('filters cached extension provider data while searching', async () => {
@@ -1191,7 +1191,7 @@ describe('useAtMentionMenu', () => {
             {
               id: 'custom-item',
               label: 'Name',
-              insertText: '@\u001b[31mName\u001b[0m\u202E ',
+              insertText: '@\u001b[31mName\u001b[0m\u202E\u0085中文 ',
             },
           ]),
         },
@@ -1206,8 +1206,8 @@ describe('useAtMentionMenu', () => {
     });
 
     expect(view.dispatch).toHaveBeenCalledWith({
-      changes: { from: 0, to: 1, insert: '@Name ' },
-      selection: { anchor: 6 },
+      changes: { from: 0, to: 1, insert: '@Name中文 ' },
+      selection: { anchor: 8 },
       scrollIntoView: true,
     });
   });
@@ -1312,7 +1312,7 @@ describe('useAtMentionMenu', () => {
       path: '.',
       entries: [
         {
-          name: 'safe\u202E.md',
+          name: 'safe\u202E\u0085中文.md',
           kind: 'file',
           ignored: false,
         },
@@ -1329,8 +1329,8 @@ describe('useAtMentionMenu', () => {
     });
 
     expect(view.dispatch).toHaveBeenCalledWith({
-      changes: { from: 0, to: 1, insert: '@safe.md ' },
-      selection: { anchor: 9 },
+      changes: { from: 0, to: 1, insert: '@safe中文.md ' },
+      selection: { anchor: 11 },
       scrollIntoView: true,
     });
   });
