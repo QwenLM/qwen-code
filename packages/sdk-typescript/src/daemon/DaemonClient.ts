@@ -98,6 +98,9 @@ import type {
   DaemonToolToggleResult,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
+  DaemonSessionArtifactPinOptions,
+  DaemonSessionArtifactRemoveOptions,
+  DaemonSessionArtifactUnpinOptions,
   DaemonSessionArtifactsEnvelope,
   DaemonSessionArtifactFsckResult,
   DaemonSessionArtifactGcResult,
@@ -3108,6 +3111,7 @@ export class DaemonClient {
     sessionId: string,
     artifactId: string,
     clientId?: string,
+    options?: DaemonSessionArtifactRemoveOptions,
   ): Promise<DaemonSessionArtifactMutationResult> {
     return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
       `/session/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`,
@@ -3115,6 +3119,7 @@ export class DaemonClient {
       {
         method: 'DELETE',
         clientId,
+        ...(options !== undefined ? { body: options } : {}),
       },
     );
   }
@@ -3123,6 +3128,7 @@ export class DaemonClient {
     sessionId: string,
     artifactId: string,
     clientId?: string,
+    options?: DaemonSessionArtifactPinOptions,
   ): Promise<DaemonSessionArtifactMutationResult> {
     return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
       `/session/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/pin`,
@@ -3130,6 +3136,7 @@ export class DaemonClient {
       {
         method: 'POST',
         clientId,
+        ...(options !== undefined ? { body: options } : {}),
       },
     );
   }
@@ -3138,6 +3145,7 @@ export class DaemonClient {
     sessionId: string,
     artifactId: string,
     clientId?: string,
+    options?: DaemonSessionArtifactUnpinOptions,
   ): Promise<DaemonSessionArtifactMutationResult> {
     return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
       `/session/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/pin`,
@@ -3145,6 +3153,7 @@ export class DaemonClient {
       {
         method: 'DELETE',
         clientId,
+        ...(options !== undefined ? { body: options } : {}),
       },
     );
   }

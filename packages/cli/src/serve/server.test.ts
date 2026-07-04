@@ -187,8 +187,6 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_cancel',
   'session_events',
   'session_artifacts',
-  'session_artifacts_persistence',
-  'session_artifacts_content_retention',
   'slow_client_warning',
   'typed_event_schema',
   'session_set_model',
@@ -293,7 +291,15 @@ const EXPECTED_REGISTERED_FEATURES = [
   // All four conditional tags filtered from the stage1 baseline so
   // they appear here in their registry-declaration order, not the
   // stage1 order.
-  ...EXPECTED_STAGE1_FEATURES.filter(
+  ...EXPECTED_STAGE1_FEATURES.flatMap((feature) =>
+    feature === 'session_artifacts'
+      ? [
+          feature,
+          'session_artifacts_persistence',
+          'session_artifacts_content_retention',
+        ]
+      : [feature],
+  ).filter(
     (f) =>
       f !== 'workspace_init' &&
       f !== 'workspace_github_setup' &&
@@ -643,16 +649,19 @@ interface FakeBridge extends AcpSessionBridge {
     sessionId: string;
     artifactId: string;
     context?: BridgeClientRequestContext;
+    options?: Parameters<AcpSessionBridge['removeSessionArtifact']>[3];
   }>;
   pinSessionArtifactCalls: Array<{
     sessionId: string;
     artifactId: string;
     context?: BridgeClientRequestContext;
+    options?: Parameters<AcpSessionBridge['pinSessionArtifact']>[3];
   }>;
   unpinSessionArtifactCalls: Array<{
     sessionId: string;
     artifactId: string;
     context?: BridgeClientRequestContext;
+    options?: Parameters<AcpSessionBridge['unpinSessionArtifact']>[3];
   }>;
   fsckSessionArtifactsCalls: string[];
   gcSessionArtifactsCalls: string[];
@@ -1497,29 +1506,32 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return addSessionArtifactImpl(sessionId, artifact, context);
     },
-    async removeSessionArtifact(sessionId, artifactId, context) {
+    async removeSessionArtifact(sessionId, artifactId, context, options) {
       removeSessionArtifactCalls.push({
         sessionId,
         artifactId,
         ...(context ? { context } : {}),
+        ...(options ? { options } : {}),
       });
-      return removeSessionArtifactImpl(sessionId, artifactId, context);
+      return removeSessionArtifactImpl(sessionId, artifactId, context, options);
     },
-    async pinSessionArtifact(sessionId, artifactId, context) {
+    async pinSessionArtifact(sessionId, artifactId, context, options) {
       pinSessionArtifactCalls.push({
         sessionId,
         artifactId,
         ...(context ? { context } : {}),
+        ...(options ? { options } : {}),
       });
-      return pinSessionArtifactImpl(sessionId, artifactId, context);
+      return pinSessionArtifactImpl(sessionId, artifactId, context, options);
     },
-    async unpinSessionArtifact(sessionId, artifactId, context) {
+    async unpinSessionArtifact(sessionId, artifactId, context, options) {
       unpinSessionArtifactCalls.push({
         sessionId,
         artifactId,
         ...(context ? { context } : {}),
+        ...(options ? { options } : {}),
       });
-      return unpinSessionArtifactImpl(sessionId, artifactId, context);
+      return unpinSessionArtifactImpl(sessionId, artifactId, context, options);
     },
     async fsckSessionArtifacts(sessionId) {
       fsckSessionArtifactsCalls.push(sessionId);
@@ -2099,6 +2111,42 @@ describe('createServeApp', () => {
           );
           continue;
         }
+        if (feature === 'session_artifacts_persistence') {
+          expect(
+            predicate({ sessionArtifactsPersistenceAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ sessionArtifactsPersistenceAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              sessionArtifactsPersistenceAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
+        if (feature === 'session_artifacts_content_retention') {
+          expect(
+            predicate({ sessionArtifactsContentRetentionAvailable: true }),
+          ).toBe(true);
+          expect(
+            predicate({ sessionArtifactsContentRetentionAvailable: false }),
+          ).toBe(false);
+          expect(predicate({})).toBe(false);
+          expect(
+            getAdvertisedServeFeatures(undefined, {
+              sessionArtifactsContentRetentionAvailable: true,
+            }),
+          ).toContain(feature);
+          expect(getAdvertisedServeFeatures(undefined, {})).not.toContain(
+            feature,
+          );
+          continue;
+        }
         if (feature === 'workspace_reload') {
           expect(predicate({ reloadAvailable: true })).toBe(true);
           expect(predicate({ reloadAvailable: false })).toBe(false);
@@ -2500,6 +2548,8 @@ describe('createServeApp', () => {
       expect(res.body.features).toEqual(
         getAdvertisedServeFeatures(undefined, {
           mcpPoolActive: true,
+          sessionArtifactsPersistenceAvailable: true,
+          sessionArtifactsContentRetentionAvailable: true,
         }),
       );
       expect(res.body.modelServices).toEqual([]);
@@ -7299,6 +7349,27 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('DELETE /session/:id/artifacts/:artifactId forwards content deletion option', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app)
+          .delete('/session/session-A/artifacts/artifact-1')
+          .send({ deleteContent: true }),
+      ).set('X-Qwen-Client-Id', 'client-1');
+
+      expect(res.status).toBe(200);
+      expect(bridge.removeSessionArtifactCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          artifactId: 'artifact-1',
+          context: { clientId: 'client-1' },
+          options: { deleteContent: true },
+        },
+      ]);
+    });
+
     it('POST /session/:id/artifacts/:artifactId/pin forwards mutation auth context', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
@@ -7322,6 +7393,63 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('POST /session/:id/artifacts/:artifactId/pin forwards retention options', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app)
+          .post('/session/session-A/artifacts/artifact-1/pin')
+          .send({ mode: 'content', ttlDays: 7, clientRetained: false }),
+      ).set('X-Qwen-Client-Id', 'client-1');
+
+      expect(res.status).toBe(200);
+      expect(bridge.pinSessionArtifactCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          artifactId: 'artifact-1',
+          context: { clientId: 'client-1' },
+          options: { mode: 'content', ttlDays: 7, clientRetained: false },
+        },
+      ]);
+    });
+
+    it('POST /session/:id/artifacts/:artifactId/pin rejects ttlDays for metadata pinning', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app)
+          .post('/session/session-A/artifacts/artifact-1/pin')
+          .send({ mode: 'metadata', ttlDays: 7 }),
+      ).set('X-Qwen-Client-Id', 'client-1');
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatchObject({
+        code: 'VALIDATION_FAILED',
+        field: 'ttlDays',
+      });
+      expect(bridge.pinSessionArtifactCalls).toHaveLength(0);
+    });
+
+    it('POST /session/:id/artifacts/:artifactId/pin rejects ttlDays above the maximum', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app)
+          .post('/session/session-A/artifacts/artifact-1/pin')
+          .send({ mode: 'content', ttlDays: 366 }),
+      ).set('X-Qwen-Client-Id', 'client-1');
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toMatchObject({
+        code: 'VALIDATION_FAILED',
+        field: 'ttlDays',
+      });
+      expect(bridge.pinSessionArtifactCalls).toHaveLength(0);
+    });
+
     it('DELETE /session/:id/artifacts/:artifactId/pin forwards mutation auth context', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
@@ -7341,6 +7469,27 @@ describe('createServeApp', () => {
           sessionId: 'session-A',
           artifactId: 'artifact-1',
           context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('DELETE /session/:id/artifacts/:artifactId/pin forwards target retention', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app)
+          .delete('/session/session-A/artifacts/artifact-1/pin')
+          .send({ retention: 'ephemeral' }),
+      ).set('X-Qwen-Client-Id', 'client-1');
+
+      expect(res.status).toBe(200);
+      expect(bridge.unpinSessionArtifactCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          artifactId: 'artifact-1',
+          context: { clientId: 'client-1' },
+          options: { retention: 'ephemeral' },
         },
       ]);
     });

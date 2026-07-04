@@ -23,7 +23,8 @@ export type SessionArtifactPersistenceWarning =
   | 'content_expired'
   | 'content_hash_mismatch'
   | 'metadata_only_restore'
-  | 'restore_validation_failed';
+  | 'restore_validation_failed'
+  | 'sticky_override_active';
 
 export type PersistedSessionArtifactKind =
   | 'file'
@@ -74,13 +75,10 @@ export interface PersistedSessionArtifact {
   updatedAt: string;
   persistedAt?: string;
   expiresAt?: string;
-  restoreState?: SessionArtifactRestoreState;
-  persistenceWarning?: SessionArtifactPersistenceWarning;
   contentRef?: SessionArtifactContentRef;
   toolCallId?: string;
   toolName?: string;
   hookEventName?: string;
-  clientId?: string;
 }
 
 export type SessionArtifactPersistedChangeAction =
@@ -307,8 +305,6 @@ function remapSessionArtifactForFork(
     id,
     retention:
       artifact.retention === 'pinned' ? 'restorable' : artifact.retention,
-    restoreState: 'restored',
-    persistenceWarning: 'metadata_only_restore',
   };
   delete next.contentRef;
   delete next.expiresAt;
@@ -441,27 +437,10 @@ function normalizePersistedArtifact(
   const sizeBytes = getNonNegativeInteger(value, 'sizeBytes');
   const persistedAt = getString(value, 'persistedAt');
   const expiresAt = getString(value, 'expiresAt');
-  const restoreState = normalizeLiteral<SessionArtifactRestoreState>(
-    value['restoreState'],
-    ['live', 'restored', 'unverified', 'blocked'],
-  );
-  const persistenceWarning =
-    normalizeLiteral<SessionArtifactPersistenceWarning>(
-      value['persistenceWarning'],
-      [
-        'persistence_unavailable',
-        'content_missing',
-        'content_expired',
-        'content_hash_mismatch',
-        'metadata_only_restore',
-        'restore_validation_failed',
-      ],
-    );
   const contentRef = normalizeContentRef(value['contentRef']);
   const toolCallId = getString(value, 'toolCallId');
   const toolName = getString(value, 'toolName');
   const hookEventName = getString(value, 'hookEventName');
-  const clientId = getString(value, 'clientId');
   return {
     id,
     kind,
@@ -482,13 +461,10 @@ function normalizePersistedArtifact(
     updatedAt: getString(value, 'updatedAt') ?? new Date(0).toISOString(),
     ...(persistedAt ? { persistedAt } : {}),
     ...(expiresAt ? { expiresAt } : {}),
-    ...(restoreState ? { restoreState } : {}),
-    ...(persistenceWarning ? { persistenceWarning } : {}),
     ...(contentRef ? { contentRef } : {}),
     ...(toolCallId ? { toolCallId } : {}),
     ...(toolName ? { toolName } : {}),
     ...(hookEventName ? { hookEventName } : {}),
-    ...(clientId ? { clientId } : {}),
   };
 }
 

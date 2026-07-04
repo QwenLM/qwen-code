@@ -474,7 +474,8 @@ export type KnownDaemonSessionArtifactPersistenceWarning =
   | 'content_expired'
   | 'content_hash_mismatch'
   | 'metadata_only_restore'
-  | 'restore_validation_failed';
+  | 'restore_validation_failed'
+  | 'sticky_override_active';
 
 export type DaemonSessionArtifactPersistenceWarning =
   OpenStringUnion<KnownDaemonSessionArtifactPersistenceWarning>;
@@ -567,6 +568,20 @@ export interface DaemonSessionArtifactMutationResult {
   sessionId: string;
   changes: DaemonSessionArtifactChange[];
   warnings?: string[];
+}
+
+export interface DaemonSessionArtifactPinOptions {
+  mode?: 'metadata' | 'content';
+  ttlDays?: number;
+  clientRetained?: boolean;
+}
+
+export interface DaemonSessionArtifactRemoveOptions {
+  deleteContent?: boolean;
+}
+
+export interface DaemonSessionArtifactUnpinOptions {
+  retention?: 'ephemeral' | 'restorable';
 }
 
 export interface DaemonSessionArtifactFsckResult {

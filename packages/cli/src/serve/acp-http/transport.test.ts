@@ -367,6 +367,7 @@ class FakeBridge {
         sessionId: string;
         artifactId: string;
         context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2];
+        options: Parameters<HttpAcpBridge['removeSessionArtifact']>[3];
       }
     | undefined;
   lastPinnedArtifact:
@@ -374,6 +375,7 @@ class FakeBridge {
         sessionId: string;
         artifactId: string;
         context: Parameters<HttpAcpBridge['pinSessionArtifact']>[2];
+        options: Parameters<HttpAcpBridge['pinSessionArtifact']>[3];
       }
     | undefined;
   lastUnpinnedArtifact:
@@ -381,6 +383,7 @@ class FakeBridge {
         sessionId: string;
         artifactId: string;
         context: Parameters<HttpAcpBridge['unpinSessionArtifact']>[2];
+        options: Parameters<HttpAcpBridge['unpinSessionArtifact']>[3];
       }
     | undefined;
   lastFsckSessionId: string | undefined;
@@ -407,8 +410,9 @@ class FakeBridge {
     sessionId: string,
     artifactId: string,
     context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2],
+    options?: Parameters<HttpAcpBridge['removeSessionArtifact']>[3],
   ) {
-    this.lastRemovedArtifact = { sessionId, artifactId, context };
+    this.lastRemovedArtifact = { sessionId, artifactId, context, options };
     return {
       v: 1,
       sessionId,
@@ -419,8 +423,9 @@ class FakeBridge {
     sessionId: string,
     artifactId: string,
     context: Parameters<HttpAcpBridge['pinSessionArtifact']>[2],
+    options?: Parameters<HttpAcpBridge['pinSessionArtifact']>[3],
   ) {
-    this.lastPinnedArtifact = { sessionId, artifactId, context };
+    this.lastPinnedArtifact = { sessionId, artifactId, context, options };
     return {
       v: 1,
       sessionId,
@@ -431,8 +436,9 @@ class FakeBridge {
     sessionId: string,
     artifactId: string,
     context: Parameters<HttpAcpBridge['unpinSessionArtifact']>[2],
+    options?: Parameters<HttpAcpBridge['unpinSessionArtifact']>[3],
   ) {
-    this.lastUnpinnedArtifact = { sessionId, artifactId, context };
+    this.lastUnpinnedArtifact = { sessionId, artifactId, context, options };
     return {
       v: 1,
       sessionId,
@@ -5715,7 +5721,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         jsonrpc: '2.0',
         id: 59,
         method: '_qwen/session/artifacts/remove',
-        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+        params: {
+          sessionId: 'sess-1',
+          artifactId: 'artifact-1',
+          deleteContent: true,
+        },
       });
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
@@ -5734,6 +5744,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(bridge.lastRemovedArtifact).toMatchObject({
         sessionId: 'sess-1',
         artifactId: 'artifact-1',
+        options: { deleteContent: true },
       });
     });
 
@@ -5779,7 +5790,13 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         jsonrpc: '2.0',
         id: 61,
         method: '_qwen/session/artifacts/pin',
-        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+        params: {
+          sessionId: 'sess-1',
+          artifactId: 'artifact-1',
+          mode: 'content',
+          ttlDays: 7,
+          clientRetained: false,
+        },
       });
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
@@ -5792,6 +5809,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(bridge.lastPinnedArtifact).toMatchObject({
         sessionId: 'sess-1',
         artifactId: 'artifact-1',
+        options: { mode: 'content', ttlDays: 7, clientRetained: false },
       });
     });
 
@@ -5810,7 +5828,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         jsonrpc: '2.0',
         id: 62,
         method: '_qwen/session/artifacts/unpin',
-        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+        params: {
+          sessionId: 'sess-1',
+          artifactId: 'artifact-1',
+          retention: 'ephemeral',
+        },
       });
       const frames = await takeFrames(await streamRes, 2);
       expect(frames[1]).toMatchObject({
@@ -5823,6 +5845,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(bridge.lastUnpinnedArtifact).toMatchObject({
         sessionId: 'sess-1',
         artifactId: 'artifact-1',
+        options: { retention: 'ephemeral' },
       });
     });
 
@@ -5963,8 +5986,14 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           sessionId,
           artifactId,
           context,
+          options,
         ) => {
-          bridge.lastRemovedArtifact = { sessionId, artifactId, context };
+          bridge.lastRemovedArtifact = {
+            sessionId,
+            artifactId,
+            context,
+            options,
+          };
           removeStarted();
           await removeReleasedPromise;
           return {

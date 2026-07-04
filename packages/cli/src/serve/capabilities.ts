@@ -303,6 +303,8 @@ export interface AdvertiseFeatureToggles {
   persistSettingAvailable?: boolean;
   voiceTranscriptionAvailable?: boolean;
   sessionShellCommandEnabled?: boolean;
+  sessionArtifactsPersistenceAvailable?: boolean;
+  sessionArtifactsContentRetentionAvailable?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
   /**
@@ -379,6 +381,14 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'session_shell_command',
     (toggles) => toggles.sessionShellCommandEnabled === true,
+  ],
+  [
+    'session_artifacts_persistence',
+    (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
+    'session_artifacts_content_retention',
+    (toggles) => toggles.sessionArtifactsContentRetentionAvailable === true,
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],

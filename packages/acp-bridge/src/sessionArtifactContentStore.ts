@@ -7,9 +7,11 @@
 import { createHash } from 'node:crypto';
 import fsSync from 'node:fs';
 import { promises as fs } from 'node:fs';
+import type { FileHandle } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import type { SessionArtifactContentRef } from '@qwen-code/qwen-code-core';
+import type { SessionArtifactPersistenceWarning } from '@qwen-code/qwen-code-core';
 import type { DaemonSessionArtifact } from './sessionArtifacts.js';
 import { SessionArtifactValidationError } from './sessionArtifacts.js';
 
@@ -71,20 +73,6 @@ export class SessionArtifactContentStore {
         'artifactId',
       );
     });
-    const sourceStat = await fs.stat(source);
-    if (!sourceStat.isFile()) {
-      throw new SessionArtifactValidationError(
-        'Only regular workspace files can be pinned with content retention',
-        'artifactId',
-      );
-    }
-    if (sourceStat.size > MAX_PINNED_FILE_BYTES) {
-      throw new SessionArtifactValidationError(
-        `Pinned artifact content exceeds ${MAX_PINNED_FILE_BYTES} bytes`,
-        'artifactId',
-      );
-    }
-
     return this.enqueueWrite(async () => {
       const tmpDir = path.join(this.rootDir, '.tmp');
       await fs.mkdir(tmpDir, { recursive: true, mode: 0o700 });
@@ -92,15 +80,13 @@ export class SessionArtifactContentStore {
         tmpDir,
         `${process.pid}-${Date.now()}-${artifact.id}.bin`,
       );
+      let sourceHandle: FileHandle | undefined;
       try {
-        await fs.copyFile(source, tmpPath);
-        const { sha256, sizeBytes } = await hashFile(tmpPath);
-        if (sizeBytes > MAX_PINNED_FILE_BYTES) {
-          throw new SessionArtifactValidationError(
-            `Pinned artifact content exceeds ${MAX_PINNED_FILE_BYTES} bytes`,
-            'artifactId',
-          );
-        }
+        sourceHandle = await openRegularWorkspaceFile(source);
+        const { sha256, sizeBytes } = await copyOpenFileToTemp(
+          sourceHandle,
+          tmpPath,
+        );
 
         const contentId = `${sha256}-${stableContentSuffix(
           sessionId,
@@ -148,6 +134,8 @@ export class SessionArtifactContentStore {
           await fs.rm(tmpPath, { force: true }).catch(() => {});
         }
         throw error;
+      } finally {
+        await sourceHandle?.close().catch(() => undefined);
       }
     });
   }
@@ -177,6 +165,53 @@ export class SessionArtifactContentStore {
       }
     }
     return { checked: contentRefs.length, missing, hashMismatches };
+  }
+
+  async verifyContentRef(
+    sessionId: string,
+    artifactId: string,
+    ref: SessionArtifactContentRef,
+  ): Promise<SessionArtifactPersistenceWarning | undefined> {
+    if (
+      ref.kind !== 'managed_copy' ||
+      !isValidContentId(ref.contentId) ||
+      !/^[0-9a-f]{64}$/.test(ref.sha256) ||
+      !Number.isSafeInteger(ref.sizeBytes) ||
+      ref.sizeBytes < 0
+    ) {
+      return 'restore_validation_failed';
+    }
+    const contentDir = path.join(this.rootDir, ref.contentId);
+    let manifest: ContentManifest;
+    try {
+      manifest = await readManifest(path.join(contentDir, 'manifest.json'));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return 'content_missing';
+      }
+      return 'restore_validation_failed';
+    }
+    if (
+      manifest.sessionId !== sessionId ||
+      manifest.artifactId !== artifactId ||
+      manifest.contentId !== ref.contentId ||
+      manifest.sha256 !== ref.sha256 ||
+      manifest.sizeBytes !== ref.sizeBytes
+    ) {
+      return 'restore_validation_failed';
+    }
+    try {
+      const stat = await fs.stat(path.join(contentDir, 'content'));
+      if (!stat.isFile() || stat.size !== ref.sizeBytes) {
+        return 'content_hash_mismatch';
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return 'content_missing';
+      }
+      throw error;
+    }
+    return undefined;
   }
 
   async gc(
@@ -322,6 +357,129 @@ async function resolveWorkspaceFile(
   return realCandidate;
 }
 
+async function openRegularWorkspaceFile(filePath: string): Promise<FileHandle> {
+  const sourceStat = await fs.stat(filePath);
+  if (!sourceStat.isFile()) {
+    throw new SessionArtifactValidationError(
+      'Only regular workspace files can be pinned with content retention',
+      'artifactId',
+    );
+  }
+  if (sourceStat.nlink > 1) {
+    throw new SessionArtifactValidationError(
+      'Hardlinked workspace files cannot be pinned with content retention',
+      'artifactId',
+    );
+  }
+  if (sourceStat.size > MAX_PINNED_FILE_BYTES) {
+    throw new SessionArtifactValidationError(
+      `Pinned artifact content exceeds ${MAX_PINNED_FILE_BYTES} bytes`,
+      'artifactId',
+    );
+  }
+  let handle: FileHandle;
+  try {
+    handle = await fs.open(
+      filePath,
+      fsSync.constants.O_RDONLY | noFollowFlag(),
+    );
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ELOOP') {
+      throw new SessionArtifactValidationError(
+        'workspacePath must not resolve through a symlink while pinning content',
+        'workspacePath',
+      );
+    }
+    throw error;
+  }
+  try {
+    const handleStat = await handle.stat();
+    if (!handleStat.isFile()) {
+      throw new SessionArtifactValidationError(
+        'Only regular workspace files can be pinned with content retention',
+        'artifactId',
+      );
+    }
+    if (!sameFile(sourceStat, handleStat)) {
+      throw new SessionArtifactValidationError(
+        'workspacePath changed while pinning content',
+        'workspacePath',
+      );
+    }
+    if (handleStat.nlink > 1) {
+      throw new SessionArtifactValidationError(
+        'Hardlinked workspace files cannot be pinned with content retention',
+        'artifactId',
+      );
+    }
+    if (handleStat.size > MAX_PINNED_FILE_BYTES) {
+      throw new SessionArtifactValidationError(
+        `Pinned artifact content exceeds ${MAX_PINNED_FILE_BYTES} bytes`,
+        'artifactId',
+      );
+    }
+    return handle;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+async function copyOpenFileToTemp(
+  handle: FileHandle,
+  tmpPath: string,
+): Promise<{ sha256: string; sizeBytes: number }> {
+  const writer = await fs.open(tmpPath, 'w', 0o600);
+  const hash = createHash('sha256');
+  const buffer = Buffer.allocUnsafe(64 * 1024);
+  let sizeBytes = 0;
+  let position = 0;
+  try {
+    while (true) {
+      const { bytesRead } = await handle.read(
+        buffer,
+        0,
+        buffer.length,
+        position,
+      );
+      if (bytesRead === 0) break;
+      position += bytesRead;
+      sizeBytes += bytesRead;
+      if (sizeBytes > MAX_PINNED_FILE_BYTES) {
+        throw new SessionArtifactValidationError(
+          `Pinned artifact content exceeds ${MAX_PINNED_FILE_BYTES} bytes`,
+          'artifactId',
+        );
+      }
+      const chunk = buffer.subarray(0, bytesRead);
+      hash.update(chunk);
+      await writer.write(chunk);
+    }
+    await writer.sync();
+  } finally {
+    await writer.close().catch(() => undefined);
+  }
+  return { sha256: hash.digest('hex'), sizeBytes };
+}
+
+function noFollowFlag(): number {
+  return typeof fsSync.constants.O_NOFOLLOW === 'number'
+    ? fsSync.constants.O_NOFOLLOW
+    : 0;
+}
+
+function sameFile(before: fsSync.Stats, after: fsSync.Stats): boolean {
+  if (
+    before.dev !== 0 ||
+    before.ino !== 0 ||
+    after.dev !== 0 ||
+    after.ino !== 0
+  ) {
+    return before.dev === after.dev && before.ino === after.ino;
+  }
+  return before.size === after.size && before.mtimeMs === after.mtimeMs;
+}
+
 function hashFile(
   filePath: string,
 ): Promise<{ sha256: string; sizeBytes: number }> {
@@ -371,12 +529,16 @@ async function writeManifestAtomic(
     contentDir,
     `.manifest-${process.pid}-${Date.now()}.json.tmp`,
   );
+  let handle: FileHandle | undefined;
   try {
-    await fs.writeFile(tmpPath, `${JSON.stringify(manifest)}\n`, {
-      mode: 0o600,
-    });
+    handle = await fs.open(tmpPath, 'w', 0o600);
+    await handle.writeFile(`${JSON.stringify(manifest)}\n`);
+    await handle.sync();
+    await handle.close();
+    handle = undefined;
     await fs.rename(tmpPath, path.join(contentDir, 'manifest.json'));
   } catch (error) {
+    await handle?.close().catch(() => undefined);
     await fs.rm(tmpPath, { force: true }).catch(() => undefined);
     throw error;
   }

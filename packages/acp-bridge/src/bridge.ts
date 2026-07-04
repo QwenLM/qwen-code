@@ -95,6 +95,9 @@ import type {
   BridgeWorkspaceMemoryForgetMatch,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
+  SessionArtifactPinRequest,
+  SessionArtifactRemoveRequest,
+  SessionArtifactUnpinRequest,
 } from './bridgeTypes.js';
 import type { BridgeOptions, BridgeTelemetry } from './bridgeOptions.js';
 import { MCP_RESTART_SERVER_DEADLINE_MS } from './mcpTimeouts.js';
@@ -110,6 +113,7 @@ import {
 import { PermissionForbiddenError } from './bridgeErrors.js';
 import {
   SessionArtifactStore,
+  SessionArtifactValidationError,
   type SessionArtifactChange,
   type SessionArtifactInput,
   type SessionArtifactMutationResult,
@@ -853,6 +857,8 @@ function extractPromptText(
 
 const DEFAULT_INIT_TIMEOUT_MS = 10_000;
 const PERSIST_TIMEOUT_MS = 5_000;
+const ARTIFACT_TTL_DAY_MS = 24 * 60 * 60 * 1000;
+const ARTIFACT_MAX_TTL_DAYS = 365;
 const MCP_RESTART_TIMEOUT_MS = 300_000;
 const WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS = 300_000;
 const MCP_OAUTH_TIMEOUT_MS = 600_000;
@@ -2441,6 +2447,102 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return input;
   };
 
+  const artifactExpiresAt = (
+    options: SessionArtifactPinRequest | undefined,
+    mode: 'metadata' | 'content',
+  ): string | undefined => {
+    if (options?.ttlDays === undefined) return undefined;
+    if (mode !== 'content') {
+      throw new SessionArtifactValidationError(
+        'ttlDays is only valid with content pinning',
+        'ttlDays',
+      );
+    }
+    if (!Number.isSafeInteger(options.ttlDays) || options.ttlDays <= 0) {
+      throw new SessionArtifactValidationError(
+        'ttlDays must be a positive safe integer',
+        'ttlDays',
+      );
+    }
+    if (options.ttlDays > ARTIFACT_MAX_TTL_DAYS) {
+      throw new SessionArtifactValidationError(
+        `ttlDays must be at most ${ARTIFACT_MAX_TTL_DAYS}`,
+        'ttlDays',
+      );
+    }
+    const expiresAtMs = Date.now() + options.ttlDays * ARTIFACT_TTL_DAY_MS;
+    if (!Number.isSafeInteger(expiresAtMs)) {
+      throw new SessionArtifactValidationError(
+        'ttlDays is too large',
+        'ttlDays',
+      );
+    }
+    return new Date(expiresAtMs).toISOString();
+  };
+
+  const artifactPinMode = (
+    options: SessionArtifactPinRequest | undefined,
+  ): 'metadata' | 'content' => {
+    const mode = options?.mode ?? 'content';
+    if (mode !== 'metadata' && mode !== 'content') {
+      throw new SessionArtifactValidationError(
+        'mode must be "metadata" or "content"',
+        'mode',
+      );
+    }
+    return mode;
+  };
+
+  const artifactRemoveOptions = (
+    options: SessionArtifactRemoveRequest | undefined,
+  ): SessionArtifactRemoveRequest => {
+    if (options?.deleteContent === undefined) return {};
+    if (typeof options.deleteContent !== 'boolean') {
+      throw new SessionArtifactValidationError(
+        'deleteContent must be a boolean',
+        'deleteContent',
+      );
+    }
+    return { deleteContent: options.deleteContent };
+  };
+
+  const artifactClientRetained = (
+    options: SessionArtifactPinRequest | undefined,
+  ): boolean | undefined => {
+    if (options?.clientRetained === undefined) return undefined;
+    if (typeof options.clientRetained !== 'boolean') {
+      throw new SessionArtifactValidationError(
+        'clientRetained must be a boolean',
+        'clientRetained',
+      );
+    }
+    return options.clientRetained;
+  };
+
+  const artifactUnpinOptions = (
+    options: SessionArtifactUnpinRequest | undefined,
+  ): SessionArtifactUnpinRequest => {
+    if (options?.retention === undefined) return {};
+    if (
+      options.retention !== 'ephemeral' &&
+      options.retention !== 'restorable'
+    ) {
+      throw new SessionArtifactValidationError(
+        'retention must be "ephemeral" or "restorable"',
+        'retention',
+      );
+    }
+    return { retention: options.retention };
+  };
+
+  const gcArtifactContent = async (entry: SessionEntry): Promise<void> => {
+    const refs = await entry.artifacts.contentRefs();
+    await artifactContentStore.gc(
+      entry.sessionId,
+      new Set(refs.map((ref) => ref.contentId)),
+    );
+  };
+
   function createSessionArtifactPersistence(
     connection: ClientSideConnection,
     sessionId: string,
@@ -2795,6 +2897,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       seedSnapshotCaches(entry, state);
       const artifactRestoreWarnings = await entry.artifacts.restore(
         restoredArtifactSnapshotFromState(state),
+        {
+          verifyContentRef: (artifact) =>
+            artifact.contentRef
+              ? artifactContentStore.verifyContentRef(
+                  entry.sessionId,
+                  artifact.id,
+                  artifact.contentRef,
+                )
+              : Promise.resolve(undefined),
+        },
       );
       for (const warning of artifactRestoreWarnings) {
         writeStderrLine(
@@ -4198,6 +4310,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     async getSessionArtifacts(sessionId) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      const pruned = await entry.artifacts.pruneExpiredPins();
+      if (pruned.changes.length > 0) {
+        publishArtifactChanges(entry, pruned.changes);
+        await gcArtifactContent(entry);
+      }
       return entry.artifacts.list();
     },
 
@@ -4212,16 +4329,34 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return result;
     },
 
-    async removeSessionArtifact(sessionId, artifactId, context) {
+    async removeSessionArtifact(sessionId, artifactId, context, options) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
+      const artifact = await entry.artifacts.get(artifactId);
       const result = await entry.artifacts.remove(artifactId, { clientId });
+      const removeOptions = artifactRemoveOptions(options);
+      const warnings = [...(result.warnings ?? [])];
+      if (removeOptions.deleteContent === true && result.changes.length > 0) {
+        if (
+          artifact?.source === 'client' &&
+          artifact.clientId !== undefined &&
+          artifact.clientId === clientId
+        ) {
+          try {
+            await gcArtifactContent(entry);
+          } catch {
+            warnings.push('content_delete_preserved');
+          }
+        } else {
+          warnings.push('content_delete_preserved');
+        }
+      }
       publishArtifactChanges(entry, result.changes, clientId);
-      return result;
+      return warnings.length > 0 ? { ...result, warnings } : result;
     },
 
-    async pinSessionArtifact(sessionId, artifactId, context) {
+    async pinSessionArtifact(sessionId, artifactId, context, options) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
@@ -4229,27 +4364,46 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!artifact) {
         return { v: 1, sessionId, changes: [] };
       }
-      const contentRef = await artifactContentStore.pinWorkspaceFile(
-        sessionId,
-        artifact,
-        entry.workspaceCwd,
-      );
-      const result = await entry.artifacts.pin(artifactId, contentRef);
+      const mode = artifactPinMode(options);
+      if (artifact.retention === 'pinned') {
+        const result = await entry.artifacts.pin(artifactId);
+        publishArtifactChanges(entry, result.changes, clientId);
+        return result;
+      }
+      const contentRef =
+        mode === 'metadata'
+          ? undefined
+          : await artifactContentStore.pinWorkspaceFile(
+              sessionId,
+              artifact,
+              entry.workspaceCwd,
+            );
+      if (mode === 'content' && !contentRef) {
+        throw new SessionArtifactValidationError(
+          'artifact content is not available for retention',
+          'artifactId',
+        );
+      }
+      const result = await entry.artifacts.pin(artifactId, {
+        retention: mode === 'metadata' ? 'restorable' : 'pinned',
+        contentRef,
+        expiresAt: artifactExpiresAt(options, mode),
+        clientRetained: artifactClientRetained(options),
+      });
       publishArtifactChanges(entry, result.changes, clientId);
       return result;
     },
 
-    async unpinSessionArtifact(sessionId, artifactId, context) {
+    async unpinSessionArtifact(sessionId, artifactId, context, options) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
-      const result = await entry.artifacts.unpin(artifactId);
+      const result = await entry.artifacts.unpin(
+        artifactId,
+        artifactUnpinOptions(options),
+      );
       if (result.changes.length > 0) {
-        const refs = await entry.artifacts.contentRefs();
-        await artifactContentStore.gc(
-          sessionId,
-          new Set(refs.map((ref) => ref.contentId)),
-        );
+        await gcArtifactContent(entry);
       }
       publishArtifactChanges(entry, result.changes, clientId);
       return result;

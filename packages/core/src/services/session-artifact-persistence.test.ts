@@ -156,6 +156,47 @@ describe('session artifact persistence records', () => {
     expect(snapshot?.artifacts[0]).not.toHaveProperty('contentRef');
   });
 
+  it('drops runtime warning fields during restore normalization', () => {
+    const restored = artifact('s1', 'https://example.com/sticky', {
+      persistenceWarning: 'sticky_override_active',
+    } as Partial<PersistedSessionArtifact>);
+
+    const snapshot = rebuildSessionArtifactSnapshot([
+      event({
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 's1',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          { action: 'created', artifactId: restored.id, artifact: restored },
+        ],
+      }),
+    ]);
+
+    expect(snapshot?.artifacts[0]).not.toHaveProperty('persistenceWarning');
+  });
+
+  it('drops persisted client ids during restore normalization', () => {
+    const restored = {
+      ...artifact('s1', 'https://example.com/client-owned'),
+      clientId: 'client-a',
+    } as PersistedSessionArtifact;
+
+    const snapshot = rebuildSessionArtifactSnapshot([
+      event({
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 's1',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          { action: 'created', artifactId: restored.id, artifact: restored },
+        ],
+      }),
+    ]);
+
+    expect(snapshot?.artifacts[0]).not.toHaveProperty('clientId');
+  });
+
   it('remaps forked payloads to the new session without carrying pinned content', () => {
     const source = artifact('source-session', 'https://example.com/report', {
       retention: 'pinned',
@@ -191,14 +232,59 @@ describe('session artifact persistence records', () => {
         'url:https://example.com/report',
       ),
       retention: 'restorable',
-      restoreState: 'restored',
-      persistenceWarning: 'metadata_only_restore',
     });
     expect(forked).not.toHaveProperty('contentRef');
     expect(forked).not.toHaveProperty('expiresAt');
+    expect(forked).not.toHaveProperty('restoreState');
+    expect(forked).not.toHaveProperty('persistenceWarning');
   });
 
-  it('remaps forked snapshot payloads and clears inherited tombstone state', () => {
+  it('remaps forked tombstone changes when artifact metadata is present', () => {
+    const source = artifact('source-session', 'https://example.com/deleted');
+
+    const remapped = remapSessionArtifactPayloadForFork(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'source-session',
+        sequence: 6,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          {
+            action: 'removed',
+            artifactId: source.id,
+            artifact: source,
+            reason: 'unpin_to_ephemeral',
+          },
+        ],
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactEventRecordPayload;
+
+    expect(remapped.changes).toEqual([
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: stableSessionArtifactId(
+          'forked-session',
+          'url:https://example.com/deleted',
+        ),
+        reason: 'unpin_to_ephemeral',
+      }),
+    ]);
+    expect(remapped.changes[0]?.artifact).toMatchObject({
+      id: stableSessionArtifactId(
+        'forked-session',
+        'url:https://example.com/deleted',
+      ),
+      retention: 'restorable',
+    });
+    expect(remapped.changes[0]?.artifact).not.toHaveProperty('restoreState');
+    expect(remapped.changes[0]?.artifact).not.toHaveProperty(
+      'persistenceWarning',
+    );
+  });
+
+  it('remaps forked snapshot payloads and drops bare tombstone state', () => {
     const source = artifact('source-session', 'https://example.com/snapshot', {
       retention: 'pinned',
       contentRef: {
@@ -234,10 +320,10 @@ describe('session artifact persistence records', () => {
         'url:https://example.com/snapshot',
       ),
       retention: 'restorable',
-      restoreState: 'restored',
-      persistenceWarning: 'metadata_only_restore',
     });
     expect(remapped.artifacts[0]).not.toHaveProperty('contentRef');
     expect(remapped.artifacts[0]).not.toHaveProperty('expiresAt');
+    expect(remapped.artifacts[0]).not.toHaveProperty('restoreState');
+    expect(remapped.artifacts[0]).not.toHaveProperty('persistenceWarning');
   });
 });

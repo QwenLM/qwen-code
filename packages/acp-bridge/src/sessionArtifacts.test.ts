@@ -125,6 +125,41 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('does not write live client ids into durable artifact records', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's1-client-id-durable',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+
+    const created = await store.upsertMany(
+      [
+        {
+          title: 'Client artifact',
+          url: 'https://example.com/client',
+          source: 'client',
+          clientId: 'client-a',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(created.changes[0]?.artifact).toMatchObject({
+      clientId: 'client-a',
+    });
+    expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('clientId');
+    expect(events[0]?.changes[0]?.artifact).not.toHaveProperty('restoreState');
+    expect(events[0]?.changes[0]?.artifact).not.toHaveProperty(
+      'persistenceWarning',
+    );
+  });
+
   it('returns pinned content refs for gc and fsck callers', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-content-refs',
@@ -147,7 +182,7 @@ describe('SessionArtifactStore', () => {
       createdAt: '2026-07-04T00:00:00.000Z',
     };
 
-    await store.pin(artifactId, contentRef);
+    await store.pin(artifactId, { contentRef });
     await expect(store.contentRefs()).resolves.toEqual([contentRef]);
 
     await store.unpin(artifactId);
@@ -179,11 +214,11 @@ describe('SessionArtifactStore', () => {
       createdAt: '2026-07-04T00:00:00.000Z',
     };
 
-    await expect(store.pin('missing', contentRef)).resolves.toMatchObject({
+    await expect(store.pin('missing', { contentRef })).resolves.toMatchObject({
       changes: [],
     });
 
-    const pinned = await store.pin(artifactId, contentRef);
+    const pinned = await store.pin(artifactId, { contentRef });
     expect(pinned.changes[0]?.artifact).toMatchObject({
       retention: 'pinned',
       clientRetained: true,
@@ -202,7 +237,134 @@ describe('SessionArtifactStore', () => {
     expect(events.map((event) => event.sequence)).toEqual([1, 2, 3]);
   });
 
-  it('marks metadata-only pin when no content ref is available', async () => {
+  it('unpins to live-only state with a durable sticky tombstone', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's1-unpin-ephemeral',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Report', url: 'https://example.com/report' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    const contentRef = {
+      kind: 'managed_copy' as const,
+      contentId: `${'a'.repeat(64)}-${'b'.repeat(16)}`,
+      sha256: 'a'.repeat(64),
+      sizeBytes: 12,
+      createdAt: '2026-07-04T00:00:00.000Z',
+    };
+
+    await store.pin(artifactId, { contentRef });
+    const unpinned = await store.unpin(artifactId, {
+      retention: 'ephemeral',
+    });
+
+    expect(unpinned.changes[0]?.artifact).toMatchObject({
+      id: artifactId,
+      retention: 'ephemeral',
+      persistenceWarning: 'sticky_override_active',
+    });
+    expect(unpinned.changes[0]?.artifact).not.toHaveProperty('contentRef');
+    expect(events[2]?.changes).toEqual([
+      expect.objectContaining({
+        action: 'removed',
+        artifactId,
+        reason: 'unpin_to_ephemeral',
+      }),
+    ]);
+
+    await store.upsertMany([
+      { title: 'Report', url: 'https://example.com/report' },
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: artifactId,
+          retention: 'ephemeral',
+          persistenceWarning: 'sticky_override_active',
+        }),
+      ],
+    });
+
+    await store.upsertMany(
+      [
+        {
+          title: 'Report',
+          url: 'https://example.com/report',
+          retention: 'restorable',
+        },
+      ],
+      { strict: true },
+    );
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: artifactId,
+          retention: 'restorable',
+        }),
+      ],
+    });
+    expect((await store.list()).artifacts[0]).not.toHaveProperty(
+      'persistenceWarning',
+    );
+  });
+
+  it('downgrades expired pinned content before exposing artifacts', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's1-expired-pin',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Report', url: 'https://example.com/report' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    await store.pin(artifactId, {
+      contentRef: {
+        kind: 'managed_copy',
+        contentId: `${'c'.repeat(64)}-${'d'.repeat(16)}`,
+        sha256: 'c'.repeat(64),
+        sizeBytes: 12,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      },
+      expiresAt: '2026-07-04T00:00:00.000Z',
+    });
+
+    const pruned = await store.pruneExpiredPins(
+      new Date('2026-07-05T00:00:00.000Z'),
+    );
+
+    expect(pruned.changes[0]?.artifact).toMatchObject({
+      id: artifactId,
+      retention: 'restorable',
+      persistenceWarning: 'content_expired',
+    });
+    expect(pruned.changes[0]?.artifact).not.toHaveProperty('contentRef');
+    expect(pruned.changes[0]?.artifact).not.toHaveProperty('expiresAt');
+    expect(events[2]?.changes[0]?.artifact).toMatchObject({
+      retention: 'restorable',
+    });
+    expect(events[2]?.changes[0]?.artifact).not.toHaveProperty(
+      'persistenceWarning',
+    );
+  });
+
+  it('keeps metadata-only pin restorable when no content ref is available', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-pin-metadata',
       workspaceCwd: workspace,
@@ -221,12 +383,64 @@ describe('SessionArtifactStore', () => {
       changes: [
         {
           artifact: {
-            retention: 'pinned',
+            retention: 'restorable',
             persistenceWarning: 'metadata_only_restore',
           },
         },
       ],
     });
+  });
+
+  it('does not refresh an already pinned artifact on repeated pin', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's1-pin-idempotent',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Report', url: 'https://example.com/report' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    const contentRef = {
+      kind: 'managed_copy' as const,
+      contentId: `${'a'.repeat(64)}-${'b'.repeat(16)}`,
+      sha256: 'a'.repeat(64),
+      sizeBytes: 12,
+      createdAt: '2026-07-04T00:00:00.000Z',
+    };
+    await store.pin(artifactId, {
+      contentRef,
+      expiresAt: '2026-08-01T00:00:00.000Z',
+    });
+
+    await expect(
+      store.pin(artifactId, {
+        contentRef: {
+          ...contentRef,
+          contentId: `${'c'.repeat(64)}-${'d'.repeat(16)}`,
+          sha256: 'c'.repeat(64),
+        },
+        expiresAt: '2026-09-01T00:00:00.000Z',
+      }),
+    ).resolves.toMatchObject({ changes: [] });
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          retention: 'pinned',
+          contentRef,
+          expiresAt: '2026-08-01T00:00:00.000Z',
+        },
+      ],
+    });
+    expect(events).toHaveLength(2);
   });
 
   it('rolls back pin mutations when persistence fails', async () => {
@@ -250,11 +464,13 @@ describe('SessionArtifactStore', () => {
 
     await expect(
       store.pin(artifactId, {
-        kind: 'managed_copy',
-        contentId: `${'a'.repeat(64)}-${'b'.repeat(16)}`,
-        sha256: 'a'.repeat(64),
-        sizeBytes: 12,
-        createdAt: '2026-07-04T00:00:00.000Z',
+        contentRef: {
+          kind: 'managed_copy',
+          contentId: `${'a'.repeat(64)}-${'b'.repeat(16)}`,
+          sha256: 'a'.repeat(64),
+          sizeBytes: 12,
+          createdAt: '2026-07-04T00:00:00.000Z',
+        },
       }),
     ).rejects.toThrow('persist failed');
     await expect(store.list()).resolves.toMatchObject({
@@ -716,7 +932,15 @@ describe('SessionArtifactStore', () => {
       ],
       { strict: true },
     );
-    await store.pin(created.changes[0]!.artifactId);
+    await store.pin(created.changes[0]!.artifactId, {
+      contentRef: {
+        kind: 'managed_copy',
+        contentId: `${'a'.repeat(64)}-${'b'.repeat(16)}`,
+        sha256: 'a'.repeat(64),
+        sizeBytes: 12,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      },
+    });
 
     await store.upsertMany([{ title: 'New', url: 'https://example.com/new' }], {
       strict: true,
@@ -2129,6 +2353,69 @@ describe('SessionArtifactStore', () => {
       ],
     });
   });
+
+  it('strips invalid retained content refs during restore', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-content-ref',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await source.upsertMany(
+      [{ title: 'Pinned', url: 'https://example.com/pinned' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    await source.pin(artifactId, {
+      contentRef: {
+        kind: 'managed_copy',
+        contentId: `${'e'.repeat(64)}-${'f'.repeat(16)}`,
+        sha256: 'e'.repeat(64),
+        sizeBytes: 12,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      },
+    });
+    const persisted = events[1]!.changes[0]!.artifact!;
+    const snapshot: RebuiltSessionArtifactSnapshot = {
+      v: 2,
+      sessionId: 's11-restore-content-ref',
+      sequence: 2,
+      artifacts: [persisted],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    };
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-restore-content-ref',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      restored.restore(snapshot, {
+        verifyContentRef: async () => 'content_hash_mismatch',
+      }),
+    ).resolves.toEqual([]);
+
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: artifactId,
+          retention: 'restorable',
+          restoreState: 'restored',
+          status: 'missing',
+          persistenceWarning: 'content_hash_mismatch',
+        }),
+      ],
+    });
+    expect((await restored.list()).artifacts[0]).not.toHaveProperty(
+      'contentRef',
+    );
+  });
 });
 
 describe('SessionArtifactContentStore', () => {
@@ -2314,6 +2601,31 @@ describe('SessionArtifactContentStore', () => {
     }
   });
 
+  it('rejects hardlinked workspace files for content retention', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const originalPath = path.join(workspace, 'reports', 'original.txt');
+    const hardlinkPath = path.join(workspace, 'reports', 'hardlink.txt');
+    await fs.writeFile(originalPath, 'hardlinked');
+    try {
+      await fs.link(originalPath, hardlinkPath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EPERM' || code === 'EACCES' || code === 'EXDEV') {
+        return;
+      }
+      throw error;
+    }
+    const artifact = {
+      ...(await workspaceArtifact('regular.txt', 'regular')),
+      workspacePath: 'reports/hardlink.txt',
+    };
+
+    await expect(
+      contentStore.pinWorkspaceFile('content-session', artifact, workspace),
+    ).rejects.toThrow(SessionArtifactValidationError);
+  });
+
   it('rejects new content over total quota and cleans up temporary files', async () => {
     const contentStore = new SessionArtifactContentStore(contentRoot);
     const artifact = await workspaceArtifact('over-quota.txt', 'new-content');
@@ -2395,6 +2707,45 @@ describe('SessionArtifactContentStore', () => {
       checked: 1,
       missing: [ref.contentId],
     });
+  });
+
+  it('validates retained content refs against manifest and content size', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('verify.txt', 'hello');
+    const ref = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+
+    await expect(
+      contentStore.verifyContentRef('content-session', artifact.id, ref),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      contentStore.verifyContentRef('other-session', artifact.id, ref),
+    ).resolves.toBe('restore_validation_failed');
+
+    await fs.writeFile(
+      path.join(contentRoot, ref.contentId, 'content'),
+      'HELLO',
+    );
+    await expect(
+      contentStore.verifyContentRef('content-session', artifact.id, ref),
+    ).resolves.toBeUndefined();
+    await expect(contentStore.fsck([ref])).resolves.toMatchObject({
+      hashMismatches: [ref.contentId],
+    });
+
+    await fs.writeFile(path.join(contentRoot, ref.contentId, 'content'), 'bad');
+    await expect(
+      contentStore.verifyContentRef('content-session', artifact.id, ref),
+    ).resolves.toBe('content_hash_mismatch');
+
+    await fs.rm(path.join(contentRoot, ref.contentId, 'content'));
+    await expect(
+      contentStore.verifyContentRef('content-session', artifact.id, ref),
+    ).resolves.toBe('content_missing');
   });
 
   it('garbage-collects only unreferenced content for the requested session', async () => {

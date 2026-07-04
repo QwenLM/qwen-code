@@ -305,6 +305,11 @@ describe('DaemonClient', () => {
       await expect(
         client.removeSessionArtifact('session/1', 'artifact/1', 'client-1'),
       ).resolves.toEqual(result);
+      await expect(
+        client.removeSessionArtifact('session/1', 'artifact/1', 'client-1', {
+          deleteContent: true,
+        }),
+      ).resolves.toEqual(result);
       expect(calls[0]).toMatchObject({
         url: 'http://daemon/session/session%2F1/artifacts/artifact%2F1',
         method: 'DELETE',
@@ -312,6 +317,15 @@ describe('DaemonClient', () => {
           'x-qwen-client-id': 'client-1',
         },
         body: null,
+      });
+      expect(calls[1]).toMatchObject({
+        url: 'http://daemon/session/session%2F1/artifacts/artifact%2F1',
+        method: 'DELETE',
+        headers: {
+          'content-type': 'application/json',
+          'x-qwen-client-id': 'client-1',
+        },
+        body: JSON.stringify({ deleteContent: true }),
       });
     });
 
@@ -330,6 +344,18 @@ describe('DaemonClient', () => {
       await expect(
         client.unpinSessionArtifact('session/1', 'artifact/1', 'client-1'),
       ).resolves.toEqual(result);
+      await expect(
+        client.pinSessionArtifact('session/1', 'artifact/1', 'client-1', {
+          mode: 'content',
+          ttlDays: 7,
+          clientRetained: false,
+        }),
+      ).resolves.toEqual(result);
+      await expect(
+        client.unpinSessionArtifact('session/1', 'artifact/1', 'client-1', {
+          retention: 'ephemeral',
+        }),
+      ).resolves.toEqual(result);
 
       expect(calls[0]).toMatchObject({
         url: 'http://daemon/session/session%2F1/artifacts/artifact%2F1/pin',
@@ -342,6 +368,28 @@ describe('DaemonClient', () => {
         method: 'DELETE',
         headers: { 'x-qwen-client-id': 'client-1' },
         body: null,
+      });
+      expect(calls[2]).toMatchObject({
+        url: 'http://daemon/session/session%2F1/artifacts/artifact%2F1/pin',
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          'x-qwen-client-id': 'client-1',
+        },
+        body: JSON.stringify({
+          mode: 'content',
+          ttlDays: 7,
+          clientRetained: false,
+        }),
+      });
+      expect(calls[3]).toMatchObject({
+        url: 'http://daemon/session/session%2F1/artifacts/artifact%2F1/pin',
+        method: 'DELETE',
+        headers: {
+          'content-type': 'application/json',
+          'x-qwen-client-id': 'client-1',
+        },
+        body: JSON.stringify({ retention: 'ephemeral' }),
       });
     });
 

@@ -142,6 +142,23 @@ export interface SessionArtifactMutationResult {
   warnings?: string[];
 }
 
+export interface SessionArtifactPinOptions {
+  retention?: Extract<SessionArtifactRetention, 'pinned' | 'restorable'>;
+  contentRef?: SessionArtifactContentRef;
+  expiresAt?: string;
+  clientRetained?: boolean;
+}
+
+export interface SessionArtifactUnpinOptions {
+  retention?: Extract<SessionArtifactRetention, 'ephemeral' | 'restorable'>;
+}
+
+export interface SessionArtifactRestoreOptions {
+  verifyContentRef?: (
+    artifact: PersistedSessionArtifact,
+  ) => Promise<SessionArtifactPersistenceWarning | undefined>;
+}
+
 export interface SessionArtifactPersistence {
   recordEvent(payload: SessionArtifactEventRecordPayload): Promise<void>;
   recordSnapshot(payload: SessionArtifactSnapshotRecordPayload): Promise<void>;
@@ -169,6 +186,7 @@ interface SessionArtifactStoreOptions {
 interface NormalizedArtifact extends DaemonSessionArtifact {
   identityKey: string;
   receivedSeq: number;
+  retentionExplicit: boolean;
   retentionSource: DaemonSessionArtifactSource;
   trustedPublisher: boolean;
   lastStatAt?: number;
@@ -273,7 +291,8 @@ export class SessionArtifactStore {
       }
       const changes: SessionArtifactChange[] = [];
       try {
-        for (const artifact of coalesceByIdentity(normalizedResults)) {
+        for (const normalized of coalesceByIdentity(normalizedResults)) {
+          const artifact = this.applyStickyEphemeralOverride(normalized);
           const existing =
             this.artifacts.get(artifact.id) ??
             this.findPublishedUpgradeTarget(artifact) ??
@@ -440,7 +459,7 @@ export class SessionArtifactStore {
 
   async pin(
     artifactId: string,
-    contentRef?: SessionArtifactContentRef,
+    options: SessionArtifactPinOptions = {},
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
       const before = this.cloneState();
@@ -448,18 +467,31 @@ export class SessionArtifactStore {
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
+      if (existing.retention === 'pinned') {
+        return { v: 1, sessionId: this.sessionId, changes: [] };
+      }
+      const targetRetention =
+        options.retention ?? (options.contentRef ? 'pinned' : 'restorable');
+      const { contentRef, expiresAt } = options;
       const updated: StoredArtifact = {
         ...existing,
-        retention: 'pinned',
-        clientRetained: true,
+        retention: targetRetention,
+        clientRetained: options.clientRetained ?? true,
         restoreState: 'live',
         updatedAt: new Date().toISOString(),
-        ...(contentRef
-          ? { contentRef }
-          : { persistenceWarning: 'metadata_only_restore' as const }),
       };
-      if (contentRef) {
+      if (targetRetention === 'pinned' && contentRef) {
+        updated.contentRef = contentRef;
         delete updated.persistenceWarning;
+        if (expiresAt) {
+          updated.expiresAt = expiresAt;
+        } else {
+          delete updated.expiresAt;
+        }
+      } else {
+        updated.persistenceWarning = 'metadata_only_restore';
+        delete updated.contentRef;
+        delete updated.expiresAt;
       }
       this.artifacts.set(artifactId, updated);
       const changes: SessionArtifactChange[] = [
@@ -484,23 +516,32 @@ export class SessionArtifactStore {
     });
   }
 
-  async unpin(artifactId: string): Promise<SessionArtifactMutationResult> {
+  async unpin(
+    artifactId: string,
+    options: SessionArtifactUnpinOptions = {},
+  ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
       const before = this.cloneState();
       const existing = this.artifacts.get(artifactId);
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
+      const targetRetention = options.retention ?? 'restorable';
       const updated: StoredArtifact = {
         ...existing,
-        retention: 'restorable',
+        retention: targetRetention,
         restoreState: 'live',
-        persistenceWarning: 'metadata_only_restore',
+        persistenceWarning:
+          targetRetention === 'ephemeral'
+            ? 'sticky_override_active'
+            : 'metadata_only_restore',
         updatedAt: new Date().toISOString(),
       };
       delete updated.contentRef;
       delete updated.expiresAt;
-      this.artifacts.set(artifactId, updated);
+      if (targetRetention === 'ephemeral') {
+        delete updated.persistedAt;
+      }
       const changes: SessionArtifactChange[] = [
         {
           action: 'updated',
@@ -508,8 +549,25 @@ export class SessionArtifactStore {
           artifact: toPublicArtifact(updated),
         },
       ];
+      const durableChanges =
+        targetRetention === 'ephemeral'
+          ? [
+              {
+                action: 'removed' as const,
+                artifactId,
+                artifact: toPublicArtifact(existing),
+                reason: 'unpin_to_ephemeral' as const,
+              },
+            ]
+          : changes;
+      if (targetRetention !== 'ephemeral') {
+        this.artifacts.set(artifactId, updated);
+      }
       try {
-        const warnings = await this.persistChanges(changes, true);
+        const warnings = await this.persistChanges(durableChanges, true);
+        if (targetRetention === 'ephemeral') {
+          this.artifacts.set(artifactId, updated);
+        }
         return {
           v: 1,
           sessionId: this.sessionId,
@@ -523,8 +581,69 @@ export class SessionArtifactStore {
     });
   }
 
+  async pruneExpiredPins(
+    now = new Date(),
+  ): Promise<SessionArtifactMutationResult> {
+    return this.enqueue(async () => {
+      const before = this.cloneState();
+      const changes: SessionArtifactChange[] = [];
+      for (const [artifactId, existing] of this.artifacts) {
+        if (
+          existing.retention !== 'pinned' ||
+          !existing.expiresAt ||
+          Date.parse(existing.expiresAt) > now.getTime()
+        ) {
+          continue;
+        }
+        const updated: StoredArtifact = {
+          ...existing,
+          retention: 'restorable',
+          restoreState: 'live',
+          persistenceWarning: 'content_expired',
+          updatedAt: now.toISOString(),
+        };
+        delete updated.contentRef;
+        delete updated.expiresAt;
+        this.artifacts.set(artifactId, updated);
+        changes.push({
+          action: 'updated',
+          artifactId,
+          artifact: toPublicArtifact(updated),
+        });
+      }
+      if (changes.length === 0) {
+        return { v: 1, sessionId: this.sessionId, changes: [] };
+      }
+      try {
+        const warnings = await this.persistChanges(changes, true);
+        return {
+          v: 1,
+          sessionId: this.sessionId,
+          changes,
+          ...(warnings.length > 0 ? { warnings } : {}),
+        };
+      } catch (error) {
+        this.restoreState(before);
+        writeStderrLine(
+          `[artifacts] session=${this.sessionId} action=ttl_prune_failed reason=${JSON.stringify(
+            error instanceof Error ? error.message : String(error),
+          )}`,
+        );
+        return {
+          v: 1,
+          sessionId: this.sessionId,
+          changes: [],
+          warnings: [
+            'expired pinned artifacts retained because persistence failed',
+          ],
+        };
+      }
+    });
+  }
+
   async restore(
     snapshot: RebuiltSessionArtifactSnapshot | undefined,
+    options: SessionArtifactRestoreOptions = {},
   ): Promise<string[]> {
     if (!snapshot) return [];
     return this.enqueue(async () => {
@@ -555,19 +674,41 @@ export class SessionArtifactStore {
             warnings.push(`skipped artifact with mismatched id ${artifact.id}`);
             continue;
           }
+          let contentRef = artifact.contentRef;
+          let expiresAt = artifact.expiresAt;
+          let retention = artifact.retention;
+          let status = normalized.status;
+          let persistenceWarning:
+            | SessionArtifactPersistenceWarning
+            | undefined = contentRef ? undefined : 'metadata_only_restore';
+          if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
+            contentRef = undefined;
+            expiresAt = undefined;
+            retention = 'restorable';
+            status = 'missing';
+            persistenceWarning = 'content_expired';
+          } else if (contentRef && options.verifyContentRef) {
+            const warning = await options.verifyContentRef(artifact);
+            if (warning) {
+              contentRef = undefined;
+              expiresAt = undefined;
+              retention = 'restorable';
+              status = 'missing';
+              persistenceWarning = warning;
+            }
+          }
           const stored: StoredArtifact = {
             ...normalized,
-            retention: artifact.retention,
+            retention,
             clientRetained: artifact.clientRetained,
             createdAt: artifact.createdAt,
             updatedAt: artifact.updatedAt,
             persistedAt: artifact.persistedAt,
-            expiresAt: artifact.expiresAt,
+            expiresAt,
+            status,
             restoreState: 'restored',
-            persistenceWarning: artifact.contentRef
-              ? artifact.persistenceWarning
-              : (artifact.persistenceWarning ?? 'metadata_only_restore'),
-            contentRef: artifact.contentRef,
+            persistenceWarning,
+            contentRef,
             insertSeq: ++this.insertSeq,
           };
           this.artifacts.set(stored.id, stored);
@@ -655,10 +796,7 @@ export class SessionArtifactStore {
       const stored = this.artifacts.get(change.artifactId);
       if (!stored) continue;
       stored.persistedAt = recordedAt;
-      if (
-        stored.contentRef ||
-        stored.persistenceWarning !== 'metadata_only_restore'
-      ) {
+      if (stored.contentRef) {
         delete stored.persistenceWarning;
       }
       change.artifact = toPublicArtifact(stored);
@@ -845,6 +983,7 @@ export class SessionArtifactStore {
       id,
       identityKey,
       receivedSeq,
+      retentionExplicit: input.retention !== undefined,
       retentionSource: source,
       trustedPublisher,
       kind,
@@ -901,6 +1040,23 @@ export class SessionArtifactStore {
           now,
         }),
     );
+  }
+
+  private applyStickyEphemeralOverride(
+    artifact: NormalizedArtifact,
+  ): NormalizedArtifact {
+    if (
+      !this.stickyEphemeralIds.has(artifact.id) ||
+      artifact.retentionExplicit ||
+      artifact.retention === 'ephemeral'
+    ) {
+      return artifact;
+    }
+    return {
+      ...artifact,
+      retention: 'ephemeral',
+      persistenceWarning: 'sticky_override_active',
+    };
   }
 
   private async getInitialWorkspaceStatus(workspacePath: string): Promise<{
@@ -1073,6 +1229,7 @@ function mergeBatchArtifact(
       trustedPublisher: true,
       createdAt: existing.createdAt,
       receivedSeq: existing.receivedSeq,
+      retentionExplicit: existing.retentionExplicit || next.retentionExplicit,
       retentionSource: existing.retentionSource,
       retention: strongestRetention(existing.retention, next.retention),
       restoreState: 'live',
@@ -1094,6 +1251,7 @@ function mergeBatchArtifact(
     metadata: mergeMetadata(existing, next),
     clientRetained: existing.clientRetained || next.clientRetained,
     trustedPublisher: existing.trustedPublisher || next.trustedPublisher,
+    retentionExplicit: existing.retentionExplicit || next.retentionExplicit,
     lastStatAt: next.lastStatAt ?? existing.lastStatAt,
   };
 }
@@ -1146,7 +1304,9 @@ function mergeArtifact(
     retention: strongestRetention(existing.retention, incoming.retention),
     restoreState: 'live',
     persistenceWarning:
-      existing.persistenceWarning ?? incoming.persistenceWarning,
+      incoming.retentionExplicit && incoming.retention !== 'ephemeral'
+        ? incoming.persistenceWarning
+        : (existing.persistenceWarning ?? incoming.persistenceWarning),
     contentRef: existing.contentRef ?? incoming.contentRef,
     persistedAt: existing.persistedAt ?? incoming.persistedAt,
     expiresAt: existing.expiresAt ?? incoming.expiresAt,
@@ -1457,7 +1617,6 @@ function persistedArtifactToInput(
     toolCallId: artifact.toolCallId,
     toolName: artifact.toolName,
     hookEventName: artifact.hookEventName,
-    clientId: artifact.clientId,
   };
 }
 
@@ -1503,17 +1662,12 @@ function toPersistedArtifact(
     updatedAt: artifact.updatedAt,
     persistedAt: artifact.persistedAt ?? recordedAt,
     ...(artifact.expiresAt ? { expiresAt: artifact.expiresAt } : {}),
-    ...(artifact.restoreState ? { restoreState: artifact.restoreState } : {}),
-    ...(artifact.persistenceWarning
-      ? { persistenceWarning: artifact.persistenceWarning }
-      : {}),
     ...(artifact.contentRef ? { contentRef: artifact.contentRef } : {}),
     ...(artifact.toolCallId ? { toolCallId: artifact.toolCallId } : {}),
     ...(artifact.toolName ? { toolName: artifact.toolName } : {}),
     ...(artifact.hookEventName
       ? { hookEventName: artifact.hookEventName }
       : {}),
-    ...(artifact.clientId ? { clientId: artifact.clientId } : {}),
   };
 }
 

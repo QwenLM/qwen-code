@@ -60,6 +60,20 @@ export interface RewindResponse {
   filesFailed: string[];
 }
 
+export interface SessionArtifactPinRequest {
+  mode?: 'metadata' | 'content';
+  ttlDays?: number;
+  clientRetained?: boolean;
+}
+
+export interface SessionArtifactRemoveRequest {
+  deleteContent?: boolean;
+}
+
+export interface SessionArtifactUnpinRequest {
+  retention?: 'ephemeral' | 'restorable';
+}
+
 export interface BridgeSpawnRequest {
   /** Absolute path to the workspace root the child inherits as cwd. */
   workspaceCwd: string;
@@ -555,18 +569,21 @@ export interface AcpSessionBridge {
     sessionId: string,
     artifactId: string,
     context?: BridgeClientRequestContext,
+    options?: SessionArtifactRemoveRequest,
   ): Promise<SessionArtifactMutationResult>;
 
   pinSessionArtifact(
     sessionId: string,
     artifactId: string,
     context?: BridgeClientRequestContext,
+    options?: SessionArtifactPinRequest,
   ): Promise<SessionArtifactMutationResult>;
 
   unpinSessionArtifact(
     sessionId: string,
     artifactId: string,
     context?: BridgeClientRequestContext,
+    options?: SessionArtifactUnpinRequest,
   ): Promise<SessionArtifactMutationResult>;
 
   fsckSessionArtifacts(sessionId: string): Promise<SessionArtifactFsckResult>;

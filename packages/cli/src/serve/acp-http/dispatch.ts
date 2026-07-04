@@ -36,7 +36,12 @@ import {
   UnsupportedDeviceFlowProviderError,
   UpstreamDeviceFlowError,
 } from '../auth/device-flow.js';
-import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import type {
+  HttpAcpBridge,
+  SessionArtifactPinRequest,
+  SessionArtifactRemoveRequest,
+  SessionArtifactUnpinRequest,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   SessionShellClientRequiredError,
@@ -424,6 +429,40 @@ function pickSessionArtifactInput(
     retention,
     clientRetained,
   } as AddSessionArtifactInput;
+}
+
+function pickSessionArtifactPinRequest(
+  params: Record<string, unknown>,
+): SessionArtifactPinRequest {
+  const request: SessionArtifactPinRequest = {};
+  if (params['mode'] !== undefined) {
+    request.mode = params['mode'] as SessionArtifactPinRequest['mode'];
+  }
+  if (params['ttlDays'] !== undefined) {
+    request.ttlDays = params['ttlDays'] as number;
+  }
+  if (params['clientRetained'] !== undefined) {
+    request.clientRetained = params['clientRetained'] as boolean;
+  }
+  return request;
+}
+
+function pickSessionArtifactUnpinRequest(
+  params: Record<string, unknown>,
+): SessionArtifactUnpinRequest {
+  const retention = params['retention'];
+  return retention === undefined
+    ? {}
+    : { retention: retention as SessionArtifactUnpinRequest['retention'] };
+}
+
+function pickSessionArtifactRemoveRequest(
+  params: Record<string, unknown>,
+): SessionArtifactRemoveRequest {
+  const deleteContent = params['deleteContent'];
+  return deleteContent === undefined
+    ? {}
+    : { deleteContent: deleteContent as boolean };
 }
 
 /**
@@ -2393,6 +2432,7 @@ export class AcpDispatcher {
               sessionId,
               artifactId,
               this.sessionCtx(conn, sessionId, loopback),
+              pickSessionArtifactPinRequest(params),
             );
             this.replyConn(conn, id, result as unknown);
           });
@@ -2415,6 +2455,7 @@ export class AcpDispatcher {
               sessionId,
               artifactId,
               this.sessionCtx(conn, sessionId, loopback),
+              pickSessionArtifactUnpinRequest(params),
             );
             this.replyConn(conn, id, result as unknown);
           });
@@ -2454,6 +2495,7 @@ export class AcpDispatcher {
               sessionId,
               artifactId,
               this.sessionCtx(conn, sessionId, loopback),
+              pickSessionArtifactRemoveRequest(params),
             );
             this.replyConn(conn, id, result as unknown);
           });
