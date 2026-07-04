@@ -1066,8 +1066,11 @@ export function useComposerCore(
 
   const closeAtMenuIfOpenFn = atMenu.closeIfOpen;
   const closeAtMenuIfOpen = useCallback(() => {
-    if (!closeAtMenuIfOpenFn()) return false;
-    clearAutoAtTriggerIfIntact();
+    const result = closeAtMenuIfOpenFn();
+    if (!result) return false;
+    if (result === 'closed') {
+      clearAutoAtTriggerIfIntact();
+    }
     return true;
   }, [clearAutoAtTriggerIfIntact, closeAtMenuIfOpenFn]);
 
@@ -1768,7 +1771,9 @@ export function useComposerCore(
         if (historyBrowseActiveRef.current) {
           closeAtMenu();
         } else {
-          refreshAtMenuForView(update.view);
+          if (refreshAtMenuForView(update.view)) {
+            closeSlashMenu();
+          }
         }
       }
     });

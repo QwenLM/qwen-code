@@ -161,7 +161,7 @@ const ESC = String.fromCharCode(27);
 const ANSI_RE = new RegExp(`${ESC}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`, 'g');
 const BIDI_CONTROL_RE = /[\u200B\u200E\u200F\u061C\u2066-\u2069\u202A-\u202E]/g;
 const SAFE_DISPLAY_FALLBACK = '[invalid]';
-const AT_REFERENCE_SPECIAL_CHARS = /[ \t()[\]{};!?\\,]/g;
+const AT_REFERENCE_SPECIAL_CHARS = /[ \t()[\]{};!?\\,@]/g;
 
 function isBuiltinProviderId(providerId: string): boolean {
   return (
@@ -212,6 +212,10 @@ function escapeAtReferenceText(ref: string): string {
   return ref.replace(AT_REFERENCE_SPECIAL_CHARS, '\\$&');
 }
 
+function unescapeAtReferenceText(ref: string): string {
+  return ref.replace(/\\(.)/g, '$1');
+}
+
 function mcpResourceInsertText(serverName: string, uri: string): string {
   return `@${escapeAtReferenceText(
     buildMcpResourceRef(
@@ -237,6 +241,12 @@ function splitInsertedReferenceQuery(
       itemQuery: query.slice('ext:'.length),
     };
   }
+  if (query.startsWith('mcp:')) {
+    return {
+      providerId: MCP_RESOURCES_PROVIDER_ID,
+      itemQuery: query.slice('mcp:'.length),
+    };
+  }
   if (
     lastSelectedProviderId === MCP_RESOURCES_PROVIDER_ID &&
     lastSelectedMcpServerName &&
@@ -246,18 +256,6 @@ function splitInsertedReferenceQuery(
       providerId: MCP_RESOURCES_PROVIDER_ID,
       serverName: lastSelectedMcpServerName,
       itemQuery: query.slice(lastSelectedMcpServerName.length + 1),
-      validateServer: true,
-    };
-  }
-  const separatorIndex = query.indexOf(':');
-  if (
-    lastSelectedProviderId === MCP_RESOURCES_PROVIDER_ID &&
-    separatorIndex > 0
-  ) {
-    return {
-      providerId: MCP_RESOURCES_PROVIDER_ID,
-      serverName: query.slice(0, separatorIndex),
-      itemQuery: query.slice(separatorIndex + 1),
       validateServer: true,
     };
   }
@@ -311,7 +309,9 @@ function parentDirectoryPath(path: string): string {
 }
 
 function splitFileQuery(query: string, fallbackDir: string) {
-  const normalizedQuery = query.replace(/^\.\/+/, '').replace(/\/+/g, '/');
+  const normalizedQuery = unescapeAtReferenceText(query)
+    .replace(/^\.\/+/, '')
+    .replace(/\/+/g, '/');
   const slashIndex = normalizedQuery.lastIndexOf('/');
   if (slashIndex < 0) {
     return {
@@ -338,11 +338,11 @@ function parseAtMention(view: EditorView | null) {
   const match = textBefore.match(AT_PATTERN);
   if (!match) return null;
   const from = selection.head - match[0].length;
-  if (
-    from > line.from &&
-    !/\s/.test(view.state.doc.sliceString(from - 1, from))
-  ) {
-    return null;
+  if (from > line.from) {
+    const previous = view.state.doc.sliceString(from - 1, from);
+    if (!/[\s([{'"]/.test(previous)) {
+      return null;
+    }
   }
   return {
     from,
@@ -547,8 +547,8 @@ function createExtensionProvider(
             return matchesQuery(lowerQuery, ext.label, ext.description);
           })
           .sort((a, b) => {
-            const aLabel = (a.description || a.label).toLowerCase();
-            const bLabel = (b.description || b.label).toLowerCase();
+            const aLabel = a.label.toLowerCase();
+            const bLabel = b.label.toLowerCase();
             const aPrefix = aLabel.startsWith(lowerQuery) ? 0 : 1;
             const bPrefix = bLabel.startsWith(lowerQuery) ? 0 : 1;
             if (aPrefix !== bPrefix) return aPrefix - bPrefix;
@@ -591,15 +591,22 @@ function createMcpResourcesProvider(
         const lowerQuery = query.toLowerCase();
         return status.servers
           .filter((server) => !server.disabled)
-          .filter(
-            (server) =>
-              server.resourceCount === undefined || server.resourceCount > 0,
-          )
           .map((server): AtMentionItem => {
+            const safeName = sanitizeInsertText(server.name);
             const count =
               server.resourceCount === undefined
                 ? undefined
                 : formatResourceCount(server.resourceCount);
+            if (server.resourceCount === 0) {
+              return {
+                id: `mcp-server-ref:${server.name}`,
+                label: safeDisplayText(server.name),
+                description: sanitizeDisplayText(server.description ?? ''),
+                detail: sanitizeDisplayText(server.description ?? ''),
+                insertText: `@mcp:${escapeAtReferenceText(safeName)} `,
+                kind: 'insert',
+              };
+            }
             return {
               id: `mcp-server:${server.name}`,
               label: safeDisplayText(server.name),
@@ -656,6 +663,7 @@ export function useAtMentionMenu({
   );
   const lastSelectedProviderIdRef = useRef<string | null>(null);
   const lastSelectedMcpServerNameRef = useRef<string | null>(null);
+  const preserveProviderSelectionRef = useRef(false);
 
   const allProviders = useMemo(() => {
     const builtinProviders = [
@@ -730,7 +738,11 @@ export function useAtMentionMenu({
     (options: { preserveProviderSelection?: boolean } = {}) => {
       clearPendingLoad();
       builtinCacheRef.current = createBuiltinProviderCache();
-      if (!options.preserveProviderSelection) {
+      const preserveSelection =
+        options.preserveProviderSelection ||
+        preserveProviderSelectionRef.current;
+      preserveProviderSelectionRef.current = false;
+      if (!preserveSelection) {
         lastSelectedProviderIdRef.current = null;
         lastSelectedMcpServerNameRef.current = null;
       }
@@ -757,10 +769,10 @@ export function useAtMentionMenu({
         fileDirectory: undefined,
         inputMode: undefined,
       });
-      return true;
+      return 'categories';
     }
     close();
-    return true;
+    return 'closed';
   }, [clearPendingLoad, close, setMenu]);
 
   useEffect(
@@ -1087,12 +1099,12 @@ export function useAtMentionMenu({
     (view: EditorView | null) => {
       if (disabledRef.current || shellModeRef.current) {
         close();
-        return;
+        return false;
       }
       const parsed = parseAtMention(view);
       if (!parsed) {
         close();
-        return;
+        return false;
       }
       const current = stateRef.current;
       const keepItemsLevel =
@@ -1103,7 +1115,7 @@ export function useAtMentionMenu({
           (current.inputMode === 'context' && parsed.to >= current.to)) &&
         current.selectedProviderId !== undefined;
       if (keepItemsLevel) {
-        if (!current.selectedProviderId) return;
+        if (!current.selectedProviderId) return true;
         const providerId: string = current.selectedProviderId;
         const query =
           current.inputMode === 'context'
@@ -1133,10 +1145,10 @@ export function useAtMentionMenu({
               nextState,
               { validateServer: current.validateMcpServer },
             );
-            return;
+            return true;
           }
           scheduleLoadItems(providerId, query, nextState);
-          return;
+          return true;
         }
         setMenu({
           ...current,
@@ -1145,7 +1157,7 @@ export function useAtMentionMenu({
           query,
           providers: providerViewsRef.current,
         });
-        return;
+        return true;
       }
       const filteredProviders = providerViewsRef.current.filter((provider) => {
         return matchesQuery(parsed.query, provider.label, provider.description);
@@ -1186,7 +1198,7 @@ export function useAtMentionMenu({
               },
               { validateServer: insertedReference.validateServer },
             );
-            return;
+            return true;
           }
           scheduleLoadItems(
             insertedReference.providerId,
@@ -1208,7 +1220,29 @@ export function useAtMentionMenu({
               inputMode: 'context',
             },
           );
-          return;
+          return true;
+        }
+        const prefixedProvider = providerViewsRef.current.find(
+          (provider) =>
+            !isBuiltinProviderId(provider.id) &&
+            parsed.query.startsWith(`${provider.id}:`),
+        );
+        if (prefixedProvider) {
+          const itemQuery = parsed.query.slice(prefixedProvider.id.length + 1);
+          scheduleLoadItems(prefixedProvider.id, itemQuery, {
+            from: parsed.from,
+            to: parsed.to,
+            query: itemQuery,
+            level: 'items',
+            selectedProviderId: prefixedProvider.id,
+            selectedIndex: 0,
+            providers: providerViewsRef.current,
+            itemMode: 'default',
+            mcpServerName: undefined,
+            fileDirectory: undefined,
+            inputMode: 'context',
+          });
+          return true;
         }
         if (
           providerViewsRef.current.some(
@@ -1229,7 +1263,7 @@ export function useAtMentionMenu({
             fileDirectory: fileDirectoryRef.current,
             inputMode: 'context',
           });
-          return;
+          return true;
         }
       }
       setMenu({
@@ -1243,6 +1277,7 @@ export function useAtMentionMenu({
         loading: false,
         inputMode: undefined,
       });
+      return true;
     },
     [
       close,
@@ -1469,6 +1504,19 @@ export function useAtMentionMenu({
         close();
         return true;
       }
+      const currentMention = view.state.doc.sliceString(
+        current.from,
+        current.to,
+      );
+      if (!currentMention.startsWith('@')) {
+        console.warn('[@mention] stale insertion text', {
+          from: current.from,
+          to: current.to,
+        });
+        close();
+        return true;
+      }
+      preserveProviderSelectionRef.current = true;
       view.dispatch({
         changes: { from: current.from, to: current.to, insert },
         selection: { anchor: current.from + insert.length },

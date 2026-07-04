@@ -966,6 +966,8 @@ export const ChatEditor = memo(
     const closeSlashMenu = core.closeSlashMenu;
     const atMenu = core.atMenu;
     const closeAtMenu = core.closeAtMenu;
+    const hasSlashMenu = Boolean(slashMenu);
+    const hasAtMenu = Boolean(atMenu);
     const editorViewRef = core.viewRef;
 
     useEffect(() => {
@@ -982,7 +984,7 @@ export const ChatEditor = memo(
     }, [showQuickActions]);
 
     useEffect(() => {
-      if (!slashMenu && !atMenu) return;
+      if (!hasSlashMenu && !hasAtMenu) return;
       const onPointerOutside = (event: Event) => {
         const target = event.target;
         const container = containerRef.current;
@@ -1003,7 +1005,7 @@ export const ChatEditor = memo(
         window.removeEventListener('mousedown', onPointerOutside);
         window.removeEventListener('touchstart', onPointerOutside);
       };
-    }, [atMenu, slashMenu, closeAtMenu, closeSlashMenu]);
+    }, [hasAtMenu, hasSlashMenu, closeAtMenu, closeSlashMenu]);
 
     useEffect(() => {
       const glowRoot = containerRef.current;

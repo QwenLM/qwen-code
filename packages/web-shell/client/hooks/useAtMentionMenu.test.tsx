@@ -144,6 +144,38 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.items.map((item) => item.label)).toEqual(['second']);
   });
 
+  it('ranks extension name matches before description-only matches', async () => {
+    vi.useFakeTimers();
+    mount({
+      actions: {
+        loadExtensionsStatus: vi.fn().mockResolvedValue({
+          extensions: [
+            {
+              name: 'zeta',
+              displayName: 'alpha helper',
+              isActive: true,
+            },
+            {
+              name: 'alpha',
+              isActive: true,
+            },
+          ],
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(1));
+    await runDebounce();
+    act(() => latest!.updateSearch('alpha'));
+    await runDebounce();
+
+    expect(latest!.state?.items.map((item) => item.label)).toEqual([
+      'alpha',
+      'zeta',
+    ]);
+  });
+
   it('opens extension items using the inserted ref suffix as search text', async () => {
     vi.useFakeTimers();
     mount({
@@ -211,6 +243,39 @@ describe('useAtMentionMenu', () => {
       selectedProviderId: 'extensions',
       query: 'rev',
       inputMode: 'search',
+    });
+  });
+
+  it('routes custom provider id prefixes back to that provider', async () => {
+    vi.useFakeTimers();
+    const search = vi.fn().mockResolvedValue([
+      {
+        id: 'one',
+        label: 'one',
+      },
+    ]);
+    mount({
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search,
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@custom:one')));
+    await runDebounce();
+
+    expect(search).toHaveBeenCalledWith({
+      query: 'one',
+      signal: expect.any(AbortSignal),
+    });
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'custom',
+      query: 'one',
     });
   });
 
@@ -373,6 +438,52 @@ describe('useAtMentionMenu', () => {
     ]);
   });
 
+  it('preserves provider selection when accept dispatch triggers a synchronous refresh', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    mount({
+      view,
+      actions: {
+        loadExtensionsStatus: vi.fn().mockResolvedValue({
+          extensions: [
+            {
+              name: 'review',
+              isActive: true,
+            },
+          ],
+        }),
+      },
+    });
+    view.dispatch = vi.fn((spec) => {
+      if ('changes' in spec) {
+        view.state = EditorState.create({
+          doc: '@ext:review ',
+          selection: { anchor: '@ext:review '.length },
+        });
+        act(() => latest!.refreshForView(view));
+      }
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(1));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept()).toBe(true);
+    });
+    view.state = EditorState.create({
+      doc: '@ext:revie',
+      selection: { anchor: '@ext:revie'.length },
+    });
+    act(() => latest!.refreshForView(view));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'extensions',
+      query: 'revie',
+    });
+  });
+
   it('clears a pending provider search when closing from items', async () => {
     vi.useFakeTimers();
     const search = vi.fn().mockResolvedValue([]);
@@ -437,6 +548,18 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(makeView('hello@example.com')));
 
     expect(latest!.state).toBeNull();
+  });
+
+  it('opens after bracket punctuation', () => {
+    mount();
+
+    act(() => latest!.refreshForView(makeView('(@foo')));
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'files',
+      query: 'foo',
+    });
   });
 
   it('caps custom provider results', async () => {
@@ -589,6 +712,41 @@ describe('useAtMentionMenu', () => {
     });
   });
 
+  it('closes without dispatching when accept no longer targets an @ mention', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const view = makeView('@');
+    mount({
+      view,
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search: vi.fn().mockResolvedValue([
+            {
+              id: 'item',
+              label: 'snippet',
+              insertText: '@snippet ',
+            },
+          ]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    view.state = EditorState.create({ doc: 'x', selection: { anchor: 1 } });
+    act(() => {
+      expect(latest!.accept()).toBe(true);
+    });
+
+    expect(view.dispatch).not.toHaveBeenCalled();
+    expect(latest!.state).toBeNull();
+    warn.mockRestore();
+  });
+
   it('accepts a directory item by drilling into that directory', async () => {
     vi.useFakeTimers();
     const listDirectory = vi
@@ -672,6 +830,39 @@ describe('useAtMentionMenu', () => {
       selectedProviderId: 'mcp-resources',
       itemMode: 'mcpResources',
       mcpServerName: 'docs',
+    });
+  });
+
+  it('accepts a tools-only MCP server item as a server reference', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    mount({
+      view,
+      actions: {
+        loadMcpStatus: vi.fn().mockResolvedValue({
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'tools',
+              disabled: false,
+              resourceCount: 0,
+            },
+          ],
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(2));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept()).toBe(true);
+    });
+
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '@mcp:tools ' },
+      selection: { anchor: 11 },
+      scrollIntoView: true,
     });
   });
 
@@ -1025,6 +1216,63 @@ describe('useAtMentionMenu', () => {
     });
   });
 
+  it('escapes @ characters in file insert paths', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [
+        {
+          name: 'user@example.ts',
+          kind: 'file',
+          ignored: false,
+        },
+      ],
+      truncated: false,
+    });
+    mount({ actions: { listDirectory }, view });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept(1)).toBe(true);
+    });
+
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '@user\\@example.ts ' },
+      selection: { anchor: 18 },
+      scrollIntoView: true,
+    });
+  });
+
+  it('unescapes parser delimiters when reopening a file mention', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [
+        {
+          name: 'space name(1)?.md',
+          kind: 'file',
+          ignored: false,
+        },
+      ],
+      truncated: false,
+    });
+    mount({ actions: { listDirectory } });
+
+    act(() => latest!.refreshForView(makeView('@space\\ name\\(1\\)\\?.md')));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'files',
+      items: [expect.objectContaining({ label: 'space name(1)?.md' })],
+    });
+  });
+
   it('inserts MCP resources with parser-safe escaping', async () => {
     vi.useFakeTimers();
     const view = makeView('@');
@@ -1066,9 +1314,9 @@ describe('useAtMentionMenu', () => {
       changes: {
         from: 0,
         to: 1,
-        insert: '@docs:res://doc\\?version=1\\ path@x. ',
+        insert: '@docs:res://doc\\?version=1\\ path\\@x. ',
       },
-      selection: { anchor: 36 },
+      selection: { anchor: 37 },
       scrollIntoView: true,
     });
   });
