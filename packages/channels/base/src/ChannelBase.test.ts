@@ -7,6 +7,7 @@ import type {
   ChannelConfig,
   ChannelTaskLifecycleEvent,
   Envelope,
+  SessionTarget,
 } from './types.js';
 import type {
   ChannelAgentBridge,
@@ -21,7 +22,7 @@ class TestChannel extends ChannelBase {
   sent: Array<{ chatId: string; text: string }> = [];
   proactive: Array<{ chatId: string; text: string }> = [];
   proactiveSupported = false;
-  proactiveTargetSupported = true;
+  proactiveTargetSupported: boolean | undefined;
   connected = false;
   toolCalls: Array<{ chatId: string; event: unknown }> = [];
   taskEvents: ChannelTaskLifecycleEvent[] = [];
@@ -60,8 +61,10 @@ class TestChannel extends ChannelBase {
     return this.proactiveSupported;
   }
 
-  protected override supportsProactiveTarget(): boolean {
-    return this.proactiveTargetSupported;
+  protected override supportsProactiveTarget(target: SessionTarget): boolean {
+    return (
+      this.proactiveTargetSupported ?? super.supportsProactiveTarget(target)
+    );
   }
 
   protected override async pushProactive(
