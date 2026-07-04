@@ -17,6 +17,7 @@ import styles from './ChatEditor.module.css';
 
 const AT_PANEL_THEME_VARS = [
   '--chat-editor-accent-color',
+  '--chat-editor-text-primary',
   '--accent',
   '--background',
   '--foreground',

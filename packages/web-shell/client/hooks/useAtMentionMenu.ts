@@ -30,6 +30,7 @@ export interface AtMentionMenuState {
   itemMode?: 'default' | 'mcpServers' | 'mcpResources';
   mcpServerName?: string;
   fileDirectory?: string;
+  // search mode owns the panel input; context mode mirrors text typed in the editor.
   inputMode?: 'search' | 'context';
   validateMcpServer?: boolean;
 }
@@ -154,6 +155,8 @@ export interface UseAtMentionMenuOptions {
 const AT_PATTERN = /@((?:[\p{L}\p{N}_./:-]|\\.)*)$/u;
 const EMPTY_PROVIDERS: readonly WebShellAtProvider[] = [];
 const SEARCH_DEBOUNCE_MS = 150;
+const ITEM_LIMIT = 50;
+const FILE_ROOT_ITEM_LIMIT = ITEM_LIMIT + 1;
 export const FILE_PROVIDER_ID = 'files';
 const EXTENSIONS_PROVIDER_ID = 'extensions';
 export const MCP_RESOURCES_PROVIDER_ID = 'mcp-resources';
@@ -490,7 +493,7 @@ function createFileProvider(
                 kind: 'insert',
               };
             }),
-          ].slice(0, entryQuery ? 50 : 51);
+          ].slice(0, entryQuery ? ITEM_LIMIT : FILE_ROOT_ITEM_LIMIT);
         } catch (error) {
           if (!signal.aborted) {
             console.warn('Failed to load @ file suggestions', error);
@@ -508,7 +511,7 @@ function createFileProvider(
       try {
         const pattern = query ? `${escapeGlobQuery(query)}*` : '**/*';
         const result = await getCached(getCache().globResults, pattern, () =>
-          globWorkspace(pattern, { maxResults: 50, signal }),
+          globWorkspace(pattern, { maxResults: ITEM_LIMIT, signal }),
         );
         if (signal.aborted) return [];
         return result.matches
@@ -586,7 +589,7 @@ function createExtensionProvider(
             if (aPrefix !== bPrefix) return aPrefix - bPrefix;
             return aLabel.localeCompare(bLabel);
           })
-          .slice(0, 50);
+          .slice(0, ITEM_LIMIT);
       } catch (error) {
         if (!signal.aborted) {
           console.warn('Failed to load @ extension suggestions', error);
@@ -655,7 +658,7 @@ function createMcpResourcesProvider(
             return matchesQuery(lowerQuery, server.label, server.description);
           })
           .sort((a, b) => a.label.localeCompare(b.label))
-          .slice(0, 50);
+          .slice(0, ITEM_LIMIT);
       } catch (error) {
         if (!signal.aborted) {
           console.warn('Failed to load @ MCP resource suggestions', error);
@@ -918,7 +921,9 @@ export function useAtMentionMenu({
           setMenu((prev) => {
             if (!prev || prev.level !== 'items') return prev;
             const maxItems =
-              providerId === FILE_PROVIDER_ID && query.length === 0 ? 51 : 50;
+              providerId === FILE_PROVIDER_ID && query.length === 0
+                ? FILE_ROOT_ITEM_LIMIT
+                : ITEM_LIMIT;
             return {
               ...prev,
               items: items.slice(0, maxItems).map((item) =>
@@ -1075,7 +1080,7 @@ export function useAtMentionMenu({
               );
             })
             .sort((a, b) => a.label.localeCompare(b.label))
-            .slice(0, 50);
+            .slice(0, ITEM_LIMIT);
           setMenu((prev) => {
             if (!prev || prev.level !== 'items') return prev;
             return {
