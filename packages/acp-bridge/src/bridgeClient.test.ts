@@ -587,12 +587,14 @@ describe('BridgeClient — token usage accounting', () => {
         content: { type: 'text', text: '' },
         _meta: {
           usage: { inputTokens: 1200, outputTokens: 340, totalTokens: 1540 },
+          durationMs: 4200,
         },
       },
     } as Parameters<BridgeClient['sessionUpdate']>[0]);
 
     expect(onTokenUsage).toHaveBeenCalledTimes(1);
-    expect(onTokenUsage).toHaveBeenCalledWith(1200, 340);
+    // The sibling `_meta.durationMs` (LLM round-trip) rides through too.
+    expect(onTokenUsage).toHaveBeenCalledWith(1200, 340, 4200);
   });
 
   it('does not report when the update carries no usage meta', async () => {
@@ -623,7 +625,8 @@ describe('BridgeClient — token usage accounting', () => {
       },
     } as Parameters<BridgeClient['sessionUpdate']>[0]);
 
-    expect(onTokenUsage).toHaveBeenCalledWith(0, 50);
+    // No `_meta.durationMs` on this frame → the round-trip arg is undefined.
+    expect(onTokenUsage).toHaveBeenCalledWith(0, 50, undefined);
   });
 });
 

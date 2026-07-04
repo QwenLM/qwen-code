@@ -313,11 +313,17 @@ export interface DaemonBridgeTelemetryMetrics {
   /**
    * Per-round model token usage (input/output token increments) observed at the
    * bridge's session/update fan-in, from `agent_message_chunk._meta.usage`.
-   * Values are per-round increments, not cumulative. Optional: only the daemon
-   * host wires it (for the Daemon Status token-burn chart); embedded/test
-   * callers may omit it.
+   * Values are per-round increments, not cumulative. `durationMs` is the same
+   * frame's `_meta.durationMs` (the LLM API round-trip time), present only when
+   * the emitter stamped it. Optional: only the daemon host wires it (for the
+   * Daemon Status token-burn / LLM-latency charts); embedded/test callers may
+   * omit it.
    */
-  tokenUsage?(inputTokens: number, outputTokens: number): void;
+  tokenUsage?(
+    inputTokens: number,
+    outputTokens: number,
+    durationMs?: number,
+  ): void;
 }
 
 export function createDaemonBridgeTelemetry(): {

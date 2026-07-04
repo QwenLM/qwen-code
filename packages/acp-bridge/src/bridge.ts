@@ -1509,8 +1509,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // at the session/update fan-in to the daemon host's metrics ring via
         // the telemetry seam. Optional-chained so non-daemon callers (tests,
         // Mode A) that wire no `tokenUsage` metric are a silent no-op.
-        (inputTokens, outputTokens) =>
-          telemetry.metrics?.tokenUsage?.(inputTokens, outputTokens),
+        (inputTokens, outputTokens, durationMs) =>
+          telemetry.metrics?.tokenUsage?.(
+            inputTokens,
+            outputTokens,
+            durationMs,
+          ),
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
@@ -2951,6 +2955,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
     get sessionCount() {
       return byId.size;
+    },
+
+    get pendingPromptTotal() {
+      // Sum per-session pendingPromptCount (running + queued) — the queue-depth
+      // gauge for the Daemon Status charts. Cheap: one pass over the session
+      // map, avoiding a full getDaemonStatusSnapshot() allocation per sample.
+      let total = 0;
+      for (const entry of byId.values()) total += entry.pendingPromptCount;
+      return total;
     },
 
     get activePromptCount() {

@@ -8,11 +8,17 @@ import { describe, it, expect } from 'vitest';
 import { DaemonMetricsRing, type DaemonMetricsGauges } from './daemon-metrics-ring.js';
 
 const GAUGES: DaemonMetricsGauges = {
+  cpuPercent: 12,
   rssBytes: 100,
   heapUsedBytes: 50,
   activeSessions: 2,
   activePrompts: 1,
+  pendingPrompts: 3,
   eventLoopLagP99Ms: 3,
+  sseConnections: 4,
+  wsConnections: 1,
+  acpConnections: 2,
+  rateLimitRejected: 5,
 };
 
 describe('DaemonMetricsRing', () => {
@@ -49,6 +55,36 @@ describe('DaemonMetricsRing', () => {
     expect(b.promptsCompleted).toBe(1);
     expect(b.promptDurationP95Ms).toBe(1200);
     expect(b.promptQueueWaitP95Ms).toBe(300);
+  });
+
+  it('records LLM round-trip + pipe bytes, snapshots new gauges, and resets them', () => {
+    const ring = new DaemonMetricsRing({ capacity: 10 });
+    ring.recordLlmDuration(2000);
+    ring.recordLlmDuration(8000);
+    ring.recordPipe('inbound', 1024);
+    ring.recordPipe('inbound', 512);
+    ring.recordPipe('outbound', 256);
+    ring.sample(1000, GAUGES);
+    const [b] = ring.snapshot();
+    // LLM round-trip percentiles over [2000, 8000]
+    expect(b.llmApiP50Ms).toBe(2000);
+    expect(b.llmApiP95Ms).toBe(8000);
+    // pipe bytes summed per direction
+    expect(b.pipeInBytes).toBe(1536);
+    expect(b.pipeOutBytes).toBe(256);
+    // new gauges snapshot verbatim
+    expect(b.cpuPercent).toBe(12);
+    expect(b.pendingPrompts).toBe(3);
+    expect(b.sseConnections).toBe(4);
+    expect(b.wsConnections).toBe(1);
+    expect(b.acpConnections).toBe(2);
+    expect(b.rateLimitRejected).toBe(5);
+    // window aggregates reset on the next seal
+    ring.sample(2000, GAUGES);
+    const nb = ring.snapshot()[1];
+    expect(nb.llmApiP50Ms).toBe(0);
+    expect(nb.pipeInBytes).toBe(0);
+    expect(nb.pipeOutBytes).toBe(0);
   });
 
   it('resets accumulators after each seal (idle window reads clean zero)', () => {

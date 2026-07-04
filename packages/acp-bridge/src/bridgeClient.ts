@@ -493,6 +493,7 @@ export class BridgeClient implements Client {
     private readonly onTokenUsage?: (
       inputTokens: number,
       outputTokens: number,
+      durationMs?: number,
     ) => void,
   ) {}
 
@@ -672,9 +673,13 @@ export class BridgeClient implements Client {
           typeof inputTokens === 'number' ||
           typeof outputTokens === 'number'
         ) {
+          // `_meta.durationMs` (the LLM API round-trip) rides the same frame as
+          // usage; present only when the emitter stamped a number.
+          const durationMs = updateMeta?.['durationMs'];
           this.onTokenUsage(
             typeof inputTokens === 'number' ? inputTokens : 0,
             typeof outputTokens === 'number' ? outputTokens : 0,
+            typeof durationMs === 'number' ? durationMs : undefined,
           );
         }
       }

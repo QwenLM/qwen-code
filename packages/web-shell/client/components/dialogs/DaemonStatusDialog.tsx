@@ -71,6 +71,10 @@ function formatCount(value: number): string {
   return n.toLocaleString();
 }
 
+function formatPercent(value: number): string {
+  return `${value.toFixed(value >= 100 || value === 0 ? 0 : 1)}%`;
+}
+
 function channelWorkerState(
   worker: DaemonStatusReport['runtime']['channelWorker'],
 ): string {
@@ -329,6 +333,11 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
           color: 'var(--primary)',
         },
         {
+          label: t('daemon.charts.pendingPrompts'),
+          values: col((b) => b.pendingPrompts),
+          color: 'var(--warning-color)',
+        },
+        {
           label: t('daemon.charts.activeSessions'),
           values: col((b) => b.activeSessions),
           color: 'var(--muted-foreground)',
@@ -345,6 +354,11 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
           values: col((b) => b.errors),
           color: 'var(--error-color)',
         },
+        {
+          label: t('daemon.charts.reqRejected'),
+          values: col((b) => b.rateLimitRejected),
+          color: 'var(--warning-color)',
+        },
       ])}
       {chart('daemon.charts.apiLatency', formatDurationMs, [
         {
@@ -356,6 +370,18 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
           label: 'p95',
           values: col((b) => b.latencyP95Ms),
           color: 'var(--warning-color)',
+        },
+      ])}
+      {chart('daemon.charts.llmLatency', formatDurationMs, [
+        {
+          label: 'p50',
+          values: col((b) => b.llmApiP50Ms),
+          color: 'var(--agent-blue-400)',
+        },
+        {
+          label: 'p95',
+          values: col((b) => b.llmApiP95Ms),
+          color: 'var(--primary)',
         },
       ])}
       {chart('daemon.charts.promptLatency', formatDurationMs, [
@@ -377,6 +403,13 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
           color: 'var(--error-color)',
         },
       ])}
+      {chart('daemon.charts.cpu', formatPercent, [
+        {
+          label: 'CPU',
+          values: col((b) => b.cpuPercent),
+          color: 'var(--primary)',
+        },
+      ])}
       {chart('daemon.charts.memory', formatBytes, [
         {
           label: 'RSS',
@@ -387,6 +420,35 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
           label: t('daemon.charts.heap'),
           values: col((b) => b.heapUsedBytes),
           color: 'var(--agent-blue-400)',
+        },
+      ])}
+      {chart('daemon.charts.pipe', formatBytes, [
+        {
+          label: t('daemon.charts.pipeIn'),
+          values: col((b) => b.pipeInBytes),
+          color: 'var(--agent-blue-400)',
+        },
+        {
+          label: t('daemon.charts.pipeOut'),
+          values: col((b) => b.pipeOutBytes),
+          color: 'var(--success-color)',
+        },
+      ])}
+      {chart('daemon.charts.connections', formatCount, [
+        {
+          label: 'SSE',
+          values: col((b) => b.sseConnections),
+          color: 'var(--primary)',
+        },
+        {
+          label: 'WS',
+          values: col((b) => b.wsConnections),
+          color: 'var(--agent-blue-400)',
+        },
+        {
+          label: 'ACP',
+          values: col((b) => b.acpConnections),
+          color: 'var(--muted-foreground)',
         },
       ])}
       {chart('daemon.charts.tokens', formatCount, [

@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import type { Server } from 'node:http';
 import * as https from 'node:https';
 import * as path from 'node:path';
+import * as os from 'node:os';
 import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import express, {
   type Application,
@@ -108,6 +109,16 @@ const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
 // own 5s poll so each poll surfaces roughly one fresh bucket.
 const DAEMON_METRICS_SAMPLE_MS = 5_000;
 const DAEMON_METRICS_CAPACITY = 180;
+
+// `process.cpuUsage()` can throw in restricted containers that lack the
+// syscall; fall back to zero so the metrics sampler never crashes on it.
+function safeCpuUsage(): NodeJS.CpuUsage {
+  try {
+    return process.cpuUsage();
+  } catch {
+    return { user: 0, system: 0 };
+  }
+}
 const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
 // Let the first /health response flush before evaluating the runtime graph.
 const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
@@ -2008,6 +2019,17 @@ export async function runQwenServe(
     core.registerDaemonEventLoopLagGauge(() =>
       currentDaemonEventLoopMonitor.snapshot(),
     );
+    // Daemon Status metrics ring (time-series charts). Bounded so ~15 min of
+    // per-interval history survives dialog close / page reload — the point of
+    // doing this in the daemon rather than accumulating in the browser. Fed from
+    // the telemetry middleware (request rate/latency), the bridge telemetry
+    // hooks (queue-wait/duration, token burn, LLM round-trip), the pipe recorder
+    // (IPC bytes), and the sampler's gauge reads (CPU / memory / connections /
+    // pending prompts / event-loop lag). Declared before `recordPipeMessage` so
+    // that recorder can fold pipe bytes straight in.
+    const metricsRing = new DaemonMetricsRing({
+      capacity: DAEMON_METRICS_CAPACITY,
+    });
     const pipeStats: DaemonPerfSnapshot['pipe'] = {
       inbound: { count: 0, totalBytes: 0, maxBytes: 0 },
       outbound: { count: 0, totalBytes: 0, maxBytes: 0 },
@@ -2021,17 +2043,8 @@ export async function runQwenServe(
       stats.totalBytes += bytes;
       stats.maxBytes = Math.max(stats.maxBytes, bytes);
       core.recordDaemonPipeMessage(direction, bytes);
+      metricsRing.recordPipe(direction, bytes);
     };
-    // Daemon Status metrics ring (time-series charts). Bounded so ~15 min of
-    // per-interval history survives dialog close / page reload — the point of
-    // doing this in the daemon rather than accumulating in the browser. Fed
-    // from three seams: HTTP request rate/latency via the telemetry middleware
-    // (createServeApp `recordDaemonRequest`), prompt queue-wait/duration + token
-    // burn via the bridge telemetry hooks below, and memory / active
-    // sessions+prompts / event-loop lag read as gauges by the sampler.
-    const metricsRing = new DaemonMetricsRing({
-      capacity: DAEMON_METRICS_CAPACITY,
-    });
     const daemonTelemetry = core.createDaemonBridgeTelemetry();
     daemonTelemetry.metrics = {
       sessionLifecycle(action) {
@@ -2074,11 +2087,16 @@ export async function runQwenServe(
         metricsRing.recordPromptDuration(durationMs);
       },
       cancelled: core.recordDaemonCancel,
-      // Per-round model token usage sniffed off `agent_message_chunk._meta.usage`
-      // at the bridge's single session/update fan-in. Increments (not
-      // cumulative), so the ring sums them per window into the token-burn chart.
-      tokenUsage(inputTokens, outputTokens) {
+      // Per-round model token usage + LLM round-trip time sniffed off
+      // `agent_message_chunk._meta` (`usage` + `durationMs`) at the bridge's
+      // single session/update fan-in. Increments (not cumulative), so the ring
+      // sums tokens per window (token-burn chart) and pools the round-trip times
+      // for the LLM-latency percentiles.
+      tokenUsage(inputTokens, outputTokens, durationMs) {
         metricsRing.recordTokens(inputTokens, outputTokens);
+        if (typeof durationMs === 'number') {
+          metricsRing.recordLlmDuration(durationMs);
+        }
       },
     };
     // Allocate the audit ring + publisher in the daemon host (here)
@@ -2284,16 +2302,54 @@ export async function runQwenServe(
     daemonMetricsSampler?.dispose();
     const metricsLoopDelay = monitorEventLoopDelay({ resolution: 20 });
     metricsLoopDelay.enable();
+    // Delta state for the cumulative counters. CPU% = delta CPU-µs over delta
+    // wall-ms, normalized by core count (same formula as memoryPressureMonitor);
+    // clamped to [0,100] to absorb non-monotonic cpuUsage on some VMs and
+    // CPU-bursting. Rate-limit rejects are diffed against the prior total.
+    const cpuCoreCount = os.availableParallelism?.() ?? os.cpus().length ?? 1;
+    let prevCpu = safeCpuUsage();
+    let prevCpuAt = Date.now();
+    let prevRateRejected = 0;
     const metricsSamplerTimer = setInterval(() => {
+      const nowMs = Date.now();
       const mem = process.memoryUsage();
       const eventLoopLagP99Ms = metricsLoopDelay.percentile(99) / 1_000_000;
       metricsLoopDelay.reset();
-      metricsRing.sample(Date.now(), {
+      const cpu = safeCpuUsage();
+      const elapsedMs = nowMs - prevCpuAt;
+      const cpuUs = cpu.user - prevCpu.user + (cpu.system - prevCpu.system);
+      const cpuPercent =
+        elapsedMs > 0
+          ? Math.min(
+              100,
+              Math.max(0, ((cpuUs / (elapsedMs * 1000)) * 100) / cpuCoreCount),
+            )
+          : 0;
+      prevCpu = cpu;
+      prevCpuAt = nowMs;
+      // Connections + rate limiter live on `app` (the createServeApp const just
+      // below); read lazily — the first tick is ≥5s out, so the forward
+      // reference is assigned by call time. Guard with `?.` (ACP HTTP and the
+      // limiter are both toggleable).
+      const acp = (
+        app.locals?.['acpHandle'] as AcpHttpHandle | undefined
+      )?.registry.getSnapshot();
+      const hits = getRateLimiter(app)?.getHitCounts();
+      const rejectedTotal = hits ? hits.prompt + hits.mutation + hits.read : 0;
+      const rateLimitRejected = Math.max(0, rejectedTotal - prevRateRejected);
+      prevRateRejected = rejectedTotal;
+      metricsRing.sample(nowMs, {
+        cpuPercent,
         rssBytes: mem.rss,
         heapUsedBytes: mem.heapUsed,
         activeSessions: bridge.sessionCount,
         activePrompts: bridge.activePromptCount,
+        pendingPrompts: bridge.pendingPromptTotal,
         eventLoopLagP99Ms,
+        sseConnections: runtime.getActiveSseCount(),
+        wsConnections: acp?.wsStreams ?? 0,
+        acpConnections: acp?.connectionCount ?? 0,
+        rateLimitRejected,
       });
     }, DAEMON_METRICS_SAMPLE_MS);
     metricsSamplerTimer.unref();

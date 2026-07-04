@@ -1021,6 +1021,10 @@ export interface AcpSessionBridge {
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 
+  /** Total pending prompts (running + queued) across all sessions — the
+   *  queue-depth gauge for the Daemon Status charts. */
+  readonly pendingPromptTotal: number;
+
   /**
    * Epoch-ms timestamp of the last "activity" event (prompt start/end,
    * session spawn/restore). `null` when the daemon has never processed

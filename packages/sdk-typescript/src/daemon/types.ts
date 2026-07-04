@@ -191,6 +191,8 @@ export interface DaemonMetricsSeriesBucket {
   activeSessions: number;
   /** In-flight prompts at seal time (tasks running concurrently). */
   activePrompts: number;
+  /** Prompts queued (accepted, not yet dispatched) across sessions at seal time. */
+  pendingPrompts: number;
   /** HTTP requests completed in the window. */
   requests: number;
   /** Subset of `requests` returning 4xx/5xx. */
@@ -205,12 +207,31 @@ export interface DaemonMetricsSeriesBucket {
   promptQueueWaitP95Ms: number;
   /** p95 end-to-end prompt duration over the window (ms). */
   promptDurationP95Ms: number;
+  /** Median per-round LLM API round-trip over the window (ms); daemon→model,
+   *  not the client→daemon `latency*`. 0 when none. */
+  llmApiP50Ms: number;
+  /** p95 per-round LLM API round-trip over the window (ms); 0 when none. */
+  llmApiP95Ms: number;
+  /** Process CPU utilization over the window, percent of one core. */
+  cpuPercent: number;
   /** Resident set size at seal time (bytes). */
   rssBytes: number;
   /** V8 heap used at seal time (bytes). */
   heapUsedBytes: number;
   /** Event-loop lag p99 over the window (ms); CPU-saturation signal. */
   eventLoopLagP99Ms: number;
+  /** Bytes received from the ACP child over the stdio pipe in the window. */
+  pipeInBytes: number;
+  /** Bytes sent to the ACP child over the stdio pipe in the window. */
+  pipeOutBytes: number;
+  /** Active REST/SSE streams at seal time. */
+  sseConnections: number;
+  /** Active ACP WebSocket streams at seal time. */
+  wsConnections: number;
+  /** Active ACP connections at seal time. */
+  acpConnections: number;
+  /** Rate-limited (429) rejections in the window. */
+  rateLimitRejected: number;
   /** Input (prompt) tokens burned in the window. */
   tokensIn: number;
   /** Output (completion) tokens burned in the window. */
