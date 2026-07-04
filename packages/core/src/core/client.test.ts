@@ -512,6 +512,9 @@ describe('Gemini Client (client.ts)', () => {
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
+      // Mimics the resolved Config getter: always a number (Infinity keeps
+      // the cap out of the way of unrelated streaming tests).
+      getMaxToolCallsPerTurn: vi.fn().mockReturnValue(Number.POSITIVE_INFINITY),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
@@ -7185,6 +7188,76 @@ Other open files:
           value:
             'Stop hook blocked continuation 1 consecutive time; overriding and ending the turn.',
         });
+      });
+
+      it('gives a blocking Stop hook continuation a fresh per-turn tool-call budget', async () => {
+        // First Stop check blocks (like a /goal "not met" verdict); the
+        // second allows the loop to end.
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        // Cap of 4: each turn's 3 tool calls fit, but 6 accumulated across
+        // the continuation boundary would not.
+        vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(4);
+
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'not done' }] },
+            ]),
+        } as unknown as GeminiChat;
+        let turnIndex = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          const turnNo = turnIndex++;
+          return (async function* () {
+            for (let i = 0; i < 3; i++) {
+              yield {
+                type: GeminiEventType.ToolCallRequest,
+                value: {
+                  callId: `call-${turnNo}-${i}`,
+                  name: 'test_tool',
+                  args: { turnNo, i },
+                  isClientInitiated: false,
+                  prompt_id: 'prompt-stop-hook-budget',
+                },
+              };
+            }
+            yield { type: GeminiEventType.Content, value: 'not done' };
+          })();
+        });
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-stop-hook-budget',
+          ),
+        );
+
+        // The hook continuation turn actually ran...
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        // ...and 3+3 tool calls under a cap of 4 never tripped the cap: the
+        // continuation started a fresh budget instead of inheriting the
+        // first turn's accumulated count.
+        expect(events).not.toContainEqual(
+          expect.objectContaining({ type: GeminiEventType.LoopDetected }),
+        );
       });
 
       it('emits one active_goal null when the blocking cap aborts an active goal', async () => {

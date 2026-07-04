@@ -217,6 +217,16 @@ function IconRename() {
   );
 }
 
+function IconDownload() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3v12" />
+      <path d="m7 10 5 5 5-5" />
+      <path d="M5 21h14" />
+    </svg>
+  );
+}
+
 function IconTrash() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -234,11 +244,41 @@ function IconPin() {
   );
 }
 
+function IconArchive() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="4" rx="1" />
+      <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
+      <path d="M10 12h4" />
+    </svg>
+  );
+}
+
 function IconGroup() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M4 10.5 12 5l8 5.5V19a1.5 1.5 0 0 1-1.5 1.5h-13A1.5 1.5 0 0 1 4 19v-8.5Z" />
       <path d="M9 20.5v-6h6v6" />
+    </svg>
+  );
+}
+
+function IconUnarchive() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <rect x="3" y="4" width="18" height="4" rx="1" />
+      <path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8" />
+      <path d="M12 18v-6M9 15l3-3 3 3" />
+    </svg>
+  );
+}
+
+function IconMore() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="5" cy="12" r="1.4" fill="currentColor" stroke="none" />
+      <circle cx="12" cy="12" r="1.4" fill="currentColor" stroke="none" />
+      <circle cx="19" cy="12" r="1.4" fill="currentColor" stroke="none" />
     </svg>
   );
 }
@@ -256,6 +296,99 @@ function IconChevron({ expanded }: { expanded: boolean }) {
     <svg viewBox="0 0 24 24" aria-hidden="true">
       {expanded ? <path d="m6 9 6 6 6-6" /> : <path d="m9 6 6 6-6 6" />}
     </svg>
+  );
+}
+
+interface SessionMenuItem {
+  key: string;
+  label: string;
+  icon: ReactNode;
+  onSelect: () => void;
+  danger?: boolean;
+  disabled?: boolean;
+  disabledTitle?: string;
+}
+
+/**
+ * Overflow ("...") action menu for a session row. Rendered at the sidebar
+ * root with `position: fixed` (like the row tooltip) so it escapes the
+ * session list's `overflow: auto` clipping. Closes on outside pointer,
+ * Escape, scroll, or resize. The anchor button is excluded from the
+ * outside-pointer check so its own click can toggle the menu shut.
+ */
+function SessionActionsMenu({
+  anchorEl,
+  items,
+  onClose,
+}: {
+  anchorEl: HTMLElement;
+  items: SessionMenuItem[];
+  onClose: () => void;
+}) {
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      if (ref.current?.contains(target)) return;
+      if (anchorEl.contains(target)) return;
+      onClose();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.stopPropagation();
+        onClose();
+      }
+    };
+    document.addEventListener('pointerdown', handlePointerDown, true);
+    document.addEventListener('keydown', handleKeyDown, true);
+    window.addEventListener('scroll', onClose, true);
+    window.addEventListener('resize', onClose);
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown, true);
+      document.removeEventListener('keydown', handleKeyDown, true);
+      window.removeEventListener('scroll', onClose, true);
+      window.removeEventListener('resize', onClose);
+    };
+  }, [anchorEl, onClose]);
+
+  const anchor = anchorEl.getBoundingClientRect();
+  const estimatedHeight = items.length * 34 + 8;
+  const openUp = anchor.bottom + estimatedHeight > window.innerHeight - 8;
+  const style: CSSProperties = {
+    right: Math.max(8, window.innerWidth - anchor.right),
+    ...(openUp
+      ? { bottom: window.innerHeight - anchor.top + 4 }
+      : { top: anchor.bottom + 4 }),
+  };
+
+  return (
+    <div ref={ref} className={styles.actionMenu} role="menu" style={style}>
+      {items.map((item) => (
+        <button
+          key={item.key}
+          type="button"
+          role="menuitem"
+          className={cx(
+            styles.actionMenuItem,
+            item.danger && styles.actionMenuItemDanger,
+          )}
+          disabled={item.disabled}
+          title={item.disabled ? item.disabledTitle : undefined}
+          onClick={() => {
+            if (item.disabled) return;
+            onClose();
+            item.onSelect();
+          }}
+        >
+          <span className={styles.actionMenuIcon} aria-hidden="true">
+            {item.icon}
+          </span>
+          <span className={styles.actionMenuLabel}>{item.label}</span>
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -278,13 +411,44 @@ export function WebShellSidebar({
   );
   const [selectedGroupId, setSelectedGroupId] =
     useState<SessionGroupFilter>('all');
-  const { sessions, loading, error, reload, deleteSession } = useSessions({
+  const {
+    sessions,
+    loading,
+    error,
+    reload,
+    deleteSession,
+    exportSession,
+    archiveSession,
+  } = useSessions({
     autoLoad: true,
     pageSize: SIDEBAR_SESSION_PAGE_SIZE,
+    archiveState: 'active',
     ...(organizationEnabled
       ? { view: 'organized' as const, group: selectedGroupId }
       : {}),
   });
+  const [archivedExpanded, setArchivedExpanded] = useState(false);
+  const {
+    sessions: archivedSessions,
+    loading: archivedLoading,
+    error: archivedError,
+    reload: reloadArchived,
+    deleteSession: deleteArchivedSession,
+    unarchiveSession,
+  } = useSessions({
+    autoLoad: true,
+    enabled: archivedExpanded,
+    pageSize: SIDEBAR_SESSION_PAGE_SIZE,
+    archiveState: 'archived',
+    ...(organizationEnabled
+      ? { view: 'organized' as const, group: selectedGroupId }
+      : {}),
+  });
+  const [menuState, setMenuState] = useState<{
+    session: DaemonSessionSummary;
+    isArchived: boolean;
+    anchorEl: HTMLElement;
+  } | null>(null);
   const [groups, setGroups] = useState<DaemonSessionGroup[]>([]);
   const [colorOptions, setColorOptions] = useState<DaemonSessionGroupColor[]>(
     [],
@@ -294,6 +458,10 @@ export function WebShellSidebar({
   const [editingName, setEditingName] = useState('');
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const busySessionIdRef = useRef<string | null>(null);
+  const [exportingSessionIds, setExportingSessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const exportingSessionIdsRef = useRef<Set<string>>(new Set());
   const creatingSessionRef = useRef(false);
   const [deleteCandidate, setDeleteCandidate] =
     useState<DaemonSessionSummary | null>(null);
@@ -324,6 +492,8 @@ export function WebShellSidebar({
     null,
   );
   const currentSessionId = connection.sessionId;
+  const canExportSessions =
+    connection.capabilities?.features?.includes('session_export') ?? false;
   const projectName =
     getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
   const qwenCodeVersion = connection.capabilities?.qwenCodeVersion || '';
@@ -652,6 +822,54 @@ export function WebShellSidebar({
     [currentSessionId],
   );
 
+  const setSessionExporting = useCallback(
+    (sessionId: string, exporting: boolean) => {
+      const next = new Set(exportingSessionIdsRef.current);
+      if (exporting) {
+        next.add(sessionId);
+      } else {
+        next.delete(sessionId);
+      }
+      exportingSessionIdsRef.current = next;
+      setExportingSessionIds(next);
+    },
+    [],
+  );
+
+  const handleExportSession = useCallback(
+    (session: DaemonSessionSummary) => {
+      const sessionId = session.sessionId;
+      if (!canExportSessions || exportingSessionIdsRef.current.has(sessionId)) {
+        return;
+      }
+      setSessionExporting(sessionId, true);
+      void (async () => {
+        try {
+          const result = await exportSession(sessionId, 'html');
+          const blob = new Blob([result.content], {
+            type: result.mimeType || 'text/html',
+          });
+          const url = URL.createObjectURL(blob);
+          try {
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = result.filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+          } finally {
+            URL.revokeObjectURL(url);
+          }
+        } catch (err) {
+          onError(err, t('sidebar.exportFailed'));
+        } finally {
+          setSessionExporting(sessionId, false);
+        }
+      })();
+    },
+    [canExportSessions, exportSession, onError, setSessionExporting, t],
+  );
+
   const confirmDeleteSession = useCallback(() => {
     if (!deleteCandidate) return;
     const sessionId = deleteCandidate.sessionId;
@@ -659,12 +877,17 @@ export function WebShellSidebar({
       setDeleteCandidate(null);
       return;
     }
+    const isArchived = Boolean(deleteCandidate.isArchived);
     setDeleteCandidate(null);
     busySessionIdRef.current = sessionId;
     setBusySessionId(sessionId);
-    deleteSession(sessionId)
-      .then((removed) => {
-        if (!removed) reload();
+    const removeSession = isArchived ? deleteArchivedSession : deleteSession;
+    removeSession(sessionId)
+      .then(() => {
+        // A hard delete unlinks the transcript from BOTH the active and
+        // archived directories, so resync both lists regardless of origin.
+        void reload();
+        void reloadArchived();
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
       .finally(() => {
@@ -673,7 +896,16 @@ export function WebShellSidebar({
         }
         setBusySessionId((current) => (current === sessionId ? null : current));
       });
-  }, [currentSessionId, deleteCandidate, deleteSession, onError, reload, t]);
+  }, [
+    currentSessionId,
+    deleteArchivedSession,
+    deleteCandidate,
+    deleteSession,
+    onError,
+    reload,
+    reloadArchived,
+    t,
+  ]);
 
   const handleRenameFromMenu = useCallback(
     (session: DaemonSessionSummary) => {
@@ -817,12 +1049,60 @@ export function WebShellSidebar({
     [onError, organizationEnabled, reload, t, workspaceActions],
   );
 
-  const openGroupMenu = useCallback(
-    (
-      event: ReactMouseEvent<HTMLButtonElement>,
-      session: DaemonSessionSummary,
-    ) => {
-      const rect = event.currentTarget.getBoundingClientRect();
+  const handleArchive = useCallback(
+    (session: DaemonSessionSummary) => {
+      const sessionId = session.sessionId;
+      // The daemon force-ends a live turn on archive; keep the current
+      // session off-limits, mirroring the delete guard.
+      if (sessionId === currentSessionId) return;
+      if (busySessionIdRef.current !== null) return;
+      busySessionIdRef.current = sessionId;
+      setBusySessionId(sessionId);
+      archiveSession(sessionId)
+        .then(() => {
+          void reloadArchived();
+        })
+        .catch((err: unknown) => onError(err, t('sidebar.archiveFailed')))
+        .finally(() => {
+          if (busySessionIdRef.current === sessionId) {
+            busySessionIdRef.current = null;
+          }
+          setBusySessionId((current) =>
+            current === sessionId ? null : current,
+          );
+        });
+    },
+    [archiveSession, currentSessionId, onError, reloadArchived, t],
+  );
+
+  const handleUnarchive = useCallback(
+    (session: DaemonSessionSummary) => {
+      const sessionId = session.sessionId;
+      if (busySessionIdRef.current !== null) return;
+      busySessionIdRef.current = sessionId;
+      setBusySessionId(sessionId);
+      unarchiveSession(sessionId)
+        .then(() => {
+          void reload();
+        })
+        .catch((err: unknown) => onError(err, t('sidebar.unarchiveFailed')))
+        .finally(() => {
+          if (busySessionIdRef.current === sessionId) {
+            busySessionIdRef.current = null;
+          }
+          setBusySessionId((current) =>
+            current === sessionId ? null : current,
+          );
+        });
+    },
+    [onError, reload, t, unarchiveSession],
+  );
+
+  const closeMenu = useCallback(() => setMenuState(null), []);
+
+  const openGroupMenuFromAnchor = useCallback(
+    (anchorEl: HTMLElement, session: DaemonSessionSummary) => {
+      const rect = anchorEl.getBoundingClientRect();
       const viewportWidth =
         typeof window === 'undefined'
           ? rect.right + GROUP_MENU_WIDTH
@@ -852,6 +1132,36 @@ export function WebShellSidebar({
       });
     },
     [groups.length],
+  );
+
+  const openGroupMenu = useCallback(
+    (
+      event: ReactMouseEvent<HTMLButtonElement>,
+      session: DaemonSessionSummary,
+    ) => {
+      event.stopPropagation();
+      openGroupMenuFromAnchor(event.currentTarget, session);
+    },
+    [openGroupMenuFromAnchor],
+  );
+
+  const openMenu = useCallback(
+    (
+      event: ReactMouseEvent<HTMLButtonElement>,
+      session: DaemonSessionSummary,
+      isArchived: boolean,
+    ) => {
+      event.stopPropagation();
+      const anchorEl = event.currentTarget;
+      setMenuState((prev) =>
+        prev &&
+        prev.session.sessionId === session.sessionId &&
+        prev.isArchived === isArchived
+          ? null
+          : { session, isArchived, anchorEl },
+      );
+    },
+    [],
   );
 
   const assignSessionGroup = useCallback(
@@ -1002,8 +1312,12 @@ export function WebShellSidebar({
       const stamp = session.updatedAt || session.createdAt;
       const time = stamp ? formatRelativeTime(stamp, t) : '';
       const busy = busySessionId === session.sessionId;
+      const exporting = exportingSessionIds.has(session.sessionId);
       const completedUnread =
         !isCurrent && completedUnreadIds.has(session.sessionId);
+      const isMenuOpen =
+        menuState?.session.sessionId === session.sessionId &&
+        !menuState.isArchived;
       return (
         <div
           key={session.sessionId}
@@ -1013,6 +1327,7 @@ export function WebShellSidebar({
             session.isPinned && styles.pinnedSession,
             session.hasActivePrompt && styles.runningSession,
             busy && styles.busySession,
+            isMenuOpen && styles.menuActive,
           )}
           role="button"
           tabIndex={0}
@@ -1126,30 +1441,42 @@ export function WebShellSidebar({
                       <button
                         className={styles.sessionActionButton}
                         type="button"
-                        disabled={!isCurrent}
-                        title={
-                          isCurrent
-                            ? t('sidebar.rename')
-                            : t('sidebar.renameCurrentOnly')
-                        }
-                        aria-label={t('sidebar.rename')}
-                        onClick={() => handleRenameFromMenu(session)}
-                      >
-                        <IconRename />
-                      </button>
-                      <button
-                        className={styles.sessionActionButton}
-                        type="button"
                         disabled={isCurrent}
                         title={
                           isCurrent
-                            ? t('sidebar.currentDeleteDisabled')
-                            : t('sidebar.delete')
+                            ? t('sidebar.archiveCurrentDisabled')
+                            : t('sidebar.archive')
                         }
-                        aria-label={t('sidebar.delete')}
-                        onClick={() => handleDeleteSession(session)}
+                        aria-label={t('sidebar.archive')}
+                        onClick={() => handleArchive(session)}
                       >
-                        <IconTrash />
+                        <IconArchive />
+                      </button>
+                      {canExportSessions && (
+                        <button
+                          className={styles.sessionActionButton}
+                          type="button"
+                          disabled={exporting}
+                          title={t('sidebar.export')}
+                          aria-label={t('sidebar.export')}
+                          onClick={() => handleExportSession(session)}
+                        >
+                          <IconDownload />
+                        </button>
+                      )}
+                      <button
+                        className={cx(
+                          styles.sessionActionButton,
+                          isMenuOpen && styles.sessionActionButtonActive,
+                        )}
+                        type="button"
+                        aria-label={t('sidebar.moreActions')}
+                        aria-haspopup="menu"
+                        aria-expanded={isMenuOpen}
+                        title={t('sidebar.moreActions')}
+                        onClick={(event) => openMenu(event, session, false)}
+                      >
+                        <IconMore />
                       </button>
                     </div>
                   </div>
@@ -1162,6 +1489,7 @@ export function WebShellSidebar({
     });
   }, [
     busySessionId,
+    canExportSessions,
     cancelRename,
     collapsed,
     completedUnreadIds,
@@ -1169,14 +1497,17 @@ export function WebShellSidebar({
     editingName,
     editingSessionId,
     error,
+    exportingSessionIds,
     filteredSessions,
-    handleDeleteSession,
+    handleArchive,
+    handleExportSession,
     handleLoadSession,
-    handleRenameFromMenu,
     handleTogglePin,
     hideTooltip,
     loading,
+    menuState,
     openGroupMenu,
+    openMenu,
     organizationEnabled,
     projectExpanded,
     reload,
@@ -1185,6 +1516,215 @@ export function WebShellSidebar({
     sessions.length,
     showTooltip,
     startRename,
+    t,
+  ]);
+
+  const archivedSection = useMemo(() => {
+    if (collapsed || !projectExpanded || searchQuery.trim()) return null;
+
+    const header = (
+      <button
+        type="button"
+        className={styles.archivedHeader}
+        aria-expanded={archivedExpanded}
+        onClick={() => setArchivedExpanded((expanded) => !expanded)}
+      >
+        <span className={styles.archivedChevron} aria-hidden="true">
+          <IconChevron expanded={archivedExpanded} />
+        </span>
+        <span className={styles.archivedTitle}>
+          {t('sidebar.archivedTitle')}
+        </span>
+        {archivedExpanded && archivedSessions.length > 0 && (
+          <span className={styles.archivedCount}>
+            {archivedSessions.length}
+          </span>
+        )}
+      </button>
+    );
+
+    if (!archivedExpanded) {
+      return <div className={styles.archivedSection}>{header}</div>;
+    }
+
+    let content: ReactNode;
+    if (archivedLoading && archivedSessions.length === 0) {
+      content = (
+        <div className={styles.notice}>{t('sidebar.loadingSessions')}</div>
+      );
+    } else if (archivedError && archivedSessions.length === 0) {
+      content = (
+        <button
+          className={styles.retry}
+          type="button"
+          onClick={() => reloadArchived()}
+        >
+          {t('sidebar.loadFailed')}
+        </button>
+      );
+    } else if (archivedSessions.length === 0) {
+      content = (
+        <div className={styles.notice}>{t('sidebar.archivedEmpty')}</div>
+      );
+    } else {
+      content = archivedSessions.map((session) => {
+        const label = getSessionLabel(session);
+        const stamp = session.updatedAt || session.createdAt;
+        const time = stamp ? formatRelativeTime(stamp, t) : '';
+        const busy = busySessionId === session.sessionId;
+        const isMenuOpen =
+          menuState?.session.sessionId === session.sessionId &&
+          menuState.isArchived;
+        return (
+          <div
+            key={session.sessionId}
+            className={cx(
+              styles.sessionRow,
+              styles.archivedRow,
+              busy && styles.busySession,
+              isMenuOpen && styles.menuActive,
+            )}
+            title={label}
+          >
+            <span className={styles.sessionText}>{label}</span>
+            <div className={styles.sessionMetaSlot}>
+              <span className={styles.sessionTime}>{time}</span>
+              <div
+                className={styles.sessionActions}
+                onClick={(event) => event.stopPropagation()}
+                onKeyDown={(event) => event.stopPropagation()}
+              >
+                <button
+                  className={styles.sessionActionButton}
+                  type="button"
+                  title={t('sidebar.unarchive')}
+                  aria-label={t('sidebar.unarchive')}
+                  onClick={() => handleUnarchive(session)}
+                >
+                  <IconUnarchive />
+                </button>
+                <button
+                  className={cx(
+                    styles.sessionActionButton,
+                    isMenuOpen && styles.sessionActionButtonActive,
+                  )}
+                  type="button"
+                  aria-label={t('sidebar.moreActions')}
+                  aria-haspopup="menu"
+                  aria-expanded={isMenuOpen}
+                  title={t('sidebar.moreActions')}
+                  onClick={(event) => openMenu(event, session, true)}
+                >
+                  <IconMore />
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      });
+    }
+
+    return (
+      <div className={styles.archivedSection}>
+        {header}
+        <div className={styles.archivedList}>{content}</div>
+      </div>
+    );
+  }, [
+    archivedError,
+    archivedExpanded,
+    archivedLoading,
+    archivedSessions,
+    busySessionId,
+    collapsed,
+    handleUnarchive,
+    menuState,
+    openMenu,
+    projectExpanded,
+    reloadArchived,
+    searchQuery,
+    t,
+  ]);
+
+  const menuItems = useMemo<SessionMenuItem[]>(() => {
+    if (!menuState) return [];
+    const { session, isArchived } = menuState;
+    if (isArchived) {
+      return [
+        {
+          key: 'unarchive',
+          label: t('sidebar.unarchive'),
+          icon: <IconUnarchive />,
+          onSelect: () => handleUnarchive(session),
+        },
+        {
+          key: 'delete',
+          label: t('sidebar.delete'),
+          icon: <IconTrash />,
+          danger: true,
+          onSelect: () => handleDeleteSession(session),
+        },
+      ];
+    }
+    const isCurrent = session.sessionId === currentSessionId;
+    const items: SessionMenuItem[] = [
+      {
+        key: 'rename',
+        label: t('sidebar.rename'),
+        icon: <IconRename />,
+        disabled: !isCurrent,
+        disabledTitle: t('sidebar.renameCurrentOnly'),
+        onSelect: () => handleRenameFromMenu(session),
+      },
+      ...(organizationEnabled
+        ? [
+            {
+              key: 'pin',
+              label: session.isPinned ? t('sidebar.unpin') : t('sidebar.pin'),
+              icon: <IconPin />,
+              disabled: busySessionId !== null,
+              onSelect: () => handleTogglePin(session),
+            },
+            {
+              key: 'group',
+              label: t('sidebar.organize'),
+              icon: <IconGroup />,
+              disabled: busySessionId !== null,
+              onSelect: () =>
+                openGroupMenuFromAnchor(menuState.anchorEl, session),
+            },
+          ]
+        : []),
+      {
+        key: 'archive',
+        label: t('sidebar.archive'),
+        icon: <IconArchive />,
+        disabled: isCurrent,
+        disabledTitle: t('sidebar.archiveCurrentDisabled'),
+        onSelect: () => handleArchive(session),
+      },
+      {
+        key: 'delete',
+        label: t('sidebar.delete'),
+        icon: <IconTrash />,
+        danger: true,
+        disabled: isCurrent,
+        disabledTitle: t('sidebar.currentDeleteDisabled'),
+        onSelect: () => handleDeleteSession(session),
+      },
+    ];
+    return items;
+  }, [
+    busySessionId,
+    currentSessionId,
+    handleArchive,
+    handleDeleteSession,
+    handleRenameFromMenu,
+    handleTogglePin,
+    handleUnarchive,
+    menuState,
+    openGroupMenuFromAnchor,
+    organizationEnabled,
     t,
   ]);
 
@@ -1281,6 +1821,13 @@ export function WebShellSidebar({
             </span>
           </button>
         </div>
+      )}
+      {menuState && (
+        <SessionActionsMenu
+          anchorEl={menuState.anchorEl}
+          items={menuItems}
+          onClose={closeMenu}
+        />
       )}
       {deleteCandidate && (
         <DialogShell
@@ -1587,7 +2134,10 @@ export function WebShellSidebar({
             )}
           </div>
         )}
-        <div className={styles.sessionList}>{body}</div>
+        <div className={styles.sessionList}>
+          {body}
+          {archivedSection}
+        </div>
       </div>
 
       <div className={styles.footer}>

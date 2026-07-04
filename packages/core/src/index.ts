@@ -214,6 +214,7 @@ export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
 export * from './services/gitWorktreeService.js';
+export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/image-part-utils.js';
 export * from './services/sessionRecap.js';

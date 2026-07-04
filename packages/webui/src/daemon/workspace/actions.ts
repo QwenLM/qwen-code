@@ -118,6 +118,38 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async exportSession(sessionId, format = 'html') {
+      const client = requireClient(getClient, 'Export session failed');
+      return withActionTimeout(
+        client.exportSession(sessionId, { format }),
+        'Export session timed out',
+      );
+    },
+
+    async archiveSession(sessionId: string) {
+      const client = requireClient(getClient, 'Archive session failed');
+      const result = await withActionTimeout(
+        client.archiveSessionsData([sessionId]),
+        'Archive session timed out',
+      );
+      if (result.errors.length > 0) {
+        throw new Error(result.errors[0].error);
+      }
+      return result.archived.length > 0 || result.alreadyArchived.length > 0;
+    },
+
+    async unarchiveSession(sessionId: string) {
+      const client = requireClient(getClient, 'Unarchive session failed');
+      const result = await withActionTimeout(
+        client.unarchiveSessionsData([sessionId]),
+        'Unarchive session timed out',
+      );
+      if (result.errors.length > 0) {
+        throw new Error(result.errors[0].error);
+      }
+      return result.unarchived.length > 0 || result.alreadyActive.length > 0;
+    },
+
     async loadMcpStatus() {
       const client = requireClient(getClient, 'Load MCP status failed');
       return withActionTimeout(

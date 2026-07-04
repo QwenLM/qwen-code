@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
 const ciWorkflow = readFileSync('.github/workflows/ci.yml', 'utf8');
+const releaseWorkflow = readFileSync('.github/workflows/release.yml', 'utf8');
 const sandboxImageResolverScript = readFileSync(
   '.github/scripts/resolve-sandbox-image.mjs',
   'utf8',
@@ -36,6 +37,14 @@ const prepareQwenCliSteps =
 const assessCandidatesStep =
   workflow.match(
     /- name: 'Assess candidates'[\s\S]*?(?=\n[ ]{6}- name: 'Read decision')/,
+  )?.[0] ?? '';
+const readDecisionStep =
+  workflow.match(
+    /- name: 'Read decision'[\s\S]*?(?=\n[ ]{6}- name: 'Claim issue')/,
+  )?.[0] ?? '';
+const claimIssueStep =
+  workflow.match(
+    /- name: 'Claim issue'[\s\S]*?(?=\n[ ]{6}- name: 'Develop fix')/,
   )?.[0] ?? '';
 const developFixStep =
   workflow.match(
@@ -85,7 +94,7 @@ describe('qwen-autofix workflow', () => {
       'any(. == "autofix/skip" or . == "autofix/in-progress")',
     );
     expect(workflow).toContain(
-      '--search "is:open is:issue label:${READY_FOR_AGENT_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}"',
+      '--search "is:open is:issue label:${READY_FOR_AGENT_LABEL} label:${AUTOFIX_APPROVED_LABEL} ${AUTOFIX_ISSUE_EXCLUDES}"',
     );
     expect(workflow).toContain('.[0:10] | map(. + {autofixTier: 1})');
   });
@@ -105,6 +114,9 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       '::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}',
     );
+    expect(workflow).toContain(
+      '::notice::Issue #${ISSUE_NUMBER:-n/a} needs both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL} before autofix can run.',
+    );
     expect(workflow).toContain("${sender_permission}\" == 'write'");
     expect(workflow).toContain("${sender_permission}\" == 'maintain'");
     expect(workflow).toContain("${sender_permission}\" == 'admin'");
@@ -112,10 +124,14 @@ describe('qwen-autofix workflow', () => {
       "sender_permission='${sender_permission:-none}'",
     );
     expect(workflow).toContain(
+      '[[ "${ISSUE_LABEL}" == "${READY_FOR_AGENT_LABEL}" || "${ISSUE_LABEL}" == "${BUG_LABEL}" || "${ISSUE_LABEL}" == "${AUTOFIX_APPROVED_LABEL}" ]] && label_is_trigger=true',
+    );
+    expect(workflow).toContain(
       'issue event ignored: state_open=$([[ "${ISSUE_STATE}" == \'open\' ]]',
     );
     expect(workflow).toContain('bug=${issue_is_bug}');
     expect(workflow).toContain('ready=${issue_is_ready}');
+    expect(workflow).toContain('approved=${issue_is_approved}');
     expect(workflow).toContain('trigger_label=${label_is_trigger}');
     expect(workflow).toContain('trigger_label=false label=');
     expect(workflow).toContain('sender_trusted=${sender_is_trusted}');
@@ -135,6 +151,11 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'is missing ${READY_FOR_AGENT_LABEL}; skipping.',
     );
+    expect(workflow).toContain(
+      'is missing ${AUTOFIX_APPROVED_LABEL}; skipping.',
+    );
+    expect(workflow).toContain('"${issue_is_approved}" == \'true\'');
+    expect(workflow).toContain('--remove-label "${AUTOFIX_APPROVED_LABEL}"');
     expect(workflow).not.toContain(
       "contains(github.event.issue.labels.*.name, 'type/bug')",
     );
@@ -153,6 +174,83 @@ describe('qwen-autofix workflow', () => {
     );
     expect(workflow).toContain(
       'elif [[ "$(jq -r \'.state // ""\' "${forced_issue_json}")" != \'OPEN\' ]]; then',
+    );
+    expect(workflow).toContain(
+      'workflow_dispatch is a maintainer-initiated escape hatch',
+    );
+    expect(workflow).toContain(
+      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}"',
+    );
+    expect(workflow).toContain(
+      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e --arg approved "${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(workflow).toContain(
+      'is missing ${AUTOFIX_APPROVED_LABEL}; skipping.',
+    );
+  });
+
+  it('keeps release-failure autofix issues approved for scheduled fallback', () => {
+    expect(releaseWorkflow).toContain(
+      'Safe to auto-apply approval: release-failure issue content is',
+    );
+    expect(releaseWorkflow).toContain(
+      '--add-label "${BUG_LABEL},${READY_FOR_AGENT_LABEL},${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(releaseWorkflow).toContain('--label "${AUTOFIX_APPROVED_LABEL}"');
+    expect(releaseWorkflow).toContain(
+      'gh label create "${AUTOFIX_APPROVED_LABEL}" --repo "${GH_REPO}"',
+    );
+  });
+
+  it('revalidates approval labels immediately before claiming an issue', () => {
+    expect(readDecisionStep).toContain(
+      "EVENT_NAME: '${{ github.event_name }}'",
+    );
+    expect(readDecisionStep).toContain(
+      'gh issue view "${GO}" --repo "${REPO}" --json labels,state',
+    );
+    expect(readDecisionStep).toContain('"${DRY_RUN}" != "true"');
+    expect(readDecisionStep).toContain(
+      '::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error',
+    );
+    expect(readDecisionStep).toContain(
+      '($labels | index($ready)) and ($labels | index($approved))',
+    );
+    expect(readDecisionStep).toContain(
+      'no longer has both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL}',
+    );
+  });
+
+  it('requires re-approval when transient autofix failures withdraw a claim', () => {
+    expect(withdrawClaimStep).toContain(
+      'the issue will require the `autofix/approved` label to be re-added before any future automated attempt.',
+    );
+    expect(withdrawClaimStep).toContain(
+      "LABEL_ARGS=(--remove-label 'autofix/in-progress')",
+    );
+    expect(withdrawClaimStep).not.toContain(
+      '--add-label "${AUTOFIX_APPROVED_LABEL}"',
+    );
+  });
+
+  it('fails claim cleanly before commenting when label updates fail', () => {
+    expect(claimIssueStep).toContain(
+      'if ! gh issue edit "${ISSUE}" --repo "${REPO}"',
+    );
+    expect(claimIssueStep).toContain(
+      'Failed to add autofix/in-progress label on #${ISSUE} before claim comment was posted',
+    );
+    expect(claimIssueStep).toContain('exit 1');
+    const addInProgressIndex = claimIssueStep.indexOf(
+      "--add-label 'autofix/in-progress'",
+    );
+    const removeApprovalIndex = claimIssueStep.indexOf(
+      '--remove-label "${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(addInProgressIndex).toBeGreaterThan(-1);
+    expect(removeApprovalIndex).toBeGreaterThan(addInProgressIndex);
+    expect(removeApprovalIndex).toBeLessThan(
+      claimIssueStep.indexOf('gh issue comment "${ISSUE}"'),
     );
   });
 

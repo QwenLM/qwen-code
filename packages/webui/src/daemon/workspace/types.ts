@@ -59,6 +59,8 @@ import type {
   DaemonSessionOrganizationResult,
   DaemonSessionOrganizationUpdate,
   DaemonSessionSummary,
+  DaemonSessionExportFormat,
+  DaemonSessionExportResult,
   DaemonStatusReport,
   DaemonStatusReportDetail,
   DaemonWriteMemoryRequest,
@@ -177,6 +179,18 @@ export interface DaemonWorkspaceActions {
     notFound: string[];
     errors: Array<{ sessionId: string; error: string }>;
   }>;
+  exportSession(
+    sessionId: string,
+    format?: DaemonSessionExportFormat,
+  ): Promise<DaemonSessionExportResult>;
+  /**
+   * Move a session to the archived directory. Idempotent: an
+   * already-archived session resolves `true`. Rejects if the daemon
+   * reports a per-session error (e.g. an archive/unarchive conflict).
+   */
+  archiveSession(sessionId: string): Promise<boolean>;
+  /** Restore an archived session to the active directory. Idempotent. */
+  unarchiveSession(sessionId: string): Promise<boolean>;
 
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;

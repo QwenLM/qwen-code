@@ -19,6 +19,7 @@ import {
   matchesAnyServerPattern,
 } from './config.js';
 import { Storage } from './storage.js';
+import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -4673,6 +4674,31 @@ describe('Server Config (config.ts)', () => {
         Number.POSITIVE_INFINITY,
       );
     });
+  });
+
+  describe('getMaxToolCallsPerTurn', () => {
+    it('should return the default cap when unset', () => {
+      const config = new Config(baseParams);
+      expect(config.getMaxToolCallsPerTurn()).toBe(
+        DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+      );
+    });
+
+    it('should use a custom maxToolCallsPerTurn if provided', () => {
+      const config = new Config({ ...baseParams, maxToolCallsPerTurn: 42 });
+      expect(config.getMaxToolCallsPerTurn()).toBe(42);
+    });
+
+    it.each([0, -1])(
+      'should return infinity (cap disabled) when set to %d',
+      (capValue) => {
+        const config = new Config({
+          ...baseParams,
+          maxToolCallsPerTurn: capValue,
+        });
+        expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
+      },
+    );
   });
 
   describe('getClearContextOnIdle', () => {
