@@ -21,6 +21,7 @@ class TestChannel extends ChannelBase {
   sent: Array<{ chatId: string; text: string }> = [];
   proactive: Array<{ chatId: string; text: string }> = [];
   proactiveSupported = false;
+  proactiveTargetSupported = true;
   connected = false;
   toolCalls: Array<{ chatId: string; event: unknown }> = [];
   taskEvents: ChannelTaskLifecycleEvent[] = [];
@@ -57,6 +58,10 @@ class TestChannel extends ChannelBase {
 
   override supportsProactiveSend(): boolean {
     return this.proactiveSupported;
+  }
+
+  protected override supportsProactiveTarget(): boolean {
+    return this.proactiveTargetSupported;
   }
 
   protected override async pushProactive(
@@ -1615,6 +1620,160 @@ describe('ChannelBase', () => {
         10,
       );
       expect(result).toBe('Loop job-1: */5 * * * *');
+    });
+
+    it('does not register channel loop tools without a loop controller', () => {
+      createChannel();
+
+      expect(
+        (
+          bridge as unknown as {
+            getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+          }
+        ).getChannelLoopToolHandler(),
+      ).toBeUndefined();
+    });
+
+    it('channel loop tool rejects channels without proactive send support', async () => {
+      const createForTarget = vi.fn();
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      await ch.handleInbound(envelope({ text: 'hello' }));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+
+      await expect(
+        handler!.create('s-1', {
+          cron: '*/5 * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toEqual({
+        text: 'This channel does not support proactive loop messages.',
+        isError: true,
+      });
+      expect(createForTarget).not.toHaveBeenCalled();
+    });
+
+    it('channel loop tool rejects single-scope sessions', async () => {
+      const createForTarget = vi.fn();
+      const ch = createChannel(
+        { sessionScope: 'single' },
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(envelope({ text: 'hello' }));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+
+      await expect(
+        handler!.create('s-1', {
+          cron: '*/5 * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toEqual({
+        text: 'Loops are not supported when sessionScope is single.',
+        isError: true,
+      });
+      expect(createForTarget).not.toHaveBeenCalled();
+    });
+
+    it('channel loop tool rejects unsupported proactive targets', async () => {
+      const createForTarget = vi.fn();
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      ch.proactiveTargetSupported = false;
+      await ch.handleInbound(envelope({ text: 'hello' }));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+
+      await expect(
+        handler!.create('s-1', {
+          cron: '*/5 * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toEqual({
+        text: 'This channel does not support proactive loop messages for this chat target.',
+        isError: true,
+      });
+      expect(createForTarget).not.toHaveBeenCalled();
+    });
+
+    it('channel loop tool returns invalid cron errors', async () => {
+      const createForTarget = vi.fn();
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(() => {
+              throw new Error('bad cron');
+            }),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(envelope({ text: 'hello' }));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+
+      await expect(
+        handler!.create('s-1', {
+          cron: 'bad',
+          prompt: 'drink water',
+        }),
+      ).resolves.toEqual({
+        text: 'Invalid cron expression: bad cron',
+        isError: true,
+      });
+      expect(createForTarget).not.toHaveBeenCalled();
     });
 
     it('channel loop tool normalizes legacy targets without isGroup', async () => {
