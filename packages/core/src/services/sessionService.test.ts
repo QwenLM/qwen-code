@@ -25,6 +25,7 @@ import {
   getResumeTokenCounts,
   type ConversationRecord,
 } from './sessionService.js';
+import { SessionOrganizationService } from './session-organization-service.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -907,6 +908,18 @@ describe('SessionService', () => {
 
       expect(result).toBe(true);
       expect(unlinkSyncSpy).toHaveBeenCalled();
+    });
+
+    it('should clear session organization when removing a session', async () => {
+      const removeOrganizationSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'removeSession')
+        .mockResolvedValue(undefined);
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA);
     });
 
     it('should return false when session does not exist', async () => {

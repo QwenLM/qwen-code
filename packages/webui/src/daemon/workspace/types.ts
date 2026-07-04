@@ -50,6 +50,14 @@ import type {
   DaemonWorkspaceToolsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonSessionGroup,
+  DaemonSessionGroupCatalog,
+  DaemonSessionGroupInput,
+  DaemonSessionGroupUpdate,
+  DaemonSessionListPage,
+  DaemonSessionListPageOptions,
+  DaemonSessionOrganizationResult,
+  DaemonSessionOrganizationUpdate,
   DaemonSessionSummary,
   DaemonStatusReport,
   DaemonStatusReportDetail,
@@ -144,9 +152,25 @@ export interface DaemonGlobResult {
 
 export interface DaemonWorkspaceActions {
   // Sessions
-  listSessions(options?: {
-    pageSize?: number;
-  }): Promise<DaemonSessionSummary[]>;
+  listSessions(
+    options?: DaemonSessionListPageOptions,
+  ): Promise<DaemonSessionSummary[]>;
+  listSessionsPage(
+    options?: DaemonSessionListPageOptions,
+  ): Promise<DaemonSessionListPage>;
+  listSessionGroups(): Promise<DaemonSessionGroupCatalog>;
+  createSessionGroup(
+    input: DaemonSessionGroupInput,
+  ): Promise<DaemonSessionGroup>;
+  updateSessionGroup(
+    groupId: string,
+    update: DaemonSessionGroupUpdate,
+  ): Promise<DaemonSessionGroup>;
+  deleteSessionGroup(groupId: string): Promise<{ deleted: boolean }>;
+  updateSessionOrganization(
+    sessionId: string,
+    update: DaemonSessionOrganizationUpdate,
+  ): Promise<DaemonSessionOrganizationResult>;
   deleteSession(sessionId: string): Promise<boolean>;
   deleteSessions(sessionIds: string[]): Promise<{
     removed: string[];

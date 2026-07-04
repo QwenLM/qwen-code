@@ -383,9 +383,79 @@ export interface DaemonSessionSummary {
   clientCount?: number;
   hasActivePrompt?: boolean;
   isArchived?: boolean;
+  isPinned?: boolean;
+  pinnedAt?: string;
+  groupId?: string | null;
 }
 
 export type DaemonSessionArchiveState = 'active' | 'archived';
+
+export type DaemonSessionGroupColor =
+  | 'red'
+  | 'orange'
+  | 'yellow'
+  | 'green'
+  | 'blue'
+  | 'purple';
+
+export interface DaemonSessionGroup {
+  id: string;
+  name: string;
+  color: DaemonSessionGroupColor;
+  order: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DaemonSessionGroupCatalog {
+  groups: DaemonSessionGroup[];
+  colorOptions: DaemonSessionGroupColor[];
+}
+
+export interface DaemonSessionGroupInput {
+  name: string;
+  color: DaemonSessionGroupColor;
+}
+
+export interface DaemonSessionGroupUpdate {
+  name?: string;
+  color?: DaemonSessionGroupColor;
+  order?: number;
+}
+
+export interface DaemonSessionOrganizationUpdate {
+  isPinned?: boolean;
+  groupId?: string | null;
+}
+
+export interface DaemonSessionOrganizationResult {
+  sessionId: string;
+  groupId?: string | null;
+  isPinned?: boolean;
+  pinnedAt?: string;
+  updatedAt?: string;
+}
+
+export type DaemonSessionListView = 'organized';
+
+export type DaemonSessionGroupFilter =
+  | 'all'
+  | 'pinned'
+  | 'ungrouped'
+  | (string & {});
+
+export interface DaemonSessionListPageOptions {
+  pageSize?: number;
+  cursor?: string;
+  archiveState?: DaemonSessionArchiveState;
+  view?: DaemonSessionListView;
+  group?: DaemonSessionGroupFilter;
+}
+
+export interface DaemonSessionListPage {
+  sessions: DaemonSessionSummary[];
+  nextCursor?: string;
+}
 
 export interface DaemonArchiveSessionsResult {
   archived: string[];

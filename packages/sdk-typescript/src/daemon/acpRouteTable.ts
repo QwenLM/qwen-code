@@ -231,6 +231,18 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       }),
     },
   },
+  // PATCH /session/:id/organization → _qwen/session/update_organization
+  {
+    httpMethod: 'PATCH',
+    pattern: /^\/session\/([^/]+)\/organization$/,
+    mapping: {
+      method: '_qwen/session/update_organization',
+      extractParams: (segs, body) => ({
+        sessionId: segs[0],
+        ...(isRecord(body) ? body : {}),
+      }),
+    },
+  },
   // POST /session/:id/heartbeat → _qwen/session/heartbeat
   {
     httpMethod: 'POST',
@@ -736,11 +748,59 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
           workspaceCwd: segs[0],
           ...strParam(query, 'cursor'),
           ...strParam(query, 'archiveState'),
+          ...strParam(query, 'view'),
+          ...strParam(query, 'group'),
           ...(size == null || size === ''
             ? {}
             : { _meta: { size: Number(size) } }),
         };
       },
+    },
+  },
+  // GET /workspace/:id/session-groups → _qwen/workspace/session_groups/list
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/(.+)\/session-groups\/?$/,
+    mapping: {
+      method: '_qwen/workspace/session_groups/list',
+      extractParams: (segs) => ({ workspaceCwd: segs[0] }),
+    },
+  },
+  // POST /workspace/:id/session-groups → _qwen/workspace/session_groups/create
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/(.+)\/session-groups\/?$/,
+    mapping: {
+      method: '_qwen/workspace/session_groups/create',
+      extractParams: (segs, body) => ({
+        workspaceCwd: segs[0],
+        ...(isRecord(body) ? body : {}),
+      }),
+    },
+  },
+  // PATCH /workspace/:id/session-groups/:groupId → _qwen/workspace/session_groups/update
+  {
+    httpMethod: 'PATCH',
+    pattern: /^\/workspace\/(.+)\/session-groups\/([^/]+)\/?$/,
+    mapping: {
+      method: '_qwen/workspace/session_groups/update',
+      extractParams: (segs, body) => ({
+        workspaceCwd: segs[0],
+        groupId: segs[1],
+        ...(isRecord(body) ? body : {}),
+      }),
+    },
+  },
+  // DELETE /workspace/:id/session-groups/:groupId → _qwen/workspace/session_groups/delete
+  {
+    httpMethod: 'DELETE',
+    pattern: /^\/workspace\/(.+)\/session-groups\/([^/]+)\/?$/,
+    mapping: {
+      method: '_qwen/workspace/session_groups/delete',
+      extractParams: (segs) => ({
+        workspaceCwd: segs[0],
+        groupId: segs[1],
+      }),
     },
   },
 

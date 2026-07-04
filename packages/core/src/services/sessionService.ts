@@ -35,6 +35,7 @@ import {
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
 import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
+import { SessionOrganizationService } from './session-organization-service.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -406,6 +407,18 @@ export class SessionService {
       if (fs.existsSync(sidecar)) {
         this.removeFileIfExists(sidecar);
       }
+    }
+  }
+
+  private async removeSessionOrganization(sessionId: string): Promise<void> {
+    try {
+      await new SessionOrganizationService(this.projectRoot).removeSession(
+        sessionId,
+      );
+    } catch (error) {
+      this.warn(
+        `removeSession: failed to clear session organization for ${sessionId}: ${error}`,
+      );
     }
   }
 
@@ -1045,6 +1058,7 @@ export class SessionService {
           this.removeFileIfExists(archivedPath);
         }
         this.removeWorktreeSidecars(sessionId);
+        await this.removeSessionOrganization(sessionId);
         return true;
       }
       const archivedPath = this.getSessionFilePath(sessionId, 'archived');
@@ -1057,6 +1071,7 @@ export class SessionService {
       }
       this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
+      await this.removeSessionOrganization(sessionId);
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {

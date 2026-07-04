@@ -190,6 +190,9 @@ export interface BridgeSessionSummary {
   clientCount: number;
   hasActivePrompt: boolean;
   isArchived?: boolean;
+  isPinned?: boolean;
+  pinnedAt?: string;
+  groupId?: string | null;
 }
 
 export interface SessionMetadataUpdate {

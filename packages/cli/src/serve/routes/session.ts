@@ -10,8 +10,11 @@ import {
   APPROVAL_MODES,
   BTW_MAX_INPUT_LENGTH,
   SessionService,
+  SessionOrganizationError,
+  SessionOrganizationService,
   addDaemonRequestAttribute,
   type ApprovalMode,
+  type SessionGroupColor,
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactInput } from '@qwen-code/acp-bridge/sessionArtifacts';
@@ -80,6 +83,18 @@ function sendArtifactValidationError(res: Response, err: unknown): boolean {
   return true;
 }
 
+function sendSessionOrganizationError(res: Response, err: unknown): boolean {
+  if (!(err instanceof SessionOrganizationError)) {
+    return false;
+  }
+  res.status(err.code === 'group_name_conflict' ? 409 : 400).json({
+    error: err.message,
+    code: err.code,
+    ...(err.field !== undefined ? { field: err.field } : {}),
+  });
+  return true;
+}
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
@@ -124,6 +139,30 @@ export function registerSessionRoutes(
       sessionId: e.sessionId,
       error: e.error instanceof Error ? e.error.message : String(e.error),
     }));
+
+  const resolveWorkspaceParam = (
+    req: Request,
+    res: Response,
+  ): string | null => {
+    const workspaceCwd = req.params['id'] ?? '';
+    if (!path.isAbsolute(workspaceCwd)) {
+      res
+        .status(400)
+        .json({ error: '`:id` must decode to an absolute workspace path' });
+      return null;
+    }
+    const key = canonicalizeWorkspace(workspaceCwd);
+    if (key !== boundWorkspace) {
+      res.status(400).json({
+        error: `Workspace mismatch: daemon is bound to "${boundWorkspace}"`,
+        code: 'workspace_mismatch',
+        boundWorkspace,
+        requestedWorkspace: key,
+      });
+      return null;
+    }
+    return key;
+  };
 
   const withMutableSession =
     (
@@ -1012,6 +1051,156 @@ export function registerSessionRoutes(
     }),
   );
 
+  app.patch('/session/:id/organization', mutate(), async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    try {
+      await archiveCoordinator.runSharedMany([sessionId], async () => {
+        const sessionService = new SessionService(boundWorkspace);
+        let exists = await sessionService.sessionExistsInAnyState(sessionId);
+        if (!exists) {
+          try {
+            const summary = bridge.getSessionSummary(sessionId);
+            exists = summary.workspaceCwd === boundWorkspace;
+          } catch {
+            exists = false;
+          }
+        }
+        if (!exists) {
+          res.status(404).json({
+            error: `No session with id "${sessionId}"`,
+            sessionId,
+          });
+          return;
+        }
+
+        const body = safeBody(req);
+        const rawIsPinned = body['isPinned'];
+        if (rawIsPinned !== undefined && typeof rawIsPinned !== 'boolean') {
+          res.status(400).json({
+            error: '`isPinned` must be a boolean',
+            code: 'invalid_session_organization',
+            field: 'isPinned',
+          });
+          return;
+        }
+        const rawGroupId = body['groupId'];
+        if (
+          rawGroupId !== undefined &&
+          rawGroupId !== null &&
+          typeof rawGroupId !== 'string'
+        ) {
+          res.status(400).json({
+            error: '`groupId` must be a string or null',
+            code: 'invalid_session_organization',
+            field: 'groupId',
+          });
+          return;
+        }
+
+        const organization = await new SessionOrganizationService(
+          boundWorkspace,
+        ).updateSessionOrganization(sessionId, {
+          ...(rawIsPinned !== undefined ? { isPinned: rawIsPinned } : {}),
+          ...(rawGroupId !== undefined
+            ? { groupId: rawGroupId as string | null }
+            : {}),
+        });
+        res.status(200).json({ sessionId, ...organization });
+      });
+    } catch (err) {
+      if (sendSessionOrganizationError(res, err)) return;
+      sendBridgeError(res, err, {
+        route: 'PATCH /session/:id/organization',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/workspace/:id/session-groups', async (req, res) => {
+    const key = resolveWorkspaceParam(req, res);
+    if (key === null) return;
+    try {
+      res
+        .status(200)
+        .json(await new SessionOrganizationService(key).listGroups());
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /workspace/:id/session-groups',
+      });
+    }
+  });
+
+  app.post('/workspace/:id/session-groups', mutate(), async (req, res) => {
+    const key = resolveWorkspaceParam(req, res);
+    if (key === null) return;
+    const body = safeBody(req);
+    try {
+      const group = await new SessionOrganizationService(key).createGroup({
+        name: body['name'] as string,
+        color: body['color'] as SessionGroupColor,
+      });
+      res.status(201).json({ group });
+    } catch (err) {
+      if (sendSessionOrganizationError(res, err)) return;
+      sendBridgeError(res, err, {
+        route: 'POST /workspace/:id/session-groups',
+      });
+    }
+  });
+
+  app.patch(
+    '/workspace/:id/session-groups/:groupId',
+    mutate(),
+    async (req, res) => {
+      const key = resolveWorkspaceParam(req, res);
+      if (key === null) return;
+      const body = safeBody(req);
+      try {
+        const group = await new SessionOrganizationService(key).updateGroup(
+          req.params['groupId'] ?? '',
+          {
+            ...(Object.prototype.hasOwnProperty.call(body, 'name')
+              ? { name: body['name'] as string }
+              : {}),
+            ...(Object.prototype.hasOwnProperty.call(body, 'color')
+              ? { color: body['color'] as SessionGroupColor }
+              : {}),
+            ...(Object.prototype.hasOwnProperty.call(body, 'order')
+              ? { order: body['order'] as number }
+              : {}),
+          },
+        );
+        res.status(200).json({ group });
+      } catch (err) {
+        if (sendSessionOrganizationError(res, err)) return;
+        sendBridgeError(res, err, {
+          route: 'PATCH /workspace/:id/session-groups/:groupId',
+        });
+      }
+    },
+  );
+
+  app.delete(
+    '/workspace/:id/session-groups/:groupId',
+    mutate(),
+    async (req, res) => {
+      const key = resolveWorkspaceParam(req, res);
+      if (key === null) return;
+      try {
+        const deleted = await new SessionOrganizationService(key).deleteGroup(
+          req.params['groupId'] ?? '',
+        );
+        res.status(200).json({ deleted });
+      } catch (err) {
+        if (sendSessionOrganizationError(res, err)) return;
+        sendBridgeError(res, err, {
+          route: 'DELETE /workspace/:id/session-groups/:groupId',
+        });
+      }
+    },
+  );
+
   app.get('/workspace/:id/sessions', async (req, res) => {
     // Express decodes URL-encoded path params automatically; clients pass
     // the absolute workspace cwd encoded (e.g.
@@ -1041,6 +1230,27 @@ export function registerSessionRoutes(
           ? req.query['cursor']
           : undefined;
       const size = parseSessionPageSizeQuery(req.query['size']);
+      const rawView = req.query['view'];
+      let view: 'organized' | undefined;
+      if (rawView !== undefined) {
+        if (rawView !== 'organized') {
+          res.status(400).json({
+            error: '`view` must be "organized"',
+            code: 'invalid_session_view',
+          });
+          return;
+        }
+        view = 'organized';
+      }
+      const group =
+        typeof req.query['group'] === 'string' ? req.query['group'] : undefined;
+      if (group !== undefined && view !== 'organized') {
+        res.status(400).json({
+          error: '`group` requires `view=organized`',
+          code: 'invalid_session_group_filter',
+        });
+        return;
+      }
       const rawArchiveState = req.query['archiveState'];
       let archiveState: SessionArchiveState | undefined;
       if (rawArchiveState !== undefined) {
@@ -1057,9 +1267,11 @@ export function registerSessionRoutes(
         archiveState = rawArchiveState;
       }
       const result = await listWorkspaceSessionsForResponse(bridge, key, {
-        cursor,
-        size,
-        archiveState,
+        ...(cursor !== undefined ? { cursor } : {}),
+        ...(size !== undefined ? { size } : {}),
+        ...(archiveState !== undefined ? { archiveState } : {}),
+        ...(view !== undefined ? { view } : {}),
+        ...(group !== undefined ? { group } : {}),
       });
       res.status(200).json({
         sessions: result.sessions,
@@ -1073,6 +1285,7 @@ export function registerSessionRoutes(
         });
         return;
       }
+      if (sendSessionOrganizationError(res, err)) return;
       writeStderrLine(
         `qwen serve: failed to list sessions for workspace ${safeLogValue(
           key,

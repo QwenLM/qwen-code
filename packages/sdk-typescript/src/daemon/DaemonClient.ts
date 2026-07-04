@@ -34,7 +34,15 @@ import type {
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionArchiveState,
+  DaemonSessionGroup,
+  DaemonSessionGroupCatalog,
+  DaemonSessionGroupInput,
+  DaemonSessionGroupUpdate,
   DaemonSessionLspStatus,
+  DaemonSessionListPage,
+  DaemonSessionListPageOptions,
+  DaemonSessionOrganizationResult,
+  DaemonSessionOrganizationUpdate,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
@@ -1407,6 +1415,14 @@ export class DaemonClient {
       archiveState?: DaemonSessionArchiveState;
     },
   ): Promise<DaemonSessionSummary[]> {
+    const page = await this.listWorkspaceSessionsPage(workspaceCwd, options);
+    return page.sessions;
+  }
+
+  async listWorkspaceSessionsPage(
+    workspaceCwd: string,
+    options?: DaemonSessionListPageOptions,
+  ): Promise<DaemonSessionListPage> {
     const requestedPageSize =
       options?.pageSize ?? DEFAULT_SESSION_LIST_PAGE_SIZE;
     const pageSize = Math.max(
@@ -1421,16 +1437,79 @@ export class DaemonClient {
       ),
     );
     const query = new URLSearchParams({ size: String(pageSize) });
+    if (options?.cursor !== undefined) {
+      query.set('cursor', options.cursor);
+    }
     if (options?.archiveState !== undefined) {
       query.set('archiveState', options.archiveState);
     }
-    const body = await this.jsonRequest<{
-      sessions: DaemonSessionSummary[];
-    }>(
+    if (options?.view !== undefined) {
+      query.set('view', options.view);
+    }
+    if (options?.group !== undefined) {
+      query.set('group', options.group);
+    }
+    return await this.jsonRequest<DaemonSessionListPage>(
       `/workspace/${encodeURIComponent(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
     );
-    return body.sessions;
+  }
+
+  async listSessionGroups(
+    workspaceCwd: string,
+  ): Promise<DaemonSessionGroupCatalog> {
+    return await this.jsonRequest<DaemonSessionGroupCatalog>(
+      `/workspace/${encodeURIComponent(workspaceCwd)}/session-groups`,
+      'GET /workspace/session-groups',
+    );
+  }
+
+  async createSessionGroup(
+    workspaceCwd: string,
+    input: DaemonSessionGroupInput,
+  ): Promise<DaemonSessionGroup> {
+    const body = await this.jsonRequest<{ group: DaemonSessionGroup }>(
+      `/workspace/${encodeURIComponent(workspaceCwd)}/session-groups`,
+      'POST /workspace/session-groups',
+      { method: 'POST', body: input },
+    );
+    return body.group;
+  }
+
+  async updateSessionGroup(
+    workspaceCwd: string,
+    groupId: string,
+    update: DaemonSessionGroupUpdate,
+  ): Promise<DaemonSessionGroup> {
+    const body = await this.jsonRequest<{ group: DaemonSessionGroup }>(
+      `/workspace/${encodeURIComponent(workspaceCwd)}/session-groups/${encodeURIComponent(groupId)}`,
+      'PATCH /workspace/session-groups/:groupId',
+      { method: 'PATCH', body: update },
+    );
+    return body.group;
+  }
+
+  async deleteSessionGroup(
+    workspaceCwd: string,
+    groupId: string,
+  ): Promise<{ deleted: boolean }> {
+    return await this.jsonRequest<{ deleted: boolean }>(
+      `/workspace/${encodeURIComponent(workspaceCwd)}/session-groups/${encodeURIComponent(groupId)}`,
+      'DELETE /workspace/session-groups/:groupId',
+      { method: 'DELETE' },
+    );
+  }
+
+  async updateSessionOrganization(
+    sessionId: string,
+    update: DaemonSessionOrganizationUpdate,
+    clientId?: string,
+  ): Promise<DaemonSessionOrganizationResult> {
+    return await this.jsonRequest<DaemonSessionOrganizationResult>(
+      `/session/${encodeURIComponent(sessionId)}/organization`,
+      'PATCH /session/:id/organization',
+      { method: 'PATCH', body: update, clientId },
+    );
   }
 
   async loadSession(

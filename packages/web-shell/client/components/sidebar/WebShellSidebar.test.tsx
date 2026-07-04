@@ -3,27 +3,41 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
-const { mockConnection } = vi.hoisted(() => ({
-  mockConnection: {
-    status: 'connected',
-    sessionId: null as string | null,
-    workspaceCwd: '/tmp/project',
-    capabilities: { qwenCodeVersion: '1.2.3' } as
-      | { qwenCodeVersion?: string }
-      | undefined,
-  },
-}));
+const { mockConnection, mockUseSessions, mockWorkspaceActions } = vi.hoisted(
+  () => ({
+    mockConnection: {
+      status: 'connected',
+      sessionId: null as string | null,
+      workspaceCwd: '/tmp/project',
+      capabilities: { qwenCodeVersion: '1.2.3' } as
+        | { qwenCodeVersion?: string; features?: string[] }
+        | undefined,
+    },
+    mockUseSessions: vi.fn(() => ({
+      sessions: [],
+      loading: false,
+      error: null,
+      reload: vi.fn(),
+      deleteSession: vi.fn(),
+    })),
+    mockWorkspaceActions: {
+      listSessionGroups: vi.fn().mockResolvedValue({
+        groups: [],
+        colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+      }),
+      createSessionGroup: vi.fn(),
+      updateSessionGroup: vi.fn(),
+      deleteSessionGroup: vi.fn(),
+      updateSessionOrganization: vi.fn(),
+    },
+  }),
+);
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => mockConnection,
   useActions: () => ({ renameSession: vi.fn() }),
-  useSessions: () => ({
-    sessions: [],
-    loading: false,
-    error: null,
-    reload: vi.fn(),
-    deleteSession: vi.fn(),
-  }),
+  useWorkspaceActions: () => mockWorkspaceActions,
+  useSessions: (options: unknown) => mockUseSessions(options),
 }));
 
 const { I18nProvider } = await import('../../i18n');
@@ -68,6 +82,16 @@ function renderSidebar(
 }
 
 beforeEach(() => {
+  mockUseSessions.mockClear();
+  mockWorkspaceActions.listSessionGroups.mockReset();
+  mockWorkspaceActions.listSessionGroups.mockResolvedValue({
+    groups: [],
+    colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+  });
+  mockWorkspaceActions.createSessionGroup.mockReset();
+  mockWorkspaceActions.updateSessionGroup.mockReset();
+  mockWorkspaceActions.deleteSessionGroup.mockReset();
+  mockWorkspaceActions.updateSessionOrganization.mockReset();
   mockConnection.capabilities = { qwenCodeVersion: '1.2.3' };
 });
 
@@ -133,5 +157,183 @@ describe('WebShellSidebar — daemon status entry', () => {
       button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onOpenDaemonStatus).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('WebShellSidebar — session organization', () => {
+  it('uses organized sessions only when the daemon advertises the capability', () => {
+    renderSidebar(false);
+    expect(mockUseSessions).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      pageSize: 1000,
+    });
+
+    for (const { root, container } of mounted.splice(0)) {
+      act(() => root.unmount());
+      container.remove();
+    }
+
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.listSessionGroups.mockReturnValue(
+      new Promise(() => undefined),
+    );
+    const container = renderSidebar(false);
+    expect(mockUseSessions).toHaveBeenLastCalledWith({
+      autoLoad: true,
+      pageSize: 1000,
+      view: 'organized',
+      group: 'all',
+    });
+    expect(
+      container.querySelector('[aria-label="Session group"]'),
+    ).not.toBeNull();
+  });
+
+  it('creates session groups from an in-app dialog form', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.createSessionGroup.mockResolvedValue({
+      id: 'group-1',
+      name: 'Backend',
+      color: 'green',
+      order: 0,
+      createdAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    const promptSpy = vi.spyOn(window, 'prompt');
+
+    renderSidebar(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const createButton = document.body.querySelector<HTMLButtonElement>(
+      '[aria-label="Create group"]',
+    );
+    expect(createButton).not.toBeNull();
+    act(() => {
+      createButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const nameInput = document.body.querySelector<HTMLInputElement>(
+      'input[maxlength="64"]',
+    );
+    expect(nameInput).not.toBeNull();
+    const setInputValue = Object.getOwnPropertyDescriptor(
+      HTMLInputElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setInputValue?.call(nameInput, 'Backend');
+      nameInput!.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    const colorSelect = Array.from(
+      document.body.querySelectorAll<HTMLSelectElement>('select'),
+    ).find((select) => select.value === 'red');
+    expect(colorSelect).toBeDefined();
+    const setSelectValue = Object.getOwnPropertyDescriptor(
+      HTMLSelectElement.prototype,
+      'value',
+    )?.set;
+    act(() => {
+      setSelectValue?.call(colorSelect, 'green');
+      colorSelect!.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+
+    const saveButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent === 'save');
+    expect(saveButton).not.toBeNull();
+    await act(async () => {
+      saveButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(promptSpy).not.toHaveBeenCalled();
+    expect(mockWorkspaceActions.createSessionGroup).toHaveBeenCalledWith({
+      name: 'Backend',
+      color: 'green',
+    });
+    promptSpy.mockRestore();
+  });
+
+  it('uses a themed group menu and assigns the selected group', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'group-1',
+          name: 'Backend',
+          color: 'green',
+          order: 0,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    mockWorkspaceActions.updateSessionOrganization.mockResolvedValue({
+      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+      groupId: 'group-1',
+      isPinned: false,
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    mockUseSessions.mockReturnValue({
+      sessions: [
+        {
+          sessionId: '550e8400-e29b-41d4-a716-446655440000',
+          displayName: 'Review plan',
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+          hasActivePrompt: false,
+        },
+      ],
+      loading: false,
+      error: null,
+      reload: vi.fn(),
+      deleteSession: vi.fn(),
+    });
+
+    renderSidebar(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const organizeButton = document.body.querySelector<HTMLButtonElement>(
+      '[aria-label="Move to group"]',
+    );
+    expect(organizeButton).not.toBeNull();
+    act(() => {
+      organizeButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    const menu = document.body.querySelector<HTMLElement>(
+      '[role="menu"][aria-label="Group"]',
+    );
+    expect(menu).not.toBeNull();
+    expect(menu!.querySelector('select')).toBeNull();
+    const selectedOption = menu!.querySelector<HTMLElement>(
+      '[role="menuitemradio"][aria-checked="true"]',
+    );
+    expect(selectedOption?.textContent).toContain('Ungrouped');
+    const groupOption = Array.from(
+      menu!.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Backend'));
+    expect(groupOption).not.toBeNull();
+    await act(async () => {
+      groupOption!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(mockWorkspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      '550e8400-e29b-41d4-a716-446655440000',
+      { groupId: 'group-1' },
+    );
   });
 });

@@ -12,16 +12,27 @@ import { useDaemonResource } from './useDaemonResource.js';
 
 export interface DaemonSessionsOptions extends DaemonResourceOptions {
   pageSize?: number;
+  cursor?: string;
+  archiveState?: 'active' | 'archived';
+  view?: 'organized';
+  group?: string;
 }
 
 export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
-  const { pageSize, ...resourceOptions } = options;
+  const { pageSize, cursor, archiveState, view, group, ...resourceOptions } =
+    options;
   const workspace = useDaemonWorkspace();
   const sessionActions = useOptionalDaemonActions();
-  const load = useCallback(
-    () => workspace.actions.listSessions({ pageSize }),
-    [pageSize, workspace.actions],
-  );
+  const load = useCallback(() => {
+    const listOptions = {
+      ...(pageSize !== undefined ? { pageSize } : {}),
+      ...(cursor !== undefined ? { cursor } : {}),
+      ...(archiveState !== undefined ? { archiveState } : {}),
+      ...(view !== undefined ? { view } : {}),
+      ...(group !== undefined ? { group } : {}),
+    };
+    return workspace.actions.listSessions(listOptions);
+  }, [archiveState, cursor, group, pageSize, view, workspace.actions]);
   const workspaceReady = !!workspace.workspaceCwd;
   const result = useDaemonResource(load, {
     ...resourceOptions,

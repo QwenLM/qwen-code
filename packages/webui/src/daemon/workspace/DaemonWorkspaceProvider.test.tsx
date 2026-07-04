@@ -34,7 +34,7 @@ const sdkMocks = vi.hoisted(() => {
   const createWorkspaceAgent = vi.fn();
   const deleteWorkspaceAgent = vi.fn();
   const workspaceProviders = vi.fn();
-  const listWorkspaceSessions = vi.fn();
+  const listWorkspaceSessionsPage = vi.fn();
   const deleteSessionsData = vi.fn();
   const daemonStatus = vi.fn();
 
@@ -57,7 +57,7 @@ const sdkMocks = vi.hoisted(() => {
     createWorkspaceAgent = createWorkspaceAgent;
     deleteWorkspaceAgent = deleteWorkspaceAgent;
     workspaceProviders = workspaceProviders;
-    listWorkspaceSessions = listWorkspaceSessions;
+    listWorkspaceSessionsPage = listWorkspaceSessionsPage;
     deleteSessionsData = deleteSessionsData;
     daemonStatus = daemonStatus;
     dispose = vi.fn();
@@ -81,7 +81,7 @@ const sdkMocks = vi.hoisted(() => {
     createWorkspaceAgent,
     deleteWorkspaceAgent,
     workspaceProviders,
-    listWorkspaceSessions,
+    listWorkspaceSessionsPage,
     deleteSessionsData,
     daemonStatus,
     reset() {
@@ -158,8 +158,8 @@ const sdkMocks = vi.hoisted(() => {
         initialized: true,
         providers: [],
       });
-      listWorkspaceSessions.mockReset();
-      listWorkspaceSessions.mockResolvedValue({ sessions: [] });
+      listWorkspaceSessionsPage.mockReset();
+      listWorkspaceSessionsPage.mockResolvedValue({ sessions: [] });
       deleteSessionsData.mockReset();
       deleteSessionsData.mockResolvedValue({
         removed: [],

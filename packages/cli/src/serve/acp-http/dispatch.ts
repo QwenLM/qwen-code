@@ -11,6 +11,9 @@ import {
   BTW_MAX_INPUT_LENGTH,
   createDebugLogger,
   SessionService,
+  SessionOrganizationError,
+  SessionOrganizationService,
+  type SessionGroupColor,
   BuiltinAgentRegistry,
   SubagentError,
   WorkspaceMemoryFileTooLargeError,
@@ -148,6 +151,11 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/context`,
   `${QWEN_METHOD_NS}session/supported_commands`,
   `${QWEN_METHOD_NS}session/update_metadata`,
+  `${QWEN_METHOD_NS}session/update_organization`,
+  `${QWEN_METHOD_NS}workspace/session_groups/list`,
+  `${QWEN_METHOD_NS}workspace/session_groups/create`,
+  `${QWEN_METHOD_NS}workspace/session_groups/update`,
+  `${QWEN_METHOD_NS}workspace/session_groups/delete`,
   `${QWEN_METHOD_NS}workspace/mcp`,
   `${QWEN_METHOD_NS}workspace/skills`,
   `${QWEN_METHOD_NS}workspace/providers`,
@@ -433,6 +441,16 @@ function toRpcError(err: unknown): {
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
+  if (err instanceof SessionOrganizationError) {
+    return {
+      code: RPC.INVALID_PARAMS,
+      message: err.message,
+      data: {
+        errorKind: err.code,
+        ...(err.field ? { field: err.field } : {}),
+      },
+    };
+  }
   if (err instanceof SubagentError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
@@ -638,6 +656,23 @@ export class AcpDispatcher {
       route: `ACP ${method}`,
       workspaceCwd: this.boundWorkspace,
     };
+  }
+
+  private parseBoundWorkspaceParam(params: Record<string, unknown>): string {
+    const rawWorkspace =
+      typeof params['workspaceCwd'] === 'string'
+        ? params['workspaceCwd']
+        : undefined;
+    if (rawWorkspace === undefined) {
+      return this.boundWorkspace;
+    }
+    const requestedWorkspace = canonicalizeWorkspace(
+      parseOptionalWorkspaceCwd({ cwd: rawWorkspace }, this.boundWorkspace),
+    );
+    if (requestedWorkspace !== this.boundWorkspace) {
+      throw new WorkspaceMismatchError(this.boundWorkspace, requestedWorkspace);
+    }
+    return requestedWorkspace;
   }
 
   private parseSessionIds(params: Record<string, unknown>): string[] {
@@ -1136,29 +1171,20 @@ export class AcpDispatcher {
         }
 
         case 'session/list': {
-          const rawWorkspace =
-            typeof params['workspaceCwd'] === 'string'
-              ? params['workspaceCwd']
-              : undefined;
-          let workspaceCwd =
-            rawWorkspace === undefined
-              ? this.boundWorkspace
-              : parseOptionalWorkspaceCwd(
-                  { cwd: rawWorkspace },
-                  this.boundWorkspace,
-                );
-          if (rawWorkspace !== undefined) {
-            const requestedWorkspace = canonicalizeWorkspace(workspaceCwd);
-            if (requestedWorkspace !== this.boundWorkspace) {
-              throw new WorkspaceMismatchError(
-                this.boundWorkspace,
-                requestedWorkspace,
-              );
-            }
-            workspaceCwd = requestedWorkspace;
-          }
+          const workspaceCwd = this.parseBoundWorkspaceParam(params);
           const cursor =
             typeof params['cursor'] === 'string' ? params['cursor'] : undefined;
+          const rawView =
+            typeof params['view'] === 'string' ? params['view'] : undefined;
+          let view: 'organized' | undefined;
+          if (rawView !== undefined) {
+            if (rawView !== 'organized') {
+              throw new AcpParamError('`view` must be "organized"');
+            }
+            view = rawView;
+          }
+          const group =
+            typeof params['group'] === 'string' ? params['group'] : undefined;
           const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
           const metaSize =
             typeof meta?.['size'] === 'number'
@@ -1185,7 +1211,7 @@ export class AcpDispatcher {
           const result = await listWorkspaceSessionsForResponse(
             this.bridge,
             workspaceCwd,
-            { cursor, size: metaSize, archiveState },
+            { cursor, size: metaSize, archiveState, view, group },
           );
           this.replyConn(conn, id, {
             sessions: result.sessions.map((s) => ({
@@ -1199,6 +1225,9 @@ export class AcpDispatcher {
               clientCount: s.clientCount,
               hasActivePrompt: s.hasActivePrompt,
               isArchived: s.isArchived === true,
+              ...(s.isPinned !== undefined ? { isPinned: s.isPinned } : {}),
+              ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}),
+              ...(s.groupId !== undefined ? { groupId: s.groupId } : {}),
             })),
             ...(result.nextCursor != null
               ? { nextCursor: result.nextCursor }
@@ -1842,6 +1871,104 @@ export class AcpDispatcher {
             );
             this.replyConn(conn, id, result as unknown);
           });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/update_organization`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!sessionId) {
+            throw new AcpParamError('`sessionId` is required');
+          }
+          if ('isPinned' in params && typeof params['isPinned'] !== 'boolean') {
+            throw new AcpParamError('`isPinned` must be a boolean');
+          }
+          if (
+            'groupId' in params &&
+            params['groupId'] !== null &&
+            typeof params['groupId'] !== 'string'
+          ) {
+            throw new AcpParamError('`groupId` must be a string or null');
+          }
+          await this.archiveCoordinator.runSharedMany([sessionId], async () => {
+            const sessionService = new SessionService(this.boundWorkspace);
+            let exists =
+              await sessionService.sessionExistsInAnyState(sessionId);
+            if (!exists) {
+              try {
+                const liveSummary = this.bridge.getSessionSummary(sessionId);
+                exists = liveSummary.workspaceCwd === this.boundWorkspace;
+              } catch {
+                exists = false;
+              }
+            }
+            if (!exists) {
+              throw new AcpParamError(`Session not found: ${sessionId}`);
+            }
+            const organization = await new SessionOrganizationService(
+              this.boundWorkspace,
+            ).updateSessionOrganization(sessionId, {
+              ...(typeof params['isPinned'] === 'boolean'
+                ? { isPinned: params['isPinned'] }
+                : {}),
+              ...('groupId' in params
+                ? { groupId: params['groupId'] as string | null }
+                : {}),
+            });
+            this.replyConn(conn, id, { sessionId, ...organization });
+          });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/session_groups/list`: {
+          const workspaceCwd = this.parseBoundWorkspaceParam(params);
+          const groups = await new SessionOrganizationService(
+            workspaceCwd,
+          ).listGroups();
+          this.replyConn(conn, id, groups);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/session_groups/create`: {
+          const workspaceCwd = this.parseBoundWorkspaceParam(params);
+          const group = await new SessionOrganizationService(
+            workspaceCwd,
+          ).createGroup({
+            name: params['name'] as string,
+            color: params['color'] as SessionGroupColor,
+          });
+          this.replyConn(conn, id, { group });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/session_groups/update`: {
+          const workspaceCwd = this.parseBoundWorkspaceParam(params);
+          const groupId = String(params['groupId'] ?? '');
+          if (!groupId) {
+            throw new AcpParamError('`groupId` is required');
+          }
+          const group = await new SessionOrganizationService(
+            workspaceCwd,
+          ).updateGroup(groupId, {
+            ...('name' in params ? { name: params['name'] as string } : {}),
+            ...('color' in params
+              ? { color: params['color'] as SessionGroupColor }
+              : {}),
+            ...('order' in params ? { order: params['order'] as number } : {}),
+          });
+          this.replyConn(conn, id, { group });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/session_groups/delete`: {
+          const workspaceCwd = this.parseBoundWorkspaceParam(params);
+          const groupId = String(params['groupId'] ?? '');
+          if (!groupId) {
+            throw new AcpParamError('`groupId` is required');
+          }
+          const deleted = await new SessionOrganizationService(
+            workspaceCwd,
+          ).deleteGroup(groupId);
+          this.replyConn(conn, id, { deleted });
           return;
         }
 
