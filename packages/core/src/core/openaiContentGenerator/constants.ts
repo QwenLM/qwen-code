@@ -1,4 +1,30 @@
 export const DEFAULT_TIMEOUT = 120000;
+/**
+ * Sentinel request timeout (ms) representing a *disabled* timeout.
+ *
+ * The OpenAI and Anthropic SDKs treat `timeout: 0` as an immediate abort rather
+ * than "no timeout", so a configured `0` (disable — matching the
+ * `QWEN_STREAM_IDLE_TIMEOUT_MS=0` convention) is mapped to the maximum JS timer
+ * delay (2^31 − 1 ms ≈ 24.8 days). `setTimeout` silently compresses larger
+ * delays to 1ms, so this is the effective ceiling.
+ */
+export const DISABLED_REQUEST_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * Resolve the request timeout (ms) to pass to a provider SDK client.
+ *
+ * - `undefined` / `null` → {@link DEFAULT_TIMEOUT}
+ * - `0` or negative → disabled ({@link DISABLED_REQUEST_TIMEOUT_MS})
+ * - otherwise → the configured value
+ */
+export function resolveRequestTimeout(
+  timeout: number | null | undefined,
+): number {
+  if (timeout === undefined || timeout === null) {
+    return DEFAULT_TIMEOUT;
+  }
+  return timeout <= 0 ? DISABLED_REQUEST_TIMEOUT_MS : timeout;
+}
 // Inactivity (no-chunk) timeout for streaming responses. The SDK `timeout`
 // only bounds connect + first response, so a stream that returns 200 then
 // goes silent is otherwise unbounded. The 4-minute default gives large-prompt
