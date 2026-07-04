@@ -428,10 +428,9 @@ export class BackgroundTaskRegistry {
     registration: AgentTaskRegistration,
     options: BackgroundTaskRegisterOptions = {},
   ): AgentTask {
-    if (registration.isBackgrounded && registration.status === 'running') {
+    if (registration.status === 'running') {
       const existing = this.agents.get(registration.agentId);
-      const isReplacingRunning =
-        existing?.isBackgrounded === true && existing.status === 'running';
+      const isReplacingRunning = existing?.status === 'running';
       if (!isReplacingRunning) {
         this.assertCanStartBackgroundAgent();
       }
@@ -852,7 +851,7 @@ export class BackgroundTaskRegistry {
 
   private getRunningBackgroundCount(): number {
     return Array.from(this.agents.values()).filter(
-      (entry) => entry.isBackgrounded && entry.status === 'running',
+      (entry) => entry.status === 'running',
     ).length;
   }
 
