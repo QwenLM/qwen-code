@@ -1777,13 +1777,19 @@ export abstract class ChannelBase {
   }
 
   private loopTargetFromEnvelope(envelope: Envelope): SessionTarget {
-    return {
+    return this.normalizeLoopTarget({
       channelName: this.name,
       senderId: envelope.senderId,
       chatId: envelope.chatId,
       threadId: envelope.threadId,
       isGroup: envelope.isGroup === true,
-    };
+    });
+  }
+
+  private normalizeLoopTarget(
+    target: SessionTarget,
+  ): SessionTarget & { isGroup: boolean } {
+    return { ...target, isGroup: target.isGroup === true };
   }
 
   private loopToolTarget(sessionId: string): SessionTarget | string {
@@ -1795,33 +1801,32 @@ export abstract class ChannelBase {
       return 'Only authorized members can use loops in this shared session.';
     }
     const senderId = this.activePrompts.get(sessionId)?.senderId;
-    if (senderId && this.isSharedSessionTarget(target)) {
-      return { ...target, senderId };
+    const normalizedTarget = this.normalizeLoopTarget(target);
+    if (senderId && this.isSharedSessionTarget(normalizedTarget)) {
+      return { ...normalizedTarget, senderId };
     }
-    return target;
+    return normalizedTarget;
   }
 
   private isStoredLoopTargetAuthorized(
     target: SessionTarget,
     senderName: string,
   ): boolean {
-    if (target.isGroup === undefined) {
-      return false;
-    }
+    const normalizedTarget = this.normalizeLoopTarget(target);
     const envelope: Envelope = {
       channelName: this.name,
-      senderId: target.senderId,
+      senderId: normalizedTarget.senderId,
       senderName,
-      chatId: target.chatId,
+      chatId: normalizedTarget.chatId,
       text: '',
-      threadId: target.threadId,
-      isGroup: target.isGroup === true,
+      threadId: normalizedTarget.threadId,
+      isGroup: normalizedTarget.isGroup,
       isMentioned: true,
       isReplyToBot: true,
     };
     return (
       this.groupGate.check(envelope).allowed &&
-      this.gate.isAllowed(target.senderId) &&
+      this.gate.isAllowed(normalizedTarget.senderId) &&
       this.isAuthorizedForSharedSession(envelope)
     );
   }

@@ -1617,6 +1617,72 @@ describe('ChannelBase', () => {
       expect(result).toBe('Loop job-1: */5 * * * *');
     });
 
+    it('channel loop tool normalizes legacy targets without isGroup', async () => {
+      const created: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+        },
+        cwd: '/tmp',
+        cron: '*/5 * * * *',
+        prompt: 'drink water',
+        recurring: true,
+        enabled: true,
+        createdBy: 'user1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const createForTarget = vi.fn().mockResolvedValue(created);
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      const legacy = ch as unknown as {
+        router: {
+          resolve(
+            channelName: string,
+            senderId: string,
+            chatId: string,
+            threadId?: string,
+            cwd?: string,
+          ): Promise<string>;
+        };
+      };
+      await legacy.router.resolve('test-chan', 'user1', 'chat1', undefined);
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+      await expect(
+        handler!.create('s-1', {
+          cron: '*/5 * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toBe('Loop job-1: */5 * * * *');
+
+      expect(createForTarget).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: expect.objectContaining({ isGroup: false }),
+        }),
+        10,
+      );
+    });
+
     it('channel loop tools require shared-session authorization', async () => {
       const createForTarget = vi.fn();
       const listForTarget = vi.fn();
@@ -8230,6 +8296,49 @@ describe('ChannelBase', () => {
       );
       expect(ch.proactive).toEqual([
         { chatId: 'group-1', text: 'loop response' },
+      ]);
+    });
+
+    it('runs stored loop prompts with legacy targets missing isGroup', async () => {
+      const disable = vi.fn();
+      const ch = createChannel(
+        { sessionScope: 'thread', groupPolicy: 'open' },
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+
+      await expect(
+        ch.runLoopPrompt({
+          id: 'job-1',
+          channelName: 'test-chan',
+          target: {
+            channelName: 'test-chan',
+            senderId: 'alice',
+            chatId: 'chat-1',
+          },
+          cwd: '/tmp',
+          cron: '0 9 * * *',
+          prompt: 'post summary',
+          label: 'daily summary',
+          recurring: true,
+          enabled: true,
+          createdBy: 'Alice',
+          createdAt: '2026-06-30T01:00:00.000Z',
+          consecutiveFailures: 0,
+          runCount: 0,
+        }),
+      ).resolves.toBe('agent response');
+
+      expect(disable).not.toHaveBeenCalled();
+      expect(ch.proactive).toEqual([
+        { chatId: 'chat-1', text: 'agent response' },
       ]);
     });
 
