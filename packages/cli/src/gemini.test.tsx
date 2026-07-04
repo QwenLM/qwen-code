@@ -520,6 +520,32 @@ describe('gemini.tsx main function', () => {
       expect(appEvents.emit).toHaveBeenCalledWith(AppEvent.LspStatusChanged);
     });
 
+    it('emits an LSP status update when reload is skipped by the config', async () => {
+      const reinitializeLsp = vi.fn(async () => undefined);
+
+      registerLspHotReload(
+        {
+          isLspEnabled: () => true,
+          getLspClient: () => ({ reinitialize: vi.fn() }),
+          getProjectRoot: () => '/workspace',
+          reinitializeLsp,
+        } as unknown as Config,
+        vi.fn(),
+      );
+
+      await lspConfigWatcherMock.instances[0]?.listener?.({
+        path: '/workspace/.lsp.json',
+        changeType: 'modified',
+      });
+
+      expect(reinitializeLsp).toHaveBeenCalledOnce();
+      expect(appEvents.emit).not.toHaveBeenCalledWith(
+        AppEvent.LogError,
+        expect.any(String),
+      );
+      expect(appEvents.emit).toHaveBeenCalledWith(AppEvent.LspStatusChanged);
+    });
+
     it('emits a user-visible error and rejects when reload fails', async () => {
       const reinitializeLsp = vi.fn(async () => {
         throw new Error('invalid lsp json');

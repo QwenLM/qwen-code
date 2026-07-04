@@ -253,6 +253,51 @@ describe('NativeLspService', () => {
     }
   });
 
+  test('reinitialize queue continues after a failed reload', async () => {
+    const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-queue-error-'));
+    try {
+      fs.writeFileSync(path.join(tempDir, '.lsp.json'), '{');
+      const tempConfig = new MockConfig();
+      tempConfig.rootPath = tempDir;
+      const service = new NativeLspService(
+        tempConfig as unknown as CoreConfig,
+        mockWorkspace as unknown as WorkspaceContext,
+        eventEmitter,
+        mockFileDiscovery as unknown as FileDiscoveryService,
+        mockIdeStore as unknown as IdeContextStore,
+        { workspaceRoot: tempDir },
+      );
+      const reconcileServerConfigs = vi.fn(async () => ({
+        added: ['typescript-language-server'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: [],
+      }));
+      (service as unknown as { serverManager: unknown }).serverManager = {
+        reconcileServerConfigs,
+      };
+
+      await expect(service.reinitialize()).rejects.toThrow();
+      expect(reconcileServerConfigs).not.toHaveBeenCalled();
+
+      fs.writeFileSync(
+        path.join(tempDir, '.lsp.json'),
+        JSON.stringify({
+          typescript: {
+            command: 'typescript-language-server',
+          },
+        }),
+      );
+      const result = await service.reinitialize();
+
+      expect(reconcileServerConfigs).toHaveBeenCalledOnce();
+      expect(result.reconcile.added).toEqual(['typescript-language-server']);
+    } finally {
+      fs.rmSync(tempDir, { recursive: true, force: true });
+    }
+  });
+
   test('reinitialize replays open documents after restarting servers', async () => {
     vi.useFakeTimers();
     const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'lsp-replay-'));

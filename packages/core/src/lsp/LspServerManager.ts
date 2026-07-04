@@ -610,12 +610,18 @@ export class LspServerManager {
       // Only unexpected process exits can trigger restart. Explicit stops set
       // stopRequested before terminating the process.
       if (!handle.config.restartOnCrash) {
+        debugLogger.warn(
+          `LSP server ${name} exited but restartOnCrash is disabled`,
+        );
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
       }
       const maxRestarts = handle.config.maxRestarts ?? DEFAULT_LSP_MAX_RESTARTS;
       if (maxRestarts <= 0) {
+        debugLogger.warn(
+          `LSP server ${name} exited but maxRestarts is ${maxRestarts}`,
+        );
         handle.status = 'FAILED';
         this.serverConfigHashes.delete(name);
         return;
