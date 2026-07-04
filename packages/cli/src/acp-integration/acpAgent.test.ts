@@ -504,6 +504,14 @@ vi.mock('../config/settings.js', () => ({
   loadSettings: vi.fn(),
   reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
 }));
+// Passthrough: the real cache would serve the first mockReturnValue to every
+// later same-cwd call, breaking tests that re-point loadSettings per call.
+vi.mock('../config/settings-cache.js', async () => {
+  const settings = await import('../config/settings.js');
+  return {
+    loadSettingsCached: (cwd: string) => settings.loadSettings(cwd),
+  };
+});
 vi.mock('../config/loadedSettingsAdapter.js', () => ({
   createLoadedSettingsAdapter: vi.fn((settings: unknown) => {
     (settings as Record<string, unknown>)['getValue'] = vi.fn();
