@@ -405,10 +405,13 @@ function VirtualizedList<T>(
       data.length > 0
     ) {
       const maxScrollTop = Math.max(0, totalHeight - scrollableContainerHeight);
+      // Only clamp aggressively when totalHeight grew (new content).
+      // When it shrinks (e.g. pending→height key transition losing measured
+      // height), preserving the current anchor avoids a jump-to-top artifact
+      // (#5941).
       if (
         totalHeight >= prevTotalHeight.current ||
-        scrollAnchor.index >= data.length ||
-        actualScrollTop > maxScrollTop
+        scrollAnchor.index >= data.length
       ) {
         const newAnchor = getAnchorForScrollTop(maxScrollTop, offsets);
         if (
