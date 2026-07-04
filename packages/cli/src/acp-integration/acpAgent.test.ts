@@ -7573,7 +7573,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
 
     expect(response._meta?.['qwen.session.loadReplay']).toEqual({
       v: 1,
-      updates: [replayUpdate],
+      updates: [{ ...replayUpdate, timestamp: 4242 }],
     });
     expect(lastSessionMock?.cumulativeUsage).toEqual({
       promptTokens: 101,
@@ -7647,10 +7647,10 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     });
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
     expect(lastSessionMock?.cumulativeUsage).toEqual({
-      promptTokens: 7,
-      cachedTokens: 3,
-      candidateTokens: 5,
-      apiTimeMs: 11,
+      promptTokens: 999,
+      cachedTokens: 0,
+      candidateTokens: 0,
+      apiTimeMs: 0,
     });
     expect(lastSessionMock?.installRewriter).toHaveBeenCalledTimes(1);
     expect(lastSessionMock?.startCronScheduler).toHaveBeenCalledTimes(1);

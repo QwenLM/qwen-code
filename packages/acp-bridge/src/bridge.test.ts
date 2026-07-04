@@ -44,7 +44,7 @@ import { extractErrorMessage, extractErrorCode } from './bridge.js';
 import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
-import type { BridgeEvent } from './eventBus.js';
+import { EventBus, type BridgeEvent } from './eventBus.js';
 import { ApprovalMode, ShellExecutionService } from '@qwen-code/qwen-code-core';
 import {
   FakeAgent,
@@ -1337,6 +1337,62 @@ describe('createAcpSessionBridge', () => {
     );
 
     await bridge.shutdown();
+  });
+
+  it('removes a response-mode restore entry if replay seeding throws', async () => {
+    const seedSpy = vi
+      .spyOn(EventBus.prototype, 'seedReplayEvents')
+      .mockImplementationOnce(() => {
+        throw new Error('seed boom');
+      });
+    const handles: ChannelHandle[] = [];
+    const factory: ChannelFactory = async () => {
+      const h = makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: [{ sessionUpdate: 'agent_message_chunk' }],
+            },
+          },
+        }),
+      });
+      handles.push(h);
+      return h.channel;
+    };
+    const bridge = makeBridge({ channelFactory: factory });
+
+    try {
+      await expect(
+        bridge.loadSession({
+          sessionId: 'persisted-seed-fails',
+          workspaceCwd: WS_A,
+          historyReplay: 'response',
+        }),
+      ).rejects.toThrow('seed boom');
+      expect(bridge.sessionCount).toBe(0);
+      expect(handles[0]?.killed).toBe(true);
+
+      await expect(
+        bridge.loadSession({
+          sessionId: 'persisted-seed-fails',
+          workspaceCwd: WS_A,
+          historyReplay: 'response',
+        }),
+      ).resolves.toMatchObject({
+        sessionId: 'persisted-seed-fails',
+        attached: false,
+      });
+      expect(
+        handles.reduce(
+          (count, handle) => count + handle.agent.loadSessionCalls.length,
+          0,
+        ),
+      ).toBe(2);
+    } finally {
+      seedSpy.mockRestore();
+      await bridge.shutdown();
+    }
   });
 
   it('reports the bad index when response-mode load replay is invalid', async () => {

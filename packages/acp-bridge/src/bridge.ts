@@ -2937,6 +2937,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       pendingRestoreEvents.delete(req.sessionId);
       if (!registeredEntry) {
         restoreEvents.close();
+        let removedRestoreEntry = false;
+        if (byId.get(req.sessionId)?.events === restoreEvents) {
+          byId.delete(req.sessionId);
+          ci?.sessionIds.delete(req.sessionId);
+          removedRestoreEntry = true;
+        }
+        if (removedRestoreEntry && ci && hasNoChannelWork(ci)) {
+          ci.emptyReapPending = true;
+          ci.isDying = true;
+        }
         // On restore failure, purge any guardrail events that the
         // child buffered during this restore window AND re-tombstone
         // the id. Without this, a subsequent successful restore for

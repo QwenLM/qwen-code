@@ -3079,7 +3079,8 @@ class QwenAgent implements Agent {
             records,
             cumulativeUsage: replayUsage,
           });
-          replayUpdates = replay.updates;
+          replayUpdates = liftSessionUpdateTimestamps(replay.updates);
+          copyCumulativeUsage(session.cumulativeUsage, replayUsage);
           if (replay.replayError !== undefined) {
             replayEnvelope = {
               v: LOAD_REPLAY_VERSION,
@@ -3087,8 +3088,6 @@ class QwenAgent implements Agent {
               partial: true,
               replayError: replay.replayError,
             };
-          } else {
-            copyCumulativeUsage(session.cumulativeUsage, replayUsage);
           }
         }
         replayEnvelope ??= {
