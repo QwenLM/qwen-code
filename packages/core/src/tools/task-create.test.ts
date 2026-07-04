@@ -9,6 +9,12 @@ import * as fs from 'node:fs/promises';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { TaskCreateTool } from './task-create.js';
+import type { ApprovalMode, Config } from '../config/config.js';
+import { runWithTeammateIdentity } from '../agents/team/identity.js';
+import { listTasks } from '../agents/team/tasks.js';
+
+const DEFAULT_MODE = 'default' as ApprovalMode;
+const PLAN_MODE = 'plan' as ApprovalMode;
 
 vi.mock('../config/storage.js', () => {
   let mockDir = '/tmp/test';
@@ -27,16 +33,18 @@ const { __setMockGlobalDir } = (await import('../config/storage.js')) as any;
 
 let tmpDir: string;
 
-function makeConfig(teamName = 'test-team') {
+function makeConfig(teamName = 'test-team', approvalMode = DEFAULT_MODE) {
   return {
     getTeamContext: () => ({ teamName }),
-  } as unknown as import('../config/config.js').Config;
+    getApprovalMode: () => approvalMode,
+  } as unknown as Config;
 }
 
 function makeConfigNoTeam() {
   return {
     getTeamContext: () => null,
-  } as unknown as import('../config/config.js').Config;
+    getApprovalMode: () => DEFAULT_MODE,
+  } as unknown as Config;
 }
 
 beforeEach(async () => {
@@ -90,6 +98,29 @@ describe('TaskCreateTool', () => {
     const result = await invocation.execute(new AbortController().signal);
     expect(result.error).toBeDefined();
     expect(result.llmContent).toContain('No active team');
+  });
+
+  it('blocks plan-required teammates before leader approval', async () => {
+    const planTool = new TaskCreateTool(makeConfig('test-team', PLAN_MODE));
+    const invocation = planTool.build({
+      subject: 'Bypass approval',
+      description: 'Another teammate could execute this.',
+    });
+
+    const result = await runWithTeammateIdentity(
+      {
+        agentName: 'planner',
+        teamName: 'test-team',
+        agentId: 'planner@test-team',
+        isTeamLead: false,
+        planModeRequired: true,
+      },
+      () => invocation.execute(new AbortController().signal),
+    );
+
+    expect(result.error).toBeDefined();
+    expect(result.llmContent).toContain('waiting for leader approval');
+    await expect(listTasks('test-team')).resolves.toEqual([]);
   });
 
   it('validates required params', () => {

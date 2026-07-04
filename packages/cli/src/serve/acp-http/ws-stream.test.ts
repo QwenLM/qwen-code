@@ -51,6 +51,19 @@ describe('WsStream', () => {
     stream.close();
   });
 
+  it('send() ignores the bus event id — no SSE `id:` framing on the WS wire', async () => {
+    // WsStream.send accepts `id` only for TransportStream parity; WebSocket is
+    // stateful and has no Last-Event-ID replay. The wire payload must be the
+    // bare JSON message — if a refactor ever let the id leak into the frame it
+    // would corrupt the WS protocol with SSE-specific framing.
+    const stream = new WsStream(ws as never);
+    await stream.send({ data: 1 }, 42);
+    expect(ws.sent).toEqual(['{"data":1}']);
+    expect(ws.sent[0]).not.toContain('id:');
+    expect(ws.sent[0]).not.toContain('42');
+    stream.close();
+  });
+
   it('send() serializes writes sequentially (no interleaving)', async () => {
     const stream = new WsStream(ws as never);
     const p1 = stream.send({ seq: 1 });

@@ -2,6 +2,7 @@ import type { CommandModule, Argv } from 'yargs';
 import { startCommand } from './channel/start.js';
 import { stopCommand } from './channel/stop.js';
 import { statusCommand } from './channel/status.js';
+import { daemonWorkerCommand } from './channel/daemon-worker.js';
 import {
   pairingListCommand,
   pairingApproveCommand,
@@ -26,6 +27,7 @@ export const channelCommand: CommandModule = {
   builder: (yargs: Argv) =>
     yargs
       .command(startCommand)
+      .command(daemonWorkerCommand)
       .command(stopCommand)
       .command(statusCommand)
       .command(pairingCommand)

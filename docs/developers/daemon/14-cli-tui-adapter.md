@@ -6,7 +6,7 @@
 
 `packages/sdk-typescript/src/daemon/ui/` adds a `ui/*` subpackage to the SDK. It turns the daemon SSE event stream into UI-renderable transcript blocks through reusable primitives:
 
-- **Normalization** (`normalizer.ts`): maps the daemon wire schema's 43 known event types (see [`09-event-schema.md`](./09-event-schema.md)) into 37 UI-friendly `DaemonUiEventType` semantic events such as `assistant.text.delta`, `tool.update`, and `session.metadata.changed`.
+- **Normalization** (`normalizer.ts`): maps the daemon wire schema's 47 known event types (see [`09-event-schema.md`](./09-event-schema.md)) into 37 UI-friendly `DaemonUiEventType` semantic events such as `assistant.text.delta`, `tool.update`, and `session.metadata.changed`.
 - **State machine** (`transcript.ts`, `store.ts`): pure reducer plus subscribable store that projects UI events into an ordered `DaemonTranscriptBlock[]`.
 - **Renderers** (`render.ts`, `terminal.ts`, `toolPreview.ts`): transcript blocks to HTML, terminal text, and tool preview strings. Hosts can use or replace them.
 - **Conformance** (`conformance.ts`): cross-host consistency tests used when channel, TUI, and IDE surfaces migrate to these primitives.
@@ -15,7 +15,7 @@ The first production consumer is **`packages/webui/src/daemon/`** ([#4328](https
 
 ## Responsibilities
 
-- Normalize the 43 daemon wire events into a stable UI vocabulary (`DaemonUiEventType`) so renderers do not inspect `rawEvent.data`.
+- Normalize the 47 daemon wire events into a stable UI vocabulary (`DaemonUiEventType`) so renderers do not inspect `rawEvent.data`.
 - Keep daemon-monotonic SSE `eventId` as the **primary ordering key** so different clients render transcripts in the same order.
 - Use a pure reducer to produce transcript blocks, with selectors for pending permissions, current tool, approval mode, tool progress, and subagent children.
 - Provide baseline HTML and terminal renderers while allowing host-specific rendering.
@@ -71,7 +71,7 @@ The first production consumer is **`packages/webui/src/daemon/`** ([#4328](https
 - `auth.device_flow.started`, `auth.device_flow.throttled`, `auth.device_flow.authorized`
 - `auth.device_flow.failed`, `auth.device_flow.cancelled`
 
-`normalizeDaemonEvent` maps the 43 daemon known wire events into this vocabulary. Unknown, unmodeled, or malformed event types normalize to `debug` and preserve `rawEvent` for host diagnostics.
+`normalizeDaemonEvent` maps the 47 daemon known wire events into this vocabulary. Unknown, unmodeled, or malformed event types normalize to `debug` and preserve `rawEvent` for host diagnostics.
 
 ### Reducer and selectors
 

@@ -237,6 +237,15 @@ describe('daemon selectors', () => {
     expect(selectDaemonStreamingState([], 'waiting')).toBe('waiting');
     expect(selectDaemonStreamingState([], 'streaming')).toBe('responding');
     expect(
+      selectDaemonStreamingState([block({ kind: 'tool', status: 'running' })]),
+    ).toBe('responding');
+    expect(
+      selectDaemonStreamingState(
+        [block({ kind: 'tool', status: 'running' })],
+        'idle',
+      ),
+    ).toBe('idle');
+    expect(
       selectDaemonStreamingState(
         [block({ kind: 'thought', text: 'thinking', streaming: true })],
         'waiting',

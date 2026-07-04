@@ -15,7 +15,12 @@ import {
   GeminiEventType,
   findRepeatedDuplicateProviderToolCall,
 } from './turn.js';
-import type { GenerateContentResponse, Part, Content } from '@google/genai';
+import type {
+  GenerateContentResponse,
+  Part,
+  Content,
+  PartListUnion,
+} from '@google/genai';
 import { reportError } from '../utils/errorReporting.js';
 import type { GeminiChat } from './geminiChat.js';
 import { StreamEventType } from './geminiChat.js';
@@ -23,6 +28,8 @@ import { normalizeModelToolCallIds } from './toolCallIdUtils.js';
 
 const mockSendMessageStream = vi.fn();
 const mockGetHistory = vi.fn();
+const mockGetHistoryLength = vi.fn();
+const mockGetHistoryTailShallow = vi.fn();
 const mockMaybeIncludeSchemaDepthContext = vi.fn();
 
 vi.mock('@google/genai', async (importOriginal) => {
@@ -30,6 +37,8 @@ vi.mock('@google/genai', async (importOriginal) => {
   const MockChat = vi.fn().mockImplementation(() => ({
     sendMessageStream: mockSendMessageStream,
     getHistory: mockGetHistory,
+    getHistoryLength: mockGetHistoryLength,
+    getHistoryTailShallow: mockGetHistoryTailShallow,
     maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
   }));
   return {
@@ -96,6 +105,8 @@ describe('Turn', () => {
   type MockedChatInstance = {
     sendMessageStream: typeof mockSendMessageStream;
     getHistory: typeof mockGetHistory;
+    getHistoryLength: typeof mockGetHistoryLength;
+    getHistoryTailShallow: typeof mockGetHistoryTailShallow;
     maybeIncludeSchemaDepthContext: typeof mockMaybeIncludeSchemaDepthContext;
   };
   let mockChatInstance: MockedChatInstance;
@@ -105,10 +116,14 @@ describe('Turn', () => {
     mockChatInstance = {
       sendMessageStream: mockSendMessageStream,
       getHistory: mockGetHistory,
+      getHistoryLength: mockGetHistoryLength,
+      getHistoryTailShallow: mockGetHistoryTailShallow,
       maybeIncludeSchemaDepthContext: mockMaybeIncludeSchemaDepthContext,
     };
     turn = new Turn(mockChatInstance as unknown as GeminiChat, 'prompt-id-1');
     mockGetHistory.mockReturnValue([]);
+    mockGetHistoryLength.mockReturnValue(0);
+    mockGetHistoryTailShallow.mockReturnValue([]);
     mockSendMessageStream.mockResolvedValue((async function* () {})());
   });
 
@@ -365,7 +380,8 @@ describe('Turn', () => {
       const historyContent: Content[] = [
         { role: 'model', parts: [{ text: 'Previous history' }] },
       ];
-      mockGetHistory.mockReturnValue(historyContent);
+      mockGetHistoryLength.mockReturnValue(historyContent.length);
+      mockGetHistoryTailShallow.mockReturnValue(historyContent);
       mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
       const events = [];
       for await (const event of turn.run(
@@ -385,8 +401,230 @@ describe('Turn', () => {
       expect(reportError).toHaveBeenCalledWith(
         error,
         'Error when talking to API',
-        [...historyContent, reqParts],
+        {
+          history: {
+            rawLength: 1,
+            tail: [
+              {
+                role: 'model',
+                partCount: 1,
+                functionCalls: [],
+                functionResponses: [],
+                textPreview: 'Previous history',
+              },
+            ],
+          },
+          request: {
+            partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
+        },
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
+      );
+    });
+
+    it('should report API errors with empty history summary', async () => {
+      const error = new Error('API Error');
+      const reqParts: Part[] = [{ text: 'Trigger error' }];
+      mockSendMessageStream.mockRejectedValue(error);
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      const errorEvent = events[0] as ServerGeminiErrorEvent;
+      expect(errorEvent.type).toBe(GeminiEventType.Error);
+      expect(errorEvent.value).toEqual({
+        error: { message: 'API Error', status: undefined },
+      });
+      expect(reportError).toHaveBeenCalledWith(
+        error,
+        'Error when talking to API',
+        {
+          history: {
+            rawLength: 0,
+            tail: [],
+          },
+          request: {
+            partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
+        },
+        'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
+      );
+    });
+
+    it('should report API errors without cloning full history', async () => {
+      const error = new Error('API Error');
+      const largeText = 'x'.repeat(1024 * 1024);
+      const reqParts: Part = { text: 'Trigger error' };
+      mockSendMessageStream.mockRejectedValue(error);
+      mockGetHistory.mockImplementation(() => {
+        throw new Error('full history clone should not be used');
+      });
+      mockGetHistoryLength.mockReturnValue(100);
+      mockGetHistoryTailShallow.mockReturnValue([
+        {
+          role: 'user',
+          parts: [
+            { functionResponse: { name: 'tool', response: { largeText } } },
+          ],
+        },
+        {
+          role: 'model',
+          parts: [
+            { thought: true, text: 'internal reasoning' },
+            { functionCall: { name: 'readFile', args: {} } },
+            { text: largeText },
+          ],
+        },
+      ] satisfies Content[]);
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events[0]?.type).toBe(GeminiEventType.Error);
+      expect(mockGetHistory).not.toHaveBeenCalled();
+      expect(mockGetHistoryLength).toHaveBeenCalled();
+      expect(mockGetHistoryTailShallow).toHaveBeenCalledWith(8, true);
+      const reportedContext = vi.mocked(reportError).mock.calls[0]?.[2];
+      expect(JSON.stringify(reportedContext)).not.toContain(largeText);
+      expect(JSON.stringify(reportedContext)).not.toContain(
+        'internal reasoning',
+      );
+      expect(reportError).toHaveBeenCalledWith(
+        error,
+        'Error when talking to API',
+        {
+          history: {
+            rawLength: 100,
+            tail: [
+              {
+                role: 'user',
+                partCount: 1,
+                functionCalls: [],
+                functionResponses: ['tool'],
+                textPreview: '',
+              },
+              {
+                role: 'model',
+                partCount: 3,
+                functionCalls: ['readFile'],
+                functionResponses: [],
+                textPreview: largeText.slice(0, 200),
+              },
+            ],
+          },
+          request: {
+            partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
+        },
+        'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
+      );
+    });
+
+    it('should report API errors when request parts include strings', async () => {
+      const error = new Error('API Error');
+      const reqParts: PartListUnion = ['Trigger ', { text: 'error' }];
+      const diagnosticFailure: unknown = 'history is unavailable';
+      mockSendMessageStream.mockRejectedValue(error);
+      mockGetHistoryLength.mockImplementation(() => {
+        throw diagnosticFailure;
+      });
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events[0]?.type).toBe(GeminiEventType.Error);
+      expect(reportError).toHaveBeenCalledWith(
+        error,
+        'Error when talking to API',
+        {
+          history: {
+            error: 'failed to build diagnostic summary',
+            cause: 'history is unavailable',
+          },
+          request: {
+            partCount: 2,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
+        },
+        'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
+      );
+    });
+
+    it('should preserve API errors when diagnostic summary fails', async () => {
+      const error = new Error('API Error');
+      const reqParts: Part[] = [{ text: 'Trigger error' }];
+      mockSendMessageStream.mockRejectedValue(error);
+      mockGetHistoryLength.mockImplementation(() => {
+        throw new Error('history is unavailable');
+      });
+      mockMaybeIncludeSchemaDepthContext.mockResolvedValue(undefined);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        reqParts,
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events[0]?.type).toBe(GeminiEventType.Error);
+      expect(reportError).toHaveBeenCalledWith(
+        error,
+        'Error when talking to API',
+        {
+          history: {
+            error: 'failed to build diagnostic summary',
+            cause: {
+              message: 'history is unavailable',
+              stack: expect.any(String),
+            },
+          },
+          request: {
+            partCount: 1,
+            functionCalls: [],
+            functionResponses: [],
+            textPreview: 'Trigger error',
+          },
+        },
+        'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
     });
 

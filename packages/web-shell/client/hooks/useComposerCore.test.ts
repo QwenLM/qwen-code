@@ -6,6 +6,7 @@ import {
   getComposerTagDisplay,
   getComposerTagLabel,
   getComposerTagValue,
+  getFollowupCompletion,
   isLargePaste,
   normalizePastedText,
   prunePendingPastes,
@@ -29,6 +30,22 @@ describe('composer paste helpers', () => {
     expect(isLargePaste(Array.from({ length: 11 }, () => 'x').join('\n'))).toBe(
       true,
     );
+  });
+});
+
+describe('follow-up completion helpers', () => {
+  it('uses the full suggestion when the editor is empty', () => {
+    expect(getFollowupCompletion('', 'show me tests')).toBe('show me tests');
+  });
+
+  it('keeps a suggestion available while the user types a matching prefix', () => {
+    expect(getFollowupCompletion('show', 'show me tests')).toBe(
+      'show me tests',
+    );
+  });
+
+  it('ignores suggestions that no longer match the editor text', () => {
+    expect(getFollowupCompletion('run', 'show me tests')).toBeNull();
   });
 });
 
@@ -91,6 +108,14 @@ describe('composer tag serialization', () => {
         value: ' src/a.ts ',
       }),
     ).toBe('src/a.ts');
+    expect(
+      serializeComposerTag({
+        id: 'ext',
+        label: 'Extension',
+        value: 'clickhouse',
+        serialized: '@ext:clickhouse',
+      }),
+    ).toBe('@ext:clickhouse');
     expect(serializeComposerTag({ id: 'mode', label: ' Plan ' })).toBe('Plan');
     expect(serializeComposerTag({ id: 'plain' })).toBe('plain');
   });

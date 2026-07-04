@@ -133,10 +133,16 @@ export const SERVE_CONTROL_EXT_METHODS = {
   sessionShellHistory: 'qwen/control/session/shell_history',
   sessionLanguage: 'qwen/control/session/language',
   sessionRewind: 'qwen/control/session/rewind',
+  sessionContinue: 'qwen/control/session/continue',
   sessionTitle: 'qwen/control/session/title',
   workspaceMcpRestart: 'qwen/control/workspace/mcp/restart',
   workspaceMcpManage: 'qwen/control/workspace/mcp/manage',
   workspaceAgentGenerate: 'qwen/control/workspace/agents/generate',
+  workspaceMemoryRememberAvailability:
+    'qwen/control/workspace/memory/remember/availability',
+  workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
+  workspaceMemoryForget: 'qwen/control/workspace/memory/forget',
+  workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
   sessionGoalClear: 'qwen/control/session/goal/clear',
@@ -144,6 +150,18 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMcpRuntimeRemove: 'qwen/control/workspace/mcp/runtime-remove',
   workspaceReload: 'qwen/control/workspace/reload',
   workspaceExtensionsRefresh: 'qwen/control/workspace/extensions/refresh',
+  /**
+   * Reverse tool channel (issue #5626, Phase 2). Unlike every other entry
+   * here — which the PARENT serve process calls DOWN into the `qwen --acp`
+   * child — this one is called by the CHILD UP into the parent: a
+   * client-hosted (extension) MCP server's `sendSdkMcpMessage` round-trips a
+   * JSON-RPC `mcp_message` from the child's `McpClientManager` back to the
+   * parent's `ClientMcpRegistrar`, which pushes it down the daemon WS to the
+   * client and returns the correlated response. Params: `{ server, payload }`;
+   * result: `{ payload }`.
+   */
+  clientMcpMessage: 'qwen/control/client_mcp/message',
+  sessionCd: 'qwen/control/session/cd',
 } as const;
 
 export type ServeStatus =
@@ -401,6 +419,7 @@ export interface ServeWorkspaceProviderCurrent {
   modelId?: string;
   baseUrl?: string;
   fastModelId?: string;
+  visionModelId?: string;
 }
 
 export interface ServeWorkspaceProviderModel {
@@ -434,6 +453,7 @@ export interface ServeWorkspaceProvidersStatus {
   initialized: boolean;
   acpChannelLive?: boolean;
   current?: ServeWorkspaceProviderCurrent;
+  approvalMode?: string;
   providers: ServeWorkspaceProviderStatus[];
   errors?: ServeStatusCell[];
 }
@@ -560,6 +580,20 @@ export interface ServeSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /**
+   * `id` of the agent task that spawned this one; absent for agents
+   * launched by the top-level session. Mirrors `AgentTask.parentAgentId`
+   * (a `null` there serializes as absent here). Lets clients render the
+   * roster as a tree.
+   */
+  parentAgentId?: string;
+  /**
+   * Display name (`subagentType`) of the spawning agent, captured at
+   * registration time so it survives the parent's eviction. Display-only.
+   */
+  parentName?: string;
+  /** Launch depth (0-based; 0 = spawned by the top-level session). */
+  depth?: number;
 }
 
 export interface ServeSessionShellTaskStatus {
@@ -990,6 +1024,7 @@ export interface ServeExtensionEntry {
   id: string;
   name: string;
   displayName?: string;
+  description?: string;
   version: string;
   isActive: boolean;
   path: string;

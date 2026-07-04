@@ -83,6 +83,165 @@ describe('<MarkdownDisplay />', () => {
       expect(lastFrame()).toMatchSnapshot();
     });
 
+    it('clips a long pending message to availableTerminalHeight', () => {
+      // A long streaming message must NOT render all its lines: the live
+      // (non-<Static>) frame would exceed the terminal height and ink would
+      // clearTerminal + re-stream the whole transcript on every token (the
+      // top→bottom "scroll replay" seen on tab-switch in multiplexers). The
+      // pending markdown is clipped to availableTerminalHeight.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={10}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      // Contiguous head + a "generating more" cue — NOT decimated (ink
+      // overflow="hidden" would drop interspersed rows) and NOT blank.
+      expect(output).toContain('line 1');
+      expect(output).toContain('line 2');
+      expect(output).toContain('generating more');
+      // The tail is dropped (budget exceeded), so a late line is absent.
+      expect(output).not.toContain('line 60');
+      const lineCount = output.split('\n').length;
+      expect(lineCount).toBeLessThanOrEqual(10);
+    });
+
+    it('does not pad a short pending message up to availableTerminalHeight', () => {
+      // The clip must activate only when content exceeds the budget —
+      // a short pending message renders at its natural height, no blank rows.
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text="just one short line"
+          isPending={true}
+          availableTerminalHeight={20}
+        />,
+      );
+      const output = (lastFrame() ?? '').replace(/\n+$/, '');
+      expect(output).toContain('just one short line');
+      // Not clipped → no "generating more" cue (a bug that always appends it
+      // would fail here).
+      expect(output).not.toContain('generating more');
+      const lineCount = output.split('\n').length;
+      expect(lineCount).toBeLessThan(20);
+    });
+
+    it('does not clip a long committed (non-pending) message', () => {
+      // The clip is gated on isPending: committed messages live in <Static> and
+      // must render in full. Guards against accidentally dropping the isPending
+      // check (which would silently truncate scrollback).
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={false}
+          availableTerminalHeight={10}
+        />,
+      );
+      expect(lastFrame() ?? '').toContain('line 60');
+    });
+
+    it('handles a code fence spanning the clip boundary', () => {
+      // The head-slice can cut between an opening fence and its close; the
+      // parser's EOF inCodeBlock flush then renders the (unclosed) block. The
+      // frame must still stay within the budget.
+      const text = [
+        'intro line',
+        '',
+        '```ts',
+        ...Array.from({ length: 50 }, (_, i) => `code ${i}`),
+        '```',
+      ].join(eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={10}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output.split('\n').length).toBeLessThanOrEqual(10);
+      // The head-slice bounds code content to <= availableTerminalHeight - 2
+      // (= RenderCodeBlock's own inner budget), so the inner "generating more"
+      // never fires inside a slice — there is at most ONE cue, not two stacked.
+      expect(
+        (output.match(/generating more/g) ?? []).length,
+      ).toBeLessThanOrEqual(1);
+    });
+
+    it('does not stack a double cue for a math block near the clip boundary', () => {
+      // RenderMathBlock reserves more rows (RESERVED_LINES=3) than a code block;
+      // the head-slice budget reserves 2 rows so a retained math block never
+      // hits its own inner truncation cue on top of the outer one.
+      const text = [
+        '$$',
+        ...Array.from({ length: 40 }, (_, i) => `x_{${i}} +`),
+        '$$',
+      ].join(eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={8}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(
+        (output.match(/generating more/g) ?? []).length,
+      ).toBeLessThanOrEqual(1);
+      expect(output.split('\n').length).toBeLessThanOrEqual(8);
+    });
+
+    it('does not clip a pending message when no height budget is given', () => {
+      // The clip is gated on availableTerminalHeight !== undefined; without a
+      // budget the full message renders (no clip, no cue).
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={undefined}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('line 60');
+      expect(output).not.toContain('generating more');
+    });
+
+    it('applies the minimum floor at a degenerate budget of 1', () => {
+      // Math.max(MIN_PENDING_CONTENT_LINES, 1 - 2) = 1 (floored): keep one
+      // content line + the cue, never 0 or negative.
+      const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
+        eol,
+      );
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={1}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('line 1');
+      expect(output).not.toContain('line 2');
+      expect(output).toContain('generating more');
+    });
+
     it('renders unordered lists with different markers', () => {
       const text = `
 - item A
@@ -918,5 +1077,91 @@ flowchart TD
     expect(output).toContain('Line 2');
     expect(output).toContain('Line 3');
     expect(output).toMatchSnapshot();
+  });
+
+  describe('pending render-height safety net', () => {
+    const tableText = [
+      '| A | B |',
+      '| --- | --- |',
+      '| 1 | one |',
+      '| 2 | two |',
+    ].join('\n');
+
+    it('draws a streaming table live (no placeholder) when it fits the viewport', () => {
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={tableText} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).not.toContain('generating table');
+      expect(output).toContain('┌'); // real table drawn while streaming
+      expect(output).toContain('one');
+    });
+
+    it('clamps a tall streaming table to the viewport instead of locking', () => {
+      const rows = Array.from({ length: 30 }, (_, i) => `| r${i} | v${i} |`);
+      const text = ['| A | B |', '| --- | --- |', ...rows].join('\n');
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={10}
+        />,
+      );
+      const output = (lastFrame() ?? '').replace(/\n+$/, '');
+      expect(output.split('\n').length).toBeLessThanOrEqual(10);
+    });
+
+    it('renders a completed (closed) table in full even while pending', () => {
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={`${tableText}\n\nDone.`}
+          isPending={true}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).not.toContain('generating table');
+      expect(output).toContain('┌');
+      expect(output).toContain('one');
+      expect(output).toContain('Done.');
+    });
+
+    it('keeps a completed table + trailing text within the viewport (no overflow)', () => {
+      const rows = Array.from({ length: 8 }, (_, i) => `| r${i} | v${i} |`);
+      const text = [
+        '| A | B |',
+        '| --- | --- |',
+        ...rows,
+        '',
+        'Conclusion.',
+      ].join('\n');
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={12}
+        />,
+      );
+      const output = (lastFrame() ?? '').replace(/\n+$/, '');
+      expect(output.split('\n').length).toBeLessThanOrEqual(12);
+    });
+
+    it('counts wide/CJK wrapping so a pending block stays within the viewport', () => {
+      const wide = '一二三四五六七八九十'.repeat(6); // ~120 display cols
+      const text = Array.from({ length: 20 }, () => wide).join('\n');
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          contentWidth={20}
+          availableTerminalHeight={10}
+        />,
+      );
+      const output = (lastFrame() ?? '').replace(/\n+$/, '');
+      expect(output.split('\n').length).toBeLessThanOrEqual(10);
+    });
   });
 });

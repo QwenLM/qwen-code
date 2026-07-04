@@ -5,7 +5,7 @@
  */
 
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
-import type { BridgeEvent } from '../event-bus.js';
+import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   createWorkspaceFileSystemFactory,
   type WorkspaceFileSystemFactory,

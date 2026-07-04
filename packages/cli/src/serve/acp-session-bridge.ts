@@ -72,6 +72,14 @@ export type {
   BridgeClientRequestContext,
   BridgeHeartbeatResult,
   BridgeHeartbeatState,
+  BridgeWorkspaceMemoryRememberContextMode,
+  BridgeWorkspaceMemoryRememberRequest,
+  BridgeWorkspaceMemoryRememberResult,
+  BridgeAutoMemoryTopic,
+  BridgeWorkspaceMemoryForgetRequest,
+  BridgeWorkspaceMemoryForgetMatch,
+  BridgeWorkspaceMemoryForgetResult,
+  BridgeWorkspaceMemoryDreamResult,
   BridgeDaemonStatusLimits,
   BridgeDaemonSessionDiagnostic,
   BridgeDaemonStatusSnapshot,
@@ -81,8 +89,12 @@ export type {
 
 export {
   BranchWhilePromptActiveError,
+  CdWhilePromptActiveError,
   SessionNotFoundError,
   RestoreInProgressError,
+  SessionArchivedError,
+  SessionConflictError,
+  SessionArchivingError,
   InvalidSessionScopeError,
   SessionLimitExceededError,
   PromptQueueFullError,
@@ -111,3 +123,5 @@ export {
   MAX_WORKSPACE_PATH_LENGTH,
   canonicalizeWorkspace,
 } from '@qwen-code/acp-bridge/workspacePaths';
+
+export { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';

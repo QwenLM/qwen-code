@@ -1,12 +1,10 @@
 import {
-  Component,
   createContext,
   memo,
   useContext,
   useEffect,
   useMemo,
   useState,
-  type ErrorInfo,
   type ReactNode,
 } from 'react';
 import { useTheme } from '../../themeContext';
@@ -24,8 +22,10 @@ import {
 import { useI18n } from '../../i18n';
 import {
   useWebShellCustomization,
+  type MarkdownTableMode,
   type MarkdownContentSource,
 } from '../../customization';
+import { ErrorBoundary } from '../ErrorBoundary';
 import { EnhancedMarkdownTable } from './EnhancedMarkdownTable';
 import styles from './Markdown.module.css';
 
@@ -38,7 +38,7 @@ interface MarkdownProps {
    * the content settles, avoiding flicker and wasted re-tokenization.
    */
   isStreaming?: boolean;
-  enhanceTables?: boolean;
+  tableMode?: MarkdownTableMode;
 }
 
 const SUPPORTED_LANGUAGES = new Set([
@@ -51,6 +51,7 @@ const SUPPORTED_LANGUAGES = new Set([
   'c',
   'cpp',
   'csharp',
+  'fsharp',
   'ruby',
   'php',
   'swift',
@@ -89,10 +90,13 @@ const SUPPORTED_LANGUAGES = new Set([
   'diff',
 ]);
 
-// Common fence aliases → Shiki's canonical language id. Without this, blocks
-// tagged ```ts / ```js / ```py fall through to the unhighlighted "text" path
-// even though Shiki supports them under their full names.
+// Common fence aliases → Shiki's canonical language id. This keeps shorthand
+// tags like ```ts and punctuation tags like ```c++ highlighted under the
+// language ids Shiki actually supports.
 const LANGUAGE_ALIASES: Record<string, string> = {
+  'c++': 'cpp',
+  'c#': 'csharp',
+  'f#': 'fsharp',
   ts: 'typescript',
   js: 'javascript',
   py: 'python',
@@ -289,8 +293,9 @@ function CodeBlock({
   const [html, setHtml] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
 
-  const match = className?.match(/language-(\w+)/);
-  const { label, lang, resolvedLang } = resolveFenceLanguage(match?.[1]);
+  const { label, lang, resolvedLang } = resolveFenceLanguage(
+    extractRawFenceLanguage(className),
+  );
   const code = String(children).replace(/\n$/, '');
   const shikiTheme =
     appTheme === 'light' ? 'github-light-default' : 'github-dark-default';
@@ -409,6 +414,15 @@ function CodeBlock({
   );
 }
 
+function extractRawFenceLanguage(className: string | undefined): string {
+  const token = className?.match(/(?:^|\s)language-([^\s]+)/)?.[1] ?? '';
+  const match = token.match(/^([\w+.#-]+)/);
+  if (!match) return '';
+  const language = match[1] ?? '';
+  const nextChar = token[language.length];
+  return !nextChar || nextChar === '{' || nextChar === ':' ? language : '';
+}
+
 function InlineCode({ children }: { children: ReactNode }) {
   return <code className={styles.inlineCode}>{children}</code>;
 }
@@ -421,45 +435,15 @@ function PlainMarkdownTable({ children }: { children?: ReactNode }) {
   );
 }
 
-class EnhancedMarkdownTableBoundary extends Component<
-  { children: ReactNode; fallback: ReactNode; resetKey: string },
-  { hasError: boolean; resetKey: string }
-> {
-  state = { hasError: false, resetKey: this.props.resetKey };
-
-  static getDerivedStateFromError() {
-    return { hasError: true };
-  }
-
-  static getDerivedStateFromProps(
-    props: { resetKey: string },
-    state: { resetKey: string },
-  ) {
-    if (props.resetKey !== state.resetKey) {
-      return { hasError: false, resetKey: props.resetKey };
-    }
-    return null;
-  }
-
-  componentDidCatch(error: Error, errorInfo: ErrorInfo) {
-    console.error(
-      '[web-shell] enhanced markdown table failed:',
-      error,
-      errorInfo.componentStack,
-    );
-  }
-
-  render() {
-    return this.state.hasError ? this.props.fallback : this.props.children;
-  }
-}
-
 // Carries the streaming flag to CodeBlock via context instead of a closure, so
 // the `code` renderer below can be a single stable reference. Toggling
 // isStreaming then no longer changes the `code` element type, so React reuses
 // the same CodeBlock instance across the streaming→settled transition
 // (preserving its highlighted `html` state) instead of remounting it.
 const IsStreamingContext = createContext(false);
+const MarkdownSourceContext = createContext<MarkdownContentSource | undefined>(
+  undefined,
+);
 
 function MarkdownCode({
   className,
@@ -475,12 +459,75 @@ function MarkdownCode({
 
   if (isBlock) {
     return (
-      <CodeBlock className={className} isStreaming={isStreaming}>
-        {String(children)}
-      </CodeBlock>
+      <MarkdownFencedCode className={className} isStreaming={isStreaming}>
+        {children}
+      </MarkdownFencedCode>
     );
   }
   return <InlineCode>{children}</InlineCode>;
+}
+
+function MarkdownFencedCode({
+  className,
+  children,
+  isStreaming,
+}: {
+  className?: string;
+  children?: ReactNode;
+  isStreaming?: boolean;
+}) {
+  const source = useContext(MarkdownSourceContext);
+  const appTheme = useTheme();
+  const { markdown } = useWebShellCustomization();
+  const rawCode = String(children);
+  const code = rawCode.replace(/\n$/, '');
+  const fallback = (
+    <CodeBlock className={className} isStreaming={isStreaming}>
+      {rawCode}
+    </CodeBlock>
+  );
+  const language = extractRawFenceLanguage(className);
+  const { resolvedLang: resolvedLanguage } = resolveFenceLanguage(language);
+  const canUseCustomRenderer = !!source && !!className && !!language;
+
+  if (canUseCustomRenderer) {
+    try {
+      const custom = markdown?.renderCodeBlock?.({
+        language,
+        resolvedLanguage,
+        className,
+        code,
+        isStreaming: !!isStreaming,
+        source,
+        theme: appTheme,
+      });
+      if (custom != null && typeof custom !== 'boolean') {
+        return (
+          <ErrorBoundary
+            fallback={fallback}
+            label={`custom code block component render (lang=${language})`}
+            resetKeys={[
+              language,
+              source,
+              appTheme,
+              isStreaming ? 'streaming' : 'settled',
+              code,
+            ]}
+          >
+            {custom}
+          </ErrorBoundary>
+        );
+      }
+    } catch (error) {
+      console.error(
+        '[web-shell] custom code block renderer call failed (lang=%s):',
+        language,
+        error,
+      );
+    }
+  }
+
+  return fallback;
 }
 
 function MarkdownPre({ children }: { children?: ReactNode }) {
@@ -513,11 +560,11 @@ function MarkdownImage({ src, alt }: { src?: string; alt?: string }) {
 }
 
 // `code`/`pre`/`a`/`img` are stable references; only `table` is created per
-// call (it closes over enhanceTables/tableResetKey). Recreating the components
+// call (it closes over tableMode/tableResetKey). Recreating the components
 // object for a table reset therefore never changes the `code` element type, so
 // code blocks are not remounted.
 function createComponents(
-  enhanceTables?: boolean,
+  tableMode: MarkdownTableMode = 'basic',
   tableResetKey = '',
 ): Components {
   return {
@@ -526,20 +573,21 @@ function createComponents(
     a: MarkdownLink,
     img: MarkdownImage,
     table({ children }: { children?: ReactNode }) {
-      const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
-      if (enhanceTables) {
+      if (tableMode === 'advanced') {
+        const fallback = <PlainMarkdownTable>{children}</PlainMarkdownTable>;
         return (
-          <EnhancedMarkdownTableBoundary
+          <ErrorBoundary
             fallback={fallback}
-            resetKey={tableResetKey}
+            label="enhanced markdown table"
+            resetKeys={[tableResetKey]}
           >
             <EnhancedMarkdownTable fallback={fallback}>
               {children}
             </EnhancedMarkdownTable>
-          </EnhancedMarkdownTableBoundary>
+          </ErrorBoundary>
         );
       }
-      return fallback;
+      return <PlainMarkdownTable>{children}</PlainMarkdownTable>;
     },
   };
 }
@@ -550,29 +598,32 @@ export const Markdown = memo(function Markdown({
   content,
   source,
   isStreaming,
-  enhanceTables,
+  tableMode,
 }: MarkdownProps) {
-  const { markdown } = useWebShellCustomization();
+  const { markdown, markdownTableMode } = useWebShellCustomization();
   const sourceMarkdown = source ? markdown : undefined;
   const renderedContent =
     content && source && sourceMarkdown?.transformMarkdown
       ? sourceMarkdown.transformMarkdown(content, { source })
       : content;
+  const effectiveTableMode = isStreaming
+    ? 'basic'
+    : (tableMode ?? markdownTableMode ?? 'basic');
   const components = useMemo(() => {
-    if (enhanceTables) {
-      return createComponents(true, renderedContent);
+    if (effectiveTableMode === 'advanced') {
+      return createComponents('advanced', renderedContent);
     }
     return COMPONENTS_DEFAULT;
-  }, [enhanceTables, renderedContent]);
+  }, [effectiveTableMode, renderedContent]);
   const sourceComponents = sourceMarkdown?.components;
   const renderedComponents = useMemo(() => {
     if (!sourceComponents) return components;
     return {
       ...components,
       ...sourceComponents,
-      ...(enhanceTables ? { table: components.table } : {}),
+      ...(effectiveTableMode === 'advanced' ? { table: components.table } : {}),
     };
-  }, [components, enhanceTables, sourceComponents]);
+  }, [components, effectiveTableMode, sourceComponents]);
 
   if (!content) return null;
   const remarkPlugins = sourceMarkdown?.remarkPlugins
@@ -588,13 +639,15 @@ export const Markdown = memo(function Markdown({
       data-markdown-source={source}
     >
       <IsStreamingContext.Provider value={!!isStreaming}>
-        <ReactMarkdown
-          remarkPlugins={remarkPlugins}
-          rehypePlugins={rehypePlugins}
-          components={renderedComponents}
-        >
-          {renderedContent}
-        </ReactMarkdown>
+        <MarkdownSourceContext.Provider value={source}>
+          <ReactMarkdown
+            remarkPlugins={remarkPlugins}
+            rehypePlugins={rehypePlugins}
+            components={renderedComponents}
+          >
+            {renderedContent}
+          </ReactMarkdown>
+        </MarkdownSourceContext.Provider>
       </IsStreamingContext.Provider>
     </div>
   );

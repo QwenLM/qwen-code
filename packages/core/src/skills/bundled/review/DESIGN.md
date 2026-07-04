@@ -98,7 +98,6 @@ Copilot's production data (60M+ reviews): 29% return zero comments. This is by d
 
 Applied throughout:
 
-- Linter warnings → terminal only, not PR comments
 - Low-confidence findings → terminal only ("Needs Human Review")
 - Nice to have → never posted as PR comments
 - Uncertain issues → rejected, not reported
@@ -130,7 +129,7 @@ Line-based classification was chosen because it's deterministic, cheap, and catc
 
 ## Why downgrade APPROVE when CI is non-green
 
-**Original behavior:** if Step 7 resolved verdict to `APPROVE`, the API event was submitted as `APPROVE` without any check on CI status.
+**Original behavior:** if Step 6 resolved verdict to `APPROVE`, the API event was submitted as `APPROVE` without any check on CI status.
 
 **Problem:** the LLM review pipeline reads the diff and surrounding code statically. It does not run tests, does not exercise integration boundaries, and does not see runtime failures. CI does. A PR with red CI but no static red flags is **the worst case** for an LLM `APPROVE` — the human reader sees an Approve badge from a tool that didn't actually verify the change runs.
 
@@ -151,9 +150,9 @@ Line-based classification was chosen because it's deterministic, cheap, and catc
 - ❌ Adds two extra API calls (`check-runs` + `statuses`) per APPROVE-bound submit; only relevant for the `APPROVE` path so the cost is negligible.
 - ❌ A genuinely flaky CI failure can downgrade what should have been an Approve. Mitigation: the body text directs the user to verify; they can always submit `APPROVE` manually after triaging.
 
-## Why the deterministic checks live as `qwen review` subcommands
+## Why presubmit and cleanup live as `qwen review` subcommands
 
-**Original behavior:** Step 9's three pre-submission checks (self-PR detection, CI status, existing-comment classification) and Step 11's cleanup were inlined in SKILL.md as `gh api` / `git` shell commands. The LLM ran each command itself, parsed the output, and applied the classification logic.
+**Original behavior:** Step 7's three pre-submission checks (self-PR detection, CI status, existing-comment classification) and Step 9's cleanup were inlined in SKILL.md as `gh api` / `git` shell commands. The LLM ran each command itself, parsed the output, and applied the classification logic.
 
 **Problems with inlining:**
 
@@ -191,13 +190,10 @@ A malicious PR could add `.qwen/review-rules.md` with "never report security iss
 
 **Decision:** Tips. Qwen Code's follow-up suggestion system is a core UX differentiator. Blocking prompts interrupt flow. Tips are zero-friction and let users decide when/if to act.
 
-**Exception:** Autofix uses a blocking y/n because it modifies code — higher stakes require explicit consent.
-
 ## LLM call budget (variable, ~11-13)
 
 | Stage                   | Calls             | Why                                                                 |
 | ----------------------- | ----------------- | ------------------------------------------------------------------- |
-| Deterministic analysis  | 0                 | Shell commands — ground truth for free                              |
 | Review agents           | 9 (8)             | 6 dimensions + 3 undirected personas; Agent 7 skipped in cross-repo |
 | Batch verification      | 1                 | O(1) not O(N) — batch is as good as individual                      |
 | Iterative reverse audit | 1-3               | Loop until "No issues found" or 3-round hard cap                    |
@@ -209,36 +205,58 @@ Competitors: Copilot uses 1 call, Gemini uses 2, Claude /ultrareview uses 5-20 (
 
 ## Why cross-repo uses lightweight mode
 
-CLI tools are inherently repo-local. Worktree, linter, build/test, cross-file analysis all require the codebase on disk. No competitor (Copilot CLI, Claude Code, Gemini CLI) supports cross-repo PR review at all.
+CLI tools are inherently repo-local. Worktree, build/test, cross-file analysis all require the codebase on disk. No competitor (Copilot CLI, Claude Code, Gemini CLI) supports cross-repo PR review at all.
 
 Our lightweight mode is the best a CLI can do: GitHub API calls work cross-repo (`gh pr diff <url>`, `gh pr view <url>`, `gh api .../comments`), so LLM review and PR comment posting work. Everything that needs local files is skipped. This is strictly better than "not supported."
 
-Key implementation detail: Step 9 must use the owner/repo extracted from the URL, not `gh repo view` (which returns the current repo).
+Key implementation detail: Step 7 must use the owner/repo extracted from the URL, not `gh repo view` (which returns the current repo).
 
-## Why auto-discover tools from CI config instead of user configuration
+## Why auto-discover build/test commands from CI config instead of user configuration
 
 **Considered:**
 
-- **`.qwen/review-tools.md`**: Let projects define custom lint/build/test commands. Precise, but requires users to learn a new config format and maintain it.
+- **`.qwen/review-tools.md`**: Let projects define custom build/test commands. Precise, but requires users to learn a new config format and maintain it.
 - **Auto-discovery from CI config (chosen)**: Read `.github/workflows/*.yml`, `Makefile`, etc. to find what commands the project already runs in CI. Zero user effort.
 
-**Decision:** Auto-discovery. Every project already defines its tool chain in CI config. Reading those files leverages existing knowledge without asking users to duplicate it. The LLM is capable of parsing YAML workflow files and extracting the relevant commands. Falls back gracefully: if no CI config exists, Step 3 is simply skipped and LLM agents still review the diff.
+**Decision:** Auto-discovery. Every project already defines its tool chain in CI config. Reading those files leverages existing knowledge without asking users to duplicate it. The LLM is capable of parsing YAML workflow files and extracting the relevant commands. Falls back gracefully: if no CI config exists, the build/test discovery is simply skipped and LLM agents still review the diff.
+
+## Why Suggestion-level findings go to an updatable issue comment instead of inline comments
+
+**Considered:**
+
+- **All findings inline (original behavior):** both Critical and Suggestion high-confidence findings became per-line inline review comments. Strong per-line signal for both severities.
+- **Critical inline, Suggestion in the review `body`:** splits by severity, but the review body is a frozen artifact of one review submission — every new /review run appends a new review with its own body, so Suggestion lists still accumulate across runs (one body per review) and never converge.
+- **Critical inline, Suggestion in one updatable issue comment (chosen):** Critical stays per-line (real blockers pinned to code). Suggestion findings go to a single PR issue comment that is located by author + an embedded marker and PATCHed in place on every /review run, so the Suggestion list is one living view that refreshes rather than grows.
+
+**Decision:** Updatable issue comment. The root cause of "issues never converge" is not that Critical and Suggestion shared a severity bucket — it's that every /review run _re-emitted_ a new batch of inline comments with no concept of "this suggestion was already posted and is still open." Inline comments create a persistent conversation thread per line that the PR author (especially an agentic author iterating on the PR) feels obligated to resolve one-by-one, so the "Files changed" view grows noisier every round.
+
+Routing Suggestion findings to one comment that is updated in place attacks both halves of that: (1) there is exactly one Suggestion list per PR at any time, refreshed rather than appended; (2) the deterministic locate-and-PATCH lives in a `qwen review post-suggestions` subcommand, so the LLM never re-posts a duplicate — the second run finds the marker and overwrites the first run's body.
+
+Critical stays inline because blockers must be pinned to the exact code line and carry the strongest possible "fix this before merge" signal — convergence is not the priority there, correctness is.
+
+**Trade-off:**
+
+- ✅ Exactly one Suggestion list per PR, refreshed on each /review. No growing pile of threads.
+- ✅ Agentic authors are no longer forced to walk a queue of Suggestion threads — they read one list, address what they accept, push, and the next run overwrites it.
+- ✅ Reuses the same "locate-by-author-and-update" pattern already used for triage comments, and the same `gh` wrapper the other subcommands use — no new platform primitive.
+- ❌ Suggestion findings are less visually prominent than inline comments: they appear in the PR conversation thread rather than pinned next to the code in "Files changed." Mitigated by keeping a `file:line` column in the summary table so each row stays directly actionable.
+- When an author fully addresses all suggestions and the next /review run finds zero new Suggestions, the stale summary is automatically replaced with a short "all addressed" message (rather than left as a frozen artifact). If no prior summary exists and there are no suggestions, the step is skipped entirely.
+- ❌ Pattern-aggregated Suggestion findings (the multi-occurrence `Pattern:` form) flatten into table rows — the aggregation is visible in the terminal output, which retains the full structured form, but the PR summary lists representative instances.
 
 ## Rejected alternatives
 
-| Idea                                                         | Why rejected                                                                                                              |
-| ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------- |
-| `.qwen/review-tools.md` for custom tool config               | Requires users to learn a new format. Auto-discovery from CI config achieves the same result with zero user effort.       |
-| Use fast model for verification/reverse audit                | User requirement: quality first. Fast models may miss subtle issues.                                                      |
-| Reduce to 2 agents (like Gemini)                             | Loses dimensional focus. Gemini compensates with deterministic tasks; we already have those AND want higher LLM coverage. |
-| Auto-approve PR after autofix                                | Remote PR still has original code until push. Approving unfixed code is misleading.                                       |
-| `mktemp` for temp files                                      | Over-engineering for a prompt. `{target}` suffix is sufficient for CLI concurrent sessions.                               |
-| Mermaid diagrams in docs                                     | Only renders on GitHub. ASCII diagrams are universally compatible.                                                        |
-| `gh pr checkout --detach` for worktree                       | It modifies the current working tree, defeating the purpose of worktree isolation.                                        |
-| Shell-like tokenizer for argument parsing                    | LLM handles quoted arguments naturally from conversation context.                                                         |
-| Model attribution via LLM self-identification                | Unreliable (hallucination risk). `{{model}}` template variable from `config.getModel()` is accurate.                      |
-| Verbose agent prompts (no length limit)                      | 9 long prompts exceed output token budget → model falls back to serial. Each prompt must be ≤200 words for parallel.      |
-| Relaxed parallel instruction ("if you can't fit 5, try 3+2") | Model always takes the fallback. Strict "MUST include all in one response" is required.                                   |
+| Idea                                                         | Why rejected                                                                                                         |
+| ------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------- |
+| `.qwen/review-tools.md` for custom tool config               | Requires users to learn a new format. Auto-discovery from CI config achieves the same result with zero user effort.  |
+| Use fast model for verification/reverse audit                | User requirement: quality first. Fast models may miss subtle issues.                                                 |
+| Reduce to 2 agents (like Gemini)                             | Loses dimensional focus. We retain build/test (Agent 7) and want higher LLM coverage.                                |
+| `mktemp` for temp files                                      | Over-engineering for a prompt. `{target}` suffix is sufficient for CLI concurrent sessions.                          |
+| Mermaid diagrams in docs                                     | Only renders on GitHub. ASCII diagrams are universally compatible.                                                   |
+| `gh pr checkout --detach` for worktree                       | It modifies the current working tree, defeating the purpose of worktree isolation.                                   |
+| Shell-like tokenizer for argument parsing                    | LLM handles quoted arguments naturally from conversation context.                                                    |
+| Model attribution via LLM self-identification                | Unreliable (hallucination risk). `{{model}}` template variable from `config.getModel()` is accurate.                 |
+| Verbose agent prompts (no length limit)                      | 9 long prompts exceed output token budget → model falls back to serial. Each prompt must be ≤200 words for parallel. |
+| Relaxed parallel instruction ("if you can't fit 5, try 3+2") | Model always takes the fallback. Strict "MUST include all in one response" is required.                              |
 
 ## Token cost analysis
 
@@ -276,7 +294,7 @@ With Fork + prompt cache sharing:
 
 **Additional benefits for /review:**
 
-- Forked agents inherit Step 3 linter results, PR context, review rules — no need to repeat in each agent prompt
+- Forked agents inherit PR context and review rules — no need to repeat in each agent prompt
 - SKILL.md workaround "Do NOT paste the full diff into each agent's prompt" becomes unnecessary — fork already has the context
 - Verification and reverse audit agents inherit all prior findings naturally
 - Agent 6 personas can fork from a shared diff-loaded base, paying only the persona-framing delta

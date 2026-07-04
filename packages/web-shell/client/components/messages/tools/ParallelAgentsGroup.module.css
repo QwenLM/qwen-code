@@ -1,11 +1,10 @@
 .wrap {
-  margin: 8px 0;
+  margin: 0;
 }
 
 .summary {
   width: 100%;
   margin: 0;
-  padding: 2px 0;
   border: none;
   border-radius: 0;
   background: transparent;
@@ -21,12 +20,18 @@
 
 .summary:hover,
 .summary:focus-visible {
-  color: var(--muted-foreground);
+  color: var(--primary);
   outline: none;
 }
 
+.summary:hover .summaryTextActive,
+.summary:focus-visible .summaryTextActive {
+  background-image: none;
+  -webkit-text-fill-color: currentColor;
+}
+
 .summaryIcon {
-  width: 14px;
+  min-width: 14px;
   height: 14px;
   display: inline-flex;
   align-items: center;
@@ -37,6 +42,13 @@
 
 .summaryIcon svg {
   display: block;
+}
+
+.summaryStatus {
+  display: inline-flex;
+  align-items: center;
+  flex-shrink: 0;
+  line-height: 1;
 }
 
 .summaryToolIcon {
@@ -56,7 +68,6 @@
 }
 
 .summaryTextActive {
-  color: var(--muted-foreground);
   background-image: linear-gradient(
     105deg,
     var(--muted-foreground) 0%,

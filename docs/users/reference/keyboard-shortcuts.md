@@ -47,7 +47,7 @@ This document lists the available keyboard shortcuts in Qwen Code.
 | `Ctrl+U`                                              | Delete from the cursor to the beginning of the line.                                                                                |
 | `Ctrl+V` (Windows: `Alt+V`)                           | Paste clipboard content. If the clipboard contains an image, it will be saved and a reference to it will be inserted in the prompt. |
 | `Ctrl+W` / `Meta+Backspace` / `Ctrl+Backspace`        | Delete the word to the left of the cursor.                                                                                          |
-| `Ctrl+X` / `Meta+Enter`                               | Open the current input in an external editor.                                                                                       |
+| `Ctrl+X`                                              | Open the current input in an external editor.                                                                                       |
 
 ## Suggestions
 

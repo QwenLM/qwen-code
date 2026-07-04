@@ -110,14 +110,18 @@ function hasEditContent(tool: ACPToolCall): boolean {
   return hasDiffContent(tool) || !!extractText(tool);
 }
 
-function extractDiff(tool: ACPToolCall): string {
+export function extractDiff(tool: ACPToolCall): string {
+  const rawFileDiff = getRawFileDiff(tool);
+  if (rawFileDiff) return rawFileDiff;
+
   if (tool.content) {
     const diffBlock = tool.content.find((b) => b.type === 'diff');
     if (diffBlock && diffBlock.type === 'diff') {
       return buildUnifiedDiff(diffBlock.oldText || '', diffBlock.newText || '');
     }
   }
-  return getRawFileDiff(tool);
+
+  return '';
 }
 
 export function getRawFileDiff(tool: ACPToolCall): string {
@@ -364,6 +368,7 @@ interface ToolLineProps {
   approval?: PermissionRequest | null;
   workspaceCwd?: string;
   shellOutputMaxLines?: number;
+  summaryOnly?: boolean;
 }
 
 function getAgentDisplayInfo(
@@ -403,17 +408,17 @@ function getAgentDisplayInfo(
             (tool.status === 'in_progress' && now ? now : undefined),
         );
 
-  const totalTokens =
+  const outputTokens =
     taskExec &&
     typeof taskExec['tokenCount'] === 'number' &&
     taskExec['tokenCount'] > 0
       ? (taskExec['tokenCount'] as number)
       : stats &&
-          typeof stats['totalTokens'] === 'number' &&
-          stats['totalTokens'] > 0
-        ? (stats['totalTokens'] as number)
+          typeof stats['outputTokens'] === 'number' &&
+          stats['outputTokens'] > 0
+        ? (stats['outputTokens'] as number)
         : 0;
-  const tokens = totalTokens > 0 ? formatTokenCount(totalTokens) : '';
+  const tokens = outputTokens > 0 ? formatTokenCount(outputTokens) : '';
 
   return {
     agentType,
@@ -763,6 +768,7 @@ function areToolLinePropsEqual(
   if (prev.approval?.id !== next.approval?.id) return false;
   if (prev.workspaceCwd !== next.workspaceCwd) return false;
   if (prev.shellOutputMaxLines !== next.shellOutputMaxLines) return false;
+  if (prev.summaryOnly !== next.summaryOnly) return false;
   const a = prev.tool;
   const b = next.tool;
   return (
@@ -811,6 +817,7 @@ export const ToolLine = memo(function ToolLine({
   approval,
   workspaceCwd,
   shellOutputMaxLines = DEFAULT_SHELL_OUTPUT_MAX_LINES,
+  summaryOnly = false,
 }: ToolLineProps) {
   const { t } = useI18n();
   const compactMode = useContext(CompactModeContext);
@@ -983,20 +990,23 @@ export const ToolLine = memo(function ToolLine({
           }}
         />
       </div>
-      {isTodo && hasTodoList && (
+      {(!summaryOnly || expanded) && isTodo && hasTodoList && (
         <TodoToolBody tool={tool} todos={todoItems!} expanded={expanded} />
       )}
       {/* Todo tool whose payload couldn't be parsed (e.g. malformed args):
           fall back to the raw result summary so the row isn't blank. */}
-      {isTodo && !hasTodoList && result && (
+      {(!summaryOnly || expanded) && isTodo && !hasTodoList && result && (
         <div className={styles.lineOutput}>{result}</div>
       )}
       {relocateDescription && (
         <div className={styles.lineFullArg}>{description}</div>
       )}
-      {!isTodo && result && (!expanded || !detailView) && (
-        <div className={styles.lineOutput}>{result}</div>
-      )}
+      {!isTodo &&
+        result &&
+        (!expanded || !detailView) &&
+        (!summaryOnly || expanded) && (
+          <div className={styles.lineOutput}>{result}</div>
+        )}
       {!isTodo && expanded && detailView && (
         <div className={styles.lineDetail}>
           {isShellToolName(name) && (
@@ -1053,7 +1063,7 @@ export const ToolGroup = memo(function ToolGroup({
 
   if (!hasApprovalTool) {
     return (
-      <div className={styles.chatGroupWrap}>
+      <div>
         <button
           type="button"
           className={styles.chatSummary}
@@ -1092,7 +1102,7 @@ export const ToolGroup = memo(function ToolGroup({
           }
         >
           <div className={styles.chatSummaryContentInner}>
-            <div className={styles.group}>
+            <div className={`${styles.group} ${styles.chatSummaryGroup}`}>
               {tools.map((tool) => (
                 <ToolLine
                   key={tool.callId}
@@ -1100,6 +1110,7 @@ export const ToolGroup = memo(function ToolGroup({
                   approval={pendingApproval}
                   workspaceCwd={workspaceCwd}
                   shellOutputMaxLines={shellOutputMaxLines}
+                  summaryOnly
                 />
               ))}
             </div>

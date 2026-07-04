@@ -5,8 +5,15 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import type { DaemonEvent } from '@qwen-code/sdk/daemon';
-import { getReplayTokenCount, getReplayTokenUsage } from './mappers.js';
+import type {
+  DaemonEvent,
+  DaemonWorkspaceSkillsStatus,
+} from '@qwen-code/sdk/daemon';
+import {
+  getReplayTokenCount,
+  getReplayTokenUsage,
+  mapWorkspaceSkills,
+} from './mappers.js';
 
 function usageEvent(
   id: number,
@@ -140,5 +147,73 @@ describe('getReplayTokenCount', () => {
     expect(
       getReplayTokenCount([usageEvent(1, { inputTokens: 500 }), throwing]),
     ).toBe(500);
+  });
+});
+
+describe('mapWorkspaceSkills', () => {
+  it('returns empty commands and skills for undefined status', () => {
+    expect(mapWorkspaceSkills(undefined)).toEqual({ commands: [], skills: [] });
+  });
+
+  it('maps workspace skills into skill slash commands', () => {
+    const status: DaemonWorkspaceSkillsStatus = {
+      v: 1,
+      workspaceCwd: '/ws',
+      initialized: true,
+      skills: [
+        {
+          kind: 'skill',
+          status: 'ok',
+          name: 'review',
+          description: 'Review a GitHub pull request',
+          level: 'bundled',
+          modelInvocable: true,
+          argumentHint: '<pr-number>',
+        },
+        {
+          kind: 'skill',
+          status: 'ok',
+          name: 'deep-research',
+          description: '',
+          level: 'bundled',
+          modelInvocable: false,
+        },
+        {
+          kind: 'skill',
+          status: 'disabled',
+          name: 'disabled-skill',
+          description: 'Disabled in settings',
+          level: 'project',
+          modelInvocable: true,
+        },
+      ],
+    };
+
+    const result = mapWorkspaceSkills(status);
+
+    expect(result.skills).toEqual(['review', 'deep-research']);
+    expect(result.commands).toEqual([
+      {
+        name: 'review',
+        description: 'Review a GitHub pull request',
+        argumentHint: '<pr-number>',
+        raw: {
+          name: 'review',
+          description: 'Review a GitHub pull request',
+          input: { hint: '<pr-number>' },
+          _meta: { source: 'skill' },
+        },
+      },
+      {
+        name: 'deep-research',
+        description: '',
+        raw: {
+          name: 'deep-research',
+          description: '',
+          input: null,
+          _meta: { source: 'skill' },
+        },
+      },
+    ]);
   });
 });

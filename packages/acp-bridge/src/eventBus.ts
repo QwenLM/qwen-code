@@ -206,6 +206,41 @@ export class EventBus {
     return this.subs.size;
   }
 
+  seedReplayEvents(
+    inputs: Array<Omit<BridgeEvent, 'id' | 'v'>>,
+  ): BridgeEvent[] {
+    if (this.closed) return [];
+    if (inputs.length === 0) return [];
+
+    const events: BridgeEvent[] = [];
+    for (const input of inputs) {
+      const existingMeta = input._meta;
+      const event: BridgeEvent = {
+        id: this.nextId++,
+        v: EVENT_SCHEMA_VERSION,
+        ...input,
+        _meta: {
+          ...(existingMeta ?? {}),
+          serverTimestamp: getServerTimestamp(existingMeta),
+        },
+      };
+      events.push(event);
+      try {
+        this.compactionEngine?.ingest(event);
+      } catch {
+        // CompactionEngine is best-effort; mirror publish()'s never-throws
+        // contract for bulk replay seeding.
+      }
+    }
+
+    // Seeded replay frames intentionally do not enter the reconnect ring. A
+    // partially retained ring would no longer be a contiguous suffix of all ids
+    // this bus produced, so clear it and let subscribe() surface resync for
+    // stale cursors.
+    this.ring.length = 0;
+    return events;
+  }
+
   /**
    * Publish an event to the bus. Returns the constructed `BridgeEvent`
    * (with `id` + `v` assigned) on success, or `undefined` when the
@@ -454,6 +489,19 @@ export class EventBus {
       } else {
         const earliestInRing = this.ring[0]?.id;
         if (
+          earliestInRing === undefined &&
+          opts.lastEventId < this.nextId - 1
+        ) {
+          queue.forcePush({
+            v: EVENT_SCHEMA_VERSION,
+            type: 'state_resync_required',
+            data: {
+              reason: 'seeded_replay_not_in_ring',
+              lastDeliveredId: opts.lastEventId,
+              earliestAvailableId: this.nextId,
+            },
+          });
+        } else if (
           earliestInRing !== undefined &&
           earliestInRing > opts.lastEventId + 1
         ) {

@@ -8,6 +8,7 @@ import type {
   DaemonEvent,
   DaemonErrorKind,
   DaemonMcpTransport,
+  DaemonSessionArtifactChange,
   PermissionOutcome,
 } from './types.js';
 // Single source of truth: the daemon publisher owns the wire literal in
@@ -18,8 +19,18 @@ import type {
 // (same lightweight mechanism as `@qwen-code/acp-bridge/mcpTimeouts`). A `const`
 // keeps its literal type, so it still narrows in `switch (event.type)` and works
 // as a `typeof`-d type argument.
-import { MID_TURN_MESSAGE_INJECTED_EVENT } from '@qwen-code/acp-bridge/daemonEventTypes';
-export { MID_TURN_MESSAGE_INJECTED_EVENT };
+import {
+  MID_TURN_MESSAGE_INJECTED_EVENT,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
+} from '@qwen-code/acp-bridge/daemonEventTypes';
+export {
+  MID_TURN_MESSAGE_INJECTED_EVENT,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
+};
 
 export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_update',
@@ -31,7 +42,11 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_died',
   'session_closed',
   'session_metadata_updated',
+  'artifact_changed',
   MID_TURN_MESSAGE_INJECTED_EVENT,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
   'client_evicted',
   'slow_client_warning',
   'stream_error',
@@ -267,6 +282,12 @@ export interface DaemonSessionMetadataUpdatedData {
   [key: string]: unknown;
 }
 
+export interface DaemonArtifactChangedData {
+  sessionId: string;
+  change: DaemonSessionArtifactChange;
+  [key: string]: unknown;
+}
+
 /**
  * `mid_turn_message_injected` payload. Emitted when the daemon drains
  * browser-queued mid-turn messages into the running turn (web-shell mid-turn
@@ -446,13 +467,29 @@ export interface DaemonMcpChildRefusedBatchData {
  * ~/.qwen/QWEN.md), `mode` is the requested write mode, and
  * `bytesWritten` is the size of the file post-write.
  */
-export interface DaemonMemoryChangedData {
+export interface DaemonFileMemoryChangedData {
   scope: 'workspace' | 'global';
   filePath: string;
   mode: 'append' | 'replace';
   bytesWritten: number;
   [key: string]: unknown;
 }
+
+export interface DaemonManagedMemoryChangedData {
+  scope: 'managed';
+  source:
+    | 'workspace_memory_remember'
+    | 'workspace_memory_forget'
+    | 'workspace_memory_dream'
+    | (string & {});
+  taskId: string;
+  touchedScopes: Array<'user' | 'project'>;
+  [key: string]: unknown;
+}
+
+export type DaemonMemoryChangedData =
+  | DaemonFileMemoryChangedData
+  | DaemonManagedMemoryChangedData;
 
 /**
  * A workspace agent CRUD mutation completed successfully. `change`
@@ -844,10 +881,49 @@ export type DaemonSessionMetadataUpdatedEvent = DaemonEventEnvelope<
   'session_metadata_updated',
   DaemonSessionMetadataUpdatedData
 >;
+export type DaemonArtifactChangedEvent = DaemonEventEnvelope<
+  'artifact_changed',
+  DaemonArtifactChangedData
+>;
 export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
   typeof MID_TURN_MESSAGE_INJECTED_EVENT,
   DaemonMidTurnMessageInjectedData
 >;
+export interface DaemonPendingPromptAddedData {
+  sessionId: string;
+  promptId: string;
+  text: string;
+  queuedAt: number;
+  [key: string]: unknown;
+}
+export interface DaemonPendingPromptStartedData {
+  sessionId: string;
+  promptId: string;
+  text: string;
+  [key: string]: unknown;
+}
+export interface DaemonPendingPromptCompletedData {
+  sessionId: string;
+  promptId: string;
+  state: 'completed' | 'removed';
+  [key: string]: unknown;
+}
+export type DaemonPendingPromptAddedEvent = DaemonEventEnvelope<
+  typeof PENDING_PROMPT_ADDED_EVENT,
+  DaemonPendingPromptAddedData
+>;
+export type DaemonPendingPromptStartedEvent = DaemonEventEnvelope<
+  typeof PENDING_PROMPT_STARTED_EVENT,
+  DaemonPendingPromptStartedData
+>;
+export type DaemonPendingPromptCompletedEvent = DaemonEventEnvelope<
+  typeof PENDING_PROMPT_COMPLETED_EVENT,
+  DaemonPendingPromptCompletedData
+>;
+export type DaemonPendingPromptEvent =
+  | DaemonPendingPromptAddedEvent
+  | DaemonPendingPromptStartedEvent
+  | DaemonPendingPromptCompletedEvent;
 export type DaemonClientEvictedEvent = DaemonEventEnvelope<
   'client_evicted',
   DaemonClientEvictedData
@@ -988,7 +1064,9 @@ export type DaemonSessionEvent =
   | DaemonSessionDiedEvent
   | DaemonSessionClosedEvent
   | DaemonSessionMetadataUpdatedEvent
+  | DaemonArtifactChangedEvent
   | DaemonMidTurnMessageInjectedEvent
+  | DaemonPendingPromptEvent
   | DaemonSessionBranchedEvent;
 
 export type DaemonControlEvent =
@@ -1437,9 +1515,25 @@ export function asKnownDaemonEvent(
       return isSessionMetadataUpdatedData(event.data)
         ? (event as DaemonSessionMetadataUpdatedEvent)
         : undefined;
+    case 'artifact_changed':
+      return isArtifactChangedData(event.data)
+        ? (event as DaemonArtifactChangedEvent)
+        : undefined;
     case MID_TURN_MESSAGE_INJECTED_EVENT:
       return isMidTurnMessageInjectedData(event.data)
         ? (event as DaemonMidTurnMessageInjectedEvent)
+        : undefined;
+    case PENDING_PROMPT_ADDED_EVENT:
+      return isPendingPromptAddedData(event.data)
+        ? (event as DaemonPendingPromptAddedEvent)
+        : undefined;
+    case PENDING_PROMPT_STARTED_EVENT:
+      return isPendingPromptStartedData(event.data)
+        ? (event as DaemonPendingPromptStartedEvent)
+        : undefined;
+    case PENDING_PROMPT_COMPLETED_EVENT:
+      return isPendingPromptCompletedData(event.data)
+        ? (event as DaemonPendingPromptCompletedEvent)
         : undefined;
     case 'client_evicted':
       return isClientEvictedData(event.data)
@@ -1944,7 +2038,11 @@ export function reduceDaemonSessionEvent(
     case 'mcp_server_removed':
     case 'settings_reloaded':
     case 'extensions_changed':
+    case 'artifact_changed':
     case MID_TURN_MESSAGE_INJECTED_EVENT:
+    case PENDING_PROMPT_ADDED_EVENT:
+    case PENDING_PROMPT_STARTED_EVENT:
+    case PENDING_PROMPT_COMPLETED_EVENT:
       return base;
     case 'session_rewound':
       return {
@@ -2376,6 +2474,22 @@ function isSessionMetadataUpdatedData(
   );
 }
 
+function isArtifactChangedData(
+  value: unknown,
+): value is DaemonArtifactChangedData {
+  if (!isRecord(value) || !isNonEmptyString(value['sessionId'])) {
+    return false;
+  }
+  const change = value['change'];
+  if (!isRecord(change) || !isNonEmptyString(change['artifactId'])) {
+    return false;
+  }
+  return (
+    isNonEmptyString(change['action']) &&
+    (change['reason'] === undefined || isNonEmptyString(change['reason']))
+  );
+}
+
 function isMidTurnMessageInjectedData(
   value: unknown,
 ): value is DaemonMidTurnMessageInjectedData {
@@ -2384,6 +2498,40 @@ function isMidTurnMessageInjectedData(
     isNonEmptyString(value['sessionId']) &&
     Array.isArray(value['messages']) &&
     value['messages'].every((message) => typeof message === 'string')
+  );
+}
+
+function isPendingPromptAddedData(
+  value: unknown,
+): value is DaemonPendingPromptAddedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['promptId']) &&
+    typeof value['text'] === 'string' &&
+    typeof value['queuedAt'] === 'number'
+  );
+}
+
+function isPendingPromptStartedData(
+  value: unknown,
+): value is DaemonPendingPromptStartedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['promptId']) &&
+    typeof value['text'] === 'string'
+  );
+}
+
+function isPendingPromptCompletedData(
+  value: unknown,
+): value is DaemonPendingPromptCompletedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['promptId']) &&
+    (value['state'] === 'completed' || value['state'] === 'removed')
   );
 }
 
@@ -2488,6 +2636,15 @@ function isMcpChildRefusedBatchData(
 function isMemoryChangedData(value: unknown): value is DaemonMemoryChangedData {
   if (!isRecord(value)) return false;
   const scope = value['scope'];
+  if (scope === 'managed') {
+    const touchedScopes = value['touchedScopes'];
+    return (
+      isNonEmptyString(value['source']) &&
+      isNonEmptyString(value['taskId']) &&
+      Array.isArray(touchedScopes) &&
+      touchedScopes.every((s) => s === 'user' || s === 'project')
+    );
+  }
   const mode = value['mode'];
   return (
     (scope === 'workspace' || scope === 'global') &&

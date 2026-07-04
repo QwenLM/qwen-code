@@ -299,38 +299,9 @@ function writeDistPackageJson(
 ) {
   console.log('Creating package.json for distribution...');
 
-  const cliEntryContent = `#!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath, pathToFileURL } from 'node:url';
-import { dirname, join } from 'node:path';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const cliPath = join(__dirname, 'cli.js');
-
-function isServeCommand() {
-  return process.argv[2] === 'serve';
-}
-
-if (isServeCommand()) {
-  process.argv[1] = cliPath;
-  await import(pathToFileURL(cliPath).href);
-} else {
-  const result = spawnSync(
-    process.execPath,
-    ['--expose-gc', cliPath, ...process.argv.slice(2)],
-    { stdio: 'inherit' },
-  );
-
-  if (result.signal) {
-    process.kill(process.pid, result.signal);
-  } else {
-    process.exit(result.status ?? 1);
-  }
-}
-`;
-
   const cliEntryPath = path.join(distDir, 'cli-entry.js');
-  fs.writeFileSync(cliEntryPath, cliEntryContent, { mode: 0o755 });
+  fs.copyFileSync(path.join(__dirname, 'cli-entry.js'), cliEntryPath);
+  fs.chmodSync(cliEntryPath, 0o755);
   console.log('Created dist cli-entry.js wrapper');
 
   const rootPackageJson = JSON.parse(

@@ -137,31 +137,37 @@ describe('MemoryManager', () => {
       expect(tasks.some((t) => t.status === 'completed')).toBe(true);
     });
 
-    it('skips extraction when history writes to a memory file', async () => {
-      const mgr = new MemoryManager();
-      const result = await mgr.scheduleExtract({
-        projectRoot,
-        sessionId: 'sess-1',
-        history: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  name: 'write_file',
-                  args: {
-                    file_path: `${projectRoot}/.qwen/memory/user/test.md`,
+    it.each([
+      ['private', '.qwen/memory/user/test.md'],
+      ['team', '.qwen/team-memory/test.md'],
+    ])(
+      'skips extraction when history writes to a %s memory file',
+      async (_label, filePath) => {
+        const mgr = new MemoryManager();
+        const result = await mgr.scheduleExtract({
+          projectRoot,
+          sessionId: 'sess-1',
+          history: [
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'write_file',
+                    args: {
+                      file_path: path.join(projectRoot, filePath),
+                    },
                   },
                 },
-              },
-            ],
-          },
-        ],
-      });
+              ],
+            },
+          ],
+        });
 
-      expect(result.skippedReason).toBe('memory_tool');
-      expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
-    });
+        expect(result.skippedReason).toBe('memory_tool');
+        expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
+      },
+    );
 
     it('queues a trailing extract when one is already running', async () => {
       let resolveFirst!: (
@@ -1626,6 +1632,37 @@ describe('MemoryManager', () => {
 
       expect(result.status).toBe('skipped');
       expect(result.skippedReason).toBe('memory_pressure');
+    });
+  });
+
+  describe('appendToUserMemory', () => {
+    it('forwards options to buildManagedAutoMemoryPrompt', () => {
+      const mgr = new MemoryManager();
+
+      // Without forceFullProtocol (all indexes empty → condensed path)
+      const condensed = mgr.appendToUserMemory(
+        '',
+        '/project/.qwen/memory',
+        null,
+      );
+
+      // With forceFullProtocol → full verbose path
+      const full = mgr.appendToUserMemory(
+        '',
+        '/project/.qwen/memory',
+        null,
+        undefined,
+        undefined,
+        { forceFullProtocol: true },
+      );
+
+      // Condensed path uses short section headers
+      expect(condensed).toContain('## Memory types');
+      expect(condensed).not.toContain('## Types of memory');
+
+      // Full path uses verbose section headers
+      expect(full).toContain('## Types of memory');
+      expect(full).toContain('## What NOT to save in memory');
     });
   });
 });

@@ -30,7 +30,10 @@ import {
   getComposerTagLabel,
   getComposerTagValue,
 } from '../hooks/useComposerCore';
+import { cssUrlVar } from '../utils/cssUrlVar';
+import { getComposerTagIconUrl } from './composerTagIcons';
 import { ModeIcon } from './ModeIcon';
+import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
 import styles from './ChatEditor.module.css';
@@ -40,7 +43,18 @@ export type ComposerToolbarAction =
   | 'model'
   | 'commands'
   | 'files'
-  | 'widthMode';
+  | 'widthMode'
+  | 'voice';
+
+const ACTIVE_TOOLBAR_ACTIONS = [
+  'approvalMode',
+  'model',
+  'widthMode',
+  'voice',
+] as const satisfies readonly ComposerToolbarAction[];
+const ACTIVE_TOOLBAR_ACTION_SET = new Set<ComposerToolbarAction>(
+  ACTIVE_TOOLBAR_ACTIONS,
+);
 
 interface ChatEditorProps {
   onSubmit: (
@@ -51,13 +65,16 @@ interface ChatEditorProps {
   onToggleShortcuts?: () => void;
   onCancel?: () => void;
   isRunning?: boolean;
+  isPreparing?: boolean;
+  /** First Esc armed a cancel — the send button shows an "Esc to stop" hint. */
+  cancelArmed?: boolean;
   disabled?: boolean;
   placeholderText?: string;
   commands: CommandInfo[];
   skills?: SkillInfo[];
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   queuedMessages?: string[];
-  onPopQueuedMessages?: () => string | null;
+  onPopQueuedMessages?: () => boolean;
   onClearQueuedMessages?: () => boolean;
   currentMode?: string;
   currentModel?: string;
@@ -133,6 +150,15 @@ const CHAT_EDITOR_THEME = {
   },
 };
 
+function isTouchLikeDevice(): boolean {
+  if (typeof window === 'undefined') return false;
+  return (
+    (typeof navigator !== 'undefined' && navigator.maxTouchPoints > 0) ||
+    (typeof window.matchMedia === 'function' &&
+      window.matchMedia('(hover: none), (pointer: coarse)').matches)
+  );
+}
+
 const SLASH_PANEL_THEME_VARS = [
   '--chat-editor-accent-color',
   '--accent',
@@ -169,6 +195,10 @@ function SendIcon() {
 
 function StopIcon() {
   return <span className={styles.stopIcon} aria-hidden="true" />;
+}
+
+function LoadingIcon() {
+  return <span className={styles.loadingIcon} aria-hidden="true" />;
 }
 
 function QuickActionsIcon() {
@@ -655,9 +685,9 @@ function SlashCommandPanel({
     '--slash-column-gap': hasDetailColumn ? '2ch' : '0px',
   } as CSSProperties;
 
-  let lastSection: string | undefined;
-
   if (!anchorRect) return null;
+
+  const rowPlans = planSlashSectionRows(menu.items, menu.kind);
 
   const positionedPanelStyle = {
     ...panelStyle,
@@ -691,16 +721,24 @@ function SlashCommandPanel({
             onScroll={() => setHoverDetail(null)}
           >
             {menu.items.map((item, index) => {
-              const section = item.section;
-              const showSection =
-                menu.kind === 'command' &&
-                index > 0 &&
-                section !== undefined &&
-                section !== lastSection;
-              lastSection = section ?? lastSection;
+              const plan = rowPlans[index];
               return (
                 <div key={`${item.id}:${index}`} className={styles.slashEntry}>
-                  {showSection && <div className={styles.slashSection} />}
+                  {plan.showHeader && (
+                    <>
+                      {plan.showDivider && (
+                        <div className={styles.slashSection} />
+                      )}
+                      <div className={styles.slashSectionHeader}>
+                        <span>{item.section}</span>
+                        {plan.count > 0 ? (
+                          <span className={styles.slashSectionCount}>
+                            {plan.count}
+                          </span>
+                        ) : null}
+                      </div>
+                    </>
+                  )}
                   <button
                     ref={(node) => {
                       itemRefs.current[index] = node;
@@ -848,6 +886,8 @@ export const ChatEditor = memo(
       onToggleShortcuts,
       onCancel,
       isRunning = false,
+      isPreparing = false,
+      cancelArmed = false,
       disabled = false,
       placeholderText = 'Type a message...',
       commands,
@@ -855,7 +895,6 @@ export const ChatEditor = memo(
       slashCommandCategoryOrder,
       queuedMessages = [],
       onPopQueuedMessages,
-      onClearQueuedMessages,
       currentMode = 'default',
       currentModel = '',
       chatWidthMode = '1000',
@@ -887,7 +926,6 @@ export const ChatEditor = memo(
       slashCommandCategoryOrder,
       queuedMessages,
       onPopQueuedMessages,
-      onClearQueuedMessages,
       currentMode,
       onFocusFooter,
       dialogOpen,
@@ -904,6 +942,7 @@ export const ChatEditor = memo(
     const {
       renderComposerToolbarStart: ToolbarStart,
       renderComposerToolbarEnd: ToolbarEnd,
+      renderComposerToolbarRight: ToolbarRight,
     } = useWebShellCustomization();
 
     useImperativeHandle(ref, () => core.handle, [core.handle]);
@@ -911,6 +950,7 @@ export const ChatEditor = memo(
     const [modeDropdownOpen, setModeDropdownOpen] = useState(false);
     const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
     const [quickActionsOpen, setQuickActionsOpen] = useState(false);
+    const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
     const modeBtnRef = useRef<HTMLButtonElement>(null);
@@ -919,6 +959,19 @@ export const ChatEditor = memo(
     const slashMenu = core.slashMenu;
     const closeSlashMenu = core.closeSlashMenu;
     const editorViewRef = core.viewRef;
+
+    useEffect(() => {
+      if (typeof window === 'undefined' || !window.matchMedia) return;
+      const media = window.matchMedia('(hover: none), (pointer: coarse)');
+      const update = () => setShowQuickActions(isTouchLikeDevice());
+      update();
+      media.addEventListener('change', update);
+      return () => media.removeEventListener('change', update);
+    }, []);
+
+    useEffect(() => {
+      if (!showQuickActions) setQuickActionsOpen(false);
+    }, [showQuickActions]);
 
     useEffect(() => {
       if (!slashMenu) return;
@@ -979,10 +1032,13 @@ export const ChatEditor = memo(
         })),
       [t],
     );
-    const visibleActionSet = useMemo(
-      () => (visibleToolbarActions ? new Set(visibleToolbarActions) : null),
-      [visibleToolbarActions],
-    );
+    const visibleActionSet = useMemo(() => {
+      if (!visibleToolbarActions) return null;
+      const activeActions = visibleToolbarActions.filter((action) =>
+        ACTIVE_TOOLBAR_ACTION_SET.has(action),
+      );
+      return new Set(activeActions);
+    }, [visibleToolbarActions]);
     const showToolbarAction = (action: ComposerToolbarAction) => {
       if (!visibleActionSet) return true;
       return visibleActionSet.has(action);
@@ -1195,13 +1251,22 @@ export const ChatEditor = memo(
     } = core.searchState;
 
     const renderComposerTagContent = (tag: WebShellComposerTag) => {
-      const tagLabel = getComposerTagLabel(tag);
+      const rawTagLabel = getComposerTagLabel(tag);
       const tagValue = getComposerTagValue(tag);
+      const tagLabel = tag.kind ? '' : rawTagLabel;
+      const iconUrl = getComposerTagIconUrl(tag.kind);
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{tag.id}</span>;
       }
       return (
         <>
+          {iconUrl && (
+            <span
+              className={styles.tagIcon}
+              style={cssUrlVar('--composer-tag-icon-url', iconUrl)}
+              aria-hidden="true"
+            />
+          )}
           {tagLabel && <span className={styles.tagLabel}>{tagLabel}</span>}
           {tagValue && <span className={styles.tagValue}>{tagValue}</span>}
         </>
@@ -1213,9 +1278,10 @@ export const ChatEditor = memo(
 
     // Model display label
     const modelLabel = getModelDisplayName(currentModel);
+    const showCancelButton = isRunning && !core.hasContent;
 
     return (
-      <div className={styles.editorShell}>
+      <div className={styles.editorShell} data-composer>
         <div
           ref={containerRef}
           className={styles.container}
@@ -1452,37 +1518,7 @@ export const ChatEditor = memo(
                 </div>
               </div>
               <div className={styles.toolbarRight}>
-                {showToolbarAction('commands') && (
-                  <button
-                    className={styles.toolBtn}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setQuickActionsOpen(false);
-                      core.insertText('/');
-                    }}
-                    aria-label={t('editor.hintCommands')}
-                    title={t('editor.hintCommands')}
-                    data-tooltip={t('editor.hintCommands')}
-                  >
-                    <span className={styles.toolBtnIcon}>/</span>
-                  </button>
-                )}
-                {showToolbarAction('files') && (
-                  <button
-                    className={styles.toolBtn}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setQuickActionsOpen(false);
-                      core.insertText('@');
-                    }}
-                    aria-label={t('editor.hintFiles')}
-                    title={t('editor.hintFiles')}
-                    data-tooltip={t('editor.hintFiles')}
-                  >
-                    <span className={styles.toolBtnIcon}>@</span>
-                  </button>
-                )}
-                {quickActions.length > 0 && (
+                {showQuickActions && quickActions.length > 0 && (
                   <button
                     className={`${styles.toolBtn} ${styles.quickActionsBtn}`}
                     onClick={(e) => {
@@ -1501,6 +1537,17 @@ export const ChatEditor = memo(
                       <QuickActionsIcon />
                     </span>
                   </button>
+                )}
+                {ToolbarRight && (
+                  <div className={styles.toolbarRightCustom}>
+                    <ToolbarRight
+                      disabled={disabled}
+                      isRunning={isRunning}
+                      currentMode={currentMode}
+                      currentModel={currentModel}
+                      sessionName={sessionName}
+                    />
+                  </div>
                 )}
                 {showChatWidthToggle &&
                   widthToggleFits &&
@@ -1535,41 +1582,84 @@ export const ChatEditor = memo(
                       </span>
                     </button>
                   )}
-                <VoiceButton
-                  disabled={disabled}
-                  onInsert={(text) => {
-                    const existing = core.getText();
-                    const sep = existing && !/\s$/.test(existing) ? ' ' : '';
-                    core.insertText(`${sep}${text} `);
-                    core.focus();
-                  }}
-                />
+                {showToolbarAction('voice') && (
+                  <VoiceButton
+                    disabled={disabled}
+                    onInsert={(text) => {
+                      const existing = core.getText();
+                      const sep = existing && !/\s$/.test(existing) ? ' ' : '';
+                      core.insertText(`${sep}${text} `);
+                      core.focus();
+                    }}
+                  />
+                )}
                 <button
                   className={
-                    isRunning
-                      ? `${styles.sendBtn} ${styles.sendBtnRunning}`
+                    isPreparing || showCancelButton
+                      ? `${styles.sendBtn} ${styles.sendBtnRunning}${
+                          cancelArmed ? ` ${styles.sendBtnArmed}` : ''
+                        }`
                       : styles.sendBtn
                   }
                   disabled={
-                    isRunning ? !onCancel : core.disabled || !core.hasContent
+                    isPreparing
+                      ? true
+                      : showCancelButton
+                        ? !onCancel
+                        : core.disabled || !core.hasContent
                   }
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (isRunning) {
+                    if (isPreparing) {
+                      return;
+                    }
+                    if (showCancelButton) {
                       onCancel?.();
                       return;
                     }
                     core.submitText();
                   }}
-                  aria-label={isRunning ? t('stream.cancel') : t('editor.send')}
+                  aria-label={
+                    isPreparing
+                      ? t('common.loading')
+                      : showCancelButton
+                        ? cancelArmed
+                          ? t('stream.cancelArmed')
+                          : t('stream.cancel')
+                        : t('editor.send')
+                  }
+                  title={
+                    isRunning && cancelArmed
+                      ? t('stream.cancelArmed')
+                      : undefined
+                  }
                 >
-                  {isRunning ? <StopIcon /> : <SendIcon />}
+                  {isPreparing ? (
+                    <LoadingIcon />
+                  ) : showCancelButton ? (
+                    cancelArmed ? (
+                      <span className={styles.escLabel} aria-hidden="true">
+                        Esc
+                      </span>
+                    ) : (
+                      <StopIcon />
+                    )
+                  ) : (
+                    <SendIcon />
+                  )}
                 </button>
+                <span
+                  role="status"
+                  aria-live="polite"
+                  className={styles.srOnly}
+                >
+                  {isRunning && cancelArmed ? t('stream.cancelArmed') : ''}
+                </span>
               </div>
             </div>
           </div>
         </div>
-        {quickActionsOpen && quickActions.length > 0 && (
+        {showQuickActions && quickActionsOpen && quickActions.length > 0 && (
           <QuickActionsPanel
             actions={quickActions}
             onRun={runQuickAction}

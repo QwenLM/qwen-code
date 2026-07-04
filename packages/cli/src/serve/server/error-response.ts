@@ -15,6 +15,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   BranchWhilePromptActiveError,
   CancelSentinelCollisionError,
+  CdWhilePromptActiveError,
   InvalidClientIdError,
   InvalidPermissionOptionError,
   InvalidRewindTargetError,
@@ -26,7 +27,10 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionArchivedError,
+  SessionArchivingError,
   SessionBusyError,
+  SessionConflictError,
   SessionLimitExceededError,
   SessionNotFoundError,
   SessionShellClientRequiredError,
@@ -218,6 +222,14 @@ export function sendBridgeError(
     });
     return;
   }
+  if (err instanceof CdWhilePromptActiveError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'cd_while_prompt_active',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
   if (err instanceof TrustGateError) {
     // Trust-folder rejection. 403 because the workspace's trust posture
     // forbids the privileged mode.
@@ -230,6 +242,31 @@ export function sendBridgeError(
   }
   if (err instanceof SessionNotFoundError) {
     res.status(404).json({ error: err.message, sessionId: err.sessionId });
+    return;
+  }
+  if (err instanceof SessionArchivedError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_archived',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionConflictError) {
+    res.status(409).json({
+      error: err.message,
+      code: 'session_conflict',
+      sessionId: err.sessionId,
+    });
+    return;
+  }
+  if (err instanceof SessionArchivingError) {
+    res.set('Retry-After', '5');
+    res.status(409).json({
+      error: err.message,
+      code: 'session_archiving',
+      sessionId: err.sessionId,
+    });
     return;
   }
   if (err instanceof InvalidClientIdError) {
@@ -424,6 +461,31 @@ export function sendBridgeError(
         res.status(503).json({
           error: errorMessage(err),
           code: 'acp_channel_unavailable',
+        });
+        return;
+      }
+      if (kind === 'restrictive_sandbox') {
+        res.status(403).json({
+          error: errorMessage(err),
+          code: 'restrictive_sandbox',
+        });
+        return;
+      }
+      if (kind === 'directory_not_found') {
+        const d = data as { path?: string };
+        res.status(400).json({
+          error: errorMessage(err),
+          code: 'directory_not_found',
+          path: d.path,
+        });
+        return;
+      }
+      if (kind === 'directory_not_trusted') {
+        const d = data as { path?: string };
+        res.status(403).json({
+          error: errorMessage(err),
+          code: 'directory_not_trusted',
+          path: d.path,
         });
         return;
       }

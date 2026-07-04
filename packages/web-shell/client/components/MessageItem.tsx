@@ -5,6 +5,8 @@ import type {
   PermissionRequest,
   TodoItem,
 } from '../adapters/types';
+import { useI18n } from '../i18n';
+import { ErrorBoundary } from './ErrorBoundary';
 import { MessageTimestamp } from './MessageTimestamp';
 import { UserMessage } from './messages/UserMessage';
 import { AssistantMessage, ThinkingMessage } from './messages/AssistantMessage';
@@ -130,13 +132,59 @@ export const MessageItem = memo(function MessageItem({
 
   if (body === null) return null;
 
+  // Isolate each message's render: a throw in Markdown/KaTeX/Mermaid/a tool
+  // panel degrades to an inline notice rather than white-screening the whole
+  // (embeddable) transcript. `resetKeys={[message]}` lets a streamed/edited/
+  // retried update recover on its own; a stable broken message stays on the
+  // fallback without looping.
+  const safeBody = (
+    <ErrorBoundary
+      label={`message:${message.role}`}
+      resetKeys={[message]}
+      fallback={
+        <MessageRenderError align={message.role === 'user' ? 'end' : 'start'} />
+      }
+    >
+      {body}
+    </ErrorBoundary>
+  );
+
+  // Re-enable text selection on every message row so users can long-press /
+  // drag-select reply text. The blanket `html * { user-select: none }` in
+  // standalone.css disables selection on UI chrome (native-app feel); this
+  // attribute opts the message subtree back in, including descendants
+  // (Markdown body, code blocks, tool panels, sub-messages).
+  //
+  // `display: contents` keeps this wrapper out of layout: several parents
+  // (e.g. MessageTimestamp's chat row) are flex containers whose items used
+  // to be the message body itself. A plain div here becomes the flex item
+  // instead and shrinks to its content width, squeezing user chat bubbles
+  // (whose max-width: 80% then resolves against the shrunken wrapper) so
+  // even short messages wrap mid-word. The user-select re-enable rule
+  // matches `[data-user-selectable] *`, so the boxless wrapper does not
+  // affect it.
+  const selectableSafeBody = (
+    <div data-user-selectable="true" style={{ display: 'contents' }}>
+      {safeBody}
+    </div>
+  );
+
   if (message.role === 'assistant') {
     if (showAssistantActions) {
-      return body;
+      return selectableSafeBody;
     }
     return (
-      <MessageTimestamp timestamp={message.timestamp}>{body}</MessageTimestamp>
+      <MessageTimestamp timestamp={message.timestamp}>
+        {selectableSafeBody}
+      </MessageTimestamp>
     );
+  }
+
+  // The cancellation marker is a right-aligned, full-width turn-terminal row;
+  // a hover timestamp would overlap its text, so skip the MessageTimestamp
+  // wrapper. The data-user-selectable div is still applied for consistency.
+  if (message.role === 'system' && message.source === 'prompt_cancelled') {
+    return selectableSafeBody;
   }
 
   return (
@@ -146,10 +194,37 @@ export const MessageItem = memo(function MessageItem({
       copyText={message.role === 'user' ? message.content : undefined}
       copyTitle="Copy"
     >
-      {body}
+      {selectableSafeBody}
     </MessageTimestamp>
   );
 }, areMessageItemPropsEqual);
+
+// Aligns with the message it replaces: user messages are right-aligned bubbles,
+// so the notice sits on the right too and still reads as that user turn's prompt
+// (a left-aligned notice would look like it belongs to the previous turn's
+// output). Assistant and other rows are left-aligned, matching their layout.
+function MessageRenderError({ align }: { align: 'start' | 'end' }) {
+  const { t } = useI18n();
+  return (
+    <div
+      role="alert"
+      style={{
+        display: 'flex',
+        justifyContent: align === 'end' ? 'flex-end' : 'flex-start',
+      }}
+    >
+      <span
+        style={{
+          color: 'var(--error-color, #e06c75)',
+          fontSize: '0.85em',
+          opacity: 0.85,
+        }}
+      >
+        {t('message.renderError')}
+      </span>
+    </div>
+  );
+}
 
 function areMessageItemPropsEqual(
   prev: MessageItemProps,

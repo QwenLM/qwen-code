@@ -11,19 +11,22 @@
   overflow: hidden;
 }
 
+.chatSummaryGroup {
+  margin: 4px 0 0;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  gap: 2px;
+}
+
 .line {
   padding: 2px 0;
   min-width: 0;
 }
 
-.chatGroupWrap {
-  margin: 2px 0;
-}
-
 .chatSummary {
   width: 100%;
   margin: 0;
-  padding: 2px 0;
   border: none;
   border-radius: 0;
   background: transparent;
@@ -39,8 +42,14 @@
 
 .chatSummary:hover,
 .chatSummary:focus-visible {
-  color: var(--muted-foreground);
+  color: var(--primary);
   outline: none;
+}
+
+.chatSummary:hover .chatSummaryTextActive,
+.chatSummary:focus-visible .chatSummaryTextActive {
+  background-image: none;
+  -webkit-text-fill-color: currentColor;
 }
 
 .chatSummaryIcon {
@@ -153,37 +162,20 @@
 }
 
 .icon {
+  color: var(--muted-foreground);
   font-size: 13px;
+  font-weight: 400;
   flex-shrink: 0;
-}
-
-.iconDone {
-  color: var(--success-color);
+  white-space: nowrap;
 }
 
 .iconError {
   color: var(--error-color);
 }
 
-.iconPending {
-  color: var(--muted-foreground);
-}
-
-.iconSpin {
-  color: var(--warning-color);
-  display: inline-block;
-  animation: spin 1s linear infinite;
-}
-
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
-}
-
 .lineName {
-  font-weight: 700;
-  color: var(--foreground);
+  font-weight: 400;
+  color: var(--muted-foreground);
   font-size: 13px;
   flex-shrink: 0;
 }
@@ -217,7 +209,7 @@
 }
 
 .lineExpandable:hover .lineName {
-  color: var(--agent-blue-500);
+  color: var(--foreground);
 }
 
 .lineOutput {

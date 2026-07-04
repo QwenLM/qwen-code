@@ -253,7 +253,7 @@ describe('modelConfigResolver', () => {
         expect(result.config.timeout).toBeUndefined();
       });
 
-      it('zero QWEN_CODE_API_TIMEOUT_MS ignored in OAuth path', () => {
+      it('zero QWEN_CODE_API_TIMEOUT_MS accepted in OAuth path (disables timeout downstream)', () => {
         const result = resolveModelConfig({
           authType: AuthType.QWEN_OAUTH,
           cli: {},
@@ -263,7 +263,11 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        expect(result.config.timeout).toBeUndefined();
+        expect(result.config.timeout).toBe(0);
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
       });
 
       it('fractional QWEN_CODE_API_TIMEOUT_MS ignored in OAuth', () => {
@@ -462,7 +466,7 @@ describe('modelConfigResolver', () => {
         expect(result.sources['timeout'].kind).toBe('settings');
       });
 
-      it('ignores negative or zero QWEN_CODE_API_TIMEOUT_MS values', () => {
+      it('accepts zero QWEN_CODE_API_TIMEOUT_MS and overrides settings (disables timeout downstream)', () => {
         const result = resolveModelConfig({
           authType: AuthType.USE_OPENAI,
           cli: {},
@@ -478,9 +482,12 @@ describe('modelConfigResolver', () => {
           },
         });
 
-        // Should fall back to settings value
-        expect(result.config.timeout).toBe(30000);
-        expect(result.sources['timeout'].kind).toBe('settings');
+        // 0 is a valid disable sentinel; env overrides settings.
+        expect(result.config.timeout).toBe(0);
+        expect(result.sources['timeout'].kind).toBe('env');
+        expect(result.sources['timeout'].envKey).toBe(
+          'QWEN_CODE_API_TIMEOUT_MS',
+        );
       });
 
       it('timeout is undefined when not configured, default applied in buildClient', () => {

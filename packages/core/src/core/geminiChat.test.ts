@@ -173,6 +173,7 @@ describe('GeminiChat', async () => {
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
       getBaseLlmClient: vi.fn().mockReturnValue(undefined),
       getChatCompression: vi.fn().mockReturnValue(undefined),
+      getAutoCompactThreshold: vi.fn().mockReturnValue(undefined),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getDebugLogger: vi
         .fn()
@@ -369,6 +370,35 @@ describe('GeminiChat', async () => {
         'Qwen Code is streaming a model response',
       );
       expect(mockSleepInhibitorRelease).toHaveBeenCalledTimes(1);
+    });
+
+    it('increments the user-content push counter once per surviving send', async () => {
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        (async function* () {
+          yield {
+            candidates: [
+              {
+                content: { role: 'model', parts: [{ text: 'done' }] },
+                finishReason: 'STOP',
+              },
+            ],
+          } as unknown as GenerateContentResponse;
+        })(),
+      );
+
+      const before = chat.getUserContentPushCount();
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'hello' },
+        'prompt-id-push-count',
+      );
+      for await (const _ of stream) {
+        /* consume stream */
+      }
+
+      // The user content landed exactly once, so the counter advanced by one —
+      // this is the signal the Retry strip/restore in client.ts gates on.
+      expect(chat.getUserContentPushCount()).toBe(before + 1);
     });
 
     it('releases the sleep inhibitor when the stream errors', async () => {
@@ -1490,6 +1520,76 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('keeps historical image refs stable and reattaches only recent image bytes', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 1,
+      });
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'old-shot' } }],
+        },
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'new-shot' } }],
+        },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'response' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+              index: 0,
+              safetyRatings: [],
+            },
+          ],
+          text: () => 'response',
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'continue' },
+        'prompt-id-image-refs',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      const contents = request?.contents as Content[];
+      const serialized = JSON.stringify(contents);
+      expect(serialized).toMatch(
+        /\[Image #[a-f0-9]{12}: image\/png, \d+ bytes\]/,
+      );
+      expect(serialized).not.toContain('"data":"old-shot"');
+      expect(serialized?.match(/"data":"new-shot"/g)).toHaveLength(1);
+      expect(contents.at(-1)).toEqual({
+        role: 'user',
+        parts: expect.arrayContaining([
+          { text: 'continue' },
+          {
+            text: expect.stringContaining('Recent images reattached'),
+          },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'new-shot',
+              displayName: undefined,
+            },
+          },
+        ]),
+      });
+    });
+
     it('coalesces startup reminders with the first user prompt for provider requests', async () => {
       chat.setHistory([
         {
@@ -1943,7 +2043,7 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         authType: AuthType.USE_GEMINI,
         model: 'test-model',
-        contextWindowSize: 200_000,
+        contextWindowSize: 264_000,
       });
       const subagentChat = new GeminiChat(mockConfig, config, [
         { role: 'user', parts: [{ text: 'inherited' }] },
@@ -2681,7 +2781,9 @@ describe('GeminiChat', async () => {
     }
 
     /**
-     * Default 200K window in our mocks; computeThresholds:
+     * 264K raw window in our mocks. With effectiveReservedOutput = 64K
+     * (max(ESCALATED_MAX_TOKENS, tokenLimit('test-model','output'))):
+     *   contextLimit    = 264K - 64K = 200K
      *   effectiveWindow = 200K - 20K (SUMMARY_RESERVE) = 180K
      *   hard            = max(180K - 3K, auto) = 177K
      * So lastPromptTokenCount=176K + a small user message tips over 177K.
@@ -2690,7 +2792,7 @@ describe('GeminiChat', async () => {
       vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
         authType: AuthType.USE_GEMINI,
         model: 'test-model',
-        contextWindowSize: 200_000,
+        contextWindowSize: 264_000,
       });
     });
 
@@ -3760,6 +3862,132 @@ describe('GeminiChat', async () => {
       expect(compressSpy).toHaveBeenCalledTimes(1);
       expect(compressSpy.mock.calls[0][1].force).toBe(false);
     });
+
+    it('sources reservedOutputTokens from model output limit when params.config.maxOutputTokens is absent (issue #5950)', async () => {
+      // Use claude-sonnet-4-6 which has a 65536 output limit in tokenLimits.ts.
+      // ESCALATED_MAX_TOKENS is 64000, so effectiveReservedOutput =
+      // max(64000, 65536) = 65536.
+      // With 200K window: contextLimit = 200000 - 65536 = 134464
+      // computeThresholds(134464): effectiveWindow = 114464, hard = 111464
+      // Without the fix: contextLimit = 200000, hard = 177000
+      // Setting lastPromptTokenCount to 112000 should trigger hard-rescue
+      // ONLY when the output budget is correctly reserved.
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'claude-sonnet-4-6',
+        contextWindowSize: 200_000,
+      });
+
+      const compressSpy = vi
+        .spyOn(ChatCompressionService.prototype, 'compress')
+        .mockResolvedValueOnce({
+          newHistory: [
+            { role: 'user', parts: [{ text: 'summary' }] },
+            { role: 'model', parts: [{ text: 'ack' }] },
+          ],
+          info: {
+            originalTokenCount: 112_000,
+            newTokenCount: 40_000,
+            compressionStatus: CompressionStatus.COMPRESSED,
+          },
+        });
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        makeStreamResponse('after output-budget rescue'),
+      );
+
+      const chatInstance = new GeminiChat(
+        mockConfig,
+        config,
+        [],
+        undefined,
+        uiTelemetryService,
+      );
+      chatInstance.setLastPromptTokenCount(112_000);
+
+      // Do NOT pass params.config.maxOutputTokens — exercises the real
+      // sourcing path where effectiveReservedOutput is computed from
+      // tokenLimit(model, 'output') / ESCALATED_MAX_TOKENS.
+      const stream = await chatInstance.sendMessageStream(
+        'claude-sonnet-4-6',
+        { message: 'hi' },
+        'prompt-output-budget-sourcing',
+      );
+      for await (const _ of stream) {
+        /* consume */
+      }
+
+      // Compression must have been triggered with force=true (hard-rescue)
+      // proving that the adjusted threshold (111464) was used, not the raw
+      // threshold (177K) which 112K would NOT exceed.
+      expect(compressSpy).toHaveBeenCalledTimes(1);
+      expect(compressSpy.mock.calls[0][1].force).toBe(true);
+      // Also verify reservedOutputTokens was threaded to the compression
+      // service cheap-gate.
+      expect(compressSpy.mock.calls[0][1].reservedOutputTokens).toBe(65_536);
+    });
+
+    it('sources reservedOutputTokens from QWEN_CODE_MAX_OUTPUT_TOKENS env var when no config override is present', async () => {
+      // When QWEN_CODE_MAX_OUTPUT_TOKENS is set (32000) and there is no
+      // samplingParams.max_tokens nor params.config.maxOutputTokens, the env
+      // var value becomes effectiveReservedOutput.
+      // With 200K window: contextLimit = 200000 - 32000 = 168000
+      // computeThresholds(168000): effectiveWindow = 148000, hard = 145000
+      // Without the fix (raw 200K): hard = 177000, and 150K would NOT exceed.
+      // Setting lastPromptTokenCount to 150000 triggers hard-rescue ONLY when
+      // the env var budget is correctly subtracted.
+      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'] = '32000';
+      try {
+        vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+          authType: AuthType.USE_GEMINI,
+          model: 'test-model',
+          contextWindowSize: 200_000,
+        });
+
+        const compressSpy = vi
+          .spyOn(ChatCompressionService.prototype, 'compress')
+          .mockResolvedValueOnce({
+            newHistory: [
+              { role: 'user', parts: [{ text: 'summary' }] },
+              { role: 'model', parts: [{ text: 'ack' }] },
+            ],
+            info: {
+              originalTokenCount: 150_000,
+              newTokenCount: 40_000,
+              compressionStatus: CompressionStatus.COMPRESSED,
+            },
+          });
+        vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+          makeStreamResponse('after env-var rescue'),
+        );
+
+        const chatInstance = new GeminiChat(
+          mockConfig,
+          config,
+          [],
+          undefined,
+          uiTelemetryService,
+        );
+        chatInstance.setLastPromptTokenCount(150_000);
+
+        const stream = await chatInstance.sendMessageStream(
+          'test-model',
+          { message: 'hi' },
+          'prompt-env-var-output-budget',
+        );
+        for await (const _ of stream) {
+          /* consume */
+        }
+
+        // Compression must have been triggered with force=true (hard-rescue)
+        // proving that the adjusted threshold (145000) was used, not the raw
+        // threshold (177K) which 150K would NOT exceed.
+        expect(compressSpy).toHaveBeenCalledTimes(1);
+        expect(compressSpy.mock.calls[0][1].force).toBe(true);
+        expect(compressSpy.mock.calls[0][1].reservedOutputTokens).toBe(32_000);
+      } finally {
+        delete process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'];
+      }
+    });
   });
 
   describe('addHistory', () => {
@@ -4105,6 +4333,27 @@ describe('GeminiChat', async () => {
 
       expect(chat.getLastModelMessageText()).toBe('new answer');
       expect(structuredCloneSpy).not.toHaveBeenCalled();
+    });
+
+    it('filters out thought parts from the last model message', () => {
+      chat.addHistory({
+        role: 'model',
+        parts: [
+          { text: 'internal reasoning...', thought: true },
+          { text: 'visible response' },
+        ],
+      });
+
+      expect(chat.getLastModelMessageText()).toBe('visible response');
+    });
+
+    it('returns undefined when all text parts are thoughts', () => {
+      chat.addHistory({
+        role: 'model',
+        parts: [{ text: 'only thinking', thought: true }],
+      });
+
+      expect(chat.getLastModelMessageText()).toBeUndefined();
     });
   });
 
@@ -6056,11 +6305,14 @@ describe('GeminiChat', async () => {
         { role: 'user', parts: [{ text: 'orphaned message' }] },
       ]);
 
-      chat.stripOrphanedUserEntriesFromHistory();
+      const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
 
       expect(chat.getHistory()).toEqual([
         { role: 'user', parts: [{ text: 'first message' }] },
         { role: 'model', parts: [{ text: 'first response' }] },
+      ]);
+      expect(strippedEntries).toEqual([
+        { role: 'user', parts: [{ text: 'orphaned message' }] },
       ]);
     });
 
@@ -6085,13 +6337,27 @@ describe('GeminiChat', async () => {
         },
       ]);
 
-      chat.stripOrphanedUserEntriesFromHistory();
+      const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
 
       expect(chat.getHistory()).toEqual([
         { role: 'user', parts: [{ text: 'query' }] },
         {
           role: 'model',
           parts: [{ functionCall: { name: 'tool', args: {} } }],
+        },
+      ]);
+      expect(strippedEntries).toEqual([
+        { role: 'user', parts: [{ text: 'IDE context' }] },
+        {
+          role: 'user',
+          parts: [
+            {
+              functionResponse: {
+                name: 'tool',
+                response: { result: 'ok' },
+              },
+            },
+          ],
         },
       ]);
     });
@@ -7034,6 +7300,42 @@ describe('GeminiChat', async () => {
       expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
         3,
       );
+    });
+
+    it('preserves current user image bytes during output recovery', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 0,
+      });
+      const streams = [
+        makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'escalated' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'done' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        {
+          message: [
+            { text: 'describe this image' },
+            { inlineData: { mimeType: 'image/png', data: 'current-shot' } },
+          ],
+        },
+        'prompt-recovery-image',
+      );
+
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const recoveryRequest = vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mock.calls[2]?.[0];
+      const serialized = JSON.stringify(recoveryRequest?.contents);
+      expect(serialized).toContain('"data":"current-shot"');
     });
 
     it('should coalesce overlapping recovery continuation text', async () => {
