@@ -2309,13 +2309,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ...mockConfig,
       getTargetDir: vi.fn().mockReturnValue('/work/status'),
       getMcpServers: vi.fn().mockReturnValue({}),
-      getAuthType: vi.fn().mockReturnValue('qwen'),
-      getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getAuthType: vi.fn().mockReturnValue('custom-provider'),
+      getModel: vi.fn().mockReturnValue('custom-model'),
       getModelsConfig: vi.fn().mockReturnValue({
         getGenerationConfig: vi
           .fn()
           .mockReturnValue({ apiKey: 'sk-from-settings' }),
-        getCurrentAuthType: vi.fn().mockReturnValue('qwen'),
+        getCurrentAuthType: vi.fn().mockReturnValue('custom-provider'),
         syncAfterAuthRefresh: vi.fn(),
       }),
       getSkillManager: vi.fn().mockReturnValue({
@@ -2362,11 +2362,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       ...mockConfig,
       getTargetDir: vi.fn().mockReturnValue('/work/status'),
       getMcpServers: vi.fn().mockReturnValue({}),
-      getAuthType: vi.fn().mockReturnValue('qwen'),
-      getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getAuthType: vi.fn().mockReturnValue('custom-provider'),
+      getModel: vi.fn().mockReturnValue('custom-model'),
       getModelsConfig: vi.fn().mockReturnValue({
         getGenerationConfig: vi.fn().mockReturnValue({}),
-        getCurrentAuthType: vi.fn().mockReturnValue('qwen'),
+        getCurrentAuthType: vi.fn().mockReturnValue('custom-provider'),
         syncAfterAuthRefresh: vi.fn(),
       }),
       getSkillManager: vi.fn().mockReturnValue({
@@ -2403,6 +2403,58 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(authCell?.status).toBe('unknown');
     expect(authCell?.detail?.hasToken).toBe('unknown');
     expect(authCell?.detail?.envVarCandidates).toEqual([]);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('extMethod preflight auth cell reports unknown for qwen-oauth even with placeholder apiKey', async () => {
+    mockConfig = {
+      ...mockConfig,
+      getTargetDir: vi.fn().mockReturnValue('/work/status'),
+      getMcpServers: vi.fn().mockReturnValue({}),
+      getAuthType: vi.fn().mockReturnValue('qwen-oauth'),
+      getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getModelsConfig: vi.fn().mockReturnValue({
+        getGenerationConfig: vi
+          .fn()
+          .mockReturnValue({ apiKey: 'QWEN_OAUTH_DYNAMIC_TOKEN' }),
+        getCurrentAuthType: vi.fn().mockReturnValue('qwen-oauth'),
+        syncAfterAuthRefresh: vi.fn(),
+      }),
+      getSkillManager: vi.fn().mockReturnValue({
+        listSkills: vi.fn().mockResolvedValue([]),
+      }),
+      getAllConfiguredModels: vi.fn().mockReturnValue([]),
+      getToolRegistry: vi.fn().mockReturnValue({ getAllTools: () => [] }),
+    } as unknown as Config;
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    const preflight = (await agent.extMethod(
+      SERVE_STATUS_EXT_METHODS.workspacePreflight,
+      {},
+    )) as {
+      cells: Array<{
+        kind: string;
+        status: string;
+        detail?: { hasToken: boolean | 'unknown'; envVarCandidates: string[] };
+      }>;
+    };
+
+    const authCell = preflight.cells.find((c) => c.kind === 'auth');
+    expect(authCell?.status).toBe('unknown');
+    expect(authCell?.detail?.hasToken).toBe('unknown');
 
     mockConnectionState.resolve();
     await agentPromise;
