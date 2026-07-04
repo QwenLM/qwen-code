@@ -1,0 +1,189 @@
+.card {
+  margin: 10px 0;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--border) 88%, transparent);
+  border-radius: 8px;
+  background: var(--card, var(--background));
+  box-shadow: 0 8px 22px rgb(15 23 42 / 5%);
+}
+
+.toolbar {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 10px 0 14px;
+  background: color-mix(in srgb, var(--subtle-bg) 68%, var(--background));
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+}
+
+.title {
+  min-width: 0;
+  margin: 0;
+  color: var(--foreground);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 1.3;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.toggle {
+  display: inline-grid;
+  flex: 0 0 auto;
+  grid-template-columns: repeat(2, 30px);
+  gap: 2px;
+  padding: 2px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--border) 84%, transparent);
+  border-radius: 6px;
+  background: var(--background);
+}
+
+.toggleButton {
+  display: grid;
+  width: 30px;
+  height: 26px;
+  place-items: center;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    color 0.16s ease;
+}
+
+.toggleButton:hover {
+  background: var(--subtle-bg-strong);
+  color: var(--foreground);
+}
+
+.toggleButton[aria-pressed='true'] {
+  background: var(--agent-blue-500, #0033ff);
+  color: #ffffff;
+}
+
+.toggleButton svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+.toggleButton path {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.4;
+}
+
+.chartFrame {
+  position: relative;
+  min-height: 370px;
+}
+
+.chartSurface {
+  height: 370px;
+  min-height: 260px;
+  width: calc(100% - 20px);
+  margin: 0 10px 8px;
+  background: var(--background);
+}
+
+.chartOverlay {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: color-mix(in srgb, var(--background) 88%, transparent);
+}
+
+.state {
+  display: grid;
+  min-height: 160px;
+  place-items: center;
+  padding: 16px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  text-align: center;
+}
+
+.loading {
+  min-height: 220px;
+}
+
+.spinner {
+  width: 22px;
+  height: 22px;
+  border: 2px solid var(--border);
+  border-top-color: var(--agent-blue-500, #0033ff);
+  border-radius: 999px;
+  animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.tableWrap {
+  min-height: 240px;
+  max-height: min(60vh, 520px);
+  overflow: auto;
+  background: var(--card, var(--background));
+  scrollbar-color: var(--border) transparent;
+}
+
+.tableNotice {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 8px 12px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  background: color-mix(in srgb, var(--subtle-bg) 72%, var(--background));
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.table {
+  width: max-content;
+  min-width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 13px;
+}
+
+.table th,
+.table td {
+  padding: 9px 12px;
+  border-right: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  text-align: left;
+  vertical-align: top;
+}
+
+.table th:last-child,
+.table td:last-child {
+  border-right: 0;
+}
+
+.table th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: color-mix(in srgb, var(--subtle-bg) 68%, var(--background));
+  color: var(--foreground);
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.table td {
+  color: color-mix(in srgb, var(--foreground) 90%, var(--muted-foreground));
+}

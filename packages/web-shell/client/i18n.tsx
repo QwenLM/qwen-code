@@ -10,8 +10,7 @@ export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
 
 type MessageValue =
-  | string
-  | ((vars?: Record<string, string | number>) => string);
+  string | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
 
@@ -214,6 +213,27 @@ const EN: Messages = {
     `${v?.label ?? 'Selection'} copied to the clipboard`,
   'code.copy': 'Copy',
   'code.copied': 'Copied!',
+  'echartsChart.defaultTitle': 'Chart Loading',
+  'echartsChart.noData': 'No data',
+  'echartsChart.tableNotice': (v) => {
+    const omittedRows = Number(v?.omittedRows ?? 0);
+    const omittedColumns = Number(v?.omittedColumns ?? 0);
+    if (omittedRows > 0 && omittedColumns > 0) {
+      return `Showing ${v?.visibleRows ?? 0} of ${v?.totalRows ?? 0} rows and ${v?.visibleColumns ?? 0} of ${v?.totalColumns ?? 0} columns`;
+    }
+    if (omittedColumns > 0) {
+      return `Showing ${v?.visibleColumns ?? 0} of ${v?.totalColumns ?? 0} columns`;
+    }
+    return `Showing ${v?.visibleRows ?? 0} of ${v?.totalRows ?? 0} rows`;
+  },
+  'echartsChart.rendering': 'Rendering chart',
+  'echartsChart.runtimeUnavailable': 'Chart runtime is unavailable.',
+  'echartsChart.renderFailed': 'Chart render failed.',
+  'echartsChart.viewMode': 'View mode',
+  'echartsChart.showChart': 'Show chart',
+  'echartsChart.showData': 'Show data',
+  'echartsChart.chart': 'Chart',
+  'echartsChart.data': 'Data',
   'markdownTable.blank': '(blank)',
   'markdownTable.column': (v) => `Column ${v?.index ?? ''}`,
   'markdownTable.rows': (v) => {
@@ -1550,6 +1570,27 @@ const ZH: Messages = {
   'copy.toClipboard': (v) => `${v?.label ?? '内容'} 已复制到剪贴板`,
   'code.copy': '复制',
   'code.copied': '已复制！',
+  'echartsChart.defaultTitle': '图表加载中',
+  'echartsChart.noData': '暂无数据',
+  'echartsChart.tableNotice': (v) => {
+    const omittedRows = Number(v?.omittedRows ?? 0);
+    const omittedColumns = Number(v?.omittedColumns ?? 0);
+    if (omittedRows > 0 && omittedColumns > 0) {
+      return `显示 ${v?.visibleRows ?? 0}/${v?.totalRows ?? 0} 行，${v?.visibleColumns ?? 0}/${v?.totalColumns ?? 0} 列`;
+    }
+    if (omittedColumns > 0) {
+      return `显示 ${v?.visibleColumns ?? 0}/${v?.totalColumns ?? 0} 列`;
+    }
+    return `显示 ${v?.visibleRows ?? 0}/${v?.totalRows ?? 0} 行`;
+  },
+  'echartsChart.rendering': '正在渲染图表',
+  'echartsChart.runtimeUnavailable': '图表运行时不可用。',
+  'echartsChart.renderFailed': '图表渲染失败。',
+  'echartsChart.viewMode': '视图模式',
+  'echartsChart.showChart': '显示图表',
+  'echartsChart.showData': '显示数据',
+  'echartsChart.chart': '图表',
+  'echartsChart.data': '数据',
   'markdownTable.blank': '(空白)',
   'markdownTable.column': (v) => `第 ${v?.index ?? ''} 列`,
   'markdownTable.rows': (v) => `${v?.count ?? 0} 行`,
