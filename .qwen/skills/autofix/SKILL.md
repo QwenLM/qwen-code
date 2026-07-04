@@ -114,7 +114,8 @@ Follow the project conventions in `AGENTS.md`, the reproduce-first workflow in
    - `<workdir>/e2e-report.md`: baseline evidence, after behavior, exact
      suggested verification commands, and relevant output excerpts.
    - `<workdir>/pr-title.txt` and `<workdir>/pr-body.md`: use the project
-     `prepare-pr` skill for issue `<issue>`.
+     `prepare-pr` skill (`.qwen/skills/prepare-pr/SKILL.md`) for issue
+     `<issue>`.
 
 If the fix is beyond confident reach, write `<workdir>/failure.md` with what
 you learned and exit without committing.
