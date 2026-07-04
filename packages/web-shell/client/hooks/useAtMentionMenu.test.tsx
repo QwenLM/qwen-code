@@ -43,17 +43,21 @@ function setViewState(view: EditorView, doc: string, anchor = doc.length) {
 
 function Harness({
   actions,
+  disabled = false,
   providers,
+  shellMode = false,
   view,
 }: {
   actions?: AtMentionWorkspaceActions;
+  disabled?: boolean;
   providers?: readonly WebShellAtProvider[];
+  shellMode?: boolean;
   view?: EditorView | null;
 }) {
   latest = useAtMentionMenu({
     viewRef: { current: view ?? null },
-    disabledRef: { current: false },
-    shellModeRef: { current: false },
+    disabledRef: { current: disabled },
+    shellModeRef: { current: shellMode },
     workspaceActionsRef: { current: actions },
     providers,
   });
@@ -62,11 +66,15 @@ function Harness({
 
 function mount({
   actions,
+  disabled,
   providers,
+  shellMode,
   view,
 }: {
   actions?: AtMentionWorkspaceActions;
+  disabled?: boolean;
   providers?: readonly WebShellAtProvider[];
+  shellMode?: boolean;
   view?: EditorView | null;
 } = {}) {
   container = document.createElement('div');
@@ -74,7 +82,13 @@ function mount({
   root = createRoot(container);
   act(() => {
     root!.render(
-      <Harness actions={actions} providers={providers} view={view} />,
+      <Harness
+        actions={actions}
+        disabled={disabled}
+        providers={providers}
+        shellMode={shellMode}
+        view={view}
+      />,
     );
   });
 }
@@ -96,6 +110,26 @@ afterEach(() => {
 });
 
 describe('useAtMentionMenu', () => {
+  it('does not open while disabled', () => {
+    mount({ disabled: true });
+
+    act(() => {
+      expect(latest!.refreshForView(makeView('@'))).toBe(false);
+    });
+
+    expect(latest!.state).toBeNull();
+  });
+
+  it('does not open in shell mode', () => {
+    mount({ shellMode: true });
+
+    act(() => {
+      expect(latest!.refreshForView(makeView('@'))).toBe(false);
+    });
+
+    expect(latest!.state).toBeNull();
+  });
+
   it('strips ANSI and BiDi controls from extension display text', async () => {
     vi.useFakeTimers();
     mount({
