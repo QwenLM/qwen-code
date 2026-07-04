@@ -16,16 +16,28 @@
  *    overrides empty-string values)
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { ModelsConfig } from './modelsConfig.js';
 import { AuthType } from '../core/contentGenerator.js';
 import type { ModelProvidersConfig } from './types.js';
+
+const debugLoggerDebug = vi.hoisted(() => vi.fn());
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: () => ({
+    debug: debugLoggerDebug,
+    error: vi.fn(),
+    info: vi.fn(),
+    warn: vi.fn(),
+  }),
+}));
 
 describe('Persistent 401 reproduction — issue #5979 / #6129 / #6283', () => {
   const ENV_KEY_DASHSCOPE = 'TEST_DASHSCOPE_API_KEY_REPRO';
   const ENV_KEY_TOKEN_PLAN = 'TEST_TOKEN_PLAN_API_KEY_REPRO';
 
   beforeEach(() => {
+    debugLoggerDebug.mockClear();
     delete process.env[ENV_KEY_DASHSCOPE];
     delete process.env[ENV_KEY_TOKEN_PLAN];
   });
@@ -72,6 +84,7 @@ describe('Persistent 401 reproduction — issue #5979 / #6129 / #6283', () => {
     // ModelsConfig always reads from process.env — if the env var layer
     // let a stale key through, it propagates here.
     expect(gc.apiKey).toBe(OLD_KEY);
+    expect(debugLoggerDebug).not.toHaveBeenCalled();
   });
 
   /**
@@ -117,6 +130,11 @@ describe('Persistent 401 reproduction — issue #5979 / #6129 / #6283', () => {
     const gc = modelsConfig.getGenerationConfig();
     expect(gc.apiKey).toBeUndefined();
     expect(gc.model).toBe('qwen3-coder-tp');
+    expect(debugLoggerDebug).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `process.env["${ENV_KEY_TOKEN_PLAN}"] is not set`,
+      ),
+    );
   });
 
   /**
@@ -155,5 +173,10 @@ describe('Persistent 401 reproduction — issue #5979 / #6129 / #6283', () => {
     // before we get here, but at the ModelsConfig layer this test only sees
     // what process.env contains right now (empty string).
     expect(gc.apiKey).toBeUndefined();
+    expect(debugLoggerDebug).toHaveBeenCalledWith(
+      expect.stringContaining(
+        `process.env["${ENV_KEY_DASHSCOPE}"] is empty string`,
+      ),
+    );
   });
 });

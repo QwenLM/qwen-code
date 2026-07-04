@@ -207,7 +207,7 @@ describe('applyProviderInstallPlan', () => {
     expect(refreshAuth).not.toHaveBeenCalled();
   });
 
-  it('does not print a shadowing warning when an env key changes', async () => {
+  it('prints a shadowing warning when an env key changes', async () => {
     process.env['SHADOW_KEY'] = 'old-value';
     const adapter = createAdapter();
     const consoleError = vi
@@ -221,7 +221,9 @@ describe('applyProviderInstallPlan', () => {
 
     await applyProviderInstallPlan(plan, { settings: adapter });
 
-    expect(consoleError).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledWith(
+      expect.stringContaining('SHADOW_KEY is also set'),
+    );
     expect(process.env['SHADOW_KEY']).toBe('new-value');
   });
 
