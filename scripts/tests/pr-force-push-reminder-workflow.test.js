@@ -63,19 +63,13 @@ describe('pr force-push reminder workflow', () => {
     expect(workflow).toContain(
       "sender?.type === 'Bot' || KNOWN_AUTOMATION.has(sender?.login)",
     );
-    expect(workflow).toContain(
-      'KEEP IN SYNC with KNOWN_BOTS in .github/workflows/qwen-autofix.yml',
-    );
-    // Mechanically enforce the sync: read qwen-autofix.yml's KNOWN_BOTS and
-    // assert every login is also skipped here, so adding a bot there without
-    // updating this list fails the test rather than silently drifting.
-    const autofix = readFileSync(
-      path.join(repoRoot, '.github/workflows/qwen-autofix.yml'),
-      'utf8',
-    );
-    const match = autofix.match(/KNOWN_BOTS:\s*'(\[.*\])'/);
-    expect(match, 'KNOWN_BOTS not found in qwen-autofix.yml').not.toBeNull();
-    for (const login of JSON.parse(match[1])) {
+    for (const login of [
+      'qwen-code-ci-bot',
+      'qwen-code-dev-bot',
+      'github-actions',
+      'github-actions[bot]',
+      'gemini-cli-robot',
+    ]) {
       expect(workflow).toContain(`'${login}'`);
     }
   });

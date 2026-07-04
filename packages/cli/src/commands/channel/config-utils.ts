@@ -35,6 +35,61 @@ function resolveOptionalStringField(
   return resolveEnvVars(value);
 }
 
+/**
+ * Validate identity/memoryScope shape at parse time. settings.json is
+ * hand-edited; a malformed value would otherwise surface as an opaque
+ * TypeError on the first prompt of every session instead of at startup.
+ */
+function parseObjectStringFields<Field extends string>(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+  key: 'identity' | 'memoryScope',
+  fields: readonly Field[],
+): Record<string, string> | undefined {
+  const value = rawConfig[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(
+      `Channel "${channelName}" field "${key}" must be an object.`,
+    );
+  }
+  const record = value as Record<string, unknown>;
+  const result: Record<string, string> = {};
+  for (const field of fields) {
+    const fieldValue = record[field];
+    if (fieldValue === undefined || fieldValue === null || fieldValue === '') {
+      continue;
+    }
+    if (typeof fieldValue !== 'string') {
+      throw new Error(
+        `Channel "${channelName}" field "${key}.${field}" must be a string.`,
+      );
+    }
+    result[field] = fieldValue;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function parseMemoryScopeConfig(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+): ChannelConfig['memoryScope'] {
+  const parsed = parseObjectStringFields(
+    channelName,
+    rawConfig,
+    'memoryScope',
+    ['namespace', 'mode'] as const,
+  );
+  if (parsed?.['mode'] !== undefined && parsed['mode'] !== 'metadata-only') {
+    throw new Error(
+      `Channel "${channelName}" field "memoryScope.mode" must be "metadata-only".`,
+    );
+  }
+  return parsed as ChannelConfig['memoryScope'];
+}
+
 export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
@@ -87,6 +142,12 @@ export async function parseChannelConfig(
     cwd: resolvePath((rawConfig['cwd'] as string) || defaultCwd),
     approvalMode: rawConfig['approvalMode'] as string | undefined,
     instructions: rawConfig['instructions'] as string | undefined,
+    identity: parseObjectStringFields(name, rawConfig, 'identity', [
+      'id',
+      'displayName',
+      'description',
+    ] as const) as ChannelConfig['identity'],
+    memoryScope: parseMemoryScopeConfig(name, rawConfig),
     model: rawConfig['model'] as string | undefined,
     groupPolicy:
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',

@@ -61,6 +61,7 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { resolveShellOutputMaxLines } from './components/messages/ToolGroup';
@@ -97,6 +98,11 @@ import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
+import {
+  decodeVisionModelForPicker,
+  encodeVisionModelForSetting,
+  extractBareModelId,
+} from './utils/modelEncoding';
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
@@ -126,6 +132,11 @@ import {
   createAndAttachSessionForPrompt,
   isDaemonApprovalMode,
 } from './utils/sessionPreparation';
+import {
+  getComposerPlaceholderKey,
+  shouldBlockComposerSubmit,
+  shouldDisableComposerInput,
+} from './utils/composerInputState';
 import type { ACPToolCall, Message, PermissionRequest } from './adapters/types';
 import {
   computeTodoDetails,
@@ -212,6 +223,14 @@ const MAX_TOASTS = 4;
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
+
+/** Maps each ModelDialogMode to its i18n title key — single source of truth. */
+const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
+  main: 'model.select',
+  fast: 'model.setFast',
+  voice: 'model.setVoice',
+  vision: 'model.setVision',
+};
 
 function isVisibleComposerModel(model: { id: string }): boolean {
   return !HIDDEN_COMPOSER_MODEL_IDS.has(model.id);
@@ -1040,12 +1059,12 @@ export function App({
   const editorRef = useRef<EditorHandle | null>(null);
   const notifiedComposerReadyRef = useRef<EditorHandle | null>(null);
   const footerRef = useRef<HTMLDivElement>(null);
-  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [canScrollMessageListToBottom, setCanScrollMessageListToBottom] =
+    useState(false);
   const previousFooterRectRef = useRef<DOMRect | null>(null);
   const previousEmptyStateRef = useRef(false);
   const resumeChatBottomFollow = useCallback(
     (behavior: ScrollBehavior = 'smooth') => {
-      setShowScrollToBottom(false);
       requestAnimationFrame(() => {
         messageListRef.current?.scrollToBottom(behavior);
         requestAnimationFrame(() => {
@@ -1138,6 +1157,7 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
+  const [showDaemonStatusDialog, setShowDaemonStatusDialog] = useState(false);
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
@@ -1342,6 +1362,7 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
+    showDaemonStatusDialog ||
     showExtensionsDialog ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
@@ -1642,6 +1663,19 @@ export function App({
   const currentVoiceModel = (() => {
     const value = workspaceSettings.find(
       (setting) => setting.key === 'voiceModel',
+    )?.values.effective;
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  })();
+  const currentVisionModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'visionModel',
+    )?.values.effective;
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    return decodeVisionModelForPicker(value.trim());
+  })();
+  const currentFastModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'fastModel',
     )?.values.effective;
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
@@ -2023,14 +2057,11 @@ export function App({
   const loadSidebarSession = useCallback(
     async (sessionId: string) => {
       setSidebarSwitchingSessionId(sessionId);
-      // Close the drawer before awaiting the load so it doesn't linger over the
-      // old transcript while the new session streams in, matching the other
-      // session-switch paths (/resume, ResumeDialog).
+      // Close the drawer before awaiting the load; the transcript clears
+      // immediately and shows its loading skeleton for the selected session.
       closeMobileDrawer();
       try {
-        await sessionActions.loadSession(sessionId, {
-          deferTranscriptReset: true,
-        });
+        await sessionActions.loadSession(sessionId);
       } catch (error) {
         setSidebarSwitchingSessionId((current) =>
           current === sessionId ? null : current,
@@ -2045,11 +2076,17 @@ export function App({
     if (
       sidebarSwitchingSessionId !== null &&
       connection.sessionId === sidebarSwitchingSessionId &&
+      !connection.loadingTranscript &&
       !connection.catchingUp
     ) {
       setSidebarSwitchingSessionId(null);
     }
-  }, [connection.catchingUp, connection.sessionId, sidebarSwitchingSessionId]);
+  }, [
+    connection.catchingUp,
+    connection.loadingTranscript,
+    connection.sessionId,
+    sidebarSwitchingSessionId,
+  ]);
 
   const openTasksPanel = useCallback(() => {
     if (!requireActiveSessionForLocalCommand()) return;
@@ -2195,6 +2232,18 @@ export function App({
 
   const handleSubmit = useCallback(
     (text: string, images?: PromptImage[]) => {
+      if (connectionRef.current.loadingTranscript) {
+        pushToast('warning', t('editor.sessionLoading'));
+        return false;
+      }
+      if (
+        shouldBlockComposerSubmit({
+          connectionStatus: connectionRef.current.status,
+        })
+      ) {
+        pushToast('warning', t('editor.connectionDisconnected'));
+        return false;
+      }
       const promptBlocked = streamingStateRef.current !== 'idle';
       const submitPromptFromEditor = (
         promptText: string,
@@ -2414,6 +2463,21 @@ export function App({
                 voiceModelId,
               ).catch((error: unknown) =>
                 reportError(error, t('model.setVoice')),
+              );
+              return true;
+            }
+            if (modelArg === '--vision') {
+              setModelDialogMode('vision');
+              return true;
+            }
+            if (modelArg.startsWith('--vision ')) {
+              const visionModelId = modelArg.replace(/^--vision\s+/, '');
+              setWorkspaceSetting(
+                'workspace',
+                'visionModel',
+                visionModelId,
+              ).catch((error: unknown) =>
+                reportError(error, t('model.setVision')),
               );
               return true;
             }
@@ -3066,9 +3130,12 @@ export function App({
     }
     editorRef.current?.focus();
   }, []);
-  const handleFollowStateChange = useCallback((isFollowing: boolean) => {
-    setShowScrollToBottom(!isFollowing);
-  }, []);
+  const handleCanScrollToBottomChange = useCallback(
+    (canScrollToBottom: boolean) => {
+      setCanScrollMessageListToBottom(canScrollToBottom);
+    },
+    [],
+  );
 
   const handleRetry = useCallback(() => {
     if (
@@ -3227,7 +3294,11 @@ export function App({
     };
   }, [resetEscapeState]);
 
-  const isDisabled = !connected || connection.catchingUp;
+  const isDisabled = shouldDisableComposerInput({
+    catchingUp: Boolean(connection.catchingUp),
+    pendingApproval: pendingApproval !== null,
+    isPreparingPrompt,
+  });
 
   const handleModelSelect = useCallback(
     (modelId: string) => {
@@ -3262,6 +3333,9 @@ export function App({
         blockLocalCommandDuringTurn();
         return;
       }
+      // Model IDs from the picker arrive as bare model IDs (baseModelId), not
+      // ACP format. The model picker strips the (authType) suffix before
+      // calling this handler.
       sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
@@ -3271,12 +3345,34 @@ export function App({
 
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
-      setWorkspaceSetting('workspace', 'voiceModel', modelId).catch(
+      // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
+      // not ACP format. extractVoiceModels() sets id to the baseModelId.
+      const bareModelId = extractBareModelId(modelId);
+      setWorkspaceSetting('workspace', 'voiceModel', bareModelId).catch(
         (error: unknown) => reportError(error, t('model.setVoice')),
       );
     },
     [reportError, setWorkspaceSetting, t],
   );
+
+  const handleVisionModelSelect = useCallback(
+    (modelId: string) => {
+      // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
+      // Core's resolveVisionModelSelection() expects `authType:modelId`.
+      const encoded = encodeVisionModelForSetting(modelId);
+      setWorkspaceSetting('workspace', 'visionModel', encoded).catch(
+        (error: unknown) => reportError(error, t('model.setVision')),
+      );
+    },
+    [reportError, setWorkspaceSetting, t],
+  );
+
+  const modelHandlers: Record<ModelDialogMode, (id: string) => void> = {
+    main: handleModelSelect,
+    fast: handleFastModelSelect,
+    voice: handleVoiceModelSelect,
+    vision: handleVisionModelSelect,
+  };
 
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
@@ -3412,13 +3508,7 @@ export function App({
           )}
           {modelDialogMode && (
             <DialogShell
-              title={
-                modelDialogMode === 'fast'
-                  ? t('model.setFast')
-                  : modelDialogMode === 'voice'
-                    ? t('model.setVoice')
-                    : t('model.select')
-              }
+              title={t(MODE_TITLE_KEY[modelDialogMode])}
               size="lg"
               onClose={() => setModelDialogMode(null)}
             >
@@ -3426,15 +3516,17 @@ export function App({
                 mode={modelDialogMode}
                 models={modelDialogMode === 'voice' ? voiceModels : undefined}
                 currentModelId={
-                  modelDialogMode === 'voice' ? currentVoiceModel : undefined
+                  modelDialogMode === 'voice'
+                    ? currentVoiceModel
+                    : modelDialogMode === 'vision'
+                      ? currentVisionModel
+                      : modelDialogMode === 'fast'
+                        ? currentFastModel
+                        : undefined
                 }
                 onSelect={(modelId) => {
-                  if (modelDialogMode === 'fast') {
-                    handleFastModelSelect(modelId);
-                  } else if (modelDialogMode === 'voice') {
-                    handleVoiceModelSelect(modelId);
-                  } else {
-                    handleModelSelect(modelId);
+                  if (modelDialogMode) {
+                    modelHandlers[modelDialogMode](modelId);
                   }
                   setModelDialogMode(null);
                 }}
@@ -3463,6 +3555,15 @@ export function App({
               onClose={() => setShowToolsDialog(false)}
             >
               <ToolsDialog />
+            </DialogShell>
+          )}
+          {showDaemonStatusDialog && (
+            <DialogShell
+              title={t('daemon.title')}
+              size="xl"
+              onClose={() => setShowDaemonStatusDialog(false)}
+            >
+              <DaemonStatusDialog />
             </DialogShell>
           )}
           {showExtensionsDialog && (
@@ -3536,6 +3637,7 @@ export function App({
                 onSubDialog={(key) => {
                   setShowSettingsDialog(false);
                   if (key === 'fastModel') setModelDialogMode('fast');
+                  else if (key === 'visionModel') setModelDialogMode('vision');
                   else if (key === 'tools.approvalMode')
                     setShowApprovalModeDialog(true);
                 }}
@@ -3697,6 +3799,10 @@ export function App({
                     closeMobileDrawer();
                     setShowSettingsDialog(true);
                   }}
+                  onOpenDaemonStatus={() => {
+                    closeMobileDrawer();
+                    setShowDaemonStatusDialog(true);
+                  }}
                   onNewSession={createNewSession}
                   onLoadSession={loadSidebarSession}
                   onError={reportError}
@@ -3751,11 +3857,13 @@ export function App({
                         messages={displayMessages}
                         pendingApproval={pendingToolApproval}
                         onShowContextDetail={handleShowContextDetail}
+                        loadingTranscript={connection.loadingTranscript}
                         catchingUp={connection.catchingUp}
                         isResponding={streamingState !== 'idle'}
                         activeTurnStartedAt={activeTurnStartedAt}
                         workspaceCwd={connection.workspaceCwd || ''}
                         shellOutputMaxLines={shellOutputMaxLines}
+                        hideSessionTimeline={effectiveChatWidthMode === 'wide'}
                         showRetryHint={showRetryHint}
                         onRetryClick={handleRetry}
                         onBranchSession={handleBranchCurrentSession}
@@ -3764,7 +3872,9 @@ export function App({
                         }
                         tailContent={undefined}
                         tailKey={undefined}
-                        onFollowStateChange={handleFollowStateChange}
+                        onCanScrollToBottomChange={
+                          handleCanScrollToBottomChange
+                        }
                         virtualScrollThreshold={virtualScrollThreshold}
                       />
                       {btwMessage?.role === 'btw' && (
@@ -3781,7 +3891,7 @@ export function App({
                 </CompactModeContext.Provider>
 
                 <div ref={footerRef} className={styles.footer}>
-                  {showScrollToBottom && (
+                  {canScrollMessageListToBottom && (
                     <div
                       className={
                         showFloatingTodos
@@ -3857,11 +3967,7 @@ export function App({
                       isRunning={streamingState !== 'idle'}
                       isPreparing={isPreparingPrompt}
                       cancelArmed={cancelArmed}
-                      disabled={
-                        isDisabled ||
-                        pendingApproval !== null ||
-                        isPreparingPrompt
-                      }
+                      disabled={isDisabled}
                       commands={commands}
                       skills={loadedSkills}
                       slashCommandCategoryOrder={slashCommandCategoryOrder}
@@ -3886,13 +3992,13 @@ export function App({
                       onDismissFollowup={onDismissFollowup}
                       composerInput={composerInput}
                       composerInputVersion={composerInputVersion}
-                      placeholderText={
-                        !connected || connection.catchingUp
-                          ? t('common.loading')
-                          : isPreparingPrompt || streamingState !== 'idle'
-                            ? t('editor.processing')
-                            : t('editor.placeholder')
-                      }
+                      placeholderText={t(
+                        getComposerPlaceholderKey({
+                          catchingUp: Boolean(connection.catchingUp),
+                          isPreparingPrompt,
+                          isStreaming: streamingState !== 'idle',
+                        }),
+                      )}
                     />
                   </div>
                   {CustomFooter ? (

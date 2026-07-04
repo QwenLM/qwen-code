@@ -18,6 +18,11 @@ import type {
 import type { BridgeEvent, SubscribeOptions } from './eventBus.js';
 import type { PermissionPolicy } from './permission.js';
 import type {
+  SessionArtifactInput,
+  SessionArtifactMutationResult,
+  SessionArtifactsEnvelope,
+} from './sessionArtifacts.js';
+import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
@@ -136,6 +141,11 @@ export interface ChangeSessionCwdResult {
 }
 
 export type BridgeWorkspaceMemoryRememberContextMode = 'workspace' | 'clean';
+export type BridgeAutoMemoryTopic =
+  | 'user'
+  | 'feedback'
+  | 'project'
+  | 'reference';
 
 export interface BridgeWorkspaceMemoryRememberRequest {
   content: string;
@@ -146,6 +156,28 @@ export interface BridgeWorkspaceMemoryRememberResult {
   summary?: string;
   filesTouched: string[];
   touchedScopes: Array<'user' | 'project'>;
+}
+
+export interface BridgeWorkspaceMemoryForgetRequest {
+  query: string;
+}
+
+export interface BridgeWorkspaceMemoryForgetMatch {
+  topic: BridgeAutoMemoryTopic;
+  summary: string;
+  filePath: string;
+}
+
+export interface BridgeWorkspaceMemoryForgetResult {
+  summary?: string;
+  removedEntries: BridgeWorkspaceMemoryForgetMatch[];
+  touchedTopics: BridgeAutoMemoryTopic[];
+}
+
+export interface BridgeWorkspaceMemoryDreamResult {
+  summary?: string;
+  touchedTopics: BridgeAutoMemoryTopic[];
+  dedupedEntries: number;
 }
 
 /** Sparse summary used by `GET /workspace/:id/sessions`. */
@@ -495,6 +527,33 @@ export interface AcpSessionBridge {
   ): SessionMetadataUpdate;
 
   /**
+   * List the structured artifacts registered for a live session. Throws
+   * `SessionNotFoundError` when the id is unknown.
+   */
+  getSessionArtifacts(sessionId: string): Promise<SessionArtifactsEnvelope>;
+
+  /**
+   * Register a client-supplied artifact for the session. Client artifacts use
+   * the daemon-issued client id from the request context for retention/audit;
+   * request bodies cannot self-assign client ids.
+   */
+  addSessionArtifact(
+    sessionId: string,
+    artifact: SessionArtifactInput,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactMutationResult>;
+
+  /**
+   * Remove an artifact from the session. Missing artifact ids are idempotent
+   * no-ops; unknown session ids still throw `SessionNotFoundError`.
+   */
+  removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactMutationResult>;
+
+  /**
    * Cast a vote on a pending `permission_request` (first-responder wins).
    */
   respondToPermission(
@@ -584,6 +643,22 @@ export interface AcpSessionBridge {
   runWorkspaceMemoryRemember(
     request: BridgeWorkspaceMemoryRememberRequest,
   ): Promise<BridgeWorkspaceMemoryRememberResult>;
+
+  /**
+   * Run a hidden workspace-level managed-memory forget task. This
+   * ensures the ACP child exists but must not create/load/resume an ACP
+   * session or touch the per-session prompt queue.
+   */
+  runWorkspaceMemoryForget(
+    request: BridgeWorkspaceMemoryForgetRequest,
+  ): Promise<BridgeWorkspaceMemoryForgetResult>;
+
+  /**
+   * Run a hidden workspace-level managed-memory dream task. This
+   * ensures the ACP child exists but must not create/load/resume an ACP
+   * session or touch the per-session prompt queue.
+   */
+  runWorkspaceMemoryDream(): Promise<BridgeWorkspaceMemoryDreamResult>;
 
   /**
    * Check whether the ACP child can run managed-memory remember for the

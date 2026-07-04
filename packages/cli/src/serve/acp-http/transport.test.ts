@@ -17,6 +17,7 @@ import type {
   HttpAcpBridge,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -27,11 +28,7 @@ import {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import {
-  RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG,
-  SessionService,
-  Storage,
-} from '@qwen-code/qwen-code-core';
+import { SessionService, Storage } from '@qwen-code/qwen-code-core';
 import {
   resetHomeEnvBootstrapForTesting,
   SettingScope,
@@ -53,11 +50,7 @@ import {
   WorkspaceSettingsPartialPersistError,
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
-import {
-  buildChromeDevToolsMcpRuntimeConfigFromPackage,
-  type AcpHttpHandle,
-  mountAcpHttp,
-} from './index.js';
+import { type AcpHttpHandle, mountAcpHttp } from './index.js';
 import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
@@ -88,70 +81,6 @@ vi.mock('../../services/setup-github.js', async () => {
     ...actual,
     setupGithub: setupGithubMocks.setupGithub,
   };
-});
-
-describe('buildChromeDevToolsMcpRuntimeConfigFromPackage', () => {
-  const pkgJsonPath = path.join('/tmp/chrome-devtools-mcp', 'package.json');
-
-  it.each([undefined, 0, -1, 1.5] as const)(
-    'rejects invalid localPort=%s',
-    (localPort) => {
-      expect(
-        buildChromeDevToolsMcpRuntimeConfigFromPackage(
-          localPort,
-          pkgJsonPath,
-          'bin/cli.js',
-        ),
-      ).toBeUndefined();
-    },
-  );
-
-  it('rejects missing and escaping bin paths', () => {
-    expect(
-      buildChromeDevToolsMcpRuntimeConfigFromPackage(4170, pkgJsonPath, {}),
-    ).toBeUndefined();
-    expect(
-      buildChromeDevToolsMcpRuntimeConfigFromPackage(
-        4170,
-        pkgJsonPath,
-        '../evil.js',
-      ),
-    ).toBeUndefined();
-  });
-
-  it('builds the stdio config for a package-local bin', () => {
-    expect(
-      buildChromeDevToolsMcpRuntimeConfigFromPackage(4170, pkgJsonPath, {
-        cli: 'bin/cli.js',
-      }),
-    ).toEqual({
-      command: process.execPath,
-      args: [
-        path.join('/tmp/chrome-devtools-mcp', 'bin/cli.js'),
-        '--wsEndpoint',
-        'ws://127.0.0.1:4170/cdp',
-      ],
-      alwaysLoadTools: true,
-      [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
-    });
-  });
-
-  it('uses the listening host for a specific non-wildcard bind', () => {
-    expect(
-      buildChromeDevToolsMcpRuntimeConfigFromPackage(
-        4170,
-        pkgJsonPath,
-        { cli: 'bin/cli.js' },
-        '192.168.1.20',
-      ),
-    ).toMatchObject({
-      args: [
-        path.join('/tmp/chrome-devtools-mcp', 'bin/cli.js'),
-        '--wsEndpoint',
-        'ws://192.168.1.20:4170/cdp',
-      ],
-    });
-  });
 });
 
 /**
@@ -425,6 +354,51 @@ class FakeBridge {
       servers: [{ name: 'typescript', status: 'READY', languages: ['ts'] }],
     };
   }
+  lastAddedArtifact:
+    | {
+        sessionId: string;
+        artifact: Parameters<HttpAcpBridge['addSessionArtifact']>[1];
+        context: Parameters<HttpAcpBridge['addSessionArtifact']>[2];
+      }
+    | undefined;
+  lastArtifactListSessionId: string | undefined;
+  lastRemovedArtifact:
+    | {
+        sessionId: string;
+        artifactId: string;
+        context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2];
+      }
+    | undefined;
+  async getSessionArtifacts(sessionId: string) {
+    this.lastArtifactListSessionId = sessionId;
+    return {
+      v: 1,
+      sessionId,
+      artifacts: [],
+      generatedAt: new Date().toISOString(),
+      limits: { maxArtifacts: 200 },
+    };
+  }
+  async addSessionArtifact(
+    sessionId: string,
+    artifact: Parameters<HttpAcpBridge['addSessionArtifact']>[1],
+    context: Parameters<HttpAcpBridge['addSessionArtifact']>[2],
+  ) {
+    this.lastAddedArtifact = { sessionId, artifact, context };
+    return { v: 1, sessionId, changes: [] };
+  }
+  async removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2],
+  ) {
+    this.lastRemovedArtifact = { sessionId, artifactId, context };
+    return {
+      v: 1,
+      sessionId,
+      changes: [{ action: 'removed' as const, artifactId, reason: 'explicit' }],
+    };
+  }
   async getWorkspaceToolsStatus() {
     return { v: 1, tools: [] };
   }
@@ -476,6 +450,12 @@ class FakeBridge {
   }
   async runWorkspaceMemoryRemember() {
     return { summary: 'remembered', filesTouched: [], touchedScopes: [] };
+  }
+  async runWorkspaceMemoryForget() {
+    return { summary: 'forgot', removedEntries: [], touchedTopics: [] };
+  }
+  async runWorkspaceMemoryDream() {
+    return { summary: 'dreamed', touchedTopics: [], dedupedEntries: 0 };
   }
   async isWorkspaceMemoryRememberAvailable() {
     return true;
@@ -1053,6 +1033,18 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/workspace/memory/remember/get',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/forget',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/forget/get',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/dream',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/memory/dream/get',
     );
   });
 
@@ -5521,6 +5513,331 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('_qwen/session/artifacts returns the session artifact snapshot', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/artifacts',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          v: 1,
+          sessionId: 'sess-1',
+          artifacts: [],
+          limits: { maxArtifacts: 200 },
+        },
+      });
+      expect(bridge.lastArtifactListSessionId).toBe('sess-1');
+    });
+
+    it('_qwen/session/artifacts/add forwards only public artifact fields', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 58,
+        method: '_qwen/session/artifacts/add',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Lineage',
+          kind: 'link',
+          storage: 'external_url',
+          url: 'https://example.test/lineage',
+          metadata: { table: 'fact_orders' },
+          source: 'tool',
+          trustedPublisher: true,
+          clientId: 'forged-client',
+          toolName: 'forged-tool',
+          hookEventName: 'forged-hook',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { v: 1, sessionId: 'sess-1', changes: [] },
+      });
+      expect(bridge.lastAddedArtifact?.sessionId).toBe('sess-1');
+      expect(bridge.lastAddedArtifact?.artifact).toMatchObject({
+        title: 'Lineage',
+        kind: 'link',
+        storage: 'external_url',
+        url: 'https://example.test/lineage',
+        metadata: { table: 'fact_orders' },
+      });
+      const artifact = bridge.lastAddedArtifact?.artifact as
+        | Record<string, unknown>
+        | undefined;
+      expect(artifact).not.toHaveProperty('sessionId');
+      expect(artifact).not.toHaveProperty('source');
+      expect(artifact).not.toHaveProperty('trustedPublisher');
+      expect(artifact).not.toHaveProperty('clientId');
+      expect(artifact).not.toHaveProperty('toolName');
+      expect(artifact).not.toHaveProperty('hookEventName');
+    });
+
+    it('_qwen/session/artifacts/add maps artifact validation errors to invalid params', async () => {
+      bridge.addSessionArtifact = async () => {
+        throw new SessionArtifactValidationError(
+          'url must use http or https',
+          'url',
+        );
+      };
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/artifacts/add',
+        params: {
+          sessionId: 'sess-1',
+          title: 'Bad URL',
+          url: 'file:///tmp/report.html',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          data: { errorKind: 'artifact_validation_failed', field: 'url' },
+        },
+      });
+    });
+
+    it('_qwen/session/artifacts/remove forwards artifact id', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 59,
+        method: '_qwen/session/artifacts/remove',
+        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          v: 1,
+          sessionId: 'sess-1',
+          changes: [
+            {
+              action: 'removed',
+              artifactId: 'artifact-1',
+              reason: 'explicit',
+            },
+          ],
+        },
+      });
+      expect(bridge.lastRemovedArtifact).toMatchObject({
+        sessionId: 'sess-1',
+        artifactId: 'artifact-1',
+      });
+    });
+
+    it('_qwen/session/artifacts/remove rejects missing artifact id', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 60,
+        method: '_qwen/session/artifacts/remove',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          message: '`artifactId` is required',
+        },
+      });
+      expect(bridge.lastRemovedArtifact).toBeUndefined();
+    });
+
+    it('_qwen/session/artifacts/add holds the archive gate while mutating', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440131';
+        await writeStoredSession(sessionId);
+        let addStarted!: () => void;
+        let releaseAdd!: () => void;
+        const addStartedPromise = new Promise<void>((resolve) => {
+          addStarted = resolve;
+        });
+        const addReleasedPromise = new Promise<void>((resolve) => {
+          releaseAdd = resolve;
+        });
+        bridge.addSessionArtifact = async (sessionId, artifact, context) => {
+          bridge.lastAddedArtifact = { sessionId, artifact, context };
+          addStarted();
+          await addReleasedPromise;
+          return { v: 1, sessionId, changes: [] };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/load',
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 99 });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 60,
+          method: '_qwen/session/artifacts/add',
+          params: {
+            sessionId,
+            title: 'Lineage',
+            url: 'https://example.test/lineage',
+          },
+        });
+        await addStartedPromise;
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 61,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 61,
+          error: {
+            code: -32603,
+            data: { errorKind: 'session_archiving', sessionId },
+          },
+        });
+
+        releaseAdd();
+        expect(await reader.next()).toMatchObject({
+          id: 60,
+          result: { v: 1, sessionId, changes: [] },
+        });
+        reader.close();
+      });
+    });
+
+    it('_qwen/session/artifacts/remove holds the archive gate while mutating', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440132';
+        await writeStoredSession(sessionId);
+        let removeStarted!: () => void;
+        let releaseRemove!: () => void;
+        const removeStartedPromise = new Promise<void>((resolve) => {
+          removeStarted = resolve;
+        });
+        const removeReleasedPromise = new Promise<void>((resolve) => {
+          releaseRemove = resolve;
+        });
+        bridge.removeSessionArtifact = async (
+          sessionId,
+          artifactId,
+          context,
+        ) => {
+          bridge.lastRemovedArtifact = { sessionId, artifactId, context };
+          removeStarted();
+          await removeReleasedPromise;
+          return {
+            v: 1,
+            sessionId,
+            changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+          };
+        };
+
+        const connId = await initialize();
+        const stream = await openStream(connId);
+        const reader = frameReader(stream);
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/load',
+          params: { sessionId },
+        });
+        expect(await reader.next()).toMatchObject({ id: 99 });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 62,
+          method: '_qwen/session/artifacts/remove',
+          params: { sessionId, artifactId: 'artifact-1' },
+        });
+        await removeStartedPromise;
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 63,
+          method: '_qwen/sessions/archive',
+          params: { sessionIds: [sessionId] },
+        });
+        expect(await reader.next()).toMatchObject({
+          id: 63,
+          error: {
+            code: -32603,
+            data: { errorKind: 'session_archiving', sessionId },
+          },
+        });
+
+        releaseRemove();
+        expect(await reader.next()).toMatchObject({
+          id: 62,
+          result: {
+            v: 1,
+            sessionId,
+            changes: [
+              {
+                action: 'removed',
+                artifactId: 'artifact-1',
+                reason: 'explicit',
+              },
+            ],
+          },
+        });
+        reader.close();
+      });
+    });
+
     it('session methods reject unowned session', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -6004,6 +6321,101 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       }
     });
 
+    it('_qwen/workspace/memory/forget queues and polls hidden tasks', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 82,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'old preference' },
+        });
+        const queued = (await reader.next()) as {
+          result: { taskId: string; status: string };
+        };
+        expect(queued.result).toMatchObject({
+          status: 'queued',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 83,
+          method: '_qwen/workspace/memory/forget/get',
+          params: { taskId: queued.result.taskId },
+        });
+        const completed = (await reader.next()) as {
+          result: { status: string; result: { summary: string } };
+        };
+        expect(completed.result).toMatchObject({
+          status: 'completed',
+          result: { summary: 'forgot' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/workspace/memory/forget rejects oversized queries', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/workspace/memory/forget',
+          params: { query: 'x'.repeat(64 * 1024 + 1) },
+        });
+        const frame = (await reader.next()) as {
+          error: { code: number; message: string };
+        };
+        expect(frame.error.code).toBe(-32602);
+        expect(frame.error.message).toContain('`query` exceeds');
+      } finally {
+        reader.close();
+      }
+    });
+
+    it('_qwen/workspace/memory/dream queues and polls hidden tasks', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      const reader = frameReader(await streamRes);
+      try {
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 84,
+          method: '_qwen/workspace/memory/dream',
+          params: {},
+        });
+        const queued = (await reader.next()) as {
+          result: { taskId: string; status: string };
+        };
+        expect(queued.result).toMatchObject({
+          status: 'queued',
+        });
+
+        await new Promise((resolve) => setTimeout(resolve, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 85,
+          method: '_qwen/workspace/memory/dream/get',
+          params: { taskId: queued.result.taskId },
+        });
+        const completed = (await reader.next()) as {
+          result: { status: string; result: { summary: string } };
+        };
+        expect(completed.result).toMatchObject({
+          status: 'completed',
+          result: { summary: 'dreamed' },
+        });
+      } finally {
+        reader.close();
+      }
+    });
+
     it('shares remember task state between REST and ACP transports', async () => {
       const connId = await initialize();
       const clientId = clientIdForConnection(connId);
@@ -6467,6 +6879,15 @@ describe('ACP WebSocket transport security', () => {
   let server: Server;
   let port: number;
   let bridge: FakeBridge;
+  let previousCdpMcpCommand: string | undefined;
+
+  beforeEach(() => {
+    previousCdpMcpCommand = process.env['QWEN_CDP_MCP_COMMAND'];
+  });
+
+  async function yieldImmediate(): Promise<void> {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
 
   function startServer(
     opts: {
@@ -6510,7 +6931,16 @@ describe('ACP WebSocket transport security', () => {
   afterEach(async () => {
     server?.closeAllConnections?.();
     await new Promise<void>((r) => server?.close(() => r()) ?? r());
+    if (previousCdpMcpCommand === undefined) {
+      delete process.env['QWEN_CDP_MCP_COMMAND'];
+    } else {
+      process.env['QWEN_CDP_MCP_COMMAND'] = previousCdpMcpCommand;
+    }
   });
+
+  function enableCdpMcpCommand() {
+    process.env['QWEN_CDP_MCP_COMMAND'] = process.execPath;
+  }
 
   function wsConnect(
     opts: { headers?: Record<string, string> } = {},
@@ -6607,7 +7037,43 @@ describe('ACP WebSocket transport security', () => {
     expect(result.code).toBe(101);
   });
 
+  it('does not register chrome-devtools MCP without an explicit CDP MCP command', async () => {
+    delete process.env['QWEN_CDP_MCP_COMMAND'];
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await yieldImmediate();
+    expect(bridge.runtimeMcpAdds).toHaveLength(0);
+    expect(bridge.runtimeMcpRemoves).toHaveLength(0);
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (chrome-devtools-mcp is no longer bundled)',
+    );
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
+  it('treats a whitespace-only CDP MCP command as unset', async () => {
+    process.env['QWEN_CDP_MCP_COMMAND'] = '   ';
+    stdioMocks.writeStderrLine.mockClear();
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await yieldImmediate();
+    expect(bridge.runtimeMcpAdds).toHaveLength(0);
+    expect(stdioMocks.writeStderrLine).toHaveBeenCalledWith(
+      'qwen serve: set QWEN_CDP_MCP_COMMAND to enable browser automation MCP (chrome-devtools-mcp is no longer bundled)',
+    );
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
   it('dynamically registers chrome-devtools MCP for an active CDP bridge', async () => {
+    enableCdpMcpCommand();
     await startServer({ cdpTunnelOverWs: true });
     const ws = await wsConnect();
     await initializeCdpBridge(ws);
@@ -6620,7 +7086,6 @@ describe('ACP WebSocket transport security', () => {
     expect(bridge.runtimeMcpAdds[0]?.config).toMatchObject({
       command: process.execPath,
       args: expect.arrayContaining([
-        expect.stringContaining('chrome-devtools-mcp'),
         '--wsEndpoint',
         `ws://127.0.0.1:${port}/cdp`,
       ]),
@@ -6635,7 +7100,23 @@ describe('ACP WebSocket transport security', () => {
     });
   });
 
+  it('passes a custom CDP MCP command through to the runtime config', async () => {
+    process.env['QWEN_CDP_MCP_COMMAND'] = '/opt/custom/cdp-adapter';
+    await startServer({ cdpTunnelOverWs: true });
+    const ws = await wsConnect();
+    await initializeCdpBridge(ws);
+
+    await vi.waitFor(() => expect(bridge.runtimeMcpAdds).toHaveLength(1));
+    expect(bridge.runtimeMcpAdds[0]?.config).toMatchObject({
+      command: '/opt/custom/cdp-adapter',
+    });
+
+    ws.close();
+    await new Promise<void>((resolve) => ws.once('close', () => resolve()));
+  });
+
   it('keeps chrome-devtools MCP registered while a replacement CDP bridge is active', async () => {
+    enableCdpMcpCommand();
     await startServer({ cdpTunnelOverWs: true });
     const first = await wsConnect();
     await initializeCdpBridge(first, 1);
@@ -6659,6 +7140,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('removes chrome-devtools MCP when settings already define it', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddResult = { shadowedSettings: true };
@@ -6678,6 +7160,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('retries chrome-devtools MCP registration after a skipped result', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddResult = {
@@ -6707,6 +7190,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('removes chrome-devtools MCP if the CDP bridge disconnects during registration', async () => {
+    enableCdpMcpCommand();
     await startServer({ cdpTunnelOverWs: true });
     let releaseAdd: (() => void) | undefined;
     bridge.runtimeMcpBeforeAddResolve = () =>
@@ -6729,6 +7213,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('retries chrome-devtools MCP registration after add failure', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddError = new Error('add failed');
@@ -6754,6 +7239,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('retries chrome-devtools MCP registration while the ACP channel is unavailable', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddError = Object.assign(new Error('no channel'), {
@@ -6781,6 +7267,7 @@ describe('ACP WebSocket transport security', () => {
   });
 
   it('stops retrying chrome-devtools MCP registration after ACP channel retry exhaustion', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({ cdpTunnelOverWs: true });
     bridge.runtimeMcpAddError = Object.assign(new Error('no channel'), {
@@ -6805,6 +7292,7 @@ describe('ACP WebSocket transport security', () => {
   }, 10_000);
 
   it('skips chrome-devtools MCP registration when /cdp requires auth', async () => {
+    enableCdpMcpCommand();
     stdioMocks.writeStderrLine.mockClear();
     await startServer({
       cdpTunnelOverWs: true,

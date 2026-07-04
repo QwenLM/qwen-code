@@ -33,6 +33,7 @@ import {
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { getComposerTagIconUrl } from './composerTagIcons';
 import { ModeIcon } from './ModeIcon';
+import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
 import { VoiceButton } from '../voice/VoiceButton';
 import styles from './ChatEditor.module.css';
@@ -684,9 +685,9 @@ function SlashCommandPanel({
     '--slash-column-gap': hasDetailColumn ? '2ch' : '0px',
   } as CSSProperties;
 
-  let lastSection: string | undefined;
-
   if (!anchorRect) return null;
+
+  const rowPlans = planSlashSectionRows(menu.items, menu.kind);
 
   const positionedPanelStyle = {
     ...panelStyle,
@@ -720,16 +721,24 @@ function SlashCommandPanel({
             onScroll={() => setHoverDetail(null)}
           >
             {menu.items.map((item, index) => {
-              const section = item.section;
-              const showSection =
-                menu.kind === 'command' &&
-                index > 0 &&
-                section !== undefined &&
-                section !== lastSection;
-              lastSection = section ?? lastSection;
+              const plan = rowPlans[index];
               return (
                 <div key={`${item.id}:${index}`} className={styles.slashEntry}>
-                  {showSection && <div className={styles.slashSection} />}
+                  {plan.showHeader && (
+                    <>
+                      {plan.showDivider && (
+                        <div className={styles.slashSection} />
+                      )}
+                      <div className={styles.slashSectionHeader}>
+                        <span>{item.section}</span>
+                        {plan.count > 0 ? (
+                          <span className={styles.slashSectionCount}>
+                            {plan.count}
+                          </span>
+                        ) : null}
+                      </div>
+                    </>
+                  )}
                   <button
                     ref={(node) => {
                       itemRefs.current[index] = node;
@@ -1272,7 +1281,7 @@ export const ChatEditor = memo(
     const showCancelButton = isRunning && !core.hasContent;
 
     return (
-      <div className={styles.editorShell}>
+      <div className={styles.editorShell} data-composer>
         <div
           ref={containerRef}
           className={styles.container}

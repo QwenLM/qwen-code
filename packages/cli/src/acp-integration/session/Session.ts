@@ -31,6 +31,7 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   LoopTickResult,
+  ToolArtifact,
   VisionBridgeResult,
 } from '@qwen-code/qwen-code-core';
 import {
@@ -171,6 +172,7 @@ import {
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildExtensionMentionContext,
   EXTENSION_CONTEXT_BUDGET,
@@ -729,35 +731,43 @@ export async function buildAvailableCommandsSnapshot(
     'acp',
     settings,
   );
+  const disabledSkillNames = config.getDisabledSkillNames();
 
-  const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
-    const acceptsInput =
-      cmd.acceptsInput ??
-      (cmd.kind !== CommandKind.BUILT_IN ||
-        cmd.completion != null ||
-        cmd.argumentHint != null ||
-        (cmd.subCommands != null && cmd.subCommands.length > 0));
-    return {
-      name: cmd.name,
-      description: cmd.description,
-      input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
-      _meta: {
-        argumentHint: cmd.argumentHint,
-        source: cmd.source,
-        sourceLabel: cmd.sourceLabel,
-        supportedModes: getEffectiveSupportedModes(cmd),
-        subcommands: getCommandSubcommandNames(cmd),
-        modelInvocable: cmd.modelInvocable === true,
-        // Carry aliases so a channel consumer (which only sees the wire snapshot,
-        // not the command registry) can recognize an aliased command and avoid
-        // tagging it. _meta is ACP's extension point; omitted when there are none
-        // so command entries without aliases stay byte-identical on the wire.
-        ...(cmd.altNames && cmd.altNames.length > 0
-          ? { altNames: cmd.altNames }
-          : {}),
-      },
-    };
+  const visibleSlashCommands = slashCommands.filter((cmd) => {
+    if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
+    return !disabledSkillNames.has(cmd.skillDetail.name.toLowerCase());
   });
+
+  const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
+    (cmd) => {
+      const acceptsInput =
+        cmd.acceptsInput ??
+        (cmd.kind !== CommandKind.BUILT_IN ||
+          cmd.completion != null ||
+          cmd.argumentHint != null ||
+          (cmd.subCommands != null && cmd.subCommands.length > 0));
+      return {
+        name: cmd.name,
+        description: cmd.description,
+        input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
+        _meta: {
+          argumentHint: cmd.argumentHint,
+          source: cmd.source,
+          sourceLabel: cmd.sourceLabel,
+          supportedModes: getEffectiveSupportedModes(cmd),
+          subcommands: getCommandSubcommandNames(cmd),
+          modelInvocable: cmd.modelInvocable === true,
+          // Carry aliases so a channel consumer (which only sees the wire snapshot,
+          // not the command registry) can recognize an aliased command and avoid
+          // tagging it. _meta is ACP's extension point; omitted when there are none
+          // so command entries without aliases stay byte-identical on the wire.
+          ...(cmd.altNames && cmd.altNames.length > 0
+            ? { altNames: cmd.altNames }
+            : {}),
+        },
+      };
+    },
+  );
 
   let availableSkills: string[] | undefined;
   const skillDetailsByName = new Map<
@@ -767,7 +777,9 @@ export async function buildAvailableCommandsSnapshot(
   try {
     const skillManager = config.getSkillManager();
     if (skillManager) {
-      const skills = await skillManager.listSkills();
+      const skills = (await skillManager.listSkills()).filter(
+        (skill) => !disabledSkillNames.has(skill.name.toLowerCase()),
+      );
       availableSkills = skills.map((skill) => skill.name);
       for (const skill of skills) {
         skillDetailsByName.set(skill.name, {
@@ -784,7 +796,7 @@ export async function buildAvailableCommandsSnapshot(
     debugLogger.error('Error loading available skills:', error);
   }
 
-  for (const command of slashCommands) {
+  for (const command of visibleSlashCommands) {
     if (command.kind !== CommandKind.SKILL || !command.skillDetail) {
       continue;
     }
@@ -3987,7 +3999,6 @@ export class Session implements SessionContext {
         parts.push(await recordSkippedToolCall(remainingCall, message));
       }
     };
-
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by
     // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
@@ -5020,6 +5031,11 @@ export class Session implements SessionContext {
               ? 'error'
               : 'success';
           const succeeded = status === 'success';
+          const responseError = toolResult.error
+            ? new Error(toolResult.error.message)
+            : aborted
+              ? new Error('Tool execution was cancelled')
+              : undefined;
 
           // Fire PostToolUse hook on successful execution (aligned with core path)
           if (
@@ -5062,6 +5078,12 @@ export class Session implements SessionContext {
               const contextPart = { text: postHookResult.additionalContext };
               responseParts.push(contextPart);
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUse',
+              toolName,
+              toolCallId: callId,
+              artifacts: postHookResult.artifacts,
+            });
           } else if (
             hooksEnabledForTool &&
             messageBusForTool &&
@@ -5087,6 +5109,12 @@ export class Session implements SessionContext {
                 `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
               );
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUseFailure',
+              toolName,
+              toolCallId: callId,
+              artifacts: failureHookResult.artifacts,
+            });
           }
 
           // Handle TodoWriteTool: extract todos and send plan update
@@ -5105,20 +5133,15 @@ export class Session implements SessionContext {
             // Still log and return function response for LLM
           } else {
             // Normal tool handling: emit result using ToolCallEmitter
-            const error = toolResult.error
-              ? new Error(toolResult.error.message)
-              : aborted
-                ? new Error('Tool execution was cancelled')
-                : undefined;
-
             await this.toolCallEmitter.emitResult({
               callId,
               toolName,
               args,
               message: responseParts,
               resultDisplay: toolResult.returnDisplay,
-              error,
+              error: responseError,
               success: succeeded,
+              artifacts: toolResult.artifacts,
             });
           }
 
@@ -5194,6 +5217,12 @@ export class Session implements SessionContext {
                 `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
               );
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUseFailure',
+              toolName,
+              toolCallId: callId,
+              artifacts: failureHookResult.artifacts,
+            });
           }
 
           // Use ToolCallEmitter for error handling
@@ -5230,8 +5259,9 @@ export class Session implements SessionContext {
               error,
             );
 
+          const responseParts = errorResponse(error);
           return {
-            parts: errorResponse(error),
+            parts: responseParts,
             stopAfterPermissionCancel: nestedPermissionCancelled,
             loopDetected,
           };
@@ -5703,6 +5733,35 @@ export class Session implements SessionContext {
   debug(msg: string): void {
     if (this.config.getDebugMode()) {
       debugLogger.warn(msg);
+    }
+  }
+
+  private async emitHookArtifactsNotification(args: {
+    hookEventName: 'PostToolUse' | 'PostToolUseFailure';
+    toolName?: string;
+    toolCallId?: string;
+    artifacts?: ToolArtifact[];
+  }): Promise<void> {
+    if (!args.artifacts || args.artifacts.length === 0) {
+      return;
+    }
+
+    try {
+      await this.client.extNotification('qwen/notify/session/artifact-event', {
+        v: 1,
+        sessionId: this.sessionId,
+        source: 'hook',
+        hookEventName: args.hookEventName,
+        toolName: args.toolName,
+        toolCallId: args.toolCallId,
+        artifacts: args.artifacts,
+      });
+    } catch (error) {
+      writeStderrLine(
+        `Hook artifact notification dropped for ${args.toolName ?? args.hookEventName}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 

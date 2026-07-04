@@ -61,8 +61,11 @@ import {
   unregisterGoalHook,
   ToolNames,
   FORK_SUBAGENT_TYPE,
+  runManagedAutoMemoryDream,
   runManagedRememberByAgent,
   matchesAnyServerPattern,
+  registerAcpEventLoopLagGauge,
+  startEventLoopLagMonitor,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -87,7 +90,6 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   AgentSideConnection,
   RequestError,
-  ndJsonStream,
   PROTOCOL_VERSION,
 } from '@agentclientprotocol/sdk';
 import type { Content } from '@google/genai';
@@ -128,6 +130,7 @@ import {
   pickAuthMethodsForAuthRequired,
 } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
+import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
@@ -157,6 +160,8 @@ import {
   loadCliConfig,
 } from '../config/config.js';
 import { extractRememberErrorCode } from '../serve/workspace-remember-errors.js';
+import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
+import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
@@ -216,7 +221,6 @@ import {
   type ServeWorkspaceProviderModel,
   type ServeWorkspaceProviderStatus,
   type ServeWorkspaceProvidersStatus,
-  type ServeWorkspaceSkillStatus,
   type ServeWorkspaceSkillsStatus,
   type ServeWorkspaceToolStatus,
   type ServeWorkspaceToolsStatus,
@@ -250,6 +254,21 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+function createHiddenWorkspaceMemoryConfig(config: Config): Config {
+  return new Proxy(config, {
+    get(target, prop) {
+      if (prop === 'getChatRecordingService') {
+        return () => undefined;
+      }
+      if (prop === 'getTranscriptPath') {
+        return () => '';
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
 
 function collapseForkDirective(directive: string, maxLength: number): string {
   const oneLine = directive.replace(/\s+/g, ' ').trim();
@@ -2298,23 +2317,35 @@ export async function runAcpAgent(
     // client-hosted MCP server (#5626) round-trips over the parent WS.
     sendSdkMcpMessage: bootstrapClientMcpSender,
   });
+  const eventLoopMonitor = startEventLoopLagMonitor({
+    onNewMaxStall: (maxMs) => {
+      console.error(`[perf] acp agent event loop stall: max=${maxMs}ms`);
+    },
+  });
 
-  const stdout = Writable.toWeb(process.stdout) as WritableStream;
-  const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
-
-  // Stdout is used to send messages to the client, so console.log/console.info
-  // messages to stderr so that they don't interfere with ACP.
-  console.log = console.error;
-  console.info = console.error;
-  console.debug = console.error;
-
-  const stream = ndJsonStream(stdout, stdin);
   let agentInstance: QwenAgent | undefined;
-  const connection = new AgentSideConnection((conn) => {
-    acpConnection = conn;
-    agentInstance = new QwenAgent(config, settings, argv, conn);
-    return agentInstance;
-  }, stream);
+  let connection: AgentSideConnection;
+  try {
+    const stdout = Writable.toWeb(process.stdout) as WritableStream;
+    const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
+
+    // Stdout is used to send messages to the client, so console.log/console.info
+    // messages to stderr so that they don't interfere with ACP.
+    console.log = console.error;
+    console.info = console.error;
+    console.debug = console.error;
+
+    const stream = ndJsonStream(stdout, stdin);
+    connection = new AgentSideConnection((conn) => {
+      acpConnection = conn;
+      agentInstance = new QwenAgent(config, settings, argv, conn);
+      return agentInstance;
+    }, stream);
+  } catch (err) {
+    eventLoopMonitor.dispose();
+    throw err;
+  }
+  registerAcpEventLoopLagGauge(() => eventLoopMonitor.snapshot());
 
   // Both the SIGTERM handler and the IDE-initiated close path need
   // to drain the MCP pool before runExitCleanup. Single helper
@@ -2377,23 +2408,29 @@ export async function runAcpAgent(
     shuttingDown = true;
     debugLogger.debug('[ACP] Shutdown signal received, closing streams');
 
-    // Fire SessionEnd hook for all active sessions (aligned with core path)
-    await fireSessionEndOnce(SessionEndReason.Other);
-    agentInstance?.disposeSessions();
+    try {
+      // Fire SessionEnd hook for all active sessions (aligned with core path)
+      await fireSessionEndOnce(SessionEndReason.Other);
+      agentInstance?.disposeSessions();
 
-    try {
-      process.stdin.destroy();
-    } catch {
-      // stdin may already be closed
+      try {
+        process.stdin.destroy();
+      } catch {
+        // stdin may already be closed
+      }
+      try {
+        process.stdout.destroy();
+      } catch {
+        // stdout may already be closed
+      }
+      // Drain the workspace MCP pool BEFORE runExitCleanup so the
+      // descendant pid sweep can SIGTERM wrapper grandchildren.
+      await drainPoolBeforeExit('signal');
+    } catch (err) {
+      debugLogger.error('[ACP] Shutdown error:', err);
+    } finally {
+      eventLoopMonitor.dispose();
     }
-    try {
-      process.stdout.destroy();
-    } catch {
-      // stdout may already be closed
-    }
-    // Drain the workspace MCP pool BEFORE runExitCleanup so the
-    // descendant pid sweep can SIGTERM wrapper grandchildren.
-    await drainPoolBeforeExit('signal');
     // Clean up child processes (MCP servers, etc.) and force exit.
     // Without this, orphan subprocesses keep the Node.js event loop alive
     // and the CLI process never terminates after the IDE disconnects.
@@ -2408,16 +2445,19 @@ export async function runAcpAgent(
   process.on('SIGTERM', shutdownHandler);
   process.on('SIGINT', shutdownHandler);
 
-  await connection.closed;
-  // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
-  await fireSessionEndOnce(SessionEndReason.PromptInputExit);
-  // Mirror the SIGTERM handler's pool drain on the IDE-initiated
-  // normal close path to avoid leaking shared MCP entries.
-  await drainPoolBeforeExit('ide_close');
-  agentInstance?.disposeSessions();
-
-  process.off('SIGTERM', shutdownHandler);
-  process.off('SIGINT', shutdownHandler);
+  try {
+    await connection.closed;
+    // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
+    await fireSessionEndOnce(SessionEndReason.PromptInputExit);
+    // Mirror the SIGTERM handler's pool drain on the IDE-initiated
+    // normal close path to avoid leaking shared MCP entries.
+    await drainPoolBeforeExit('ide_close');
+    agentInstance?.disposeSessions();
+  } finally {
+    process.off('SIGTERM', shutdownHandler);
+    process.off('SIGINT', shutdownHandler);
+    eventLoopMonitor.dispose();
+  }
 }
 
 export function toStdioServer(server: McpServer): McpServerStdio | undefined {
@@ -3891,27 +3931,13 @@ class QwenAgent implements Agent {
     }
 
     try {
+      const disabled = config.getDisabledSkillNames();
       const skills = await skillManager.listSkills();
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
         initialized: true,
-        skills: skills.map((skill): ServeWorkspaceSkillStatus => {
-          const modelInvocable = skill.disableModelInvocation !== true;
-          return {
-            kind: 'skill',
-            status: modelInvocable ? 'ok' : 'disabled',
-            name: skill.name,
-            description: skill.description,
-            level: skill.level,
-            modelInvocable,
-            ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
-            ...(skill.model ? { model: skill.model } : {}),
-            ...(skill.extensionName
-              ? { extensionName: skill.extensionName }
-              : {}),
-          };
-        }),
+        skills: skills.map((skill) => mapSkillConfigToStatus(skill, disabled)),
       };
     } catch (error) {
       return {
@@ -5496,6 +5522,127 @@ class QwenAgent implements Agent {
               errorKind: code,
             },
           );
+        }
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget: {
+        const query = params['query'];
+        if (typeof query !== 'string' || !query.trim()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing query',
+          );
+        }
+        const trimmedQuery = query.trim();
+        if (
+          Buffer.byteLength(trimmedQuery, 'utf8') > MAX_REMEMBER_CONTENT_BYTES
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Query exceeds maximum size',
+          );
+        }
+        if (!this.config.isManagedMemoryAvailable()) {
+          throw new RequestError(
+            -32009,
+            'Managed memory is unavailable for this daemon workspace',
+            { errorKind: 'managed_memory_unavailable' },
+          );
+        }
+
+        const childSignal = AbortSignal.timeout(
+          WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
+        );
+        try {
+          const projectRoot = this.config.getProjectRoot();
+          const hiddenConfig = createHiddenWorkspaceMemoryConfig(this.config);
+          const result = await this.config
+            .getMemoryManager()
+            .forget(projectRoot, trimmedQuery, {
+              config: hiddenConfig,
+              abortSignal: childSignal,
+            });
+          return {
+            summary:
+              result.systemMessage ??
+              formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
+            removedEntries: result.removedEntries,
+            touchedTopics: result.touchedTopics,
+          } as unknown as Record<string, unknown>;
+        } catch (err) {
+          if (err instanceof RequestError) {
+            throw err;
+          }
+          if (childSignal.aborted) {
+            throw new RequestError(
+              -32099,
+              'Workspace memory forget timed out',
+              {
+                errorKind: 'forget_timeout',
+              },
+            );
+          }
+          const code = extractRememberErrorCode(err, 'forget_failed');
+          if (code === 'managed_memory_unavailable') {
+            throw new RequestError(
+              -32009,
+              'Managed memory is unavailable for this daemon workspace',
+              { errorKind: 'managed_memory_unavailable' },
+            );
+          }
+          throw new RequestError(-32099, 'Workspace memory forget failed', {
+            errorKind: code,
+          });
+        }
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream: {
+        if (!this.config.isManagedMemoryAvailable()) {
+          throw new RequestError(
+            -32009,
+            'Managed memory is unavailable for this daemon workspace',
+            { errorKind: 'managed_memory_unavailable' },
+          );
+        }
+
+        const childSignal = AbortSignal.timeout(
+          WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
+        );
+        try {
+          const result = await runManagedAutoMemoryDream(
+            this.config.getProjectRoot(),
+            new Date(),
+            createHiddenWorkspaceMemoryConfig(this.config),
+            childSignal,
+            {
+              trigger: 'manual',
+              recordMetadata: true,
+              suppressChatRecording: true,
+            },
+          );
+          return {
+            summary: result.systemMessage,
+            touchedTopics: result.touchedTopics,
+            dedupedEntries: result.dedupedEntries,
+          } as unknown as Record<string, unknown>;
+        } catch (err) {
+          if (err instanceof RequestError) {
+            throw err;
+          }
+          if (childSignal.aborted) {
+            throw new RequestError(-32099, 'Workspace memory dream timed out', {
+              errorKind: 'dream_timeout',
+            });
+          }
+          const code = extractRememberErrorCode(err, 'dream_failed');
+          if (code === 'managed_memory_unavailable') {
+            throw new RequestError(
+              -32009,
+              'Managed memory is unavailable for this daemon workspace',
+              { errorKind: 'managed_memory_unavailable' },
+            );
+          }
+          throw new RequestError(-32099, 'Workspace memory dream failed', {
+            errorKind: code,
+          });
         }
       }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {

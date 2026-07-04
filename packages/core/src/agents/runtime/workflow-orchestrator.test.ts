@@ -1179,26 +1179,25 @@ describe('createProductionDispatch', () => {
       'monitor',
       'enter_plan_mode',
       'exit_plan_mode',
+      'agent',
     ]);
   });
 
   // T10 (PR #4732 R1): the production dispatch must throw when the
   // subagent terminates with a non-GOAL mode. Without this, `await agent(...)`
   // would resolve to '' on user cancel and the script would keep running.
-  it.each([
-    ['CANCELLED'],
-    ['MAX_TURNS'],
-    ['TIMEOUT'],
-    ['ERROR'],
-  ])('throws when subagent terminate mode is %s', async (mode) => {
-    nextTerminateMode.value = mode;
-    const dispatch = createProductionDispatch(fakeConfig());
-    await expect(dispatch('hello', { label: 'h1' })).rejects.toThrow(
-      new RegExp(
-        `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
-      ),
-    );
-  });
+  it.each([['CANCELLED'], ['MAX_TURNS'], ['TIMEOUT'], ['ERROR']])(
+    'throws when subagent terminate mode is %s',
+    async (mode) => {
+      nextTerminateMode.value = mode;
+      const dispatch = createProductionDispatch(fakeConfig());
+      await expect(dispatch('hello', { label: 'h1' })).rejects.toThrow(
+        new RegExp(
+          `workflow-agent-[0-9a-f]{16} did not complete \\(terminate mode: ${mode}\\)\\.`,
+        ),
+      );
+    },
+  );
 
   // ── R1 (#1 + #3): token reporting across all terminate modes ──────────
 
@@ -1956,14 +1955,15 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
     expect(calls).toHaveLength(1);
     expect(calls[0].config.name).toBe('Explore');
     expect(calls[0].executeAgentId).toMatch(/^workflow-agent-[0-9a-f]{16}$/);
-    // Workflow floor [SendMessage, Monitor, EnterPlanMode, ExitPlanMode] must
-    // be unioned in.
+    // Workflow floor [SendMessage, Monitor, EnterPlanMode, ExitPlanMode,
+    // Agent] must be unioned in.
     expect(calls[0].config.disallowedTools).toEqual(
       expect.arrayContaining([
         'send_message',
         'monitor',
         'enter_plan_mode',
         'exit_plan_mode',
+        'agent',
       ]),
     );
   });
@@ -2046,6 +2046,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         'monitor',
         'enter_plan_mode',
         'exit_plan_mode',
+        'agent',
       ]),
     );
   });
@@ -2446,6 +2447,7 @@ describe('WorkflowOrchestrator P3 — agentType / model / isolation / schema', (
         'monitor',
         'enter_plan_mode',
         'exit_plan_mode',
+        'agent',
       ]),
     );
   });

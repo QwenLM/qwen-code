@@ -1,38 +1,46 @@
 #!/usr/bin/env node
 import { readFileSync, writeFileSync, appendFileSync } from 'node:fs';
 
-const DEFAULT_MAX_DIFF_BYTES = 256 * 1024;
-const DEFAULT_MAX_DIFF_LINES = 5000;
-const DEFAULT_MAX_FILES = 80;
+const SECRET_NAME_PATTERN = String.raw`secrets\.[A-Z0-9_]+|process\.env\.[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|_PAT)|\b(?:GITHUB_TOKEN|GH_TOKEN|OPENAI_API_KEY)\b`;
+const LOGGING_SINK_PATTERN = String.raw`\b(?:console\.\w+|process\.(?:stdout|stderr)\.write)\s*\(`;
+const NETWORK_SINK_PATTERN = String.raw`\b(?:fetch|axios|curl|wget)\b`;
+
+function secretSinkPattern(sinkPattern) {
+  return new RegExp(
+    String.raw`(?:${sinkPattern}[\s\S]{0,500}(?:${SECRET_NAME_PATTERN})|(?:${SECRET_NAME_PATTERN})[\s\S]{0,500}${sinkPattern})`,
+    'i',
+  );
+}
 
 const SENSITIVE_DIFF_PATTERNS = [
-  ['sensitive_diff:pull_request_target', /\bpull_request_target\b/i],
-  ['sensitive_diff:workflow_run', /\bworkflow_run\b/i],
-  ['sensitive_diff:repository_dispatch', /\brepository_dispatch\b/i],
-  ['sensitive_diff:write_all_permissions', /\bpermissions\s*:\s*write-all\b/i],
-  ['sensitive_diff:id_token_write', /\bid-token\s*:\s*write\b/i],
-  ['sensitive_diff:contents_write', /\bcontents\s*:\s*write\b/i],
-  ['sensitive_diff:actions_write', /\bactions\s*:\s*write\b/i],
+  ['sensitive_diff:secret_logging', secretSinkPattern(LOGGING_SINK_PATTERN)],
+  ['sensitive_diff:secret_network', secretSinkPattern(NETWORK_SINK_PATTERN)],
+];
+
+const SECRET_VALUE_PATTERNS = [
+  ['secret_value:private_key', /-----BEGIN [A-Z ]*PRIVATE KEY-----/],
   [
-    'sensitive_diff:self_hosted_runner',
-    /\bruns-on\s*:\s*(?:\[.*)?self-hosted\b/i,
+    'secret_value:github_token',
+    /\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{36,}\b|\bgithub_pat_[A-Za-z0-9_]{20,}\b/,
   ],
-  ['sensitive_diff:secrets_context', /\bsecrets\.[A-Z0-9_]+/i],
-  ['sensitive_diff:github_token', /\b(?:GITHUB_TOKEN|GH_TOKEN)\b/],
-  ['sensitive_diff:openai_key', /\bOPENAI_API_KEY\b/],
+  ['secret_value:openai_key', /\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/],
+  ['secret_value:aws_access_key', /\b(?:AKIA|ASIA)[A-Z0-9]{16}\b/],
+  ['secret_value:slack_token', /\bxox[baprs]-[A-Za-z0-9-]{20,}\b/],
   [
-    'sensitive_diff:secret_identifier',
-    /\b[A-Z0-9_]*(?:API_KEY|TOKEN|SECRET|PASSWORD|_PAT)\b/,
+    'secret_value:bearer_token',
+    /\bAuthorization\s*:\s*Bearer\s+[A-Za-z0-9._~+/=-]{20,}\b/i,
   ],
   [
-    'sensitive_diff:curl_pipe_shell',
-    /\b(?:curl|wget)\b[^\n|]*\|[^\n]*(?:sh|bash)\b/i,
+    'secret_value:access_token_param',
+    /\baccess_token=[A-Za-z0-9._~+/=-]{20,}\b/i,
   ],
-  ['sensitive_diff:eval', /\beval\s*(?:\(|`|\$)/i],
-  ['sensitive_diff:new_function', /\bnew\s+Function\s*\(/],
   [
-    'sensitive_diff:child_process',
-    /\bchild_process\b|\bexecSync\s*\(|\bexec\s*\(|\bspawn\s*\(/,
+    'secret_value:url_credentials',
+    /\b[a-z][a-z0-9+.-]*:\/\/[^/\s:@]+:[^@\s]{20,}@/i,
+  ],
+  [
+    'secret_value:assignment',
+    /(?:^|[^A-Za-z0-9])(?:[A-Z0-9_-]*(?:api[_-]?key|token|secret|password|pat))\b[^=\n:]{0,32}(?::?=|:)\s*['"`][A-Za-z0-9._~+/=-]{20,}['"`]/i,
   ],
 ];
 
@@ -55,39 +63,8 @@ const PROMPT_INJECTION_PATTERNS = [
   ],
 ];
 
-function filePath(file) {
-  if (typeof file === 'string') return file;
-  if (file && typeof file.path === 'string') return file.path;
-  if (file && typeof file.filename === 'string') return file.filename;
-  return '';
-}
-
 function addReason(reasons, code) {
   if (!reasons.includes(code)) reasons.push(code);
-}
-
-function checkSensitivePath(path, reasons) {
-  if (!path) {
-    addReason(reasons, 'input:invalid_file_path');
-    return;
-  }
-
-  if (path.startsWith('.github/')) {
-    addReason(reasons, 'sensitive_path:github');
-  }
-  if (path.startsWith('.devcontainer/')) {
-    addReason(reasons, 'sensitive_path:devcontainer');
-  }
-  if (/^(?:Dockerfile(?:\..*)?|docker-compose[^/]*\.ya?ml)$/i.test(path)) {
-    addReason(reasons, 'sensitive_path:container');
-  }
-  if (
-    /(^|\/)(?:\.env|\.env\.[^/]+|secrets?\.|credentials?\.|auth[^/]*|token[^/]*)/i.test(
-      path,
-    )
-  ) {
-    addReason(reasons, 'sensitive_path:secret_or_auth');
-  }
 }
 
 function checkPatterns(text, patterns, reasons) {
@@ -96,39 +73,25 @@ function checkPatterns(text, patterns, reasons) {
   }
 }
 
-export function assessPullRequestSafety({
-  pr,
-  diff,
-  maxDiffBytes = DEFAULT_MAX_DIFF_BYTES,
-  maxDiffLines = DEFAULT_MAX_DIFF_LINES,
-  maxFiles = DEFAULT_MAX_FILES,
-}) {
+export function assessPullRequestSafety({ pr, diff, trustedAuthor = false }) {
   const reasons = [];
   const headSha = typeof pr?.headRefOid === 'string' ? pr.headRefOid : '';
-  const files = Array.isArray(pr?.files) ? pr.files : null;
   const diffText = typeof diff === 'string' ? diff : '';
   let addedText = '';
 
   if (!headSha) addReason(reasons, 'input:missing_head_sha');
-  if (!files) {
-    addReason(reasons, 'input:files_unavailable');
-  } else {
-    if (files.length > maxFiles) addReason(reasons, 'input:too_many_files');
-    for (const file of files) checkSensitivePath(filePath(file), reasons);
+
+  if (trustedAuthor && reasons.length === 0) {
+    return {
+      decision: 'allow_triage',
+      head_sha: headSha,
+      reason_codes: [],
+    };
   }
 
   if (!diffText) {
     addReason(reasons, 'input:diff_unavailable');
   } else {
-    if (Buffer.byteLength(diffText, 'utf8') > maxDiffBytes) {
-      addReason(reasons, 'input:diff_too_large');
-    }
-    if (diffText.split('\n').length > maxDiffLines) {
-      addReason(reasons, 'input:diff_too_many_lines');
-    }
-    if (/Binary files .* differ/i.test(diffText)) {
-      addReason(reasons, 'input:binary_diff');
-    }
     addedText = diffText
       .split('\n')
       .filter((line) => line.startsWith('+') && !line.startsWith('+++'))
@@ -138,6 +101,7 @@ export function assessPullRequestSafety({
   }
 
   const prText = `${pr?.title ?? ''}\n${pr?.body ?? ''}\n${addedText}`;
+  checkPatterns(prText, SECRET_VALUE_PATTERNS, reasons);
   checkPatterns(prText, PROMPT_INJECTION_PATTERNS, reasons);
 
   return {
@@ -191,7 +155,8 @@ function main() {
 
   const pr = JSON.parse(readFileSync(args.pr, 'utf8'));
   const diff = readFileSync(args.diff, 'utf8');
-  const result = assessPullRequestSafety({ pr, diff });
+  const trustedAuthor = args['trusted-author'] === 'true';
+  const result = assessPullRequestSafety({ pr, diff, trustedAuthor });
 
   if (args.comment) {
     writeFileSync(

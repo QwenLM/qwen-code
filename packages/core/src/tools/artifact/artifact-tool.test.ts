@@ -70,6 +70,16 @@ describe('ArtifactTool', () => {
     expect(res.llmContent).toMatch(/Published artifact/);
     expect(res.llmContent).toMatch(/file:\/\//);
     expect(openSpy).toHaveBeenCalledTimes(1);
+    expect(res.artifacts).toMatchObject([
+      {
+        kind: 'html',
+        storage: 'published',
+        title: 'My Report',
+        mimeType: 'text/html',
+      },
+    ]);
+    expect(res.artifacts?.[0]?.url).toMatch(/^file:\/\//);
+    expect(res.artifacts?.[0]?.managedId).toBeTruthy();
 
     const published = res.resultFilePaths?.[0];
     expect(published).toBeTruthy();

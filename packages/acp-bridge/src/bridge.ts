@@ -85,6 +85,11 @@ import type {
   BridgeDaemonStatusSnapshot,
   ChangeSessionCwdRequest,
   ChangeSessionCwdResult,
+  BridgeAutoMemoryTopic,
+  BridgeWorkspaceMemoryDreamResult,
+  BridgeWorkspaceMemoryForgetRequest,
+  BridgeWorkspaceMemoryForgetResult,
+  BridgeWorkspaceMemoryForgetMatch,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
 } from './bridgeTypes.js';
@@ -100,6 +105,12 @@ import {
   type PermissionAuditPublisher,
 } from './permissionMediator.js';
 import { PermissionForbiddenError } from './bridgeErrors.js';
+import {
+  SessionArtifactStore,
+  type SessionArtifactChange,
+  type SessionArtifactInput,
+  type SessionArtifactMutationResult,
+} from './sessionArtifacts.js';
 
 const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
   captureContext: () => undefined,
@@ -241,6 +252,8 @@ interface SessionEntry {
   connection: ClientSideConnection;
   /** Per-session event bus drives `GET /session/:id/events`. */
   events: EventBus;
+  /** Per-session structured artifact registry. */
+  artifacts: SessionArtifactStore;
   /**
    * Tail of the per-session prompt queue. Each new prompt chains off the
    * resolved (or rejected) state of this promise so prompts run one at a
@@ -476,6 +489,101 @@ function parseWorkspaceMemoryRememberResult(
     ...(summary === undefined ? {} : { summary }),
     filesTouched: filesTouched as string[],
     touchedScopes: touchedScopes as Array<'user' | 'project'>,
+  };
+}
+
+function isBridgeAutoMemoryTopic(
+  value: unknown,
+): value is BridgeAutoMemoryTopic {
+  return (
+    value === 'user' ||
+    value === 'feedback' ||
+    value === 'project' ||
+    value === 'reference'
+  );
+}
+
+function parseWorkspaceMemoryForgetMatch(
+  value: unknown,
+): BridgeWorkspaceMemoryForgetMatch | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    !isBridgeAutoMemoryTopic(record['topic']) ||
+    typeof record['summary'] !== 'string' ||
+    typeof record['filePath'] !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    topic: record['topic'],
+    summary: record['summary'],
+    filePath: record['filePath'],
+  };
+}
+
+function parseWorkspaceMemoryForgetResult(
+  response: unknown,
+): BridgeWorkspaceMemoryForgetResult {
+  if (
+    response === null ||
+    typeof response !== 'object' ||
+    Array.isArray(response)
+  ) {
+    throw new Error('Malformed workspace memory forget response');
+  }
+  const record = response as Record<string, unknown>;
+  const summary = record['summary'];
+  const removedEntries = record['removedEntries'];
+  const touchedTopics = record['touchedTopics'];
+  const parsedRemovedEntries = Array.isArray(removedEntries)
+    ? removedEntries.map(parseWorkspaceMemoryForgetMatch)
+    : [];
+  if (
+    (summary !== undefined && typeof summary !== 'string') ||
+    !Array.isArray(removedEntries) ||
+    parsedRemovedEntries.some((entry) => entry === null) ||
+    !Array.isArray(touchedTopics) ||
+    !touchedTopics.every(isBridgeAutoMemoryTopic)
+  ) {
+    throw new Error('Malformed workspace memory forget response');
+  }
+  return {
+    ...(summary === undefined ? {} : { summary }),
+    removedEntries: parsedRemovedEntries as BridgeWorkspaceMemoryForgetMatch[],
+    touchedTopics: touchedTopics as BridgeAutoMemoryTopic[],
+  };
+}
+
+function parseWorkspaceMemoryDreamResult(
+  response: unknown,
+): BridgeWorkspaceMemoryDreamResult {
+  if (
+    response === null ||
+    typeof response !== 'object' ||
+    Array.isArray(response)
+  ) {
+    throw new Error('Malformed workspace memory dream response');
+  }
+  const record = response as Record<string, unknown>;
+  const summary = record['summary'];
+  const touchedTopics = record['touchedTopics'];
+  const dedupedEntries = record['dedupedEntries'];
+  if (
+    (summary !== undefined && typeof summary !== 'string') ||
+    !Array.isArray(touchedTopics) ||
+    !touchedTopics.every(isBridgeAutoMemoryTopic) ||
+    typeof dedupedEntries !== 'number' ||
+    !Number.isFinite(dedupedEntries)
+  ) {
+    throw new Error('Malformed workspace memory dream response');
+  }
+  return {
+    ...(summary === undefined ? {} : { summary }),
+    touchedTopics: touchedTopics as BridgeAutoMemoryTopic[],
+    dedupedEntries,
   };
 }
 
@@ -1341,6 +1449,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         },
         async () => await channelFactory(boundWorkspace, childEnvOverrides),
       );
+      const sessionIds = new Set<string>();
       const client = new BridgeClient(
         // BfFut: ACP today carries a sessionId on every per-session
         // notification / request, so the no-sessionId branch is
@@ -1395,6 +1504,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // Mode A) never host a client MCP server, so the method stays
         // unreachable.
         opts.clientMcpSender,
+        (sessionId) => sessionIds.has(sessionId),
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
@@ -1412,7 +1522,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         channel,
         connection,
         client,
-        sessionIds: new Set(),
+        sessionIds,
         pendingRestoreIds: new Set(),
         sessionSpawnsInFlight: 0,
         workspaceControlInFlight: 0,
@@ -2255,6 +2365,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       channel: ci.channel,
       connection: ci.connection,
       events,
+      artifacts: new SessionArtifactStore({ sessionId, workspaceCwd }),
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
       pendingPromptList: [],
@@ -2280,6 +2391,43 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     // freshly-created EventBus. Idempotent on unknown sessionIds.
     ci.client.drainEarlyEvents(entry.sessionId, entry);
     return entry;
+  };
+
+  const publishArtifactChanges = (
+    entry: SessionEntry,
+    changes: SessionArtifactChange[],
+    originatorClientId?: string,
+  ): void => {
+    for (const change of changes) {
+      entry.events.publish({
+        type: 'artifact_changed',
+        data: { sessionId: entry.sessionId, change },
+        ...(originatorClientId ? { originatorClientId } : {}),
+      });
+    }
+  };
+
+  const makeClientArtifactInput = (
+    artifact: SessionArtifactInput,
+    clientId: string | undefined,
+  ): SessionArtifactInput => {
+    const input: SessionArtifactInput = {
+      title: artifact.title,
+      kind: artifact.kind,
+      storage: artifact.storage,
+      description: artifact.description,
+      workspacePath: artifact.workspacePath,
+      managedId: artifact.managedId,
+      url: artifact.url,
+      mimeType: artifact.mimeType,
+      sizeBytes: artifact.sizeBytes,
+      metadata: artifact.metadata,
+      source: 'client',
+    };
+    if (clientId) {
+      input.clientId = clientId;
+    }
+    return input;
   };
 
   // A5: seed the snapshot caches from the agent's session-create response
@@ -3964,6 +4112,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return { displayName: entry.displayName };
     },
 
+    async getSessionArtifacts(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return entry.artifacts.list();
+    },
+
+    async addSessionArtifact(sessionId, artifact, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      const input = makeClientArtifactInput(artifact, clientId);
+      const result: SessionArtifactMutationResult =
+        await entry.artifacts.upsertMany([input], { strict: true });
+      publishArtifactChanges(entry, result.changes, clientId);
+      return result;
+    },
+
+    async removeSessionArtifact(sessionId, artifactId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      const result = await entry.artifacts.remove(artifactId, { clientId });
+      publishArtifactChanges(entry, result.changes, clientId);
+      return result;
+    },
+
     listWorkspaceSessions(workspaceCwd) {
       if (!path.isAbsolute(workspaceCwd)) return [];
       const key =
@@ -4181,6 +4355,56 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } finally {
         if (hasNoChannelWork(info)) {
           await startIdleTimer(info, 'workspace memory remember');
+        }
+      }
+    },
+
+    async runWorkspaceMemoryForget(
+      request: BridgeWorkspaceMemoryForgetRequest,
+    ): Promise<BridgeWorkspaceMemoryForgetResult> {
+      const info = await ensureChannel();
+      try {
+        const response = await withWorkspaceControl(info, () =>
+          withTimeout(
+            Promise.race([
+              info.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget,
+                { ...request, cwd: boundWorkspace },
+              ),
+              getChannelClosedReject(info),
+            ]),
+            WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget,
+          ),
+        );
+        return parseWorkspaceMemoryForgetResult(response);
+      } finally {
+        if (hasNoChannelWork(info)) {
+          await startIdleTimer(info, 'workspace memory forget');
+        }
+      }
+    },
+
+    async runWorkspaceMemoryDream(): Promise<BridgeWorkspaceMemoryDreamResult> {
+      const info = await ensureChannel();
+      try {
+        const response = await withWorkspaceControl(info, () =>
+          withTimeout(
+            Promise.race([
+              info.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream,
+                { cwd: boundWorkspace },
+              ),
+              getChannelClosedReject(info),
+            ]),
+            WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream,
+          ),
+        );
+        return parseWorkspaceMemoryDreamResult(response);
+      } finally {
+        if (hasNoChannelWork(info)) {
+          await startIdleTimer(info, 'workspace memory dream');
         }
       }
     },
