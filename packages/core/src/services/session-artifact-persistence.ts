@@ -7,6 +7,7 @@
 import { createHash } from 'node:crypto';
 
 export const SESSION_ARTIFACT_PERSISTENCE_VERSION = 2 as const;
+const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
 
 export type SessionArtifactRetention = 'ephemeral' | 'restorable' | 'pinned';
 
@@ -499,7 +500,14 @@ function normalizeContentRef(
   const sha256 = getString(value, 'sha256');
   const sizeBytes = getNonNegativeInteger(value, 'sizeBytes');
   const createdAt = getString(value, 'createdAt');
-  if (!contentId || !sha256 || sizeBytes === undefined || !createdAt) {
+  if (
+    !contentId ||
+    !CONTENT_ID_PATTERN.test(contentId) ||
+    !sha256 ||
+    !/^[0-9a-f]{64}$/.test(sha256) ||
+    sizeBytes === undefined ||
+    !createdAt
+  ) {
     return undefined;
   }
   return { kind: 'managed_copy', contentId, sha256, sizeBytes, createdAt };

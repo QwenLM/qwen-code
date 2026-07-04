@@ -190,6 +190,8 @@ export class SessionArtifactStore {
   private durableEventsSinceSnapshot = 0;
   private realWorkspaceCwdPromise?: Promise<string>;
   private operationQueue: Promise<void> = Promise.resolve();
+  private readonly tombstonedIds = new Set<string>();
+  private readonly stickyEphemeralIds = new Set<string>();
 
   constructor(options: SessionArtifactStoreOptions) {
     this.sessionId = options.sessionId;
@@ -528,8 +530,16 @@ export class SessionArtifactStore {
     return this.enqueue(async () => {
       const warnings = [...snapshot.warnings];
       this.artifacts.clear();
+      this.tombstonedIds.clear();
+      this.stickyEphemeralIds.clear();
       this.insertSeq = 0;
       this.persistenceSeq = snapshot.sequence;
+      for (const id of snapshot.tombstonedIds) {
+        this.tombstonedIds.add(id);
+      }
+      for (const id of snapshot.stickyEphemeralIds) {
+        this.stickyEphemeralIds.add(id);
+      }
       for (const artifact of snapshot.artifacts) {
         try {
           const input = persistedArtifactToInput(artifact);
@@ -578,6 +588,8 @@ export class SessionArtifactStore {
     insertSeq: number;
     persistenceSeq: number;
     durableEventsSinceSnapshot: number;
+    tombstonedIds: Set<string>;
+    stickyEphemeralIds: Set<string>;
   } {
     return {
       artifacts: new Map(
@@ -589,6 +601,8 @@ export class SessionArtifactStore {
       insertSeq: this.insertSeq,
       persistenceSeq: this.persistenceSeq,
       durableEventsSinceSnapshot: this.durableEventsSinceSnapshot,
+      tombstonedIds: new Set(this.tombstonedIds),
+      stickyEphemeralIds: new Set(this.stickyEphemeralIds),
     };
   }
 
@@ -597,6 +611,8 @@ export class SessionArtifactStore {
     insertSeq: number;
     persistenceSeq: number;
     durableEventsSinceSnapshot: number;
+    tombstonedIds: Set<string>;
+    stickyEphemeralIds: Set<string>;
   }): void {
     this.artifacts.clear();
     for (const [id, artifact] of state.artifacts) {
@@ -605,6 +621,14 @@ export class SessionArtifactStore {
     this.insertSeq = state.insertSeq;
     this.persistenceSeq = state.persistenceSeq;
     this.durableEventsSinceSnapshot = state.durableEventsSinceSnapshot;
+    this.tombstonedIds.clear();
+    for (const id of state.tombstonedIds) {
+      this.tombstonedIds.add(id);
+    }
+    this.stickyEphemeralIds.clear();
+    for (const id of state.stickyEphemeralIds) {
+      this.stickyEphemeralIds.add(id);
+    }
   }
 
   private async persistChanges(
@@ -631,7 +655,12 @@ export class SessionArtifactStore {
       const stored = this.artifacts.get(change.artifactId);
       if (!stored) continue;
       stored.persistedAt = recordedAt;
-      delete stored.persistenceWarning;
+      if (
+        stored.contentRef ||
+        stored.persistenceWarning !== 'metadata_only_restore'
+      ) {
+        delete stored.persistenceWarning;
+      }
       change.artifact = toPublicArtifact(stored);
     }
 
@@ -647,6 +676,7 @@ export class SessionArtifactStore {
 
     try {
       await this.persistence.recordEvent(payload);
+      this.applyDurableMarkers(durableChanges);
       await this.maybeRecordSnapshot(recordedAt);
       return [];
     } catch (error) {
@@ -681,6 +711,8 @@ export class SessionArtifactStore {
       sequence: ++this.persistenceSeq,
       recordedAt,
       artifacts,
+      tombstonedIds: Array.from(this.tombstonedIds),
+      stickyEphemeralIds: Array.from(this.stickyEphemeralIds),
     };
     try {
       await this.persistence.recordSnapshot(payload);
@@ -708,6 +740,24 @@ export class SessionArtifactStore {
     return [
       'artifact persistence unavailable; durable artifacts kept ephemeral',
     ];
+  }
+
+  private applyDurableMarkers(changes: readonly SessionArtifactChange[]): void {
+    for (const change of changes) {
+      if (change.action === 'removed') {
+        if (change.reason === 'explicit') {
+          this.tombstonedIds.add(change.artifactId);
+          this.stickyEphemeralIds.delete(change.artifactId);
+        } else if (change.reason === 'unpin_to_ephemeral') {
+          this.stickyEphemeralIds.add(change.artifactId);
+        }
+        continue;
+      }
+      if (change.artifact && change.artifact.retention !== 'ephemeral') {
+        this.tombstonedIds.delete(change.artifactId);
+        this.stickyEphemeralIds.delete(change.artifactId);
+      }
+    }
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -1290,7 +1340,7 @@ function selectEvictionCandidate(
           SOURCE_RESERVATIONS[artifact.retentionSource],
     ) ??
     oldest(candidates, (artifact) => !artifact.clientRetained) ??
-    oldest(candidates)
+    oldest(candidates, (artifact) => artifact.retention !== 'pinned')
   );
 }
 

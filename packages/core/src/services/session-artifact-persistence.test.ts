@@ -129,6 +129,33 @@ describe('session artifact persistence records', () => {
     expect(snapshot?.sequence).toBe(3);
   });
 
+  it('drops malformed content refs during restore normalization', () => {
+    const pinned = artifact('s1', 'https://example.com/pinned', {
+      retention: 'pinned',
+      contentRef: {
+        kind: 'managed_copy',
+        contentId: '../../escape',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 12,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      },
+    });
+
+    const snapshot = rebuildSessionArtifactSnapshot([
+      event({
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 's1',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          { action: 'created', artifactId: pinned.id, artifact: pinned },
+        ],
+      }),
+    ]);
+
+    expect(snapshot?.artifacts[0]).not.toHaveProperty('contentRef');
+  });
+
   it('remaps forked payloads to the new session without carrying pinned content', () => {
     const source = artifact('source-session', 'https://example.com/report', {
       retention: 'pinned',

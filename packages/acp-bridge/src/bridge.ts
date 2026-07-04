@@ -2923,6 +2923,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       activePromptCounter--;
       touchActivity();
     }
+    try {
+      await artifactContentStore.gc(sessionId, new Set());
+    } catch (error) {
+      writeStderrLine(
+        `qwen serve: session artifact GC failed during close for ${JSON.stringify(
+          sessionId,
+        )}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
     byId.delete(sessionId);
     telemetry.metrics?.sessionLifecycle('close');
     // Tombstone the closed sessionId so any late `extNotification`

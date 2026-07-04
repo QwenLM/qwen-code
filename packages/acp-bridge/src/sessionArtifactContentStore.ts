@@ -16,6 +16,7 @@ import { SessionArtifactValidationError } from './sessionArtifacts.js';
 const CONTENT_FORMAT_VERSION = 1;
 const MAX_PINNED_FILE_BYTES = 50 * 1024 * 1024;
 const MAX_CONTENT_STORE_BYTES = 256 * 1024 * 1024;
+const CONTENT_ID_PATTERN = /^[0-9a-f]{64}-[0-9a-f]{16}$/;
 
 interface ContentManifest {
   v: typeof CONTENT_FORMAT_VERSION;
@@ -134,11 +135,7 @@ export class SessionArtifactContentStore {
           sizeBytes,
           createdAt,
         };
-        await fs.writeFile(
-          path.join(contentDir, 'manifest.json'),
-          `${JSON.stringify(manifest)}\n`,
-          { mode: 0o600 },
-        );
+        await writeManifestAtomic(contentDir, manifest);
         return {
           kind: 'managed_copy',
           contentId,
@@ -161,6 +158,10 @@ export class SessionArtifactContentStore {
     const missing: string[] = [];
     const hashMismatches: string[] = [];
     for (const ref of contentRefs) {
+      if (!isValidContentId(ref.contentId)) {
+        missing.push(ref.contentId);
+        continue;
+      }
       const dataPath = path.join(this.rootDir, ref.contentId, 'content');
       try {
         const { sha256 } = await hashFile(dataPath);
@@ -194,7 +195,10 @@ export class SessionArtifactContentStore {
       throw error;
     }
     for (const entry of entries) {
-      if (entry === '.tmp') continue;
+      if (entry === '.tmp') {
+        await cleanTmpDir(path.join(this.rootDir, entry));
+        continue;
+      }
       const fullPath = path.join(this.rootDir, entry);
       if (referencedContentIds.has(entry)) {
         retained.push(entry);
@@ -236,7 +240,14 @@ export class SessionArtifactContentStore {
         );
         total += manifest.sizeBytes;
       } catch {
-        // Malformed manifests are handled by fsck/GC; ignore them for quota.
+        try {
+          const stat = await fs.stat(path.join(this.rootDir, entry, 'content'));
+          if (stat.isFile()) {
+            total += stat.size;
+          }
+        } catch {
+          // Malformed manifests are handled by fsck/GC.
+        }
       }
     }
     return total;
@@ -332,7 +343,64 @@ function hashFile(
 
 async function readManifest(filePath: string): Promise<ContentManifest> {
   const body = await fs.readFile(filePath, 'utf8');
-  return JSON.parse(body) as ContentManifest;
+  const parsed = JSON.parse(body) as Partial<ContentManifest>;
+  if (
+    parsed.v !== CONTENT_FORMAT_VERSION ||
+    !parsed.contentId ||
+    !isValidContentId(parsed.contentId) ||
+    typeof parsed.sessionId !== 'string' ||
+    typeof parsed.artifactId !== 'string' ||
+    typeof parsed.workspacePath !== 'string' ||
+    typeof parsed.sha256 !== 'string' ||
+    !/^[0-9a-f]{64}$/.test(parsed.sha256) ||
+    typeof parsed.sizeBytes !== 'number' ||
+    !Number.isSafeInteger(parsed.sizeBytes) ||
+    parsed.sizeBytes < 0 ||
+    typeof parsed.createdAt !== 'string'
+  ) {
+    throw new Error('Invalid artifact content manifest');
+  }
+  return parsed as ContentManifest;
+}
+
+async function writeManifestAtomic(
+  contentDir: string,
+  manifest: ContentManifest,
+): Promise<void> {
+  const tmpPath = path.join(
+    contentDir,
+    `.manifest-${process.pid}-${Date.now()}.json.tmp`,
+  );
+  try {
+    await fs.writeFile(tmpPath, `${JSON.stringify(manifest)}\n`, {
+      mode: 0o600,
+    });
+    await fs.rename(tmpPath, path.join(contentDir, 'manifest.json'));
+  } catch (error) {
+    await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+    throw error;
+  }
+}
+
+async function cleanTmpDir(tmpDir: string): Promise<void> {
+  let entries: string[];
+  try {
+    entries = await fs.readdir(tmpDir);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+      return;
+    }
+    throw error;
+  }
+  await Promise.all(
+    entries.map((entry) =>
+      fs.rm(path.join(tmpDir, entry), { recursive: true, force: true }),
+    ),
+  );
+}
+
+function isValidContentId(contentId: string): boolean {
+  return CONTENT_ID_PATTERN.test(contentId);
 }
 
 async function exists(filePath: string): Promise<boolean> {
