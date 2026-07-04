@@ -7,7 +7,6 @@
 import {
   SessionService,
   SessionOrganizationError,
-  SessionOrganizationService,
   type SessionArchiveState,
 } from '@qwen-code/qwen-code-core';
 import type {
@@ -15,6 +14,7 @@ import type {
   BridgeSessionSummary,
 } from '../acp-session-bridge.js';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
+import { createSessionOrganizationService } from '../session-organization-helpers.js';
 
 const DEFAULT_SESSION_PAGE_SIZE = 20;
 const MAX_SESSION_PAGE_SIZE = 100;
@@ -154,12 +154,15 @@ function getSummaryActivityTime(session: BridgeSessionSummary): number {
 }
 
 function compareOrganizedSessions(
+  activityTimeById: ReadonlyMap<string, number>,
   a: BridgeSessionSummary,
   b: BridgeSessionSummary,
 ): number {
   const byPinned = Number(Boolean(b.isPinned)) - Number(Boolean(a.isPinned));
   if (byPinned !== 0) return byPinned;
-  const byTime = getSummaryActivityTime(b) - getSummaryActivityTime(a);
+  const byTime =
+    (activityTimeById.get(b.sessionId) ?? 0) -
+    (activityTimeById.get(a.sessionId) ?? 0);
   if (byTime !== 0) return byTime;
   return a.sessionId.localeCompare(b.sessionId);
 }
@@ -182,14 +185,6 @@ function applyOrganization(
       ? { pinnedAt: organization.pinnedAt }
       : {}),
   };
-}
-
-function createSessionOrganizationService(
-  workspaceCwd: string,
-): SessionOrganizationService {
-  return new SessionOrganizationService(workspaceCwd, (message) => {
-    writeStderrLine(`qwen serve: session-org: ${message}`);
-  });
 }
 
 async function listOrganizedWorkspaceSessionsForResponse(
@@ -281,14 +276,19 @@ async function listOrganizedWorkspaceSessionsForResponse(
     }
   }
 
-  const filtered = [...bySessionId.values()]
-    .filter((session) => {
-      if (group === 'all') return true;
-      if (group === 'pinned') return session.isPinned === true;
-      if (group === 'ungrouped') return session.groupId == null;
-      return session.groupId === group;
-    })
-    .sort(compareOrganizedSessions);
+  const filtered = [...bySessionId.values()].filter((session) => {
+    if (group === 'all') return true;
+    if (group === 'pinned') return session.isPinned === true;
+    if (group === 'ungrouped') return session.groupId == null;
+    return session.groupId === group;
+  });
+  const activityTimeById = new Map(
+    filtered.map((session) => [
+      session.sessionId,
+      getSummaryActivityTime(session),
+    ]),
+  );
+  filtered.sort((a, b) => compareOrganizedSessions(activityTimeById, a, b));
   const page = filtered.slice(offset, offset + pageSize);
   const nextOffset = offset + page.length;
   const nextCursor =

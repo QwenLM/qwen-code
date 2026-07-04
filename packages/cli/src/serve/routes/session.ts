@@ -11,7 +11,6 @@ import {
   BTW_MAX_INPUT_LENGTH,
   SessionService,
   SessionOrganizationError,
-  SessionOrganizationService,
   addDaemonRequestAttribute,
   type ApprovalMode,
   type SessionGroupColor,
@@ -60,6 +59,7 @@ import {
   parseSessionExportFormat,
   sessionExportFormatValues,
 } from '../server/session-export.js';
+import { createSessionOrganizationService } from '../session-organization-helpers.js';
 
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
@@ -92,20 +92,18 @@ function sendSessionOrganizationError(res: Response, err: unknown): boolean {
   if (!(err instanceof SessionOrganizationError)) {
     return false;
   }
-  res.status(err.code === 'group_name_conflict' ? 409 : 400).json({
+  const status =
+    err.code === 'group_name_conflict'
+      ? 409
+      : err.code === 'group_not_found'
+        ? 404
+        : 400;
+  res.status(status).json({
     error: err.message,
     code: err.code,
     ...(err.field !== undefined ? { field: err.field } : {}),
   });
   return true;
-}
-
-function createSessionOrganizationService(
-  workspaceCwd: string,
-): SessionOrganizationService {
-  return new SessionOrganizationService(workspaceCwd, (message) => {
-    writeStderrLine(`qwen serve: session-org: ${message}`);
-  });
 }
 
 export function registerSessionRoutes(

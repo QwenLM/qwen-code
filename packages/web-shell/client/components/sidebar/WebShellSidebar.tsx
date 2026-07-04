@@ -456,8 +456,10 @@ export function WebShellSidebar({
   const [groupBusy, setGroupBusy] = useState(false);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
-  const [busySessionId, setBusySessionId] = useState<string | null>(null);
-  const busySessionIdRef = useRef<string | null>(null);
+  const [busySessionIds, setBusySessionIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const busySessionIdsRef = useRef<Set<string>>(new Set());
   const [exportingSessionIds, setExportingSessionIds] = useState<Set<string>>(
     () => new Set(),
   );
@@ -514,6 +516,17 @@ export function WebShellSidebar({
         : groups.find((group) => group.id === selectedGroupId),
     [groups, selectedGroupId],
   );
+
+  const setSessionBusy = useCallback((sessionId: string, busy: boolean) => {
+    const next = new Set(busySessionIdsRef.current);
+    if (busy) {
+      next.add(sessionId);
+    } else {
+      next.delete(sessionId);
+    }
+    busySessionIdsRef.current = next;
+    setBusySessionIds(next);
+  }, []);
 
   const reloadGroups = useCallback(async () => {
     if (!organizationEnabled) {
@@ -713,7 +726,8 @@ export function WebShellSidebar({
   );
 
   const handleNewSession = useCallback(() => {
-    if (busySessionIdRef.current !== null || creatingSessionRef.current) return;
+    if (busySessionIdsRef.current.size > 0 || creatingSessionRef.current)
+      return;
 
     creatingSessionRef.current = true;
     void (async () => {
@@ -736,7 +750,7 @@ export function WebShellSidebar({
     (sessionId: string) => {
       if (
         sessionId === currentSessionId ||
-        sessionId === busySessionIdRef.current
+        busySessionIdsRef.current.has(sessionId)
       ) {
         return;
       }
@@ -746,8 +760,7 @@ export function WebShellSidebar({
         next.delete(sessionId);
         return next;
       });
-      busySessionIdRef.current = sessionId;
-      setBusySessionId(sessionId);
+      setSessionBusy(sessionId, true);
       void (async () => {
         try {
           await onLoadSession(sessionId);
@@ -756,16 +769,11 @@ export function WebShellSidebar({
             onError(err, t('sidebar.switchFailed'));
           }
         } finally {
-          if (busySessionIdRef.current === sessionId) {
-            busySessionIdRef.current = null;
-          }
-          setBusySessionId((current) =>
-            current === sessionId ? null : current,
-          );
+          setSessionBusy(sessionId, false);
         }
       })();
     },
-    [currentSessionId, onError, onLoadSession, t],
+    [currentSessionId, onError, onLoadSession, setSessionBusy, t],
   );
 
   const startRename = useCallback((session: DaemonSessionSummary) => {
@@ -785,8 +793,8 @@ export function WebShellSidebar({
       return;
     }
     const sessionId = editingSessionId;
-    busySessionIdRef.current = sessionId;
-    setBusySessionId(sessionId);
+    if (busySessionIdsRef.current.has(sessionId)) return;
+    setSessionBusy(sessionId, true);
     actions
       .renameSession(nextName)
       .then(() => {
@@ -798,10 +806,7 @@ export function WebShellSidebar({
         cancelRename();
       })
       .finally(() => {
-        if (busySessionIdRef.current === sessionId) {
-          busySessionIdRef.current = null;
-        }
-        setBusySessionId((current) => (current === sessionId ? null : current));
+        setSessionBusy(sessionId, false);
       });
   }, [
     actions,
@@ -811,6 +816,7 @@ export function WebShellSidebar({
     editingSessionId,
     onError,
     reload,
+    setSessionBusy,
     t,
   ]);
 
@@ -879,8 +885,8 @@ export function WebShellSidebar({
     }
     const isArchived = Boolean(deleteCandidate.isArchived);
     setDeleteCandidate(null);
-    busySessionIdRef.current = sessionId;
-    setBusySessionId(sessionId);
+    if (busySessionIdsRef.current.has(sessionId)) return;
+    setSessionBusy(sessionId, true);
     const removeSession = isArchived ? deleteArchivedSession : deleteSession;
     removeSession(sessionId)
       .then(() => {
@@ -891,10 +897,7 @@ export function WebShellSidebar({
       })
       .catch((err: unknown) => onError(err, t('sidebar.deleteFailed')))
       .finally(() => {
-        if (busySessionIdRef.current === sessionId) {
-          busySessionIdRef.current = null;
-        }
-        setBusySessionId((current) => (current === sessionId ? null : current));
+        setSessionBusy(sessionId, false);
       });
   }, [
     currentSessionId,
@@ -904,6 +907,7 @@ export function WebShellSidebar({
     onError,
     reload,
     reloadArchived,
+    setSessionBusy,
     t,
   ]);
 
@@ -1027,10 +1031,11 @@ export function WebShellSidebar({
 
   const handleTogglePin = useCallback(
     (session: DaemonSessionSummary) => {
-      if (!organizationEnabled || busySessionIdRef.current !== null) return;
       const sessionId = session.sessionId;
-      busySessionIdRef.current = sessionId;
-      setBusySessionId(sessionId);
+      if (!organizationEnabled || busySessionIdsRef.current.has(sessionId)) {
+        return;
+      }
+      setSessionBusy(sessionId, true);
       workspaceActions
         .updateSessionOrganization(sessionId, {
           isPinned: !session.isPinned,
@@ -1038,15 +1043,10 @@ export function WebShellSidebar({
         .then(() => reload())
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
-          if (busySessionIdRef.current === sessionId) {
-            busySessionIdRef.current = null;
-          }
-          setBusySessionId((current) =>
-            current === sessionId ? null : current,
-          );
+          setSessionBusy(sessionId, false);
         });
     },
-    [onError, organizationEnabled, reload, t, workspaceActions],
+    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
   );
 
   const handleArchive = useCallback(
@@ -1055,47 +1055,42 @@ export function WebShellSidebar({
       // The daemon force-ends a live turn on archive; keep the current
       // session off-limits, mirroring the delete guard.
       if (sessionId === currentSessionId) return;
-      if (busySessionIdRef.current !== null) return;
-      busySessionIdRef.current = sessionId;
-      setBusySessionId(sessionId);
+      if (busySessionIdsRef.current.has(sessionId)) return;
+      setSessionBusy(sessionId, true);
       archiveSession(sessionId)
         .then(() => {
           void reloadArchived();
         })
         .catch((err: unknown) => onError(err, t('sidebar.archiveFailed')))
         .finally(() => {
-          if (busySessionIdRef.current === sessionId) {
-            busySessionIdRef.current = null;
-          }
-          setBusySessionId((current) =>
-            current === sessionId ? null : current,
-          );
+          setSessionBusy(sessionId, false);
         });
     },
-    [archiveSession, currentSessionId, onError, reloadArchived, t],
+    [
+      archiveSession,
+      currentSessionId,
+      onError,
+      reloadArchived,
+      setSessionBusy,
+      t,
+    ],
   );
 
   const handleUnarchive = useCallback(
     (session: DaemonSessionSummary) => {
       const sessionId = session.sessionId;
-      if (busySessionIdRef.current !== null) return;
-      busySessionIdRef.current = sessionId;
-      setBusySessionId(sessionId);
+      if (busySessionIdsRef.current.has(sessionId)) return;
+      setSessionBusy(sessionId, true);
       unarchiveSession(sessionId)
         .then(() => {
           void reload();
         })
         .catch((err: unknown) => onError(err, t('sidebar.unarchiveFailed')))
         .finally(() => {
-          if (busySessionIdRef.current === sessionId) {
-            busySessionIdRef.current = null;
-          }
-          setBusySessionId((current) =>
-            current === sessionId ? null : current,
-          );
+          setSessionBusy(sessionId, false);
         });
     },
-    [onError, reload, t, unarchiveSession],
+    [onError, reload, setSessionBusy, t, unarchiveSession],
   );
 
   const closeMenu = useCallback(() => setMenuState(null), []);
@@ -1166,25 +1161,21 @@ export function WebShellSidebar({
 
   const assignSessionGroup = useCallback(
     (session: DaemonSessionSummary, groupId: string | null) => {
-      if (!organizationEnabled || busySessionIdRef.current !== null) return;
       const sessionId = session.sessionId;
+      if (!organizationEnabled || busySessionIdsRef.current.has(sessionId)) {
+        return;
+      }
       setGroupMenu(null);
-      busySessionIdRef.current = sessionId;
-      setBusySessionId(sessionId);
+      setSessionBusy(sessionId, true);
       workspaceActions
         .updateSessionOrganization(sessionId, { groupId })
         .then(() => reload())
         .catch((err: unknown) => onError(err, t('sidebar.organizationFailed')))
         .finally(() => {
-          if (busySessionIdRef.current === sessionId) {
-            busySessionIdRef.current = null;
-          }
-          setBusySessionId((current) =>
-            current === sessionId ? null : current,
-          );
+          setSessionBusy(sessionId, false);
         });
     },
-    [onError, organizationEnabled, reload, t, workspaceActions],
+    [onError, organizationEnabled, reload, setSessionBusy, t, workspaceActions],
   );
 
   const filteredSessions = useMemo(() => {
@@ -1311,7 +1302,7 @@ export function WebShellSidebar({
       const label = getSessionLabel(session);
       const stamp = session.updatedAt || session.createdAt;
       const time = stamp ? formatRelativeTime(stamp, t) : '';
-      const busy = busySessionId === session.sessionId;
+      const busy = busySessionIds.has(session.sessionId);
       const exporting = exportingSessionIds.has(session.sessionId);
       const completedUnread =
         !isCurrent && completedUnreadIds.has(session.sessionId);
@@ -1488,7 +1479,7 @@ export function WebShellSidebar({
       );
     });
   }, [
-    busySessionId,
+    busySessionIds,
     canExportSessions,
     cancelRename,
     collapsed,
@@ -1571,7 +1562,7 @@ export function WebShellSidebar({
         const label = getSessionLabel(session);
         const stamp = session.updatedAt || session.createdAt;
         const time = stamp ? formatRelativeTime(stamp, t) : '';
-        const busy = busySessionId === session.sessionId;
+        const busy = busySessionIds.has(session.sessionId);
         const isMenuOpen =
           menuState?.session.sessionId === session.sessionId &&
           menuState.isArchived;
@@ -1635,7 +1626,7 @@ export function WebShellSidebar({
     archivedExpanded,
     archivedLoading,
     archivedSessions,
-    busySessionId,
+    busySessionIds,
     collapsed,
     handleUnarchive,
     menuState,
@@ -1667,6 +1658,7 @@ export function WebShellSidebar({
       ];
     }
     const isCurrent = session.sessionId === currentSessionId;
+    const sessionBusy = busySessionIds.has(session.sessionId);
     const items: SessionMenuItem[] = [
       {
         key: 'rename',
@@ -1682,14 +1674,14 @@ export function WebShellSidebar({
               key: 'pin',
               label: session.isPinned ? t('sidebar.unpin') : t('sidebar.pin'),
               icon: <IconPin />,
-              disabled: busySessionId !== null,
+              disabled: sessionBusy,
               onSelect: () => handleTogglePin(session),
             },
             {
               key: 'group',
               label: t('sidebar.organize'),
               icon: <IconGroup />,
-              disabled: busySessionId !== null,
+              disabled: sessionBusy,
               onSelect: () =>
                 openGroupMenuFromAnchor(menuState.anchorEl, session),
             },
@@ -1715,7 +1707,7 @@ export function WebShellSidebar({
     ];
     return items;
   }, [
-    busySessionId,
+    busySessionIds,
     currentSessionId,
     handleArchive,
     handleDeleteSession,

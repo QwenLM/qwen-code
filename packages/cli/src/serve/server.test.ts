@@ -7011,6 +7011,20 @@ describe('createServeApp', () => {
         'invalid_session_organization',
       );
 
+      const unknownGroupFilter = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=missing-group`,
+        ),
+      );
+      expect(unknownGroupFilter.status).toBe(404);
+      expect(unknownGroupFilter.body.code).toBe('group_not_found');
+
+      const unknownGroupAssignment = await host(
+        request(app).patch(`/session/${sessionId}/organization`),
+      ).send({ groupId: 'missing-group' });
+      expect(unknownGroupAssignment.status).toBe(404);
+      expect(unknownGroupAssignment.body.code).toBe('group_not_found');
+
       const missingSession = await host(
         request(app).patch(
           '/session/550e8400-e29b-41d4-a716-446655440099/organization',

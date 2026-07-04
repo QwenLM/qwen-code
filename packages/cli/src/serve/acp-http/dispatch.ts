@@ -12,7 +12,6 @@ import {
   createDebugLogger,
   SessionService,
   SessionOrganizationError,
-  SessionOrganizationService,
   type SessionGroupColor,
   BuiltinAgentRegistry,
   SubagentError,
@@ -89,6 +88,7 @@ import {
   InvalidCursorError,
   listWorkspaceSessionsForResponse,
 } from '../server.js';
+import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {
   archiveDaemonSessions,
   assertSessionLoadable,
@@ -128,14 +128,6 @@ import {
   type JsonRpcRequest,
   type JsonRpcResponse,
 } from './json-rpc.js';
-
-function createSessionOrganizationService(
-  workspaceCwd: string,
-): SessionOrganizationService {
-  return new SessionOrganizationService(workspaceCwd, (message) => {
-    writeStderrLine(`qwen serve: session-org: ${message}`);
-  });
-}
 
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
@@ -1892,6 +1884,8 @@ export class AcpDispatcher {
           if (!sessionId) {
             throw new AcpParamError('`sessionId` is required');
           }
+          // Organization is workspace-scoped UI state. It can target persisted or
+          // archived sessions without a live ACP owner, matching the REST route.
           if ('isPinned' in params && typeof params['isPinned'] !== 'boolean') {
             throw new AcpParamError('`isPinned` must be a boolean');
           }

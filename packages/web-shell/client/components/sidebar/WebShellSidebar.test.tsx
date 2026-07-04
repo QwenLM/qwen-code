@@ -463,6 +463,69 @@ describe('WebShellSidebar — session organization', () => {
     );
     expect(mockActive.reload).toHaveBeenCalledTimes(1);
   });
+
+  it('does not drop organization actions for another session while one is busy', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    let resolveFirst: ((value: unknown) => void) | undefined;
+    mockWorkspaceActions.updateSessionOrganization.mockImplementation(
+      (sessionId: string) => {
+        if (sessionId === 'session-a') {
+          return new Promise((resolve) => {
+            resolveFirst = resolve;
+          });
+        }
+        return Promise.resolve({
+          sessionId,
+          groupId: null,
+          isPinned: true,
+          pinnedAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        });
+      },
+    );
+    mockActive.sessions = [makeSession('session-a'), makeSession('session-b')];
+
+    const container = renderSidebar(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const pinButtons = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[aria-label="Pin"]'),
+    );
+    expect(pinButtons).toHaveLength(2);
+
+    await act(async () => {
+      pinButtons[0]!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(
+      mockWorkspaceActions.updateSessionOrganization,
+    ).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      pinButtons[1]!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+    expect(
+      mockWorkspaceActions.updateSessionOrganization,
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      mockWorkspaceActions.updateSessionOrganization,
+    ).toHaveBeenLastCalledWith('session-b', { isPinned: true });
+
+    await act(async () => {
+      resolveFirst?.({
+        sessionId: 'session-a',
+        groupId: null,
+        isPinned: true,
+        pinnedAt: '2026-07-04T00:00:00.000Z',
+        updatedAt: '2026-07-04T00:00:00.000Z',
+      });
+      await Promise.resolve();
+    });
+  });
 });
 
 describe('WebShellSidebar — session export', () => {

@@ -1277,7 +1277,7 @@ Query parameters:
 | `cursor`       | no       | Pagination cursor from the previous response.                                                                                                                                                   |
 | `size`         | no       | Page size. Invalid values return `400 { code: "invalid_cursor" }` or the existing page-size validation.                                                                                         |
 | `view`         | no       | Omit for the legacy recent list. `organized` opts into server-side pinned/group ordering and adds optional organization fields. Any other value returns `400 { code: "invalid_session_view" }`. |
-| `group`        | no       | Only meaningful with `view=organized`. `all` (default), `pinned`, `ungrouped`, or a custom group id. Unknown group ids return `400 { code: "group_not_found" }`.                                |
+| `group`        | no       | Only meaningful with `view=organized`. `all` (default), `pinned`, `ungrouped`, or a custom group id. Unknown group ids return `404 { code: "group_not_found" }`.                                |
 
 Response:
 
@@ -1365,7 +1365,7 @@ Response:
 
 ### `PATCH /workspace/:id/session-groups/:groupId`
 
-Update a custom session group. Strict mutation gate. Pre-flight `caps.features.includes('session_organization')`. Body fields are optional: `{ "name"?: string, "color"?: string, "order"?: number }`. Unknown group ids return `400 { code: "group_not_found" }`; duplicate/invalid names and colors use the same errors as create.
+Update a custom session group. Strict mutation gate. Pre-flight `caps.features.includes('session_organization')`. Body fields are optional: `{ "name"?: string, "color"?: string, "order"?: number }`. Unknown group ids return `404 { code: "group_not_found" }`; duplicate/invalid names and colors use the same errors as create.
 
 ### `DELETE /workspace/:id/session-groups/:groupId`
 
@@ -1536,7 +1536,7 @@ Request:
 | Field      | Required | Notes                                                                                                |
 | ---------- | -------- | ---------------------------------------------------------------------------------------------------- |
 | `isPinned` | no       | Boolean. `true` sets `pinnedAt` if it was not already pinned; `false` clears `pinnedAt`.             |
-| `groupId`  | no       | Custom group id or `null` for ungrouped. Unknown group ids return `400 { code: "group_not_found" }`. |
+| `groupId`  | no       | Custom group id or `null` for ungrouped. Unknown group ids return `404 { code: "group_not_found" }`. |
 
 Response:
 
