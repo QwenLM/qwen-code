@@ -1078,4 +1078,90 @@ flowchart TD
     expect(output).toContain('Line 3');
     expect(output).toMatchSnapshot();
   });
+
+  describe('pending render-height safety net', () => {
+    const tableText = [
+      '| A | B |',
+      '| --- | --- |',
+      '| 1 | one |',
+      '| 2 | two |',
+    ].join('\n');
+
+    it('draws a streaming table live (no placeholder) when it fits the viewport', () => {
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={tableText} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).not.toContain('generating table');
+      expect(output).toContain('┌'); // real table drawn while streaming
+      expect(output).toContain('one');
+    });
+
+    it('clamps a tall streaming table to the viewport instead of locking', () => {
+      const rows = Array.from({ length: 30 }, (_, i) => `| r${i} | v${i} |`);
+      const text = ['| A | B |', '| --- | --- |', ...rows].join('\n');
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={10}
+        />,
+      );
+      const output = (lastFrame() ?? '').replace(/\n+$/, '');
+      expect(output.split('\n').length).toBeLessThanOrEqual(10);
+    });
+
+    it('renders a completed (closed) table in full even while pending', () => {
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={`${tableText}\n\nDone.`}
+          isPending={true}
+        />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).not.toContain('generating table');
+      expect(output).toContain('┌');
+      expect(output).toContain('one');
+      expect(output).toContain('Done.');
+    });
+
+    it('keeps a completed table + trailing text within the viewport (no overflow)', () => {
+      const rows = Array.from({ length: 8 }, (_, i) => `| r${i} | v${i} |`);
+      const text = [
+        '| A | B |',
+        '| --- | --- |',
+        ...rows,
+        '',
+        'Conclusion.',
+      ].join('\n');
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={12}
+        />,
+      );
+      const output = (lastFrame() ?? '').replace(/\n+$/, '');
+      expect(output.split('\n').length).toBeLessThanOrEqual(12);
+    });
+
+    it('counts wide/CJK wrapping so a pending block stays within the viewport', () => {
+      const wide = '一二三四五六七八九十'.repeat(6); // ~120 display cols
+      const text = Array.from({ length: 20 }, () => wide).join('\n');
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          contentWidth={20}
+          availableTerminalHeight={10}
+        />,
+      );
+      const output = (lastFrame() ?? '').replace(/\n+$/, '');
+      expect(output.split('\n').length).toBeLessThanOrEqual(10);
+    });
+  });
 });
