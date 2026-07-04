@@ -1840,6 +1840,45 @@ describe('ChannelBase', () => {
       expect(ch.sent[0]!.text).toBe('Cancelled loop job-1.');
     });
 
+    it('/loop cancel reports failure when a visible loop cannot be disabled', async () => {
+      const loop: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const disable = vi.fn().mockResolvedValue(false);
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn().mockResolvedValue([loop]),
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+
+      await ch.handleInbound(envelope({ text: '/loop cancel job-1' }));
+
+      expect(disable).toHaveBeenCalledWith('job-1');
+      expect(ch.sent[0]!.text).toBe('Failed to cancel loop job-1.');
+    });
+
     it('/loop inspect and cancel require an id', async () => {
       const listForTarget = vi.fn().mockResolvedValue([]);
       const ch = createChannel(

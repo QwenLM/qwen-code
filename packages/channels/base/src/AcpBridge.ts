@@ -318,6 +318,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     ) {
       return;
     }
+    this.channelLoopMcpRegistered = true;
     try {
       await this.connection.extMethod(WORKSPACE_MCP_RUNTIME_ADD_METHOD, {
         name: CHANNEL_LOOP_MCP_SERVER_NAME,
@@ -327,8 +328,8 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
         },
       });
-      this.channelLoopMcpRegistered = true;
     } catch (error) {
+      this.channelLoopMcpRegistered = false;
       process.stderr.write(
         `[AcpBridge] Failed to register channel loop MCP server: ${error instanceof Error ? error.message : String(error)}\n`,
       );

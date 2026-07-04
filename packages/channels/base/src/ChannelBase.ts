@@ -202,7 +202,8 @@ export abstract class ChannelBase {
     this.onSessionDied(event.sessionId);
   };
   private readonly channelLoopToolHandler = {
-    canHandle: (sessionId: string) => this.router.getTarget(sessionId)?.channelName === this.name,
+    canHandle: (sessionId: string) =>
+      this.router.getTarget(sessionId)?.channelName === this.name,
     create: (sessionId: string, input: ChannelLoopToolCreateInput) =>
       this.createLoopFromTool(sessionId, input),
     list: (sessionId: string) => this.listLoopsFromTool(sessionId),
@@ -1662,8 +1663,9 @@ export abstract class ChannelBase {
     }
     const jobs = await this.loopController.listForTarget(this.name, target);
     const match = jobs.find((job) => job.id === id);
-    const disabled = match ? await this.loopController.disable(id) : false;
-    return disabled ? `Cancelled loop ${id}.` : `No loop ${id}.`;
+    if (!match) return `No loop ${id}.`;
+    const disabled = await this.loopController.disable(id);
+    return disabled ? `Cancelled loop ${id}.` : `Failed to cancel loop ${id}.`;
   }
 
   private async handleLoopList(envelope: Envelope): Promise<boolean> {
@@ -1765,10 +1767,14 @@ export abstract class ChannelBase {
       this.loopTargetFromEnvelope(envelope),
     );
     const match = jobs.find((job) => job.id === id);
-    const disabled = match ? await this.loopController.disable(id) : false;
+    if (!match) {
+      await this.sendMessage(envelope.chatId, `No loop ${id}.`);
+      return true;
+    }
+    const disabled = await this.loopController.disable(id);
     await this.sendMessage(
       envelope.chatId,
-      disabled ? `Cancelled loop ${id}.` : `No loop ${id}.`,
+      disabled ? `Cancelled loop ${id}.` : `Failed to cancel loop ${id}.`,
     );
     return true;
   }
