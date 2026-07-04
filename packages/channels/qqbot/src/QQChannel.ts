@@ -107,9 +107,31 @@ export class QQChannel extends ChannelBase {
   private replyMsgIdCleanupTimer: ReturnType<typeof setInterval> | null = null;
   /** 5-minute TTL for replyMsgId entries and seenMessages dedup. */
   private static readonly REPLY_MSG_ID_TTL_MS = 300_000;
+  /** Idle-flush timeout: buffer is sent after this many ms of silence. */
+  private static readonly IDLE_FLUSH_MS = 2000;
+  /** Max consecutive send failures before the stream is abandoned. */
+  private static readonly MAX_FLUSH_RETRIES = 3;
 
   /** Path to persisted QQ routing state: chatTypeMap, replyMsgId, msgSeqMap. */
 
+  /**
+   * Streaming state machine with per-session buffers.
+   *
+   * Three states for each session:
+   *   active   — accumulating chunks in buffer (onResponseChunk extends timer)
+   *   flushing — sendMessage() is in-flight (prevents parallel sends)
+   *   idle     — waiting for next chunk (timer counting down to idleFlush)
+   *
+   * Transitions:
+   *   active → flushing: idleFlush timer fires, or onToolCall cancels timer
+   *   flushing → idle: send settles, idle timer restarts on retry
+   *   any → done: onResponseComplete sends remaining content
+   *
+   * Guards:
+   *   - flushingSessions prevents concurrent sends per session
+   *   - pendingStreamDelete defers cleanup until in-flight send resolves
+   *   - flushedSessions tracks already-sent sessions to skip final fullText
+   */
   // ── Streaming state ───────────────────────────────────────────
   private streamState: Map<
     string,
@@ -117,6 +139,7 @@ export class QQChannel extends ChannelBase {
       chatId: string;
       buffer: string;
       timer: ReturnType<typeof setTimeout> | null;
+      retryCount: number;
     }
   > = new Map();
   private flushingSessions: Set<string> = new Set();
@@ -124,7 +147,6 @@ export class QQChannel extends ChannelBase {
   private _reconnectId: number = 0;
   private blockStreaming: boolean = false;
   private flushedSessions: Set<string> = new Set();
-
   private readonly qqStatePath: string;
   /**
    * Path to the SessionRouter persistence file we back up before shutdown.
@@ -466,7 +488,12 @@ export class QQChannel extends ChannelBase {
     if (this.blockStreaming) return;
     let state = this.streamState.get(sessionId);
     if (!state) {
-      state = { chatId, buffer: chunk, timer: null };
+      state = { chatId, buffer: chunk, timer: null, retryCount: 0 } as {
+        chatId: string;
+        buffer: string;
+        timer: ReturnType<typeof setTimeout> | null;
+        retryCount: number;
+      };
       this.streamState.set(sessionId, state);
     } else {
       state.buffer += chunk;
@@ -478,7 +505,7 @@ export class QQChannel extends ChannelBase {
     const reconnectId = this._reconnectId;
     state.timer = setTimeout(() => {
       this.idleFlush(sessionId, reconnectId);
-    }, 2000);
+    }, QQChannel.IDLE_FLUSH_MS);
     state.timer.unref?.();
   }
 
@@ -489,39 +516,68 @@ export class QQChannel extends ChannelBase {
     if (this.flushingSessions.has(sessionId)) return;
     const buffer = state.buffer;
     state.buffer = '';
+    state.timer = null; // Clear expired one-shot timer reference
     this.flushingSessions.add(sessionId);
     this.sendMessage(state.chatId, buffer)
       .then(() => {
+        state.retryCount = 0;
         this.flushedSessions.add(sessionId);
         if (this.pendingStreamDelete.has(sessionId)) {
           this.pendingStreamDelete.delete(sessionId);
-          if (this.streamState.get(sessionId) === state && !state.buffer) {
-            this.streamState.delete(sessionId);
-          }
-        } else {
-          if (this.streamState.get(sessionId) === state && !state.buffer) {
-            this.streamState.delete(sessionId);
-          }
+        }
+        // Clean up streamState if no more content arrived during send
+        const s = this.streamState.get(sessionId);
+        if (s === state && !s.buffer) {
+          this.streamState.delete(sessionId);
         }
       })
       .catch((e: unknown) => {
         process.stderr.write(
-          `[QQ:${this.name}] idleFlush send failed: ${String(e)}\n`,
+          `[QQ:${this.name}] idleFlush send failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
         );
+        // Undo flush mark from any prior successful send for this session
+        this.flushedSessions.delete(sessionId);
         if (this.pendingStreamDelete.has(sessionId)) {
+          // Session is ending — retry up to MAX_FLUSH_RETRIES
           this.pendingStreamDelete.delete(sessionId);
-          if (this.streamState.get(sessionId) === state && !state.buffer) {
-            this.streamState.delete(sessionId);
+          const current = this.streamState.get(sessionId);
+          if (current === state) {
+            current.buffer = buffer;
+            current.retryCount++;
+            if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
+              const reconnectId2 = this._reconnectId;
+              current.timer = setTimeout(() => {
+                this.idleFlush(sessionId, reconnectId2);
+              }, QQChannel.IDLE_FLUSH_MS);
+              current.timer.unref?.();
+            } else {
+              this.streamState.delete(sessionId);
+              process.stderr.write(
+                `[QQ:${this.name}] idleFlush retries exhausted for ${sanitizeLogText(sessionId, 64)}\n`,
+              );
+            }
           }
         } else {
+          // Not ending — re-buffer and retry
           const current = this.streamState.get(sessionId);
           if (current) {
             current.buffer = buffer + (current.buffer || '');
-            const reconnectId2 = this._reconnectId;
-            current.timer = setTimeout(() => {
-              this.idleFlush(sessionId, reconnectId2);
-            }, 2000);
-            current.timer.unref?.();
+            current.retryCount++;
+            if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
+              // Only set timer if onResponseChunk hasn't already set one
+              if (!current.timer) {
+                const reconnectId2 = this._reconnectId;
+                current.timer = setTimeout(() => {
+                  this.idleFlush(sessionId, reconnectId2);
+                }, QQChannel.IDLE_FLUSH_MS);
+                current.timer.unref?.();
+              }
+            } else {
+              this.streamState.delete(sessionId);
+              process.stderr.write(
+                `[QQ:${this.name}] idleFlush retries exhausted for ${sanitizeLogText(sessionId, 64)}\n`,
+              );
+            }
           }
         }
       })
@@ -543,37 +599,57 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.add(event.sessionId);
     this.sendMessage(state.chatId, buffer)
       .then(() => {
+        const current = this.streamState.get(event.sessionId);
+        if (current) current.retryCount = 0;
         this.flushedSessions.add(event.sessionId);
         if (this.pendingStreamDelete.has(event.sessionId)) {
           this.pendingStreamDelete.delete(event.sessionId);
-          if (
-            this.streamState.get(event.sessionId) === state &&
-            !state.buffer
-          ) {
-            this.streamState.delete(event.sessionId);
-          }
+        }
+        // Clean up streamState if no more content arrived during send
+        const s = this.streamState.get(event.sessionId);
+        if (s === state && !s.buffer) {
+          this.streamState.delete(event.sessionId);
         }
       })
       .catch((e: unknown) => {
+        process.stderr.write(
+          `[QQ:${this.name}] toolCallFlush send failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+        );
+        this.flushedSessions.delete(event.sessionId);
         if (this.pendingStreamDelete.has(event.sessionId)) {
           this.pendingStreamDelete.delete(event.sessionId);
-          if (
-            this.streamState.get(event.sessionId) === state &&
-            !state.buffer
-          ) {
-            this.streamState.delete(event.sessionId);
+          const current = this.streamState.get(event.sessionId);
+          if (current === state) {
+            current.buffer = buffer;
+            current.retryCount++;
+            if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
+              const reconnectId2 = this._reconnectId;
+              current.timer = setTimeout(() => {
+                this.idleFlush(event.sessionId, reconnectId2);
+              }, QQChannel.IDLE_FLUSH_MS);
+              current.timer.unref?.();
+            } else {
+              this.streamState.delete(event.sessionId);
+            }
           }
         } else {
-          state.buffer = buffer + (state.buffer || '');
-          const reconnectId2 = this._reconnectId;
-          state.timer = setTimeout(() => {
-            this.idleFlush(event.sessionId, reconnectId2);
-          }, 2000);
-          state.timer.unref?.();
+          const current = this.streamState.get(event.sessionId);
+          if (current) {
+            current.buffer = buffer + (current.buffer || '');
+            current.retryCount++;
+            if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
+              if (!current.timer) {
+                const reconnectId2 = this._reconnectId;
+                current.timer = setTimeout(() => {
+                  this.idleFlush(event.sessionId, reconnectId2);
+                }, QQChannel.IDLE_FLUSH_MS);
+                current.timer.unref?.();
+              }
+            } else {
+              this.streamState.delete(event.sessionId);
+            }
+          }
         }
-        process.stderr.write(
-          `[QQ:${this.name}] toolCallFlush send failed: ${String(e)}\n`,
-        );
       })
       .finally(() => {
         this.flushingSessions.delete(event.sessionId);
@@ -601,6 +677,18 @@ export class QQChannel extends ChannelBase {
     if (remaining) {
       await super.onResponseComplete(chatId, remaining, sessionId);
     }
+  }
+
+  override onSessionDied(sessionId: string): void {
+    const state = this.streamState.get(sessionId);
+    if (state?.timer) {
+      clearTimeout(state.timer);
+    }
+    this.streamState.delete(sessionId);
+    this.flushingSessions.delete(sessionId);
+    this.pendingStreamDelete.delete(sessionId);
+    this.flushedSessions.delete(sessionId);
+    super.onSessionDied(sessionId);
   }
   // ── State Persistence (cross-server context continuation) ──────
 

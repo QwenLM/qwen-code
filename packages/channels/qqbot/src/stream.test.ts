@@ -63,6 +63,9 @@ vi.mock('@qwen-code/channel-base', () => ({
         }
       ).sendMessage(_chatId, fullText);
     }
+    onSessionDied(_sessionId: string): void {
+      // no-op in mock; overridden by QQChannel
+    }
   },
   SessionRouter: class {
     restoreSessions(): Promise<void> {
@@ -163,6 +166,9 @@ function toolCall(sessionId: string): ToolCallEvent {
 
 /** Helper: drain microtasks to let async sendMessage chains settle. */
 async function drain() {
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
@@ -378,7 +384,7 @@ describe('onToolCall flush', () => {
     expect(mockSendQQMessage).not.toHaveBeenCalled();
   });
 
-  it('send failure is caught internally by sendMessage (then fires)', async () => {
+  it('send failure re-buffers and retries (not silently lost)', async () => {
     const ch = makeChannel();
     let rejectSend: (err: Error) => void;
     const sendPromise = new Promise<MockResponse>((_resolve, reject) => {
@@ -393,7 +399,6 @@ describe('onToolCall flush', () => {
     const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
     pendingStreamDelete.add('sess-1');
 
-    // sendMessage catches the error internally and resolves
     rejectSend!(new Error('send failed'));
     try {
       await sendPromise;
@@ -402,8 +407,16 @@ describe('onToolCall flush', () => {
     }
     await drain();
 
-    // .then() fires: pendingStreamDelete cleared, streamState deleted
+    // Re-buffered for retry instead of silently dropped
     expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    expect(streamState(ch).has('sess-1')).toBe(true);
+    expect(streamState(ch).get('sess-1')!.buffer).toBe('text before tool');
+
+    // After MAX_FLUSH_RETRIES retries, streamState is cleaned up
+    for (let i = 0; i < 3; i++) {
+      vi.advanceTimersByTime(2000);
+      await drain();
+    }
     expect(streamState(ch).has('sess-1')).toBe(false);
   });
 });
@@ -506,7 +519,7 @@ describe('pendingStreamDelete coordination', () => {
     expect(flushingSessions.has('sess-1')).toBe(false);
   });
 
-  it('on wasPending failure: deletes streamState (no leak)', async () => {
+  it('pendingStreamDelete failure re-buffers and retries (no leak)', async () => {
     const ch = makeChannel();
     let rejectSend: (err: Error) => void;
     const sendPromise = new Promise<MockResponse>((_resolve, reject) => {
@@ -530,7 +543,16 @@ describe('pendingStreamDelete coordination', () => {
     }
     await drain();
 
+    // Re-buffered for retry instead of silently dropped
     expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    expect(streamState(ch).has('sess-1')).toBe(true);
+    expect(streamState(ch).get('sess-1')!.buffer).toBe('text');
+
+    // After retries exhausted, streamState is cleaned up
+    for (let i = 0; i < 3; i++) {
+      vi.advanceTimersByTime(2000);
+      await drain();
+    }
     expect(streamState(ch).has('sess-1')).toBe(false);
   });
 });
@@ -592,6 +614,199 @@ describe('streaming guards', () => {
     resolveSend!(mockResponse(true));
     await drain();
 
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('error recovery paths', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('idleFlush retries after send failure and succeeds', async () => {
+    const ch = makeChannel();
+    mockSendQQMessage
+      .mockRejectedValueOnce(new Error('network error'))
+      .mockResolvedValue(mockResponse(true));
+
+    onResponseChunk(ch, 'test-chat', 'retry me', 'sess-1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // First send failed
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+
+    // Advance retry timer
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // Retry succeeded
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('idleFlush stops retrying after MAX_FLUSH_RETRIES failures', async () => {
+    const ch = makeChannel();
+    mockSendQQMessage.mockRejectedValue(new Error('persistent error'));
+
+    onResponseChunk(ch, 'test-chat', 'doomed', 'sess-1');
+
+    // Each idleFlush fires + MAX_FLUSH_RETRIES retries before giving up
+    for (let i = 0; i <= 3; i++) {
+      vi.advanceTimersByTime(2000);
+      await drain();
+    }
+
+    // After retries exhausted, streamState is deleted
+    expect(streamState(ch).has('sess-1')).toBe(false);
+  });
+
+  it('retries when pendingStreamDelete is set and send fails (no silent data loss)', async () => {
+    const ch = makeChannel();
+    mockSendQQMessage
+      .mockRejectedValueOnce(new Error('fail'))
+      .mockResolvedValue(mockResponse(true));
+
+    onResponseChunk(ch, 'test-chat', 'last words', 'sess-1');
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    pendingStreamDelete.add('sess-1');
+
+    // Trigger first idleFlush
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // pendingStreamDelete should be cleared, buffer restored for retry
+    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    expect(streamState(ch).get('sess-1')!.buffer).toBe('last words');
+
+    // Advance retry timer
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+    expect(streamState(ch).has('sess-1')).toBe(false);
+  });
+
+  it('onToolCall retries after send failure', async () => {
+    const ch = makeChannel();
+    mockSendQQMessage
+      .mockRejectedValueOnce(new Error('fail'))
+      .mockResolvedValue(mockResponse(true));
+
+    onResponseChunk(ch, 'test-chat', 'tool text', 'sess-1');
+    ch.onToolCall('test-chat', toolCall('sess-1'));
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+
+    // Advance retry timer
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(2);
+  });
+
+  it('onToolCall catch uses fresh streamState (stale closure fix)', async () => {
+    const ch = makeChannel();
+    let rejectSend: (err: Error) => void;
+    const sendPromise = new Promise<MockResponse>((_r, rej) => {
+      rejectSend = rej as (err: Error) => void;
+    });
+    mockSendQQMessage.mockReturnValue(sendPromise);
+
+    onResponseChunk(ch, 'test-chat', 'before tool', 'sess-1');
+    ch.onToolCall('test-chat', toolCall('sess-1'));
+
+    // While send is in flight, simulate new chunks arriving via onResponseChunk
+    // The current streamState still exists so onResponseChunk mutates it
+    (ch as unknown as Record<string, unknown>)['onResponseChunk'](
+      'test-chat',
+      ' fresh',
+      'sess-1',
+    );
+
+    // Let the original send fail
+    rejectSend!(new Error('send failed'));
+    try {
+      await sendPromise;
+    } catch {
+      /* expected */
+    }
+    await drain();
+
+    // The retry buffer should include the fresh chunk (appended by .catch())
+    const st = streamState(ch).get('sess-1');
+    expect(st).toBeDefined();
+    expect(st!.buffer).toContain('before tool');
+    expect(st!.buffer).toContain(' fresh');
+  });
+
+  it('disconnect() clears all streaming state', () => {
+    const ch = makeChannel();
+    onResponseChunk(ch, 'test-chat', 'buffered', 'sess-1');
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Set<string>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    const flushedSessions = chp['flushedSessions'] as Set<string>;
+
+    flushingSessions.add('sess-1');
+    pendingStreamDelete.add('sess-1');
+    flushedSessions.add('sess-1');
+
+    (chp['disconnect'] as () => void)();
+
+    expect(streamState(ch).size).toBe(0);
+    expect(flushingSessions.size).toBe(0);
+    expect(pendingStreamDelete.size).toBe(0);
+    expect(flushedSessions.size).toBe(0);
+  });
+
+  it('onSessionDied cleans up stream state for dead session', () => {
+    const ch = makeChannel();
+    onResponseChunk(ch, 'test-chat', 'alive', 'sess-1');
+
+    ch.onSessionDied('sess-1');
+
+    expect(streamState(ch).has('sess-1')).toBe(false);
+
+    const chp = ch as unknown as Record<string, unknown>;
+    expect((chp['flushingSessions'] as Set<string>).has('sess-1')).toBe(false);
+    expect((chp['pendingStreamDelete'] as Set<string>).has('sess-1')).toBe(
+      false,
+    );
+    expect((chp['flushedSessions'] as Set<string>).has('sess-1')).toBe(false);
+  });
+
+  it('flushingSessions guard prevents retry while already flushing', async () => {
+    const ch = makeChannel();
+    mockSendQQMessage.mockRejectedValue(new Error('fail'));
+
+    onResponseChunk(ch, 'test-chat', 'hello', 'sess-1');
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const flushingSessions = chp['flushingSessions'] as Set<string>;
+
+    // First idleFlush triggers
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+
+    // Simulate that the session is now marked as flushing (duplicate prevention)
+    flushingSessions.add('sess-1');
+
+    // Retry timer fires but idleFlush bails due to flushingSessions guard
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // No additional send call
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
   });
 });
