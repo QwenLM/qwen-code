@@ -34,10 +34,14 @@ import type {
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionArchiveState,
+  DaemonSessionExportFormat,
+  DaemonSessionExportResult,
   DaemonSessionLspStatus,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
+  DaemonStatusReport,
+  DaemonStatusReportDetail,
   DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   DaemonUpdateAgentRequest,
@@ -60,6 +64,10 @@ import type {
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
+  DaemonWorkspaceMemoryDreamOptions,
+  DaemonWorkspaceMemoryDreamTask,
+  DaemonWorkspaceMemoryForgetOptions,
+  DaemonWorkspaceMemoryForgetTask,
   DaemonWorkspaceMemoryRememberOptions,
   DaemonWorkspaceMemoryRememberTask,
   HeartbeatResult,
@@ -123,6 +131,8 @@ import type {
 } from './types.js';
 
 const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
+const WORKSPACE_MEMORY_FORGET_PATH = '/workspace/memory/forget';
+const WORKSPACE_MEMORY_DREAM_PATH = '/workspace/memory/dream';
 
 /**
  * SDK-side HTTP client for the `qwen serve` daemon. Sibling to
@@ -672,6 +682,21 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Consolidated daemon status report (`GET /daemon/status`). The default
+   * `summary` detail reads cheap in-memory counters; `full` adds per-session,
+   * ACP-connection, auth, and workspace diagnostics sections.
+   */
+  async daemonStatus(
+    detail: DaemonStatusReportDetail = 'summary',
+  ): Promise<DaemonStatusReport> {
+    const query = detail === 'summary' ? '' : `?detail=${detail}`;
+    return await this.jsonRequest<DaemonStatusReport>(
+      `/daemon/status${query}`,
+      'GET /daemon/status',
+    );
+  }
+
   async workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp`,
@@ -1074,6 +1099,57 @@ export class DaemonClient {
     );
   }
 
+  async forgetWorkspaceMemory(
+    query: string,
+    opts: DaemonWorkspaceMemoryForgetOptions = {},
+  ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    return await this.jsonRequest<DaemonWorkspaceMemoryForgetTask>(
+      WORKSPACE_MEMORY_FORGET_PATH,
+      `POST ${WORKSPACE_MEMORY_FORGET_PATH}`,
+      {
+        method: 'POST',
+        body: { query },
+        clientId: opts.clientId,
+      },
+    );
+  }
+
+  async getWorkspaceMemoryForgetTask(
+    taskId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    return await this.jsonRequest(
+      `${WORKSPACE_MEMORY_FORGET_PATH}/${encodeURIComponent(taskId)}`,
+      `GET ${WORKSPACE_MEMORY_FORGET_PATH}/:taskId`,
+      { clientId: opts?.clientId },
+    );
+  }
+
+  async dreamWorkspaceMemory(
+    opts: DaemonWorkspaceMemoryDreamOptions = {},
+  ): Promise<DaemonWorkspaceMemoryDreamTask> {
+    return await this.jsonRequest<DaemonWorkspaceMemoryDreamTask>(
+      WORKSPACE_MEMORY_DREAM_PATH,
+      `POST ${WORKSPACE_MEMORY_DREAM_PATH}`,
+      {
+        method: 'POST',
+        body: {},
+        clientId: opts.clientId,
+      },
+    );
+  }
+
+  async getWorkspaceMemoryDreamTask(
+    taskId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspaceMemoryDreamTask> {
+    return await this.jsonRequest(
+      `${WORKSPACE_MEMORY_DREAM_PATH}/${encodeURIComponent(taskId)}`,
+      `GET ${WORKSPACE_MEMORY_DREAM_PATH}/:taskId`,
+      { clientId: opts?.clientId },
+    );
+  }
+
   // -- Workspace agents (workspace memory/agents) ------------------------------
 
   async listWorkspaceAgents(): Promise<DaemonWorkspaceAgentsStatus> {
@@ -1367,6 +1443,42 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
     return this.restoreSession('load', sessionId, req, clientId);
+  }
+
+  async exportSession(
+    sessionId: string,
+    opts: {
+      format?: DaemonSessionExportFormat;
+      clientId?: string;
+    } = {},
+  ): Promise<DaemonSessionExportResult> {
+    const format = opts.format ?? 'html';
+    const query = opts.format
+      ? `?format=${encodeURIComponent(opts.format)}`
+      : '';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/export${query}`,
+      { headers: this.headers({}, opts.clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/export');
+        }
+        const content = await res.text();
+        const mimeType = res.headers.get('content-type') ?? '';
+        const filename =
+          /filename="([^"]+)"/i.exec(
+            res.headers.get('content-disposition') ?? '',
+          )?.[1] ?? `export.${format}`;
+        return {
+          content,
+          filename,
+          mimeType,
+          format,
+        };
+      },
+      undefined,
+      'rest',
+    );
   }
 
   async resumeSession(

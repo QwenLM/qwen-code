@@ -783,6 +783,42 @@ describe('runNonInteractive', () => {
     );
   });
 
+  it('shows the maxToolCallsPerTurn hint when the per-turn cap halts the run', async () => {
+    setupMetricsMock();
+    const events: ServerGeminiStreamEvent[] = [
+      { type: GeminiEventType.Content, value: 'Partial work' },
+      {
+        type: GeminiEventType.LoopDetected,
+        value: { loopType: LoopType.TURN_TOOL_CALL_CAP },
+      },
+    ];
+    mockGeminiClient.sendMessageStream.mockReturnValue(
+      createStreamFromEvents(events),
+    );
+
+    const exitCode = await runNonInteractive(
+      mockConfig,
+      mockSettings,
+      'Long turn',
+      'prompt-id-turn-cap',
+    );
+
+    expect(exitCode).toBe(1);
+    // The cap has its own knob, so the message must point at it rather than
+    // claiming the halt cannot be configured away.
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      expect.stringContaining('`model.maxToolCallsPerTurn`'),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining('cannot be disabled'),
+    );
+    expect(processStderrSpy).not.toHaveBeenCalledWith(
+      expect.stringContaining(
+        'Set the `model.skipLoopDetection` setting to true',
+      ),
+    );
+  });
+
   it('marks JSON output as an error when loop detection halts the run', async () => {
     (mockConfig.getOutputFormat as Mock).mockReturnValue(OutputFormat.JSON);
     setupMetricsMock();

@@ -89,6 +89,11 @@ describe('redactLogCredentials', () => {
     expect(redactLogCredentials(token)).toBe(R);
   });
 
+  it('redacts Slack user access tokens', () => {
+    const token = 'xoxp-' + '1'.repeat(20);
+    expect(redactLogCredentials(token)).toBe(R);
+  });
+
   it('redacts real-format Slack tokens with hyphens', () => {
     const token = 'xoxb-fake-' + 'a'.repeat(30);
     expect(redactLogCredentials(token)).toBe(R);

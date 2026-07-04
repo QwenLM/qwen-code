@@ -213,8 +213,10 @@ export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
 export * from './services/gitWorktreeService.js';
+export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/image-part-utils.js';
+export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/session-artifact-persistence.js';
 export * from './services/sessionService.js';
@@ -288,6 +290,7 @@ export * from './memory/store.js';
 export * from './memory/const.js';
 export * from './memory/channel-memory.js';
 export * from './memory/remember.js';
+export * from './memory/dream.js';
 // Issue : write helper for hierarchical context files,
 // re-exported so the `qwen serve` daemon can mutate workspace memory
 // via `POST /workspace/memory` without depending on internal paths.

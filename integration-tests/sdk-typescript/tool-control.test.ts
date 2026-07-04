@@ -32,6 +32,12 @@ import {
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
 const TEST_TIMEOUT = 60000;
+const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
+const IS_CONTAINER_SANDBOX =
+  SANDBOX_MODE === 'docker' || SANDBOX_MODE === 'podman';
+const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
+  ? '127.0.0.1,localhost,host.docker.internal'
+  : '127.0.0.1,localhost';
 
 describe('Tool Control Parameters (E2E)', () => {
   let helper: SDKTestHelper;
@@ -1031,19 +1037,27 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('test.txt', 'original');
 
         const canUseToolCalls: string[] = [];
-        const fakeServer = await startFakeOpenAIServer(({ requestIndex }) => {
-          if (requestIndex === 0) {
-            return {
-              toolCalls: [
-                fakeToolCall('read_file', {
-                  file_path: helper.getPath('test.txt'),
-                }),
-              ],
-            };
-          }
+        const fakeServer = await startFakeOpenAIServer(
+          ({ requestIndex }) => {
+            if (requestIndex === 0) {
+              return {
+                toolCalls: [
+                  fakeToolCall('read_file', {
+                    file_path: helper.getPath('test.txt'),
+                  }),
+                ],
+              };
+            }
 
-          return { content: 'Plan: leave the file unchanged.' };
-        });
+            return { content: 'Plan: leave the file unchanged.' };
+          },
+          IS_CONTAINER_SANDBOX
+            ? {
+                listenHost: '0.0.0.0',
+                baseUrlHost: 'host.docker.internal',
+              }
+            : undefined,
+        );
 
         const q = query({
           prompt: 'Read test.txt and write "modified" to it.',
@@ -1052,8 +1066,8 @@ describe('Tool Control Parameters (E2E)', () => {
             cwd: testDir,
             model: 'fake-model',
             env: {
-              NO_PROXY: '127.0.0.1,localhost',
-              no_proxy: '127.0.0.1,localhost',
+              NO_PROXY: LOCAL_OPENAI_NO_PROXY,
+              no_proxy: LOCAL_OPENAI_NO_PROXY,
               OPENAI_API_KEY: 'fake-key',
               OPENAI_BASE_URL: fakeServer.baseUrl,
               OPENAI_MODEL: 'fake-model',

@@ -538,6 +538,54 @@ describe('acpRouteTable – matchRoute', () => {
     expect(params).toEqual({ taskId: 'remember/a' });
   });
 
+  it('POST /workspace/memory/forget maps to _qwen/workspace/memory/forget', () => {
+    const result = matchRoute('/workspace/memory/forget', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/forget');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      { query: 'old preference' },
+      'POST',
+    );
+    expect(params).toEqual({ query: 'old preference' });
+  });
+
+  it('GET /workspace/memory/forget/:taskId maps to _qwen/workspace/memory/forget/get', () => {
+    const result = matchRoute('/workspace/memory/forget/forget%2Fa', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/forget/get');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ taskId: 'forget/a' });
+  });
+
+  it('POST /workspace/memory/dream maps to _qwen/workspace/memory/dream', () => {
+    const result = matchRoute('/workspace/memory/dream', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/dream');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'POST',
+    );
+    expect(params).toEqual({});
+  });
+
+  it('GET /workspace/memory/dream/:taskId maps to _qwen/workspace/memory/dream/get', () => {
+    const result = matchRoute('/workspace/memory/dream/dream%2Fa', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/workspace/memory/dream/get');
+    const params = result!.mapping.extractParams(
+      result!.segments,
+      undefined,
+      'GET',
+    );
+    expect(params).toEqual({ taskId: 'dream/a' });
+  });
+
   it('GET /workspace/agents maps to _qwen/workspace/agents/list', () => {
     const result = matchRoute('/workspace/agents', 'GET');
     expect(result).not.toBeNull();

@@ -202,6 +202,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'auth_provider_install',
   'workspace_memory',
   'workspace_memory_remember',
+  'workspace_memory_forget',
+  'workspace_memory_dream',
   'workspace_agents',
   'workspace_agent_generate',
   'workspace_env',
@@ -216,6 +218,7 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_close',
   'session_archive',
   'session_metadata',
+  'session_export',
   // Issue #4175 PR 14. Always-on. Daemon supports the MCP client
   // guardrail surface (`--mcp-client-budget`, `clientCount` /
   // `budgets[]` on `/workspace/mcp`, `disabledReason: 'budget'` on
@@ -570,6 +573,20 @@ interface FakeBridgeOpts {
     filesTouched: string[];
     touchedScopes: Array<'user' | 'project'>;
   }>;
+  workspaceMemoryForgetImpl?: (request: { query: string }) => Promise<{
+    summary?: string;
+    removedEntries: Array<{
+      topic: 'user' | 'feedback' | 'project' | 'reference';
+      summary: string;
+      filePath: string;
+    }>;
+    touchedTopics: Array<'user' | 'feedback' | 'project' | 'reference'>;
+  }>;
+  workspaceMemoryDreamImpl?: () => Promise<{
+    summary?: string;
+    touchedTopics: Array<'user' | 'feedback' | 'project' | 'reference'>;
+    dedupedEntries: number;
+  }>;
   daemonStatusSnapshotImpl?: () => BridgeDaemonStatusSnapshot;
 }
 
@@ -714,6 +731,8 @@ interface FakeBridge extends AcpSessionBridge {
     content: string;
     contextMode: 'workspace' | 'clean';
   }>;
+  workspaceMemoryForgetCalls: Array<{ query: string }>;
+  workspaceMemoryDreamCalls: number;
   setToolEnabledCalls: Array<{
     toolName: string;
     enabled: boolean;
@@ -814,6 +833,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
     [];
+  const workspaceMemoryForgetCalls: FakeBridge['workspaceMemoryForgetCalls'] =
+    [];
+  let workspaceMemoryDreamCalls = 0;
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
@@ -855,6 +877,20 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       summary: 'remembered',
       filesTouched: [],
       touchedScopes: [],
+    }));
+  const workspaceMemoryForgetImpl =
+    opts.workspaceMemoryForgetImpl ??
+    (async () => ({
+      summary: 'forgot',
+      removedEntries: [],
+      touchedTopics: [],
+    }));
+  const workspaceMemoryDreamImpl =
+    opts.workspaceMemoryDreamImpl ??
+    (async () => ({
+      summary: 'dreamed',
+      touchedTopics: [],
+      dedupedEntries: 0,
     }));
   const cancelImpl = opts.cancelImpl ?? (async () => {});
   const respondImpl = opts.respondImpl ?? (() => true);
@@ -1317,6 +1353,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     generateSessionRecapCalls,
     forkCalls,
     workspaceMemoryRememberCalls,
+    workspaceMemoryForgetCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
@@ -1331,6 +1368,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     get workspaceMcpCalls() {
       return workspaceMcpCalls;
+    },
+    get workspaceMemoryDreamCalls() {
+      return workspaceMemoryDreamCalls;
     },
     get workspaceSkillsCalls() {
       return workspaceSkillsCalls;
@@ -1619,6 +1659,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async runWorkspaceMemoryRemember(request) {
       workspaceMemoryRememberCalls.push(request);
       return workspaceMemoryRememberImpl(request);
+    },
+    async runWorkspaceMemoryForget(request) {
+      workspaceMemoryForgetCalls.push(request);
+      return workspaceMemoryForgetImpl(request);
+    },
+    async runWorkspaceMemoryDream() {
+      workspaceMemoryDreamCalls++;
+      return workspaceMemoryDreamImpl();
     },
     async isWorkspaceMemoryRememberAvailable() {
       return true;
@@ -9605,6 +9653,168 @@ describe('createServeApp', () => {
         .send();
       expect(res.status).toBe(400);
       expect(res.body.code).toBe('invalid_client_id');
+    });
+  });
+
+  describe('GET /session/:id/export', () => {
+    let previousRuntimeDir: string | undefined;
+    let runtimeDir: string;
+    let wsDir: string;
+
+    beforeEach(async () => {
+      previousRuntimeDir = process.env['QWEN_RUNTIME_DIR'];
+      runtimeDir = await fsp.mkdtemp(
+        path.join(os.tmpdir(), 'qwen-serve-session-export-'),
+      );
+      process.env['QWEN_RUNTIME_DIR'] = runtimeDir;
+      wsDir = realpathSync(runtimeDir);
+    });
+
+    afterEach(async () => {
+      if (previousRuntimeDir === undefined) {
+        delete process.env['QWEN_RUNTIME_DIR'];
+      } else {
+        process.env['QWEN_RUNTIME_DIR'] = previousRuntimeDir;
+      }
+      await fsp.rm(runtimeDir, { recursive: true, force: true });
+    });
+
+    async function writeExportSession(
+      sessionId: string,
+      state: 'active' | 'archived' = 'active',
+    ): Promise<void> {
+      const chatsDir = path.join(
+        new Storage(wsDir).getProjectDir(),
+        'chats',
+        ...(state === 'archived' ? ['archive'] : []),
+      );
+      await fsp.mkdir(chatsDir, { recursive: true });
+      const records = [
+        {
+          uuid: `${sessionId}-user-1`,
+          parentUuid: null,
+          sessionId,
+          timestamp: '2026-05-28T12:00:00.000Z',
+          type: 'user',
+          message: {
+            role: 'user',
+            parts: [{ text: 'hello export' }],
+          },
+          cwd: wsDir,
+        },
+        {
+          uuid: `${sessionId}-assistant-1`,
+          parentUuid: `${sessionId}-user-1`,
+          sessionId,
+          timestamp: '2026-05-28T12:00:01.000Z',
+          type: 'assistant',
+          message: {
+            role: 'model',
+            parts: [{ text: 'export response' }],
+          },
+          cwd: wsDir,
+          model: 'qwen-test',
+        },
+      ];
+      const body = records.map((record) => JSON.stringify(record)).join('\n');
+      await fsp.writeFile(path.join(chatsDir, `${sessionId}.jsonl`), body);
+    }
+
+    function createExportApp() {
+      return createServeApp({ ...baseOpts, workspace: wsDir }, undefined, {
+        bridge: fakeBridge(),
+        boundWorkspace: wsDir,
+      });
+    }
+
+    it('exports HTML by default as an attachment', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeExportSession(sid);
+      const app = createExportApp();
+
+      const res = await request(app)
+        .get(`/session/${sid}/export`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toContain('text/html');
+      expect(res.headers['cache-control']).toBe('no-store');
+      expect(res.headers['x-content-type-options']).toBe('nosniff');
+      expect(res.headers['content-disposition']).toMatch(
+        /^attachment; filename="qwen-code-export-.+\.html"$/,
+      );
+      expect(res.text).toContain('id="chat-data"');
+      expect(res.text).toContain('hello export');
+      expect(res.text).toContain('export response');
+    });
+
+    it.each([
+      ['md', 'text/markdown', '# Chat Session Export'],
+      ['json', 'application/json', '"sessionId":'],
+      ['jsonl', 'application/jsonl', '"type":"session_metadata"'],
+    ])('exports %s format', async (format, mimeType, marker) => {
+      const sid = `55555555-bbbb-cccc-dddd-${format.padEnd(12, '0')}`;
+      await writeExportSession(sid);
+      const app = createExportApp();
+
+      const res = await request(app)
+        .get(`/session/${sid}/export?format=${format}`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(200);
+      expect(res.headers['content-type']).toContain(mimeType);
+      expect(res.headers['content-disposition']).toContain(`.${format}"`);
+      expect(res.text).toContain(marker);
+      expect(res.text).toContain('hello export');
+      if (format === 'json') {
+        expect(res.body.metadata.channel).toBe('daemon');
+      }
+    });
+
+    it('rejects invalid export format', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeExportSession(sid);
+      const app = createExportApp();
+
+      const res = await request(app)
+        .get(`/session/${sid}/export?format=pdf`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(400);
+      expect(res.body).toMatchObject({
+        code: 'invalid_export_format',
+        format: 'pdf',
+      });
+    });
+
+    it('returns 404 for missing sessions', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      const app = createExportApp();
+
+      const res = await request(app)
+        .get(`/session/${sid}/export`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(404);
+      expect(res.body).toMatchObject({
+        sessionId: sid,
+      });
+    });
+
+    it('returns session_archived for archived sessions', async () => {
+      const sid = '55555555-bbbb-cccc-dddd-eeeeeeeeeeee';
+      await writeExportSession(sid, 'archived');
+      const app = createExportApp();
+
+      const res = await request(app)
+        .get(`/session/${sid}/export`)
+        .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      expect(res.status).toBe(409);
+      expect(res.body).toMatchObject({
+        code: 'session_archived',
+        sessionId: sid,
+      });
     });
   });
 

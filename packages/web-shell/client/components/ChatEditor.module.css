@@ -181,12 +181,9 @@
 .slashPanel {
   position: fixed;
   z-index: var(--web-shell-popover-z-index, 1000);
-  --slash-panel-max-height: min(
-    calc(
-      (22px + 10px) + (22px + 10px) + (22px + 10px) + (22px + 10px) + 6px + 12px
-    ),
-    50vh
-  );
+  /* Round cap sized for ~12 command rows plus their section headers/dividers,
+     bounded by 45vh so it stays proportional on short viewports. */
+  --slash-panel-max-height: min(460px, 45vh);
   --slash-anchor-width: 620px;
   --slash-command-col: 20ch;
   --slash-desc-col: 32ch;
@@ -260,6 +257,27 @@
   height: 1px;
   margin: 5px 8px;
   background: var(--chat-editor-border-color);
+}
+
+.slashSectionHeader {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 4px 8px 2px;
+  color: var(--muted-foreground);
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  user-select: none;
+}
+
+.slashSectionCount {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-weight: 400;
+  font-variant-numeric: tabular-nums;
+  opacity: 0.7;
 }
 
 .slashItem {
@@ -393,6 +411,22 @@
 
 .tagLabel,
 .tagValue {
+  color: var(--chat-editor-text-primary);
+}
+
+.tagIcon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  margin-left: 7px;
+  background: currentColor;
+  mask: var(--composer-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
+}
+
+.tagLabel,
+.tagValue {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -404,10 +438,15 @@
   color: var(--chat-editor-accent-color);
 }
 
+.tagIcon + .tagLabel {
+  padding-left: 0.5ch;
+}
+
 .tagValue {
   max-width: 32ch;
   padding: 3px 0 3px 0.5ch;
-  color: var(--chat-editor-text-secondary);
+  color: var(--foreground, #e4e4e4);
+  opacity: 1;
 }
 
 .tagRemove {

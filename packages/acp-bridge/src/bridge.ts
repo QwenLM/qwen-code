@@ -88,6 +88,11 @@ import type {
   BridgeDaemonStatusSnapshot,
   ChangeSessionCwdRequest,
   ChangeSessionCwdResult,
+  BridgeAutoMemoryTopic,
+  BridgeWorkspaceMemoryDreamResult,
+  BridgeWorkspaceMemoryForgetRequest,
+  BridgeWorkspaceMemoryForgetResult,
+  BridgeWorkspaceMemoryForgetMatch,
   BridgeWorkspaceMemoryRememberRequest,
   BridgeWorkspaceMemoryRememberResult,
 } from './bridgeTypes.js';
@@ -488,6 +493,101 @@ function parseWorkspaceMemoryRememberResult(
     ...(summary === undefined ? {} : { summary }),
     filesTouched: filesTouched as string[],
     touchedScopes: touchedScopes as Array<'user' | 'project'>,
+  };
+}
+
+function isBridgeAutoMemoryTopic(
+  value: unknown,
+): value is BridgeAutoMemoryTopic {
+  return (
+    value === 'user' ||
+    value === 'feedback' ||
+    value === 'project' ||
+    value === 'reference'
+  );
+}
+
+function parseWorkspaceMemoryForgetMatch(
+  value: unknown,
+): BridgeWorkspaceMemoryForgetMatch | null {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return null;
+  }
+  const record = value as Record<string, unknown>;
+  if (
+    !isBridgeAutoMemoryTopic(record['topic']) ||
+    typeof record['summary'] !== 'string' ||
+    typeof record['filePath'] !== 'string'
+  ) {
+    return null;
+  }
+  return {
+    topic: record['topic'],
+    summary: record['summary'],
+    filePath: record['filePath'],
+  };
+}
+
+function parseWorkspaceMemoryForgetResult(
+  response: unknown,
+): BridgeWorkspaceMemoryForgetResult {
+  if (
+    response === null ||
+    typeof response !== 'object' ||
+    Array.isArray(response)
+  ) {
+    throw new Error('Malformed workspace memory forget response');
+  }
+  const record = response as Record<string, unknown>;
+  const summary = record['summary'];
+  const removedEntries = record['removedEntries'];
+  const touchedTopics = record['touchedTopics'];
+  const parsedRemovedEntries = Array.isArray(removedEntries)
+    ? removedEntries.map(parseWorkspaceMemoryForgetMatch)
+    : [];
+  if (
+    (summary !== undefined && typeof summary !== 'string') ||
+    !Array.isArray(removedEntries) ||
+    parsedRemovedEntries.some((entry) => entry === null) ||
+    !Array.isArray(touchedTopics) ||
+    !touchedTopics.every(isBridgeAutoMemoryTopic)
+  ) {
+    throw new Error('Malformed workspace memory forget response');
+  }
+  return {
+    ...(summary === undefined ? {} : { summary }),
+    removedEntries: parsedRemovedEntries as BridgeWorkspaceMemoryForgetMatch[],
+    touchedTopics: touchedTopics as BridgeAutoMemoryTopic[],
+  };
+}
+
+function parseWorkspaceMemoryDreamResult(
+  response: unknown,
+): BridgeWorkspaceMemoryDreamResult {
+  if (
+    response === null ||
+    typeof response !== 'object' ||
+    Array.isArray(response)
+  ) {
+    throw new Error('Malformed workspace memory dream response');
+  }
+  const record = response as Record<string, unknown>;
+  const summary = record['summary'];
+  const touchedTopics = record['touchedTopics'];
+  const dedupedEntries = record['dedupedEntries'];
+  if (
+    (summary !== undefined && typeof summary !== 'string') ||
+    !Array.isArray(touchedTopics) ||
+    !touchedTopics.every(isBridgeAutoMemoryTopic) ||
+    typeof dedupedEntries !== 'number' ||
+    !Number.isFinite(dedupedEntries)
+  ) {
+    throw new Error('Malformed workspace memory dream response');
+  }
+  return {
+    ...(summary === undefined ? {} : { summary }),
+    touchedTopics: touchedTopics as BridgeAutoMemoryTopic[],
+    dedupedEntries,
   };
 }
 
@@ -4372,6 +4472,56 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } finally {
         if (hasNoChannelWork(info)) {
           await startIdleTimer(info, 'workspace memory remember');
+        }
+      }
+    },
+
+    async runWorkspaceMemoryForget(
+      request: BridgeWorkspaceMemoryForgetRequest,
+    ): Promise<BridgeWorkspaceMemoryForgetResult> {
+      const info = await ensureChannel();
+      try {
+        const response = await withWorkspaceControl(info, () =>
+          withTimeout(
+            Promise.race([
+              info.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget,
+                { ...request, cwd: boundWorkspace },
+              ),
+              getChannelClosedReject(info),
+            ]),
+            WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget,
+          ),
+        );
+        return parseWorkspaceMemoryForgetResult(response);
+      } finally {
+        if (hasNoChannelWork(info)) {
+          await startIdleTimer(info, 'workspace memory forget');
+        }
+      }
+    },
+
+    async runWorkspaceMemoryDream(): Promise<BridgeWorkspaceMemoryDreamResult> {
+      const info = await ensureChannel();
+      try {
+        const response = await withWorkspaceControl(info, () =>
+          withTimeout(
+            Promise.race([
+              info.connection.extMethod(
+                SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream,
+                { cwd: boundWorkspace },
+              ),
+              getChannelClosedReject(info),
+            ]),
+            WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS,
+            SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream,
+          ),
+        );
+        return parseWorkspaceMemoryDreamResult(response);
+      } finally {
+        if (hasNoChannelWork(info)) {
+          await startIdleTimer(info, 'workspace memory dream');
         }
       }
     },

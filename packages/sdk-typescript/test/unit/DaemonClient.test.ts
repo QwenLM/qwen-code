@@ -13,6 +13,7 @@ import {
   composeAbortSignals,
   normalizePendingPromptLimit,
 } from '../../src/daemon/DaemonClient.js';
+import type { DaemonTransport } from '../../src/daemon/DaemonTransport.js';
 import {
   DaemonCapabilityMissingError,
   isDaemonContentHash,
@@ -36,6 +37,14 @@ function jsonResponse(status: number, body: unknown): Response {
     status,
     headers: { 'content-type': 'application/json' },
   });
+}
+
+function textResponse(
+  status: number,
+  body: string,
+  headers: Record<string, string> = {},
+): Response {
+  return new Response(body, { status, headers });
 }
 
 function sseResponse(frames: string): Response {
@@ -145,6 +154,42 @@ describe('DaemonClient', () => {
       );
       const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
       await expect(client.health()).rejects.toBeInstanceOf(DaemonHttpError);
+    });
+  });
+
+  describe('daemonStatus', () => {
+    it('GETs /daemon/status without a detail param by default', async () => {
+      const body = { v: 1, detail: 'summary', status: 'ok', issues: [] };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+      });
+      const res = await client.daemonStatus();
+      expect(res).toEqual(body);
+      expect(calls[0]?.url).toBe('http://daemon/daemon/status');
+      expect(calls[0]?.method).toBe('GET');
+      expect(calls[0]?.headers['authorization']).toBe('Bearer secret');
+    });
+
+    it('GETs /daemon/status?detail=full when asked for full detail', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { v: 1, detail: 'full' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.daemonStatus('full');
+      expect(calls[0]?.url).toBe('http://daemon/daemon/status?detail=full');
+    });
+
+    it('throws DaemonHttpError on non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(500, { error: 'Failed to build daemon status' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.daemonStatus()).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
     });
   });
 
@@ -774,6 +819,124 @@ describe('DaemonClient', () => {
         'client-1',
         'client-1',
       ]);
+    });
+  });
+
+  describe('exportSession', () => {
+    it('GETs the default HTML export and parses attachment metadata', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        textResponse(200, '<html>export</html>', {
+          'content-type': 'text/html; charset=utf-8',
+          'content-disposition':
+            'attachment; filename="qwen-code-export-2026.html"',
+        }),
+      );
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+      });
+      const exportClient = client as DaemonClient & {
+        exportSession(
+          sessionId: string,
+          opts?: { format?: 'html' },
+        ): Promise<{
+          content: string;
+          filename: string;
+          mimeType: string;
+          format: string;
+        }>;
+      };
+
+      const result = await exportClient.exportSession('with/slash');
+
+      expect(result).toEqual({
+        content: '<html>export</html>',
+        filename: 'qwen-code-export-2026.html',
+        mimeType: 'text/html; charset=utf-8',
+        format: 'html',
+      });
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/with%2Fslash/export',
+        method: 'GET',
+        headers: { authorization: 'Bearer secret' },
+      });
+    });
+
+    it('passes the requested export format', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        textResponse(200, '# export', {
+          'content-type': 'text/markdown; charset=utf-8',
+          'content-disposition': 'attachment; filename="session.md"',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const exportClient = client as DaemonClient & {
+        exportSession(
+          sessionId: string,
+          opts: { format: 'md' },
+        ): Promise<{ format: string }>;
+      };
+
+      await exportClient.exportSession('s-1', { format: 'md' });
+
+      expect(calls[0]?.url).toBe('http://daemon/session/s-1/export?format=md');
+    });
+
+    it('throws DaemonHttpError on non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(400, {
+          error: 'Invalid export format',
+          code: 'invalid_export_format',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      const exportClient = client as DaemonClient & {
+        exportSession(sessionId: string): Promise<unknown>;
+      };
+
+      await expect(exportClient.exportSession('s-1')).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+    });
+
+    it('uses direct REST fetch even when an ACP transport is configured', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        textResponse(200, '{}', {
+          'content-type': 'application/json',
+          'content-disposition': 'attachment; filename="session.json"',
+        }),
+      );
+      const transportFetch = vi.fn(async () =>
+        jsonResponse(500, { error: 'transport should not be used' }),
+      );
+      const transport: DaemonTransport = {
+        type: 'acp-http',
+        supportsReplay: true,
+        connected: true,
+        fetch: transportFetch,
+        async *subscribeEvents() {},
+        dispose() {},
+      };
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        fetch,
+        transport,
+      });
+      const exportClient = client as DaemonClient & {
+        exportSession(
+          sessionId: string,
+          opts: { format: 'json' },
+        ): Promise<{ content: string }>;
+      };
+
+      await expect(
+        exportClient.exportSession('s-1', { format: 'json' }),
+      ).resolves.toMatchObject({ content: '{}' });
+      expect(transportFetch).not.toHaveBeenCalled();
+      expect(calls[0]?.url).toBe(
+        'http://daemon/session/s-1/export?format=json',
+      );
     });
   });
 
@@ -3665,6 +3828,102 @@ describe('DaemonClient', () => {
       expect(calls[0]).toMatchObject({
         method: 'GET',
         url: 'http://daemon/workspace/memory/remember/remember%2Fa%20b',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+    });
+
+    it('POSTs /workspace/memory/forget and forwards client id', async () => {
+      const reply = {
+        taskId: 'forget-1',
+        status: 'queued' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.forgetWorkspaceMemory('old preference', {
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/forget');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        query: 'old preference',
+      });
+    });
+
+    it('GETs /workspace/memory/forget/:taskId', async () => {
+      const reply = {
+        taskId: 'forget/a b',
+        status: 'completed' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:01.000Z',
+        result: {
+          summary: 'forgot',
+          removedEntries: [],
+          touchedTopics: ['project' as const],
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getWorkspaceMemoryForgetTask('forget/a b', {
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/memory/forget/forget%2Fa%20b',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+    });
+
+    it('POSTs /workspace/memory/dream and forwards client id', async () => {
+      const reply = {
+        taskId: 'dream-1',
+        status: 'queued' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.dreamWorkspaceMemory({ clientId: 'client-7' }),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/dream');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('GETs /workspace/memory/dream/:taskId', async () => {
+      const reply = {
+        taskId: 'dream/a b',
+        status: 'completed' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:01.000Z',
+        result: {
+          summary: 'dreamed',
+          touchedTopics: ['project' as const],
+          dedupedEntries: 1,
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getWorkspaceMemoryDreamTask('dream/a b', {
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/memory/dream/dream%2Fa%20b',
       });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
     });

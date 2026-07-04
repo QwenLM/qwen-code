@@ -8,6 +8,7 @@ on:
       - 'reopened'
       - 'ready_for_review'
       - 'review_requested'
+      - 'closed'
   issue_comment:
     types: ['created']
   pull_request_review_comment:
@@ -48,18 +49,25 @@ on:
         type: 'boolean'
 
 concurrency:
-  # PR lifecycle events share a PR-scoped group so new pushes restart the delay.
+  # PR lifecycle events share a PR-scoped group so new pushes restart the delay
+  # and closed PRs stop any in-flight lifecycle review.
   # Comment/review events use per-run groups to avoid cancelling active reviews.
   group: >-
     ${{ github.event_name == 'pull_request_target' &&
     format('qwen-pr-review-pr-{0}', github.event.pull_request.number) ||
     format('qwen-pr-review-run-{0}', github.run_id) }}
-  cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}"
+  cancel-in-progress: >-
+    ${{
+      github.event_name == 'pull_request_target' &&
+      (github.event.action == 'synchronize' ||
+       github.event.action == 'closed')
+    }}
 
 jobs:
   precheck-pr:
     if: |-
       github.event_name == 'pull_request_target' &&
+      github.event.action != 'closed' &&
       github.event.pull_request.head.repo.full_name != github.repository &&
       (github.event.action != 'review_requested' ||
        github.event.requested_reviewer.login == 'qwen-code-ci-bot')
@@ -77,6 +85,7 @@ jobs:
     # this `if` only matches the /review command shape.
     needs: ['authorize']
     if: |-
+      always() &&
       needs.authorize.outputs.should_review == 'true' &&
       ((github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
@@ -154,6 +163,7 @@ jobs:
   delay-automatic-review:
     needs: ['authorize']
     if: |-
+      always() &&
       github.event_name == 'pull_request_target' &&
       (github.event.action == 'opened' ||
        github.event.action == 'synchronize') &&
@@ -205,6 +215,8 @@ jobs:
     # `if`s still do the exact command body match; this prefix is just a filter.
     if: |-
       always() &&
+      (github.event_name != 'pull_request_target' ||
+       github.event.action != 'closed') &&
       (github.event_name != 'pull_request_target' ||
        github.event.pull_request.head.repo.full_name == github.repository ||
        needs.precheck-pr.outputs.decision == 'allow_triage') &&

@@ -48,9 +48,11 @@ const { mockExtensionManagerState } = vi.hoisted(() => ({
   },
 }));
 
-const { mockRunManagedRememberByAgent } = vi.hoisted(() => ({
-  mockRunManagedRememberByAgent: vi.fn(),
-}));
+const { mockRunManagedAutoMemoryDream, mockRunManagedRememberByAgent } =
+  vi.hoisted(() => ({
+    mockRunManagedAutoMemoryDream: vi.fn(),
+    mockRunManagedRememberByAgent: vi.fn(),
+  }));
 
 vi.mock('@agentclientprotocol/sdk', () => ({
   AgentSideConnection: vi.fn().mockImplementation(() => ({
@@ -58,7 +60,6 @@ vi.mock('@agentclientprotocol/sdk', () => ({
       return mockConnectionState.promise;
     },
   })),
-  ndJsonStream: vi.fn().mockReturnValue({}),
   RequestError: class RequestError extends Error {
     code: number;
     data: unknown;
@@ -102,6 +103,10 @@ vi.mock('@agentclientprotocol/sdk', () => ({
   PROTOCOL_VERSION: '1.0.0',
 }));
 
+vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
+  ndJsonStream: vi.fn().mockReturnValue({}),
+}));
+
 // Mock stream conversion
 vi.mock('node:stream', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:stream')>();
@@ -120,6 +125,16 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     warn: vi.fn(),
     info: vi.fn(),
   }),
+  registerAcpEventLoopLagGauge: vi.fn(),
+  startEventLoopLagMonitor: vi.fn(() => ({
+    snapshot: vi.fn(() => ({
+      meanMs: 0,
+      p50Ms: 0,
+      p99Ms: 0,
+      maxMs: 0,
+    })),
+    dispose: vi.fn(),
+  })),
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
   AuthType: {
@@ -133,6 +148,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     AGENT: 'agent',
   },
   FORK_SUBAGENT_TYPE: 'fork',
+  IMAGE_CAPABILITY: Object.freeze({
+    autoHandlesWrongModel: true,
+    maxBytes: 10380902,
+    maxImagesPerTurn: 4,
+  }),
   ALL_PROVIDERS: [
     {
       id: 'deepseek',
@@ -297,6 +317,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     removeSession: vi.fn(),
   },
   runManagedRememberByAgent: mockRunManagedRememberByAgent,
+  runManagedAutoMemoryDream: mockRunManagedAutoMemoryDream,
   clearCachedCredentialFile: vi.fn(),
   getAllGeminiMdFilenames: vi.fn(() => ['QWEN.md', 'AGENTS.md']),
   getAutoMemoryRoot: vi.fn(
@@ -598,6 +619,8 @@ import {
   applyProviderInstallPlan,
   Storage,
   unregisterGoalHook,
+  startEventLoopLagMonitor,
+  registerAcpEventLoopLagGauge,
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
@@ -788,6 +811,64 @@ describe('runAcpAgent shutdown cleanup', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('registers and disposes the event loop monitor on normal connection close', async () => {
+    const snapshot = vi.fn(() => ({
+      meanMs: 0,
+      p50Ms: 0,
+      p99Ms: 0,
+      maxMs: 0,
+    }));
+    const dispose = vi.fn();
+    vi.mocked(startEventLoopLagMonitor).mockReturnValueOnce({
+      snapshot,
+      dispose,
+    });
+
+    const agentPromise = runAcpAgent(mockConfig, mockSettings, mockArgv);
+
+    await vi.waitFor(() => {
+      expect(registerAcpEventLoopLagGauge).toHaveBeenCalledWith(
+        expect.any(Function),
+      );
+    });
+    const readGauge = vi.mocked(registerAcpEventLoopLagGauge).mock.calls[0]![0];
+    expect(readGauge()).toEqual({
+      meanMs: 0,
+      p50Ms: 0,
+      p99Ms: 0,
+      maxMs: 0,
+    });
+    expect(snapshot).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('disposes the event loop monitor when connection setup fails', async () => {
+    const dispose = vi.fn();
+    vi.mocked(startEventLoopLagMonitor).mockReturnValueOnce({
+      snapshot: vi.fn(() => ({
+        meanMs: 0,
+        p50Ms: 0,
+        p99Ms: 0,
+        maxMs: 0,
+      })),
+      dispose,
+    });
+    vi.mocked(AgentSideConnection).mockImplementationOnce(() => {
+      throw new Error('connection setup failed');
+    });
+
+    await expect(
+      runAcpAgent(mockConfig, mockSettings, mockArgv),
+    ).rejects.toThrow('connection setup failed');
+
+    expect(dispose).toHaveBeenCalledTimes(1);
+    expect(registerAcpEventLoopLagGauge).not.toHaveBeenCalled();
   });
 });
 
@@ -1148,6 +1229,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     mockRunExitCleanup.mockResolvedValue(undefined);
     mockExtensionManagerState.extensions = [];
     mockExtensionManagerState.refreshCache.mockResolvedValue(undefined);
+    mockRunManagedAutoMemoryDream.mockReset();
     mockRunManagedRememberByAgent.mockReset();
     lastSessionMock = undefined;
     capturedAgentFactory = undefined;
@@ -1220,6 +1302,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         mcpCapabilities: {
           sse: true,
           http: true,
+        },
+        _meta: {
+          imageCapability: {
+            autoHandlesWrongModel: true,
+            maxBytes: 10380902,
+            maxImagesPerTurn: 4,
+          },
         },
       },
     });
@@ -1295,6 +1384,88 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       },
     );
     expect(innerConfig.setFileSystemService).toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('passes each concurrent newSession its own workspace settings instance', async () => {
+    const settingsA = makeSessionSettings();
+    const settingsB = makeSessionSettings();
+    vi.mocked(loadSettings).mockImplementation(
+      (cwd) =>
+        (cwd === '/workspace-a' ? settingsA : settingsB) as LoadedSettings,
+    );
+
+    const innerConfigA = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue('session-a'),
+    };
+    const innerConfigB = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue('session-b'),
+    };
+    // Session A stalls inside loadCliConfig (its real-world analogue: config
+    // load + MCP discovery + auth refresh) while session B starts and
+    // finishes; the gate then lets A complete.
+    let releaseSessionA!: () => void;
+    const sessionAGate = new Promise<void>((resolve) => {
+      releaseSessionA = resolve;
+    });
+    vi.mocked(loadCliConfig)
+      .mockImplementationOnce(async () => {
+        await sessionAGate;
+        return innerConfigA as unknown as Config;
+      })
+      .mockImplementationOnce(async () => innerConfigB as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      (sessionId: string) =>
+        ({
+          getId: vi.fn().mockReturnValue(sessionId),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const fakeConn = {
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as AgentSideConnectionLike;
+    const agent = capturedAgentFactory!(fakeConn) as AgentLike;
+
+    const sessionAPromise = agent.newSession({
+      cwd: '/workspace-a',
+      mcpServers: [],
+    });
+    await vi.waitFor(() =>
+      expect(vi.mocked(loadCliConfig)).toHaveBeenCalledTimes(1),
+    );
+    await agent.newSession({ cwd: '/workspace-b', mcpServers: [] });
+    releaseSessionA();
+    await sessionAPromise;
+
+    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith('/workspace-a');
+    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith('/workspace-b');
+
+    const sessionCalls = vi.mocked(Session).mock.calls;
+    expect(sessionCalls).toHaveLength(2);
+    // Session B finished first while A was still mid-creation.
+    expect(sessionCalls[0]![0]).toBe('session-b');
+    expect(sessionCalls[0]![3]).toBe(settingsB);
+    // Session A must still be constructed with workspace A's settings, not
+    // with the instance session B loaded in the meantime.
+    expect(sessionCalls[1]![0]).toBe('session-a');
+    expect(sessionCalls[1]![3]).toBe(settingsA);
 
     mockConnectionState.resolve();
     await agentPromise;
@@ -2912,6 +3083,313 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
 
     mockConnectionState.resolve();
     await agentPromise;
+  });
+
+  it('runs workspace memory forget without requiring a session', async () => {
+    const forget = vi.fn().mockResolvedValue({
+      systemMessage: 'Forgot 1 entry.',
+      removedEntries: [
+        {
+          topic: 'project',
+          summary: 'old preference',
+          filePath: '/mem/project.md',
+        },
+      ],
+      touchedTopics: ['project'],
+    });
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getMemoryManager: vi.fn().mockReturnValue({ forget }),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget, {
+        query: '  old preference  ',
+      }),
+    ).resolves.toEqual({
+      summary: 'Forgot 1 entry.',
+      removedEntries: [
+        {
+          topic: 'project',
+          summary: 'old preference',
+          filePath: '/mem/project.md',
+        },
+      ],
+      touchedTopics: ['project'],
+    });
+    expect(forget).toHaveBeenCalledWith('/workspace', 'old preference', {
+      config: expect.objectContaining({
+        getChatRecordingService: expect.any(Function),
+        getTranscriptPath: expect.any(Function),
+      }),
+      abortSignal: expect.any(AbortSignal),
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('rejects oversized workspace memory forget queries', async () => {
+    const forget = vi.fn();
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getMemoryManager: vi.fn().mockReturnValue({ forget }),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget, {
+        query: 'x'.repeat(64 * 1024 + 1),
+      }),
+    ).rejects.toThrow('Query exceeds maximum size');
+    expect(forget).not.toHaveBeenCalled();
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('uses forget-specific error codes for workspace memory forget failures', async () => {
+    const forget = vi.fn().mockRejectedValue(new Error('boom'));
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getMemoryManager: vi.fn().mockReturnValue({ forget }),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget, {
+        query: 'old preference',
+      }),
+    ).rejects.toMatchObject({
+      code: -32099,
+      message: 'Workspace memory forget failed',
+      data: { errorKind: 'forget_failed' },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('uses forget-specific error codes for workspace memory forget timeouts', async () => {
+    const forget = vi.fn().mockRejectedValue(new Error('late abort'));
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getMemoryManager: vi.fn().mockReturnValue({ forget }),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    const controller = new AbortController();
+    controller.abort();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(controller.signal);
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget, {
+          query: 'old preference',
+        }),
+      ).rejects.toMatchObject({
+        code: -32099,
+        message: 'Workspace memory forget timed out',
+        data: { errorKind: 'forget_timeout' },
+      });
+    } finally {
+      timeoutSpy.mockRestore();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
+  });
+
+  it('runs workspace memory dream without requiring a session', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+    mockRunManagedAutoMemoryDream.mockResolvedValue({
+      systemMessage: 'Managed auto-memory dream completed.',
+      touchedTopics: ['project'],
+      dedupedEntries: 1,
+    });
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream, {}),
+    ).resolves.toEqual({
+      summary: 'Managed auto-memory dream completed.',
+      touchedTopics: ['project'],
+      dedupedEntries: 1,
+    });
+    expect(mockRunManagedAutoMemoryDream).toHaveBeenCalledWith(
+      '/workspace',
+      expect.any(Date),
+      expect.objectContaining({
+        getChatRecordingService: expect.any(Function),
+        getTranscriptPath: expect.any(Function),
+      }),
+      expect.any(AbortSignal),
+      {
+        trigger: 'manual',
+        recordMetadata: true,
+        suppressChatRecording: true,
+      },
+    );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('uses dream-specific error codes for workspace memory dream failures', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+    mockRunManagedAutoMemoryDream.mockRejectedValue(new Error('boom'));
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream, {}),
+    ).rejects.toMatchObject({
+      code: -32099,
+      message: 'Workspace memory dream failed',
+      data: { errorKind: 'dream_failed' },
+    });
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('uses dream-specific error codes for workspace memory dream timeouts', async () => {
+    Object.assign(mockConfig, {
+      isManagedMemoryAvailable: vi.fn().mockReturnValue(true),
+      getProjectRoot: vi.fn().mockReturnValue('/workspace'),
+      getChatRecordingService: vi.fn().mockReturnValue({
+        recordUiTelemetryEvent: vi.fn(),
+      }),
+      getTranscriptPath: vi.fn().mockReturnValue('/tmp/transcript.jsonl'),
+    });
+    mockRunManagedAutoMemoryDream.mockRejectedValue(new Error('late abort'));
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+    const controller = new AbortController();
+    controller.abort();
+    const timeoutSpy = vi
+      .spyOn(AbortSignal, 'timeout')
+      .mockReturnValue(controller.signal);
+
+    try {
+      await expect(
+        agent.extMethod(SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream, {}),
+      ).rejects.toMatchObject({
+        code: -32099,
+        message: 'Workspace memory dream timed out',
+        data: { errorKind: 'dream_timeout' },
+      });
+    } finally {
+      timeoutSpy.mockRestore();
+      mockConnectionState.resolve();
+      await agentPromise;
+    }
   });
 
   it('reports workspace memory remember availability', async () => {
