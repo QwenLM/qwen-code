@@ -1249,6 +1249,7 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getModelsConfig: vi.fn().mockReturnValue({
         getCurrentAuthType: vi.fn().mockReturnValue('api-key'),
         syncAfterAuthRefresh: vi.fn(),
+        getGenerationConfig: vi.fn().mockReturnValue({}),
       }),
       reloadModelProvidersConfig: vi.fn(),
       refreshAuth: vi.fn().mockResolvedValue(undefined),
