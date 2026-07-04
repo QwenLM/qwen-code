@@ -454,6 +454,11 @@ describe('Session', () => {
       isCronEnabled: vi.fn().mockReturnValue(false),
       getSessionTokenLimit: vi.fn().mockReturnValue(0),
       getStopHookBlockingCap: vi.fn().mockReturnValue(8),
+      // Mimics the resolved Config getter: always a number. The daemon-cap
+      // test overrides this with a small value.
+      getMaxToolCallsPerTurn: vi
+        .fn()
+        .mockReturnValue(core.DEFAULT_MAX_TOOL_CALLS_PER_TURN),
       getGeminiClient: vi.fn().mockReturnValue(mockGeminiClient),
       getBackgroundTaskRegistry: vi
         .fn()
@@ -2954,6 +2959,9 @@ describe('Session', () => {
 
       it('stops an ACP prompt after exceeding the daemon tool-call cap', async () => {
         mockConfig.getApprovalMode = vi.fn().mockReturnValue(ApprovalMode.YOLO);
+        // Pin the cap via the config mock — the daemon halts at whatever the
+        // resolved getter returns.
+        mockConfig.getMaxToolCallsPerTurn = vi.fn().mockReturnValue(100);
         const functionCalls = Array.from({ length: 102 }, (_, index) => ({
           id: `read_${index}`,
           name: 'read_file',
