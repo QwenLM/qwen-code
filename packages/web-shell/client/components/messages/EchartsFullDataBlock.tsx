@@ -56,6 +56,11 @@ export interface EchartsFullDataRefMeta {
   format: 'csv' | 'json';
 }
 
+/**
+ * Resolves a renderer-validated data ref. The ref uses artifact:// or
+ * session-file:// with normalized non-empty path segments and no traversal,
+ * query/hash, whitespace, control, backslash, or double-encoded percent forms.
+ */
 export type EchartsFullDataRefResolver = (
   ref: string,
   meta: EchartsFullDataRefMeta,
@@ -807,12 +812,29 @@ function formatCell(value: DatasetCell | undefined): string {
   return String(value);
 }
 
+function hasControlCharacter(value: string): boolean {
+  for (let index = 0; index < value.length; index += 1) {
+    const code = value.charCodeAt(index);
+    if (code <= 0x1f || code === 0x7f) return true;
+  }
+  return false;
+}
+
+function hasWhitespaceOrControl(value: string): boolean {
+  return /\s/.test(value) || hasControlCharacter(value);
+}
+
+type EchartsFullDataRefDescriptor = {
+  ref: string;
+  meta: EchartsFullDataRefMeta;
+  option: EchartsFullDataOption;
+};
+
 type ParseOptionResult = {
   option?: EchartsFullDataOption;
   parseError?: string;
+  dataRef?: EchartsFullDataRefDescriptor;
 };
-
-type ParseOptionMaybePromise = ParseOptionResult | Promise<ParseOptionResult>;
 
 function validateDatasetSize(
   rowCount: number,
@@ -1002,17 +1024,55 @@ function normalizeDataRef(ref: unknown): {
     };
   }
   const trimmed = ref.trim();
-  const normalized = trimmed.toLowerCase();
-  const isSupported = SUPPORTED_DATA_REF_PREFIXES.some((prefix) =>
-    normalized.startsWith(prefix),
+  if (trimmed !== ref || hasWhitespaceOrControl(ref)) {
+    return {
+      parseError:
+        'Chart envelope data.ref must not contain whitespace or control characters.',
+    };
+  }
+  const lower = trimmed.toLowerCase();
+  const prefix = SUPPORTED_DATA_REF_PREFIXES.find((candidate) =>
+    lower.startsWith(candidate),
   );
-  if (!isSupported) {
+  if (!prefix) {
     return {
       parseError:
         'Chart envelope data.ref must use artifact:// or session-file://.',
     };
   }
-  return { ref: trimmed };
+
+  const rawPath = trimmed.slice(prefix.length);
+  if (rawPath.length === 0) {
+    return { parseError: 'Chart envelope data.ref path must be non-empty.' };
+  }
+  if (/[?#\\]/.test(rawPath)) {
+    return {
+      parseError:
+        'Chart envelope data.ref path must not include query, hash, or backslash characters.',
+    };
+  }
+
+  let decodedPath: string;
+  try {
+    decodedPath = decodeURIComponent(rawPath);
+  } catch {
+    return { parseError: 'Chart envelope data.ref path is malformed.' };
+  }
+  if (/[%?#\\]/.test(decodedPath) || hasWhitespaceOrControl(decodedPath)) {
+    return {
+      parseError:
+        'Chart envelope data.ref path must not include query, hash, whitespace, control, backslash, or double-encoded percent characters.',
+    };
+  }
+
+  const segments = decodedPath.split('/');
+  if (segments.some((segment) => segment.length === 0 || segment === '..')) {
+    return {
+      parseError:
+        'Chart envelope data.ref path must use non-empty segments and cannot contain "..".',
+    };
+  }
+  return { ref: `${prefix}${segments.join('/')}` };
 }
 
 function normalizeDataRefMeta(data: EchartsObject): {
@@ -1045,10 +1105,7 @@ function normalizeDataRefMeta(data: EchartsObject): {
   };
 }
 
-function normalizeEnvelope(
-  envelope: EchartsObject,
-  resolveDataRef?: EchartsFullDataRefResolver,
-): ParseOptionMaybePromise {
+function normalizeEnvelope(envelope: EchartsObject): ParseOptionResult {
   if (envelope.version !== 1) {
     return { parseError: 'Chart envelope version must be 1.' };
   }
@@ -1077,28 +1134,7 @@ function normalizeEnvelope(
   if (parseError || !ref) return { parseError };
   const { meta, parseError: metaError } = normalizeDataRefMeta(data);
   if (metaError || !meta) return { parseError: metaError };
-  if (!resolveDataRef) {
-    return { parseError: 'Chart data reference resolver is unavailable.' };
-  }
-
-  return resolveDataRefWithTimeout(resolveDataRef, ref, meta)
-    .then((resolved) => {
-      const result = normalizeEnvelopeDataset({
-        kind: 'inline',
-        dimensions: resolved?.dimensions,
-        source: resolved?.source,
-      });
-      if (result.parseError || !result.dataset) {
-        return { parseError: result.parseError };
-      }
-      return injectDatasetAndValidate(option, result.dataset);
-    })
-    .catch((error: unknown) => ({
-      parseError:
-        error instanceof Error
-          ? `Chart data reference could not be resolved: ${error.message}`
-          : 'Chart data reference could not be resolved.',
-    }));
+  return { dataRef: { ref, meta, option } };
 }
 
 function resolveDataRefWithTimeout(
@@ -1118,10 +1154,31 @@ function resolveDataRefWithTimeout(
   });
 }
 
-function parseOption(
-  code: string,
-  resolveDataRef?: EchartsFullDataRefResolver,
-): ParseOptionMaybePromise {
+function resolveEnvelopeDataRef(
+  resolveDataRef: EchartsFullDataRefResolver,
+  dataRef: EchartsFullDataRefDescriptor,
+): Promise<ParseOptionResult> {
+  return resolveDataRefWithTimeout(resolveDataRef, dataRef.ref, dataRef.meta)
+    .then((resolved) => {
+      const result = normalizeEnvelopeDataset({
+        kind: 'inline',
+        dimensions: resolved?.dimensions,
+        source: resolved?.source,
+      });
+      if (result.parseError || !result.dataset) {
+        return { parseError: result.parseError };
+      }
+      return injectDatasetAndValidate(dataRef.option, result.dataset);
+    })
+    .catch((error: unknown) => ({
+      parseError:
+        error instanceof Error
+          ? `Chart data reference could not be resolved: ${error.message}`
+          : 'Chart data reference could not be resolved.',
+    }));
+}
+
+function parseOption(code: string): ParseOptionResult {
   if (code.length > MAX_CHART_CODE_LENGTH) {
     return {
       parseError: `Chart data is too large. Maximum supported size: ${MAX_CHART_CODE_LENGTH} characters.`,
@@ -1137,7 +1194,7 @@ function parseOption(
       return { parseError: 'Chart data is too deeply nested.' };
     }
     if (isEchartsFullDataEnvelope(parsed)) {
-      return normalizeEnvelope(parsed, resolveDataRef);
+      return normalizeEnvelope(parsed);
     }
     const option = parsed as EchartsFullDataOption;
     const shapeError = validateOptionShape(option);
@@ -1149,12 +1206,6 @@ function parseOption(
         error instanceof Error ? error.message : 'Chart data is invalid.',
     };
   }
-}
-
-function isPromiseResult(
-  value: ParseOptionMaybePromise,
-): value is Promise<ParseOptionResult> {
-  return typeof (value as Promise<ParseOptionResult>).then === 'function';
 }
 
 export function createEchartsFullDataRenderer({
@@ -1202,36 +1253,36 @@ function EchartsFullDataBlockFromCode({
     },
     [],
   );
-  const parsed = useMemo<ParseOptionMaybePromise>(
-    () =>
-      isStreaming
-        ? {}
-        : parseOption(
-            code,
-            hasResolveDataRef ? stableResolveDataRef : undefined,
-          ),
-    [code, hasResolveDataRef, isStreaming, stableResolveDataRef],
+  const parsed = useMemo<ParseOptionResult>(
+    () => (isStreaming ? {} : parseOption(code)),
+    [code, isStreaming],
   );
   const [resolvedParsed, setResolvedParsed] = useState<ParseOptionResult>({});
-  const isResolvingRef = isPromiseResult(parsed);
+  const { dataRef } = parsed;
 
   useEffect(() => {
-    if (!isResolvingRef) {
+    if (!dataRef) {
       setResolvedParsed({});
+      return;
+    }
+    if (!hasResolveDataRef) {
+      setResolvedParsed({
+        parseError: 'Chart data reference resolver is unavailable.',
+      });
       return;
     }
 
     let cancelled = false;
     setResolvedParsed({});
-    parsed.then((result) => {
+    resolveEnvelopeDataRef(stableResolveDataRef, dataRef).then((result) => {
       if (!cancelled) setResolvedParsed(result);
     });
     return () => {
       cancelled = true;
     };
-  }, [isResolvingRef, parsed]);
+  }, [dataRef, hasResolveDataRef, stableResolveDataRef]);
 
-  const { option, parseError } = isResolvingRef ? resolvedParsed : parsed;
+  const { option, parseError } = dataRef ? resolvedParsed : parsed;
 
   return (
     <EchartsFullDataBlock

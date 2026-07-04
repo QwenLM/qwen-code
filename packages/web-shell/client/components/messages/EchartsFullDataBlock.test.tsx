@@ -458,7 +458,7 @@ describe('EchartsFullDataBlock', () => {
         version: 1,
         data: {
           kind: 'ref',
-          ref: 'artifact://chart-data/orders',
+          ref: 'ARTIFACT://chart-data/%6Frders',
           format: 'csv',
           dimensions: ['day', 'orders'],
         },
@@ -772,6 +772,63 @@ describe('EchartsFullDataBlock', () => {
       'Chart envelope data.ref must use artifact:// or session-file://.',
     );
     expect(unsupportedScheme.querySelector('pre code')).toBeNull();
+  });
+
+  it('validates ref envelopes before calling the host resolver', async () => {
+    const resolveDataRef = vi.fn();
+    const invalidRefs = [
+      {
+        ref: 'artifact://',
+        message: 'Chart envelope data.ref path must be non-empty.',
+      },
+      {
+        ref: 'session-file://../../secret',
+        message:
+          'Chart envelope data.ref path must use non-empty segments and cannot contain "..".',
+      },
+      {
+        ref: 'session-file://%2e%2e/secret',
+        message:
+          'Chart envelope data.ref path must use non-empty segments and cannot contain "..".',
+      },
+      {
+        ref: 'artifact://chart-data/orders?token=1',
+        message:
+          'Chart envelope data.ref path must not include query, hash, or backslash characters.',
+      },
+      {
+        ref: 'artifact://chart-data/%252e%252e/orders',
+        message:
+          'Chart envelope data.ref path must not include query, hash, whitespace, control, backslash, or double-encoded percent characters.',
+      },
+      {
+        ref: 'artifact://chart-data/\u0000orders',
+        message:
+          'Chart envelope data.ref must not contain whitespace or control characters.',
+      },
+    ];
+
+    for (const { ref, message } of invalidRefs) {
+      const container = await renderEchartsMarkdown({
+        code: JSON.stringify({
+          version: 1,
+          data: {
+            kind: 'ref',
+            ref,
+            format: 'json',
+            dimensions: ['day', 'orders'],
+          },
+          option: {
+            series: [{ type: 'bar' }],
+          },
+        }),
+        resolveDataRef,
+      });
+
+      expect(container.textContent).toContain(message);
+      expect(container.querySelector('pre code')).toBeNull();
+    }
+    expect(resolveDataRef).not.toHaveBeenCalled();
   });
 
   it('rejects resolved ref data over the dataset limits', async () => {
