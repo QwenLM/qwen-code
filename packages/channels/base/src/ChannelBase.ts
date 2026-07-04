@@ -2203,7 +2203,7 @@ export abstract class ChannelBase {
     return `${GROUP_HISTORY_CONTEXT_MARKER}\n${formatted.join('\n')}\n\n${CURRENT_MESSAGE_MARKER}\n${promptText}`;
   }
 
-  protected async preflightInbound(envelope: Envelope): Promise<boolean> {
+  protected preflightInbound(envelope: Envelope): boolean | Promise<boolean> {
     const groupResult = this.groupGate.check(envelope);
     if (!groupResult.allowed) {
       if (groupResult.reason === 'mention_required') {
@@ -2215,7 +2215,9 @@ export abstract class ChannelBase {
     const result = this.gate.check(envelope.senderId, envelope.senderName);
     if (!result.allowed) {
       if (result.pairingCode !== undefined) {
-        await this.onPairingRequired(envelope.chatId, result.pairingCode);
+        return this.onPairingRequired(envelope.chatId, result.pairingCode).then(
+          () => false,
+        );
       }
       return false;
     }
@@ -2224,7 +2226,8 @@ export abstract class ChannelBase {
   }
 
   async handleInbound(envelope: Envelope): Promise<void> {
-    if (!(await this.preflightInbound(envelope))) return;
+    const preflight = this.preflightInbound(envelope);
+    if (!(preflight instanceof Promise ? await preflight : preflight)) return;
 
     await this.processInbound(envelope);
   }
