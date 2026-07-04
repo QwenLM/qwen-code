@@ -43,10 +43,13 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next).not.toHaveProperty('clientId');
     expect(next).not.toHaveProperty('displayName');
     expect(next).not.toHaveProperty('tokenCount');
-    expect(next).not.toHaveProperty('commands');
-    expect(next).not.toHaveProperty('skills');
     expect(next).not.toHaveProperty('supportedCommands');
     expect(next).not.toHaveProperty('context');
+    // Workspace-scoped slash commands and skills survive a clear so skill-backed
+    // commands (e.g. /review) keep autocompleting in the fresh deferred session
+    // before its first prompt creates a session (mirrors #6153 / #6066).
+    expect(next.commands).toEqual([commandInfo('old-command')]);
+    expect(next.skills).toEqual(['old-skill']);
   });
 
   it('preserves a concurrently loaded session', () => {

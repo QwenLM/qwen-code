@@ -4355,6 +4355,63 @@ describe('DaemonSessionProvider', () => {
     ).not.toHaveBeenCalled();
   });
 
+  it('keeps workspace skill slash commands after clearing so /review still autocompletes', async () => {
+    const firstSession = createMockSession({
+      sessionId: 'session-a',
+      supportedCommands: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'session-a',
+        availableCommands: [],
+        availableSkills: ['review'],
+      })),
+    });
+    sdkMocks.sessions.push(firstSession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection?.commands?.map((command) => command.name)).toContain(
+      'review',
+    );
+    expect(connection?.skills).toContain('review');
+
+    await act(async () => {
+      await actions?.clearSession();
+    });
+    for (let i = 0; i < 10 && connection?.sessionId !== undefined; i++) {
+      await act(async () => {
+        await wait(5);
+        await flushPromises();
+      });
+    }
+
+    // Clearing returns to the deferred pre-first-prompt state (no sessionId),
+    // but the workspace-scoped skill command must survive so '/rev' + Tab keeps
+    // completing '/review' in the new session before its first prompt creates a
+    // session (matches the initial deferred-connect guarantee from #6153).
+    expect(connection).not.toHaveProperty('sessionId');
+    expect(connection?.commands?.map((command) => command.name)).toContain(
+      'review',
+    );
+    expect(connection?.skills).toContain('review');
+    // The session-scoped raw snapshots are still dropped so the next session
+    // refetches instead of reusing stale metadata.
+    expect(connection).not.toHaveProperty('supportedCommands');
+    expect(connection).not.toHaveProperty('context');
+  });
+
   it('ignores streamed events from a session after it is cleared', async () => {
     const streamStarted = createDeferred<void>();
     const releaseOldEvent = createDeferred<void>();
