@@ -1053,9 +1053,29 @@ describe('daemon event schema', () => {
   });
 
   it('treats byte-overflow client_evicted as terminal', () => {
-    const state = reduceDaemonSessionEvents([
-      {
-        id: 1,
+    const evicted = {
+      id: 1,
+      v: 1,
+      type: 'client_evicted',
+      data: {
+        reason: 'queue_bytes_overflow',
+        droppedAfter: 8,
+        queueSize: 1,
+        maxQueued: 256,
+        queuedBytes: 1_900_000,
+        maxQueuedBytes: 2_097_152,
+        eventBytes: 300_000,
+      },
+    } satisfies DaemonEvent;
+    const known = asKnownDaemonEvent(evicted);
+    expect(known?.type).toBe('client_evicted');
+    if (known?.type !== 'client_evicted') {
+      throw new Error('expected client_evicted event');
+    }
+    expect(known.data.queuedBytes).toBe(1_900_000);
+
+    expect(
+      asKnownDaemonEvent({
         v: 1,
         type: 'client_evicted',
         data: {
@@ -1063,12 +1083,14 @@ describe('daemon event schema', () => {
           droppedAfter: 8,
           queueSize: 1,
           maxQueued: 256,
-          queuedBytes: 1_900_000,
+          queuedBytes: Number.NaN,
           maxQueuedBytes: 2_097_152,
           eventBytes: 300_000,
         },
-      },
-    ]);
+      }),
+    ).toBeUndefined();
+
+    const state = reduceDaemonSessionEvents([evicted]);
 
     expect(state.alive).toBe(false);
     expect(state.terminalEvent?.type).toBe('client_evicted');
