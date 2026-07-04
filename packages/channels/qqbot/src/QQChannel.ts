@@ -87,6 +87,8 @@ export class QQChannel extends ChannelBase {
   private seenMessages: Map<string, number> = new Map();
   /** Cleanup timer for seenMessages TTL eviction. */
   private seenCleanupTimer: ReturnType<typeof setInterval> | null = null;
+  /** Cross-event-type dedup cache (e.g., GROUP_AT_MESSAGE_CREATE + GROUP_MESSAGE_CREATE). */
+  private crossEventDedup: Map<string, number> = new Map();
   /** Timestamp of last received HEARTBEAT_ACK, for zombie-connection detection. */
   private lastHeartbeatAck: number = 0;
   /** Debounce timer for saveQQState to avoid blocking event loop. */
@@ -145,10 +147,9 @@ export class QQChannel extends ChannelBase {
   /** Named handler for permanent textChunk listener (cron/non-prompt). */
   private _cronTextHandler: ((sessionId: string, text: string) => void) | null =
     null;
-  /** Tracks whether _cronTextHandler is registered on bridge. */
-  /** Gate: only set during cron-scheduled message flows. Prevents
-     phantom cronBuffer entries when textChunk fires during normal
-     bridge.prompt() calls (ChannelBase has its own listener there). */
+  /** Gate: only true during cron-scheduled message flows. Prevents
+      phantom cronBuffer entries when textChunk fires during normal
+      bridge.prompt() calls (ChannelBase has its own listener there). */
   private _inCronFlow: boolean = false;
   private cronTextHandlerAttached: boolean = false;
 
@@ -351,7 +352,7 @@ export class QQChannel extends ChannelBase {
         '',
         '## 关于机器人消息',
         '',
-        '消息前缀 [bot] 表示该消息来自另一个机器人。是否回复由你自主判断。',
+        '机器人消息已被自动过滤，不会出现在对话中。',
       ].join('\n');
     }
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -449,6 +450,17 @@ export class QQChannel extends ChannelBase {
       );
 
       if (!resp.ok) {
+        // Log diagnostic info for non-429 failures
+        if (resp.status !== 429) {
+          const errBody = sanitizeLogText(
+            await resp.text().catch(() => ''),
+            200,
+          );
+          process.stderr.write(
+            `[QQ:${this.name}] Send failed (HTTP ${resp.status}: ${errBody})
+`,
+          );
+        }
         // 429 = rate-limited — do not retry, bail immediately
         if (resp.status === 429) {
           process.stderr.write(
@@ -580,6 +592,12 @@ export class QQChannel extends ChannelBase {
     const base = getApiBase(Boolean(this.qqConfig.sandbox));
     const routeType =
       this.chatTypeMap.get(chatId) || this.qqConfig.chatTypes?.[chatId];
+    if (routeType && routeType !== 'group' && routeType !== 'c2c') {
+      process.stderr.write(
+        `[QQ:${this.name}] Unknown chatType '${String(routeType)}' for ${sanitizeLogText(chatId, 64)}, defaulting to c2c
+`,
+      );
+    }
     const path =
       routeType === 'group'
         ? `/v2/groups/${chatId}/messages`
@@ -925,8 +943,11 @@ export class QQChannel extends ChannelBase {
         const tmpPath = this.qqStatePath + '.tmp';
         writeFileSync(tmpPath, this.serializeQQState(), { mode: 0o600 });
         renameSync(tmpPath, this.qqStatePath);
-      } catch {
-        /* best-effort */
+      } catch (e) {
+        process.stderr.write(
+          `[QQ:${this.name}] saveQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+`,
+        );
       }
     }, 500);
     this.saveTimer.unref();
@@ -964,7 +985,6 @@ export class QQChannel extends ChannelBase {
 
   /** Flush pending state writes immediately (called on disconnect). */
   /** Flush pending state writes immediately (called on disconnect). */
-  /** Flush pending state writes immediately (called on disconnect). */
   private flushQQState(): void {
     if (this.saveTimer) {
       clearTimeout(this.saveTimer);
@@ -974,8 +994,11 @@ export class QQChannel extends ChannelBase {
       const tmpPath = this.qqStatePath + '.tmp';
       writeFileSync(tmpPath, this.serializeQQState(), { mode: 0o600 });
       renameSync(tmpPath, this.qqStatePath);
-    } catch {
-      /* best-effort */
+    } catch (e) {
+      process.stderr.write(
+        `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+`,
+      );
     }
   }
 
@@ -1053,8 +1076,11 @@ export class QQChannel extends ChannelBase {
         if (data.trim())
           writeFileSync(this.sessionsBackupPath, data, { mode: 0o600 });
       }
-    } catch {
-      /* best-effort */
+    } catch (e) {
+      process.stderr.write(
+        `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+`,
+      );
     }
   }
 
@@ -1070,8 +1096,11 @@ export class QQChannel extends ChannelBase {
           { mode: 0o600 },
         );
       }
-    } catch {
-      /* best-effort */
+    } catch (e) {
+      process.stderr.write(
+        `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+`,
+      );
     }
   }
 
@@ -1113,8 +1142,11 @@ export class QQChannel extends ChannelBase {
           tc.set(correctId, entry.cwd || '');
         }
       }
-    } catch {
-      /* best-effort */
+    } catch (e) {
+      process.stderr.write(
+        `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+`,
+      );
     }
   }
 
@@ -1260,6 +1292,18 @@ export class QQChannel extends ChannelBase {
   ): void {
     this.ws = new WebSocket(url);
     const dialed = this.ws;
+
+    // 30-second READY timeout — if the gateway never sends READY,
+    // close the connection so connect() rejects instead of hanging.
+    this.readyTimeout = setTimeout(() => {
+      if (this.ws !== dialed) return;
+      process.stderr.write(
+        `[QQ:${this.name}] READY timeout after 30s, closing\n`,
+      );
+      this.ws?.close(4002, 'READY timeout');
+      reject(new Error(`[QQ:${this.name}] READY timeout after 30s`));
+    }, 30_000);
+    this.readyTimeout.unref?.();
 
     this.ws.on('open', () => {
       process.stderr.write(`[QQ:${this.name}] WebSocket connected\n`);
@@ -1650,12 +1694,30 @@ export class QQChannel extends ChannelBase {
         for (const [id, ts] of this.seenMessages) {
           if (ts < cutoff) this.seenMessages.delete(id);
         }
+        for (const [key, ts] of this.crossEventDedup) {
+          if (ts < cutoff) this.crossEventDedup.delete(key);
+        }
         if (this.seenMessages.size === 0) {
           clearInterval(this.seenCleanupTimer!);
           this.seenCleanupTimer = null;
         }
       }, 60_000).unref();
     }
+    return false;
+  }
+  /**
+   * Check if a message was already processed via a different event type
+   * (e.g., GROUP_AT_MESSAGE_CREATE + GROUP_MESSAGE_CREATE for the same message).
+   * Uses composite key of chatId + authorId + content, 10-min TTL via cleanup timer.
+   */
+  private isCrossEventDuplicate(
+    chatId: string,
+    event: QQGroupMessageEvent,
+  ): boolean {
+    const key = `${chatId}:${event.author?.user_openid || event.author?.id || ''}:${event.content || ''}`;
+    const now = Date.now();
+    if (this.crossEventDedup.has(key)) return true;
+    this.crossEventDedup.set(key, now);
     return false;
   }
 
@@ -1669,6 +1731,7 @@ export class QQChannel extends ChannelBase {
   ): {
     isAtBot: boolean;
     isSlash: boolean;
+    cleanText: string;
     safeName: string;
     text: string;
     senderName: string;
@@ -1705,7 +1768,7 @@ export class QQChannel extends ChannelBase {
       ? sanitizePromptText(cleanText)
       : `[atMention=${isAtBot}]${openIdSuffix} [${safeName}]: ${sanitizePromptText(this.qqConfig.allowMention !== false ? content : cleanText)}`;
 
-    return { isAtBot, isSlash, safeName, text, senderName };
+    return { isAtBot, isSlash, safeName, text, senderName, cleanText };
   }
 
   private handleC2C(event: QQMessageEvent): void {
@@ -1774,7 +1837,7 @@ export class QQChannel extends ChannelBase {
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
-    const { isAtBot, isSlash, text, senderName } = result;
+    const { isAtBot, isSlash, text, senderName, cleanText } = result;
 
     // GROUP_AT_MESSAGE_CREATE only fires when the bot IS @mentioned, so
     // finalIsAtBot is unconditionally true. If isAtBot (from mentions array)
@@ -1792,6 +1855,13 @@ export class QQChannel extends ChannelBase {
     const correctedText = !isAtBot
       ? text.replace('[atMention=false]', '[atMention=true]')
       : text;
+    // When finalIsAtBot is forced, also correct isSlash so slash commands like /clear are not treated as plain text.
+    // Also correct the text to use clean command form when isSlash was missed.
+    const correctedIsSlash = !isAtBot ? cleanText.startsWith('/') : isSlash;
+    const correctedTextFinal =
+      correctedIsSlash && !isSlash
+        ? sanitizePromptText(cleanText)
+        : correctedText;
 
     // GROUP_AT_MESSAGE_CREATE always has finalIsAtBot=true, so @-bot
     // messages are always delivered. Log when active messages are disabled.
@@ -1803,23 +1873,25 @@ export class QQChannel extends ChannelBase {
 
     // Deduplicate before handleInbound — prepareGroupMessage already ran
     // so side effects (extractBotOpenId) are applied regardless of dedup.
-    if (this.isDuplicate(event.id)) return;
+    // Also check cross-event dedup: GROUP_MESSAGE_CREATE may also fire for the same message.
+    if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
+      return;
     this.setReplyMsgId(chatId, event.id);
     this.handleInbound({
       channelName: this.name,
       senderId:
-        event.author.id ||
         event.author.user_openid ||
+        event.author.id ||
         event.author.member_openid ||
         'unknown',
       senderName,
       chatId,
-      text: correctedText,
+      text: correctedTextFinal,
       messageId: event.id,
       isGroup: true,
       isMentioned: finalIsAtBot,
       isReplyToBot: finalIsAtBot,
-      ...(isSlash ? {} : { alreadyPrefixed: true as const }),
+      ...(correctedIsSlash ? {} : { alreadyPrefixed: true as const }),
     }).catch((e) =>
       process.stderr.write(
         `[QQ:${this.name}] Group handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
@@ -1864,7 +1936,9 @@ export class QQChannel extends ChannelBase {
       return;
     }
 
-    if (this.isDuplicate(event.id)) return;
+    // Also check cross-event dedup: GROUP_AT_MESSAGE_CREATE may have already handled this message.
+    if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
+      return;
 
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
@@ -1897,8 +1971,8 @@ export class QQChannel extends ChannelBase {
       chatId,
       text,
       senderId:
-        event.author.id ||
         event.author.user_openid ||
+        event.author.id ||
         event.author.member_openid ||
         'unknown',
       senderName,
@@ -1942,6 +2016,7 @@ export class QQChannel extends ChannelBase {
         if (target?.chatId === groupId) {
           if (entry.timer) clearTimeout(entry.timer);
           this.cronBuffer.delete(sid);
+          this.cronRetryCount.delete(sid);
         }
       }
     }

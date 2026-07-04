@@ -371,10 +371,10 @@ describe('group sender-name sanitization', () => {
       text: string;
       alreadyPrefixed?: boolean;
     };
-    // With no mentions, isAtBot=false so isSlash=false; text gets corrected
-    // with [atMention=true] prefix and alreadyPrefixed is set.
-    expect(env.text).toBe('[atMention=true] [Alice]: /clear');
-    expect(env.alreadyPrefixed).toBe(true);
+    // With no mentions, isAtBot=false so isSlash=false; isSlash is corrected
+    // when finalIsAtBot is forced — text becomes the clean slash command.
+    expect(env.text).toBe('/clear');
+    expect(env.alreadyPrefixed).toBeUndefined();
   });
 
   it('sanitizes the sender name AND command text in the slash-command audit log (no log forging)', () => {
