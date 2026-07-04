@@ -1,0 +1,4 @@
+interface:
+  display_name: 'Autofix'
+  short_description: 'Run the Qwen Autofix CI agent modes.'
+  default_prompt: '/autofix assess-candidates --workdir /tmp/autofix'

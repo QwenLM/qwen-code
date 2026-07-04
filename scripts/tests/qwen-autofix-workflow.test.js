@@ -74,6 +74,10 @@ const installAndBuildSteps =
     /- name: 'Install dependencies and build'[\s\S]*?(?=\n[ ]{6}- name: ')/g,
   ) ?? [];
 
+function readAutofixSkill() {
+  return readFileSync('.qwen/skills/autofix/SKILL.md', 'utf8');
+}
+
 describe('qwen-autofix workflow', () => {
   it('keeps ECS issue autofix limited to forced and ready-for-agent issues', () => {
     expect(workflow).toContain('autofixTier');
@@ -304,6 +308,8 @@ describe('qwen-autofix workflow', () => {
   });
 
   it('runs heavy autofix jobs on hosted runners with sandbox images', () => {
+    const workflowAndSkill = `${workflow}\n${readAutofixSkill()}`;
+
     expect(workflow).toMatch(/issue-autofix:[\s\S]*?runs-on: 'ubuntu-latest'/);
     expect(workflow).toMatch(/review-address:[\s\S]*?runs-on: 'ubuntu-latest'/);
     expect(workflow).not.toContain(
@@ -332,8 +338,8 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain('run_shell_command(npm run build)');
     expect(workflow).not.toContain('run_shell_command(npm run bundle)');
     expect(workflow).not.toContain('run_shell_command(npx vitest)');
-    expect(workflow).toContain('Do not run project code,');
-    expect(workflow).toContain(
+    expect(workflowAndSkill).toContain('Do not run project code,');
+    expect(workflowAndSkill).toContain(
       'workflow verification gate runs trusted checks after',
     );
     expect(workflow).toContain('"sandbox": "docker"');
@@ -436,6 +442,35 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain('Qwen Code failed on attempt');
     }
     expect(assessCandidatesStep).toContain('rm -f "${WORKDIR}/decision.json"');
+  });
+
+  it('keeps agent decision logic in the project autofix skill', () => {
+    const skill = readAutofixSkill();
+
+    expect(skill).toContain('name: autofix');
+    expect(skill).toContain('assess-candidates');
+    expect(skill).toContain('develop-issue');
+    expect(skill).toContain('address-review');
+
+    expect(assessCandidatesStep).toContain(
+      '/autofix assess-candidates --workdir /tmp/autofix',
+    );
+    expect(developFixStep).toContain(
+      '/autofix develop-issue --issue ${{ steps.decision.outputs.go_issue }} --workdir /tmp/autofix',
+    );
+    expect(triageAndAddressStep).toContain(
+      '/autofix address-review --pr ${{ matrix.target.pr }} --issue ${{ matrix.target.issue }} --workdir /tmp/autofix-review-${{ matrix.target.pr }}',
+    );
+
+    for (const step of [
+      assessCandidatesStep,
+      developFixStep,
+      triageAndAddressStep,
+    ]) {
+      expect(step).not.toContain('## Role');
+      expect(step).not.toContain('## Workflow');
+      expect(step).not.toContain('## Task');
+    }
   });
 
   it('allows non-package fixes after deterministic verification', () => {
