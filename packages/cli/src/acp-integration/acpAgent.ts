@@ -64,6 +64,7 @@ import {
   runManagedAutoMemoryDream,
   runManagedRememberByAgent,
   matchesAnyServerPattern,
+  IMAGE_CAPABILITY,
   registerAcpEventLoopLagGauge,
   startEventLoopLagMonitor,
 } from '@qwen-code/qwen-code-core';
@@ -143,6 +144,7 @@ import {
   reloadEnvironment,
   SettingScope,
 } from '../config/settings.js';
+import { loadSettingsCached } from '../config/settings-cache.js';
 import {
   buildPermissionSettings,
   normalizePermissionRules,
@@ -2832,6 +2834,9 @@ class QwenAgent implements Agent {
           sse: true,
           http: true,
         },
+        _meta: {
+          imageCapability: IMAGE_CAPABILITY,
+        },
       },
     };
   }
@@ -2870,11 +2875,19 @@ class QwenAgent implements Agent {
     cwd,
     mcpServers,
   }: NewSessionRequest): Promise<NewSessionResponse> {
-    const config = await this.newSessionConfig(cwd, mcpServers);
+    // Per-request settings: session handlers run concurrently, and
+    // `this.settings` is only a "latest loaded" cache for agent-level
+    // readers. Threading the instance explicitly keeps a slow session
+    // creation from picking up whichever workspace loaded last — Session
+    // persists model changes through this instance, so a mix-up writes to
+    // another workspace's settings.json.
+    const settings = loadSettingsCached(cwd);
+    this.settings = settings;
+    const config = await this.newSessionConfig(cwd, mcpServers, settings);
     await this.ensureAuthenticated(config);
     this.setupFileSystem(config);
 
-    const session = await this.createAndStoreSession(config);
+    const session = await this.createAndStoreSession(config, settings);
     const availableModels = this.buildAvailableModels(config);
     const modesData = this.buildModesData(config);
     const configOptions = this.buildConfigOptions(config);
@@ -2888,8 +2901,12 @@ class QwenAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    // Load per-request settings BEFORE the existence check: the check must
+    // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
+    // whichever settings a concurrent handler loaded last.
+    const settings = loadSettingsCached(params.cwd);
     const exists = await runWithAcpRuntimeOutputDir(
-      this.settings,
+      settings,
       params.cwd,
       async () => {
         const sessionService = new SessionService(params.cwd);
@@ -2899,6 +2916,10 @@ class QwenAgent implements Agent {
     if (!exists) {
       throw RequestError.resourceNotFound(`session:${params.sessionId}`);
     }
+    // Adopt into the "latest loaded" cache only once the session is
+    // confirmed — a failed probe for a stale id must not repoint
+    // agent-level readers at this request's workspace.
+    this.settings = settings;
 
     const config = await this.newSessionConfig(
       params.cwd,
@@ -2907,6 +2928,7 @@ class QwenAgent implements Agent {
       // future loosening — `newSessionConfig` iterates the list, so
       // a `null`/`undefined` would otherwise throw `TypeError`.
       params.mcpServers ?? [],
+      settings,
       params.sessionId,
       true,
     );
@@ -2914,7 +2936,11 @@ class QwenAgent implements Agent {
     this.setupFileSystem(config);
 
     const sessionData = config.getResumedSessionData();
-    const session = await this.createAndStoreSession(config, sessionData);
+    const session = await this.createAndStoreSession(
+      config,
+      settings,
+      sessionData,
+    );
 
     await this.#restoreWorktreeOnResume(config, session);
 
@@ -2932,8 +2958,10 @@ class QwenAgent implements Agent {
   async unstable_resumeSession(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
+    // Same per-request settings discipline as `loadSession`.
+    const settings = loadSettingsCached(params.cwd);
     const exists = await runWithAcpRuntimeOutputDir(
-      this.settings,
+      settings,
       params.cwd,
       async () => {
         const sessionService = new SessionService(params.cwd);
@@ -2943,10 +2971,12 @@ class QwenAgent implements Agent {
     if (!exists) {
       throw RequestError.resourceNotFound(`session:${params.sessionId}`);
     }
+    this.settings = settings;
 
     const config = await this.newSessionConfig(
       params.cwd,
       params.mcpServers ?? [],
+      settings,
       params.sessionId,
       true,
     );
@@ -2955,6 +2985,7 @@ class QwenAgent implements Agent {
 
     const session = await this.createAndStoreSession(
       config,
+      settings,
       config.getResumedSessionData(),
       { replayHistory: false },
     );
@@ -7674,10 +7705,10 @@ class QwenAgent implements Agent {
   private async newSessionConfig(
     cwd: string,
     mcpServers: McpServer[],
+    settings: LoadedSettings,
     sessionId?: string,
     resume?: boolean,
   ): Promise<Config> {
-    this.settings = loadSettings(cwd);
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
     // `sessionMcpServers` (top precedence tier) rather than merging into
@@ -7738,7 +7769,7 @@ class QwenAgent implements Agent {
       }
     }
 
-    const settings = this.settings.merged;
+    const mergedSettings = settings.merged;
 
     const argvForSession = {
       ...this.argv,
@@ -7747,7 +7778,7 @@ class QwenAgent implements Agent {
     };
 
     const config = await loadCliConfig(
-      settings,
+      mergedSettings,
       argvForSession,
       cwd,
       // ACP sessions do not provide an extension override. Passing [] is a
@@ -7756,16 +7787,16 @@ class QwenAgent implements Agent {
       undefined,
       // Pass separated hooks for proper source attribution
       {
-        userHooks: this.settings.getUserHooks(),
-        projectHooks: this.settings.getProjectHooks(),
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
       },
-      // CRITICAL: close over `this.settings` (LoadedSettings instance), NOT
-      // over the local `settings` snapshot built above. `LoadedSettings.
-      // setValue` replaces `_merged`, so a closure over the snapshot would
-      // never see workspace toggles applied during the session. ACP/Zed
-      // sessions otherwise leak persisted disabled skills into the first
-      // <available_skills> at cold start.
-      buildDisabledSkillNamesProvider(this.settings),
+      // CRITICAL: close over the per-request `settings` (LoadedSettings
+      // instance), NOT over the `mergedSettings` snapshot built above.
+      // `LoadedSettings.setValue` replaces `_merged`, so a closure over the
+      // snapshot would never see workspace toggles applied during the
+      // session. ACP/Zed sessions otherwise leak persisted disabled skills
+      // into the first <available_skills> at cold start.
+      buildDisabledSkillNamesProvider(settings),
       sessionMcpServers,
     );
     // ACP sessions run with piped stdio (non-TTY), so the default
@@ -7926,6 +7957,7 @@ class QwenAgent implements Agent {
 
   private async createAndStoreSession(
     config: Config,
+    settings: LoadedSettings,
     sessionData?: ResumedSessionData,
     options: { replayHistory?: boolean } = {},
   ): Promise<Session> {
@@ -7939,12 +7971,7 @@ class QwenAgent implements Agent {
 
     this.sessions.get(sessionId)?.dispose();
 
-    const session = new Session(
-      sessionId,
-      config,
-      this.connection,
-      this.settings,
-    );
+    const session = new Session(sessionId, config, this.connection, settings);
     this.sessions.set(sessionId, session);
 
     setTimeout(async () => {

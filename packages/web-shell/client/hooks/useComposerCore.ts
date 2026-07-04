@@ -158,6 +158,7 @@ const TOOLTIP_STYLES = `
   margin: 6px 10px 4px;
   padding: 2px 0 4px !important;
   line-height: 1.2;
+  color: var(--muted-foreground, #a1a1aa) !important;
   border-bottom: 1px solid var(--border) !important;
 }
 
