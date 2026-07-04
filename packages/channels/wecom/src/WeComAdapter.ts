@@ -197,7 +197,11 @@ export class WeComChannel extends ChannelBase {
       authentication.promise.catch(() => {});
       const connected = client.connect();
       const connectedPromise = isPromiseLike(connected)
-        ? Promise.resolve(connected).then(() => {})
+        ? withTimeout(
+            Promise.resolve(connected).then(() => {}),
+            AUTHENTICATION_TIMEOUT_MS,
+            'WeCom SDK connect timed out.',
+          )
         : Promise.resolve();
       await Promise.all([connectedPromise, authentication.promise]);
       authenticated = true;
@@ -800,6 +804,30 @@ function waitForAuthentication(client: WeComClient): {
     promise,
     cancel: (err?: Error) => finish(err),
   };
+}
+
+function withTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  return new Promise<T>((resolvePromise, rejectPromise) => {
+    timeout = setTimeout(() => {
+      rejectPromise(new Error(message));
+    }, timeoutMs);
+    timeout.unref?.();
+    promise.then(
+      (value) => {
+        if (timeout) clearTimeout(timeout);
+        resolvePromise(value);
+      },
+      (err: unknown) => {
+        if (timeout) clearTimeout(timeout);
+        rejectPromise(err);
+      },
+    );
+  });
 }
 
 function delay(ms: number): Promise<void> {

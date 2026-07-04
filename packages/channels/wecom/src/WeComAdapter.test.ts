@@ -750,6 +750,32 @@ describe('WeComChannel', () => {
     expect(lastClient().disconnect).toHaveBeenCalled();
   });
 
+  it('fails when SDK authenticates but connect never settles', async () => {
+    vi.useFakeTimers();
+    mocks.state.autoAuthenticate = false;
+    mocks.state.connectNeverSettles = true;
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+
+    const connecting = channel.connect();
+    const client = lastClient();
+    let settled: string | undefined;
+    connecting.then(
+      () => {
+        settled = 'resolved';
+      },
+      (err: unknown) => {
+        settled = err instanceof Error ? err.message : String(err);
+      },
+    );
+
+    client.emit('authenticated', {});
+    await vi.advanceTimersByTimeAsync(30_000);
+    await Promise.resolve();
+
+    expect(settled).toBe('WeCom SDK connect timed out.');
+    expect(client.disconnect).toHaveBeenCalled();
+  });
+
   it('removes SDK event handlers on disconnect', async () => {
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
@@ -1494,6 +1520,34 @@ describe('WeComChannel', () => {
       from: { userid: 'alice' },
       image: {
         url: 'https://[::ffff:0:a00:1]/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('blocks SIIT IPv4-mapped metadata URLs before probing them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-siit-metadata-ip',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://[::ffff:0:a9fe:a9fe]/latest/meta-data/',
         aeskey: 'k1',
       },
     });
