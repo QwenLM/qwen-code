@@ -526,6 +526,53 @@ describe('WebShellSidebar — session organization', () => {
       await Promise.resolve();
     });
   });
+
+  it('disables new session while a session organization update is busy', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    let resolveUpdate: ((value: unknown) => void) | undefined;
+    mockWorkspaceActions.updateSessionOrganization.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveUpdate = resolve;
+      }),
+    );
+    mockActive.sessions = [makeSession('session-a')];
+    const onNewSession = vi.fn();
+
+    const container = renderSidebar(false, { onNewSession });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const pinButton =
+      container.querySelector<HTMLButtonElement>('[aria-label="Pin"]');
+    await act(async () => {
+      pinButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    const newSessionButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="New chat"]',
+    );
+    expect(newSessionButton).not.toBeNull();
+    expect(newSessionButton!.disabled).toBe(true);
+    act(() => {
+      newSessionButton!.click();
+    });
+    expect(onNewSession).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveUpdate?.({
+        sessionId: 'session-a',
+        groupId: null,
+        isPinned: true,
+        pinnedAt: '2026-07-04T00:00:00.000Z',
+        updatedAt: '2026-07-04T00:00:00.000Z',
+      });
+      await Promise.resolve();
+    });
+    expect(newSessionButton!.disabled).toBe(false);
+  });
 });
 
 describe('WebShellSidebar — session export', () => {

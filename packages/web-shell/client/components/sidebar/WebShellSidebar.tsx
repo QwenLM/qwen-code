@@ -464,6 +464,7 @@ export function WebShellSidebar({
     () => new Set(),
   );
   const exportingSessionIdsRef = useRef<Set<string>>(new Set());
+  const [creatingSession, setCreatingSession] = useState(false);
   const creatingSessionRef = useRef(false);
   const [deleteCandidate, setDeleteCandidate] =
     useState<DaemonSessionSummary | null>(null);
@@ -516,6 +517,7 @@ export function WebShellSidebar({
         : groups.find((group) => group.id === selectedGroupId),
     [groups, selectedGroupId],
   );
+  const newSessionDisabled = busySessionIds.size > 0 || creatingSession;
 
   const setSessionBusy = useCallback((sessionId: string, busy: boolean) => {
     const next = new Set(busySessionIdsRef.current);
@@ -730,6 +732,7 @@ export function WebShellSidebar({
       return;
 
     creatingSessionRef.current = true;
+    setCreatingSession(true);
     void (async () => {
       try {
         const created = await onNewSession();
@@ -742,6 +745,7 @@ export function WebShellSidebar({
         }
       } finally {
         creatingSessionRef.current = false;
+        setCreatingSession(false);
       }
     })();
   }, [onError, onNewSession, reload, t]);
@@ -968,7 +972,6 @@ export function WebShellSidebar({
                 color: groupColor,
               });
         if (groupEditor.mode === 'create') {
-          setSelectedGroupId(group.id);
           if (groupEditor.targetSession) {
             try {
               await workspaceActions.updateSessionOrganization(
@@ -976,13 +979,17 @@ export function WebShellSidebar({
                 { groupId: group.id },
               );
               await reload();
+              setSelectedGroupId(group.id);
             } catch (err) {
+              setSelectedGroupId('all');
               setGroupEditor(null);
               setGroupName('');
               await reloadGroups();
               onError(err, t('sidebar.groupAssignFailedAfterCreate'));
               return;
             }
+          } else {
+            setSelectedGroupId(group.id);
           }
         }
         setGroupEditor(null);
@@ -1951,6 +1958,7 @@ export function WebShellSidebar({
         type="button"
         title={t('sidebar.newChat')}
         aria-label={t('sidebar.newChat')}
+        disabled={newSessionDisabled}
         onClick={handleNewSession}
       >
         <span className={styles.navIcon}>

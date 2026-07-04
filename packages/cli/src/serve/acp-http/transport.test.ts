@@ -6024,6 +6024,42 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it.each([
+      {
+        params: { isPinned: true },
+        message: '`sessionId` is required',
+      },
+      {
+        params: { sessionId: 'session-1', isPinned: 'yes' },
+        message: '`isPinned` must be a boolean',
+      },
+      {
+        params: { sessionId: 'session-1', groupId: 1 },
+        message: '`groupId` must be a string or null',
+      },
+    ])(
+      '_qwen/session/update_organization rejects invalid params: $message',
+      async ({ params, message }) => {
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 76,
+          method: '_qwen/session/update_organization',
+          params,
+        });
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 76,
+          error: {
+            code: -32602,
+            message,
+          },
+        });
+      },
+    );
+
     it('_qwen/workspace/mcp/tools rejects missing serverName', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);

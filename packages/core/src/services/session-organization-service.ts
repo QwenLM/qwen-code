@@ -87,6 +87,7 @@ const STORE_FILE = 'session-organization.v1.json';
 const SCHEMA_VERSION = 1;
 const MAX_GROUP_NAME_LENGTH = 64;
 const locks = new Map<string, Promise<unknown>>();
+const warningKeysByStorePath = new Map<string, Set<string>>();
 
 function hasControlCharacter(value: string): boolean {
   return [...value].some((char) => {
@@ -218,7 +219,6 @@ function serializeOrganization(
 export class SessionOrganizationService {
   private readonly storage: Storage;
   private readFailed = false;
-  private readonly warnedOrphanedGroupRefs = new Set<string>();
 
   constructor(
     cwd: string,
@@ -430,6 +430,8 @@ export class SessionOrganizationService {
                 ? organization['updatedAt']
                 : new Date(0).toISOString(),
           };
+        } else {
+          this.warnMalformedSessionEntry(sessionId);
         }
       }
       this.readFailed = false;
@@ -519,11 +521,28 @@ export class SessionOrganizationService {
   }
 
   private warnOrphanedGroupReference(sessionId: string, groupId: string): void {
-    const key = `${sessionId}\0${groupId}`;
-    if (this.warnedOrphanedGroupRefs.has(key)) return;
-    this.warnedOrphanedGroupRefs.add(key);
-    this.onWarning?.(
+    this.warnOnce(
+      `orphaned-group:${sessionId}\0${groupId}`,
       `Dropped orphaned session group reference: session ${sessionId} references missing group ${groupId}`,
     );
+  }
+
+  private warnMalformedSessionEntry(sessionId: string): void {
+    this.warnOnce(
+      `malformed-session:${sessionId}`,
+      `Dropped malformed session organization entry: ${sessionId}`,
+    );
+  }
+
+  private warnOnce(key: string, message: string): void {
+    const storePath = this.getStorePath();
+    let warningKeys = warningKeysByStorePath.get(storePath);
+    if (warningKeys === undefined) {
+      warningKeys = new Set();
+      warningKeysByStorePath.set(storePath, warningKeys);
+    }
+    if (warningKeys.has(key)) return;
+    warningKeys.add(key);
+    this.onWarning?.(message);
   }
 }

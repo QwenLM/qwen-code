@@ -151,6 +151,9 @@ async function listAllPersistedSummaries(
     const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
     sessions.push(...page.items.slice(0, remaining).map(toSummary));
     cursor = page.nextCursor;
+    if (page.items.length === 0) {
+      break;
+    }
     if (
       page.items.length > remaining ||
       (sessions.length >= MAX_ORGANIZED_SESSIONS && cursor !== undefined)

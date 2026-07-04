@@ -67,6 +67,11 @@
   padding: 8px 4px;
 }
 
+.newChatButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.48;
+}
+
 .newChatButton:hover,
 .footerButton:hover,
 .projectRow:hover,

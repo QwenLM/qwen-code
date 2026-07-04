@@ -83,6 +83,29 @@ describe('SessionOrganizationService', () => {
     );
   });
 
+  it('rejects invalid group names and colors', async () => {
+    await expect(
+      service.createGroup({ name: 'Bad\tName', color: 'blue' }),
+    ).rejects.toMatchObject({
+      code: 'invalid_group_name',
+      field: 'name',
+    });
+
+    await expect(
+      service.createGroup({ name: 'Bad\u007fName', color: 'blue' }),
+    ).rejects.toMatchObject({
+      code: 'invalid_group_name',
+      field: 'name',
+    });
+
+    await expect(
+      service.createGroup({ name: 'Feature', color: 'pink' as never }),
+    ).rejects.toMatchObject({
+      code: 'invalid_group_color',
+      field: 'color',
+    });
+  });
+
   it('assigns new group order after the current maximum order', async () => {
     const first = await service.createGroup({ name: 'First', color: 'red' });
     const second = await service.createGroup({
@@ -260,9 +283,37 @@ describe('SessionOrganizationService', () => {
       }),
     );
     await service.readSnapshot();
+    await new SessionOrganizationService(cwd, (warning) => {
+      warnings.push(warning);
+    }).readSnapshot();
 
     expect(warnings).toEqual([
       `Dropped orphaned session group reference: session ${sessionIdA} references missing group missing-group`,
+    ]);
+  });
+
+  it('warns once when reading malformed session entries', async () => {
+    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
+    await fs.writeFile(
+      service.getStorePath(),
+      JSON.stringify({
+        schemaVersion: 1,
+        groups: [],
+        sessions: {
+          [sessionIdA]: 'bad-entry',
+        },
+      }),
+      'utf8',
+    );
+
+    const snapshot = await service.readSnapshot();
+    expect(snapshot.sessions.has(sessionIdA)).toBe(false);
+    await new SessionOrganizationService(cwd, (warning) => {
+      warnings.push(warning);
+    }).readSnapshot();
+
+    expect(warnings).toEqual([
+      `Dropped malformed session organization entry: ${sessionIdA}`,
     ]);
   });
 
