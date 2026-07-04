@@ -3018,7 +3018,7 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
 
   it('session/load uses response-mode and replays the snapshot on initial session stream attach', async () => {
     bridge.replaySnapshot = {
-      lastEventId: 2,
+      lastEventId: 3,
       compactedTurns: [
         {
           v: 1,
@@ -3029,11 +3029,17 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
             update: { sessionUpdate: 'user_message_chunk' },
           },
         } as BridgeEvent,
+        {
+          v: 1,
+          id: 2,
+          type: 'model_switched',
+          data: { modelId: 'qwen3' },
+        } as BridgeEvent,
       ],
       liveJournal: [
         {
           v: 1,
-          id: 2,
+          id: 3,
           type: 'session_update',
           data: {
             sessionId: 'loaded-1',
@@ -3069,11 +3075,11 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
 
     const sess = await openStream(connId, 'loaded-1');
-    const framesPromise = takeFrames(sess, 3, 1000);
+    const framesPromise = takeFrames(sess, 4, 1000);
     await waitUntil(() => bridge.subscribeCalls.length >= 1);
     expect(bridge.subscribeCalls[0]).toEqual({
       sessionId: 'loaded-1',
-      lastEventId: 2,
+      lastEventId: 3,
     });
     bridge.queues.get('loaded-1')!.push({
       type: 'replay_complete',
@@ -3087,16 +3093,20 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         kind?: string;
       };
     }>;
-    expect(frames).toHaveLength(3);
+    expect(frames).toHaveLength(4);
     expect(frames[0]).toMatchObject({
       method: 'session/update',
       params: { update: { sessionUpdate: 'user_message_chunk' } },
     });
     expect(frames[1]).toMatchObject({
+      method: '_qwen/notify',
+      params: { kind: 'model_switched', data: { modelId: 'qwen3' } },
+    });
+    expect(frames[2]).toMatchObject({
       method: 'session/update',
       params: { update: { sessionUpdate: 'agent_message_chunk' } },
     });
-    expect(frames[2]).toMatchObject({
+    expect(frames[3]).toMatchObject({
       method: '_qwen/notify',
       params: { kind: 'replay_complete' },
     });

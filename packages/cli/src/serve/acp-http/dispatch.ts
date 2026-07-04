@@ -3738,7 +3738,7 @@ export class AcpDispatcher {
           const snapshotEvents = [
             ...snapshot.compactedTurns,
             ...snapshot.liveJournal,
-          ].filter((event) => event.type === 'session_update');
+          ];
           for (const event of snapshotEvents) {
             if (signal.aborted) return;
             if (typeof event.id === 'number' && event.id <= lastDeliveredId) {
