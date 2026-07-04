@@ -1393,6 +1393,16 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     expect(hits).toEqual([target]);
   });
 
+  it('deduplicates glob hits that resolve to the same workspace file', async () => {
+    const target = path.join(h.secondWorkspace, 'shared.ts');
+    await fsp.writeFile(target, '');
+    await fsp.symlink(target, path.join(h.workspace, 'linked.ts'), 'file');
+
+    const hits = await h.fs.glob('*.ts');
+
+    expect(hits).toEqual([target]);
+  });
+
   it('glob applies ignore rules from the canonical target workspace', async () => {
     await teardown(h);
     h = await makeMultiRootHarness((_primaryDir, secondDir) =>

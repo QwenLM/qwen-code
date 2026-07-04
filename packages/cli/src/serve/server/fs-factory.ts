@@ -134,19 +134,23 @@ function dropNestedWorkspacesPreservingPrimary(
 ): string[] {
   const primary = workspaces[0];
   if (primary === undefined) return [];
-  const filtered = workspaces.filter(
+  const withoutPrimaryOverlaps = workspaces.filter(
     (workspace, i) =>
       i === 0 ||
       (workspace !== primary &&
         !isWithinRoot(workspace, primary) &&
-        !isWithinRoot(primary, workspace) &&
-        !workspaces.some(
-          (other, j) =>
-            i !== j &&
-            j !== 0 &&
-            workspace !== other &&
-            isWithinRoot(workspace, other),
-        )),
+        !isWithinRoot(primary, workspace)),
+  );
+  const filtered = withoutPrimaryOverlaps.filter(
+    (workspace, i) =>
+      i === 0 ||
+      !withoutPrimaryOverlaps.some(
+        (other, j) =>
+          i !== j &&
+          j !== 0 &&
+          workspace !== other &&
+          isWithinRoot(workspace, other),
+      ),
   );
   if (filtered.length < workspaces.length) {
     writeStderrLine(

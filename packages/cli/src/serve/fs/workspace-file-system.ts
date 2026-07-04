@@ -707,6 +707,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       // `loadIgnoreRules` defaults (which already include `.git`
       // as a default ignore dir).
       const out: ResolvedPath[] = [];
+      const seenCanonicals = new Set<string>();
       const max = opts.maxResults ?? Number.POSITIVE_INFINITY;
       let escapedCount = 0;
       let permissionErrorCount = 0;
@@ -776,6 +777,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             escapedCount += 1;
             continue;
           }
+          if (seenCanonicals.has(canonical)) continue;
           // Check the dirent kind so directory ignore rules (`dist/`,
           // `.git/`, `node_modules/`) actually match — `shouldIgnore`
           // probes `<rel>/` for the directory filter, which the
@@ -796,6 +798,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           const kind = dirent?.isDirectory() ? 'directory' : 'file';
           const verdict = this.ignoreVerdict(canonical as ResolvedPath, kind);
           if (verdict.ignored && !opts.includeIgnored) continue;
+          seenCanonicals.add(canonical);
           out.push(canonical as ResolvedPath);
         }
       }

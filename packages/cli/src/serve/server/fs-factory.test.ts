@@ -169,4 +169,23 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
 
     expect(roots).toEqual([realpathSync.native(primary)]);
   });
+
+  it('keeps sibling env roots when their common parent is dropped', async () => {
+    const scratch = await mkScratch();
+    const parent = path.join(scratch, 'parent');
+    const primary = path.join(parent, 'primary');
+    const sibling = path.join(parent, 'sibling');
+    await fsp.mkdir(primary, { recursive: true });
+    await fsp.mkdir(sibling);
+
+    const roots = resolveBoundWorkspacesFromIdeEnv(
+      primary,
+      [parent, sibling].join(path.delimiter),
+    );
+
+    expect(roots).toEqual([
+      realpathSync.native(primary),
+      realpathSync.native(sibling),
+    ]);
+  });
 });
