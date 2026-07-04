@@ -2024,9 +2024,8 @@ export const useGeminiStream = (
               toolCallRequests.length = 0;
               clearRetryCountdown();
               const fromModel =
-                sanitizeDisplayText(event.fromModel) ?? event.fromModel;
-              const toModel =
-                sanitizeDisplayText(event.toModel) ?? event.toModel;
+                sanitizeDisplayText(event.fromModel) ?? '(unknown)';
+              const toModel = sanitizeDisplayText(event.toModel) ?? '(unknown)';
               addItem(
                 {
                   type: 'notification',

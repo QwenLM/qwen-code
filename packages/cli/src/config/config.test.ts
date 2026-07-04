@@ -1027,6 +1027,33 @@ describe('loadCliConfig', () => {
     expect(config.getIncludePartialMessages()).toBe(true);
   });
 
+  it('should prefer CLI fallback models over settings fallback models', async () => {
+    process.argv = ['node', 'script.js', '--fallback-model', 'cli-a,cli-b'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({ modelFallbacks: 'settings-a' }, argv);
+
+    expect(config.getModelFallbacks()).toEqual(['cli-a', 'cli-b']);
+  });
+
+  it('should use settings fallback models when the CLI flag is absent', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig(
+      { modelFallbacks: ' settings-a , settings-b ' },
+      argv,
+    );
+
+    expect(config.getModelFallbacks()).toEqual(['settings-a', 'settings-b']);
+  });
+
+  it('should ignore blank settings fallback models', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({ modelFallbacks: '   ' }, argv);
+
+    expect(config.getModelFallbacks()).toEqual([]);
+  });
+
   it('should enable runtime sleep prevention by default', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
