@@ -1811,7 +1811,7 @@ describe('ShellExecutionService', () => {
 
       expect(mockPtySpawn).toHaveBeenCalledWith(
         'cmd.exe',
-        '/d /s /c C:\\Windows\\System32\\chcp.com 65001 >nul & dir "foo bar"',
+        '/d /s /c C:\\Windows\\System32\\chcp.com 65001 >nul 2>nul & dir "foo bar"',
         expect.any(Object),
       );
       mockGetShellConfiguration.mockReturnValue({
@@ -3064,7 +3064,7 @@ describe('ShellExecutionService child_process fallback', () => {
           '/d',
           '/s',
           '/c',
-          'C:\\Windows\\System32\\chcp.com 65001 >nul & dir "foo bar"',
+          'C:\\Windows\\System32\\chcp.com 65001 >nul 2>nul & dir "foo bar"',
         ],
         expect.objectContaining({
           detached: false,
