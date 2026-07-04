@@ -3,28 +3,65 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
-const { mockConnection } = vi.hoisted(() => ({
-  mockConnection: {
-    status: 'connected',
-    sessionId: null as string | null,
-    workspaceCwd: '/tmp/project',
-    capabilities: { qwenCodeVersion: '1.2.3' } as
-      | { qwenCodeVersion?: string }
-      | undefined,
-  },
-}));
+type MockSession = {
+  sessionId: string;
+  workspaceCwd: string;
+  displayName?: string;
+  createdAt?: string;
+  updatedAt?: string;
+  clientCount?: number;
+  hasActivePrompt?: boolean;
+  isArchived?: boolean;
+};
+
+const { mockConnection, mockActive, mockArchived, renameSessionSpy } =
+  vi.hoisted(() => {
+    const makeStore = () => ({
+      sessions: [] as MockSession[],
+      loading: false,
+      error: null as unknown,
+      reload: vi.fn(),
+      deleteSession: vi.fn().mockResolvedValue(true),
+      archiveSession: vi.fn().mockResolvedValue(true),
+      unarchiveSession: vi.fn().mockResolvedValue(true),
+    });
+    return {
+      mockConnection: {
+        status: 'connected',
+        sessionId: null as string | null,
+        workspaceCwd: '/tmp/project',
+        capabilities: { qwenCodeVersion: '1.2.3' } as
+          | { qwenCodeVersion?: string }
+          | undefined,
+      },
+      mockActive: makeStore(),
+      mockArchived: makeStore(),
+      renameSessionSpy: vi.fn(),
+    };
+  });
 
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => mockConnection,
-  useActions: () => ({ renameSession: vi.fn() }),
-  useSessions: () => ({
-    sessions: [],
-    loading: false,
-    error: null,
-    reload: vi.fn(),
-    deleteSession: vi.fn(),
-  }),
+  useActions: () => ({ renameSession: renameSessionSpy }),
+  useSessions: (options?: { archiveState?: 'active' | 'archived' }) =>
+    options?.archiveState === 'archived' ? mockArchived : mockActive,
 }));
+
+function makeSession(
+  sessionId: string,
+  over: Partial<MockSession> = {},
+): MockSession {
+  return {
+    sessionId,
+    workspaceCwd: '/tmp/project',
+    displayName: `Session ${sessionId}`,
+    createdAt: '2026-01-01T00:00:00.000Z',
+    updatedAt: '2026-01-01T00:00:00.000Z',
+    clientCount: 0,
+    hasActivePrompt: false,
+    ...over,
+  };
+}
 
 const { I18nProvider } = await import('../../i18n');
 const { WebShellSidebar } = await import('./WebShellSidebar');
@@ -69,6 +106,17 @@ function renderSidebar(
 
 beforeEach(() => {
   mockConnection.capabilities = { qwenCodeVersion: '1.2.3' };
+  mockConnection.sessionId = null;
+  for (const store of [mockActive, mockArchived]) {
+    store.sessions = [];
+    store.loading = false;
+    store.error = null;
+    store.reload.mockClear();
+    store.deleteSession.mockClear();
+    store.archiveSession.mockClear();
+    store.unarchiveSession.mockClear();
+  }
+  renameSessionSpy.mockClear();
 });
 
 afterEach(() => {
@@ -133,5 +181,90 @@ describe('WebShellSidebar — daemon status entry', () => {
       button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
     });
     expect(onOpenDaemonStatus).toHaveBeenCalledTimes(1);
+  });
+});
+
+function click(el: Element | null): void {
+  expect(el).not.toBeNull();
+  act(() => {
+    el!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
+// Clicks that kick off an async action (archive/unarchive) settle a trailing
+// `setBusySessionId` in a `.finally()`; flush those microtasks inside act().
+async function clickAsync(el: Element | null): Promise<void> {
+  expect(el).not.toBeNull();
+  await act(async () => {
+    el!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  });
+}
+
+describe('WebShellSidebar — archive actions', () => {
+  it('archives an active session from the quick action button', async () => {
+    mockActive.sessions = [makeSession('aaaaaaaa')];
+    const container = renderSidebar(false);
+    const archiveBtn = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Archive"]',
+    );
+    expect(archiveBtn).not.toBeNull();
+    expect(archiveBtn!.disabled).toBe(false);
+    await clickAsync(archiveBtn);
+    expect(mockActive.archiveSession).toHaveBeenCalledWith('aaaaaaaa');
+    expect(mockArchived.unarchiveSession).not.toHaveBeenCalled();
+  });
+
+  it('disables archiving the current session', () => {
+    mockActive.sessions = [makeSession('current1')];
+    mockConnection.sessionId = 'current1';
+    const container = renderSidebar(false);
+    const archiveBtn = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Archive"]',
+    );
+    expect(archiveBtn).not.toBeNull();
+    expect(archiveBtn!.disabled).toBe(true);
+    click(archiveBtn);
+    expect(mockActive.archiveSession).not.toHaveBeenCalled();
+  });
+
+  it('opens the overflow menu with rename, archive, and delete', () => {
+    mockActive.sessions = [makeSession('aaaaaaaa')];
+    const container = renderSidebar(false);
+    click(container.querySelector('[aria-label="More actions"]'));
+    const menu = container.querySelector('[role="menu"]');
+    expect(menu).not.toBeNull();
+    const labels = Array.from(menu!.querySelectorAll('[role="menuitem"]')).map(
+      (el) => el.textContent,
+    );
+    expect(labels).toEqual(['Rename', 'Archive', 'Delete']);
+  });
+
+  it('archives a non-current session from the overflow menu', async () => {
+    mockActive.sessions = [makeSession('aaaaaaaa')];
+    const container = renderSidebar(false);
+    click(container.querySelector('[aria-label="More actions"]'));
+    const archiveItem = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
+    ).find((el) => el.textContent === 'Archive');
+    await clickAsync(archiveItem ?? null);
+    expect(mockActive.archiveSession).toHaveBeenCalledWith('aaaaaaaa');
+  });
+
+  it('reveals archived sessions on demand and restores them', async () => {
+    mockArchived.sessions = [makeSession('bbbbbbbb', { isArchived: true })];
+    const container = renderSidebar(false);
+    // Collapsed by default: the archived rows (and their Restore button) are
+    // not rendered until the section is expanded.
+    expect(container.querySelector('[aria-label="Restore"]')).toBeNull();
+    const header = Array.from(container.querySelectorAll('button')).find((b) =>
+      b.textContent?.includes('Archived'),
+    );
+    click(header ?? null);
+    const restoreBtn = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Restore"]',
+    );
+    expect(restoreBtn).not.toBeNull();
+    await clickAsync(restoreBtn);
+    expect(mockArchived.unarchiveSession).toHaveBeenCalledWith('bbbbbbbb');
   });
 });
