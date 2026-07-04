@@ -601,11 +601,11 @@ export class QQChannel extends ChannelBase {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+
     if (this.beforeExitHook) {
       process.off('beforeExit', this.beforeExitHook);
       this.beforeExitHook = null;
     }
-
     // Clean up cron buffers
     if (this.qqConfig['cron-msg-experimental']) {
       for (const [, entry] of this.cronBuffer) {
@@ -981,9 +981,9 @@ export class QQChannel extends ChannelBase {
 
   /**
    * Restore QQ routing state from disk.
+
    * Trusts persisted JSON — if the file is corrupt, entries with undefined
-   * values may appear, which is acceptable for a rare edge case.
-   */
+   * values may appear, which is acceptable for a rare edge case.   */
   private restoreQQState(): boolean {
     try {
       if (!existsSync(this.qqStatePath)) return false;
@@ -994,6 +994,7 @@ export class QQChannel extends ChannelBase {
         );
         return false;
       }
+
       if (raw.chatTypeMap) {
         this.chatTypeMap = new Map(
           (raw.chatTypeMap as Array<[string, unknown]>).filter(
