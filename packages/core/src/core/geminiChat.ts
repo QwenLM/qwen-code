@@ -2678,7 +2678,26 @@ export class GeminiChat {
               let fallbackSucceeded = false;
               let fallbackIndex = 0;
               let currentModel = model;
-              const attemptedFallbackModels = new Set<string>([model]);
+              const initialFallbackClassification = currentErrorClassification;
+              let resolvedPrimaryModel = model;
+              try {
+                resolvedPrimaryModel = (
+                  await self.config
+                    .getBaseLlmClient()
+                    .resolveForModel(model, { failClosed: true })
+                ).model;
+              } catch (resolveError) {
+                if (isAbortError(resolveError)) throw resolveError;
+                debugLogger.warn(
+                  `[FALLBACK] Failed to resolve primary model ` +
+                    `"${model}" for fallback de-duplication: ` +
+                    `${resolveError instanceof Error ? resolveError.message : String(resolveError)}.`,
+                );
+              }
+              const attemptedFallbackModels = new Set<string>([
+                model,
+                resolvedPrimaryModel,
+              ]);
 
               for (const fallbackModelId of fallbackModels) {
                 // Skip fallback models that match the current/primary model
@@ -2786,20 +2805,29 @@ export class GeminiChat {
                     },
                   );
 
+                  const canTryNextFallback = isFallbackEligible(
+                    fallbackClassification,
+                  );
                   debugLogger.warn(
                     `[FALLBACK] Fallback model "${resolvedFallbackModel}" also ` +
                       `failed (reason: ${fallbackClassification.reason}, ` +
                       `status: ${fallbackClassification.statusCode ?? 'unknown'}). ` +
-                      `${fallbackIndex < fallbackModels.length ? 'Trying next fallback.' : 'No more fallbacks.'}`,
+                      `${canTryNextFallback ? 'Checking remaining fallbacks.' : 'Stopping fallback chain.'}`,
                   );
 
-                  lastError = fallbackError;
                   currentModel = resolvedFallbackModel;
                   currentErrorClassification = fallbackClassification;
 
                   // Only continue to next fallback if this error is also
                   // fallback-eligible. Auth/client errors should fail immediately.
-                  if (!isFallbackEligible(fallbackClassification)) {
+                  if (!canTryNextFallback) {
+                    lastError = new Error(
+                      `Primary model "${model}" failed ` +
+                        `(${initialFallbackClassification.reason}); ` +
+                        `fallback "${resolvedFallbackModel}" also failed ` +
+                        `(${fallbackClassification.reason}).`,
+                      { cause: fallbackError },
+                    );
                     debugLogger.warn(
                       `[FALLBACK] Error from "${resolvedFallbackModel}" is not ` +
                         `fallback-eligible (${fallbackClassification.reason}). ` +
@@ -2807,16 +2835,24 @@ export class GeminiChat {
                     );
                     break;
                   }
+                  lastError = fallbackError;
                 }
               }
 
               if (!fallbackSucceeded) {
                 self.popPendingPartialAssistantTurn();
                 debugLogger.warn(
-                  '[FALLBACK] All fallback models exhausted. ' +
+                  '[FALLBACK] Fallback chain exhausted without success. ' +
                     'Throwing last error.',
                 );
               }
+            } else {
+              debugLogger.info(
+                '[FALLBACK] Fallback chain skipped: primary error is not ' +
+                  'fallback-eligible ' +
+                  `(reason: ${currentErrorClassification.reason}, ` +
+                  `diagnosis: ${currentErrorClassification.diagnosis}).`,
+              );
             }
           }
 

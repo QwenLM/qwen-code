@@ -4716,12 +4716,20 @@ describe('GeminiChat', async () => {
           batchEmbedContents: vi.fn(),
           useSummarizedThinking: vi.fn().mockReturnValue(false),
         } as unknown as ContentGenerator;
-        const resolveForModel = vi.fn().mockResolvedValue({
-          contentGenerator: fallbackContentGenerator,
-          retryAuthType: AuthType.USE_GEMINI,
-          retryErrorCodes: undefined,
-          model: 'fallback-model',
-        });
+        const resolveForModel = vi
+          .fn()
+          .mockResolvedValueOnce({
+            contentGenerator: mockContentGenerator,
+            retryAuthType: AuthType.USE_GEMINI,
+            retryErrorCodes: undefined,
+            model: 'test-model',
+          })
+          .mockResolvedValue({
+            contentGenerator: fallbackContentGenerator,
+            retryAuthType: AuthType.USE_GEMINI,
+            retryErrorCodes: undefined,
+            model: 'fallback-model',
+          });
         vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
           resolveForModel,
         } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
@@ -4836,12 +4844,20 @@ describe('GeminiChat', async () => {
           useSummarizedThinking: vi.fn().mockReturnValue(false),
         } as unknown as ContentGenerator;
         vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
-          resolveForModel: vi.fn().mockResolvedValue({
-            contentGenerator: fallbackContentGenerator,
-            retryAuthType: AuthType.USE_GEMINI,
-            retryErrorCodes: undefined,
-            model: 'fallback-model',
-          }),
+          resolveForModel: vi
+            .fn()
+            .mockResolvedValueOnce({
+              contentGenerator: mockContentGenerator,
+              retryAuthType: AuthType.USE_GEMINI,
+              retryErrorCodes: undefined,
+              model: 'test-model',
+            })
+            .mockResolvedValue({
+              contentGenerator: fallbackContentGenerator,
+              retryAuthType: AuthType.USE_GEMINI,
+              retryErrorCodes: undefined,
+              model: 'fallback-model',
+            }),
         } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
 
         const capacityError = new StreamContentError(
@@ -4893,7 +4909,18 @@ describe('GeminiChat', async () => {
             /* consume */
           }
         })();
-        const resultPromise = await expect(collecting).rejects.toBe(authError);
+        const resultPromise = (async () => {
+          try {
+            await collecting;
+            throw new Error('Expected fallback stream to fail.');
+          } catch (error) {
+            const contextualError = error as Error & { cause?: unknown };
+            expect(contextualError.message).toBe(
+              'Primary model "test-model" failed (rate-limit); fallback "fallback-model" also failed (unclassified).',
+            );
+            expect(contextualError.cause).toBe(authError);
+          }
+        })();
         await vi.advanceTimersByTimeAsync(0);
         await vi.advanceTimersByTimeAsync(10_000);
         await resultPromise;
@@ -4905,6 +4932,77 @@ describe('GeminiChat', async () => {
       } finally {
         vi.useRealTimers();
       }
+    });
+
+    it('skips fallback aliases that resolve to the primary backend model', async () => {
+      vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
+        authType: AuthType.USE_GEMINI,
+        model: 'test-model',
+        maxRetries: 0,
+      });
+      vi.mocked(mockConfig.getModelFallbacks).mockReturnValue([
+        'fallback-alias',
+      ]);
+
+      const fallbackGenerateContentStream = vi.fn();
+      const fallbackContentGenerator = {
+        generateContent: vi.fn(),
+        generateContentStream: fallbackGenerateContentStream,
+        countTokens: vi.fn(),
+        embedContent: vi.fn(),
+        batchEmbedContents: vi.fn(),
+        useSummarizedThinking: vi.fn().mockReturnValue(false),
+      } as unknown as ContentGenerator;
+      const resolveForModel = vi
+        .fn()
+        .mockResolvedValueOnce({
+          contentGenerator: mockContentGenerator,
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'resolved-primary-model',
+        })
+        .mockResolvedValueOnce({
+          contentGenerator: fallbackContentGenerator,
+          retryAuthType: AuthType.USE_GEMINI,
+          retryErrorCodes: undefined,
+          model: 'resolved-primary-model',
+        });
+      vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+        resolveForModel,
+      } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
+
+      const capacityError = new StreamContentError(
+        '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
+      );
+      vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mockResolvedValueOnce(
+        (async function* () {
+          throw capacityError;
+
+          yield {} as GenerateContentResponse;
+        })(),
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'test' },
+        'prompt-resolved-primary-skip',
+      );
+      const collecting = (async () => {
+        for await (const _ of stream) {
+          /* consume */
+        }
+      })();
+
+      await expect(collecting).rejects.toBe(capacityError);
+      expect(resolveForModel).toHaveBeenCalledWith('test-model', {
+        failClosed: true,
+      });
+      expect(resolveForModel).toHaveBeenCalledWith('fallback-alias', {
+        failClosed: true,
+      });
+      expect(fallbackGenerateContentStream).not.toHaveBeenCalled();
     });
 
     it('rolls back primary partial tool calls when all fallback entries are skipped', async () => {
