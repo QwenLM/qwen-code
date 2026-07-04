@@ -286,12 +286,13 @@ function getProviderQueryFromMention(
   ) {
     return parsedQuery.slice('mcp:'.length);
   }
+  const unescapedQuery = unescapeAtReferenceText(parsedQuery);
   if (
     providerId === MCP_RESOURCES_PROVIDER_ID &&
     mcpServerName &&
-    parsedQuery.startsWith(`${mcpServerName}:`)
+    unescapedQuery.startsWith(`${mcpServerName}:`)
   ) {
-    return parsedQuery.slice(mcpServerName.length + 1);
+    return unescapedQuery.slice(mcpServerName.length + 1);
   }
   if (
     !isBuiltinProviderId(providerId) &&
@@ -992,7 +993,7 @@ export function useAtMentionMenu({
       serverName: string,
       query: string,
       baseState: Omit<AtMentionMenuState, 'items' | 'loading'>,
-      options: LoadMcpResourceOptions = {},
+      options: LoadMcpResourceOptions & { loadingAlreadySet?: boolean } = {},
     ) => {
       const actions = workspaceActionsRef.current;
       const loadMcpResources = actions?.loadMcpResources;
@@ -1014,7 +1015,9 @@ export function useAtMentionMenu({
         stateRef.current.mcpServerName === serverName
           ? stateRef.current.items
           : [];
-      setMenu({ ...baseState, items: previousItems, loading: true });
+      if (!options.loadingAlreadySet) {
+        setMenu({ ...baseState, items: previousItems, loading: true });
+      }
       const loadMcpStatus = actions?.loadMcpStatus;
       const enabledPromise = options.validateServer
         ? isEnabledMcpServer(
@@ -1131,12 +1134,18 @@ export function useAtMentionMenu({
           : [];
       setMenu({ ...baseState, items: previousItems, loading: true });
       if (builtinCacheRef.current.mcpResources.has(serverName)) {
-        loadMcpResourceItems(serverName, query, baseState, options);
+        loadMcpResourceItems(serverName, query, baseState, {
+          ...options,
+          loadingAlreadySet: true,
+        });
         return;
       }
       searchTimerRef.current = setTimeout(() => {
         searchTimerRef.current = null;
-        loadMcpResourceItems(serverName, query, baseState, options);
+        loadMcpResourceItems(serverName, query, baseState, {
+          ...options,
+          loadingAlreadySet: true,
+        });
       }, SEARCH_DEBOUNCE_MS);
     },
     [loadMcpResourceItems, setMenu],

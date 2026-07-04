@@ -1742,6 +1742,54 @@ describe('useAtMentionMenu', () => {
     });
   });
 
+  it('updates MCP resource search from escaped editor text', async () => {
+    vi.useFakeTimers();
+    const loadMcpResources = vi.fn().mockResolvedValue({
+      resources: [
+        { uri: 'res://one', name: 'One' },
+        { uri: 'res://two', name: 'Two' },
+      ],
+    });
+    mount({
+      view: makeView('@'),
+      actions: {
+        loadMcpStatus: vi.fn().mockResolvedValue({
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'docs',
+              disabled: false,
+              resourceCount: 2,
+            },
+          ],
+        }),
+        loadMcpResources,
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(2));
+    await runDebounce();
+    act(() => latest!.accept());
+    await runDebounce();
+    act(() => latest!.close({ preserveProviderSelection: true }));
+    act(() => latest!.refreshForView(makeView('@docs\\:')));
+    await runDebounce();
+    act(() => latest!.refreshForView(makeView('@docs\\:res\\://two')));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      selectedProviderId: 'mcp-resources',
+      itemMode: 'mcpResources',
+      mcpServerName: 'docs',
+      query: 'res://two',
+      items: [expect.objectContaining({ label: 'Two' })],
+    });
+    expect(loadMcpResources).toHaveBeenLastCalledWith('docs', {
+      signal: expect.any(AbortSignal),
+    });
+  });
+
   it('prefers the selected MCP server name over generic provider prefixes', async () => {
     vi.useFakeTimers();
     const loadMcpResources = vi.fn().mockResolvedValue({ resources: [] });
