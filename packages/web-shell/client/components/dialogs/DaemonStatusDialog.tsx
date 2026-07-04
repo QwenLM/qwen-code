@@ -1,12 +1,14 @@
 import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import {
   useStatusReport,
+  type DaemonMetricsSeriesBucket,
   type DaemonStatusReport,
   type DaemonStatusReportLevel,
   type DaemonStatusReportSection,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { ErrorBoundary } from '../ErrorBoundary';
+import { SvgLineChart, type ChartSeries } from './SvgLineChart';
 import styles from './DaemonStatusDialog.module.css';
 
 // The cheap in-memory summary is polled continuously; the expensive detail
@@ -39,6 +41,16 @@ function formatDurationMs(ms: number): string {
 function formatBytes(bytes: number): string {
   const mb = bytes / (1024 * 1024);
   return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+}
+
+// Compact counts for chart peaks/current values: thousands collapse to "12.3k"
+// so token burn and request counts stay legible in the narrow legend.
+function formatCount(value: number): string {
+  const n = Math.round(value);
+  if (n >= 10_000) {
+    return `${(n / 1000).toFixed(n % 1000 === 0 ? 0 : 1)}k`;
+  }
+  return n.toLocaleString();
 }
 
 function channelWorkerState(
@@ -255,6 +267,116 @@ function FullDetail({ report }: { report: DaemonStatusReport }) {
         />
       </Card>
     </>
+  );
+}
+
+// Bottleneck-analysis dashboard: the daemon samples load, throughput, latency,
+// resource pressure, and token burn into one time-bucketed series, so these
+// charts share an x-axis. Lining up "N tasks running at once" (concurrency)
+// against event-loop lag, queue wait, memory, and API latency shows *where* a
+// busy daemon is actually stalling.
+function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
+  const { t } = useI18n();
+  if (series.length === 0) {
+    return (
+      <Card title={t('daemon.charts.title')}>
+        <div className={styles.empty}>{t('daemon.charts.empty')}</div>
+      </Card>
+    );
+  }
+  const col = (pick: (b: DaemonMetricsSeriesBucket) => number): number[] =>
+    series.map(pick);
+  const chart = (
+    titleKey: string,
+    format: (v: number) => string,
+    lines: ChartSeries[],
+  ): ReactNode => (
+    <Card title={t(titleKey)}>
+      <SvgLineChart series={lines} format={format} ariaLabel={t(titleKey)} />
+    </Card>
+  );
+  return (
+    <div className={styles.grid}>
+      {chart('daemon.charts.concurrency', formatCount, [
+        {
+          label: t('daemon.charts.activePrompts'),
+          values: col((b) => b.activePrompts),
+          color: 'var(--primary)',
+        },
+        {
+          label: t('daemon.charts.activeSessions'),
+          values: col((b) => b.activeSessions),
+          color: 'var(--muted-foreground)',
+        },
+      ])}
+      {chart('daemon.charts.requests', formatCount, [
+        {
+          label: t('daemon.charts.reqTotal'),
+          values: col((b) => b.requests),
+          color: 'var(--success-color)',
+        },
+        {
+          label: t('daemon.charts.reqErrors'),
+          values: col((b) => b.errors),
+          color: 'var(--error-color)',
+        },
+      ])}
+      {chart('daemon.charts.apiLatency', formatDurationMs, [
+        {
+          label: 'p50',
+          values: col((b) => b.latencyP50Ms),
+          color: 'var(--agent-blue-400)',
+        },
+        {
+          label: 'p95',
+          values: col((b) => b.latencyP95Ms),
+          color: 'var(--warning-color)',
+        },
+      ])}
+      {chart('daemon.charts.promptLatency', formatDurationMs, [
+        {
+          label: t('daemon.charts.queueWait'),
+          values: col((b) => b.promptQueueWaitP95Ms),
+          color: 'var(--warning-color)',
+        },
+        {
+          label: t('daemon.charts.promptDuration'),
+          values: col((b) => b.promptDurationP95Ms),
+          color: 'var(--primary)',
+        },
+      ])}
+      {chart('daemon.charts.eventLoop', formatDurationMs, [
+        {
+          label: t('daemon.charts.eventLoopLag'),
+          values: col((b) => b.eventLoopLagP99Ms),
+          color: 'var(--error-color)',
+        },
+      ])}
+      {chart('daemon.charts.memory', formatBytes, [
+        {
+          label: 'RSS',
+          values: col((b) => b.rssBytes),
+          color: 'var(--primary)',
+        },
+        {
+          label: t('daemon.charts.heap'),
+          values: col((b) => b.heapUsedBytes),
+          color: 'var(--agent-blue-400)',
+        },
+      ])}
+      {chart('daemon.charts.tokens', formatCount, [
+        {
+          label: t('daemon.charts.tokensIn'),
+          values: col((b) => b.tokensIn),
+          color: 'var(--agent-blue-400)',
+        },
+        {
+          label: t('daemon.charts.tokensOut'),
+          values: col((b) => b.tokensOut),
+          color: 'var(--success-color)',
+        },
+      ])}
+    </div>
   );
 }
 
@@ -617,6 +739,11 @@ function DaemonStatusDialogInner() {
           )}
         </Card>
       </div>
+
+      {/* Time-series charts for bottleneck analysis. Driven by the
+          continuously-refreshed summary report so the curves advance on every
+          poll; the daemon retains the history, so it survives dialog close. */}
+      <MetricsCharts series={report.runtime.metrics?.series ?? []} />
 
       {/* Contain a crash in the detail sections (e.g. a partial detail=full
           payload) to this region so the healthy summary cards above stay live,

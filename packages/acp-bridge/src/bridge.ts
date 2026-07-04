@@ -1505,6 +1505,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // unreachable.
         opts.clientMcpSender,
         (sessionId) => sessionIds.has(sessionId),
+        // Daemon token-burn accounting: forward per-round token usage observed
+        // at the session/update fan-in to the daemon host's metrics ring via
+        // the telemetry seam. Optional-chained so non-daemon callers (tests,
+        // Mode A) that wire no `tokenUsage` metric are a silent no-op.
+        (inputTokens, outputTokens) =>
+          telemetry.metrics?.tokenUsage?.(inputTokens, outputTokens),
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 

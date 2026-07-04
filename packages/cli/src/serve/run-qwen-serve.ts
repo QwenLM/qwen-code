@@ -9,7 +9,7 @@ import * as fs from 'node:fs';
 import type { Server } from 'node:http';
 import * as https from 'node:https';
 import * as path from 'node:path';
-import { performance } from 'node:perf_hooks';
+import { monitorEventLoopDelay, performance } from 'node:perf_hooks';
 import express, {
   type Application,
   type NextFunction,
@@ -81,6 +81,7 @@ import {
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
+import { DaemonMetricsRing } from './daemon-metrics-ring.js';
 import type {
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
@@ -102,6 +103,11 @@ const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
+// Daemon Status metrics ring: seal one bucket every SAMPLE_MS and retain
+// CAPACITY of them (5s × 180 ≈ 15 min of history), matching the dashboard's
+// own 5s poll so each poll surfaces roughly one fresh bucket.
+const DAEMON_METRICS_SAMPLE_MS = 5_000;
+const DAEMON_METRICS_CAPACITY = 180;
 const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
 // Let the first /health response flush before evaluating the runtime graph.
 const FAST_PATH_RUNTIME_START_AFTER_HEALTH_MS = 50;
@@ -1867,6 +1873,10 @@ export async function runQwenServe(
   let daemonEventLoopMonitor:
     | ReturnType<CoreRuntime['startEventLoopLagMonitor']>
     | undefined;
+  // Daemon Status metrics-ring sampler: a fixed-cadence timer that seals a
+  // bucket plus the window-scoped event-loop histogram it resets each seal.
+  // Torn down together with the event-loop monitor on runtime restart/stop.
+  let daemonMetricsSampler: { dispose(): void } | undefined;
   let runtimeStartupError: string | undefined;
   let runtimeStarting: Promise<void> | undefined;
   let markRuntimeReady!: () => void;
@@ -1884,6 +1894,8 @@ export async function runQwenServe(
   const disposeDaemonEventLoopMonitor = (): void => {
     daemonEventLoopMonitor?.dispose();
     daemonEventLoopMonitor = undefined;
+    daemonMetricsSampler?.dispose();
+    daemonMetricsSampler = undefined;
   };
   let channelWorker: ChannelWorkerSupervisor =
     createDisabledChannelWorkerSupervisor();
@@ -2010,6 +2022,16 @@ export async function runQwenServe(
       stats.maxBytes = Math.max(stats.maxBytes, bytes);
       core.recordDaemonPipeMessage(direction, bytes);
     };
+    // Daemon Status metrics ring (time-series charts). Bounded so ~15 min of
+    // per-interval history survives dialog close / page reload — the point of
+    // doing this in the daemon rather than accumulating in the browser. Fed
+    // from three seams: HTTP request rate/latency via the telemetry middleware
+    // (createServeApp `recordDaemonRequest`), prompt queue-wait/duration + token
+    // burn via the bridge telemetry hooks below, and memory / active
+    // sessions+prompts / event-loop lag read as gauges by the sampler.
+    const metricsRing = new DaemonMetricsRing({
+      capacity: DAEMON_METRICS_CAPACITY,
+    });
     const daemonTelemetry = core.createDaemonBridgeTelemetry();
     daemonTelemetry.metrics = {
       sessionLifecycle(action) {
@@ -2043,9 +2065,21 @@ export async function runQwenServe(
           },
         );
       },
-      promptQueueWait: core.recordDaemonPromptQueueWait,
-      promptDuration: core.recordDaemonPromptDuration,
+      promptQueueWait(durationMs) {
+        core.recordDaemonPromptQueueWait(durationMs);
+        metricsRing.recordPromptQueueWait(durationMs);
+      },
+      promptDuration(durationMs) {
+        core.recordDaemonPromptDuration(durationMs);
+        metricsRing.recordPromptDuration(durationMs);
+      },
       cancelled: core.recordDaemonCancel,
+      // Per-round model token usage sniffed off `agent_message_chunk._meta.usage`
+      // at the bridge's single session/update fan-in. Increments (not
+      // cumulative), so the ring sums them per window into the token-burn chart.
+      tokenUsage(inputTokens, outputTokens) {
+        metricsRing.recordTokens(inputTokens, outputTokens);
+      },
     };
     // Allocate the audit ring + publisher in the daemon host (here)
     // rather than inside the bridge factory, because the ring is the
@@ -2238,6 +2272,38 @@ export async function runQwenServe(
       heapUsed: () => process.memoryUsage().heapUsed,
     });
 
+    // Start the metrics-ring sampler now that `bridge` exists: seal a bucket
+    // every DAEMON_METRICS_SAMPLE_MS, reading memory / active sessions+prompts
+    // and a window-scoped event-loop lag p99 (its own histogram, reset each
+    // seal so the charted lag is per-interval, not the since-start average the
+    // shared monitor reports). `unref()` so sampling never keeps the process
+    // alive; torn down by `disposeDaemonEventLoopMonitor`.
+    // Retire any prior sampler before building a new one so a runtime rebuild
+    // (buildRuntime re-entry) can't leak the old interval + histogram —
+    // symmetric with the `daemonEventLoopMonitor?.dispose()` above.
+    daemonMetricsSampler?.dispose();
+    const metricsLoopDelay = monitorEventLoopDelay({ resolution: 20 });
+    metricsLoopDelay.enable();
+    const metricsSamplerTimer = setInterval(() => {
+      const mem = process.memoryUsage();
+      const eventLoopLagP99Ms = metricsLoopDelay.percentile(99) / 1_000_000;
+      metricsLoopDelay.reset();
+      metricsRing.sample(Date.now(), {
+        rssBytes: mem.rss,
+        heapUsedBytes: mem.heapUsed,
+        activeSessions: bridge.sessionCount,
+        activePrompts: bridge.activePromptCount,
+        eventLoopLagP99Ms,
+      });
+    }, DAEMON_METRICS_SAMPLE_MS);
+    metricsSamplerTimer.unref();
+    daemonMetricsSampler = {
+      dispose(): void {
+        clearInterval(metricsSamplerTimer);
+        metricsLoopDelay.disable();
+      },
+    };
+
     const app = runtime.createServeApp(opts, () => actualPort, {
       bridge,
       webShellDir,
@@ -2254,6 +2320,9 @@ export async function runQwenServe(
           outbound: { ...pipeStats.outbound },
         },
       }),
+      getMetricsSeries: () => metricsRing.snapshot(),
+      recordDaemonRequest: (durationMs, statusCode) =>
+        metricsRing.recordRequest(durationMs, statusCode),
       workspace: workspaceService,
       // Reverse tool channel (#5626): the SAME registry wired into `bridge` above,
       // so the WS provider and the child-answering bridge share one sender map.

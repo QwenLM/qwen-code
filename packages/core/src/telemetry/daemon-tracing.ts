@@ -310,6 +310,14 @@ export interface DaemonBridgeTelemetryMetrics {
   promptQueueWait(durationMs: number): void;
   promptDuration(durationMs: number): void;
   cancelled(): void;
+  /**
+   * Per-round model token usage (input/output token increments) observed at the
+   * bridge's session/update fan-in, from `agent_message_chunk._meta.usage`.
+   * Values are per-round increments, not cumulative. Optional: only the daemon
+   * host wires it (for the Daemon Status token-burn chart); embedded/test
+   * callers may omit it.
+   */
+  tokenUsage?(inputTokens: number, outputTokens: number): void;
 }
 
 export function createDaemonBridgeTelemetry(): {

@@ -483,6 +483,17 @@ export class BridgeClient implements Client {
      */
     private readonly clientMcpSender?: ClientMcpMessageSender,
     private readonly ownsSession: (sessionId: string) => boolean = () => true,
+    /**
+     * Optional daemon token-usage hook. Called once per model round with the
+     * per-round input/output token increments read from
+     * `agent_message_chunk._meta.usage` at {@link sessionUpdate} (the single
+     * session/update fan-in). Wired only by the daemon host for the Daemon
+     * Status token-burn chart; omitted by tests / Mode A in-process consumers.
+     */
+    private readonly onTokenUsage?: (
+      inputTokens: number,
+      outputTokens: number,
+    ) => void,
   ) {}
 
   async requestPermission(
@@ -646,6 +657,28 @@ export class BridgeClient implements Client {
       ...originator,
       ...(serverTimestamp !== undefined ? { _meta: { serverTimestamp } } : {}),
     });
+    // Daemon token-burn accounting: model token usage rides on an otherwise-
+    // empty `agent_message_chunk` as `update._meta.usage` with per-round
+    // increments (`inputTokens`/`outputTokens`, camelCase). Report each frame
+    // once — subagent frames carry usage too (tagged `parentToolCallId`) and
+    // are independent turns, so counting every frame once is the correct total.
+    // Read defensively: `_meta`/`usage` are optional and untyped here.
+    if (this.onTokenUsage) {
+      const usage = updateMeta?.['usage'];
+      if (usage !== null && typeof usage === 'object') {
+        const inputTokens = (usage as { inputTokens?: unknown }).inputTokens;
+        const outputTokens = (usage as { outputTokens?: unknown }).outputTokens;
+        if (
+          typeof inputTokens === 'number' ||
+          typeof outputTokens === 'number'
+        ) {
+          this.onTokenUsage(
+            typeof inputTokens === 'number' ? inputTokens : 0,
+            typeof outputTokens === 'number' ? outputTokens : 0,
+          );
+        }
+      }
+    }
     if (entry) {
       if (artifacts.length > 0) {
         await this.upsertAndPublishArtifacts(entry, artifacts, {

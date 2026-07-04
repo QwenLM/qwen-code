@@ -429,6 +429,7 @@ export type {
   DaemonStatusReportLevel,
   DaemonStatusReportSection,
   DaemonStatusReportSession,
+  DaemonMetricsSeriesBucket,
   DaemonUpdateAgentRequest,
   DaemonContentHash,
   DaemonWorkspaceAgentDetail,

@@ -548,6 +548,85 @@ describe('BridgeClient — original timestamp preservation', () => {
   });
 });
 
+describe('BridgeClient — token usage accounting', () => {
+  const noFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+
+  function makeClientWithTokenHook(
+    sessionId: string,
+    onTokenUsage: (inputTokens: number, outputTokens: number) => void,
+  ) {
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+    };
+    return new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      undefined, // clientMcpSender
+      undefined, // ownsSession → default () => true
+      onTokenUsage,
+    );
+  }
+
+  it('reports per-round input/output tokens from update._meta.usage', async () => {
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:usage', onTokenUsage);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:usage',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          usage: { inputTokens: 1200, outputTokens: 340, totalTokens: 1540 },
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(onTokenUsage).toHaveBeenCalledTimes(1);
+    expect(onTokenUsage).toHaveBeenCalledWith(1200, 340);
+  });
+
+  it('does not report when the update carries no usage meta', async () => {
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:nousage', onTokenUsage);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:nousage',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'hello' },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(onTokenUsage).not.toHaveBeenCalled();
+  });
+
+  it('defaults a missing input or output token field to 0', async () => {
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:partial', onTokenUsage);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:partial',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { usage: { outputTokens: 50 } },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(onTokenUsage).toHaveBeenCalledWith(0, 50);
+  });
+});
+
 describe('BridgeClient — artifact ingress', () => {
   const noPermissionFlow = () => {
     throw new Error('test: permission flow should not run');

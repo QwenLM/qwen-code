@@ -177,6 +177,47 @@ export interface DaemonStatusReportSession {
 }
 
 /**
+ * One time-bucketed sample in the Daemon Status metrics series (client-side
+ * mirror of the daemon's `DaemonMetricsBucket`). Each bucket covers a fixed
+ * window: the request/token counters, the `*P50Ms`/`*P95Ms` percentiles, and
+ * `promptsCompleted` aggregate what happened *during* the window, while
+ * `activeSessions`/`activePrompts`/`rssBytes`/`heapUsedBytes`/
+ * `eventLoopLagP99Ms` are gauges read at seal time `t`.
+ */
+export interface DaemonMetricsSeriesBucket {
+  /** Epoch ms at which this bucket was sealed (window end). */
+  t: number;
+  /** Active sessions at seal time. */
+  activeSessions: number;
+  /** In-flight prompts at seal time (tasks running concurrently). */
+  activePrompts: number;
+  /** HTTP requests completed in the window. */
+  requests: number;
+  /** Subset of `requests` returning 4xx/5xx. */
+  errors: number;
+  /** Median HTTP request duration over the window (ms); 0 when idle. */
+  latencyP50Ms: number;
+  /** p95 HTTP request duration over the window (ms); 0 when idle. */
+  latencyP95Ms: number;
+  /** Prompts that finished in the window (task throughput). */
+  promptsCompleted: number;
+  /** p95 prompt queue-wait over the window (ms); backpressure signal. */
+  promptQueueWaitP95Ms: number;
+  /** p95 end-to-end prompt duration over the window (ms). */
+  promptDurationP95Ms: number;
+  /** Resident set size at seal time (bytes). */
+  rssBytes: number;
+  /** V8 heap used at seal time (bytes). */
+  heapUsedBytes: number;
+  /** Event-loop lag p99 over the window (ms); CPU-saturation signal. */
+  eventLoopLagP99Ms: number;
+  /** Input (prompt) tokens burned in the window. */
+  tokensIn: number;
+  /** Output (completion) tokens burned in the window. */
+  tokensOut: number;
+}
+
+/**
  * Status report envelope returned from `GET /daemon/status`. Fields the
  * daemon may add over time arrive as additive optional members, mirroring
  * the `DaemonCapabilities` convention.
@@ -270,6 +311,15 @@ export interface DaemonStatusReport {
     rateLimit: {
       enabled: boolean;
       rejectedSinceStart: Record<string, number>;
+    };
+    /**
+     * Rolling per-interval activity series backing the Daemon Status charts
+     * (requests, latency, prompts, tokens, memory, event-loop lag over time).
+     * Optional/additive: absent on daemons predating it or before the sampler
+     * seals its first bucket. Ordered oldest→newest.
+     */
+    metrics?: {
+      series: DaemonMetricsSeriesBucket[];
     };
     /**
      * Prompt/session activity counters. Optional because this is additive to
