@@ -708,6 +708,38 @@ export class LspServerManager {
     return { ...process.env, ...filteredEnv };
   }
 
+  /**
+   * Builds the environment used only for the pre-start command probe.
+   *
+   * The probe runs `command --version`, so a workspace-controlled PATH could
+   * redirect a bare command such as `clangd` to an unintended executable before
+   * the real LSP server startup path is reached. Keep regular env values that
+   * probes may need, but always resolve commands through the current process
+   * PATH instead of `.lsp.json`.
+   */
+  private buildCommandProbeEnv(
+    env: Record<string, string> | undefined,
+  ): NodeJS.ProcessEnv | undefined {
+    if (!env || Object.keys(env).length === 0) {
+      return undefined;
+    }
+    const filteredEnv: Record<string, string> = {};
+    for (const [key, value] of Object.entries(env)) {
+      const normalizedKey = key.toUpperCase();
+      if (
+        normalizedKey === 'PATH' ||
+        SECURITY_SENSITIVE_ENV_KEYS.has(normalizedKey)
+      ) {
+        debugLogger.warn(
+          `Ignoring security-sensitive LSP command probe env override: ${key}`,
+        );
+        continue;
+      }
+      filteredEnv[key] = value;
+    }
+    return { ...process.env, ...filteredEnv };
+  }
+
   private async connectSocketWithRetry(
     socket: LspSocketOptions,
     timeoutMs: number,
@@ -859,6 +891,7 @@ export class LspServerManager {
           }
         | undefined;
       if (config.command) {
+        this.throwIfStartupAborted(signal);
         processDiagnostics = { stderrTail: '' };
         process = spawn(config.command, config.args ?? [], {
           cwd: workspaceFolder,
@@ -874,12 +907,7 @@ export class LspServerManager {
           process,
           processDiagnostics,
         );
-        await new Promise<void>((resolve, reject) => {
-          process?.once('spawn', () => resolve());
-          process?.once('error', (error) => {
-            reject(new Error(`Failed to spawn LSP server: ${error.message}`));
-          });
-        });
+        await this.waitForSocketProcessSpawn(process, signal);
       }
 
       try {
@@ -941,6 +969,66 @@ export class LspServerManager {
     } finally {
       earlyExit.dispose();
     }
+  }
+
+  /**
+   * Waits for the LSP server child process to successfully spawn.
+   *
+   * Resolves when the 'spawn' event fires, rejects if an error occurs during
+   * spawning or if the provided abort signal is triggered. Ensures all event
+   * listeners are cleaned up regardless of outcome to prevent memory leaks.
+   *
+   * @param process - The child process to monitor for successful spawn
+   * @param signal - Optional AbortSignal to cancel the wait; if already aborted,
+   *                 the process is killed immediately and the promise rejects
+   */
+  private async waitForSocketProcessSpawn(
+    process: ChildProcess,
+    signal: AbortSignal | undefined,
+  ): Promise<void> {
+    this.throwIfStartupAborted(signal);
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const cleanup = () => {
+        process.off('spawn', onSpawn);
+        process.off('error', onError);
+        signal?.removeEventListener('abort', onAbort);
+      };
+      const settle = (complete: () => void) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        cleanup();
+        complete();
+      };
+      const onSpawn = () => settle(resolve);
+      const onError = (error: Error) =>
+        settle(() =>
+          reject(new Error(`Failed to spawn LSP server: ${error.message}`)),
+        );
+      const onAbort = () =>
+        settle(() => {
+          if (process.exitCode === null) {
+            try {
+              process.kill();
+            } catch (error) {
+              debugLogger.warn(
+                'Error killing aborted LSP socket process:',
+                error,
+              );
+            }
+          }
+          reject(new Error('LSP server startup cancelled'));
+        });
+
+      process.once('spawn', onSpawn);
+      process.once('error', onError);
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) {
+        onAbort();
+      }
+    });
   }
 
   private watchSocketProcessEarlyExit(
@@ -1063,7 +1151,7 @@ export class LspServerManager {
       const child = spawn(command, ['--version'], {
         stdio: ['ignore', 'ignore', 'ignore'],
         cwd: cwd ?? this.workspaceRoot,
-        env: this.buildProcessEnv(env),
+        env: this.buildCommandProbeEnv(env),
       });
 
       child.on('error', () => {

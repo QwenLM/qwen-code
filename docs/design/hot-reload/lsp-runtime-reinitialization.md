@@ -201,6 +201,14 @@ Resource cleanup:
 - `stopAll()` must participate in the same reconcile queue as hot reload. It is
   not enough to wait for the current queue and then iterate handles, because a
   new reconcile could otherwise enter between the wait and handle cleanup.
+- `NativeLspService.stop()` must also cancel any in-flight or queued
+  `reinitialize()` operation before stopping servers. The implementation uses
+  cooperative cancellation with `AbortController`: stop marks the service as
+  stopping, aborts the active reload, and every queued reload checks the signal
+  before loading config, reconciling, clearing document tracking, replaying
+  documents, or waiting on replay delays. This prevents shutdown from blocking
+  indefinitely on a slow reload while also preventing a cancelled reload from
+  starting new LSP processes after `stopAll()`.
 - Crash restarts must also serialize through the reconcile queue, or clear the
   hash when they permanently fail. They must not start a replacement process in
   parallel with a config-change reconcile.
@@ -229,14 +237,21 @@ Flow:
 3. Merge configs using the current precedence.
 4. Apply the LSP admission filter before reconcile.
 5. Call `serverManager.reconcileServerConfigs(serverConfigs)`.
-6. Clear `openedDocuments` and `lastConnections` only for removed, restarted,
-   and failed servers; preserve document state for unchanged servers.
+6. Clear `openedDocuments` and `lastConnections` only for removed and
+   successfully restarted servers; preserve document state for unchanged and
+   failed servers. Failed servers keep their document tracking so a later
+   successful restart can replay the same open documents.
 7. For successfully restarted servers, replay `textDocument/didOpen` for
    documents that were open before the restart. This gives the replacement
    server the same document context without waiting for the next hover,
    completion, or diagnostic request to lazily reopen each file. After replaying
    one or more documents for a server, wait for the same document-open delay
    used by lazy `ensureDocumentOpen()` before reporting reload completion.
+
+The open-document snapshot must be taken after `reconcileServerConfigs()`
+returns and must be scoped to `reconcile.restarted`. Documents opened while
+reconcile is pending are then included in the replay snapshot before tracking is
+cleared for restarted servers.
 
 Initial discovery should use the same admission filter before calling
 `setServerConfigs()`. This keeps startup and hot reload status consistent for
@@ -300,7 +315,9 @@ private setRuntimeLspInitializationError(error: Error | string | undefined): voi
 
 `reinitializeLsp()` uses it to expose reload failures through
 `getLspStatusSnapshot()` without loosening the public post-init client mutation
-API.
+API. A returned reconcile result with `failed` servers is a partial failure, not
+a clean success. `reinitializeLsp()` must set `initializationError` for that
+case and only clear the error when the reload has no failed servers.
 
 ### 4. Admission and Permission Boundary
 
@@ -326,9 +343,14 @@ Environment variables from `.lsp.json` are also workspace-controlled. Runtime
 spawn may merge allowed env overrides, but code-injection variables such as
 `NODE_OPTIONS`, `LD_PRELOAD`, `LD_LIBRARY_PATH`, `DYLD_INSERT_LIBRARIES`, and
 `DYLD_LIBRARY_PATH` must not be overridden by LSP config. `PATH` is allowed for
-the actual server process to preserve common toolchain setups, but command
-existence probing must use the process environment instead of the config-provided
-env, so a malicious `PATH` cannot redirect bare command names during the probe.
+the actual server process to preserve common toolchain setups. Command
+existence probing may keep regular config-provided env values that probes may
+need, but it must not use config-provided `PATH` when resolving bare command
+names. This prevents a malicious workspace `PATH` from redirecting a probe such
+as `clangd --version` to an unintended executable before the real startup path.
+Sensitive env key filtering, including the probe-only `PATH` filter, must be
+case-insensitive so Windows-style case-insensitive environment names such as
+`Path`, `node_options`, or `Ld_PreLoad` cannot bypass the denylist.
 
 Allow-list boundary:
 
@@ -497,8 +519,9 @@ environment-dependent, so they are not required.
   failure;
 - crash restart reset ignores connection/process cleanup errors and continues
   the queued restart;
-- command existence probing does not use config-provided env, and
-  code-injection env overrides are filtered before spawn;
+- command existence probing keeps regular config-provided env values, but does
+  not use config-provided `PATH`, and code-injection env overrides are filtered
+  before spawn;
 - reconcile return value contains added/removed/restarted/unchanged/failed, not
   admission skipped.
 
@@ -524,9 +547,15 @@ real language servers.
 - if a CLI allow-list is implemented, the upper bound filters admitted configs;
 - service-level return value aggregates admission skipped reasons;
 - restarted/removed servers only clear their own document tracking.
+- failed servers do not clear document tracking and can replay those documents
+  after a later successful restart.
 - restarted servers replay `textDocument/didOpen` for previously opened
   documents after the replacement server is ready, then wait for the
   document-open processing delay.
+- documents opened while reconcile is pending are included in the replay
+  snapshot for restarted servers.
+- `stop()` cancels in-flight replay delay and queued `reinitialize()` calls
+  before they can start new servers.
 - `stop()` clears document tracking caches after stopping all servers.
 
 `packages/core/src/config/config.test.ts`
@@ -535,6 +564,8 @@ real language servers.
 - when enabled and the client supports `reinitialize`, it delegates the call;
 - when reinitialize throws, the status snapshot exposes the initialization/reload
   error.
+- when reinitialize returns partial failures, the status snapshot exposes an
+  initialization/reload error until a later fully successful reload clears it.
 
 ### CLI Tests
 

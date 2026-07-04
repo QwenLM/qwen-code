@@ -588,7 +588,7 @@ describe('LspServerManager', () => {
     expect(manager.getHandles().get('clangd')?.status).toBe('READY');
   });
 
-  it('uses filtered LSP config env when probing command existence', async () => {
+  it('passes LSP config env through command probe filtering', async () => {
     const manager = createTrustedManager();
     vi.spyOn(
       manager as unknown as {
@@ -1030,6 +1030,27 @@ describe('LspServerManager', () => {
     expect(env['SAFE_VALUE']).toBe('1');
   });
 
+  it('does not use LSP config PATH when probing command existence', () => {
+    const manager = createTrustedManager();
+    const env = (
+      manager as unknown as {
+        buildCommandProbeEnv(env: Record<string, string>): NodeJS.ProcessEnv;
+      }
+    ).buildCommandProbeEnv({
+      PATH: '/tmp/fake-bin',
+      Path: '/tmp/fake-bin-windows',
+      JAVA_HOME: '/opt/java',
+      NODE_OPTIONS: '--require /tmp/hook.js',
+      SAFE_VALUE: '1',
+    });
+
+    expect(env['PATH']).not.toBe('/tmp/fake-bin');
+    expect(env['Path']).not.toBe('/tmp/fake-bin-windows');
+    expect(env['JAVA_HOME']).toBe('/opt/java');
+    expect(env['NODE_OPTIONS']).toBe(process.env['NODE_OPTIONS']);
+    expect(env['SAFE_VALUE']).toBe('1');
+  });
+
   it('ignores reset errors while queueing a crash restart', async () => {
     const manager = createTrustedManager();
     let exitHandler: ((code: number | null) => void) | undefined;
@@ -1182,6 +1203,40 @@ describe('LspServerManager', () => {
 
     expect(stopped).toBe(true);
     expect(manager.getHandles().size).toBe(0);
+  });
+
+  it('cancels socket command spawn wait when startup is aborted', async () => {
+    const manager = createTrustedManager();
+    const controller = new AbortController();
+    const childProcess = {
+      exitCode: null,
+      kill: vi.fn(),
+      once: vi.fn((_event: string, _handler: (...args: unknown[]) => void) => childProcess),
+      off: vi.fn((_event: string, _handler: (...args: unknown[]) => void) => childProcess),
+    };
+    const privateView = manager as unknown as {
+      waitForSocketProcessSpawn(
+        process: ChildProcess,
+        signal: AbortSignal,
+      ): Promise<void>;
+    };
+
+    const wait = privateView.waitForSocketProcessSpawn(
+      childProcess as unknown as ChildProcess,
+      controller.signal,
+    );
+    controller.abort();
+
+    await expect(wait).rejects.toThrow('LSP server startup cancelled');
+    expect(childProcess.kill).toHaveBeenCalledOnce();
+    expect(childProcess.off).toHaveBeenCalledWith(
+      'spawn',
+      expect.any(Function),
+    );
+    expect(childProcess.off).toHaveBeenCalledWith(
+      'error',
+      expect.any(Function),
+    );
   });
 
   it('fails socket startup early when the child exits before connect', async () => {
