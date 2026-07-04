@@ -5,6 +5,10 @@
  */
 
 import { useCallback } from 'react';
+import type {
+  DaemonSessionArchiveState,
+  DaemonSessionExportFormat,
+} from '@qwen-code/sdk/daemon';
 import { useOptionalDaemonActions } from '../../session/DaemonSessionProvider.js';
 import { useDaemonWorkspace } from '../DaemonWorkspaceProvider.js';
 import type { DaemonResourceOptions } from '../types.js';
@@ -12,15 +16,17 @@ import { useDaemonResource } from './useDaemonResource.js';
 
 export interface DaemonSessionsOptions extends DaemonResourceOptions {
   pageSize?: number;
+  /** Which session directory to list. Defaults to the daemon's `active`. */
+  archiveState?: DaemonSessionArchiveState;
 }
 
 export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
-  const { pageSize, ...resourceOptions } = options;
+  const { pageSize, archiveState, ...resourceOptions } = options;
   const workspace = useDaemonWorkspace();
   const sessionActions = useOptionalDaemonActions();
   const load = useCallback(
-    () => workspace.actions.listSessions({ pageSize }),
-    [pageSize, workspace.actions],
+    () => workspace.actions.listSessions({ pageSize, archiveState }),
+    [archiveState, pageSize, workspace.actions],
   );
   const workspaceReady = !!workspace.workspaceCwd;
   const result = useDaemonResource(load, {
@@ -44,6 +50,27 @@ export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
     },
     [workspace.actions, reload],
   );
+  const exportSession = useCallback(
+    (sessionId: string, format: DaemonSessionExportFormat = 'html') =>
+      workspace.actions.exportSession(sessionId, format),
+    [workspace.actions],
+  );
+  const archiveSession = useCallback(
+    async (sessionId: string) => {
+      const archived = await workspace.actions.archiveSession(sessionId);
+      if (archived) reload();
+      return archived;
+    },
+    [workspace.actions, reload],
+  );
+  const unarchiveSession = useCallback(
+    async (sessionId: string) => {
+      const unarchived = await workspace.actions.unarchiveSession(sessionId);
+      if (unarchived) reload();
+      return unarchived;
+    },
+    [workspace.actions, reload],
+  );
   return {
     ...result,
     sessions: result.data ?? [],
@@ -53,5 +80,8 @@ export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
     releaseSession: sessionActions?.releaseSession,
     deleteSession,
     deleteSessions,
+    exportSession,
+    archiveSession,
+    unarchiveSession,
   };
 }

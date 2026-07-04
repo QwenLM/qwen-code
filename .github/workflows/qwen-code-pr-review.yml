@@ -8,6 +8,7 @@ on:
       - 'reopened'
       - 'ready_for_review'
       - 'review_requested'
+      - 'closed'
   issue_comment:
     types: ['created']
   pull_request_review_comment:
@@ -48,18 +49,20 @@ on:
         type: 'boolean'
 
 concurrency:
-  # PR lifecycle events share a PR-scoped group so new pushes restart the delay.
+  # PR lifecycle events share a PR-scoped group so new pushes restart the delay
+  # and closed PRs stop any in-flight lifecycle review.
   # Comment/review events use per-run groups to avoid cancelling active reviews.
   group: >-
     ${{ github.event_name == 'pull_request_target' &&
     format('qwen-pr-review-pr-{0}', github.event.pull_request.number) ||
     format('qwen-pr-review-run-{0}', github.run_id) }}
-  cancel-in-progress: "${{ github.event_name == 'pull_request_target' && github.event.action == 'synchronize' }}"
+  cancel-in-progress: "${{ github.event_name == 'pull_request_target' && (github.event.action == 'synchronize' || github.event.action == 'closed') }}"
 
 jobs:
   precheck-pr:
     if: |-
       github.event_name == 'pull_request_target' &&
+      github.event.action != 'closed' &&
       github.event.pull_request.head.repo.full_name != github.repository &&
       (github.event.action != 'review_requested' ||
        github.event.requested_reviewer.login == 'qwen-code-ci-bot')
@@ -77,6 +80,7 @@ jobs:
     # this `if` only matches the /review command shape.
     needs: ['authorize']
     if: |-
+      !cancelled() &&
       needs.authorize.outputs.should_review == 'true' &&
       ((github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
@@ -97,7 +101,7 @@ jobs:
     concurrency:
       group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
       cancel-in-progress: false
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       pull-requests: 'write'
@@ -141,7 +145,7 @@ jobs:
     if: |-
       github.event_name == 'pull_request_target' &&
       github.event.action == 'review_requested'
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions: {}
     outputs:
       bot_login: '${{ steps.values.outputs.bot_login }}'
@@ -154,6 +158,7 @@ jobs:
   delay-automatic-review:
     needs: ['authorize']
     if: |-
+      !cancelled() &&
       github.event_name == 'pull_request_target' &&
       (github.event.action == 'opened' ||
        github.event.action == 'synchronize') &&
@@ -204,7 +209,9 @@ jobs:
     # unrelated comment — to avoid spawning a job per comment. The downstream
     # `if`s still do the exact command body match; this prefix is just a filter.
     if: |-
-      always() &&
+      !cancelled() &&
+      (github.event_name != 'pull_request_target' ||
+       github.event.action != 'closed') &&
       (github.event_name != 'pull_request_target' ||
        github.event.pull_request.head.repo.full_name == github.repository ||
        needs.precheck-pr.outputs.decision == 'allow_triage') &&
@@ -222,7 +229,7 @@ jobs:
     # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
     # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
     # use the persistent ECS runner.
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -308,7 +315,7 @@ jobs:
     # - reopened/ready_for_review runs immediately
     # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
     if: |-
-      always() &&
+      !cancelled() &&
       ((github.event_name == 'workflow_dispatch' &&
        (github.event.inputs.command == 'review' || github.event.inputs.command == '')) ||
       (github.event_name == 'pull_request_target' &&
@@ -341,7 +348,7 @@ jobs:
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
         needs.authorize.outputs.should_review == 'true'))
     timeout-minutes: 200
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -535,14 +542,103 @@ jobs:
               local real_gh
               real_gh="$(command -v gh)"
               export QWEN_CI_REAL_GH="$real_gh"
-              {
-                printf '%s\n' '#!/usr/bin/env bash'
-                printf '%s\n' '[ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"'
-                printf '%s\n' '[ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"'
-                printf '%s\n' '[ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"'
-                printf '%s\n' '[ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"'
-                printf '%s\n' 'exec "$QWEN_CI_REAL_GH" "$@"'
-              } > "$proxy_bin/gh"
+              cat > "$proxy_bin/gh" <<'QWEN_GH_WRAPPER'
+          #!/usr/bin/env bash
+          set -euo pipefail
+          [ -n "${QWEN_CI_HTTPS_PROXY:-}" ] && export HTTPS_PROXY="$QWEN_CI_HTTPS_PROXY"
+          [ -n "${QWEN_CI_https_proxy:-}" ] && export https_proxy="$QWEN_CI_https_proxy"
+          [ -n "${QWEN_CI_HTTP_PROXY:-}" ] && export HTTP_PROXY="$QWEN_CI_HTTP_PROXY"
+          [ -n "${QWEN_CI_http_proxy:-}" ] && export http_proxy="$QWEN_CI_http_proxy"
+          guard_pr_write() {
+            local repo="${QWEN_CI_REVIEW_REPO:-}"
+            local pr_number="${QWEN_CI_REVIEW_PR_NUMBER:-}"
+            local expected_head="${QWEN_CI_REVIEW_EXPECTED_HEAD_SHA:-}"
+            if [ -z "$repo" ] || [ -z "$pr_number" ]; then
+              echo "Blocked PR write: QWEN_CI_REVIEW_REPO and QWEN_CI_REVIEW_PR_NUMBER must be set." >&2
+              exit 90
+            fi
+            local pr_data state current_head
+            if ! pr_data="$("$QWEN_CI_REAL_GH" pr view "$pr_number" --repo "$repo" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
+              echo "Blocked PR write: failed to verify PR #${pr_number} state." >&2
+              exit 90
+            fi
+            IFS=$'\t' read -r state current_head <<< "$pr_data"
+            if [ "$state" != "OPEN" ]; then
+              echo "Blocked PR write: PR #${pr_number} is ${state}." >&2
+              exit 90
+            fi
+            if [ -n "$expected_head" ] && [ "$current_head" != "$expected_head" ]; then
+              echo "Blocked PR write: PR #${pr_number} moved from ${expected_head} to ${current_head}." >&2
+              exit 90
+            fi
+          }
+          guard_api_write() {
+            local endpoint="" method="" write_flag=false previous=""
+            local arg upper_method
+            for arg in "$@"; do
+              if [ -n "$previous" ]; then
+                case "$previous" in
+                  --method|-X) method="$arg" ;;
+                esac
+                previous=""
+                continue
+              fi
+              case "$arg" in
+                --method|-X|--jq|-q|--hostname|-H|--preview|--cache)
+                  previous="$arg"
+                  ;;
+                --method=*)
+                  method="${arg#--method=}"
+                  ;;
+                --input|--field|--raw-field|-f|-F)
+                  write_flag=true
+                  previous="$arg"
+                  ;;
+                --input=*|--field=*|--raw-field=*|-f*|-F*)
+                  write_flag=true
+                  ;;
+                -*)
+                  ;;
+                *)
+                  if [ -z "$endpoint" ]; then
+                    endpoint="$arg"
+                  fi
+                  ;;
+              esac
+            done
+            upper_method="$(printf '%s' "$method" | tr '[:lower:]' '[:upper:]')"
+            if [ -z "$upper_method" ] && [ "$write_flag" = true ]; then
+              upper_method="POST"
+            fi
+            case "$upper_method" in
+              POST|PUT|PATCH|DELETE) ;;
+              *) return 0 ;;
+            esac
+            case "$endpoint" in
+              repos/*/pulls/*/reviews|/repos/*/pulls/*/reviews|\
+              repos/*/pulls/*/comments|/repos/*/pulls/*/comments|\
+              repos/*/issues/*/comments|/repos/*/issues/*/comments|\
+              repos/*/issues/comments/*|/repos/*/issues/comments/*)
+                guard_pr_write
+                ;;
+            esac
+          }
+          case "${1:-}" in
+            api)
+              shift
+              guard_api_write "$@"
+              set -- api "$@"
+              ;;
+            pr)
+              case "${2:-}" in
+                comment|review)
+                  guard_pr_write
+                  ;;
+              esac
+              ;;
+          esac
+          exec "$QWEN_CI_REAL_GH" "$@"
+          QWEN_GH_WRAPPER
               chmod +x "$proxy_bin/gh"
             fi
 
@@ -592,13 +688,27 @@ jobs:
             fail "timeout_minutes must not exceed 180 minutes"
           fi
 
-          if ! PR_STATE="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state --jq '.state')"; then
+          if ! PR_DATA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')"; then
             fail "Failed to determine state for PR #${PR_NUMBER}."
           fi
+          IFS=$'\t' read -r PR_STATE CURRENT_HEAD_SHA <<< "$PR_DATA"
           if [ "$PR_STATE" != "OPEN" ]; then
             echo "Skipping: PR #${PR_NUMBER} is ${PR_STATE}." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
+          EXPECTED_HEAD_SHA="$CURRENT_HEAD_SHA"
+          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            EVENT_HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            if [ "$CURRENT_HEAD_SHA" != "$EVENT_HEAD_SHA" ]; then
+              echo "Skipping stale review run: event head ${EVENT_HEAD_SHA} is no longer current (current head ${CURRENT_HEAD_SHA})." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            EXPECTED_HEAD_SHA="$EVENT_HEAD_SHA"
+          fi
+          export QWEN_CI_REVIEW_REPO="$REPO"
+          export QWEN_CI_REVIEW_PR_NUMBER="$PR_NUMBER"
+          export QWEN_CI_REVIEW_EXPECTED_HEAD_SHA="$EXPECTED_HEAD_SHA"
+          echo "expected_head_sha=$EXPECTED_HEAD_SHA" >> "$GITHUB_OUTPUT"
 
           PROMPT="/review ${REVIEW_URL}"
           if [ "$REVIEW_MODE" = "comment" ]; then
@@ -671,12 +781,26 @@ jobs:
           steps.context.outputs.pr_number != ''
         env:
           GH_TOKEN: '${{ secrets.CI_BOT_PAT }}'
+          EXPECTED_HEAD_SHA: "${{ steps.review.outputs.expected_head_sha || '' }}"
           FAILURE_KIND: "${{ steps.review.outputs.failure_kind || '' }}"
           FAILURE_REASON: "${{ steps.review.outputs.failure_reason || 'Run review failed. See workflow logs for details.' }}"
           PR_NUMBER: '${{ steps.context.outputs.pr_number }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
           TIMEOUT_MINUTES: '${{ steps.context.outputs.timeout_minutes }}'
         run: |-
+          pr_data="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json state,headRefOid --jq '[.state, .headRefOid] | @tsv')" || {
+            echo "Could not verify PR #${PR_NUMBER}; skipping fallback comment." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          }
+          IFS=$'\t' read -r pr_state current_head <<< "$pr_data"
+          if [ "$pr_state" != "OPEN" ]; then
+            echo "Skipping fallback comment: PR #${PR_NUMBER} is ${pr_state}." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ -n "$EXPECTED_HEAD_SHA" ] && [ "$current_head" != "$EXPECTED_HEAD_SHA" ]; then
+            echo "Skipping fallback comment: PR #${PR_NUMBER} moved from ${EXPECTED_HEAD_SHA} to ${current_head}." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
           if [ "$FAILURE_KIND" = "timeout" ]; then
             if [ "$TIMEOUT_MINUTES" -lt 180 ]; then
               body="**Qwen Code review timed out.** ${FAILURE_REASON} For large PRs, retry with a longer timeout by commenting: \`@qwen-code /review --timeout=180\`. See [workflow logs](${RUN_URL})."
@@ -693,7 +817,7 @@ jobs:
   resolve-pr:
     needs: ['authorize']
     if: |-
-      always() &&
+      !cancelled() &&
       github.repository == 'QwenLM/qwen-code' &&
       needs.authorize.outputs.should_review == 'true' &&
       (

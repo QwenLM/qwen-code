@@ -380,6 +380,33 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(withEmptyFastModel.current).not.toHaveProperty('fastModelId');
   });
 
+  it('includes only non-empty vision model settings in current selection', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'main-model' },
+      visionModel: 'vision-model',
+      modelProviders: {
+        openai: [{ id: 'main-model', name: 'Main Model' }],
+      },
+    });
+
+    const withVisionModel = await provider(workspace, false);
+    expect(withVisionModel.current?.visionModelId).toBe('vision-model');
+
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'main-model' },
+      visionModel: '',
+      modelProviders: {
+        openai: [{ id: 'main-model', name: 'Main Model' }],
+      },
+    });
+
+    const withEmptyVisionModel = await provider(workspace, false);
+    expect(withEmptyVisionModel.current).not.toHaveProperty('visionModelId');
+  });
+
   it('does not include runtime models in the workspace provider catalog', async () => {
     const provider = createWorkspaceProvidersStatusProvider({
       argv: { model: 'runtime-only-model' },

@@ -5,6 +5,7 @@ import {
   atCompletionSource,
   type ExtensionCompletionEntry,
   type GlobFn,
+  type McpServerCompletionEntry,
 } from './atCompletion';
 
 const extensions: ExtensionCompletionEntry[] = [
@@ -27,6 +28,17 @@ const extensions: ExtensionCompletionEntry[] = [
   },
 ];
 
+const mcpServers: McpServerCompletionEntry[] = [
+  {
+    name: 'dataworks',
+    description: 'DataWorks MCP',
+  },
+  {
+    name: 'clickhouse',
+    description: 'ClickHouse MCP',
+  },
+];
+
 function context(doc: string): CompletionContext {
   return new CompletionContext(EditorState.create({ doc }), doc.length, true);
 }
@@ -41,19 +53,22 @@ describe('atCompletionSource', () => {
       context('@'),
       () => glob,
       () => async () => ({ extensions }),
+      () => async () => ({ servers: mcpServers }),
     );
 
     expect(result?.from).toBe(0);
     expect(result?.options.map((option) => option.label)).toEqual([
-      '@ext:browser',
-      '@ext:review-tools',
-      '@README.md',
-      '@src/index.ts',
+      'browser',
+      'review-tools',
+      'README.md',
+      'src/index.ts',
+      'clickhouse',
+      'dataworks',
     ]);
     expect(glob).toHaveBeenCalledWith('**/*', { maxResults: 50 });
   });
 
-  it('filters extensions and files by partial input', async () => {
+  it('filters extensions, MCP servers, and files by partial input', async () => {
     const glob = vi.fn<GlobFn>().mockResolvedValue({
       matches: ['browser-test.ts'],
     });
@@ -62,11 +77,18 @@ describe('atCompletionSource', () => {
       context('@bro'),
       () => glob,
       () => async () => ({ extensions }),
+      () => async () => ({
+        servers: [
+          ...mcpServers,
+          { name: 'browser-mcp', description: 'Browser MCP' },
+        ],
+      }),
     );
 
     expect(result?.options.map((option) => option.label)).toEqual([
-      '@ext:browser',
-      '@browser-test.ts',
+      'browser',
+      'browser-test.ts',
+      'browser-mcp',
     ]);
     expect(glob).toHaveBeenCalledWith('bro*', { maxResults: 50 });
   });
@@ -83,7 +105,7 @@ describe('atCompletionSource', () => {
     );
 
     expect(result?.options.map((option) => option.label)).toEqual([
-      '@ext:review-tools',
+      'review-tools',
     ]);
     expect(result?.options[0]?.apply).toBe('@ext:review-tools ');
     expect(glob).not.toHaveBeenCalled();
@@ -103,7 +125,7 @@ describe('atCompletionSource', () => {
     );
 
     expect(result?.options.map((option) => option.label)).toEqual([
-      '@README.md',
+      'README.md',
     ]);
   });
 });
