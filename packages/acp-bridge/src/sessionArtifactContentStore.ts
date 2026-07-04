@@ -216,8 +216,13 @@ export class SessionArtifactContentStore {
       return 'restore_validation_failed';
     }
     try {
-      const stat = await fs.stat(path.join(contentDir, 'content'));
-      if (!stat.isFile() || stat.size !== ref.sizeBytes) {
+      const contentPath = path.join(contentDir, 'content');
+      const stat = await fs.stat(contentPath);
+      if (!stat.isFile()) {
+        return 'content_hash_mismatch';
+      }
+      const { sha256, sizeBytes } = await hashFile(contentPath);
+      if (sha256 !== ref.sha256 || sizeBytes !== ref.sizeBytes) {
         return 'content_hash_mismatch';
       }
     } catch (error) {

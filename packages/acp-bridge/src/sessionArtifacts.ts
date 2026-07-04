@@ -254,9 +254,16 @@ export class SessionArtifactStore {
 
   async upsertMany(
     inputs: SessionArtifactInput[],
-    options: { strict?: boolean; trustedPublisher?: boolean } = {},
+    options: {
+      strict?: boolean;
+      validationStrict?: boolean;
+      persistenceStrict?: boolean;
+      trustedPublisher?: boolean;
+    } = {},
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
+      const validationStrict = options.validationStrict ?? options.strict;
+      const persistenceStrict = options.persistenceStrict ?? options.strict;
       const before = this.cloneState();
       const normalizedResults: NormalizedArtifact[] = [];
       const warnings: string[] = [];
@@ -270,7 +277,7 @@ export class SessionArtifactStore {
             ),
           );
         } catch (error) {
-          if (options.strict) {
+          if (validationStrict) {
             throw error;
           }
           const message =
@@ -324,12 +331,14 @@ export class SessionArtifactStore {
             .map((change) => change.artifactId),
         );
         changes.push(
-          ...(await this.evictOverflow(createdIds, changes, options.strict)),
+          ...(await this.evictOverflow(createdIds, changes, persistenceStrict)),
         );
 
-        warnings.push(...(await this.persistChanges(changes, options.strict)));
+        warnings.push(
+          ...(await this.persistChanges(changes, persistenceStrict)),
+        );
       } catch (error) {
-        if (options.strict) {
+        if (validationStrict || persistenceStrict) {
           this.restoreState(before);
         }
         throw error;
@@ -457,7 +466,16 @@ export class SessionArtifactStore {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
       if (existing.retention === 'pinned') {
-        return { v: 1, sessionId: this.sessionId, changes: [] };
+        const warnings =
+          Object.keys(options).length > 0
+            ? ['artifact already pinned; pin options ignored']
+            : undefined;
+        return {
+          v: 1,
+          sessionId: this.sessionId,
+          changes: [],
+          ...(warnings ? { warnings } : {}),
+        };
       }
       const targetRetention =
         options.retention ?? (options.contentRef ? 'pinned' : 'restorable');
@@ -559,14 +577,9 @@ export class SessionArtifactStore {
               },
             ]
           : changes;
-      if (targetRetention !== 'ephemeral') {
-        this.artifacts.set(artifactId, updated);
-      }
+      this.artifacts.set(artifactId, updated);
       try {
         const warnings = await this.persistChanges(durableChanges, true);
-        if (targetRetention === 'ephemeral') {
-          this.artifacts.set(artifactId, updated);
-        }
         return {
           v: 1,
           sessionId: this.sessionId,
@@ -586,6 +599,7 @@ export class SessionArtifactStore {
     return this.enqueue(async () => {
       const before = this.cloneState();
       const changes: SessionArtifactChange[] = [];
+      const expiredIds: string[] = [];
       for (const [artifactId, existing] of this.artifacts) {
         if (
           existing.retention !== 'pinned' ||
@@ -594,6 +608,7 @@ export class SessionArtifactStore {
         ) {
           continue;
         }
+        expiredIds.push(artifactId);
         const updated: StoredArtifact = {
           ...existing,
           retention: 'restorable',
@@ -623,6 +638,15 @@ export class SessionArtifactStore {
         };
       } catch (error) {
         this.restoreState(before);
+        for (const artifactId of expiredIds) {
+          const restored = this.artifacts.get(artifactId);
+          if (restored?.retention === 'pinned') {
+            this.artifacts.set(artifactId, {
+              ...restored,
+              persistenceWarning: 'persistence_unavailable',
+            });
+          }
+        }
         writeStderrLine(
           `[artifacts] session=${this.sessionId} action=ttl_prune_failed reason=${JSON.stringify(
             error instanceof Error ? error.message : String(error),
@@ -1379,7 +1403,7 @@ function mergeArtifact(
   return { artifact: changed ? next : existing, changed };
 }
 
-function publicArtifactsEqual(
+export function publicArtifactsEqual(
   a: DaemonSessionArtifact,
   b: DaemonSessionArtifact,
 ): boolean {

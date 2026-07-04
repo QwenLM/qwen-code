@@ -2356,6 +2356,53 @@ describe('SessionArtifactStore', () => {
     ).toBe(false);
   });
 
+  it('snapshots unpin-to-ephemeral state after applying the live update', async () => {
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's11-unpin-snapshot',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Pinned', url: 'https://example.com/pinned' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    await store.pin(artifactId, {
+      contentRef: {
+        kind: 'managed_copy',
+        contentId: `${'a'.repeat(64)}-${'b'.repeat(16)}`,
+        sha256: 'a'.repeat(64),
+        sizeBytes: 5,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      },
+    });
+    for (let index = 0; index < 47; index++) {
+      await store.upsertMany(
+        [
+          {
+            title: `Durable ${index}`,
+            url: `https://example.com/unpin-${index}`,
+          },
+        ],
+        { strict: true },
+      );
+    }
+
+    await store.unpin(artifactId, { retention: 'ephemeral' });
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.stickyEphemeralIds).toContain(artifactId);
+    expect(
+      snapshots[0]?.artifacts.some((artifact) => artifact.id === artifactId),
+    ).toBe(false);
+  });
+
   it('downgrades non-strict durable artifacts when persistence is unavailable', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's11-unavailable',
@@ -2406,6 +2453,59 @@ describe('SessionArtifactStore', () => {
       ),
     ).rejects.toThrow('disk full');
     await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
+  it('keeps expired pins visible with a warning when TTL prune persistence fails', async () => {
+    let rejectPrune = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-prune-fail',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          if (
+            rejectPrune &&
+            payload.changes.some((change) => change.action === 'updated')
+          ) {
+            throw new Error('disk full');
+          }
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Pinned', url: 'https://example.com/pinned' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    await store.pin(artifactId, {
+      expiresAt: '2026-07-04T00:00:00.000Z',
+      contentRef: {
+        kind: 'managed_copy',
+        contentId: `${'c'.repeat(64)}-${'d'.repeat(16)}`,
+        sha256: 'c'.repeat(64),
+        sizeBytes: 5,
+        createdAt: '2026-07-03T00:00:00.000Z',
+      },
+    });
+
+    rejectPrune = true;
+    await expect(
+      store.pruneExpiredPins(new Date('2026-07-05T00:00:00.000Z')),
+    ).resolves.toMatchObject({
+      changes: [],
+      warnings: [
+        'expired pinned artifacts retained because persistence failed',
+      ],
+    });
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: artifactId,
+          retention: 'pinned',
+          persistenceWarning: 'persistence_unavailable',
+        }),
+      ],
+    });
   });
 
   it('removes live artifacts even when explicit tombstone persistence fails', async () => {
@@ -2974,7 +3074,7 @@ describe('SessionArtifactContentStore', () => {
     );
     await expect(
       contentStore.verifyContentRef('content-session', artifact.id, ref),
-    ).resolves.toBeUndefined();
+    ).resolves.toBe('content_hash_mismatch');
     await expect(contentStore.fsck([ref])).resolves.toMatchObject({
       hashMismatches: [ref.contentId],
     });

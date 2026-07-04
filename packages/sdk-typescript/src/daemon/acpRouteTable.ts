@@ -270,7 +270,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/session\/([^/]+)\/artifacts\/([^/]+)\/pin$/,
     mapping: {
       method: '_qwen/session/artifacts/pin',
-      extractParams: (segs) => ({
+      extractParams: (segs, body) => ({
+        ...(isRecord(body) ? body : {}),
         sessionId: segs[0],
         artifactId: segs[1],
       }),
@@ -282,7 +283,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/session\/([^/]+)\/artifacts\/([^/]+)\/pin$/,
     mapping: {
       method: '_qwen/session/artifacts/unpin',
-      extractParams: (segs) => ({
+      extractParams: (segs, body) => ({
+        ...(isRecord(body) ? body : {}),
         sessionId: segs[0],
         artifactId: segs[1],
       }),
@@ -312,7 +314,8 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/session\/([^/]+)\/artifacts\/([^/]+)$/,
     mapping: {
       method: '_qwen/session/artifacts/remove',
-      extractParams: (segs) => ({
+      extractParams: (segs, body) => ({
+        ...(isRecord(body) ? body : {}),
         sessionId: segs[0],
         artifactId: segs[1],
       }),

@@ -224,7 +224,28 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
-  it('returns artifact snapshots when best-effort GET content GC fails', async () => {
+  it('rejects invalid client artifact records instead of dropping them', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      await expect(
+        bridge.addSessionArtifact(
+          session.sessionId,
+          {
+            title: 'x'.repeat(201),
+            url: 'https://example.com/client',
+          },
+          { clientId: session.clientId },
+        ),
+      ).rejects.toThrow(/title/);
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('does not prune or GC expired pins during artifact GET', async () => {
     const previousQwenHome = process.env['QWEN_HOME'];
     const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
     const workspace = await fsp.mkdtemp(
@@ -267,16 +288,143 @@ describe('createAcpSessionBridge', () => {
         artifacts: [
           {
             id: artifactId,
-            retention: 'restorable',
-            persistenceWarning: 'content_expired',
+            retention: 'pinned',
           },
         ],
-        warnings: ['artifact content GC failed; stale content retained'],
       });
-      expect(gcSpy).toHaveBeenCalledTimes(1);
+      expect(gcSpy).not.toHaveBeenCalled();
     } finally {
       gcSpy.mockRestore();
       vi.useRealTimers();
+      await bridge.shutdown();
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(tempHome, { recursive: true, force: true });
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('prunes expired pins during artifact mutations and reports GC warnings', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-workspace-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-04T00:00:00.000Z'));
+    const gcSpy = vi
+      .spyOn(SessionArtifactContentStore.prototype, 'gc')
+      .mockRejectedValueOnce(new Error('disk unavailable'));
+    const bridge = makeBridge({
+      boundWorkspace: workspace,
+      channelFactory: async () => makeChannel().channel,
+    });
+    try {
+      await fsp.mkdir(path.join(workspace, 'reports'), { recursive: true });
+      await fsp.writeFile(path.join(workspace, 'reports', 'report.txt'), 'hi');
+      const session = await bridge.spawnOrAttach({ workspaceCwd: workspace });
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Report',
+          workspacePath: 'reports/report.txt',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      await bridge.pinSessionArtifact(
+        session.sessionId,
+        artifactId,
+        { clientId: session.clientId },
+        { mode: 'content', ttlDays: 1 },
+      );
+
+      vi.setSystemTime(new Date('2026-07-06T00:00:00.000Z'));
+      await expect(
+        bridge.addSessionArtifact(
+          session.sessionId,
+          {
+            title: 'New link',
+            url: 'https://example.com/new-link',
+          },
+          { clientId: session.clientId },
+        ),
+      ).resolves.toMatchObject({
+        warnings: ['artifact content GC failed; stale content retained'],
+      });
+      expect(gcSpy).toHaveBeenCalledTimes(1);
+      await expect(
+        bridge.getSessionArtifacts(session.sessionId),
+      ).resolves.toMatchObject({
+        artifacts: expect.arrayContaining([
+          expect.objectContaining({
+            id: artifactId,
+            retention: 'restorable',
+            persistenceWarning: 'content_expired',
+          }),
+        ]),
+      });
+    } finally {
+      gcSpy.mockRestore();
+      vi.useRealTimers();
+      await bridge.shutdown();
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(tempHome, { recursive: true, force: true });
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('warns when pin options are ignored for an already pinned artifact', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-workspace-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    const bridge = makeBridge({
+      boundWorkspace: workspace,
+      channelFactory: async () => makeChannel().channel,
+    });
+    try {
+      await fsp.mkdir(path.join(workspace, 'reports'), { recursive: true });
+      await fsp.writeFile(path.join(workspace, 'reports', 'report.txt'), 'hi');
+      const session = await bridge.spawnOrAttach({ workspaceCwd: workspace });
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Report',
+          workspacePath: 'reports/report.txt',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      await bridge.pinSessionArtifact(
+        session.sessionId,
+        artifactId,
+        { clientId: session.clientId },
+        { mode: 'content' },
+      );
+
+      await expect(
+        bridge.pinSessionArtifact(
+          session.sessionId,
+          artifactId,
+          { clientId: session.clientId },
+          { mode: 'metadata' },
+        ),
+      ).resolves.toMatchObject({
+        changes: [],
+        warnings: ['artifact already pinned; pin options ignored'],
+      });
+    } finally {
       await bridge.shutdown();
       if (previousQwenHome === undefined) {
         delete process.env['QWEN_HOME'];

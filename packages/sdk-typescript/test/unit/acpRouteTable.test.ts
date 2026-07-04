@@ -266,8 +266,16 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/session/artifacts/remove');
     expect(
-      result!.mapping.extractParams(result!.segments, undefined, 'DELETE'),
-    ).toEqual({ sessionId: 's8', artifactId: 'art 1' });
+      result!.mapping.extractParams(
+        result!.segments,
+        { deleteContent: false },
+        'DELETE',
+      ),
+    ).toEqual({
+      sessionId: 's8',
+      artifactId: 'art 1',
+      deleteContent: false,
+    });
   });
 
   it('POST /session/:id/artifacts/:artifactId/pin maps to _qwen/session/artifacts/pin', () => {
@@ -275,8 +283,12 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/session/artifacts/pin');
     expect(
-      result!.mapping.extractParams(result!.segments, undefined, 'POST'),
-    ).toEqual({ sessionId: 's8', artifactId: 'art 1' });
+      result!.mapping.extractParams(
+        result!.segments,
+        { mode: 'metadata' },
+        'POST',
+      ),
+    ).toEqual({ sessionId: 's8', artifactId: 'art 1', mode: 'metadata' });
   });
 
   it('DELETE /session/:id/artifacts/:artifactId/pin maps to _qwen/session/artifacts/unpin', () => {
@@ -284,8 +296,16 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/session/artifacts/unpin');
     expect(
-      result!.mapping.extractParams(result!.segments, undefined, 'DELETE'),
-    ).toEqual({ sessionId: 's8', artifactId: 'art 1' });
+      result!.mapping.extractParams(
+        result!.segments,
+        { retention: 'ephemeral' },
+        'DELETE',
+      ),
+    ).toEqual({
+      sessionId: 's8',
+      artifactId: 'art 1',
+      retention: 'ephemeral',
+    });
   });
 
   it('GET /session/:id/artifacts/fsck maps to _qwen/session/artifacts/fsck', () => {
