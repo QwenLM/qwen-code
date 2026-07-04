@@ -3753,7 +3753,10 @@ export class AcpDispatcher {
           }
           if (signal.aborted) return;
           lastDeliveredId = Math.max(lastDeliveredId, snapshot.lastEventId);
-          subscribeFromEventId = snapshot.lastEventId;
+          subscribeFromEventId = Math.max(
+            subscribeFromEventId ?? 0,
+            snapshot.lastEventId,
+          );
         } else {
           conn.markInitialReplayComplete(sessionId);
           conn.endReplayDeferral(sessionId, lastDeliveredId, false);

@@ -173,6 +173,12 @@ function isBulkReplayUpdate(value: unknown): value is SessionUpdate {
   );
 }
 
+function describeLoadReplayValue(value: unknown): string {
+  if (Array.isArray(value)) return 'array';
+  if (value === null) return 'null';
+  return typeof value;
+}
+
 function extractLoadReplayResponse(state: BridgeSessionState): {
   state: BridgeSessionState;
   updates: SessionUpdate[];
@@ -181,11 +187,32 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
   const replay = meta?.[LOAD_REPLAY_META_KEY];
   if (replay === undefined) return { state, updates: [] };
   if (!isRecord(replay) || replay['v'] !== LOAD_REPLAY_VERSION) {
-    throw new Error('Invalid qwen.session.loadReplay payload');
+    const version = isRecord(replay) ? replay['v'] : undefined;
+    throw new Error(
+      `Invalid qwen.session.loadReplay payload ` +
+        `(type=${describeLoadReplayValue(replay)}, version=${JSON.stringify(version)})`,
+    );
   }
   const rawUpdates = replay['updates'];
-  if (!Array.isArray(rawUpdates) || !rawUpdates.every(isBulkReplayUpdate)) {
-    throw new Error('Invalid qwen.session.loadReplay updates');
+  if (!Array.isArray(rawUpdates)) {
+    throw new Error(
+      `Invalid qwen.session.loadReplay updates ` +
+        `(version=${LOAD_REPLAY_VERSION}, count=not-array)`,
+    );
+  }
+  const invalidUpdateIndex = rawUpdates.findIndex(
+    (update) => !isBulkReplayUpdate(update),
+  );
+  if (invalidUpdateIndex !== -1) {
+    const invalidUpdate = rawUpdates[invalidUpdateIndex];
+    const discriminator = isRecord(invalidUpdate)
+      ? invalidUpdate['sessionUpdate']
+      : undefined;
+    throw new Error(
+      `Invalid qwen.session.loadReplay update at index ${invalidUpdateIndex} ` +
+        `(version=${LOAD_REPLAY_VERSION}, count=${rawUpdates.length}, ` +
+        `sessionUpdate=${JSON.stringify(discriminator)})`,
+    );
   }
 
   const nextMeta = { ...(meta ?? {}) };

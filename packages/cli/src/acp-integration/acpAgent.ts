@@ -2792,6 +2792,43 @@ class QwenAgent implements Agent {
     this.sessions.delete(sessionId);
   }
 
+  private discardStoredSessionIfCurrent(
+    sessionId: string,
+    session: Session,
+  ): void {
+    if (this.sessions.get(sessionId) !== session) {
+      return;
+    }
+    const logCleanupFailure = (action: string, err: unknown) => {
+      debugLogger.debug(
+        `Session ${sessionId} ${action} during failed restore cleanup failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    };
+    try {
+      session.dispose();
+    } catch (err) {
+      logCleanupFailure('dispose', err);
+    }
+    try {
+      unregisterGoalHook(session.getConfig(), sessionId);
+    } catch (err) {
+      logCleanupFailure('goal hook unregister', err);
+    }
+    try {
+      this.mcpPool?.releaseSession(sessionId);
+    } catch (err) {
+      logCleanupFailure('MCP pool release', err);
+    }
+    try {
+      uiTelemetryService.removeSession(sessionId);
+    } catch (err) {
+      logCleanupFailure('telemetry removal', err);
+    }
+    this.sessions.delete(sessionId);
+  }
+
   disposeSessions(): void {
     for (const session of this.sessions.values()) {
       session.dispose();
@@ -3016,25 +3053,30 @@ class QwenAgent implements Agent {
     );
     let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
     if (bulkReplay) {
-      const records = sessionData?.conversation.messages;
-      let replayUpdates: SessionUpdate[] = [];
-      if (records) {
-        session.primeTurnFromHistory(records);
-        const replay = await collectHistoryReplayUpdates({
-          sessionId: params.sessionId,
-          config,
-          records,
-          cumulativeUsage: session.cumulativeUsage,
-          failOnReplayError: true,
-        });
-        replayUpdates = replay.updates;
+      try {
+        const records = sessionData?.conversation.messages;
+        let replayUpdates: SessionUpdate[] = [];
+        if (records) {
+          session.primeTurnFromHistory(records);
+          const replay = await collectHistoryReplayUpdates({
+            sessionId: params.sessionId,
+            config,
+            records,
+            cumulativeUsage: session.cumulativeUsage,
+            failOnReplayError: true,
+          });
+          replayUpdates = replay.updates;
+        }
+        replayEnvelope = {
+          v: LOAD_REPLAY_VERSION,
+          updates: replayUpdates,
+        };
+        session.installRewriter();
+        session.startCronScheduler();
+      } catch (err) {
+        this.discardStoredSessionIfCurrent(params.sessionId, session);
+        throw err;
       }
-      replayEnvelope = {
-        v: LOAD_REPLAY_VERSION,
-        updates: replayUpdates,
-      };
-      session.installRewriter();
-      session.startCronScheduler();
     }
 
     await this.#restoreWorktreeOnResume(config, session);

@@ -3249,6 +3249,59 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
   });
 
+  it('does not rewind initial replay subscription behind Last-Event-ID', async () => {
+    bridge.replaySnapshot = {
+      lastEventId: 2,
+      compactedTurns: [],
+      liveJournal: [
+        {
+          v: 1,
+          id: 1,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'user_message_chunk' },
+          },
+        } as BridgeEvent,
+        {
+          v: 1,
+          id: 2,
+          type: 'session_update',
+          data: {
+            sessionId: 'loaded-1',
+            update: { sessionUpdate: 'agent_message_chunk' },
+          },
+        } as BridgeEvent,
+      ],
+    };
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const loadReply = takeFrames(connStream, 1);
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    await loadReply;
+
+    const resumed = await fetch(`${base}/acp`, {
+      headers: {
+        accept: 'text/event-stream',
+        'acp-connection-id': connId,
+        'acp-session-id': 'loaded-1',
+        'last-event-id': '5',
+      },
+    });
+    await waitUntil(() => bridge.subscribeCalls.length >= 1);
+
+    expect(bridge.subscribeCalls.at(-1)).toEqual({
+      sessionId: 'loaded-1',
+      lastEventId: 5,
+    });
+    await resumed.body?.cancel();
+  });
+
   it('session/resume owns the session + replies state', async () => {
     const connId = await initialize();
     const connStream = await openStream(connId);

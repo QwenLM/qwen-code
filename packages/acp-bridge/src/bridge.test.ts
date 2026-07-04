@@ -1306,6 +1306,36 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('reports the bad index when response-mode load replay is invalid', async () => {
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: [
+                { sessionUpdate: 'agent_message_chunk' },
+                { sessionUpdate: 'future_update_type' },
+              ],
+            },
+          },
+        }),
+      }).channel;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'persisted-bad-bulk-history',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+      }),
+    ).rejects.toThrow(
+      /Invalid qwen\.session\.loadReplay update at index 1 .*count=2.*future_update_type/,
+    );
+
+    await bridge.shutdown();
+  });
+
   it('orders response-mode replay before restore-time buffered events', async () => {
     let capturedConn: AgentSideConnection | undefined;
     const factory: ChannelFactory = async () => {
