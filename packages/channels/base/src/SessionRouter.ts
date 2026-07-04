@@ -269,14 +269,8 @@ export class SessionRouter {
   private updateTarget(sessionId: string, next: SessionTarget): void {
     const current = this.toTarget.get(sessionId);
     if (!current) return;
-    const changed =
-      current.channelName !== next.channelName ||
-      current.senderId !== next.senderId ||
-      current.chatId !== next.chatId ||
-      current.threadId !== next.threadId ||
-      current.isGroup !== next.isGroup;
-    if (!changed) return;
-    this.toTarget.set(sessionId, next);
+    if (current.isGroup === next.isGroup) return;
+    this.toTarget.set(sessionId, { ...current, isGroup: next.isGroup });
     this.persist();
   }
 

@@ -82,6 +82,20 @@ describe('SessionRouter', () => {
       expect(s1).toBe(s2); // same thread = same session
     });
 
+    it('thread scope: keeps original target owner when reusing a session', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sessionId = await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      await router.resolve('ch', 'bob', 'chat1', 'thread1');
+
+      expect(router.getTarget(sessionId)).toMatchObject({
+        channelName: 'ch',
+        senderId: 'alice',
+        chatId: 'chat1',
+        threadId: 'thread1',
+      });
+    });
+
     it('thread scope: falls back to chatId when no threadId', async () => {
       const router = new SessionRouter(bridge, '/tmp', 'thread');
       const s1 = await router.resolve('ch', 'alice', 'chat1');
