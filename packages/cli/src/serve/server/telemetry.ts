@@ -217,7 +217,13 @@ export function daemonTelemetryMiddleware(
             recordDaemonHttpResponse(span, res.statusCode);
             const durationMs = Date.now() - startMs;
             recordDaemonHttpRequest(durationMs, route.route, res.statusCode);
-            recordRequest?.(durationMs, res.statusCode);
+            // Exclude the dashboard's own status poll from the metrics-ring
+            // request rate/latency, or the Requests chart shows a baseline of
+            // ≥1/window with no external traffic (the dashboard counting itself)
+            // — misleading an operator investigating load. OTel still counts it.
+            if (route.route !== 'GET /daemon/status') {
+              recordRequest?.(durationMs, res.statusCode);
+            }
             resolve();
           };
           res.once('finish', finish);

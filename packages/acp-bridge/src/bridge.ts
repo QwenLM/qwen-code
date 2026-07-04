@@ -2094,9 +2094,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // extMethod and cache rss/cpu on the channel. The daemon's metrics sampler
   // fires this fire-and-forget, then reads the cache synchronously — keeping the
   // async round-trip off the sampler's hot path.
+  const STALE_CHILD_RESOURCE_MS = 30_000;
+  // In-flight guard: `requestWorkspaceStatus` waits up to `initTimeoutMs` (10s),
+  // longer than the 5s sample cadence — so without this a degraded child (the
+  // exact case the chart should surface) would accumulate concurrent polls and
+  // pile more load onto an already-struggling pipe. At most one outstanding poll.
+  let childResourceRefreshing = false;
   const refreshChildResource = async (): Promise<void> => {
+    if (childResourceRefreshing) return;
     const info = liveChannelInfo();
     if (!info) return;
+    childResourceRefreshing = true;
     try {
       const res = await requestWorkspaceStatus<{
         rssBytes?: unknown;
@@ -2112,7 +2120,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       info.childResourceAt = Date.now();
     } catch {
       // Child unreachable / mid-swap — keep the last good cache (or nothing
-      // before the first success); the chart reads 0 until then.
+      // before the first success). The staleness guard in the reader drops it
+      // once it ages out, so a stuck child reads 0 rather than a frozen value.
+    } finally {
+      childResourceRefreshing = false;
     }
   };
   const getChildResourceSnapshot = ():
@@ -2120,6 +2131,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     | undefined => {
     const info = liveChannelInfo();
     if (!info || info.childResourceAt === undefined) return undefined;
+    // Staleness: a child that goes unresponsive without a channel swap would
+    // otherwise show its last-good rss/cpu forever (a zombie looking healthy).
+    // Drop the reading once it ages past the window so the chart reads 0.
+    if (Date.now() - info.childResourceAt > STALE_CHILD_RESOURCE_MS) {
+      return undefined;
+    }
     return {
       rssBytes: info.childRssBytes ?? 0,
       cpuPercent: info.childCpuPercent ?? 0,

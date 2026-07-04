@@ -41,7 +41,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     const res = mockRes(200);
     const next = vi.fn() as unknown as NextFunction;
 
-    mw(mockReq('GET', '/daemon/status'), res, next);
+    mw(mockReq('GET', '/session/abc/artifacts'), res, next);
     // next runs synchronously; the record fires only when the response finishes.
     expect(next).toHaveBeenCalledTimes(1);
     expect(recordRequest).not.toHaveBeenCalled();
@@ -69,7 +69,7 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     const mw = daemonTelemetryMiddleware('/ws', recordRequest);
     const res = mockRes(200);
     mw(
-      mockReq('GET', '/daemon/status'),
+      mockReq('GET', '/session/abc/artifacts'),
       res,
       vi.fn() as unknown as NextFunction,
     );
@@ -89,12 +89,27 @@ describe('daemonTelemetryMiddleware — recordRequest seam', () => {
     expect(recordRequest).not.toHaveBeenCalled();
   });
 
+  it('excludes the dashboard status poll (GET /daemon/status) from recordRequest', () => {
+    const recordRequest = vi.fn();
+    const mw = daemonTelemetryMiddleware('/ws', recordRequest);
+    const res = mockRes(200);
+    // GET /daemon/status IS a matched telemetry route, but the metrics ring must
+    // not count the dashboard's own 5s poll as request traffic.
+    mw(
+      mockReq('GET', '/daemon/status'),
+      res,
+      vi.fn() as unknown as NextFunction,
+    );
+    res.emit('finish');
+    expect(recordRequest).not.toHaveBeenCalled();
+  });
+
   it('is a silent no-op when recordRequest is omitted (the optional-chaining path)', () => {
     const mw = daemonTelemetryMiddleware('/ws');
     const res = mockRes(200);
     expect(() => {
       mw(
-        mockReq('GET', '/daemon/status'),
+        mockReq('GET', '/session/abc/artifacts'),
         res,
         vi.fn() as unknown as NextFunction,
       );

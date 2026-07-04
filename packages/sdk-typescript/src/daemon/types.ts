@@ -177,9 +177,10 @@ export interface DaemonStatusReportSession {
 }
 
 /**
- * One time-bucketed sample in the Daemon Status metrics series (client-side
- * mirror of the daemon's `DaemonMetricsBucket`). Each bucket covers a fixed
- * window: the request/token counters, the `*P50Ms`/`*P95Ms` percentiles, and
+ * One time-bucketed sample in the Daemon Status metrics series. **Manual mirror
+ * of `packages/cli/src/serve/daemon-metrics-ring.ts` → `DaemonMetricsBucket`;
+ * keep the two field lists in sync.** Each bucket covers a fixed window: the
+ * request/token counters, the `*P50Ms`/`*P95Ms` percentiles, and
  * `promptsCompleted` aggregate what happened *during* the window, while
  * `activeSessions`/`activePrompts`/`rssBytes`/`heapUsedBytes`/
  * `eventLoopLagP99Ms` are gauges read at seal time `t`.
@@ -212,7 +213,8 @@ export interface DaemonMetricsSeriesBucket {
   llmApiP50Ms: number;
   /** p95 per-round LLM API round-trip over the window (ms); 0 when none. */
   llmApiP95Ms: number;
-  /** Process CPU utilization over the window, percent of one core. */
+  /** Process CPU utilization over the window, percent of total capacity across
+   *  all cores, clamped to [0,100]. */
   cpuPercent: number;
   /** Resident set size at seal time (bytes). */
   rssBytes: number;
@@ -236,8 +238,9 @@ export interface DaemonMetricsSeriesBucket {
   tokensIn: number;
   /** Output (completion) tokens burned in the window. */
   tokensOut: number;
-  /** ACP child process CPU % at seal time (self-reported over ACP); where the
-   *  real LLM/tool work runs. 0 when no child. */
+  /** ACP child process CPU % at seal time (self-reported over ACP; percent of
+   *  total capacity across all cores, clamped [0,100]) — where the real LLM/tool
+   *  work runs. 0 when no child. */
   childCpuPercent: number;
   /** ACP child process RSS at seal time (bytes; self-reported). 0 when none. */
   childRssBytes: number;

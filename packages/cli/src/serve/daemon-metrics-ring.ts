@@ -64,9 +64,9 @@ export interface DaemonMetricsBucket {
   llmApiP95Ms: number;
 
   // —— Resource pressure (gauge @ seal) ——
-  /** Process CPU utilization over the window, percent of one core (may exceed
-   *  100 on multi-core work). Complements memory as the other half of "how much
-   *  did it cost"; event-loop lag is only an indirect CPU-saturation signal. */
+  /** Process CPU utilization over the window, percent of total capacity across
+   *  all cores, clamped to [0,100]. Complements memory as the other half of "how
+   *  much did it cost"; event-loop lag is only an indirect saturation signal. */
   cpuPercent: number;
   /** Resident set size at seal time (bytes). */
   rssBytes: number;
@@ -98,9 +98,9 @@ export interface DaemonMetricsBucket {
   tokensOut: number;
 
   // —— ACP child process (gauge @ seal; self-reported over ACP) ——
-  /** ACP child process CPU utilization at seal time, percent of one core —
-   *  where the real LLM/tool work runs (the daemon itself mostly just forwards).
-   *  0 when no child exists or it has not reported yet. */
+  /** ACP child process CPU utilization at seal time, percent of total capacity
+   *  across all cores (clamped [0,100]) — where the real LLM/tool work runs (the
+   *  daemon itself mostly just forwards). 0 when no child / not reported. */
   childCpuPercent: number;
   /** ACP child process resident set size at seal time (bytes); 0 when none. */
   childRssBytes: number;
