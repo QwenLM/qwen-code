@@ -219,6 +219,13 @@
     max-height: min(80vh, calc(100vh - 32px));
   }
 
+  /* Keep fullscreen dominant on mobile: `.panel` above has equal specificity
+     and comes later in source order than the base `.panelFullscreen`, so
+     without this it clamps fullscreen back to 80vh on narrow screens. */
+  .panelFullscreen {
+    max-height: calc(100vh - 32px);
+  }
+
   .body {
     max-height: calc(min(80vh, calc(100vh - 32px)) - 46px);
   }

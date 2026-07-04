@@ -45,7 +45,10 @@
   padding: 5px 8px;
   border-radius: 6px;
   border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
-  background: var(--popover, var(--card));
+  /* --popover/--card live on the app root; DialogShell portals under
+     document.body where neither is defined, so fall back to --background (which
+     the dialog theme scope does define) to avoid a transparent tooltip. */
+  background: var(--popover, var(--card, var(--background)));
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
   font-size: 11px;
   line-height: 1.5;
