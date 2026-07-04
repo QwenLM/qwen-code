@@ -165,6 +165,9 @@ class FakeBridge {
     clientId?: string;
   }> = [];
   replaySnapshot: SessionReplaySnapshot | undefined;
+  loadState: Record<string, unknown> = { replayed: true };
+  loadPartial: true | undefined;
+  loadReplayError: string | undefined;
 
   closedSessions: string[] = [];
 
@@ -197,7 +200,9 @@ class FakeBridge {
       workspaceCwd: '/ws',
       attached: this.loadAttached,
       clientId: 'client-load',
-      state: { replayed: true },
+      state: this.loadState,
+      ...(this.loadPartial ? { partial: this.loadPartial } : {}),
+      ...(this.loadReplayError ? { replayError: this.loadReplayError } : {}),
     };
   }
 
@@ -3014,6 +3019,56 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     const sess = await openStream(connId, 'loaded-1');
     expect(sess.status).toBe(200);
     await sess.body?.cancel(); // release the long-lived SSE socket
+  });
+
+  it('session/load reports partial replay status under qwen _meta', async () => {
+    bridge.loadState = {
+      replayed: true,
+      _meta: { qwen: { existing: 'kept' }, other: { value: 1 } },
+    };
+    bridge.loadPartial = true;
+    bridge.loadReplayError = 'replay boom';
+    const connId = await initialize();
+    const connStream = await openStream(connId);
+    const got = takeFrames(connStream, 1);
+    await new Promise((r) => setTimeout(r, 50));
+    await post(connId, {
+      jsonrpc: '2.0',
+      id: 20,
+      method: 'session/load',
+      params: { sessionId: 'loaded-1' },
+    });
+    const [frame] = (await got) as Array<{
+      id: number;
+      result: {
+        replayed: boolean;
+        partial?: boolean;
+        replayError?: string;
+        _meta?: {
+          qwen?: {
+            existing?: string;
+            sessionLoadReplay?: {
+              partial?: boolean;
+              replayError?: string;
+            };
+          };
+          other?: { value?: number };
+        };
+      };
+    }>;
+    expect(frame.id).toBe(20);
+    expect(frame.result).not.toHaveProperty('partial');
+    expect(frame.result).not.toHaveProperty('replayError');
+    expect(frame.result._meta).toEqual({
+      qwen: {
+        existing: 'kept',
+        sessionLoadReplay: {
+          partial: true,
+          replayError: 'replay boom',
+        },
+      },
+      other: { value: 1 },
+    });
   });
 
   it('session/load uses response-mode and replays the snapshot on initial session stream attach', async () => {

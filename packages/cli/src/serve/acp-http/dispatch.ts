@@ -1130,8 +1130,35 @@ export class AcpDispatcher {
           const loadConfigOptions = await this.configOptionsFor(sessionId);
           const loadModels = this.extractModelState(loadConfigOptions);
           const loadModes = this.extractModeState(loadConfigOptions);
+          const loadState = restored.state ?? {};
+          const loadMeta = isObject(loadState._meta)
+            ? loadState._meta
+            : undefined;
+          const loadQwenMeta = isObject(loadMeta?.[QWEN_META_KEY])
+            ? loadMeta[QWEN_META_KEY]
+            : undefined;
+          const replayStatus =
+            method === 'session/load' && restored.partial === true
+              ? {
+                  partial: true as const,
+                  ...(typeof restored.replayError === 'string'
+                    ? { replayError: restored.replayError }
+                    : {}),
+                }
+              : undefined;
           this.replyConn(conn, id, {
-            ...(restored.state ?? {}),
+            ...loadState,
+            ...(replayStatus
+              ? {
+                  _meta: {
+                    ...(loadMeta ?? {}),
+                    [QWEN_META_KEY]: {
+                      ...(loadQwenMeta ?? {}),
+                      sessionLoadReplay: replayStatus,
+                    },
+                  },
+                }
+              : {}),
             ...(loadConfigOptions ? { configOptions: loadConfigOptions } : {}),
             ...(loadModels ? { models: loadModels } : {}),
             ...(loadModes ? { modes: loadModes } : {}),
