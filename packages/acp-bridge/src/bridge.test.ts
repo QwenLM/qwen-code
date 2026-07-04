@@ -1253,6 +1253,8 @@ describe('createAcpSessionBridge', () => {
               keep: 'state',
               'qwen.session.loadReplay': {
                 v: 1,
+                partial: true,
+                replayError: 'replay boom',
                 updates: [
                   {
                     sessionUpdate: 'user_message_chunk',

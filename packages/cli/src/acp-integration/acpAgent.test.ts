@@ -7412,6 +7412,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
   function bindRestoreMocks(opts: {
     sessionExists: boolean;
     resumedConversation?: { messages: unknown[] };
+    primeTurnFromHistoryImpl?: (...args: unknown[]) => unknown;
   }) {
     const innerConfig = makeRestoreInnerConfig({
       resumedConversation: opts.resumedConversation,
@@ -7432,7 +7433,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         getConfig: vi.fn().mockReturnValue(innerConfig),
         sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
         replayHistory: vi.fn().mockResolvedValue(undefined),
-        primeTurnFromHistory: vi.fn(),
+        primeTurnFromHistory: vi.fn(opts.primeTurnFromHistoryImpl),
         cumulativeUsage: {
           promptTokens: 7,
           cachedTokens: 3,
@@ -7579,7 +7580,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     await agentPromise;
   });
 
-  it('loadSession removes a bulk replay restore if replay throws', async () => {
+  it('loadSession returns partial bulk replay updates when replay throws', async () => {
     const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
     bindRestoreMocks({
       sessionExists: true,
@@ -7591,6 +7592,55 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     mockHistoryReplay.mockRejectedValueOnce(new Error('replay boom'));
     const { agent, agentPromise } = await spawnAgent();
 
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+    })) as {
+      _meta?: Record<
+        string,
+        {
+          v: number;
+          updates: unknown[];
+          partial?: boolean;
+          replayError?: string;
+        }
+      >;
+    };
+
+    expect(response._meta?.['qwen.session.loadReplay']).toMatchObject({
+      v: 1,
+      updates: [],
+      partial: true,
+      replayError: 'replay boom',
+    });
+    expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
+    expect(lastSessionMock?.installRewriter).toHaveBeenCalledTimes(1);
+    expect(lastSessionMock?.startCronScheduler).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession removes a bulk replay restore if setup throws', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    let primeCalls = 0;
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages,
+      },
+      primeTurnFromHistoryImpl: () => {
+        primeCalls++;
+        if (primeCalls === 1) {
+          throw new Error('prime boom');
+        }
+      },
+    });
+    mockHistoryReplay.mockReset();
+    const { agent, agentPromise } = await spawnAgent();
+
     await expect(
       agent.loadSession({
         cwd: '/tmp',
@@ -7598,7 +7648,7 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
         mcpServers: [],
         _meta: { 'qwen.session.loadReplayMode': 'bulk' },
       }),
-    ).rejects.toThrow('replay boom');
+    ).rejects.toThrow('prime boom');
 
     const failedSession = lastSessionMock;
     expect(failedSession?.dispose).toHaveBeenCalledTimes(1);

@@ -305,7 +305,7 @@ async function collectHistoryReplayUpdates({
     }
     const replayError = error instanceof Error ? error.message : String(error);
     debugLogger.warn(
-      '[loadUpdates] History replay failed for session %s (partial updates: %d):',
+      '[historyReplay] History replay failed for session %s (partial updates: %d):',
       sessionId,
       updates.length,
       error,
@@ -3063,11 +3063,19 @@ class QwenAgent implements Agent {
             config,
             records,
             cumulativeUsage: session.cumulativeUsage,
-            failOnReplayError: true,
+            failOnReplayError: false,
           });
           replayUpdates = replay.updates;
+          if (replay.replayError !== undefined) {
+            replayEnvelope = {
+              v: LOAD_REPLAY_VERSION,
+              updates: replayUpdates,
+              partial: true,
+              replayError: replay.replayError,
+            };
+          }
         }
-        replayEnvelope = {
+        replayEnvelope ??= {
           v: LOAD_REPLAY_VERSION,
           updates: replayUpdates,
         };

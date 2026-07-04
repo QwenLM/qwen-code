@@ -116,6 +116,8 @@ export const LOAD_REPLAY_VERSION = 1 as const;
 export interface BridgeLoadReplayEnvelope {
   v: typeof LOAD_REPLAY_VERSION;
   updates: SessionUpdate[];
+  partial?: true;
+  replayError?: string;
 }
 
 export type BridgeSessionState = LoadSessionResponse | ResumeSessionResponse;
