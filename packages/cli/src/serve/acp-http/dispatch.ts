@@ -18,6 +18,7 @@ import {
   writeWorkspaceContextFile,
   type SessionArchiveState,
   type SubagentLevel,
+  IMAGE_CAPABILITY,
 } from '@qwen-code/qwen-code-core';
 // Import the permission error classes from the same module REST's
 // `sendPermissionVoteError` uses, so `instanceof` matches the class the bridge
@@ -843,6 +844,7 @@ export class AcpDispatcher {
               this.sessionShellCommandEnabled,
             ),
           },
+          imageCapability: IMAGE_CAPABILITY,
         },
       },
     };

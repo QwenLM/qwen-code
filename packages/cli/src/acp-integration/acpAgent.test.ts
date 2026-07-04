@@ -148,6 +148,11 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     AGENT: 'agent',
   },
   FORK_SUBAGENT_TYPE: 'fork',
+  IMAGE_CAPABILITY: Object.freeze({
+    autoHandlesWrongModel: true,
+    maxBytes: 10380902,
+    maxImagesPerTurn: 4,
+  }),
   ALL_PROVIDERS: [
     {
       id: 'deepseek',
@@ -499,6 +504,14 @@ vi.mock('../config/settings.js', () => ({
   loadSettings: vi.fn(),
   reloadEnvironment: vi.fn(() => ({ updatedKeys: [], removedKeys: [] })),
 }));
+// Passthrough: the real cache would serve the first mockReturnValue to every
+// later same-cwd call, breaking tests that re-point loadSettings per call.
+vi.mock('../config/settings-cache.js', async () => {
+  const settings = await import('../config/settings.js');
+  return {
+    loadSettingsCached: (cwd: string) => settings.loadSettings(cwd),
+  };
+});
 vi.mock('../config/loadedSettingsAdapter.js', () => ({
   createLoadedSettingsAdapter: vi.fn((settings: unknown) => {
     (settings as Record<string, unknown>)['getValue'] = vi.fn();
@@ -1297,6 +1310,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         mcpCapabilities: {
           sse: true,
           http: true,
+        },
+        _meta: {
+          imageCapability: {
+            autoHandlesWrongModel: true,
+            maxBytes: 10380902,
+            maxImagesPerTurn: 4,
+          },
         },
       },
     });
