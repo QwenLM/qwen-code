@@ -343,7 +343,7 @@ class ToolSearchInvocation extends BaseToolInvocation<
       // args:{...}}) — the dispatch executor looks up the real tool in
       // the registry and forwards the call.  This keeps the KV-cache
       // prefix stable across tool discoveries.
-      llmContent += `To invoke this tool, call the \`dispatch\` tool with the tool name and its parameters (use the parameter schema above). Example: \`dispatch(tool: "<name>", args: { ...params ... })\`.`;
+      llmContent += `To invoke any of these tools, call the \`dispatch\` tool with the tool name and its parameters (use the parameter schema above). Example: \`dispatch(tool: "<name>", args: { ...params ... })\`.`;
     }
     if (missing.length > 0) {
       const header = llmContent ? '\n\n' : '';

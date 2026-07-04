@@ -889,7 +889,9 @@ describe('ToolSearchTool', () => {
     const content = String(result.llmContent);
     expect(content).toContain('<functions>');
     expect(content).toContain('dispatch');
-    expect(content).toContain('To invoke this tool, call the `dispatch` tool');
+    expect(content).toContain(
+      'To invoke any of these tools, call the `dispatch` tool',
+    );
     expect(content).toContain('dispatch(tool: "<name>"');
   });
 
