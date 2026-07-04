@@ -20,6 +20,7 @@ vi.mock('node:os', async (importOriginal) => {
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { ideContextStore } from '@qwen-code/qwen-code-core';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   clearSettingsCacheForTesting,
@@ -66,6 +67,9 @@ describe('loadSettingsCached', () => {
     resetHomeEnvBootstrapForTesting();
     resetEnvironmentTrackingForTesting();
     resetTrustedFoldersForTesting();
+    // IDE trust feeds the ideTrust fingerprint component; clear it so state
+    // never leaks between tests.
+    ideContextStore.clear();
   };
 
   beforeEach(() => {
@@ -204,6 +208,19 @@ describe('loadSettingsCached', () => {
     const otherHome = path.join(tmpRoot, 'home-2');
     fs.mkdirSync(otherHome, { recursive: true });
     mockHome.dir = otherHome;
+
+    const second = loadSettingsCached(workspaceDir);
+    expect(second).not.toBe(first);
+  });
+
+  it('reloads when IDE trust state flips', () => {
+    // The ideTrust fingerprint component guards against a stale trust/merge
+    // result: IDE trust is the one trust input that can change within a live
+    // process (trustedFolders.json is a permanent singleton, folder-trust
+    // toggles live in the settings files themselves).
+    const first = loadSettingsCached(workspaceDir);
+
+    ideContextStore.set({ workspaceState: { isTrusted: true } });
 
     const second = loadSettingsCached(workspaceDir);
     expect(second).not.toBe(first);
