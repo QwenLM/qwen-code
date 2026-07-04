@@ -6873,6 +6873,85 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('updates and deletes session groups through REST', async () => {
+      const sessionId = '550e8400-e29b-41d4-a716-446655440000';
+      await writeStoredSession({
+        sessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:00:00.000Z',
+        prompt: 'stored session',
+        mtime: new Date('2026-05-17T12:00:00.000Z'),
+      });
+      const bridge = fakeBridge();
+      const app = createServeApp(
+        { ...baseOpts, workspace: WS_BOUND },
+        undefined,
+        { bridge, boundWorkspace: WS_BOUND },
+      );
+      const host = (req: request.Test): request.Test =>
+        req.set('Host', `127.0.0.1:${baseOpts.port}`);
+
+      const groupRes = await host(
+        request(app).post(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`,
+        ),
+      ).send({ name: 'Frontend', color: 'blue' });
+      expect(groupRes.status).toBe(201);
+      const groupId = groupRes.body.group.id as string;
+
+      const updateRes = await host(
+        request(app).patch(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/session-groups/${encodeURIComponent(groupId)}`,
+        ),
+      ).send({ name: 'UI', color: 'purple', order: 4 });
+      expect(updateRes.status).toBe(200);
+      expect(updateRes.body.group).toMatchObject({
+        id: groupId,
+        name: 'UI',
+        color: 'purple',
+        order: 4,
+      });
+
+      const organizationRes = await host(
+        request(app).patch(`/session/${sessionId}/organization`),
+      ).send({ isPinned: true, groupId });
+      expect(organizationRes.status).toBe(200);
+
+      const deleteRes = await host(
+        request(app).delete(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/session-groups/${encodeURIComponent(groupId)}`,
+        ),
+      );
+      expect(deleteRes.status).toBe(200);
+      expect(deleteRes.body).toEqual({ deleted: true });
+
+      const groupsRes = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/session-groups`,
+        ),
+      );
+      expect(groupsRes.status).toBe(200);
+      expect(groupsRes.body.groups).toEqual([]);
+
+      const organized = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized&group=ungrouped`,
+        ),
+      );
+      expect(organized.status).toBe(200);
+      expect(organized.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId,
+          groupId: null,
+          isPinned: true,
+        }),
+      ]);
+    });
+
     it('returns session organization errors for invalid REST inputs', async () => {
       const sessionId = '550e8400-e29b-41d4-a716-446655440000';
       await writeStoredSession({

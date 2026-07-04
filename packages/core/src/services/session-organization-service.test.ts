@@ -122,6 +122,26 @@ describe('SessionOrganizationService', () => {
     );
   });
 
+  it('unpins a session and clears pinnedAt', async () => {
+    await service.updateSessionOrganization(sessionIdA, { isPinned: true });
+
+    const org = await service.updateSessionOrganization(sessionIdA, {
+      isPinned: false,
+    });
+
+    expect(org).toEqual(
+      expect.objectContaining({
+        groupId: null,
+        isPinned: false,
+      }),
+    );
+    expect(org.pinnedAt).toBeUndefined();
+    const snapshot = await service.readSnapshot();
+    expect(snapshot.sessions.get(sessionIdA)).toEqual(
+      expect.objectContaining({ isPinned: false }),
+    );
+  });
+
   it('rejects unknown group updates and assignments', async () => {
     await expect(
       service.updateGroup('missing-group', { name: 'Missing' }),

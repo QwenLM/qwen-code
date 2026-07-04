@@ -425,6 +425,44 @@ describe('WebShellSidebar — session organization', () => {
       { groupId: 'group-1' },
     );
   });
+
+  it('toggles pin state from the session action button', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.updateSessionOrganization.mockResolvedValue({
+      sessionId: '550e8400-e29b-41d4-a716-446655440000',
+      groupId: null,
+      isPinned: true,
+      pinnedAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    mockActive.sessions = [
+      makeSession('550e8400-e29b-41d4-a716-446655440000', {
+        displayName: 'Review plan',
+        createdAt: '2026-07-04T00:00:00.000Z',
+        updatedAt: '2026-07-04T00:00:00.000Z',
+      }),
+    ];
+
+    const container = renderSidebar(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const pinButton =
+      container.querySelector<HTMLButtonElement>('[aria-label="Pin"]');
+    expect(pinButton).not.toBeNull();
+    await act(async () => {
+      pinButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(mockWorkspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      '550e8400-e29b-41d4-a716-446655440000',
+      { isPinned: true },
+    );
+    expect(mockActive.reload).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('WebShellSidebar — session export', () => {
