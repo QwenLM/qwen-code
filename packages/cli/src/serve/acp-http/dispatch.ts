@@ -129,6 +129,14 @@ import {
   type JsonRpcResponse,
 } from './json-rpc.js';
 
+function createSessionOrganizationService(
+  workspaceCwd: string,
+): SessionOrganizationService {
+  return new SessionOrganizationService(workspaceCwd, (message) => {
+    writeStderrLine(`qwen serve: session-org: ${message}`);
+  });
+}
+
 function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
@@ -1185,6 +1193,11 @@ export class AcpDispatcher {
           }
           const group =
             typeof params['group'] === 'string' ? params['group'] : undefined;
+          if (group !== undefined && view !== 'organized') {
+            throw new AcpParamError(
+              '`group` requires `view` to be "organized"',
+            );
+          }
           const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
           const metaSize =
             typeof meta?.['size'] === 'number'
@@ -1904,7 +1917,7 @@ export class AcpDispatcher {
             if (!exists) {
               throw new AcpParamError(`Session not found: ${sessionId}`);
             }
-            const organization = await new SessionOrganizationService(
+            const organization = await createSessionOrganizationService(
               this.boundWorkspace,
             ).updateSessionOrganization(sessionId, {
               ...(typeof params['isPinned'] === 'boolean'
@@ -1921,16 +1934,15 @@ export class AcpDispatcher {
 
         case `${QWEN_METHOD_NS}workspace/session_groups/list`: {
           const workspaceCwd = this.parseBoundWorkspaceParam(params);
-          const groups = await new SessionOrganizationService(
-            workspaceCwd,
-          ).listGroups();
+          const groups =
+            await createSessionOrganizationService(workspaceCwd).listGroups();
           this.replyConn(conn, id, groups);
           return;
         }
 
         case `${QWEN_METHOD_NS}workspace/session_groups/create`: {
           const workspaceCwd = this.parseBoundWorkspaceParam(params);
-          const group = await new SessionOrganizationService(
+          const group = await createSessionOrganizationService(
             workspaceCwd,
           ).createGroup({
             name: params['name'] as string,
@@ -1946,7 +1958,7 @@ export class AcpDispatcher {
           if (!groupId) {
             throw new AcpParamError('`groupId` is required');
           }
-          const group = await new SessionOrganizationService(
+          const group = await createSessionOrganizationService(
             workspaceCwd,
           ).updateGroup(groupId, {
             ...('name' in params ? { name: params['name'] as string } : {}),
@@ -1965,9 +1977,10 @@ export class AcpDispatcher {
           if (!groupId) {
             throw new AcpParamError('`groupId` is required');
           }
-          const deleted = await new SessionOrganizationService(
-            workspaceCwd,
-          ).deleteGroup(groupId);
+          const deleted =
+            await createSessionOrganizationService(workspaceCwd).deleteGroup(
+              groupId,
+            );
           this.replyConn(conn, id, { deleted });
           return;
         }

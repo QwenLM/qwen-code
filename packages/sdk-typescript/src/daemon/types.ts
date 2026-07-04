@@ -430,10 +430,10 @@ export interface DaemonSessionOrganizationUpdate {
 
 export interface DaemonSessionOrganizationResult {
   sessionId: string;
-  groupId?: string | null;
-  isPinned?: boolean;
+  groupId: string | null;
+  isPinned: boolean;
   pinnedAt?: string;
-  updatedAt?: string;
+  updatedAt: string;
 }
 
 export type DaemonSessionListView = 'organized';

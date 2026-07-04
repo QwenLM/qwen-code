@@ -734,11 +734,19 @@ export function WebShellSidebar({
         if (groupEditor.mode === 'create') {
           setSelectedGroupId(group.id);
           if (groupEditor.targetSession) {
-            await workspaceActions.updateSessionOrganization(
-              groupEditor.targetSession.sessionId,
-              { groupId: group.id },
-            );
-            await reload();
+            try {
+              await workspaceActions.updateSessionOrganization(
+                groupEditor.targetSession.sessionId,
+                { groupId: group.id },
+              );
+              await reload();
+            } catch (err) {
+              setGroupEditor(null);
+              setGroupName('');
+              await reloadGroups();
+              onError(err, t('sidebar.groupAssignFailedAfterCreate'));
+              return;
+            }
           }
         }
         setGroupEditor(null);
@@ -747,11 +755,9 @@ export function WebShellSidebar({
       } catch (err) {
         onError(
           err,
-          groupEditor.mode === 'create' && groupEditor.targetSession
-            ? t('sidebar.organizationFailed')
-            : groupEditor.mode === 'create'
-              ? t('sidebar.groupCreateFailed')
-              : t('sidebar.groupUpdateFailed'),
+          groupEditor.mode === 'create'
+            ? t('sidebar.groupCreateFailed')
+            : t('sidebar.groupUpdateFailed'),
         );
       } finally {
         setGroupBusy(false);

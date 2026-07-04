@@ -6001,6 +6001,29 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('session/list rejects group filter without organized view', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 75,
+        method: 'session/list',
+        params: {
+          workspaceCwd: '/ws',
+          group: 'pinned',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 75,
+        error: {
+          code: -32602,
+          message: '`group` requires `view` to be "organized"',
+        },
+      });
+    });
+
     it('_qwen/workspace/mcp/tools rejects missing serverName', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);

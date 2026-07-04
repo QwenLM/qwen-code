@@ -179,7 +179,7 @@ function emptyStore(): SessionOrganizationStoreV1 {
 }
 
 function groupNameKey(name: string): string {
-  return name.trim().toLocaleLowerCase();
+  return name.trim().toLowerCase();
 }
 
 function viewOrganization(
@@ -217,6 +217,7 @@ function serializeOrganization(
 
 export class SessionOrganizationService {
   private readonly storage: Storage;
+  private readFailed = false;
 
   constructor(
     cwd: string,
@@ -395,7 +396,9 @@ export class SessionOrganizationService {
         await fs.readFile(this.getStorePath(), 'utf8'),
       ) as unknown;
       if (!isPlainRecord(raw) || raw['schemaVersion'] !== SCHEMA_VERSION) {
-        return emptyStore();
+        return this.handleUnreadableStore(
+          'store schema is missing or unsupported',
+        );
       }
       const groups = Array.isArray(raw['groups'])
         ? raw['groups'].filter(isSessionGroup)
@@ -422,6 +425,7 @@ export class SessionOrganizationService {
           };
         }
       }
+      this.readFailed = false;
       return {
         schemaVersion: SCHEMA_VERSION,
         groups: this.dedupeGroups(groups),
@@ -429,24 +433,52 @@ export class SessionOrganizationService {
       };
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        this.readFailed = false;
         return emptyStore();
       }
+      return this.handleUnreadableStore(
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+
+  private handleUnreadableStore(reason: string): SessionOrganizationStoreV1 {
+    this.readFailed = true;
+    this.onWarning?.(
+      `Failed to read session organization store at ${this.getStorePath()}: ${reason}`,
+    );
+    return emptyStore();
+  }
+
+  private async backupUnreadableStore(): Promise<void> {
+    const storePath = this.getStorePath();
+    const backupPath = `${storePath}.bak.${Date.now()}`;
+    try {
+      await fs.copyFile(storePath, backupPath);
       this.onWarning?.(
-        `Failed to read session organization store at ${this.getStorePath()}: ${
+        `Backed up unreadable session organization store to ${backupPath}`,
+      );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
+      this.onWarning?.(
+        `Failed to back up unreadable session organization store at ${storePath}: ${
           error instanceof Error ? error.message : String(error)
         }`,
       );
-      return emptyStore();
     }
   }
 
   private async writeStore(store: SessionOrganizationStoreV1): Promise<void> {
     await fs.mkdir(path.dirname(this.getStorePath()), { recursive: true });
+    if (this.readFailed) {
+      await this.backupUnreadableStore();
+    }
     await atomicWriteJSON(this.getStorePath(), {
       schemaVersion: SCHEMA_VERSION,
       groups: this.sortGroups(store.groups),
       sessions: store.sessions,
     });
+    this.readFailed = false;
   }
 
   private assertGroupNameAvailable(

@@ -122,6 +122,18 @@ describe('SessionOrganizationService', () => {
     );
   });
 
+  it('rejects unknown group updates and assignments', async () => {
+    await expect(
+      service.updateGroup('missing-group', { name: 'Missing' }),
+    ).rejects.toMatchObject({ code: 'group_not_found', field: 'groupId' });
+
+    await expect(
+      service.updateSessionOrganization(sessionIdA, {
+        groupId: 'missing-group',
+      }),
+    ).rejects.toMatchObject({ code: 'group_not_found', field: 'groupId' });
+  });
+
   it('deleting a group clears session references without losing pinned state', async () => {
     const group = await service.createGroup({
       name: 'Research',
@@ -145,7 +157,7 @@ describe('SessionOrganizationService', () => {
     );
   });
 
-  it('treats a malformed sidecar as empty and rewrites it on the next mutation', async () => {
+  it('treats a malformed sidecar as empty and backs it up before rewriting', async () => {
     await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
     await fs.writeFile(service.getStorePath(), '{not-json', 'utf8');
 
@@ -157,6 +169,21 @@ describe('SessionOrganizationService', () => {
     expect(warnings[0]).toContain('Failed to read session organization store');
 
     await service.createGroup({ name: 'Fixed', color: 'orange' });
+    const backupFiles = (await fs.readdir(path.dirname(service.getStorePath())))
+      .filter((name) =>
+        name.startsWith(`${path.basename(service.getStorePath())}.bak.`),
+      )
+      .sort();
+    expect(backupFiles).toHaveLength(1);
+    await expect(
+      fs.readFile(
+        path.join(path.dirname(service.getStorePath()), backupFiles[0]!),
+        'utf8',
+      ),
+    ).resolves.toBe('{not-json');
+    expect(warnings.some((warning) => warning.includes('Backed up'))).toBe(
+      true,
+    );
     const raw = JSON.parse(
       await fs.readFile(service.getStorePath(), 'utf8'),
     ) as {

@@ -95,6 +95,14 @@ function sendSessionOrganizationError(res: Response, err: unknown): boolean {
   return true;
 }
 
+function createSessionOrganizationService(
+  workspaceCwd: string,
+): SessionOrganizationService {
+  return new SessionOrganizationService(workspaceCwd, (message) => {
+    writeStderrLine(`qwen serve: session-org: ${message}`);
+  });
+}
+
 export function registerSessionRoutes(
   app: Application,
   deps: RegisterSessionRoutesDeps,
@@ -1098,7 +1106,7 @@ export function registerSessionRoutes(
           return;
         }
 
-        const organization = await new SessionOrganizationService(
+        const organization = await createSessionOrganizationService(
           boundWorkspace,
         ).updateSessionOrganization(sessionId, {
           ...(rawIsPinned !== undefined ? { isPinned: rawIsPinned } : {}),
@@ -1123,7 +1131,7 @@ export function registerSessionRoutes(
     try {
       res
         .status(200)
-        .json(await new SessionOrganizationService(key).listGroups());
+        .json(await createSessionOrganizationService(key).listGroups());
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /workspace/:id/session-groups',
@@ -1136,7 +1144,7 @@ export function registerSessionRoutes(
     if (key === null) return;
     const body = safeBody(req);
     try {
-      const group = await new SessionOrganizationService(key).createGroup({
+      const group = await createSessionOrganizationService(key).createGroup({
         name: body['name'] as string,
         color: body['color'] as SessionGroupColor,
       });
@@ -1157,7 +1165,7 @@ export function registerSessionRoutes(
       if (key === null) return;
       const body = safeBody(req);
       try {
-        const group = await new SessionOrganizationService(key).updateGroup(
+        const group = await createSessionOrganizationService(key).updateGroup(
           req.params['groupId'] ?? '',
           {
             ...(Object.prototype.hasOwnProperty.call(body, 'name')
@@ -1188,7 +1196,7 @@ export function registerSessionRoutes(
       const key = resolveWorkspaceParam(req, res);
       if (key === null) return;
       try {
-        const deleted = await new SessionOrganizationService(key).deleteGroup(
+        const deleted = await createSessionOrganizationService(key).deleteGroup(
           req.params['groupId'] ?? '',
         );
         res.status(200).json({ deleted });

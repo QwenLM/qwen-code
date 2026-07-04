@@ -18,6 +18,7 @@ import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 const DEFAULT_SESSION_PAGE_SIZE = 20;
 const MAX_SESSION_PAGE_SIZE = 100;
+const MAX_ORGANIZED_SESSIONS = 50_000;
 
 export interface ListWorkspaceSessionsOptions {
   cursor?: string;
@@ -56,9 +57,14 @@ function parseSessionCursor(cursor: string): number | undefined {
 
 interface OrganizedCursor {
   offset: number;
+  group: string;
+  archiveState: SessionArchiveState;
 }
 
-function parseOrganizedCursor(cursor: string): number | undefined {
+function parseOrganizedCursor(
+  cursor: string,
+  expected: { group: string; archiveState: SessionArchiveState },
+): number | undefined {
   if (cursor === '') return undefined;
   try {
     const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
@@ -68,7 +74,9 @@ function parseOrganizedCursor(cursor: string): number | undefined {
       parsed === null ||
       Array.isArray(parsed) ||
       !Number.isSafeInteger((parsed as OrganizedCursor).offset) ||
-      (parsed as OrganizedCursor).offset < 0
+      (parsed as OrganizedCursor).offset < 0 ||
+      (parsed as OrganizedCursor).group !== expected.group ||
+      (parsed as OrganizedCursor).archiveState !== expected.archiveState
     ) {
       throw new Error('invalid organized cursor');
     }
@@ -78,8 +86,15 @@ function parseOrganizedCursor(cursor: string): number | undefined {
   }
 }
 
-function encodeOrganizedCursor(offset: number): string {
-  return Buffer.from(JSON.stringify({ offset }), 'utf8').toString('base64url');
+function encodeOrganizedCursor(
+  offset: number,
+  group: string,
+  archiveState: SessionArchiveState,
+): string {
+  return Buffer.from(
+    JSON.stringify({ offset, group, archiveState }),
+    'utf8',
+  ).toString('base64url');
 }
 
 function toSummary(item: {
@@ -117,8 +132,18 @@ async function listAllPersistedSummaries(
       size: 10_000,
       archiveState,
     });
-    sessions.push(...page.items.map(toSummary));
+    const remaining = MAX_ORGANIZED_SESSIONS - sessions.length;
+    sessions.push(...page.items.slice(0, remaining).map(toSummary));
     cursor = page.nextCursor;
+    if (
+      page.items.length > remaining ||
+      (sessions.length >= MAX_ORGANIZED_SESSIONS && cursor !== undefined)
+    ) {
+      writeStderrLine(
+        `qwen serve: organized session list truncated at ${MAX_ORGANIZED_SESSIONS} sessions`,
+      );
+      break;
+    }
   } while (cursor !== undefined);
   return sessions;
 }
@@ -159,20 +184,23 @@ function applyOrganization(
   };
 }
 
+function createSessionOrganizationService(
+  workspaceCwd: string,
+): SessionOrganizationService {
+  return new SessionOrganizationService(workspaceCwd, (message) => {
+    writeStderrLine(`qwen serve: session-org: ${message}`);
+  });
+}
+
 async function listOrganizedWorkspaceSessionsForResponse(
   bridge: AcpSessionBridge,
   workspaceCwd: string,
   options: ListWorkspaceSessionsOptions,
   pageSize: number,
 ): Promise<ListWorkspaceSessionsResult> {
-  const offset =
-    options.cursor !== undefined
-      ? (parseOrganizedCursor(options.cursor) ?? 0)
-      : 0;
   const archiveState = options.archiveState ?? 'active';
-  const isFirstPage = offset === 0;
   const sessionService = new SessionService(workspaceCwd);
-  const organizationService = new SessionOrganizationService(workspaceCwd);
+  const organizationService = createSessionOrganizationService(workspaceCwd);
   const snapshot = await organizationService.readSnapshot();
   const knownGroupIds = new Set(snapshot.groups.map((group) => group.id));
   const group = options.group ?? 'all';
@@ -188,6 +216,11 @@ async function listOrganizedWorkspaceSessionsForResponse(
       'group',
     );
   }
+  const offset =
+    options.cursor !== undefined
+      ? (parseOrganizedCursor(options.cursor, { group, archiveState }) ?? 0)
+      : 0;
+  const isFirstPage = offset === 0;
 
   const bySessionId = new Map<string, BridgeSessionSummary>();
   for (const session of await listAllPersistedSummaries(
@@ -234,7 +267,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
                 hasActivePrompt: live.hasActivePrompt,
                 isArchived: false,
               },
-              undefined,
+              organization,
             ),
           );
         }
@@ -260,7 +293,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
   const nextOffset = offset + page.length;
   const nextCursor =
     nextOffset < filtered.length
-      ? encodeOrganizedCursor(nextOffset)
+      ? encodeOrganizedCursor(nextOffset, group, archiveState)
       : undefined;
   return {
     sessions: page,

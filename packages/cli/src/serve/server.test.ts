@@ -6985,6 +6985,18 @@ describe('createServeApp', () => {
       );
       expect(new Set(allIds).size).toBe(4);
 
+      const mismatchedCursor = await host(
+        request(app).get(
+          `/workspace/${encodeURIComponent(
+            WS_BOUND,
+          )}/sessions?view=organized&group=pinned&cursor=${encodeURIComponent(
+            page1.body.nextCursor as string,
+          )}`,
+        ),
+      );
+      expect(mismatchedCursor.status).toBe(400);
+      expect(mismatchedCursor.body.code).toBe('invalid_cursor');
+
       const invalidCursor = await host(
         request(app).get(
           `/workspace/${encodeURIComponent(
@@ -7041,7 +7053,7 @@ describe('createServeApp', () => {
       ]);
     });
 
-    it('treats live-only sessions as ungrouped and unpinned in organized lists', async () => {
+    it('applies organization metadata to live-only sessions in organized lists', async () => {
       const liveId = '550e8400-e29b-41d4-a716-446655440099';
       const liveSummary = {
         sessionId: liveId,
@@ -7086,8 +7098,8 @@ describe('createServeApp', () => {
       expect(organized.body.sessions).toEqual([
         expect.objectContaining({
           sessionId: liveId,
-          isPinned: false,
-          groupId: null,
+          isPinned: true,
+          groupId: groupRes.body.group.id,
         }),
       ]);
 
@@ -7097,7 +7109,13 @@ describe('createServeApp', () => {
         ),
       );
       expect(pinned.status).toBe(200);
-      expect(pinned.body.sessions).toEqual([]);
+      expect(pinned.body.sessions).toEqual([
+        expect.objectContaining({
+          sessionId: liveId,
+          isPinned: true,
+          groupId: groupRes.body.group.id,
+        }),
+      ]);
     });
 
     it('excludes live sessions from subsequent pages to prevent cross-page duplicates', async () => {

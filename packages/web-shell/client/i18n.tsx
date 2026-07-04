@@ -533,6 +533,8 @@ const EN: Messages = {
   'sidebar.groupDeleteConfirm': (v) => `Delete group "${v?.name ?? ''}"?`,
   'sidebar.groupsLoadFailed': 'Failed to load session groups',
   'sidebar.groupCreateFailed': 'Failed to create group',
+  'sidebar.groupAssignFailedAfterCreate':
+    'Group created, but failed to move session into it',
   'sidebar.groupUpdateFailed': 'Failed to update group',
   'sidebar.groupDeleteFailed': 'Failed to delete group',
   'sidebar.organizationFailed': 'Failed to update session organization',
@@ -1857,6 +1859,7 @@ const ZH: Messages = {
   'sidebar.groupDeleteConfirm': (v) => `确定删除分组“${v?.name ?? ''}”吗？`,
   'sidebar.groupsLoadFailed': '加载会话分组失败',
   'sidebar.groupCreateFailed': '创建分组失败',
+  'sidebar.groupAssignFailedAfterCreate': '分组已创建，但移动会话失败',
   'sidebar.groupUpdateFailed': '更新分组失败',
   'sidebar.groupDeleteFailed': '删除分组失败',
   'sidebar.organizationFailed': '更新会话组织失败',
