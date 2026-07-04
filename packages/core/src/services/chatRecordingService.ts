@@ -34,6 +34,10 @@ import type {
   SerializedFileHistorySnapshot,
 } from './fileHistoryService.js';
 import { serializeSnapshot } from './fileHistoryService.js';
+import type {
+  SessionArtifactEventRecordPayload,
+  SessionArtifactSnapshotRecordPayload,
+} from './session-artifact-persistence.js';
 
 const debugLogger = createDebugLogger('CHAT_RECORDING');
 
@@ -251,7 +255,9 @@ export interface ChatRecord {
     | 'rewind'
     | 'agent_bootstrap'
     | 'agent_launch_prompt'
-    | 'file_history_snapshot';
+    | 'file_history_snapshot'
+    | 'session_artifact_event'
+    | 'session_artifact_snapshot';
   /** Working directory at time of message */
   cwd: string;
   /** CLI version for compatibility tracking */
@@ -298,7 +304,9 @@ export interface ChatRecord {
     | NotificationRecordPayload
     | RewindRecordPayload
     | AgentBootstrapRecordPayload
-    | FileHistorySnapshotRecordPayload;
+    | FileHistorySnapshotRecordPayload
+    | SessionArtifactEventRecordPayload
+    | SessionArtifactSnapshotRecordPayload;
 
   /** Background subagent that produced this record (e.g. "explore-7f3c"). */
   agentId?: string;
@@ -763,6 +771,31 @@ export class ChatRecordingService {
         }
       });
     this.updateTitleAnchorTracking(record);
+  }
+
+  private async appendRecordStrict(record: ChatRecord): Promise<void> {
+    const previousLastRecordUuid = this.lastRecordUuid;
+    let conversationFile: string;
+    try {
+      conversationFile = this.ensureConversationFile();
+    } catch (error) {
+      debugLogger.error('Error appending record:', error);
+      throw error;
+    }
+
+    this.lastRecordUuid = record.uuid;
+    this.writeChain = this.writeChain
+      .catch(() => {})
+      .then(() => jsonl.writeLine(conversationFile, record));
+
+    try {
+      await this.writeChain;
+      this.updateTitleAnchorTracking(record);
+    } catch (error) {
+      this.lastRecordUuid = previousLastRecordUuid;
+      debugLogger.error('Error appending record (async):', error);
+      throw error;
+    }
   }
 
   /**
@@ -1470,5 +1503,29 @@ export class ChatRecordingService {
     } catch (error) {
       debugLogger.error('Error saving file history snapshot batch:', error);
     }
+  }
+
+  async recordSessionArtifactEvent(
+    payload: SessionArtifactEventRecordPayload,
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_artifact_event',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record);
+  }
+
+  async recordSessionArtifactSnapshot(
+    payload: SessionArtifactSnapshotRecordPayload,
+  ): Promise<void> {
+    const record: ChatRecord = {
+      ...this.createBaseRecord('system'),
+      type: 'system',
+      subtype: 'session_artifact_snapshot',
+      systemPayload: payload,
+    };
+    await this.appendRecordStrict(record);
   }
 }

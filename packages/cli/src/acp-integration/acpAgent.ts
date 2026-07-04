@@ -82,6 +82,8 @@ import type {
   DiscoveredMCPResource,
   DiscoveredMCPPrompt,
   WorkspaceRememberContextMode,
+  SessionArtifactEventRecordPayload,
+  SessionArtifactSnapshotRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
@@ -2886,7 +2888,10 @@ class QwenAgent implements Agent {
       modes: modesData,
       models: availableModels,
       configOptions,
-    };
+      ...(sessionData?.artifactSnapshot
+        ? { artifactSnapshot: sessionData.artifactSnapshot }
+        : {}),
+    } as LoadSessionResponse;
   }
 
   async unstable_resumeSession(
@@ -2925,11 +2930,15 @@ class QwenAgent implements Agent {
     const availableModels = this.buildAvailableModels(config);
     const configOptions = this.buildConfigOptions(config);
 
+    const sessionData = config.getResumedSessionData();
     return {
       modes: modesData,
       models: availableModels,
       configOptions,
-    };
+      ...(sessionData?.artifactSnapshot
+        ? { artifactSnapshot: sessionData.artifactSnapshot }
+        : {}),
+    } as ResumeSessionResponse;
   }
 
   /**
@@ -5847,6 +5856,41 @@ class QwenAgent implements Agent {
           this.config,
           AbortSignal.timeout(5 * 60_000),
         )) as unknown as Record<string, unknown>;
+      }
+      case SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist: {
+        const sessionId = params['sessionId'];
+        if (typeof sessionId !== 'string' || sessionId.length === 0) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing sessionId',
+          );
+        }
+        const kind = params['kind'];
+        if (kind !== 'event' && kind !== 'snapshot') {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing artifact persist kind',
+          );
+        }
+        const payload = params['payload'];
+        const session = this.sessionOrThrow(sessionId);
+        const recording = session.getConfig().getChatRecordingService();
+        if (!recording) {
+          throw RequestError.internalError(
+            undefined,
+            'Chat recording service unavailable',
+          );
+        }
+        if (kind === 'event') {
+          await recording.recordSessionArtifactEvent(
+            payload as SessionArtifactEventRecordPayload,
+          );
+        } else {
+          await recording.recordSessionArtifactSnapshot(
+            payload as SessionArtifactSnapshotRecordPayload,
+          );
+        }
+        return { sessionId, persisted: true, kind };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionTitle: {
         const sessionId = params['sessionId'];

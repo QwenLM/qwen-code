@@ -16,7 +16,10 @@ import type {
   SetSessionModelRequest,
   SetSessionModelResponse,
 } from '@agentclientprotocol/sdk';
-import type { ApprovalMode } from '@qwen-code/qwen-code-core';
+import type {
+  ApprovalMode,
+  RebuiltSessionArtifactSnapshot,
+} from '@qwen-code/qwen-code-core';
 import {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
@@ -106,6 +109,7 @@ import {
   type SessionArtifactInput,
   type SessionArtifactMutationResult,
 } from './sessionArtifacts.js';
+import { SessionArtifactContentStore } from './sessionArtifactContentStore.js';
 
 const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
   captureContext: () => undefined,
@@ -1163,6 +1167,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   // daemon. Cleared in the `finally` of the creator.
   let inFlightChannelSpawn: Promise<ChannelInfo> | undefined;
   const byId = new Map<string, SessionEntry>();
+  const artifactContentStore = new SessionArtifactContentStore();
   const toSessionSummary = (entry: SessionEntry): BridgeSessionSummary => ({
     sessionId: entry.sessionId,
     workspaceCwd: entry.workspaceCwd,
@@ -2265,7 +2270,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       channel: ci.channel,
       connection: ci.connection,
       events,
-      artifacts: new SessionArtifactStore({ sessionId, workspaceCwd }),
+      artifacts: new SessionArtifactStore({
+        sessionId,
+        workspaceCwd,
+        persistence: createSessionArtifactPersistence(ci.connection, sessionId),
+      }),
       promptQueue: Promise.resolve(),
       pendingPromptCount: 0,
       pendingPromptList: [],
@@ -2322,6 +2331,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       mimeType: artifact.mimeType,
       sizeBytes: artifact.sizeBytes,
       metadata: artifact.metadata,
+      retention: artifact.retention,
+      clientRetained: artifact.clientRetained,
       source: 'client',
     };
     if (clientId) {
@@ -2329,6 +2340,42 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     }
     return input;
   };
+
+  function createSessionArtifactPersistence(
+    connection: ClientSideConnection,
+    sessionId: string,
+  ) {
+    return {
+      recordEvent: async (payload: unknown): Promise<void> => {
+        await withTimeout(
+          connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
+            {
+              sessionId,
+              kind: 'event',
+              payload,
+            },
+          ),
+          PERSIST_TIMEOUT_MS,
+          'sessionArtifactPersist(event)',
+        );
+      },
+      recordSnapshot: async (payload: unknown): Promise<void> => {
+        await withTimeout(
+          connection.extMethod(
+            SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist,
+            {
+              sessionId,
+              kind: 'snapshot',
+              payload,
+            },
+          ),
+          PERSIST_TIMEOUT_MS,
+          'sessionArtifactPersist(snapshot)',
+        );
+      },
+    };
+  }
 
   // A5: seed the snapshot caches from the agent's session-create response
   // (`newSession` / `loadSession` / `resumeSession` all return `models` +
@@ -2414,6 +2461,23 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       };
     }
     return { lastEventId: snapshot.lastEventId };
+  };
+
+  const restoredArtifactSnapshotFromState = (
+    state: BridgeSessionState,
+  ): RebuiltSessionArtifactSnapshot | undefined => {
+    const candidate = (state as { artifactSnapshot?: unknown })
+      .artifactSnapshot;
+    if (
+      candidate &&
+      typeof candidate === 'object' &&
+      !Array.isArray(candidate) &&
+      (candidate as { v?: unknown }).v === 2 &&
+      Array.isArray((candidate as { artifacts?: unknown }).artifacts)
+    ) {
+      return candidate as RebuiltSessionArtifactSnapshot;
+    }
+    return undefined;
   };
 
   async function restoreSession(
@@ -2629,6 +2693,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
       entry.restoreState = state;
       seedSnapshotCaches(entry, state);
+      const artifactRestoreWarnings = await entry.artifacts.restore(
+        restoredArtifactSnapshotFromState(state),
+      );
+      for (const warning of artifactRestoreWarnings) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=restore_warning warning=${JSON.stringify(
+            warning,
+          )}`,
+        );
+      }
       const clientId = registerClient(entry, req.clientId);
       // Fold synchronous coalesce reservations into the new entry's
       // `attachCount`. By this point all coalescers that beat us must
@@ -4036,6 +4110,49 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const result = await entry.artifacts.remove(artifactId, { clientId });
       publishArtifactChanges(entry, result.changes, clientId);
       return result;
+    },
+
+    async pinSessionArtifact(sessionId, artifactId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      const artifact = await entry.artifacts.get(artifactId);
+      if (!artifact) {
+        return { v: 1, sessionId, changes: [] };
+      }
+      const contentRef = await artifactContentStore.pinWorkspaceFile(
+        sessionId,
+        artifact,
+        entry.workspaceCwd,
+      );
+      const result = await entry.artifacts.pin(artifactId, contentRef);
+      publishArtifactChanges(entry, result.changes, clientId);
+      return result;
+    },
+
+    async unpinSessionArtifact(sessionId, artifactId, context) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const clientId = resolveTrustedClientId(entry, context?.clientId);
+      const result = await entry.artifacts.unpin(artifactId);
+      publishArtifactChanges(entry, result.changes, clientId);
+      return result;
+    },
+
+    async fsckSessionArtifacts(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      return artifactContentStore.fsck(await entry.artifacts.contentRefs());
+    },
+
+    async gcSessionArtifacts(sessionId) {
+      const entry = byId.get(sessionId);
+      if (!entry) throw new SessionNotFoundError(sessionId);
+      const refs = await entry.artifacts.contentRefs();
+      return artifactContentStore.gc(
+        sessionId,
+        new Set(refs.map((ref) => ref.contentId)),
+      );
     },
 
     listWorkspaceSessions(workspaceCwd) {

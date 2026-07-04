@@ -561,6 +561,10 @@ export function registerSessionRoutes(
             mimeType: body['mimeType'] as SessionArtifactInput['mimeType'],
             sizeBytes: body['sizeBytes'] as SessionArtifactInput['sizeBytes'],
             metadata: body['metadata'] as SessionArtifactInput['metadata'],
+            retention: body['retention'] as SessionArtifactInput['retention'],
+            clientRetained: body[
+              'clientRetained'
+            ] as SessionArtifactInput['clientRetained'],
           };
           const result = await bridge.addSessionArtifact(
             sessionId,
@@ -572,6 +576,113 @@ export function registerSessionRoutes(
           if (sendArtifactValidationError(res, err)) return;
           sendBridgeError(res, err, {
             route: 'POST /session/:id/artifacts',
+            sessionId,
+          });
+        }
+      },
+    ),
+  );
+
+  app.post(
+    '/session/:id/artifacts/:artifactId/pin',
+    mutate({ strict: true }),
+    withMutableSession(
+      'POST /session/:id/artifacts/:artifactId/pin',
+      async (req, res, sessionId) => {
+        const artifactId = req.params['artifactId'];
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (!artifactId) {
+          res.status(400).json({
+            v: 1,
+            error: {
+              code: 'VALIDATION_FAILED',
+              message: '`artifactId` route parameter is required',
+              field: 'artifactId',
+            },
+          });
+          return;
+        }
+        try {
+          const result = await bridge.pinSessionArtifact(
+            sessionId,
+            artifactId,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          res.status(200).json(result);
+        } catch (err) {
+          if (sendArtifactValidationError(res, err)) return;
+          sendBridgeError(res, err, {
+            route: 'POST /session/:id/artifacts/:artifactId/pin',
+            sessionId,
+          });
+        }
+      },
+    ),
+  );
+
+  app.delete(
+    '/session/:id/artifacts/:artifactId/pin',
+    mutate({ strict: true }),
+    withMutableSession(
+      'DELETE /session/:id/artifacts/:artifactId/pin',
+      async (req, res, sessionId) => {
+        const artifactId = req.params['artifactId'];
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
+        if (!artifactId) {
+          res.status(400).json({
+            v: 1,
+            error: {
+              code: 'VALIDATION_FAILED',
+              message: '`artifactId` route parameter is required',
+              field: 'artifactId',
+            },
+          });
+          return;
+        }
+        try {
+          const result = await bridge.unpinSessionArtifact(
+            sessionId,
+            artifactId,
+            clientId !== undefined ? { clientId } : undefined,
+          );
+          res.status(200).json(result);
+        } catch (err) {
+          if (sendArtifactValidationError(res, err)) return;
+          sendBridgeError(res, err, {
+            route: 'DELETE /session/:id/artifacts/:artifactId/pin',
+            sessionId,
+          });
+        }
+      },
+    ),
+  );
+
+  app.get('/session/:id/artifacts/fsck', async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    try {
+      res.status(200).json(await bridge.fsckSessionArtifacts(sessionId));
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/artifacts/fsck',
+        sessionId,
+      });
+    }
+  });
+
+  app.post(
+    '/session/:id/artifacts/gc',
+    mutate({ strict: true }),
+    withMutableSession(
+      'POST /session/:id/artifacts/gc',
+      async (_req, res, sessionId) => {
+        try {
+          res.status(200).json(await bridge.gcSessionArtifacts(sessionId));
+        } catch (err) {
+          sendBridgeError(res, err, {
+            route: 'POST /session/:id/artifacts/gc',
             sessionId,
           });
         }

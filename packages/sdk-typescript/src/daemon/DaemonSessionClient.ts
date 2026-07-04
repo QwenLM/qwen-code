@@ -31,6 +31,8 @@ import type {
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonSessionArtifactInput,
+  DaemonSessionArtifactFsckResult,
+  DaemonSessionArtifactGcResult,
   DaemonSessionArtifactMutationResult,
   DaemonSessionArtifactsEnvelope,
   DaemonSessionState,
@@ -435,6 +437,37 @@ export class DaemonSessionClient {
       artifactId,
       this.clientId,
     );
+  }
+
+  async pinArtifact(
+    artifactId: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.client.pinSessionArtifact(
+      this.sessionId,
+      artifactId,
+      this.clientId,
+    );
+  }
+
+  async unpinArtifact(
+    artifactId: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.client.unpinSessionArtifact(
+      this.sessionId,
+      artifactId,
+      this.clientId,
+    );
+  }
+
+  async fsckArtifacts(): Promise<DaemonSessionArtifactFsckResult> {
+    return await this.client.fsckSessionArtifacts(
+      this.sessionId,
+      this.clientId,
+    );
+  }
+
+  async gcArtifacts(): Promise<DaemonSessionArtifactGcResult> {
+    return await this.client.gcSessionArtifacts(this.sessionId, this.clientId);
   }
 
   async setModel(modelId: string): Promise<SetModelResult> {

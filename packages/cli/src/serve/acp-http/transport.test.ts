@@ -369,6 +369,22 @@ class FakeBridge {
         context: Parameters<HttpAcpBridge['removeSessionArtifact']>[2];
       }
     | undefined;
+  lastPinnedArtifact:
+    | {
+        sessionId: string;
+        artifactId: string;
+        context: Parameters<HttpAcpBridge['pinSessionArtifact']>[2];
+      }
+    | undefined;
+  lastUnpinnedArtifact:
+    | {
+        sessionId: string;
+        artifactId: string;
+        context: Parameters<HttpAcpBridge['unpinSessionArtifact']>[2];
+      }
+    | undefined;
+  lastFsckSessionId: string | undefined;
+  lastGcSessionId: string | undefined;
   async getSessionArtifacts(sessionId: string) {
     this.lastArtifactListSessionId = sessionId;
     return {
@@ -398,6 +414,42 @@ class FakeBridge {
       sessionId,
       changes: [{ action: 'removed' as const, artifactId, reason: 'explicit' }],
     };
+  }
+  async pinSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    context: Parameters<HttpAcpBridge['pinSessionArtifact']>[2],
+  ) {
+    this.lastPinnedArtifact = { sessionId, artifactId, context };
+    return {
+      v: 1,
+      sessionId,
+      changes: [{ action: 'updated' as const, artifactId }],
+    };
+  }
+  async unpinSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    context: Parameters<HttpAcpBridge['unpinSessionArtifact']>[2],
+  ) {
+    this.lastUnpinnedArtifact = { sessionId, artifactId, context };
+    return {
+      v: 1,
+      sessionId,
+      changes: [{ action: 'updated' as const, artifactId }],
+    };
+  }
+  async fsckSessionArtifacts(sessionId: string) {
+    this.lastFsckSessionId = sessionId;
+    return {
+      checked: 0,
+      missing: [] as string[],
+      hashMismatches: [] as string[],
+    };
+  }
+  async gcSessionArtifacts(sessionId: string) {
+    this.lastGcSessionId = sessionId;
+    return { removed: [] as string[], retained: [] as string[] };
   }
   async getWorkspaceToolsStatus() {
     return { v: 1, tools: [] };
@@ -5546,6 +5598,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
           storage: 'external_url',
           url: 'https://example.test/lineage',
           metadata: { table: 'fact_orders' },
+          retention: 'ephemeral',
+          clientRetained: false,
           source: 'tool',
           trustedPublisher: true,
           clientId: 'forged-client',
@@ -5564,6 +5618,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         storage: 'external_url',
         url: 'https://example.test/lineage',
         metadata: { table: 'fact_orders' },
+        retention: 'ephemeral',
+        clientRetained: false,
       });
       const artifact = bridge.lastAddedArtifact?.artifact as
         | Record<string, unknown>
@@ -5674,6 +5730,124 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         },
       });
       expect(bridge.lastRemovedArtifact).toBeUndefined();
+    });
+
+    it('_qwen/session/artifacts/pin forwards artifact id', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/session/artifacts/pin',
+        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          v: 1,
+          sessionId: 'sess-1',
+          changes: [{ action: 'updated', artifactId: 'artifact-1' }],
+        },
+      });
+      expect(bridge.lastPinnedArtifact).toMatchObject({
+        sessionId: 'sess-1',
+        artifactId: 'artifact-1',
+      });
+    });
+
+    it('_qwen/session/artifacts/unpin forwards artifact id', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 62,
+        method: '_qwen/session/artifacts/unpin',
+        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: {
+          v: 1,
+          sessionId: 'sess-1',
+          changes: [{ action: 'updated', artifactId: 'artifact-1' }],
+        },
+      });
+      expect(bridge.lastUnpinnedArtifact).toMatchObject({
+        sessionId: 'sess-1',
+        artifactId: 'artifact-1',
+      });
+    });
+
+    it('_qwen/session/artifacts/fsck returns integrity status', async () => {
+      bridge.fsckSessionArtifacts = async (sessionId) => {
+        bridge.lastFsckSessionId = sessionId;
+        return { checked: 1, missing: ['missing'], hashMismatches: [] };
+      };
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 63,
+        method: '_qwen/session/artifacts/fsck',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { checked: 1, missing: ['missing'], hashMismatches: [] },
+      });
+      expect(bridge.lastFsckSessionId).toBe('sess-1');
+    });
+
+    it('_qwen/session/artifacts/gc returns cleanup result', async () => {
+      bridge.gcSessionArtifacts = async (sessionId) => {
+        bridge.lastGcSessionId = sessionId;
+        return { removed: ['old'], retained: ['kept'] };
+      };
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 64,
+        method: '_qwen/session/artifacts/gc',
+        params: { sessionId: 'sess-1' },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        result: { removed: ['old'], retained: ['kept'] },
+      });
+      expect(bridge.lastGcSessionId).toBe('sess-1');
     });
 
     it('_qwen/session/artifacts/add holds the archive gate while mutating', async () => {

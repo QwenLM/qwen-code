@@ -270,6 +270,42 @@ describe('acpRouteTable – matchRoute', () => {
     ).toEqual({ sessionId: 's8', artifactId: 'art 1' });
   });
 
+  it('POST /session/:id/artifacts/:artifactId/pin maps to _qwen/session/artifacts/pin', () => {
+    const result = matchRoute('/session/s8/artifacts/art%201/pin', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/artifacts/pin');
+    expect(
+      result!.mapping.extractParams(result!.segments, undefined, 'POST'),
+    ).toEqual({ sessionId: 's8', artifactId: 'art 1' });
+  });
+
+  it('DELETE /session/:id/artifacts/:artifactId/pin maps to _qwen/session/artifacts/unpin', () => {
+    const result = matchRoute('/session/s8/artifacts/art%201/pin', 'DELETE');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/artifacts/unpin');
+    expect(
+      result!.mapping.extractParams(result!.segments, undefined, 'DELETE'),
+    ).toEqual({ sessionId: 's8', artifactId: 'art 1' });
+  });
+
+  it('GET /session/:id/artifacts/fsck maps to _qwen/session/artifacts/fsck', () => {
+    const result = matchRoute('/session/s8/artifacts/fsck', 'GET');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/artifacts/fsck');
+    expect(
+      result!.mapping.extractParams(result!.segments, undefined, 'GET'),
+    ).toEqual({ sessionId: 's8' });
+  });
+
+  it('POST /session/:id/artifacts/gc maps to _qwen/session/artifacts/gc', () => {
+    const result = matchRoute('/session/s8/artifacts/gc', 'POST');
+    expect(result).not.toBeNull();
+    expect(result!.mapping.method).toBe('_qwen/session/artifacts/gc');
+    expect(
+      result!.mapping.extractParams(result!.segments, undefined, 'POST'),
+    ).toEqual({ sessionId: 's8' });
+  });
+
   it('POST /session/:id/recap maps to _qwen/session/recap', () => {
     const result = matchRoute('/session/s9/recap', 'POST');
     expect(result).not.toBeNull();

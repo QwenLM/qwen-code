@@ -271,6 +271,42 @@ export type KnownDaemonSessionArtifactStatus = 'available' | 'missing';
 export type DaemonSessionArtifactStatus =
   OpenStringUnion<KnownDaemonSessionArtifactStatus>;
 
+export type KnownDaemonSessionArtifactRetention =
+  | 'ephemeral'
+  | 'restorable'
+  | 'pinned';
+
+export type DaemonSessionArtifactRetention =
+  OpenStringUnion<KnownDaemonSessionArtifactRetention>;
+
+export type KnownDaemonSessionArtifactRestoreState =
+  | 'live'
+  | 'restored'
+  | 'unverified'
+  | 'blocked';
+
+export type DaemonSessionArtifactRestoreState =
+  OpenStringUnion<KnownDaemonSessionArtifactRestoreState>;
+
+export type KnownDaemonSessionArtifactPersistenceWarning =
+  | 'persistence_unavailable'
+  | 'content_missing'
+  | 'content_expired'
+  | 'content_hash_mismatch'
+  | 'metadata_only_restore'
+  | 'restore_validation_failed';
+
+export type DaemonSessionArtifactPersistenceWarning =
+  OpenStringUnion<KnownDaemonSessionArtifactPersistenceWarning>;
+
+export interface DaemonSessionArtifactContentRef {
+  kind: 'managed_copy';
+  contentId: string;
+  sha256: string;
+  sizeBytes: number;
+  createdAt: string;
+}
+
 export interface DaemonSessionArtifactInput {
   kind?: KnownDaemonSessionArtifactKind;
   storage?: Exclude<KnownDaemonSessionArtifactStorage, 'published'>;
@@ -282,6 +318,8 @@ export interface DaemonSessionArtifactInput {
   mimeType?: string;
   sizeBytes?: number;
   metadata?: Record<string, string | number | boolean | null>;
+  retention?: Exclude<KnownDaemonSessionArtifactRetention, 'pinned'>;
+  clientRetained?: boolean;
 }
 
 export interface DaemonSessionArtifact {
@@ -298,6 +336,12 @@ export interface DaemonSessionArtifact {
   mimeType?: string;
   sizeBytes?: number;
   metadata?: Record<string, string | number | boolean | null>;
+  retention: DaemonSessionArtifactRetention;
+  restoreState?: DaemonSessionArtifactRestoreState;
+  persistenceWarning?: DaemonSessionArtifactPersistenceWarning;
+  contentRef?: DaemonSessionArtifactContentRef;
+  persistedAt?: string;
+  expiresAt?: string;
   clientRetained: boolean;
   createdAt: string;
   updatedAt: string;
@@ -314,7 +358,10 @@ export type KnownDaemonSessionArtifactChangeAction =
 export type DaemonSessionArtifactChangeAction =
   OpenStringUnion<KnownDaemonSessionArtifactChangeAction>;
 
-export type KnownDaemonSessionArtifactRemovalReason = 'eviction' | 'explicit';
+export type KnownDaemonSessionArtifactRemovalReason =
+  | 'eviction'
+  | 'explicit'
+  | 'unpin_to_ephemeral';
 export type DaemonSessionArtifactRemovalReason =
   OpenStringUnion<KnownDaemonSessionArtifactRemovalReason>;
 
@@ -339,6 +386,18 @@ export interface DaemonSessionArtifactMutationResult {
   v: 1;
   sessionId: string;
   changes: DaemonSessionArtifactChange[];
+  warnings?: string[];
+}
+
+export interface DaemonSessionArtifactFsckResult {
+  checked: number;
+  missing: string[];
+  hashMismatches: string[];
+}
+
+export interface DaemonSessionArtifactGcResult {
+  removed: string[];
+  retained: string[];
 }
 
 export type DaemonStatus =

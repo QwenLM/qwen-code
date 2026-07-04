@@ -23,6 +23,10 @@ import type {
   SessionArtifactsEnvelope,
 } from './sessionArtifacts.js';
 import type {
+  SessionArtifactFsckResult,
+  SessionArtifactGcResult,
+} from './sessionArtifactContentStore.js';
+import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
@@ -525,6 +529,22 @@ export interface AcpSessionBridge {
     artifactId: string,
     context?: BridgeClientRequestContext,
   ): Promise<SessionArtifactMutationResult>;
+
+  pinSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactMutationResult>;
+
+  unpinSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactMutationResult>;
+
+  fsckSessionArtifacts(sessionId: string): Promise<SessionArtifactFsckResult>;
+
+  gcSessionArtifacts(sessionId: string): Promise<SessionArtifactGcResult>;
 
   /**
    * Cast a vote on a pending `permission_request` (first-responder wins).

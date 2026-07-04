@@ -472,6 +472,34 @@ describe('DaemonSessionClient', () => {
       ) {
         return jsonResponse(200, mutationResult);
       }
+      if (
+        req.method === 'POST' &&
+        req.url === 'http://daemon/session/s-1/artifacts/artifact-1/pin'
+      ) {
+        return jsonResponse(200, mutationResult);
+      }
+      if (
+        req.method === 'DELETE' &&
+        req.url === 'http://daemon/session/s-1/artifacts/artifact-1/pin'
+      ) {
+        return jsonResponse(200, mutationResult);
+      }
+      if (
+        req.method === 'GET' &&
+        req.url === 'http://daemon/session/s-1/artifacts/fsck'
+      ) {
+        return jsonResponse(200, {
+          checked: 1,
+          missing: [],
+          hashMismatches: [],
+        });
+      }
+      if (
+        req.method === 'POST' &&
+        req.url === 'http://daemon/session/s-1/artifacts/gc'
+      ) {
+        return jsonResponse(200, { removed: [], retained: [] });
+      }
       return jsonResponse(500, {
         error: `unexpected ${req.method} ${req.url}`,
       });
@@ -497,8 +525,27 @@ describe('DaemonSessionClient', () => {
     await expect(session.removeArtifact('artifact-1')).resolves.toEqual(
       mutationResult,
     );
+    await expect(session.pinArtifact('artifact-1')).resolves.toEqual(
+      mutationResult,
+    );
+    await expect(session.unpinArtifact('artifact-1')).resolves.toEqual(
+      mutationResult,
+    );
+    await expect(session.fsckArtifacts()).resolves.toEqual({
+      checked: 1,
+      missing: [],
+      hashMismatches: [],
+    });
+    await expect(session.gcArtifacts()).resolves.toEqual({
+      removed: [],
+      retained: [],
+    });
 
     expect(calls.map((call) => call.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
+      'client-1',
+      'client-1',
       'client-1',
       'client-1',
       'client-1',

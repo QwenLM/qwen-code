@@ -269,6 +269,74 @@ describe('DaemonClient', () => {
         body: null,
       });
     });
+
+    it('pins and unpins session artifacts with encoded ids', async () => {
+      const result = {
+        v: 1 as const,
+        sessionId: 'session/1',
+        changes: [{ action: 'updated' as const, artifactId: 'artifact/1' }],
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, result));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.pinSessionArtifact('session/1', 'artifact/1', 'client-1'),
+      ).resolves.toEqual(result);
+      await expect(
+        client.unpinSessionArtifact('session/1', 'artifact/1', 'client-1'),
+      ).resolves.toEqual(result);
+
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/session%2F1/artifacts/artifact%2F1/pin',
+        method: 'POST',
+        headers: { 'x-qwen-client-id': 'client-1' },
+        body: null,
+      });
+      expect(calls[1]).toMatchObject({
+        url: 'http://daemon/session/session%2F1/artifacts/artifact%2F1/pin',
+        method: 'DELETE',
+        headers: { 'x-qwen-client-id': 'client-1' },
+        body: null,
+      });
+    });
+
+    it('runs fsck and gc for session artifact content', async () => {
+      const replies = [
+        { checked: 1, missing: ['missing'], hashMismatches: [] },
+        { removed: ['old'], retained: ['kept'] },
+      ];
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, replies.shift()),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.fsckSessionArtifacts('session/1', 'client-1'),
+      ).resolves.toEqual({
+        checked: 1,
+        missing: ['missing'],
+        hashMismatches: [],
+      });
+      await expect(
+        client.gcSessionArtifacts('session/1', 'client-1'),
+      ).resolves.toEqual({
+        removed: ['old'],
+        retained: ['kept'],
+      });
+
+      expect(calls[0]).toMatchObject({
+        url: 'http://daemon/session/session%2F1/artifacts/fsck',
+        method: 'GET',
+        headers: { 'x-qwen-client-id': 'client-1' },
+        body: null,
+      });
+      expect(calls[1]).toMatchObject({
+        url: 'http://daemon/session/session%2F1/artifacts/gc',
+        method: 'POST',
+        headers: { 'x-qwen-client-id': 'client-1' },
+        body: null,
+      });
+    });
   });
 
   describe('workspace file helpers', () => {

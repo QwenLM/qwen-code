@@ -7,7 +7,29 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import type {
+  PersistedSessionArtifact,
+  RebuiltSessionArtifactSnapshot,
+  SessionArtifactContentRef,
+  SessionArtifactEventRecordPayload,
+  SessionArtifactPersistenceWarning,
+  SessionArtifactRestoreState,
+  SessionArtifactRetention,
+  SessionArtifactSnapshotRecordPayload,
+} from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from './internal/stderrLine.js';
+
+const SESSION_ARTIFACT_PERSISTENCE_VERSION = 2 as const;
+
+function stableSessionArtifactId(
+  sessionId: string,
+  identityKey: string,
+): string {
+  return createHash('sha256')
+    .update(`${sessionId}:${identityKey}`)
+    .digest('hex')
+    .slice(0, 16);
+}
 
 export type DaemonSessionArtifactKind =
   | 'file'
@@ -37,6 +59,7 @@ const SOURCE_RESERVATIONS: Record<DaemonSessionArtifactSource, number> = {
 };
 const WORKSPACE_STATUS_REFRESH_TTL_MS = 5_000;
 const WORKSPACE_STATUS_REFRESH_BATCH_SIZE = 20;
+const SNAPSHOT_AFTER_DURABLE_EVENTS = 50;
 
 export interface ToolArtifactLike {
   kind?: DaemonSessionArtifactKind;
@@ -53,6 +76,8 @@ export interface ToolArtifactLike {
 
 export interface SessionArtifactInput extends ToolArtifactLike {
   source?: DaemonSessionArtifactSource;
+  retention?: SessionArtifactRetention;
+  clientRetained?: boolean;
   toolCallId?: string;
   toolName?: string;
   hookEventName?: string;
@@ -73,6 +98,12 @@ export interface DaemonSessionArtifact {
   mimeType?: string;
   sizeBytes?: number;
   metadata?: Record<string, string | number | boolean | null>;
+  retention: SessionArtifactRetention;
+  restoreState?: SessionArtifactRestoreState;
+  persistenceWarning?: SessionArtifactPersistenceWarning;
+  contentRef?: SessionArtifactContentRef;
+  persistedAt?: string;
+  expiresAt?: string;
   clientRetained: boolean;
   createdAt: string;
   updatedAt: string;
@@ -82,7 +113,10 @@ export interface DaemonSessionArtifact {
   clientId?: string;
 }
 
-export type SessionArtifactRemovalReason = 'eviction' | 'explicit';
+export type SessionArtifactRemovalReason =
+  | 'eviction'
+  | 'explicit'
+  | 'unpin_to_ephemeral';
 
 export interface SessionArtifactChange {
   action: 'created' | 'updated' | 'removed';
@@ -105,6 +139,12 @@ export interface SessionArtifactMutationResult {
   v: 1;
   sessionId: string;
   changes: SessionArtifactChange[];
+  warnings?: string[];
+}
+
+export interface SessionArtifactPersistence {
+  recordEvent(payload: SessionArtifactEventRecordPayload): Promise<void>;
+  recordSnapshot(payload: SessionArtifactSnapshotRecordPayload): Promise<void>;
 }
 
 export class SessionArtifactValidationError extends Error {
@@ -123,6 +163,7 @@ interface SessionArtifactStoreOptions {
   sessionId: string;
   workspaceCwd: string;
   maxArtifacts?: number;
+  persistence?: SessionArtifactPersistence;
 }
 
 interface NormalizedArtifact extends DaemonSessionArtifact {
@@ -141,9 +182,12 @@ export class SessionArtifactStore {
   private readonly sessionId: string;
   private readonly workspaceCwd: string;
   private readonly maxArtifacts: number;
+  private readonly persistence?: SessionArtifactPersistence;
   private readonly artifacts = new Map<string, StoredArtifact>();
   private receivedSeq = 0;
   private insertSeq = 0;
+  private persistenceSeq = 0;
+  private durableEventsSinceSnapshot = 0;
   private realWorkspaceCwdPromise?: Promise<string>;
   private operationQueue: Promise<void> = Promise.resolve();
 
@@ -151,6 +195,7 @@ export class SessionArtifactStore {
     this.sessionId = options.sessionId;
     this.workspaceCwd = options.workspaceCwd;
     this.maxArtifacts = options.maxArtifacts ?? 200;
+    this.persistence = options.persistence;
   }
 
   inputBatchLimit(): number {
@@ -172,12 +217,36 @@ export class SessionArtifactStore {
     });
   }
 
+  async get(artifactId: string): Promise<DaemonSessionArtifact | undefined> {
+    return this.enqueue(async () => {
+      const artifact = this.artifacts.get(artifactId);
+      if (!artifact) return undefined;
+      if (
+        artifact.workspacePath &&
+        shouldRefreshWorkspaceStatus(artifact, Date.now())
+      ) {
+        await this.refreshWorkspaceStatus(artifact, { onError: 'missing' });
+      }
+      return toPublicArtifact(artifact);
+    });
+  }
+
+  async contentRefs(): Promise<SessionArtifactContentRef[]> {
+    return this.enqueue(async () =>
+      Array.from(this.artifacts.values())
+        .map((artifact) => artifact.contentRef)
+        .filter((ref): ref is SessionArtifactContentRef => ref !== undefined),
+    );
+  }
+
   async upsertMany(
     inputs: SessionArtifactInput[],
     options: { strict?: boolean; trustedPublisher?: boolean } = {},
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
+      const before = this.cloneState();
       const normalizedResults: NormalizedArtifact[] = [];
+      const warnings: string[] = [];
       for (const input of inputs) {
         try {
           normalizedResults.push(
@@ -201,47 +270,61 @@ export class SessionArtifactStore {
         }
       }
       const changes: SessionArtifactChange[] = [];
-      for (const artifact of coalesceByIdentity(normalizedResults)) {
-        const existing =
-          this.artifacts.get(artifact.id) ??
-          this.findPublishedUpgradeTarget(artifact) ??
-          this.findPublishedWorkspaceTarget(artifact);
-        if (!existing) {
-          const stored: StoredArtifact = {
-            ...artifact,
-            insertSeq: ++this.insertSeq,
-          };
-          this.artifacts.set(stored.id, stored);
-          changes.push({
-            action: 'created',
-            artifactId: stored.id,
-            artifact: toPublicArtifact(stored),
-          });
-          continue;
+      try {
+        for (const artifact of coalesceByIdentity(normalizedResults)) {
+          const existing =
+            this.artifacts.get(artifact.id) ??
+            this.findPublishedUpgradeTarget(artifact) ??
+            this.findPublishedWorkspaceTarget(artifact);
+          if (!existing) {
+            const stored: StoredArtifact = {
+              ...artifact,
+              insertSeq: ++this.insertSeq,
+            };
+            this.artifacts.set(stored.id, stored);
+            changes.push({
+              action: 'created',
+              artifactId: stored.id,
+              artifact: toPublicArtifact(stored),
+            });
+            continue;
+          }
+
+          const updated = mergeArtifact(existing, artifact);
+          if (updated.changed) {
+            if (updated.artifact.id !== existing.id) {
+              this.artifacts.delete(existing.id);
+            }
+            this.artifacts.set(updated.artifact.id, updated.artifact);
+            changes.push({
+              action: 'updated',
+              artifactId: updated.artifact.id,
+              artifact: toPublicArtifact(updated.artifact),
+            });
+          }
         }
 
-        const updated = mergeArtifact(existing, artifact);
-        if (updated.changed) {
-          if (updated.artifact.id !== existing.id) {
-            this.artifacts.delete(existing.id);
-          }
-          this.artifacts.set(updated.artifact.id, updated.artifact);
-          changes.push({
-            action: 'updated',
-            artifactId: updated.artifact.id,
-            artifact: toPublicArtifact(updated.artifact),
-          });
+        const createdIds = new Set(
+          changes
+            .filter((change) => change.action === 'created')
+            .map((change) => change.artifactId),
+        );
+        changes.push(...(await this.evictOverflow(createdIds, changes)));
+
+        warnings.push(...(await this.persistChanges(changes, options.strict)));
+      } catch (error) {
+        if (options.strict) {
+          this.restoreState(before);
         }
+        throw error;
       }
 
-      const createdIds = new Set(
-        changes
-          .filter((change) => change.action === 'created')
-          .map((change) => change.artifactId),
-      );
-      changes.push(...(await this.evictOverflow(createdIds, changes)));
-
-      return { v: 1, sessionId: this.sessionId, changes };
+      return {
+        v: 1,
+        sessionId: this.sessionId,
+        changes,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
     });
   }
 
@@ -257,7 +340,7 @@ export class SessionArtifactStore {
       return undefined;
     }
     const byUrl = this.artifacts.get(
-      stableArtifactId(this.sessionId, `url:${artifact.url}`),
+      stableSessionArtifactId(this.sessionId, `url:${artifact.url}`),
     );
     if (
       byUrl &&
@@ -311,6 +394,7 @@ export class SessionArtifactStore {
     options?: { clientId?: string },
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
+      const before = this.cloneState();
       const existing = this.artifacts.get(artifactId);
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
@@ -329,19 +413,301 @@ export class SessionArtifactStore {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
       this.artifacts.delete(artifactId);
-      return {
-        v: 1,
-        sessionId: this.sessionId,
-        changes: [
-          {
-            action: 'removed',
-            artifactId,
-            artifact: toPublicArtifact(existing),
-            reason: 'explicit',
-          },
-        ],
-      };
+      const changes: SessionArtifactChange[] = [
+        {
+          action: 'removed',
+          artifactId,
+          artifact: toPublicArtifact(existing),
+          reason: 'explicit',
+        },
+      ];
+      try {
+        const warnings = await this.persistChanges(changes, true);
+        return {
+          v: 1,
+          sessionId: this.sessionId,
+          changes,
+          ...(warnings.length > 0 ? { warnings } : {}),
+        };
+      } catch (error) {
+        this.restoreState(before);
+        throw error;
+      }
     });
+  }
+
+  async pin(
+    artifactId: string,
+    contentRef?: SessionArtifactContentRef,
+  ): Promise<SessionArtifactMutationResult> {
+    return this.enqueue(async () => {
+      const before = this.cloneState();
+      const existing = this.artifacts.get(artifactId);
+      if (!existing) {
+        return { v: 1, sessionId: this.sessionId, changes: [] };
+      }
+      const updated: StoredArtifact = {
+        ...existing,
+        retention: 'pinned',
+        clientRetained: true,
+        restoreState: 'live',
+        updatedAt: new Date().toISOString(),
+        ...(contentRef
+          ? { contentRef }
+          : { persistenceWarning: 'metadata_only_restore' as const }),
+      };
+      if (contentRef) {
+        delete updated.persistenceWarning;
+      }
+      this.artifacts.set(artifactId, updated);
+      const changes: SessionArtifactChange[] = [
+        {
+          action: 'updated',
+          artifactId,
+          artifact: toPublicArtifact(updated),
+        },
+      ];
+      try {
+        const warnings = await this.persistChanges(changes, true);
+        return {
+          v: 1,
+          sessionId: this.sessionId,
+          changes,
+          ...(warnings.length > 0 ? { warnings } : {}),
+        };
+      } catch (error) {
+        this.restoreState(before);
+        throw error;
+      }
+    });
+  }
+
+  async unpin(artifactId: string): Promise<SessionArtifactMutationResult> {
+    return this.enqueue(async () => {
+      const before = this.cloneState();
+      const existing = this.artifacts.get(artifactId);
+      if (!existing) {
+        return { v: 1, sessionId: this.sessionId, changes: [] };
+      }
+      const updated: StoredArtifact = {
+        ...existing,
+        retention: 'restorable',
+        restoreState: 'live',
+        persistenceWarning: 'metadata_only_restore',
+        updatedAt: new Date().toISOString(),
+      };
+      delete updated.contentRef;
+      delete updated.expiresAt;
+      this.artifacts.set(artifactId, updated);
+      const changes: SessionArtifactChange[] = [
+        {
+          action: 'updated',
+          artifactId,
+          artifact: toPublicArtifact(updated),
+        },
+      ];
+      try {
+        const warnings = await this.persistChanges(changes, true);
+        return {
+          v: 1,
+          sessionId: this.sessionId,
+          changes,
+          ...(warnings.length > 0 ? { warnings } : {}),
+        };
+      } catch (error) {
+        this.restoreState(before);
+        throw error;
+      }
+    });
+  }
+
+  async restore(
+    snapshot: RebuiltSessionArtifactSnapshot | undefined,
+  ): Promise<string[]> {
+    if (!snapshot) return [];
+    return this.enqueue(async () => {
+      const warnings = [...snapshot.warnings];
+      this.artifacts.clear();
+      this.insertSeq = 0;
+      this.persistenceSeq = snapshot.sequence;
+      for (const artifact of snapshot.artifacts) {
+        try {
+          const input = persistedArtifactToInput(artifact);
+          if (input.retention === 'pinned') {
+            input.retention = 'restorable';
+          }
+          const normalized = await this.normalizeInput(
+            input,
+            ++this.receivedSeq,
+            artifact.storage === 'published',
+          );
+          if (normalized.id !== artifact.id) {
+            warnings.push(`skipped artifact with mismatched id ${artifact.id}`);
+            continue;
+          }
+          const stored: StoredArtifact = {
+            ...normalized,
+            retention: artifact.retention,
+            clientRetained: artifact.clientRetained,
+            createdAt: artifact.createdAt,
+            updatedAt: artifact.updatedAt,
+            persistedAt: artifact.persistedAt,
+            expiresAt: artifact.expiresAt,
+            restoreState: 'restored',
+            persistenceWarning: artifact.contentRef
+              ? artifact.persistenceWarning
+              : (artifact.persistenceWarning ?? 'metadata_only_restore'),
+            contentRef: artifact.contentRef,
+            insertSeq: ++this.insertSeq,
+          };
+          this.artifacts.set(stored.id, stored);
+        } catch (error) {
+          warnings.push(
+            `skipped artifact restore: ${
+              error instanceof Error ? error.message : String(error)
+            }`,
+          );
+        }
+      }
+      return warnings;
+    });
+  }
+
+  private cloneState(): {
+    artifacts: Map<string, StoredArtifact>;
+    insertSeq: number;
+    persistenceSeq: number;
+    durableEventsSinceSnapshot: number;
+  } {
+    return {
+      artifacts: new Map(
+        Array.from(this.artifacts.entries()).map(([id, artifact]) => [
+          id,
+          cloneStoredArtifact(artifact),
+        ]),
+      ),
+      insertSeq: this.insertSeq,
+      persistenceSeq: this.persistenceSeq,
+      durableEventsSinceSnapshot: this.durableEventsSinceSnapshot,
+    };
+  }
+
+  private restoreState(state: {
+    artifacts: Map<string, StoredArtifact>;
+    insertSeq: number;
+    persistenceSeq: number;
+    durableEventsSinceSnapshot: number;
+  }): void {
+    this.artifacts.clear();
+    for (const [id, artifact] of state.artifacts) {
+      this.artifacts.set(id, cloneStoredArtifact(artifact));
+    }
+    this.insertSeq = state.insertSeq;
+    this.persistenceSeq = state.persistenceSeq;
+    this.durableEventsSinceSnapshot = state.durableEventsSinceSnapshot;
+  }
+
+  private async persistChanges(
+    changes: SessionArtifactChange[],
+    strict = false,
+  ): Promise<string[]> {
+    const durableChanges = changes.filter(isDurablePersistenceChange);
+    if (durableChanges.length === 0) {
+      return [];
+    }
+    if (!this.persistence) {
+      if (strict) {
+        throw new SessionArtifactValidationError(
+          'artifact persistence is unavailable',
+          'retention',
+        );
+      }
+      return this.downgradeDurableChanges(durableChanges);
+    }
+
+    const recordedAt = new Date().toISOString();
+    for (const change of durableChanges) {
+      if (change.action === 'removed') continue;
+      const stored = this.artifacts.get(change.artifactId);
+      if (!stored) continue;
+      stored.persistedAt = recordedAt;
+      delete stored.persistenceWarning;
+      change.artifact = toPublicArtifact(stored);
+    }
+
+    const payload: SessionArtifactEventRecordPayload = {
+      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+      sessionId: this.sessionId,
+      sequence: ++this.persistenceSeq,
+      recordedAt,
+      changes: durableChanges.map((change) =>
+        toPersistedChange(change, recordedAt),
+      ),
+    };
+
+    try {
+      await this.persistence.recordEvent(payload);
+      await this.maybeRecordSnapshot(recordedAt);
+      return [];
+    } catch (error) {
+      if (strict) {
+        throw error;
+      }
+      const reason = error instanceof Error ? error.message : String(error);
+      writeStderrLine(
+        `[artifacts] session=${this.sessionId} action=persist_failed reason=${JSON.stringify(
+          reason,
+        )}`,
+      );
+      return this.downgradeDurableChanges(durableChanges);
+    }
+  }
+
+  private async maybeRecordSnapshot(recordedAt: string): Promise<void> {
+    if (!this.persistence) return;
+    this.durableEventsSinceSnapshot++;
+    if (this.durableEventsSinceSnapshot < SNAPSHOT_AFTER_DURABLE_EVENTS) {
+      return;
+    }
+    const artifacts = Array.from(this.artifacts.values())
+      .filter((artifact) => artifact.retention !== 'ephemeral')
+      .sort((a, b) => a.insertSeq - b.insertSeq)
+      .map((artifact) =>
+        toPersistedArtifact(toPublicArtifact(artifact), recordedAt),
+      );
+    const payload: SessionArtifactSnapshotRecordPayload = {
+      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+      sessionId: this.sessionId,
+      sequence: ++this.persistenceSeq,
+      recordedAt,
+      artifacts,
+    };
+    try {
+      await this.persistence.recordSnapshot(payload);
+      this.durableEventsSinceSnapshot = 0;
+    } catch (error) {
+      writeStderrLine(
+        `[artifacts] session=${this.sessionId} action=snapshot_failed reason=${JSON.stringify(
+          error instanceof Error ? error.message : String(error),
+        )}`,
+      );
+    }
+  }
+
+  private downgradeDurableChanges(changes: SessionArtifactChange[]): string[] {
+    for (const change of changes) {
+      if (change.action === 'removed') continue;
+      const stored = this.artifacts.get(change.artifactId);
+      if (!stored) continue;
+      stored.retention = 'ephemeral';
+      stored.persistenceWarning = 'persistence_unavailable';
+      delete stored.persistedAt;
+      delete stored.contentRef;
+      change.artifact = toPublicArtifact(stored);
+    }
+    return [
+      'artifact persistence unavailable; durable artifacts kept ephemeral',
+    ];
   }
 
   private enqueue<T>(operation: () => Promise<T>): Promise<T> {
@@ -400,6 +766,10 @@ export class SessionArtifactStore {
     });
 
     const metadata = normalizeMetadata(input.metadata);
+    const retention = normalizeRetention(input.retention, {
+      persistenceAvailable: this.persistence !== undefined,
+      strictPinnedAllowed: false,
+    });
     const workspaceStatus = workspacePath
       ? await this.getInitialWorkspaceStatus(workspacePath)
       : undefined;
@@ -419,7 +789,7 @@ export class SessionArtifactStore {
       managedId,
       url,
     });
-    const id = stableArtifactId(this.sessionId, identityKey);
+    const id = stableSessionArtifactId(this.sessionId, identityKey);
 
     return {
       id,
@@ -443,7 +813,15 @@ export class SessionArtifactStore {
           ? normalizeSizeBytes(input.sizeBytes)
           : workspaceStatus?.sizeBytes,
       metadata,
-      clientRetained: source === 'client',
+      retention,
+      restoreState: 'live',
+      ...(this.persistence === undefined && retention !== 'ephemeral'
+        ? { persistenceWarning: 'persistence_unavailable' as const }
+        : {}),
+      clientRetained:
+        input.clientRetained !== undefined
+          ? input.clientRetained === true
+          : source === 'client',
       createdAt: now,
       updatedAt: now,
       toolCallId: normalizeString(input.toolCallId, 'toolCallId', 200, false),
@@ -646,6 +1024,13 @@ function mergeBatchArtifact(
       createdAt: existing.createdAt,
       receivedSeq: existing.receivedSeq,
       retentionSource: existing.retentionSource,
+      retention: strongestRetention(existing.retention, next.retention),
+      restoreState: 'live',
+      persistenceWarning:
+        existing.persistenceWarning ?? next.persistenceWarning,
+      contentRef: existing.contentRef ?? next.contentRef,
+      persistedAt: existing.persistedAt ?? next.persistedAt,
+      expiresAt: existing.expiresAt ?? next.expiresAt,
       clientRetained: existing.clientRetained || next.clientRetained,
       lastStatAt: undefined,
     };
@@ -708,6 +1093,13 @@ function mergeArtifact(
       existing.storage === 'published' && !publishedUpdate
         ? existing.metadata
         : mergeMetadata(existing, incoming),
+    retention: strongestRetention(existing.retention, incoming.retention),
+    restoreState: 'live',
+    persistenceWarning:
+      existing.persistenceWarning ?? incoming.persistenceWarning,
+    contentRef: existing.contentRef ?? incoming.contentRef,
+    persistedAt: existing.persistedAt ?? incoming.persistedAt,
+    expiresAt: existing.expiresAt ?? incoming.expiresAt,
     source: existing.source,
     retentionSource: existing.retentionSource,
     trustedPublisher: existing.trustedPublisher || incoming.trustedPublisher,
@@ -753,12 +1145,33 @@ function publicArtifactsEqual(
     a.mimeType === b.mimeType &&
     a.sizeBytes === b.sizeBytes &&
     metadataEqual(a.metadata, b.metadata) &&
+    a.retention === b.retention &&
+    a.restoreState === b.restoreState &&
+    a.persistenceWarning === b.persistenceWarning &&
+    contentRefEqual(a.contentRef, b.contentRef) &&
+    a.persistedAt === b.persistedAt &&
+    a.expiresAt === b.expiresAt &&
     a.clientRetained === b.clientRetained &&
     a.createdAt === b.createdAt &&
     a.toolCallId === b.toolCallId &&
     a.toolName === b.toolName &&
     a.hookEventName === b.hookEventName &&
     a.clientId === b.clientId
+  );
+}
+
+function contentRefEqual(
+  a: SessionArtifactContentRef | undefined,
+  b: SessionArtifactContentRef | undefined,
+): boolean {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return (
+    a.kind === b.kind &&
+    a.contentId === b.contentId &&
+    a.sha256 === b.sha256 &&
+    a.sizeBytes === b.sizeBytes &&
+    a.createdAt === b.createdAt
   );
 }
 
@@ -785,6 +1198,18 @@ function mergeSizeBytes(
     return undefined;
   }
   return existing.sizeBytes;
+}
+
+function strongestRetention(
+  a: SessionArtifactRetention,
+  b: SessionArtifactRetention,
+): SessionArtifactRetention {
+  const rank: Record<SessionArtifactRetention, number> = {
+    ephemeral: 0,
+    restorable: 1,
+    pinned: 2,
+  };
+  return rank[b] > rank[a] ? b : a;
 }
 
 function mergeMetadata(
@@ -918,6 +1343,12 @@ function toPublicArtifact(
     mimeType,
     sizeBytes,
     metadata,
+    retention,
+    restoreState,
+    persistenceWarning,
+    contentRef,
+    persistedAt,
+    expiresAt,
     clientRetained,
     createdAt,
     updatedAt,
@@ -940,6 +1371,12 @@ function toPublicArtifact(
     ...(mimeType ? { mimeType } : {}),
     ...(sizeBytes !== undefined ? { sizeBytes } : {}),
     ...(metadata ? { metadata } : {}),
+    retention,
+    ...(restoreState ? { restoreState } : {}),
+    ...(persistenceWarning ? { persistenceWarning } : {}),
+    ...(contentRef ? { contentRef } : {}),
+    ...(persistedAt ? { persistedAt } : {}),
+    ...(expiresAt ? { expiresAt } : {}),
     clientRetained,
     createdAt,
     updatedAt,
@@ -947,6 +1384,100 @@ function toPublicArtifact(
     ...(toolName ? { toolName } : {}),
     ...(hookEventName ? { hookEventName } : {}),
     ...(clientId ? { clientId } : {}),
+  };
+}
+
+function persistedArtifactToInput(
+  artifact: PersistedSessionArtifact,
+): SessionArtifactInput {
+  return {
+    title: artifact.title,
+    kind: artifact.kind,
+    storage: artifact.storage,
+    description: artifact.description,
+    workspacePath: artifact.workspacePath,
+    managedId: artifact.managedId,
+    url: artifact.url,
+    mimeType: artifact.mimeType,
+    sizeBytes: artifact.sizeBytes,
+    metadata: artifact.metadata,
+    source: artifact.source,
+    retention: artifact.retention,
+    clientRetained: artifact.clientRetained,
+    toolCallId: artifact.toolCallId,
+    toolName: artifact.toolName,
+    hookEventName: artifact.hookEventName,
+    clientId: artifact.clientId,
+  };
+}
+
+function toPersistedChange(
+  change: SessionArtifactChange,
+  recordedAt: string,
+): SessionArtifactEventRecordPayload['changes'][number] {
+  return {
+    action: change.action,
+    artifactId: change.artifactId,
+    ...(change.artifact
+      ? { artifact: toPersistedArtifact(change.artifact, recordedAt) }
+      : {}),
+    ...(change.reason ? { reason: change.reason } : {}),
+  };
+}
+
+function toPersistedArtifact(
+  artifact: DaemonSessionArtifact,
+  recordedAt: string,
+): PersistedSessionArtifact {
+  return {
+    id: artifact.id,
+    kind: artifact.kind,
+    storage: artifact.storage,
+    source: artifact.source,
+    status: artifact.status,
+    title: artifact.title,
+    ...(artifact.description ? { description: artifact.description } : {}),
+    ...(artifact.workspacePath
+      ? { workspacePath: artifact.workspacePath }
+      : {}),
+    ...(artifact.managedId ? { managedId: artifact.managedId } : {}),
+    ...(artifact.url ? { url: artifact.url } : {}),
+    ...(artifact.mimeType ? { mimeType: artifact.mimeType } : {}),
+    ...(artifact.sizeBytes !== undefined
+      ? { sizeBytes: artifact.sizeBytes }
+      : {}),
+    ...(artifact.metadata ? { metadata: artifact.metadata } : {}),
+    retention: artifact.retention,
+    clientRetained: artifact.clientRetained,
+    createdAt: artifact.createdAt,
+    updatedAt: artifact.updatedAt,
+    persistedAt: artifact.persistedAt ?? recordedAt,
+    ...(artifact.expiresAt ? { expiresAt: artifact.expiresAt } : {}),
+    ...(artifact.restoreState ? { restoreState: artifact.restoreState } : {}),
+    ...(artifact.persistenceWarning
+      ? { persistenceWarning: artifact.persistenceWarning }
+      : {}),
+    ...(artifact.contentRef ? { contentRef: artifact.contentRef } : {}),
+    ...(artifact.toolCallId ? { toolCallId: artifact.toolCallId } : {}),
+    ...(artifact.toolName ? { toolName: artifact.toolName } : {}),
+    ...(artifact.hookEventName
+      ? { hookEventName: artifact.hookEventName }
+      : {}),
+    ...(artifact.clientId ? { clientId: artifact.clientId } : {}),
+  };
+}
+
+function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
+  if (change.reason === 'eviction') return false;
+  if (!change.artifact) return false;
+  return change.artifact.retention !== 'ephemeral';
+}
+
+function cloneStoredArtifact(artifact: StoredArtifact): StoredArtifact {
+  return {
+    ...artifact,
+    ...(artifact.metadata ? { metadata: { ...artifact.metadata } } : {}),
+    ...(artifact.contentRef ? { contentRef: { ...artifact.contentRef } } : {}),
   };
 }
 
@@ -1078,13 +1609,6 @@ function buildIdentityKey(input: {
   throw new SessionArtifactValidationError(
     'artifact identity requires workspacePath, managedId, or url',
   );
-}
-
-function stableArtifactId(sessionId: string, identityKey: string): string {
-  return createHash('sha256')
-    .update(`${sessionId}:${identityKey}`)
-    .digest('hex')
-    .slice(0, 16);
 }
 
 function managedIdForWorkspacePath(
@@ -1341,6 +1865,31 @@ function normalizeMetadata(
     );
   }
   return normalized;
+}
+
+function normalizeRetention(
+  value: unknown,
+  options: { persistenceAvailable: boolean; strictPinnedAllowed: boolean },
+): SessionArtifactRetention {
+  if (value === undefined) {
+    return options.persistenceAvailable ? 'restorable' : 'ephemeral';
+  }
+  if (value === 'ephemeral' || value === 'restorable') {
+    return value;
+  }
+  if (value === 'pinned' && options.strictPinnedAllowed) {
+    return 'pinned';
+  }
+  if (value === 'pinned') {
+    throw new SessionArtifactValidationError(
+      'pinned retention requires the pin API',
+      'retention',
+    );
+  }
+  throw new SessionArtifactValidationError(
+    'retention must be ephemeral, restorable, or pinned',
+    'retention',
+  );
 }
 
 function normalizeSizeBytes(value: unknown): number {

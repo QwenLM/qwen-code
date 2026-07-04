@@ -35,6 +35,11 @@ import {
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
 import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
+import {
+  rebuildSessionArtifactSnapshot,
+  remapSessionArtifactPayloadForFork,
+  type RebuiltSessionArtifactSnapshot,
+} from './session-artifact-persistence.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -178,6 +183,8 @@ export interface ResumedSessionData {
   lastCompletedUuid: string | null;
   /** Deserialized file history snapshots for resume (enables /rewind across sessions) */
   fileHistorySnapshots?: FileHistorySnapshot[];
+  /** Persisted session artifact metadata reconstructed from JSONL records. */
+  artifactSnapshot?: RebuiltSessionArtifactSnapshot;
 }
 
 /**
@@ -1014,6 +1021,10 @@ export class SessionService {
       fileHistorySnapshots.length > MAX_SNAPSHOTS
         ? fileHistorySnapshots.slice(-MAX_SNAPSHOTS)
         : fileHistorySnapshots;
+    const artifactSnapshot = rebuildSessionArtifactSnapshot(
+      messages,
+      firstRecord.sessionId,
+    );
 
     return {
       conversation,
@@ -1021,6 +1032,7 @@ export class SessionService {
       lastCompletedUuid: lastMessage.uuid,
       fileHistorySnapshots:
         cappedSnapshots.length > 0 ? cappedSnapshots : undefined,
+      ...(artifactSnapshot ? { artifactSnapshot } : {}),
     };
   }
 
@@ -1373,14 +1385,11 @@ export class SessionService {
     // message.
     let prevUuid: string | null = null;
     const forked: ChatRecord[] = sourceRecords.map((record) => {
-      const systemPayload =
-        record.type === 'system' && record.subtype === 'file_history_snapshot'
-          ? remapFileHistorySnapshotPayload(
-              record.systemPayload,
-              sourceSessionId,
-              newSessionId,
-            )
-          : record.systemPayload;
+      const systemPayload = remapSystemPayloadForFork(
+        record,
+        sourceSessionId,
+        newSessionId,
+      );
       const next: ChatRecord = {
         ...record,
         sessionId: newSessionId,
@@ -1864,6 +1873,32 @@ function remapFileHistorySnapshotPayload(
   } catch {
     return payload;
   }
+}
+
+function remapSystemPayloadForFork(
+  record: ChatRecord,
+  sourceSessionId: string,
+  newSessionId: string,
+): ChatRecord['systemPayload'] {
+  if (record.type !== 'system') return record.systemPayload;
+  if (record.subtype === 'file_history_snapshot') {
+    return remapFileHistorySnapshotPayload(
+      record.systemPayload,
+      sourceSessionId,
+      newSessionId,
+    );
+  }
+  if (
+    record.subtype === 'session_artifact_event' ||
+    record.subtype === 'session_artifact_snapshot'
+  ) {
+    return remapSessionArtifactPayloadForFork(
+      record.systemPayload,
+      sourceSessionId,
+      newSessionId,
+    ) as ChatRecord['systemPayload'];
+  }
+  return record.systemPayload;
 }
 
 function collectFileHistorySnapshotPromptIds(

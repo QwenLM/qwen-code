@@ -187,6 +187,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'session_cancel',
   'session_events',
   'session_artifacts',
+  'session_artifacts_persistence',
+  'session_artifacts_content_retention',
   'slow_client_warning',
   'typed_event_schema',
   'session_set_model',
@@ -408,6 +410,10 @@ interface FakeBridgeOpts {
   getSessionArtifactsImpl?: AcpSessionBridge['getSessionArtifacts'];
   addSessionArtifactImpl?: AcpSessionBridge['addSessionArtifact'];
   removeSessionArtifactImpl?: AcpSessionBridge['removeSessionArtifact'];
+  pinSessionArtifactImpl?: AcpSessionBridge['pinSessionArtifact'];
+  unpinSessionArtifactImpl?: AcpSessionBridge['unpinSessionArtifact'];
+  fsckSessionArtifactsImpl?: AcpSessionBridge['fsckSessionArtifacts'];
+  gcSessionArtifactsImpl?: AcpSessionBridge['gcSessionArtifacts'];
   workspaceMcpImpl?: () => Promise<ServeWorkspaceMcpStatus>;
   workspaceMcpToolsImpl?: (
     serverName: string,
@@ -621,6 +627,18 @@ interface FakeBridge extends AcpSessionBridge {
     artifactId: string;
     context?: BridgeClientRequestContext;
   }>;
+  pinSessionArtifactCalls: Array<{
+    sessionId: string;
+    artifactId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  unpinSessionArtifactCalls: Array<{
+    sessionId: string;
+    artifactId: string;
+    context?: BridgeClientRequestContext;
+  }>;
+  fsckSessionArtifactsCalls: string[];
+  gcSessionArtifactsCalls: string[];
   workspaceMcpCalls: number;
   workspaceMcpToolsCalls: string[];
   workspaceMcpResourcesCalls: string[];
@@ -767,6 +785,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const addSessionArtifactCalls: FakeBridge['addSessionArtifactCalls'] = [];
   const removeSessionArtifactCalls: FakeBridge['removeSessionArtifactCalls'] =
     [];
+  const pinSessionArtifactCalls: FakeBridge['pinSessionArtifactCalls'] = [];
+  const unpinSessionArtifactCalls: FakeBridge['unpinSessionArtifactCalls'] = [];
+  const fsckSessionArtifactsCalls: string[] = [];
+  const gcSessionArtifactsCalls: string[] = [];
   let workspaceMcpCalls = 0;
   const workspaceMcpToolsCalls: string[] = [];
   const workspaceMcpResourcesCalls: string[] = [];
@@ -872,6 +894,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
             ...(artifact.workspacePath
               ? { workspacePath: artifact.workspacePath }
               : {}),
+            retention: artifact.retention ?? 'ephemeral',
             clientRetained: true,
             createdAt: '2026-01-01T00:00:00.000Z',
             updatedAt: '2026-01-01T00:00:00.000Z',
@@ -896,6 +919,26 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
               },
             ],
     }));
+  const pinSessionArtifactImpl =
+    opts.pinSessionArtifactImpl ??
+    ((sessionId, artifactId) => ({
+      v: 1 as const,
+      sessionId,
+      changes: [{ action: 'updated' as const, artifactId }],
+    }));
+  const unpinSessionArtifactImpl =
+    opts.unpinSessionArtifactImpl ??
+    ((sessionId, artifactId) => ({
+      v: 1 as const,
+      sessionId,
+      changes: [{ action: 'updated' as const, artifactId }],
+    }));
+  const fsckSessionArtifactsImpl =
+    opts.fsckSessionArtifactsImpl ??
+    (async () => ({ checked: 0, missing: [], hashMismatches: [] }));
+  const gcSessionArtifactsImpl =
+    opts.gcSessionArtifactsImpl ??
+    (async () => ({ removed: [], retained: [] }));
   const workspaceMcpImpl =
     opts.workspaceMcpImpl ??
     (async () => ({
@@ -1249,6 +1292,10 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     sessionArtifactsCalls,
     addSessionArtifactCalls,
     removeSessionArtifactCalls,
+    pinSessionArtifactCalls,
+    unpinSessionArtifactCalls,
+    fsckSessionArtifactsCalls,
+    gcSessionArtifactsCalls,
     workspaceMcpToolsCalls,
     workspaceMcpResourcesCalls,
     extensionEvents,
@@ -1417,6 +1464,30 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
         ...(context ? { context } : {}),
       });
       return removeSessionArtifactImpl(sessionId, artifactId, context);
+    },
+    async pinSessionArtifact(sessionId, artifactId, context) {
+      pinSessionArtifactCalls.push({
+        sessionId,
+        artifactId,
+        ...(context ? { context } : {}),
+      });
+      return pinSessionArtifactImpl(sessionId, artifactId, context);
+    },
+    async unpinSessionArtifact(sessionId, artifactId, context) {
+      unpinSessionArtifactCalls.push({
+        sessionId,
+        artifactId,
+        ...(context ? { context } : {}),
+      });
+      return unpinSessionArtifactImpl(sessionId, artifactId, context);
+    },
+    async fsckSessionArtifacts(sessionId) {
+      fsckSessionArtifactsCalls.push(sessionId);
+      return fsckSessionArtifactsImpl(sessionId);
+    },
+    async gcSessionArtifacts(sessionId) {
+      gcSessionArtifactsCalls.push(sessionId);
+      return gcSessionArtifactsImpl(sessionId);
     },
     async getWorkspaceMcpStatus() {
       workspaceMcpCalls += 1;
@@ -7086,7 +7157,12 @@ describe('createServeApp', () => {
 
       const res = await auth(request(app).post('/session/session-A/artifacts'))
         .set('X-Qwen-Client-Id', 'client-1')
-        .send({ title: 'Lineage', url: 'https://example.com/lineage' });
+        .send({
+          title: 'Lineage',
+          url: 'https://example.com/lineage',
+          retention: 'ephemeral',
+          clientRetained: false,
+        });
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
@@ -7105,6 +7181,8 @@ describe('createServeApp', () => {
           artifact: {
             title: 'Lineage',
             url: 'https://example.com/lineage',
+            retention: 'ephemeral',
+            clientRetained: false,
           },
           context: { clientId: 'client-1' },
         },
@@ -7171,6 +7249,96 @@ describe('createServeApp', () => {
           context: { clientId: 'client-1' },
         },
       ]);
+    });
+
+    it('POST /session/:id/artifacts/:artifactId/pin forwards mutation auth context', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).post('/session/session-A/artifacts/artifact-1/pin'),
+      ).set('X-Qwen-Client-Id', 'client-1');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        v: 1,
+        sessionId: 'session-A',
+        changes: [{ action: 'updated', artifactId: 'artifact-1' }],
+      });
+      expect(bridge.pinSessionArtifactCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          artifactId: 'artifact-1',
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('DELETE /session/:id/artifacts/:artifactId/pin forwards mutation auth context', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).delete('/session/session-A/artifacts/artifact-1/pin'),
+      ).set('X-Qwen-Client-Id', 'client-1');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({
+        v: 1,
+        sessionId: 'session-A',
+        changes: [{ action: 'updated', artifactId: 'artifact-1' }],
+      });
+      expect(bridge.unpinSessionArtifactCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          artifactId: 'artifact-1',
+          context: { clientId: 'client-1' },
+        },
+      ]);
+    });
+
+    it('GET /session/:id/artifacts/fsck returns content integrity status', async () => {
+      const bridge = fakeBridge({
+        fsckSessionArtifactsImpl: async () => ({
+          checked: 2,
+          missing: ['missing-content'],
+          hashMismatches: ['bad-hash'],
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).get('/session/session-A/artifacts/fsck'),
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        checked: 2,
+        missing: ['missing-content'],
+        hashMismatches: ['bad-hash'],
+      });
+      expect(bridge.fsckSessionArtifactsCalls).toEqual(['session-A']);
+    });
+
+    it('POST /session/:id/artifacts/gc returns content cleanup result', async () => {
+      const bridge = fakeBridge({
+        gcSessionArtifactsImpl: async () => ({
+          removed: ['orphaned'],
+          retained: ['kept'],
+        }),
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).post('/session/session-A/artifacts/gc'),
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({
+        removed: ['orphaned'],
+        retained: ['kept'],
+      });
+      expect(bridge.gcSessionArtifactsCalls).toEqual(['session-A']);
     });
   });
 

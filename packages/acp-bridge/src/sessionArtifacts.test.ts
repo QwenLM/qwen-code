@@ -14,6 +14,12 @@ import {
   SessionArtifactStore,
   SessionArtifactValidationError,
 } from './sessionArtifacts.js';
+import { SessionArtifactContentStore } from './sessionArtifactContentStore.js';
+import type {
+  RebuiltSessionArtifactSnapshot,
+  SessionArtifactEventRecordPayload,
+  SessionArtifactSnapshotRecordPayload,
+} from '@qwen-code/qwen-code-core';
 
 describe('SessionArtifactStore', () => {
   let workspace: string;
@@ -1698,5 +1704,359 @@ describe('SessionArtifactStore', () => {
         artifact: expect.objectContaining({ title: 'Third' }),
       }),
     );
+  });
+
+  it('records durable artifact events through the persistence hook', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's11-persist',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+
+    const created = await store.upsertMany(
+      [{ title: 'Durable', url: 'https://example.com/durable' }],
+      { strict: true },
+    );
+
+    expect(created.changes[0]?.artifact).toMatchObject({
+      retention: 'restorable',
+      restoreState: 'live',
+    });
+    expect(created.changes[0]?.artifact?.persistedAt).toBeDefined();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      sessionId: 's11-persist',
+      sequence: 1,
+      changes: [
+        {
+          action: 'created',
+          artifact: expect.objectContaining({
+            title: 'Durable',
+            retention: 'restorable',
+          }),
+        },
+      ],
+    });
+
+    const artifactId = created.changes[0]!.artifactId;
+    await store.remove(artifactId);
+
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      sequence: 2,
+      changes: [
+        {
+          action: 'removed',
+          artifactId,
+          reason: 'explicit',
+        },
+      ],
+    });
+  });
+
+  it('records periodic snapshots after durable artifact events', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's11-snapshot',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+
+    for (let index = 0; index < 50; index++) {
+      await store.upsertMany(
+        [
+          {
+            title: `Durable ${index}`,
+            url: `https://example.com/durable-${index}`,
+          },
+        ],
+        { strict: true },
+      );
+    }
+
+    expect(events).toHaveLength(50);
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]).toMatchObject({
+      sessionId: 's11-snapshot',
+      sequence: 51,
+      artifacts: expect.arrayContaining([
+        expect.objectContaining({
+          title: 'Durable 0',
+          retention: 'restorable',
+        }),
+        expect.objectContaining({
+          title: 'Durable 49',
+          retention: 'restorable',
+        }),
+      ]),
+    });
+    expect(snapshots[0]?.artifacts).toHaveLength(50);
+
+    await store.upsertMany(
+      [{ title: 'Durable 50', url: 'https://example.com/durable-50' }],
+      { strict: true },
+    );
+
+    expect(events).toHaveLength(51);
+    expect(snapshots).toHaveLength(1);
+    expect(events[50]).toMatchObject({ sequence: 52 });
+  });
+
+  it('downgrades non-strict durable artifacts when persistence is unavailable', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-unavailable',
+      workspaceCwd: workspace,
+    });
+
+    const result = await store.upsertMany([
+      {
+        title: 'Requested durable',
+        url: 'https://example.com/durable',
+        retention: 'restorable',
+      },
+    ]);
+
+    expect(result.warnings).toEqual([
+      'artifact persistence unavailable; durable artifacts kept ephemeral',
+    ]);
+    expect(result.changes[0]?.artifact).toMatchObject({
+      retention: 'ephemeral',
+      persistenceWarning: 'persistence_unavailable',
+    });
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          retention: 'ephemeral',
+          persistenceWarning: 'persistence_unavailable',
+        }),
+      ],
+    });
+  });
+
+  it('rolls back strict mutations when persistence fails', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-rollback',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          throw new Error('disk full');
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+
+    await expect(
+      store.upsertMany(
+        [{ title: 'Rollback', url: 'https://example.com/rollback' }],
+        { strict: true },
+      ),
+    ).rejects.toThrow('disk full');
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
+  it('restores rebuilt durable artifacts as metadata-only restored entries', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [{ title: 'Restored', url: 'https://example.com/restored' }],
+      { strict: true },
+    );
+    const persisted = events[0]!.changes[0]!.artifact!;
+    const snapshot: RebuiltSessionArtifactSnapshot = {
+      v: 2,
+      sessionId: 's11-restore',
+      sequence: 1,
+      artifacts: [persisted],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    };
+
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-restore',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          throw new Error('restore must not write records');
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+
+    await expect(restored.restore(snapshot)).resolves.toEqual([]);
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: persisted.id,
+          title: 'Restored',
+          retention: 'restorable',
+          restoreState: 'restored',
+          persistenceWarning: 'metadata_only_restore',
+        }),
+      ],
+    });
+  });
+});
+
+describe('SessionArtifactContentStore', () => {
+  let workspace: string;
+  let contentRoot: string;
+
+  beforeEach(async () => {
+    workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-artifacts-'));
+    contentRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-content-'),
+    );
+  });
+
+  afterEach(async () => {
+    await fs.rm(workspace, { recursive: true, force: true });
+    await fs.rm(contentRoot, { recursive: true, force: true });
+  });
+
+  async function workspaceArtifact(name: string, body: string) {
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'reports', name), body);
+    const store = new SessionArtifactStore({
+      sessionId: 'content-session',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [{ title: name, workspacePath: `reports/${name}` }],
+      { strict: true },
+    );
+    return (await store.list()).artifacts[0]!;
+  }
+
+  it('copies pinned workspace content with a path-safe content id', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('report.txt', 'hello');
+
+    const ref = await contentStore.pinWorkspaceFile(
+      'session/with/slash',
+      artifact,
+      workspace,
+    );
+
+    expect(ref).toMatchObject({
+      kind: 'managed_copy',
+      sha256: createHash('sha256').update('hello').digest('hex'),
+      sizeBytes: 5,
+    });
+    expect(ref!.contentId).toMatch(/^[a-f0-9]{64}-[a-f0-9]{16}$/);
+    await expect(
+      fs.readFile(path.join(contentRoot, ref!.contentId, 'content'), 'utf8'),
+    ).resolves.toBe('hello');
+    await expect(contentStore.fsck([ref!])).resolves.toEqual({
+      checked: 1,
+      missing: [],
+      hashMismatches: [],
+    });
+  });
+
+  it('reuses an existing retained content copy for repeated pins', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('repeat.txt', 'repeat');
+
+    const first = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+    const second = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+
+    expect(second.contentId).toBe(first.contentId);
+    await expect(contentStore.fsck([second])).resolves.toEqual({
+      checked: 1,
+      missing: [],
+      hashMismatches: [],
+    });
+  });
+
+  it('reports missing and hash-mismatched retained content', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('report.txt', 'hello');
+    const ref = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+
+    await fs.writeFile(path.join(contentRoot, ref.contentId, 'content'), 'bad');
+    await expect(contentStore.fsck([ref])).resolves.toMatchObject({
+      checked: 1,
+      hashMismatches: [ref.contentId],
+    });
+
+    await fs.rm(path.join(contentRoot, ref.contentId, 'content'));
+    await expect(contentStore.fsck([ref])).resolves.toMatchObject({
+      checked: 1,
+      missing: [ref.contentId],
+    });
+  });
+
+  it('garbage-collects only unreferenced content for the requested session', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const kept = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      await workspaceArtifact('kept.txt', 'kept'),
+      workspace,
+    ))!;
+    const orphaned = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      await workspaceArtifact('orphaned.txt', 'orphaned'),
+      workspace,
+    ))!;
+    const otherSession = (await contentStore.pinWorkspaceFile(
+      'other-session',
+      await workspaceArtifact('other.txt', 'other'),
+      workspace,
+    ))!;
+
+    await expect(
+      contentStore.gc('content-session', new Set([kept.contentId])),
+    ).resolves.toEqual({
+      removed: [orphaned.contentId],
+      retained: expect.arrayContaining([
+        kept.contentId,
+        otherSession.contentId,
+      ]),
+    });
+    await expect(
+      fs.access(path.join(contentRoot, orphaned.contentId)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      fs.access(path.join(contentRoot, kept.contentId)),
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(contentRoot, otherSession.contentId)),
+    ).resolves.toBeUndefined();
   });
 });
