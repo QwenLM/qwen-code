@@ -182,6 +182,7 @@ const UNSAFE_OPTION_KEYS = new Set([
   'backgroundImage',
   'brush',
   'calendar',
+  'cursor',
   'data',
   'extraCssText',
   'geo',
@@ -731,6 +732,8 @@ function applyDefaultChartStyle(
 function cloneAndSanitizeOptionForChart(
   option: EchartsFullDataOption,
 ): EchartsFullDataOption {
+  // The component is exported, so callers can pass programmatic options; clone
+  // first to strip non-JSON values before the sanitizer walks the tree.
   const cloned = JSON.parse(JSON.stringify(option)) as EchartsFullDataOption;
   const normalized = normalizeObjectDatasetFormatters(cloned);
   return sanitizeOptionForChart(normalized);

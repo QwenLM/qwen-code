@@ -280,6 +280,41 @@ describe('EchartsFullDataBlock', () => {
     ]);
   });
 
+  it('uses item tooltip trigger for item-only series', async () => {
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    await render(
+      <EchartsFullDataBlock
+        option={{
+          dataset: {
+            dimensions: ['name', 'value'],
+            source: [['Alpha', 42]],
+          },
+          xAxis: { type: 'category' },
+          yAxis: { type: 'value' },
+          series: [
+            { type: 'pie', encode: { itemName: 'name', value: 'value' } },
+          ],
+        }}
+        theme="dark"
+        loadEcharts={() => runtime}
+      />,
+    );
+    await flushChart();
+
+    const renderedOption = setOption.mock.calls[0]?.[0] as {
+      tooltip?: { trigger?: string };
+    };
+    expect(renderedOption.tooltip?.trigger).toBe('item');
+  });
+
   it('keeps legacy ECharts option block bodies compatible', async () => {
     const setOption = vi.fn();
     const runtime: EchartsRuntime = {
@@ -1335,6 +1370,55 @@ describe('EchartsFullDataBlock', () => {
     }
   });
 
+  it('falls back to window resize listener when ResizeObserver is unavailable', async () => {
+    const originalResizeObserver = globalThis.ResizeObserver;
+    const addEventListener = vi.spyOn(window, 'addEventListener');
+    const removeEventListener = vi.spyOn(window, 'removeEventListener');
+    globalThis.ResizeObserver = undefined as unknown as typeof ResizeObserver;
+    const option: EchartsFullDataOption = {
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [{ day: 'Mon', orders: 120 }],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+    };
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption: vi.fn(),
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+    const tree = (nextOption?: EchartsFullDataOption) => (
+      <I18nProvider language="en">
+        <EchartsFullDataBlock
+          option={nextOption}
+          theme="dark"
+          loadEcharts={() => runtime}
+        />
+      </I18nProvider>
+    );
+
+    try {
+      const { rerender } = await mount(tree(option));
+      await flushChart();
+
+      expect(
+        addEventListener.mock.calls.filter(([type]) => type === 'resize'),
+      ).toHaveLength(1);
+
+      await rerender(tree(undefined));
+
+      expect(
+        removeEventListener.mock.calls.filter(([type]) => type === 'resize'),
+      ).toHaveLength(1);
+    } finally {
+      globalThis.ResizeObserver = originalResizeObserver;
+    }
+  });
+
   it('reports synchronous loader failures inside the chart card', async () => {
     const consoleError = vi
       .spyOn(console, 'error')
@@ -1438,6 +1522,44 @@ describe('EchartsFullDataBlock', () => {
     );
   });
 
+  it('reports chart option sanitization failures inside the chart card', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await render(
+      <EchartsFullDataBlock
+        option={
+          {
+            dataset: {
+              dimensions: ['value'],
+              source: [[BigInt(1)]],
+            },
+            series: [{ type: 'bar' }],
+          } as unknown as EchartsFullDataOption
+        }
+        theme="dark"
+        loadEcharts={() => runtime}
+      />,
+    );
+    await flushChart();
+
+    expect(container.textContent).toContain('BigInt');
+    expect(setOption).not.toHaveBeenCalled();
+    expect(consoleError).toHaveBeenCalledWith(
+      '[web-shell] echarts-fulldata render failed:',
+      expect.any(TypeError),
+    );
+  });
+
   it('recovers from chart errors after option changes', async () => {
     const consoleError = vi
       .spyOn(console, 'error')
@@ -1515,6 +1637,7 @@ describe('EchartsFullDataBlock', () => {
   it('sanitizes unsafe chart option fields before calling ECharts', async () => {
     const unsafeSeriesEntry: Record<string, unknown> = {
       type: 'line',
+      cursor: 'url(https://example.test/ping), auto',
       datasetIndex: 1,
       data: [120, 999],
       href: 'javascript:alert(1)',
@@ -1604,6 +1727,7 @@ describe('EchartsFullDataBlock', () => {
       };
       xAxis?: { data?: unknown };
       series?: Array<{
+        cursor?: unknown;
         data?: unknown;
         datasetIndex?: unknown;
         href?: unknown;
@@ -1648,6 +1772,7 @@ describe('EchartsFullDataBlock', () => {
       }),
     );
     expect(renderedOption.xAxis?.data).toBeUndefined();
+    expect(renderedOption.series?.[0]?.cursor).toBeUndefined();
     expect(renderedOption.series?.[0]?.data).toBeUndefined();
     expect(renderedOption.series?.[0]?.datasetIndex).toBe(1);
     expect(renderedOption.series?.[0]?.href).toBeUndefined();
