@@ -159,9 +159,8 @@ describe('shouldFilterSuggestion', () => {
     expect(shouldFilterSuggestion('Run the tests. Then commit.')).toBe(true);
     expect(shouldFilterSuggestion('Hello! How are you?')).toBe(true);
     expect(shouldFilterSuggestion('Do this. Then do that.')).toBe(true);
-    expect(shouldFilterSuggestion('Review options etc. Then commit.')).toBe(
-      true,
-    );
+    // Abbreviation skipped, then real sentence boundary detected
+    expect(shouldFilterSuggestion('Check Dr. Smith. Then commit.')).toBe(true);
   });
 
   it('does not filter abbreviations as multiple sentences', () => {
@@ -178,9 +177,13 @@ describe('shouldFilterSuggestion', () => {
     expect(shouldFilterSuggestion('Talk to Ms. Patel next')).toBe(false);
     expect(shouldFilterSuggestion('See Prof. Lee today')).toBe(false);
     expect(shouldFilterSuggestion('Visit St. Petersburg office')).toBe(false);
-    expect(shouldFilterSuggestion('Review the etc. items')).toBe(false);
+    expect(shouldFilterSuggestion('Check etc. Tasks remaining')).toBe(false);
+    expect(shouldFilterSuggestion('Review options etc. Then commit')).toBe(
+      false,
+    );
     // Latin shorthands with an internal period
     expect(shouldFilterSuggestion('Use e.g. Docker to build')).toBe(false);
+    expect(shouldFilterSuggestion('Use i.e. Docker to build')).toBe(false);
   });
 
   it('filters formatting', () => {

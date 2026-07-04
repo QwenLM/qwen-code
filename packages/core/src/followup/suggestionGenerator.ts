@@ -238,7 +238,7 @@ const ALLOWED_SINGLE_WORDS = new Set([
   'no',
 ]);
 
-const ABBREV_HONORIFICS = new Set([
+const KNOWN_ABBREVIATIONS = new Set([
   'Mr',
   'Mrs',
   'Dr',
@@ -248,6 +248,7 @@ const ABBREV_HONORIFICS = new Set([
   'Jr',
   'St',
   'vs',
+  'etc',
 ]);
 
 const SENTENCE_BOUNDARY_RE = /[.!?]\s+[A-Z]/g;
@@ -259,7 +260,7 @@ function hasSentenceBoundary(suggestion: string): boolean {
     const wordMatch = before.match(/(\w+)$/);
     if (!wordMatch) return true;
     const word = wordMatch[1];
-    if (ABBREV_HONORIFICS.has(word)) continue;
+    if (KNOWN_ABBREVIATIONS.has(word)) continue;
     if (
       (word === 'g' && /e\.g$/.test(before)) ||
       (word === 'e' && /i\.e$/.test(before))
