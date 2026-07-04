@@ -701,8 +701,18 @@ export async function runNonInteractive(
               });
               return 1;
             }
-            case 'no_command':
-              break;
+            case 'no_command': {
+              const typedCommand =
+                input.trim().substring(1).trim().split(/\s+/)[0] ?? '';
+              await emitNonInteractiveFinalMessage({
+                message: `Unknown command: /${typedCommand}. Type /help to see available commands.`,
+                isError: true,
+                adapter,
+                config,
+                startTimeMs: startTime,
+              });
+              return 1;
+            }
             default: {
               const _exhaustive: never = slashCommandResult;
               throw new FatalInputError(

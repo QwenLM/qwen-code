@@ -366,8 +366,7 @@ export const handleSlashCommand = async (
 
   // Load the full command set (unfiltered by the denylist) so that the
   // fallback existence check below can distinguish a disabled command from a
-  // truly unknown one. Without this, a disabled command would fall through to
-  // `no_command` and be forwarded to the model as plain prompt text.
+  // truly unknown one.
   const allCommandService = await CommandService.create(
     allLoaders,
     abortController.signal,

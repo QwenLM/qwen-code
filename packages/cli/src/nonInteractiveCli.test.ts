@@ -1910,38 +1910,23 @@ describe('runNonInteractive', () => {
     );
   });
 
-  it('should treat an unknown slash command as a regular prompt', async () => {
+  it('should return an error for unknown slash commands', async () => {
     setupMetricsMock();
     // No commands are mocked, so any slash command is "unknown"
     mockGetCommands.mockReturnValue([]);
 
-    const events: ServerGeminiStreamEvent[] = [
-      { type: GeminiEventType.Content, value: 'Response to unknown' },
-      {
-        type: GeminiEventType.Finished,
-        value: { reason: undefined, usageMetadata: { totalTokenCount: 5 } },
-      },
-    ];
-    mockGeminiClient.sendMessageStream.mockReturnValue(
-      createStreamFromEvents(events),
-    );
-
-    await runNonInteractive(
+    const exitCode = await runNonInteractive(
       mockConfig,
       mockSettings,
-      '/unknowncommand',
+      '/unknowncommand arg1',
       'prompt-id-unknown',
     );
 
-    // Ensure the raw input is sent to the model
-    expect(mockGeminiClient.sendMessageStream).toHaveBeenCalledWith(
-      [{ text: '/unknowncommand' }],
-      expect.any(AbortSignal),
-      'prompt-id-unknown',
-      { type: SendMessageType.UserQuery },
+    expect(exitCode).toBe(1);
+    expect(mockGeminiClient.sendMessageStream).not.toHaveBeenCalled();
+    expect(processStderrSpy).toHaveBeenCalledWith(
+      'Unknown command: /unknowncommand. Type /help to see available commands.\n',
     );
-
-    expect(processStdoutSpy).toHaveBeenCalledWith('Response to unknown\n');
   });
 
   it('should handle known but unsupported slash commands like /help by returning early', async () => {
