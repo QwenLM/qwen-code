@@ -1155,7 +1155,10 @@ export function useAtMentionMenu({
         (current.to === parsed.to ||
           (current.inputMode === 'search' && parsed.to >= current.to) ||
           (current.inputMode === 'context' && parsed.to >= current.to)) &&
-        current.selectedProviderId !== undefined;
+        current.selectedProviderId !== undefined &&
+        providerViewsRef.current.some(
+          (provider) => provider.id === current.selectedProviderId,
+        );
       if (keepItemsLevel) {
         if (!current.selectedProviderId) return true;
         const providerId: string = current.selectedProviderId;
