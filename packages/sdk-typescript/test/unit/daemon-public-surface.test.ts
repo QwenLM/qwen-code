@@ -61,6 +61,12 @@ import type {
   DaemonSessionUpdateData,
   DaemonSessionUpdateEvent,
   DaemonSessionViewState,
+  DaemonStatusReport,
+  DaemonStatusReportDetail,
+  DaemonStatusReportIssue,
+  DaemonStatusReportLevel,
+  DaemonStatusReportSection,
+  DaemonStatusReportSession,
   DaemonStreamErrorData,
   DaemonStreamErrorEvent,
   DaemonStreamLifecycleEvent,
@@ -227,6 +233,14 @@ describe('public SDK entry — typed daemon event surface (#4217)', () => {
     expectTypeOf<DaemonSessionRecapResult>().not.toBeNever();
     expectTypeOf<DaemonLspServerStatus>().not.toBeNever();
     expectTypeOf<DaemonSessionLspStatus>().not.toBeNever();
+    // `GET /daemon/status` report surface (PR 5174 client coverage): the
+    // envelope plus the sub-shapes UI dashboards need to type against.
+    expectTypeOf<DaemonStatusReport>().not.toBeNever();
+    expectTypeOf<DaemonStatusReportDetail>().not.toBeNever();
+    expectTypeOf<DaemonStatusReportIssue>().not.toBeNever();
+    expectTypeOf<DaemonStatusReportLevel>().not.toBeNever();
+    expectTypeOf<DaemonStatusReportSection>().not.toBeNever();
+    expectTypeOf<DaemonStatusReportSession>().not.toBeNever();
   });
 
   it('exposes the PR 21 auth device-flow surface at the public entry', () => {

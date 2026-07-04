@@ -30,6 +30,8 @@ import {
   getComposerTagLabel,
   getComposerTagValue,
 } from '../hooks/useComposerCore';
+import { cssUrlVar } from '../utils/cssUrlVar';
+import { getComposerTagIconUrl } from './composerTagIcons';
 import { ModeIcon } from './ModeIcon';
 import { planSlashSectionRows } from '../utils/slashSectionPlan';
 import { getModelDisplayName } from '../utils/modelDisplay';
@@ -1249,13 +1251,22 @@ export const ChatEditor = memo(
     } = core.searchState;
 
     const renderComposerTagContent = (tag: WebShellComposerTag) => {
-      const tagLabel = getComposerTagLabel(tag);
+      const rawTagLabel = getComposerTagLabel(tag);
       const tagValue = getComposerTagValue(tag);
+      const tagLabel = tag.kind ? '' : rawTagLabel;
+      const iconUrl = getComposerTagIconUrl(tag.kind);
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{tag.id}</span>;
       }
       return (
         <>
+          {iconUrl && (
+            <span
+              className={styles.tagIcon}
+              style={cssUrlVar('--composer-tag-icon-url', iconUrl)}
+              aria-hidden="true"
+            />
+          )}
           {tagLabel && <span className={styles.tagLabel}>{tagLabel}</span>}
           {tagValue && <span className={styles.tagValue}>{tagValue}</span>}
         </>

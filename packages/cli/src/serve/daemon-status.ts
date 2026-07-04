@@ -170,6 +170,11 @@ interface DaemonStatusRuntime {
     rejectedSinceStart: Record<RateLimitTier, number>;
   };
   perf?: DaemonPerfSnapshot;
+  activity: {
+    activePrompts: number;
+    lastActivityAt: string | null;
+    idleSinceMs: number | null;
+  };
   process: NodeJS.MemoryUsage;
 }
 
@@ -239,6 +244,7 @@ export async function buildDaemonStatusResponse(
   input: BuildDaemonStatusOptions,
 ): Promise<DaemonStatusResponse> {
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
+  const lastActivity = input.bridge.lastActivityAt ?? null;
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
   const channelWorker = input.getChannelWorkerSnapshot?.() ?? {
@@ -336,6 +342,12 @@ export async function buildDaemonStatusResponse(
         rejectedSinceStart: rateLimitHits,
       },
       ...(input.getPerfSnapshot ? { perf: input.getPerfSnapshot() } : {}),
+      activity: {
+        activePrompts: input.bridge.activePromptCount ?? 0,
+        lastActivityAt:
+          lastActivity !== null ? new Date(lastActivity).toISOString() : null,
+        idleSinceMs: lastActivity !== null ? Date.now() - lastActivity : null,
+      },
       process: process.memoryUsage(),
     },
     ...(full ? { full } : {}),
@@ -669,7 +681,33 @@ function summarizeStatusData(data: unknown): SectionSummary {
     }
   }
 
+  summarizeMcpServers(data, summary);
+
   return summary;
+}
+
+function summarizeMcpServers(
+  data: StatusRecord,
+  summary: SectionSummary,
+): void {
+  const servers = data['servers'];
+  if (!Array.isArray(servers)) return;
+  let connected = 0;
+  let errored = 0;
+  let disabled = 0;
+  for (const server of servers) {
+    if (!isRecord(server)) continue;
+    if (server['disabled'] === true) {
+      disabled++;
+    } else if (server['status'] === 'error') {
+      errored++;
+    } else if (server['mcpStatus'] === 'connected') {
+      connected++;
+    }
+  }
+  summary['serversConnected'] = connected;
+  summary['serversErrored'] = errored;
+  summary['serversDisabled'] = disabled;
 }
 
 function collectStatuses(data: unknown): string[] {

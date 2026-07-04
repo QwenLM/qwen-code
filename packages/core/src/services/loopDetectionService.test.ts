@@ -15,7 +15,10 @@ import type {
 import { GeminiEventType } from '../core/turn.js';
 import * as loggers from '../telemetry/loggers.js';
 import { LoopType } from '../telemetry/types.js';
-import { LoopDetectionService } from './loopDetectionService.js';
+import {
+  DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+  LoopDetectionService,
+} from './loopDetectionService.js';
 
 vi.mock('../telemetry/loggers.js', () => ({
   logLoopDetected: vi.fn(),
@@ -31,16 +34,21 @@ const FILE_READ_WINDOW = 15;
 const GLOBAL_DUPLICATE_THRESHOLD = 6;
 const SHELL_COMMAND_STAGNATION_THRESHOLD = 8;
 const ALTERNATING_PATTERN_CYCLES = 3;
-const TURN_TOOL_CALL_CAP = 100;
 
 describe('LoopDetectionService', () => {
   let service: LoopDetectionService;
   let mockConfig: Config;
 
-  beforeEach(() => {
-    mockConfig = {
+  // getMaxToolCallsPerTurn mimics the real Config getter, which always
+  // returns an effective cap (default applied, <= 0 resolved to Infinity).
+  const makeConfig = (cap: number = DEFAULT_MAX_TOOL_CALLS_PER_TURN): Config =>
+    ({
       getTelemetryEnabled: () => true,
-    } as unknown as Config;
+      getMaxToolCallsPerTurn: () => cap,
+    }) as unknown as Config;
+
+  beforeEach(() => {
+    mockConfig = makeConfig();
     service = new LoopDetectionService(mockConfig);
     vi.clearAllMocks();
   });
@@ -1366,6 +1374,17 @@ describe('LoopDetectionService', () => {
   });
 
   describe('Turn Tool Call Cap (Always-On Circuit Breaker)', () => {
+    // The cap is configurable via model.maxToolCallsPerTurn; the service
+    // reads the resolved Config getter with no fallback of its own, so the
+    // pinned mock below is the single source of the cap in these tests.
+    const TURN_TOOL_CALL_CAP = 100;
+    let capConfig: Config;
+
+    beforeEach(() => {
+      capConfig = makeConfig(TURN_TOOL_CALL_CAP);
+      service = new LoopDetectionService(capConfig);
+    });
+
     it('should not fire when total calls are below the cap', () => {
       service.reset('');
       for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
@@ -1390,7 +1409,7 @@ describe('LoopDetectionService', () => {
       expect(loggers.logLoopDetected).toHaveBeenCalledTimes(1);
       // The turn cap reports its own loop type, not consecutive-identical.
       expect(loggers.logLoopDetected).toHaveBeenCalledWith(
-        mockConfig,
+        capConfig,
         expect.objectContaining({
           loop_type: 'turn_tool_call_cap',
         }),
@@ -1398,22 +1417,49 @@ describe('LoopDetectionService', () => {
       expect(service.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
     });
 
-    it('should fire regardless of disabledForSession', () => {
+    it('fires at the built-in default cap (the resolved getter value)', () => {
+      const svc = new LoopDetectionService(mockConfig);
+      svc.reset('');
+      for (let i = 0; i < DEFAULT_MAX_TOOL_CALLS_PER_TURN; i++) {
+        expect(
+          svc.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i })),
+        ).toBe(false);
+      }
+      expect(
+        svc.checkAlwaysOnSafeties(
+          createToolCallRequestEvent('t', { last: true }),
+        ),
+      ).toBe(true);
+      expect(svc.getLastLoopType()).toBe(LoopType.TURN_TOOL_CALL_CAP);
+    });
+
+    it('never fires when the cap is disabled (Config resolves <= 0 to Infinity)', () => {
+      const svc = new LoopDetectionService(
+        makeConfig(Number.POSITIVE_INFINITY),
+      );
+      svc.reset('');
+      for (let i = 0; i < DEFAULT_MAX_TOOL_CALLS_PER_TURN + 50; i++) {
+        expect(
+          svc.checkAlwaysOnSafeties(createToolCallRequestEvent('t', { i })),
+        ).toBe(false);
+      }
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
+    });
+
+    it('does not fire after loop detection is disabled for the session', () => {
+      // The dialog's "Disable loop detection for this session" must suppress
+      // the cap too — the user's explicit choice outranks the circuit breaker
+      // (it used to fire regardless, contradicting the dialog text).
       service.reset('');
       service.disableForSession();
-      // disableForSession prevents heuristic checks, but not the turn cap
-      for (let i = 0; i < TURN_TOOL_CALL_CAP; i++) {
-        service.checkAlwaysOnSafeties(
-          createToolCallRequestEvent('any_tool', { i }),
-        );
+      for (let i = 0; i < TURN_TOOL_CALL_CAP + 10; i++) {
+        expect(
+          service.checkAlwaysOnSafeties(
+            createToolCallRequestEvent('any_tool', { i }),
+          ),
+        ).toBe(false);
       }
-      const isLoop = service.checkAlwaysOnSafeties(
-        createToolCallRequestEvent('any_tool', { extra: true }),
-      );
-      // disabledForSession blocks non-ToolCallRequest events in
-      // checkAlwaysOnSafeties, but this IS a ToolCallRequest so the cap
-      // still fires.
-      expect(isLoop).toBe(true);
+      expect(loggers.logLoopDetected).not.toHaveBeenCalled();
     });
 
     const retryEvent = {

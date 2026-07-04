@@ -141,6 +141,14 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async loadDaemonStatus(detail) {
+      const client = requireClient(getClient, 'Load daemon status failed');
+      return withActionTimeout(
+        client.daemonStatus(detail),
+        'Load daemon status timed out',
+      );
+    },
+
     async loadSkillsStatus() {
       const client = requireClient(getClient, 'Load skills failed');
       return withActionTimeout(
