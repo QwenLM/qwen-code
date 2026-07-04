@@ -493,12 +493,13 @@ export class WeComChannel extends ChannelBase {
   }
 
   protected override onPromptBufferDropped(
-    _sessionId: string,
+    sessionId: string,
     messageIds: string[],
   ): void {
     for (const messageId of messageIds) {
       this.cleanupAttachmentDirsForMessage(messageId);
     }
+    this.cleanupUntrackedAttachmentDirsForSession(sessionId);
   }
 
   protected override onPromptEnd(
@@ -516,6 +517,7 @@ export class WeComChannel extends ChannelBase {
       for (const coalescedMessageId of coalescedMessageIds) {
         this.cleanupAttachmentDirsForMessage(coalescedMessageId);
       }
+      this.cleanupUntrackedAttachmentDirsForSession(sessionId);
       return;
     }
     this.cleanupAttachmentDirsForMessage(messageId);
@@ -559,6 +561,24 @@ export class WeComChannel extends ChannelBase {
     this.attachmentDirsBySession.delete(sessionId);
     this.removeAttachmentDirsFromMessages(dirs);
     cleanupAttachmentDirs(dirs);
+  }
+
+  private cleanupUntrackedAttachmentDirsForSession(sessionId: string): void {
+    const dirs = this.attachmentDirsBySession.get(sessionId);
+    if (!dirs) return;
+    const trackedDirs = new Set<string>();
+    for (const messageDirs of this.attachmentDirsByMessage.values()) {
+      for (const dir of messageDirs) trackedDirs.add(dir);
+    }
+    const untrackedDirs = dirs.filter((dir) => !trackedDirs.has(dir));
+    if (untrackedDirs.length === 0) return;
+    const remainingDirs = dirs.filter((dir) => trackedDirs.has(dir));
+    if (remainingDirs.length > 0) {
+      this.attachmentDirsBySession.set(sessionId, remainingDirs);
+    } else {
+      this.attachmentDirsBySession.delete(sessionId);
+    }
+    cleanupAttachmentDirs(untrackedDirs);
   }
 
   private rememberUntrackedDirsForSession(sessionId: string): void {

@@ -2397,6 +2397,72 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
   });
 
+  it('removes no-message-id attachments from a coalesced collect prompt', async () => {
+    const bridge = makeBridge();
+    let finishFirst: (() => void) | undefined;
+    let finishSecond: (() => void) | undefined;
+    (bridge.prompt as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishFirst = () => resolve('');
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishSecond = () => resolve('');
+          }),
+      );
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ dispatchMode: 'collect' }),
+      bridge,
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgid: 'msg-active',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'active.txt',
+      },
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+    client.emit('message.file', {
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'untracked.txt',
+      },
+    });
+    client.emit('message.file', {
+      msgid: 'msg-buffered',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'buffered.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(3));
+
+    finishFirst?.();
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+    finishSecond?.();
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
+  });
+
   it('keeps buffered attachment files until their coalesced prompt runs', async () => {
     const bridge = makeBridge();
     let finishFirst: (() => void) | undefined;
