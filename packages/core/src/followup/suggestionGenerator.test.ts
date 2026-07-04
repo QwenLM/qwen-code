@@ -159,6 +159,9 @@ describe('shouldFilterSuggestion', () => {
     expect(shouldFilterSuggestion('Run the tests. Then commit.')).toBe(true);
     expect(shouldFilterSuggestion('Hello! How are you?')).toBe(true);
     expect(shouldFilterSuggestion('Do this. Then do that.')).toBe(true);
+    expect(shouldFilterSuggestion('Review options etc. Then commit.')).toBe(
+      true,
+    );
   });
 
   it('does not filter abbreviations as multiple sentences', () => {

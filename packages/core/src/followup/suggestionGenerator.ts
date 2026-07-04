@@ -238,14 +238,37 @@ const ALLOWED_SINGLE_WORDS = new Set([
   'no',
 ]);
 
-/**
- * Abbreviations whose trailing period should not look like a sentence boundary.
- * The negative lookbehind skips common honorifics, abbreviations, and Latin
- * shorthands (e.g., i.e.) so that "Dr. Smith" or "Weeds vs. Wildflowers" is
- * not mistaken for two sentences.
- */
-const MULTIPLE_SENTENCES_RE =
-  /(?<!\b(?:vs|Mr|Mrs|Dr|Ms|Prof|Sr|Jr|St|etc|eg|ie|e\.g|i\.e))[.!?]\s+[A-Z]/;
+const ABBREV_HONORIFICS = new Set([
+  'Mr',
+  'Mrs',
+  'Dr',
+  'Ms',
+  'Prof',
+  'Sr',
+  'Jr',
+  'St',
+  'vs',
+]);
+
+const SENTENCE_BOUNDARY_RE = /[.!?]\s+[A-Z]/g;
+
+function hasSentenceBoundary(suggestion: string): boolean {
+  for (const m of suggestion.matchAll(SENTENCE_BOUNDARY_RE)) {
+    const i = m.index!;
+    const before = suggestion.slice(0, i);
+    const wordMatch = before.match(/(\w+)$/);
+    if (!wordMatch) return true;
+    const word = wordMatch[1];
+    if (ABBREV_HONORIFICS.has(word)) continue;
+    if (
+      (word === 'g' && /e\.g$/.test(before)) ||
+      (word === 'e' && /i\.e$/.test(before))
+    )
+      continue;
+    return true;
+  }
+  return false;
+}
 
 /**
  * Returns the filter reason if the suggestion should be suppressed, or null if it passes.
@@ -307,7 +330,7 @@ export function getFilterReason(suggestion: string): string | null {
     if (suggestion.length > 30) return 'too_many_words';
   }
   if (suggestion.length >= 100) return 'too_long';
-  if (MULTIPLE_SENTENCES_RE.test(suggestion)) return 'multiple_sentences';
+  if (hasSentenceBoundary(suggestion)) return 'multiple_sentences';
   if (/[\n*]|\*\*/.test(suggestion)) return 'has_formatting';
 
   if (
