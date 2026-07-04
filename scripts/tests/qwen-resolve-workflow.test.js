@@ -65,6 +65,20 @@ describe('qwen resolve workflow', () => {
     );
   });
 
+  it('cancels in-flight lifecycle reviews when the PR closes', () => {
+    const concurrencyStart = workflow.indexOf('\nconcurrency:');
+    const concurrency = workflow.slice(
+      concurrencyStart,
+      workflow.indexOf('\njobs:', concurrencyStart),
+    );
+
+    expect(workflow).toContain("- 'closed'");
+    expect(concurrency).toContain("github.event.action == 'closed'");
+    expect(concurrency).toContain(
+      "format('qwen-pr-review-pr-{0}', github.event.pull_request.number)",
+    );
+  });
+
   it('listens for /resolve comments', () => {
     expect(workflow).toContain(
       "github.event.comment.body == '@qwen-code /resolve'",
@@ -178,6 +192,12 @@ describe('qwen resolve workflow', () => {
       : workflow.slice(resolveJobStart, resolveJobStart + 1 + nextJob);
   const reviewJob = job(workflow, 'review-pr');
   const authorizeJob = job(workflow, 'authorize');
+  const precheckJob = job(workflow, 'precheck-pr');
+
+  it('keeps closed PR events from running precheck or authorize jobs', () => {
+    expect(precheckJob).toContain("github.event.action != 'closed'");
+    expect(authorizeJob).toContain("github.event.action != 'closed'");
+  });
 
   it('does not require fork PR authors to have write permission for automatic review', () => {
     const authorizeStep = step(
