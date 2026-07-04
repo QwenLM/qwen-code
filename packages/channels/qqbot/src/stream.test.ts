@@ -166,6 +166,10 @@ async function drain() {
   await Promise.resolve();
   await Promise.resolve();
   await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
 }
 
 // ────────────────────────────────────────────────────────────────

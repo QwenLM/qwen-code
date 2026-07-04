@@ -510,7 +510,9 @@ export class QQChannel extends ChannelBase {
         );
         if (this.pendingStreamDelete.has(sessionId)) {
           this.pendingStreamDelete.delete(sessionId);
-          this.streamState.delete(sessionId);
+          if (this.streamState.get(sessionId) === state && !state.buffer) {
+            this.streamState.delete(sessionId);
+          }
         } else {
           const current = this.streamState.get(sessionId);
           if (current) {
@@ -544,13 +546,23 @@ export class QQChannel extends ChannelBase {
         this.flushedSessions.add(event.sessionId);
         if (this.pendingStreamDelete.has(event.sessionId)) {
           this.pendingStreamDelete.delete(event.sessionId);
-          this.streamState.delete(event.sessionId);
+          if (
+            this.streamState.get(event.sessionId) === state &&
+            !state.buffer
+          ) {
+            this.streamState.delete(event.sessionId);
+          }
         }
       })
       .catch((e: unknown) => {
         if (this.pendingStreamDelete.has(event.sessionId)) {
           this.pendingStreamDelete.delete(event.sessionId);
-          this.streamState.delete(event.sessionId);
+          if (
+            this.streamState.get(event.sessionId) === state &&
+            !state.buffer
+          ) {
+            this.streamState.delete(event.sessionId);
+          }
         } else {
           state.buffer = buffer + (state.buffer || '');
           const reconnectId2 = this._reconnectId;
