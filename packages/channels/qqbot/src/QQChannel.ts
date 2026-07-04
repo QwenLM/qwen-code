@@ -150,7 +150,7 @@ export class QQChannel extends ChannelBase {
   > = new Map();
   private flushingSessions: Set<string> = new Set();
   private pendingStreamDelete: Set<string> = new Set();
-  private _reconnectId: number = 0;
+  private reconnectId: number = 0;
   private blockStreaming: boolean = false;
   private flushedSessions: Set<string> = new Set();
   private readonly qqStatePath: string;
@@ -200,7 +200,7 @@ export class QQChannel extends ChannelBase {
 
   async connect(): Promise<void> {
     this.disposed = false;
-    this._reconnectId++;
+    this.reconnectId++;
     if (!this.config.instructions) {
       this.config.instructions = [
         '## QQ Bot Channel',
@@ -465,7 +465,7 @@ export class QQChannel extends ChannelBase {
     this.pendingStreamDelete.clear();
     this.flushedSessions.clear();
     this.seenMessages.clear();
-    this._reconnectId++;
+    this.reconnectId++;
   }
 
   /**
@@ -512,11 +512,11 @@ export class QQChannel extends ChannelBase {
       if (state.buffer.length >= QQChannel.MAX_BUFFER_LENGTH) {
         const buf = state.buffer;
         state.buffer = '';
-        this.flushAndTrack(sessionId, chatId, buf, state, 'idleFlush');
+        this.flushAndTrack(sessionId, buf, state, 'idleFlush');
         return;
       }
     }
-    const reconnectId = this._reconnectId;
+    const reconnectId = this.reconnectId;
     state.timer = setTimeout(() => {
       this.idleFlush(sessionId, reconnectId);
     }, QQChannel.IDLE_FLUSH_MS);
@@ -524,13 +524,13 @@ export class QQChannel extends ChannelBase {
   }
 
   private idleFlush(sessionId: string, reconnectId: number): void {
-    if (this._reconnectId !== reconnectId) return;
+    if (this.reconnectId !== reconnectId) return;
     const state = this.streamState.get(sessionId);
     if (!state || !state.buffer) return;
     if (this.flushingSessions.has(sessionId)) {
       // Another send is in-flight — re-schedule idle timer so we retry later
       if (!state.timer) {
-        const retryReconnectId = this._reconnectId;
+        const retryReconnectId = this.reconnectId;
         state.timer = setTimeout(() => {
           this.idleFlush(sessionId, retryReconnectId);
         }, QQChannel.IDLE_FLUSH_MS);
@@ -541,7 +541,7 @@ export class QQChannel extends ChannelBase {
     const buffer = state.buffer;
     state.buffer = '';
     state.timer = null; // Clear expired one-shot timer reference
-    this.flushAndTrack(sessionId, state.chatId, buffer, state, 'idleFlush');
+    this.flushAndTrack(sessionId, buffer, state, 'idleFlush');
   }
 
   /**
@@ -551,7 +551,6 @@ export class QQChannel extends ChannelBase {
    */
   private flushAndTrack(
     sessionId: string,
-    chatId: string,
     buffer: string,
     state: {
       chatId: string;
@@ -566,7 +565,7 @@ export class QQChannel extends ChannelBase {
     // rejecting, so .then() may fire even when the send didn't actually
     // succeed. Fixing this requires sendMessage to propagate HTTP errors
     // (upstream issue). The .catch() path below handles network-level errors.
-    this.sendMessage(chatId, buffer)
+    this.sendMessage(state.chatId, buffer)
       .then(() => {
         // #3: Guard — if session died during in-flight send, touch nothing
         const current = this.streamState.get(sessionId);
@@ -576,16 +575,12 @@ export class QQChannel extends ChannelBase {
 
         if (this.pendingStreamDelete.has(sessionId)) {
           this.pendingStreamDelete.delete(sessionId);
-          // #4: Schedule another idleFlush when content arrived during send
+          // #2: Flush immediately — idle timer would add unnecessary delay
           const s = this.streamState.get(sessionId);
           if (s === state && s.buffer) {
-            // Don't clear buffer or retryCount — idleFlush will pick them up
-            const reconnectId = this._reconnectId;
-            if (s.timer) clearTimeout(s.timer);
-            s.timer = setTimeout(() => {
-              this.idleFlush(sessionId, reconnectId);
-            }, QQChannel.IDLE_FLUSH_MS);
-            s.timer.unref?.();
+            // Don't clear buffer or retryCount — idleFlush will pick them up.
+            // idleFlush has flushingSessions guard so this is safe.
+            this.idleFlush(sessionId, this.reconnectId);
             return;
           }
         }
@@ -598,7 +593,7 @@ export class QQChannel extends ChannelBase {
       })
       .catch((e: unknown) => {
         process.stderr.write(
-          `[QQ:${this.name}] ${logLabel} send failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+          `[QQ:${this.name}] ${logLabel} send failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}`,
         );
         // #1: Never undo previously-succeeded flush records on failure
 
@@ -610,7 +605,7 @@ export class QQChannel extends ChannelBase {
             current.buffer = buffer;
             current.retryCount++;
             if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
-              const reconnectId = this._reconnectId;
+              const reconnectId = this.reconnectId;
               const delay =
                 current.retryCount > 1
                   ? QQChannel.IDLE_FLUSH_BACKOFF_MS
@@ -624,7 +619,7 @@ export class QQChannel extends ChannelBase {
               // #2: Clean up flushedSessions on retry exhaustion
               this.flushedSessions.delete(sessionId);
               process.stderr.write(
-                `[QQ:${this.name}] ${logLabel} retries exhausted for ${sanitizeLogText(sessionId, 64)}\n`,
+                `[QQ:${this.name}] ${logLabel} retries exhausted for ${sanitizeLogText(sessionId, 64)}`,
               );
             }
           }
@@ -634,10 +629,17 @@ export class QQChannel extends ChannelBase {
           // #6: Identity guard — only operate on the same state reference
           if (current === state) {
             current.buffer = buffer + (current.buffer || '');
+            // #3: If re-buffer exceeds max length, flush immediately
+            if (current.buffer.length >= QQChannel.MAX_BUFFER_LENGTH) {
+              const buf = current.buffer;
+              current.buffer = '';
+              this.flushAndTrack(sessionId, buf, state, logLabel);
+              return;
+            }
             current.retryCount++;
             if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
               if (!current.timer) {
-                const reconnectId = this._reconnectId;
+                const reconnectId = this.reconnectId;
                 const delay =
                   current.retryCount > 1
                     ? QQChannel.IDLE_FLUSH_BACKOFF_MS
@@ -652,14 +654,18 @@ export class QQChannel extends ChannelBase {
               // #2: Clean up flushedSessions on retry exhaustion
               this.flushedSessions.delete(sessionId);
               process.stderr.write(
-                `[QQ:${this.name}] ${logLabel} retries exhausted for ${sanitizeLogText(sessionId, 64)}\n`,
+                `[QQ:${this.name}] ${logLabel} retries exhausted for ${sanitizeLogText(sessionId, 64)}`,
               );
             }
           }
         }
       })
       .finally(() => {
-        this.flushingSessions.delete(sessionId);
+        // #1: Identity guard — only delete if no new state replaced us
+        const current = this.streamState.get(sessionId);
+        if (!current || current === state) {
+          this.flushingSessions.delete(sessionId);
+        }
       });
   }
 
@@ -673,13 +679,7 @@ export class QQChannel extends ChannelBase {
     }
     const buffer = state.buffer;
     state.buffer = '';
-    this.flushAndTrack(
-      event.sessionId,
-      state.chatId,
-      buffer,
-      state,
-      'toolCallFlush',
-    );
+    this.flushAndTrack(event.sessionId, buffer, state, 'toolCallFlush');
   }
 
   protected override async onResponseComplete(
