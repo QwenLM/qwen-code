@@ -4,7 +4,11 @@ import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
 import type { ChannelLoopToolHandler } from './ChannelAgentBridge.js';
 
 type TestableAcpBridge = AcpBridge & {
-  connection: { extMethod: ReturnType<typeof vi.fn> };
+  child: { killed: boolean; exitCode: number | null };
+  connection: {
+    extMethod: ReturnType<typeof vi.fn>;
+    newSession?: ReturnType<typeof vi.fn>;
+  };
   channelLoopMcpServer: unknown;
   channelLoopToolHandlers: ChannelLoopToolHandler[];
   channelLoopMcpRegistered: boolean;
@@ -37,6 +41,32 @@ describe('AcpBridge', () => {
     pending.splice(0).forEach((resolve) => resolve());
     await Promise.all([first, second]);
     expect(bridge.channelLoopMcpRegistered).toBe(true);
+  });
+
+  it('waits for pending channel loop MCP registration before creating a session', async () => {
+    const pending: Array<() => void> = [];
+    const extMethod = vi.fn(
+      () => new Promise<void>((resolve) => pending.push(resolve)),
+    );
+    const newSession = vi.fn().mockResolvedValue({ sessionId: 's-1' });
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.child = { killed: false, exitCode: null };
+    bridge.connection = { extMethod, newSession };
+    bridge.channelLoopMcpServer = {};
+
+    const registration = bridge.registerChannelLoopMcpServer();
+    const session = bridge.newSession('/tmp');
+    await Promise.resolve();
+
+    expect(newSession).not.toHaveBeenCalled();
+    pending.splice(0).forEach((resolve) => resolve());
+    await registration;
+
+    await expect(session).resolves.toBe('s-1');
+    expect(newSession).toHaveBeenCalledTimes(1);
   });
 
   it('does not fabricate a payload for MCP notifications', async () => {

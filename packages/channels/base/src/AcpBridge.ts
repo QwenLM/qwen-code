@@ -71,6 +71,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private channelLoopMcpServer: ChannelLoopMcpServer | undefined;
   private readonly channelLoopToolHandlers: ChannelLoopToolHandler[] = [];
   private channelLoopMcpRegistered = false;
+  private channelLoopMcpRegistration: Promise<void> | null = null;
 
   constructor(options: AcpBridgeOptions) {
     super();
@@ -320,22 +321,32 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     ) {
       return;
     }
-    this.channelLoopMcpRegistered = true;
-    try {
-      await this.connection.extMethod(WORKSPACE_MCP_RUNTIME_ADD_METHOD, {
+    if (this.channelLoopMcpRegistration) {
+      await this.channelLoopMcpRegistration;
+      return;
+    }
+    this.channelLoopMcpRegistration = this.connection
+      .extMethod(WORKSPACE_MCP_RUNTIME_ADD_METHOD, {
         name: CHANNEL_LOOP_MCP_SERVER_NAME,
         originatorClientId: 'channel',
         config: {
           type: 'sdk',
           [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
         },
+      })
+      .then(() => {
+        this.channelLoopMcpRegistered = true;
+      })
+      .catch((error: unknown) => {
+        this.channelLoopMcpRegistered = false;
+        process.stderr.write(
+          `[AcpBridge] Failed to register channel loop MCP server: ${error instanceof Error ? error.message : String(error)}\n`,
+        );
+      })
+      .finally(() => {
+        this.channelLoopMcpRegistration = null;
       });
-    } catch (error) {
-      this.channelLoopMcpRegistered = false;
-      process.stderr.write(
-        `[AcpBridge] Failed to register channel loop MCP server: ${error instanceof Error ? error.message : String(error)}\n`,
-      );
-    }
+    await this.channelLoopMcpRegistration;
   }
 
   private async handleExtMethod(
