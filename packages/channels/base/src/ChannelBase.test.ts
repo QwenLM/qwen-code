@@ -1591,7 +1591,7 @@ describe('ChannelBase', () => {
         }
       ).getChannelLoopToolHandler();
       const result = await handler!.create('s-1', {
-        cron: '*/5 * * * *',
+        cron: '  */5 * * * *  ',
         prompt: 'drink water',
       });
 
@@ -1615,6 +1615,62 @@ describe('ChannelBase', () => {
         10,
       );
       expect(result).toBe('Loop job-1: */5 * * * *');
+    });
+
+    it('channel loop tools require shared-session authorization', async () => {
+      const createForTarget = vi.fn();
+      const listForTarget = vi.fn();
+      const disable = vi.fn();
+      const ch = createChannel(
+        {
+          allowedUsers: ['owner'],
+          groupPolicy: 'open',
+          sessionScope: 'thread',
+        },
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget,
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(
+        envelope({
+          senderId: 'stranger',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot hello',
+        }),
+      );
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+
+      await expect(
+        handler!.create('s-1', {
+          cron: '* * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toBe(
+        'Only authorized members can use loops in this shared session.',
+      );
+      await expect(handler!.list('s-1')).resolves.toBe(
+        'Only authorized members can use loops in this shared session.',
+      );
+      await expect(handler!.cancel('s-1', 'job-1')).resolves.toBe(
+        'Only authorized members can use loops in this shared session.',
+      );
+      expect(createForTarget).not.toHaveBeenCalled();
+      expect(listForTarget).not.toHaveBeenCalled();
+      expect(disable).not.toHaveBeenCalled();
     });
 
     it('channel loop tool keeps group targets proactive-capable', async () => {

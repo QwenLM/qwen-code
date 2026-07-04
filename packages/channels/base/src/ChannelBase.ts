@@ -1589,12 +1589,16 @@ export abstract class ChannelBase {
     if (target.channelName !== this.name) {
       return 'No channel target is bound to this session.';
     }
+    if (!this.isAuthorizedForSharedSessionTarget(target)) {
+      return 'Only authorized members can use loops in this shared session.';
+    }
     if (!this.supportsProactiveTarget(target)) {
       return 'This channel does not support proactive loop messages for this chat target.';
     }
 
+    const cron = input.cron.trim();
     try {
-      this.loopController.validateCron(input.cron);
+      this.loopController.validateCron(cron);
     } catch (err) {
       return `Invalid cron expression: ${err instanceof Error ? err.message : String(err)}`;
     }
@@ -1608,7 +1612,7 @@ export abstract class ChannelBase {
       channelName: this.name,
       target,
       cwd: this.config.cwd,
-      cron: input.cron,
+      cron,
       prompt,
       label: truncateLoopLabel(prompt),
       recurring: input.recurring !== false,
@@ -1646,6 +1650,9 @@ export abstract class ChannelBase {
     if (target.channelName !== this.name) {
       return 'No channel target is bound to this session.';
     }
+    if (!this.isAuthorizedForSharedSessionTarget(target)) {
+      return 'Only authorized members can use loops in this shared session.';
+    }
     const jobs = await this.loopController.listForTarget(this.name, target);
     if (jobs.length === 0) return 'No loops.';
     return jobs.map((job) => this.formatLoopListLine(job)).join('\n');
@@ -1660,6 +1667,9 @@ export abstract class ChannelBase {
     if (!target) return 'No channel target is bound to this session.';
     if (target.channelName !== this.name) {
       return 'No channel target is bound to this session.';
+    }
+    if (!this.isAuthorizedForSharedSessionTarget(target)) {
+      return 'Only authorized members can use loops in this shared session.';
     }
     const jobs = await this.loopController.listForTarget(this.name, target);
     const match = jobs.find((job) => job.id === id);
@@ -1965,9 +1975,16 @@ export abstract class ChannelBase {
    * gate can't drift; each caller sends its own rejection wording.
    */
   private isAuthorizedForSharedSession(envelope: Envelope): boolean {
-    if (!this.isSharedSession(envelope)) return true;
+    return this.isAuthorizedForSharedSessionTarget(envelope);
+  }
+
+  private isAuthorizedForSharedSessionTarget(target: {
+    isGroup?: boolean;
+    senderId: string;
+  }): boolean {
+    if (!this.isSharedSessionTarget(target)) return true;
     const authorized = this.config.allowedUsers;
-    return authorized.length === 0 || authorized.includes(envelope.senderId);
+    return authorized.length === 0 || authorized.includes(target.senderId);
   }
 
   private stopActiveStreaming(

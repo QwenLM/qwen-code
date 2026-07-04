@@ -160,7 +160,7 @@ function readCreateInput(
   }
   const recurring = args['recurring'];
   return {
-    cron,
+    cron: cron.trim(),
     prompt,
     ...(typeof recurring === 'boolean' ? { recurring } : {}),
   };
