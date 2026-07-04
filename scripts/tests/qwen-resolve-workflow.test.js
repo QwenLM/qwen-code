@@ -66,9 +66,15 @@ describe('qwen resolve workflow', () => {
   });
 
   it('cancels in-flight lifecycle reviews when the PR closes', () => {
+    const concurrencyStart = workflow.indexOf('\nconcurrency:');
+    const concurrency = workflow.slice(
+      concurrencyStart,
+      workflow.indexOf('\njobs:', concurrencyStart),
+    );
+
     expect(workflow).toContain("- 'closed'");
-    expect(workflow).toContain("github.event.action == 'closed'");
-    expect(workflow).toContain(
+    expect(concurrency).toContain("github.event.action == 'closed'");
+    expect(concurrency).toContain(
       "format('qwen-pr-review-pr-{0}', github.event.pull_request.number)",
     );
   });
