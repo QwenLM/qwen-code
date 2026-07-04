@@ -224,8 +224,7 @@ describe('updateCommand', () => {
     expect(result).toEqual({
       type: 'message',
       messageType: 'error',
-      content:
-        'Update available: 1.2.3\nDownloading update...\nUpdate failed: boom',
+      content: 'Update available: 1.2.3\nUpdate failed: boom',
     });
   });
 
@@ -272,6 +271,22 @@ describe('updateCommand', () => {
       messageType: 'error',
       content:
         'Failed to check for updates. Please check your network or registry configuration.',
+    });
+    expect(getInstallationInfo).not.toHaveBeenCalled();
+  });
+
+  it('returns an error when the update check is skipped', async () => {
+    checkForUpdatesDetailed.mockResolvedValue({
+      status: 'skipped',
+      reason: 'development mode',
+    });
+
+    const result = await updateCommand.action!(context('non_interactive'), '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'error',
+      content: 'Unable to check for updates: development mode',
     });
     expect(getInstallationInfo).not.toHaveBeenCalled();
   });

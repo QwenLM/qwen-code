@@ -240,23 +240,35 @@ export function isSafeTarLinkTarget(
   return isPathInside(path.join(resolvedDest, archiveRoot), linkTarget);
 }
 
+function getTarEntryType(entry: TarFilterEntry): string | undefined {
+  if ('type' in entry) return entry.type;
+  if ('isFile' in entry && entry.isFile()) return 'File';
+  if ('isDirectory' in entry && entry.isDirectory()) return 'Directory';
+  if ('isSymbolicLink' in entry && entry.isSymbolicLink()) {
+    return 'SymbolicLink';
+  }
+  return undefined;
+}
+
 export function isSafeTarEntry(
   entryPath: string,
   entry: TarFilterEntry,
   resolvedDest: string,
 ): boolean {
   if (!isSafeTarEntryPath(entryPath)) return false;
-  const entryType = 'type' in entry ? entry.type : undefined;
+  const entryType = getTarEntryType(entry);
   const linkPath = 'linkpath' in entry ? entry.linkpath : undefined;
 
-  // Reject hardlinks outright. tar resolves hardlink linkpath relative to the
-  // extraction root, not the entry directory, so sharing symlink target logic
-  // would allow traversal outside resolvedDest.
-  if (entryType === 'Link') {
+  if (
+    entryType !== 'File' &&
+    entryType !== 'Directory' &&
+    entryType !== 'SymbolicLink'
+  ) {
     return false;
   }
 
-  if (entryType === 'SymbolicLink' && linkPath !== undefined) {
+  if (entryType === 'SymbolicLink') {
+    if (linkPath === undefined) return false;
     return isSafeTarLinkTarget(entryPath, String(linkPath), resolvedDest);
   }
 

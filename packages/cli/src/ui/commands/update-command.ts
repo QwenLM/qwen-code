@@ -108,7 +108,7 @@ export const updateCommand: SlashCommand = {
         return {
           type: 'message' as const,
           messageType: 'error' as const,
-          content: `${info.message}\n${t('Downloading update...')}\n${message}`,
+          content: `${info.message}\n${message}`,
         };
       }
     }

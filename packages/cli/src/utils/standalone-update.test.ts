@@ -416,7 +416,12 @@ describe('standalone-update', () => {
 
     it('allows safe regular entries and safe symlinks', () => {
       const dest = path.join(tempDir, 'extract');
-      expect(isSafeTarEntry('qwen-code/bin/qwen', {}, dest)).toBe(true);
+      expect(isSafeTarEntry('qwen-code/bin/qwen', { type: 'File' }, dest)).toBe(
+        true,
+      );
+      expect(isSafeTarEntry('qwen-code/lib', { type: 'Directory' }, dest)).toBe(
+        true,
+      );
       expect(
         isSafeTarEntry(
           'qwen-code/bin/qwen',
@@ -434,6 +439,20 @@ describe('standalone-update', () => {
       expect(
         isSafeTarEntry('qwen-code/bin/qwen', fs.statSync(filePath), dest),
       ).toBe(true);
+    });
+
+    it('rejects special archive entry types', () => {
+      const dest = path.join(tempDir, 'extract');
+      for (const type of [
+        'BlockDevice',
+        'CharacterDevice',
+        'FIFO',
+        'ContiguousFile',
+      ]) {
+        expect(isSafeTarEntry('qwen-code/bin/qwen', { type }, dest)).toBe(
+          false,
+        );
+      }
     });
   });
 
