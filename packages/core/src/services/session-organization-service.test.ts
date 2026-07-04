@@ -192,7 +192,7 @@ describe('SessionOrganizationService', () => {
     );
   });
 
-  it('treats a malformed sidecar as empty and backs it up before rewriting', async () => {
+  it('treats a malformed sidecar as empty for reads and refuses to overwrite it', async () => {
     await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
     await fs.writeFile(service.getStorePath(), '{not-json', 'utf8');
 
@@ -203,31 +203,15 @@ describe('SessionOrganizationService', () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('Failed to read session organization store');
 
-    await service.createGroup({ name: 'Fixed', color: 'orange' });
-    const backupFiles = (await fs.readdir(path.dirname(service.getStorePath())))
-      .filter((name) =>
-        name.startsWith(`${path.basename(service.getStorePath())}.bak.`),
-      )
-      .sort();
-    expect(backupFiles).toHaveLength(1);
     await expect(
-      fs.readFile(
-        path.join(path.dirname(service.getStorePath()), backupFiles[0]!),
-        'utf8',
-      ),
-    ).resolves.toBe('{not-json');
-    expect(warnings.some((warning) => warning.includes('Backed up'))).toBe(
-      true,
-    );
-    const raw = JSON.parse(
-      await fs.readFile(service.getStorePath(), 'utf8'),
-    ) as {
-      schemaVersion: number;
-      groups: unknown[];
-    };
+      service.createGroup({ name: 'Fixed', color: 'orange' }),
+    ).rejects.toMatchObject({
+      code: 'session_organization_store_unreadable',
+    });
 
-    expect(raw.schemaVersion).toBe(1);
-    expect(raw.groups).toHaveLength(1);
+    await expect(fs.readFile(service.getStorePath(), 'utf8')).resolves.toBe(
+      '{not-json',
+    );
   });
 
   it('removes a session organization entry from the sidecar', async () => {

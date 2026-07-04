@@ -97,7 +97,9 @@ function sendSessionOrganizationError(res: Response, err: unknown): boolean {
       ? 409
       : err.code === 'group_not_found'
         ? 404
-        : 400;
+        : err.code === 'session_organization_store_unreadable'
+          ? 500
+          : 400;
   res.status(status).json({
     error: err.message,
     code: err.code,
@@ -1332,6 +1334,7 @@ export function registerSessionRoutes(
       res.status(200).json({
         sessions: result.sessions,
         ...(result.nextCursor != null ? { nextCursor: result.nextCursor } : {}),
+        ...(result.liveMergeFailed ? { liveMergeFailed: true } : {}),
       });
     } catch (err) {
       if (err instanceof InvalidCursorError) {

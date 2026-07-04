@@ -7061,6 +7061,15 @@ describe('createServeApp', () => {
       expect(page1.body.sessions).toHaveLength(2);
       expect(page1.body.nextCursor).toEqual(expect.any(String));
 
+      const insertedSessionId = '550e8400-e29b-41d4-a716-446655449999';
+      await writeStoredSession({
+        sessionId: insertedSessionId,
+        cwd: WS_BOUND,
+        timestamp: '2026-05-17T12:09:00.000Z',
+        prompt: 'organized inserted',
+        mtime: new Date('2026-05-17T12:19:00.000Z'),
+      });
+
       const page2 = await host(
         request(app).get(
           `/workspace/${encodeURIComponent(
@@ -7078,6 +7087,7 @@ describe('createServeApp', () => {
         (session: { sessionId: string }) => session.sessionId,
       );
       expect(new Set(allIds).size).toBe(4);
+      expect(allIds).not.toContain(insertedSessionId);
 
       const mismatchedCursor = await host(
         request(app).get(

@@ -31,6 +31,7 @@ export interface ListWorkspaceSessionsOptions {
 export interface ListWorkspaceSessionsResult {
   sessions: BridgeSessionSummary[];
   nextCursor?: string;
+  liveMergeFailed?: boolean;
 }
 
 export class InvalidCursorError extends Error {
@@ -56,43 +57,56 @@ function parseSessionCursor(cursor: string): number | undefined {
 }
 
 interface OrganizedCursor {
-  offset: number;
   group: string;
   archiveState: SessionArchiveState;
+  last: OrganizedCursorKey;
+}
+
+interface OrganizedCursorKey {
+  isPinned: boolean;
+  activityTime: number;
+  sessionId: string;
 }
 
 function parseOrganizedCursor(
   cursor: string,
   expected: { group: string; archiveState: SessionArchiveState },
-): number | undefined {
+): OrganizedCursorKey | undefined {
   if (cursor === '') return undefined;
   try {
     const decoded = Buffer.from(cursor, 'base64url').toString('utf8');
     const parsed = JSON.parse(decoded) as unknown;
+    const last = (parsed as OrganizedCursor).last;
     if (
       typeof parsed !== 'object' ||
       parsed === null ||
       Array.isArray(parsed) ||
-      !Number.isSafeInteger((parsed as OrganizedCursor).offset) ||
-      (parsed as OrganizedCursor).offset < 0 ||
+      typeof last !== 'object' ||
+      last === null ||
+      Array.isArray(last) ||
+      typeof last.isPinned !== 'boolean' ||
+      typeof last.activityTime !== 'number' ||
+      !Number.isFinite(last.activityTime) ||
+      typeof last.sessionId !== 'string' ||
+      last.sessionId.length === 0 ||
       (parsed as OrganizedCursor).group !== expected.group ||
       (parsed as OrganizedCursor).archiveState !== expected.archiveState
     ) {
       throw new Error('invalid organized cursor');
     }
-    return (parsed as OrganizedCursor).offset;
+    return last;
   } catch {
     throw new InvalidCursorError(cursor, 'organized');
   }
 }
 
 function encodeOrganizedCursor(
-  offset: number,
+  last: OrganizedCursorKey,
   group: string,
   archiveState: SessionArchiveState,
 ): string {
   return Buffer.from(
-    JSON.stringify({ offset, group, archiveState }),
+    JSON.stringify({ group, archiveState, last }),
     'utf8',
   ).toString('base64url');
 }
@@ -158,11 +172,30 @@ function compareOrganizedSessions(
   a: BridgeSessionSummary,
   b: BridgeSessionSummary,
 ): number {
-  const byPinned = Number(Boolean(b.isPinned)) - Number(Boolean(a.isPinned));
+  return compareOrganizedCursorKeys(
+    getOrganizedCursorKey(activityTimeById, a),
+    getOrganizedCursorKey(activityTimeById, b),
+  );
+}
+
+function getOrganizedCursorKey(
+  activityTimeById: ReadonlyMap<string, number>,
+  session: BridgeSessionSummary,
+): OrganizedCursorKey {
+  return {
+    isPinned: session.isPinned === true,
+    activityTime: activityTimeById.get(session.sessionId) ?? 0,
+    sessionId: session.sessionId,
+  };
+}
+
+function compareOrganizedCursorKeys(
+  a: OrganizedCursorKey,
+  b: OrganizedCursorKey,
+): number {
+  const byPinned = Number(b.isPinned) - Number(a.isPinned);
   if (byPinned !== 0) return byPinned;
-  const byTime =
-    (activityTimeById.get(b.sessionId) ?? 0) -
-    (activityTimeById.get(a.sessionId) ?? 0);
+  const byTime = b.activityTime - a.activityTime;
   if (byTime !== 0) return byTime;
   return a.sessionId.localeCompare(b.sessionId);
 }
@@ -211,11 +244,12 @@ async function listOrganizedWorkspaceSessionsForResponse(
       'group',
     );
   }
-  const offset =
+  const cursorKey =
     options.cursor !== undefined
-      ? (parseOrganizedCursor(options.cursor, { group, archiveState }) ?? 0)
-      : 0;
-  const isFirstPage = offset === 0;
+      ? parseOrganizedCursor(options.cursor, { group, archiveState })
+      : undefined;
+  const isFirstPage = cursorKey === undefined;
+  let liveMergeFailed = false;
 
   const bySessionId = new Map<string, BridgeSessionSummary>();
   for (const session of await listAllPersistedSummaries(
@@ -268,6 +302,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
         }
       }
     } catch (error) {
+      liveMergeFailed = true;
       writeStderrLine(
         `qwen serve: organized session list live merge failed; using persisted sessions only: ${
           error instanceof Error ? error.message : String(error)
@@ -289,15 +324,29 @@ async function listOrganizedWorkspaceSessionsForResponse(
     ]),
   );
   filtered.sort((a, b) => compareOrganizedSessions(activityTimeById, a, b));
-  const page = filtered.slice(offset, offset + pageSize);
-  const nextOffset = offset + page.length;
+  const afterCursor =
+    cursorKey === undefined
+      ? filtered
+      : filtered.filter(
+          (session) =>
+            compareOrganizedCursorKeys(
+              cursorKey,
+              getOrganizedCursorKey(activityTimeById, session),
+            ) < 0,
+        );
+  const page = afterCursor.slice(0, pageSize);
   const nextCursor =
-    nextOffset < filtered.length
-      ? encodeOrganizedCursor(nextOffset, group, archiveState)
+    page.length < afterCursor.length
+      ? encodeOrganizedCursor(
+          getOrganizedCursorKey(activityTimeById, page[page.length - 1]!),
+          group,
+          archiveState,
+        )
       : undefined;
   return {
     sessions: page,
     ...(nextCursor !== undefined ? { nextCursor } : {}),
+    ...(liveMergeFailed ? { liveMergeFailed: true } : {}),
   };
 }
 

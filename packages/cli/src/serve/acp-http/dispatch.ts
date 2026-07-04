@@ -442,8 +442,9 @@ function toRpcError(err: unknown): {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
   if (err instanceof SessionOrganizationError) {
+    const isServerSide = err.code === 'session_organization_store_unreadable';
     return {
-      code: RPC.INVALID_PARAMS,
+      code: isServerSide ? RPC.INTERNAL_ERROR : RPC.INVALID_PARAMS,
       message: err.message,
       data: {
         errorKind: err.code,
@@ -1237,6 +1238,7 @@ export class AcpDispatcher {
             ...(result.nextCursor != null
               ? { nextCursor: result.nextCursor }
               : {}),
+            ...(result.liveMergeFailed ? { liveMergeFailed: true } : {}),
           });
           return;
         }

@@ -455,28 +455,13 @@ export class SessionOrganizationService {
     return emptyStore();
   }
 
-  private async backupUnreadableStore(): Promise<void> {
-    const storePath = this.getStorePath();
-    const backupPath = `${storePath}.bak.${Date.now()}`;
-    try {
-      await fs.copyFile(storePath, backupPath);
-      this.onWarning?.(
-        `Backed up unreadable session organization store to ${backupPath}`,
-      );
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
-      this.onWarning?.(
-        `Failed to back up unreadable session organization store at ${storePath}: ${
-          error instanceof Error ? error.message : String(error)
-        }`,
-      );
-    }
-  }
-
   private async writeStore(store: SessionOrganizationStoreV1): Promise<void> {
     await fs.mkdir(path.dirname(this.getStorePath()), { recursive: true });
     if (this.readFailed) {
-      await this.backupUnreadableStore();
+      throw new SessionOrganizationError(
+        `Cannot update session organization store because it could not be read: ${this.getStorePath()}`,
+        'session_organization_store_unreadable',
+      );
     }
     await atomicWriteJSON(this.getStorePath(), {
       schemaVersion: SCHEMA_VERSION,

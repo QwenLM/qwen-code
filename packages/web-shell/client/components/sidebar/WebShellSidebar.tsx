@@ -1023,9 +1023,9 @@ export function WebShellSidebar({
       .then(() => {
         setDeleteGroupCandidate(null);
         setSelectedGroupId('all');
-        return reloadGroups();
       })
       .catch((err: unknown) => onError(err, t('sidebar.groupDeleteFailed')))
+      .then(() => reloadGroups().catch(() => undefined))
       .finally(() => setGroupBusy(false));
   }, [deleteGroupCandidate, onError, reloadGroups, t, workspaceActions]);
 
