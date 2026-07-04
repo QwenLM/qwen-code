@@ -214,6 +214,12 @@ class TestWeComChannel extends WeComChannel {
   }
 }
 
+class PromptEndWeComChannel extends WeComChannel {
+  finishPrompt(chatId: string, sessionId: string, messageId?: string): void {
+    this.onPromptEnd(chatId, sessionId, messageId);
+  }
+}
+
 class FailingPreflightWeComChannel extends WeComChannel {
   readonly preflights = vi.fn(async (_envelope: Envelope) => {
     throw new Error('preflight failed');
@@ -1770,6 +1776,40 @@ describe('WeComChannel', () => {
     const filePath = prompt.match(/saved to: (.*report\.txt)/)?.[1];
     expect(filePath).toBeDefined();
     await vi.waitFor(() => expect(existsSync(dirname(filePath!))).toBe(false));
+  });
+
+  it('removes session attachment dirs when prompt end has no message id', async () => {
+    const bridge = makeBridge();
+    (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<string>(() => {}),
+    );
+    const channel = new PromptEndWeComChannel('bot', makeConfig(), bridge);
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgid: 'msg-session-cleanup',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'report.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as string;
+    const attachmentPath = prompt.match(/saved to: (.*report\.txt)/)?.[1];
+    expect(attachmentPath).toBeDefined();
+    expect(existsSync(dirname(attachmentPath!))).toBe(true);
+
+    channel.finishPrompt('alice', 'session-1');
+
+    await vi.waitFor(() =>
+      expect(existsSync(dirname(attachmentPath!))).toBe(false),
+    );
   });
 
   it('removes downloaded file attachments when no prompt starts', async () => {

@@ -421,10 +421,20 @@ export class WeComChannel extends ChannelBase {
 
   protected override onPromptBuffered(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageId?: string,
   ): void {
-    if (messageId) this.bufferedAttachmentMessages.add(messageId);
+    if (!messageId) return;
+    this.bufferedAttachmentMessages.add(messageId);
+    this.rememberMessageDirsForSession(messageId, sessionId);
+  }
+
+  protected override onPromptStart(
+    _chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    if (messageId) this.rememberMessageDirsForSession(messageId, sessionId);
   }
 
   protected override onPromptBufferDrained(
@@ -449,10 +459,13 @@ export class WeComChannel extends ChannelBase {
 
   protected override onPromptEnd(
     _chatId: string,
-    _sessionId: string,
+    sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId) return;
+    if (!messageId) {
+      this.cleanupAttachmentDirsForSession(sessionId);
+      return;
+    }
     const coalescedMessageIds = this.coalescedAttachmentMessages.get(messageId);
     if (coalescedMessageIds) {
       this.coalescedAttachmentMessages.delete(messageId);
@@ -481,12 +494,33 @@ export class WeComChannel extends ChannelBase {
     }
   }
 
+  private rememberMessageDirsForSession(
+    messageId: string,
+    sessionId: string,
+  ): void {
+    const dirs = this.attachmentDirsByMessage.get(messageId);
+    if (!dirs) return;
+    const sessionDirs = this.attachmentDirsBySession.get(sessionId) ?? [];
+    for (const dir of dirs) {
+      if (!sessionDirs.includes(dir)) sessionDirs.push(dir);
+    }
+    this.attachmentDirsBySession.set(sessionId, sessionDirs);
+  }
+
   private cleanupAttachmentDirsForMessage(messageId: string): void {
     this.bufferedAttachmentMessages.delete(messageId);
     const dirs = this.attachmentDirsByMessage.get(messageId);
     if (!dirs) return;
     this.attachmentDirsByMessage.delete(messageId);
     this.removeAttachmentDirsFromSessions(dirs);
+    cleanupAttachmentDirs(dirs);
+  }
+
+  private cleanupAttachmentDirsForSession(sessionId: string): void {
+    const dirs = this.attachmentDirsBySession.get(sessionId);
+    if (!dirs) return;
+    this.attachmentDirsBySession.delete(sessionId);
+    this.removeAttachmentDirsFromMessages(dirs);
     cleanupAttachmentDirs(dirs);
   }
 
@@ -498,6 +532,19 @@ export class WeComChannel extends ChannelBase {
         this.attachmentDirsBySession.set(sessionId, remaining);
       } else {
         this.attachmentDirsBySession.delete(sessionId);
+      }
+    }
+  }
+
+  private removeAttachmentDirsFromMessages(dirs: string[]): void {
+    const removed = new Set(dirs);
+    for (const [messageId, messageDirs] of this.attachmentDirsByMessage) {
+      const remaining = messageDirs.filter((dir) => !removed.has(dir));
+      if (remaining.length) {
+        this.attachmentDirsByMessage.set(messageId, remaining);
+      } else {
+        this.attachmentDirsByMessage.delete(messageId);
+        this.bufferedAttachmentMessages.delete(messageId);
       }
     }
   }
