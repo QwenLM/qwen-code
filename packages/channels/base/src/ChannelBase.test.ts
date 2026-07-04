@@ -1673,6 +1673,89 @@ describe('ChannelBase', () => {
       expect(disable).not.toHaveBeenCalled();
     });
 
+    it('channel loop tools authorize the current shared-session caller', async () => {
+      let finishPrompt: (() => void) | undefined;
+      const createForTarget = vi.fn().mockResolvedValue({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'owner',
+          chatId: 'group1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '* * * * *',
+        prompt: 'drink water',
+        recurring: true,
+        enabled: true,
+        createdBy: 'owner',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      } satisfies ChannelLoop);
+      const ch = createChannel(
+        {
+          allowedUsers: ['owner'],
+          groupPolicy: 'open',
+          sessionScope: 'thread',
+        },
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget: vi.fn().mockResolvedValue([]),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot hello',
+        }),
+      );
+      vi.mocked(bridge.prompt).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishPrompt = () => resolve('agent response');
+          }),
+      );
+      const strangerPrompt = ch.handleInbound(
+        envelope({
+          senderId: 'stranger',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot create a loop',
+        }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+      await expect(
+        handler!.create('s-1', {
+          cron: '* * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toBe(
+        'Only authorized members can use loops in this shared session.',
+      );
+      expect(createForTarget).not.toHaveBeenCalled();
+
+      finishPrompt?.();
+      await strangerPrompt;
+    });
+
     it('channel loop tool keeps group targets proactive-capable', async () => {
       const created: ChannelLoop = {
         id: 'job-1',

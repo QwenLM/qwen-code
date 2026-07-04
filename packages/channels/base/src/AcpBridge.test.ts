@@ -1,11 +1,16 @@
 import { describe, expect, it, vi } from 'vitest';
 import { AcpBridge } from './AcpBridge.js';
+import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
+import type { ChannelLoopToolHandler } from './ChannelAgentBridge.js';
 
 type TestableAcpBridge = AcpBridge & {
   connection: { extMethod: ReturnType<typeof vi.fn> };
   channelLoopMcpServer: unknown;
+  channelLoopToolHandlers: ChannelLoopToolHandler[];
   channelLoopMcpRegistered: boolean;
+  handleClientMcpMessage(params: Record<string, unknown>): Promise<unknown>;
   registerChannelLoopMcpServer(): Promise<void>;
+  resolveChannelLoopToolHandler(sessionId: string): ChannelLoopToolHandler;
 };
 
 describe('AcpBridge', () => {
@@ -28,5 +33,42 @@ describe('AcpBridge', () => {
     pending.splice(0).forEach((resolve) => resolve());
     await Promise.all([first, second]);
     expect(bridge.channelLoopMcpRegistered).toBe(true);
+  });
+
+  it('does not wrap a missing MCP response for notifications', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.channelLoopMcpServer = {
+      handleMessage: vi.fn().mockResolvedValue(undefined),
+    };
+
+    await expect(
+      bridge.handleClientMcpMessage({
+        server: CHANNEL_LOOP_MCP_SERVER_NAME,
+        payload: { jsonrpc: '2.0', method: 'notifications/initialized' },
+        sessionId: 's-1',
+      }),
+    ).resolves.toStrictEqual({});
+  });
+
+  it('rejects channel loop tool calls when no handler matches the session', () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.channelLoopToolHandlers = [
+      {
+        canHandle: () => false,
+        create: vi.fn(),
+        list: vi.fn(),
+        cancel: vi.fn(),
+      },
+    ];
+
+    expect(() => bridge.resolveChannelLoopToolHandler('s-2')).toThrow(
+      'No channel loop handler matched session s-2.',
+    );
   });
 });

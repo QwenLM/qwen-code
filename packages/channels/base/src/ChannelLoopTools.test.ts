@@ -61,4 +61,43 @@ describe('ChannelLoopMcpServer', () => {
       },
     });
   });
+
+  it('does not respond to JSON-RPC notifications', async () => {
+    const server = new ChannelLoopMcpServer({
+      create: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+    });
+
+    await expect(
+      server.handleMessage(
+        { jsonrpc: '2.0', method: 'notifications/initialized' },
+        {},
+      ),
+    ).resolves.toBeUndefined();
+  });
+
+  it('trims cancel ids before dispatch', async () => {
+    const cancel = vi.fn().mockResolvedValue('Cancelled loop job-1.');
+    const server = new ChannelLoopMcpServer({
+      create: vi.fn(),
+      list: vi.fn(),
+      cancel,
+    });
+
+    await server.handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'tools/call',
+        params: {
+          name: 'channel_loop_cancel',
+          arguments: { id: '  job-1  ' },
+        },
+      },
+      { sessionId: 's-1' },
+    );
+
+    expect(cancel).toHaveBeenCalledWith('s-1', 'job-1');
+  });
 });
