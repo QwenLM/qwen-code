@@ -1135,6 +1135,52 @@ describe('useAtMentionMenu', () => {
     });
   });
 
+  it('recovers from file provider list failures', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const listDirectory = vi.fn().mockRejectedValue(new Error('boom'));
+    mount({ actions: { listDirectory } });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'files',
+      loading: false,
+      items: [],
+    });
+    expect(warn).toHaveBeenCalledWith(
+      'Failed to load @ file suggestions',
+      expect.any(Error),
+    );
+    warn.mockRestore();
+  });
+
+  it('recovers from fallback file glob failures', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const globWorkspace = vi.fn().mockRejectedValue(new Error('boom'));
+    mount({ actions: { globWorkspace } });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'files',
+      loading: false,
+      items: [],
+    });
+    expect(warn).toHaveBeenCalledWith(
+      'Failed to load @ file suggestions',
+      expect.any(Error),
+    );
+    warn.mockRestore();
+  });
+
   it('sanitizes custom provider item display text', async () => {
     vi.useFakeTimers();
     mount({
@@ -1611,6 +1657,47 @@ describe('useAtMentionMenu', () => {
     await runDebounce();
 
     expect(latest!.state?.items[0]?.description).toBe('text/plain');
+  });
+
+  it('recovers from MCP resource load failures', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mount({
+      view: makeView('@'),
+      actions: {
+        loadMcpStatus: vi.fn().mockResolvedValue({
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'docs',
+              disabled: false,
+              resourceCount: 1,
+            },
+          ],
+        }),
+        loadMcpResources: vi.fn().mockRejectedValue(new Error('boom')),
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(2));
+    await runDebounce();
+    act(() => latest!.accept());
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'mcp-resources',
+      itemMode: 'mcpResources',
+      mcpServerName: 'docs',
+      loading: false,
+      items: [],
+    });
+    expect(warn).toHaveBeenCalledWith(
+      'Failed to load @ MCP resources',
+      expect.any(Error),
+    );
+    warn.mockRestore();
   });
 
   it('reopens MCP resources with the last selected colon-containing server name', async () => {
