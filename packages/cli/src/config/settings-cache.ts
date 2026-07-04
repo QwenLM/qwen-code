@@ -7,7 +7,11 @@
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { ideContextStore, Storage } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  ideContextStore,
+  Storage,
+} from '@qwen-code/qwen-code-core';
 import { findEnvFiles, preResolveHomeEnvOverrides } from './environment.js';
 import {
   getSystemDefaultsPath,
@@ -48,6 +52,11 @@ import type { LoadedSettings } from './settings.js';
 
 const MAX_CACHE_ENTRIES = 64;
 
+// Matches the SETTINGS / SETTINGS_WATCHER / CONFIG loggers used by the
+// neighbouring config modules; enable with the usual DEBUG namespaces to
+// trace hit/miss, fail-open degradation and eviction in production.
+const debugLogger = createDebugLogger('SETTINGS_CACHE');
+
 interface FileSig {
   filePath: string;
   sig: string;
@@ -86,6 +95,13 @@ function realpathOr(p: string): string {
  * Paths are recomputed on every call (not stored once): they depend on
  * QWEN_HOME / HOME and the test-only system-path overrides, so a changed
  * environment shows up as a path mismatch and invalidates the entry.
+ *
+ * IMPORTANT: this list MUST stay in sync with the settings files that
+ * `loadSettings()` reads. Unlike `envFileSigs`, which structurally reuses the
+ * same `findEnvFiles()` that `loadEnvironment()` calls, these four scopes are
+ * enumerated independently. If a future PR adds a new settings scope to
+ * `loadSettings()`, add its path here too — otherwise the cache would serve a
+ * stale `LoadedSettings` with no test or compile-time signal.
  */
 function settingsFileSigs(workspaceDir: string): FileSig[] {
   const filePaths = [
@@ -154,18 +170,24 @@ export function loadSettingsCached(workspaceDir: string): LoadedSettings {
     let isFresh = false;
     try {
       isFresh = isEntryFresh(key, entry);
-    } catch {
+    } catch (error) {
       // Fail open: any unexpected fingerprint error (EACCES, EIO, ...) is
       // treated as a miss so the cache never becomes a new failure source.
+      debugLogger.warn(
+        `fingerprint check failed for ${key}; reloading:`,
+        error,
+      );
     }
     if (isFresh) {
       // Refresh LRU position (Map preserves insertion order).
       cache.delete(key);
       cache.set(key, entry);
+      debugLogger.debug(`hit ${key}`);
       return entry.settings;
     }
     cache.delete(key);
   }
+  debugLogger.debug(`miss ${key}`);
 
   // Sign the settings files BEFORE loading: if one changes while
   // loadSettings() runs, the stored signature is already stale and the next
@@ -174,8 +196,9 @@ export function loadSettingsCached(workspaceDir: string): LoadedSettings {
   let preLoadSigs: FileSig[] | undefined;
   try {
     preLoadSigs = settingsFileSigs(key);
-  } catch {
+  } catch (error) {
     // Fail open: cache nothing this round.
+    debugLogger.warn(`pre-load signing failed for ${key}; not caching:`, error);
   }
 
   // Load errors (FatalConfigError etc.) propagate unchanged and uncached;
@@ -200,11 +223,13 @@ export function loadSettingsCached(workspaceDir: string): LoadedSettings {
         const oldest = cache.keys().next().value;
         if (oldest !== undefined) {
           cache.delete(oldest);
+          debugLogger.debug(`evicted LRU entry ${oldest}`);
         }
       }
-    } catch {
+    } catch (error) {
       // Fail open: serve the freshly loaded settings uncached.
       cache.delete(key);
+      debugLogger.warn(`caching failed for ${key}; serving uncached:`, error);
     }
   }
 

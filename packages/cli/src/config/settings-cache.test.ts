@@ -237,6 +237,32 @@ describe('loadSettingsCached', () => {
     expect(second.merged.model?.name).toBe('persisted-by-setvalue');
   });
 
+  it('falls open to a reload when fingerprint validation throws', () => {
+    // Fail-open is a core invariant: an unexpected error while checking the
+    // fingerprint must degrade to a full reload, never surface. isEntryFresh
+    // reads ideContextStore first, so making that throw exercises the
+    // hit-path fail-open (and the caching fail-open, since the rebuilt
+    // fingerprint reads it too). loadSettings itself does not read it here
+    // (the workspace dir is not process.cwd()), so the reload still succeeds.
+    writeJson(userSettingsPath(), versioned({ model: { name: 'ok' } }));
+    const first = loadSettingsCached(workspaceDir);
+
+    const trustSpy = vi.spyOn(ideContextStore, 'get').mockImplementation(() => {
+      throw new Error('boom');
+    });
+    const second = loadSettingsCached(workspaceDir);
+    expect(second).not.toBe(first); // reloaded, not a propagated error
+    expect(second.merged.model?.name).toBe('ok'); // ...and still correct
+
+    // Recovery: the degraded call could not cache (rebuilding the fingerprint
+    // also threw), so this first post-recovery call is itself a miss, then
+    // subsequent calls hit normally.
+    trustSpy.mockRestore();
+    const third = loadSettingsCached(workspaceDir);
+    expect(third.merged.model?.name).toBe('ok');
+    expect(loadSettingsCached(workspaceDir)).toBe(third);
+  });
+
   it('does not cache a load failure and recovers once the file is fixed', () => {
     // Valid JSON that is not an object bypasses corruption recovery and
     // makes loadSettings throw FatalConfigError.
