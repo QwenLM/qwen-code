@@ -238,10 +238,18 @@ describe('qwen-autofix workflow', () => {
       'if ! gh issue edit "${ISSUE}" --repo "${REPO}"',
     );
     expect(claimIssueStep).toContain(
-      'Failed to update labels on #${ISSUE} before claim comment was posted',
+      'Failed to add autofix/in-progress label on #${ISSUE} before claim comment was posted',
     );
     expect(claimIssueStep).toContain('exit 1');
-    expect(claimIssueStep.indexOf('gh issue edit "${ISSUE}"')).toBeLessThan(
+    const addInProgressIndex = claimIssueStep.indexOf(
+      "--add-label 'autofix/in-progress'",
+    );
+    const removeApprovalIndex = claimIssueStep.indexOf(
+      '--remove-label "${AUTOFIX_APPROVED_LABEL}"',
+    );
+    expect(addInProgressIndex).toBeGreaterThan(-1);
+    expect(removeApprovalIndex).toBeGreaterThan(addInProgressIndex);
+    expect(removeApprovalIndex).toBeLessThan(
       claimIssueStep.indexOf('gh issue comment "${ISSUE}"'),
     );
   });

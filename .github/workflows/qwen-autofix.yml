@@ -546,11 +546,12 @@ jobs:
             --description 'Maintainer explicitly approved this issue for autonomous autofix' \
             --color '0e8a16' 2> /dev/null || true
           if ! gh issue edit "${ISSUE}" --repo "${REPO}" \
-            --add-label 'autofix/in-progress' \
-            --remove-label "${AUTOFIX_APPROVED_LABEL}"; then
-            echo "::error::Failed to update labels on #${ISSUE} before claim comment was posted"
+            --add-label 'autofix/in-progress'; then
+            echo "::error::Failed to add autofix/in-progress label on #${ISSUE} before claim comment was posted"
             exit 1
           fi
+          gh issue edit "${ISSUE}" --repo "${REPO}" \
+            --remove-label "${AUTOFIX_APPROVED_LABEL}" || true
 
           COMMENT_URL="$(gh issue comment "${ISSUE}" --repo "${REPO}" --body "${BODY}")"
           COMMENT_ID="${COMMENT_URL##*-}"
