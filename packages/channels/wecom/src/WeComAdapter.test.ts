@@ -870,6 +870,65 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('does not create a session for local commands before base dispatch', async () => {
+    const bridge = makeBridge();
+    const channel = new WeComChannel('bot', makeConfig(), bridge);
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.text', {
+      msgid: 'msg-who',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: '/who' },
+    });
+
+    await vi.waitFor(() => expect(client.sendMessage).toHaveBeenCalled());
+    expect(bridge.newSession).not.toHaveBeenCalled();
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendMessage).toHaveBeenCalledWith(
+      'alice',
+      expect.objectContaining({
+        markdown: expect.objectContaining({
+          content: expect.stringContaining('Session: none'),
+        }),
+      }),
+    );
+  });
+
+  it('does not create a session for refused group shell commands', async () => {
+    const bridge = makeBridge();
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ groupPolicy: 'open', groups: { '*': {} } }),
+      bridge,
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.text', {
+      msgid: 'msg-shell',
+      msgtype: 'text',
+      chattype: 'group',
+      chatid: 'group-1',
+      from: { userid: 'alice' },
+      text: { content: '!pwd' },
+    });
+
+    await vi.waitFor(() => expect(client.sendMessage).toHaveBeenCalled());
+    expect(bridge.newSession).not.toHaveBeenCalled();
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    expect(client.sendMessage).toHaveBeenCalledWith(
+      'group-1',
+      expect.objectContaining({
+        markdown: expect.objectContaining({
+          content: expect.stringContaining('Shell commands'),
+        }),
+      }),
+    );
+  });
+
   it('rolls back message dedup when preflight work fails', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')

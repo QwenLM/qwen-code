@@ -332,23 +332,14 @@ export class WeComChannel extends ChannelBase {
       isReplyToBot: false,
       referencedText: extractQuoteText(body),
     };
-    let sessionId: string | undefined;
     let attachments: Attachment[] = [];
     let processingStarted = false;
     try {
       if (!(await this.preflightInbound(envelope))) return;
-      sessionId = await this.router.resolve(
-        this.name,
-        envelope.senderId,
-        envelope.chatId,
-        envelope.threadId,
-        this.config.cwd,
-      );
       attachments = await this.downloadAttachments(
         body,
         attachments,
         messageId,
-        sessionId,
       );
       if (messageId) this.seenMessages.set(messageId, Date.now());
       if (attachments.length) {
@@ -512,7 +503,12 @@ export class WeComChannel extends ChannelBase {
   }
 
   private cleanupAllAttachmentDirs(): void {
-    const dirs = Array.from(this.attachmentDirsBySession.values()).flat();
+    const dirs = Array.from(
+      new Set([
+        ...Array.from(this.attachmentDirsBySession.values()).flat(),
+        ...Array.from(this.attachmentDirsByMessage.values()).flat(),
+      ]),
+    );
     this.attachmentDirsBySession.clear();
     this.attachmentDirsByMessage.clear();
     this.bufferedAttachmentMessages.clear();
