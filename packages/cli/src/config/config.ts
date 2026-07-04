@@ -2148,6 +2148,7 @@ export async function loadCliConfig(
     skipNextSpeakerCheck: settings.model?.skipNextSpeakerCheck,
     skipWorkflowUsageWarning: settings.model?.skipWorkflowUsageWarning ?? false,
     skipLoopDetection: settings.model?.skipLoopDetection ?? true,
+    maxToolCallsPerTurn: settings.model?.maxToolCallsPerTurn,
     skipStartupContext: settings.model?.skipStartupContext ?? false,
     truncateToolOutputThreshold: settings.tools?.truncateToolOutputThreshold,
     truncateToolOutputLines: settings.tools?.truncateToolOutputLines,

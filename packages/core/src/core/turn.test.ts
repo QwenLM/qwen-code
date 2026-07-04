@@ -477,6 +477,7 @@ describe('Turn', () => {
           },
         },
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
     });
 
@@ -516,6 +517,7 @@ describe('Turn', () => {
           },
         },
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
     });
 
@@ -595,6 +597,7 @@ describe('Turn', () => {
           },
         },
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
     });
 
@@ -634,6 +637,7 @@ describe('Turn', () => {
           },
         },
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
     });
 
@@ -675,6 +679,7 @@ describe('Turn', () => {
           },
         },
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
     });
 

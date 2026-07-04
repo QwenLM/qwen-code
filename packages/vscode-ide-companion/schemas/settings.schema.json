@@ -622,9 +622,14 @@
           "default": false
         },
         "skipLoopDetection": {
-          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap) still runs regardless of this setting.",
+          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap, see model.maxToolCallsPerTurn) still runs regardless of this setting.",
           "type": "boolean",
           "default": true
+        },
+        "maxToolCallsPerTurn": {
+          "description": "Hard cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
+          "type": "number",
+          "default": 100
         },
         "skipStartupContext": {
           "description": "Avoid sending the workspace startup context at the beginning of each session.",

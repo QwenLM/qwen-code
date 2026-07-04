@@ -23,6 +23,7 @@ import {
   closeCompletion,
   completionStatus,
   moveCompletionSelection,
+  pickedCompletion,
   startCompletion,
   type Completion,
 } from '@codemirror/autocomplete';
@@ -44,7 +45,10 @@ import {
   DEFAULT_COMMAND_CATEGORY_ORDER,
   type CommandDisplayCategoryOrder,
 } from '../utils/commandDisplay';
-import { createAtCompletionSource } from '../completions/atCompletion';
+import {
+  createAtCompletionSource,
+  type AtReferenceCompletion,
+} from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
 import { useI18n } from '../i18n';
 import {
@@ -52,10 +56,12 @@ import {
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
 import { isEditableTarget } from '../utils/dom';
+import { getComposerTagIconUrl } from '../components/composerTagIcons';
 import type {
   WebShellComposerApi,
   WebShellComposerInput,
   WebShellComposerTag,
+  WebShellComposerTagKind,
   WebShellComposerTagOptions,
   WebShellComposerTextOptions,
 } from '../customization';
@@ -118,11 +124,22 @@ const TOOLTIP_STYLES = `
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li {
   display: flex !important;
-  align-items: baseline;
+  align-items: center;
   min-width: 0;
   padding: 4px 8px !important;
   color: var(--foreground, #e4e4e4) !important;
   overflow: hidden;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete .cm-at-ref-completion-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin-right: 10px;
+  background: currentColor;
+  mask: var(--composer-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li:hover {
@@ -141,14 +158,16 @@ const TOOLTIP_STYLES = `
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section {
   display: block !important;
-  height: 0;
-  margin: 6px 10px 3px;
-  padding: 0 !important;
+  height: auto;
+  margin: 6px 10px 4px;
+  padding: 2px 0 4px !important;
+  line-height: 1.2;
+  color: var(--muted-foreground, #a1a1aa) !important;
   border-bottom: 1px solid var(--border) !important;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section:first-of-type {
-  display: none !important;
+  margin-top: 6px;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete .cm-completionLabel {
@@ -158,6 +177,12 @@ const TOOLTIP_STYLES = `
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li.cm-at-ref-completion-extension .cm-completionLabel,
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li.cm-at-ref-completion-mcp .cm-completionLabel,
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li.cm-at-ref-completion-file .cm-completionLabel {
+  width: calc(var(--web-shell-completion-label-width) - 20px);
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete .cm-completionDetail {
@@ -454,7 +479,9 @@ export function expandLargePastePlaceholders(
 // ---- Tag serialization (shared) ----
 
 export function serializeComposerTag(tag: WebShellComposerTag): string {
-  return tag.value?.trim() || tag.label?.trim() || tag.id;
+  return (
+    tag.serialized?.trim() || tag.value?.trim() || tag.label?.trim() || tag.id
+  );
 }
 
 function serializeComposerTags(tags: readonly WebShellComposerTag[]): string {
@@ -471,6 +498,24 @@ export function getComposerTagValue(tag: WebShellComposerTag): string {
 
 export function getComposerTagDisplay(tag: WebShellComposerTag): string {
   return getComposerTagValue(tag) || getComposerTagLabel(tag) || tag.id;
+}
+
+function buildAtReferenceTag(
+  completion: AtReferenceCompletion,
+): WebShellComposerTag | null {
+  if (!completion.atReferenceKind || !completion.label) return null;
+  const kind = completion.atReferenceKind as WebShellComposerTagKind;
+  const serialized =
+    typeof completion.apply === 'string'
+      ? completion.apply.trim()
+      : completion.label.trim();
+  return {
+    id: serialized,
+    kind,
+    label: completion.atReferenceLabel,
+    value: completion.atReferenceValue,
+    serialized,
+  };
 }
 
 export function buildComposerPrompt(
@@ -513,6 +558,8 @@ class ComposerTagWidget extends WidgetType {
       this.tag.id === other.tag.id &&
       this.tag.label === other.tag.label &&
       this.tag.value === other.tag.value &&
+      this.tag.kind === other.tag.kind &&
+      this.tag.serialized === other.tag.serialized &&
       this.tag.removable === other.tag.removable
     );
   }
@@ -521,8 +568,18 @@ class ComposerTagWidget extends WidgetType {
     const chip = document.createElement('span');
     chip.style.cssText =
       'display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
-    const tagLabel = getComposerTagLabel(this.tag);
+    const rawTagLabel = getComposerTagLabel(this.tag);
     const tagValue = getComposerTagValue(this.tag);
+    const tagLabel = this.tag.kind ? '' : rawTagLabel;
+    const iconUrl = getComposerTagIconUrl(this.tag.kind);
+
+    if (iconUrl) {
+      const icon = document.createElement('span');
+      icon.style.cssText =
+        'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:currentColor;mask:var(--composer-tag-icon-url) center / contain no-repeat;-webkit-mask:var(--composer-tag-icon-url) center / contain no-repeat;';
+      icon.style.setProperty('--composer-tag-icon-url', `url("${iconUrl}")`);
+      chip.appendChild(icon);
+    }
 
     if (tagLabel) {
       const label = document.createElement('span');
@@ -535,7 +592,7 @@ class ComposerTagWidget extends WidgetType {
     if (tagValue) {
       const value = document.createElement('span');
       value.style.cssText =
-        'max-width:32ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 0.5ch;color:var(--muted-foreground);';
+        'max-width:32ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 0.5ch;color:var(--foreground, #e4e4e4);';
       value.textContent = tagValue;
       chip.appendChild(value);
     } else if (!tagLabel) {
@@ -1338,6 +1395,24 @@ export function useComposerCore(
       createAtCompletionSource(
         () => workspaceActionsRef.current?.globWorkspace,
         () => workspaceActionsRef.current?.loadExtensionsStatus,
+        () =>
+          workspaceActionsRef.current?.loadMcpStatus
+            ? async () => {
+                const status =
+                  await workspaceActionsRef.current!.loadMcpStatus();
+                return {
+                  servers: (status?.servers ?? []).map((server) => ({
+                    name: server.name,
+                    description: server.description,
+                  })),
+                };
+              }
+            : undefined,
+        {
+          extensions: t('quickActions.extensions'),
+          mcpServers: t('mcp.title'),
+          files: t('editor.hintFiles'),
+        },
       ),
     ];
 
@@ -1718,13 +1793,35 @@ export function useComposerCore(
           override: completionSources,
           activateOnTyping: true,
           icons: false,
-          optionClass: (completion) =>
-            completion.type === 'file'
-              ? 'cm-file-completion'
-              : hasCommandHoverInfo(completion)
-                ? 'cm-command-info-completion'
-                : '',
+          optionClass: (completion) => {
+            const ref = completion as AtReferenceCompletion;
+            const classes: string[] = [];
+            if (completion.type === 'file') classes.push('cm-file-completion');
+            if (ref.atReferenceKind) {
+              classes.push(`cm-at-ref-completion-${ref.atReferenceKind}`);
+            }
+            if (hasCommandHoverInfo(completion)) {
+              classes.push('cm-command-info-completion');
+            }
+            return classes.join(' ');
+          },
           addToOptions: [
+            {
+              render: (completion) => {
+                const ref = completion as AtReferenceCompletion;
+                if (!ref.atReferenceKind) return null;
+                const iconUrl = getComposerTagIconUrl(ref.atReferenceKind);
+                if (!iconUrl) return null;
+                const icon = document.createElement('span');
+                icon.className = 'cm-at-ref-completion-icon';
+                icon.style.setProperty(
+                  '--composer-tag-icon-url',
+                  `url("${iconUrl}")`,
+                );
+                return icon;
+              },
+              position: 20,
+            },
             {
               render: renderCompletionHoverInfo,
               position: 90,
@@ -1765,6 +1862,29 @@ export function useComposerCore(
         triggerCleanupListener,
         // Update hasContent state when document changes
         EditorView.updateListener.of((update) => {
+          for (const tr of update.transactions) {
+            const completion = tr.annotation(pickedCompletion) as
+              | AtReferenceCompletion
+              | undefined;
+            if (!completion) continue;
+            const tag = buildAtReferenceTag(completion);
+            if (!tag) continue;
+            const inserted = serializeComposerTag(tag);
+            const changes = tr.changes;
+            if (changes.empty) continue;
+            let from = -1;
+            changes.iterChanges((_fA, _tA, fromB, toB, insertedText) => {
+              if (from !== -1) return;
+              if (insertedText.toString().includes(inserted)) {
+                from = fromB;
+              }
+            });
+            if (from === -1) continue;
+            const to = from + inserted.length;
+            update.view.dispatch({
+              effects: addInlineTagEffect.of({ from, to, tag }),
+            });
+          }
           if (update.docChanged) {
             const text = update.state.doc.toString();
             const followup = followupStateRef.current;

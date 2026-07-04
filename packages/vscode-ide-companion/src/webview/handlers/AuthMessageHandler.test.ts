@@ -41,6 +41,10 @@ describe('AuthMessageHandler', () => {
 
     await handler.handle({ type: 'auth' });
 
+    expect(mockShowQuickPick).toHaveBeenCalledWith(
+      expect.any(Array),
+      expect.objectContaining({ ignoreFocusOut: true }),
+    );
     expect(sendToWebView).toHaveBeenCalledWith({ type: 'authCancelled' });
   });
 
@@ -65,6 +69,9 @@ describe('AuthMessageHandler', () => {
 
     await handler.handle({ type: 'auth' });
 
+    expect(mockShowInputBox).toHaveBeenCalledWith(
+      expect.objectContaining({ ignoreFocusOut: true }),
+    );
     expect(sendToWebView).toHaveBeenCalledWith({ type: 'authCancelled' });
   });
 

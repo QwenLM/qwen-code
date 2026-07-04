@@ -16,6 +16,7 @@ import {
   type DaemonWorkspaceActions,
   type DaemonWorkspaceContextValue,
 } from './DaemonWorkspaceProvider.js';
+import { useDaemonSessions } from './hooks/useDaemonSessions.js';
 
 const sdkMocks = vi.hoisted(() => {
   const capabilities = vi.fn();
@@ -36,6 +37,8 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceProviders = vi.fn();
   const listWorkspaceSessions = vi.fn();
   const deleteSessionsData = vi.fn();
+  const exportSession = vi.fn();
+  const daemonStatus = vi.fn();
 
   class MockDaemonClient {
     constructor(_opts: unknown) {}
@@ -58,6 +61,8 @@ const sdkMocks = vi.hoisted(() => {
     workspaceProviders = workspaceProviders;
     listWorkspaceSessions = listWorkspaceSessions;
     deleteSessionsData = deleteSessionsData;
+    exportSession = exportSession;
+    daemonStatus = daemonStatus;
     dispose = vi.fn();
   }
 
@@ -81,6 +86,8 @@ const sdkMocks = vi.hoisted(() => {
     workspaceProviders,
     listWorkspaceSessions,
     deleteSessionsData,
+    exportSession,
+    daemonStatus,
     reset() {
       capabilities.mockReset();
       capabilities.mockResolvedValue({
@@ -162,6 +169,20 @@ const sdkMocks = vi.hoisted(() => {
         removed: [],
         notFound: [],
         errors: [],
+      });
+      exportSession.mockReset();
+      exportSession.mockResolvedValue({
+        content: '<html>export</html>',
+        filename: 'session.html',
+        mimeType: 'text/html',
+        format: 'html',
+      });
+      daemonStatus.mockReset();
+      daemonStatus.mockResolvedValue({
+        v: 1,
+        detail: 'summary',
+        status: 'ok',
+        issues: [],
       });
     },
   };
@@ -550,5 +571,122 @@ describe('DaemonWorkspaceProvider', () => {
       's-2',
       's-3',
     ]);
+  });
+
+  it('actions.exportSession calls client.exportSession for a session', async () => {
+    let actions: DaemonWorkspaceActions | undefined;
+
+    function Harness() {
+      const workspace = useOptionalDaemonWorkspace();
+      actions = workspace?.actions;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    if (!actions) throw new Error('actions not defined');
+
+    const workspaceActions = actions as DaemonWorkspaceActions & {
+      exportSession(
+        sessionId: string,
+        format?: 'html',
+      ): Promise<{
+        content: string;
+        filename: string;
+        mimeType: string;
+        format: string;
+      }>;
+    };
+    let result:
+      | {
+          content: string;
+          filename: string;
+          mimeType: string;
+          format: string;
+        }
+      | undefined;
+    await act(async () => {
+      result = await workspaceActions.exportSession('session-123', 'html');
+    });
+
+    expect(result).toEqual({
+      content: '<html>export</html>',
+      filename: 'session.html',
+      mimeType: 'text/html',
+      format: 'html',
+    });
+    expect(sdkMocks.exportSession).toHaveBeenCalledWith('session-123', {
+      format: 'html',
+    });
+  });
+
+  it('useDaemonSessions exposes exportSession', async () => {
+    let exportSession:
+      | ReturnType<typeof useDaemonSessions>['exportSession']
+      | undefined;
+
+    function Harness() {
+      exportSession = useDaemonSessions({
+        autoLoad: false,
+      }).exportSession;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    if (!exportSession) throw new Error('exportSession not defined');
+    const runExportSession = exportSession;
+
+    await act(async () => {
+      await runExportSession('session-456', 'jsonl');
+    });
+
+    expect(sdkMocks.exportSession).toHaveBeenCalledWith('session-456', {
+      format: 'jsonl',
+    });
+  });
+
+  it('actions.loadDaemonStatus forwards the detail level to client.daemonStatus', async () => {
+    const report = {
+      v: 1,
+      detail: 'full',
+      status: 'warning',
+      issues: [
+        {
+          code: 'pending_permissions',
+          severity: 'warning',
+          message: '2 pending permissions',
+        },
+      ],
+    };
+    sdkMocks.daemonStatus.mockResolvedValueOnce(report);
+    let actions: DaemonWorkspaceActions | undefined;
+
+    function Harness() {
+      const workspace = useOptionalDaemonWorkspace();
+      actions = workspace?.actions;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    if (!actions) throw new Error('actions not defined');
+
+    let result: unknown;
+    await act(async () => {
+      result = await actions!.loadDaemonStatus('full');
+    });
+
+    expect(result).toEqual(report);
+    expect(sdkMocks.daemonStatus).toHaveBeenCalledWith('full');
   });
 });
