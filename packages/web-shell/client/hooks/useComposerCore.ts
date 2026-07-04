@@ -1044,14 +1044,15 @@ export function useComposerCore(
     const view = viewRef.current;
     if (!trigger || !view) return;
     const doc = view.state.doc;
+    const to = trigger.from + trigger.text.length;
     if (
-      doc.length === trigger.from + trigger.text.length &&
-      doc.sliceString(trigger.from) === trigger.text
+      doc.length >= to &&
+      doc.sliceString(trigger.from, to) === trigger.text
     ) {
       view.dispatch({
         changes: {
           from: trigger.from,
-          to: trigger.from + trigger.text.length,
+          to,
           insert: '',
         },
       });
