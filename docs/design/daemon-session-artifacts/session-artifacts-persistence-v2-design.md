@@ -226,6 +226,7 @@ V2 不双写 sidecar，因此没有 JSONL + sidecar 的 metadata 重复存储。
 - `url`：按 storage type 校验 scheme、userinfo、secret-like query/fragment。
 - `managedId`：拒绝路径形态、`..`、绝对路径、分隔符。
 - `published`：只能由 daemon 内部 trusted publisher 或 manifest-validated path 产生，不能由 client payload 自称。
+- `contentRef`：如果存在，必须验证 `kind`/`id` shape，拒绝分隔符、绝对路径和 `..`，并只能通过 daemon-managed manifest 解析。
 - `metadata`：执行 primitive-only、size limit、secret key/value 和 unsafe display payload checks。
 
 验证失败时：
@@ -260,6 +261,12 @@ ingest input
 - 普通 tool/hook artifact：持久化失败不应让工具调用失败；artifact 仍可进入 live store，但必须先把 live store 中的 `retention` 降级为 `ephemeral`，设置 `persistenceWarning`，再发布 `artifact_changed`。
 - 显式 `pin/save` API：持久化失败必须返回错误，不能假装已经保存。
 
+对会影响恢复结果的删除型 mutation，必须 durable-first 或 rollback：
+
+- DELETE、eviction、unpin-to-ephemeral、`restore_pruned` 都必须先成功写入 tombstone，再从 live store 移除或发布变化。
+- 如果 tombstone append 失败，保持 live store 不变；显式 API 返回错误，后台 eviction/prune 记录 structured warning 并稍后重试。
+- 不能先从 live store 删除再尝试写 tombstone，否则下一次 replay 可能复活用户已经删除或 quota 已裁剪的 artifact。
+
 建议 warning：
 
 ```text
@@ -288,6 +295,7 @@ session load/replay 时：
 - `external_url`：只允许 `http:` / `https:`；拒绝 username/password credential；secret-like query/fragment 必须 redacted、降级为 non-openable locator，或整条 artifact 降级/阻断。
 - `published`：可以恢复 `file:` locator，但只能在 trusted publisher manifest 重新校验通过、且目标属于 daemon-managed published storage 时允许。普通 `external_url` 永远不能通过 `file:`。
 - `managedId`：拒绝路径形态、`..`、绝对路径、分隔符。
+- `contentRef`：验证 `kind`/`id` shape，拒绝分隔符、绝对路径和 `..`；只能通过 daemon-managed manifest 在当前 session/artifact scope 内解析；暴露前必须校验 stored size/hash metadata。
 - `metadata`：重新执行 primitive-only、size limit、secret key/value 和 unsafe display payload checks。
 
 恢复失败时：
@@ -676,11 +684,13 @@ V2 新增的失败路径必须有 structured logs，格式沿用：
 - V1 live session 升级到 V2 时 backfill snapshot 成功/失败两种路径。
 - DELETE tombstone 后 load 不复活 artifact。
 - unpin 到 `ephemeral` 后 load 不复活 artifact。
+- DELETE、eviction、unpin-to-ephemeral、`restore_pruned` tombstone append 失败时不会先改变 live state。
 - workspace artifact ingest 和 restore 时文件存在/缺失/symlink escape 三种状态。
 - pin/save content 时拒绝 symlink、special file、oversized stream、hardlink 异常和 TOCTOU swap。
 - external URL 只恢复 metadata，不发网络请求。
 - secret-bearing URL query/fragment 与 metadata key/value 不写入 JSONL。
 - published local `file:` 只有 trusted manifest revalidation 通过时恢复。
+- stale/tampered `contentRef` 无法绕过 daemon-managed manifest、size 和 hash 校验。
 - corrupt JSONL record 被跳过且不影响其它 artifacts。
 - chat recording / persistence disabled 时不声明或不启用 metadata restore。
 - pin/save 显式写失败时返回错误。
