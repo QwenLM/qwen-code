@@ -935,6 +935,18 @@ describe('daemon event schema', () => {
     } satisfies DaemonEvent;
     const known = asKnownDaemonEvent(warning);
     expect(known?.type).toBe('slow_client_warning');
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: {
+          queueSize: 192,
+          maxQueued: 256,
+          lastEventId: 42,
+          threshold: 'frames',
+        },
+      }),
+    ).toBeDefined();
 
     // Schema validation: required numeric fields. Missing or wrongly
     // typed payloads must NOT be recognized as known events.
@@ -1016,7 +1028,12 @@ describe('daemon event schema', () => {
       {
         v: 1,
         type: 'slow_client_warning',
-        data: { queueSize: 200, maxQueued: 256, lastEventId: 1 },
+        data: {
+          queueSize: 200,
+          maxQueued: 256,
+          lastEventId: 1,
+          threshold: 'frames',
+        },
       },
       // Warning #2 (e.g. after a drain + refill on the daemon side).
       {
@@ -1086,6 +1103,21 @@ describe('daemon event schema', () => {
           queuedBytes: Number.NaN,
           maxQueuedBytes: 2_097_152,
           eventBytes: 300_000,
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'client_evicted',
+        data: {
+          reason: 'queue_bytes_overflow',
+          droppedAfter: 8,
+          queueSize: 1,
+          maxQueued: 256,
+          queuedBytes: 1_900_000,
+          maxQueuedBytes: 2_097_152,
+          eventBytes: Number.NaN,
         },
       }),
     ).toBeUndefined();
