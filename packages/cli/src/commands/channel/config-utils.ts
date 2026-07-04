@@ -42,7 +42,14 @@ function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
   if (mode === false) return value;
   if (mode === 'available' && value.startsWith('$')) {
     const envName = value.substring(1);
-    return envName in process.env ? (process.env[envName] ?? '') : value;
+    const envValue = process.env[envName];
+    if (envValue === undefined) return value;
+    if (envValue === '') {
+      throw new Error(
+        `Environment variable ${envName} is empty (referenced as ${value})`,
+      );
+    }
+    return envValue;
   }
   return resolveEnvVars(value);
 }

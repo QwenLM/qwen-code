@@ -22,6 +22,7 @@ const mocks = vi.hoisted(() => {
     on: ReturnType<typeof vi.fn>;
     end: ReturnType<typeof vi.fn>;
     destroy: ReturnType<typeof vi.fn>;
+    setTimeout: ReturnType<typeof vi.fn>;
   };
   type MockHttpCall = {
     options: unknown;
@@ -77,6 +78,7 @@ const mocks = vi.hoisted(() => {
           return request;
         }),
         destroy: vi.fn(() => request),
+        setTimeout: vi.fn(() => request),
       };
       httpCalls.push({ options: _options, request, response });
       return request;
@@ -386,6 +388,34 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('drops messages received before authentication completes', async () => {
+    mocks.state.autoAuthenticate = false;
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+
+    const connecting = channel.connect();
+    const client = lastClient();
+    client.emit('message.text', {
+      msgid: 'msg-before-auth',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: 'hello' },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(channel.envelopes).toHaveLength(0);
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] dropping message before authentication.\n',
+    );
+
+    client.emit('authenticated', {});
+    await connecting;
+    stderr.mockRestore();
+  });
+
   it('keeps the active SDK client when the websocket disconnects', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -405,6 +435,14 @@ describe('WeComChannel', () => {
       markdown: { content: 'hello' },
     });
     stderr.mockRestore();
+  });
+
+  it('rejects sends when no SDK client is active', async () => {
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+
+    await expect(channel.sendMessage('chat-1', 'hello')).rejects.toThrow(
+      '[WeCom:bot] No active SDK client, cannot send.',
+    );
   });
 
   it('normalizes text messages into envelopes', async () => {
@@ -990,8 +1028,12 @@ describe('WeComChannel', () => {
       'https://example.invalid/redirect',
       expect.objectContaining({
         method: 'GET',
-        signal: expect.any(AbortSignal),
+        lookup: expect.any(Function),
       }),
+      expect.any(Function),
+    );
+    expect(mocks.httpCalls[0]?.request.setTimeout).toHaveBeenCalledWith(
+      10_000,
       expect.any(Function),
     );
     expect(client.downloadFile).not.toHaveBeenCalled();
@@ -1249,6 +1291,74 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('decodes NAT64 media URLs before checking embedded IPv4 safety', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-nat64',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://[64:ff9b::10.0.0.1]/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('allows public IPv4 addresses adjacent to documentation ranges', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-public-ipv4-adjacent',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://192.0.32.1/image', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(mocks.httpsRequest).toHaveBeenCalledWith(
+      'https://192.0.32.1/image',
+      expect.objectContaining({ method: 'GET' }),
+      expect.any(Function),
+    );
+    expect(channel.envelopes[0]?.attachments).toHaveLength(1);
+  });
+
+  it('still rejects IPv4 documentation ranges', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-doc-ipv4',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://192.0.2.1/image', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+  });
+
   it('keeps downloaded file attachments for base prompt consumers', async () => {
     vi.useFakeTimers();
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
@@ -1275,6 +1385,31 @@ describe('WeComChannel', () => {
 
     expect(existsSync(filePath!)).toBe(true);
     expect(existsSync(dirname(filePath!))).toBe(true);
+  });
+
+  it('removes downloaded file attachments after the prompt finishes', async () => {
+    const bridge = makeBridge();
+    const channel = new WeComChannel('bot', makeConfig(), bridge);
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgid: 'msg-cleanup-after-prompt',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'report.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as string;
+    const filePath = prompt.match(/saved to: (.*report\.txt)/)?.[1];
+    expect(filePath).toBeDefined();
+    await vi.waitFor(() => expect(existsSync(dirname(filePath!))).toBe(false));
   });
 
   it('sends markdown text and local media through the SDK', async () => {

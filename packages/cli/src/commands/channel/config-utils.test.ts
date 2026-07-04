@@ -174,21 +174,23 @@ describe('parseChannelConfig', () => {
     delete process.env['TEST_TOKEN'];
   });
 
-  it('resolves available env vars to empty strings when explicitly set', async () => {
+  it('rejects available env vars when explicitly empty', async () => {
     process.env['TEST_EMPTY_SECRET'] = '';
 
-    const result = await parseChannelConfig(
-      'bot',
-      {
-        type: 'wecom',
-        botId: 'bot-id',
-        secret: '$TEST_EMPTY_SECRET',
-      },
-      process.cwd(),
-      { resolveEnvVars: 'available' },
+    await expect(
+      parseChannelConfig(
+        'bot',
+        {
+          type: 'wecom',
+          botId: 'bot-id',
+          secret: '$TEST_EMPTY_SECRET',
+        },
+        process.cwd(),
+        { resolveEnvVars: 'available' },
+      ),
+    ).rejects.toThrow(
+      'Environment variable TEST_EMPTY_SECRET is empty (referenced as $TEST_EMPTY_SECRET)',
     );
-
-    expect(result['secret']).toBe('');
 
     delete process.env['TEST_EMPTY_SECRET'];
   });

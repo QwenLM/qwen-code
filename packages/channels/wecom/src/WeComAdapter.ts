@@ -3,6 +3,7 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
@@ -85,6 +86,7 @@ export class WeComChannel extends ChannelBase {
   private readonly wecom: WeComConfig;
   private client?: WeComClient;
   private readonly seenMessages = new Map<string, number>();
+  private readonly attachmentDirsByMessage = new Map<string, string[]>();
   private dedupTimer?: ReturnType<typeof setInterval>;
 
   constructor(
@@ -110,8 +112,15 @@ export class WeComChannel extends ChannelBase {
     }
 
     const client = new ClientCtor(options);
+    let authenticated = false;
     for (const event of MESSAGE_EVENTS) {
       client.on(event, (payload) => {
+        if (!authenticated) {
+          process.stderr.write(
+            `[WeCom:${this.name}] dropping message before authentication.\n`,
+          );
+          return;
+        }
         this.onMessage(payload).catch((err: unknown) => {
           process.stderr.write(
             `[WeCom:${this.name}] message handling failed: ${sanitizeLogText(
@@ -139,6 +148,7 @@ export class WeComChannel extends ChannelBase {
       const connected = client.connect();
       if (isPromiseLike(connected)) await connected;
       await authentication.promise;
+      authenticated = true;
     } catch (err) {
       authentication.cancel();
       if (this.client === client) this.client = undefined;
@@ -169,10 +179,9 @@ export class WeComChannel extends ChannelBase {
   async sendMessage(chatId: string, text: string): Promise<void> {
     const client = this.client;
     if (!client) {
-      process.stderr.write(
-        `[WeCom:${this.name}] No active SDK client, cannot send.\n`,
+      throw new Error(
+        `[WeCom:${this.name}] No active SDK client, cannot send.`,
       );
-      return;
     }
 
     const { cleanedText, media } = parseOutboundMediaMarkers(text);
@@ -262,7 +271,11 @@ export class WeComChannel extends ChannelBase {
     try {
       if (!(await this.preflightInbound(envelope))) return;
       if (messageId) this.seenMessages.set(messageId, Date.now());
-      attachments = await this.downloadAttachments(body, attachments);
+      attachments = await this.downloadAttachments(
+        body,
+        attachments,
+        messageId,
+      );
       if (attachments.length) {
         envelope.attachments = attachments;
       }
@@ -287,6 +300,7 @@ export class WeComChannel extends ChannelBase {
   private async downloadAttachments(
     body: Record<string, unknown>,
     attachments: Attachment[] = [],
+    messageId?: string,
   ): Promise<Attachment[]> {
     const refs = collectInboundMediaRefs(body);
     for (const ref of refs) {
@@ -314,6 +328,11 @@ export class WeComChannel extends ChannelBase {
       } else {
         const dir = join(tmpdir(), 'channel-files', randomUUID());
         mkdirSync(dir, { recursive: true });
+        if (messageId) {
+          const dirs = this.attachmentDirsByMessage.get(messageId) ?? [];
+          dirs.push(dir);
+          this.attachmentDirsByMessage.set(messageId, dirs);
+        }
         const safeName = fileName || `wecom_${ref.type}`;
         const filePath = join(dir, safeName);
         writeFileSync(filePath, data);
@@ -326,6 +345,20 @@ export class WeComChannel extends ChannelBase {
       }
     }
     return attachments;
+  }
+
+  protected override onPromptEnd(
+    _chatId: string,
+    _sessionId: string,
+    messageId?: string,
+  ): void {
+    if (!messageId) return;
+    const dirs = this.attachmentDirsByMessage.get(messageId);
+    if (!dirs) return;
+    this.attachmentDirsByMessage.delete(messageId);
+    for (const dir of dirs) {
+      rmSync(dir, { recursive: true, force: true });
+    }
   }
 
   private cleanupSeenMessages(): void {
@@ -756,7 +789,6 @@ function guardedHttpsDownload(
       rawUrl,
       {
         method: 'GET',
-        signal: AbortSignal.timeout(10_000),
         lookup: safePublicLookup,
       },
       (res) => {
@@ -800,6 +832,10 @@ function guardedHttpsDownload(
         res.on('error', (err: Error) => finish(err));
       },
     );
+    req.setTimeout(10_000, () => {
+      req.destroy();
+      finish(new Error('media download timed out'));
+    });
     req.on('error', (err: Error) => finish(err));
     req.end();
   });
@@ -932,6 +968,13 @@ function parseEmbeddedIpv4(host: string): number[] | undefined {
   if (groups[0] === 0x2001 && groups[1] === 0) {
     return hexGroupsToIpv4(groups[6]! ^ 0xffff, groups[7]! ^ 0xffff);
   }
+  if (
+    groups[0] === 0x0064 &&
+    groups[1] === 0xff9b &&
+    groups.slice(2, 6).every((group) => group === 0)
+  ) {
+    return hexGroupsToIpv4(groups[6], groups[7]);
+  }
   return undefined;
 }
 
@@ -993,7 +1036,7 @@ function parseHexGroup(value: string | undefined): number | undefined {
 }
 
 function isPublicIpv4(parts: number[]): boolean {
-  const [a = 0, b = 0] = parts;
+  const [a = 0, b = 0, c = 0] = parts;
   return !(
     a === 0 ||
     a === 10 ||
@@ -1001,10 +1044,10 @@ function isPublicIpv4(parts: number[]): boolean {
     (a === 100 && b >= 64 && b <= 127) ||
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
-    (a === 192 && b === 0) ||
+    (a === 192 && b === 0 && (c === 0 || c === 2)) ||
     (a === 192 && b === 168) ||
-    (a === 198 && (b === 18 || b === 19 || b === 51)) ||
-    (a === 203 && b === 0) ||
+    (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
+    (a === 203 && b === 0 && c === 113) ||
     a >= 224
   );
 }
