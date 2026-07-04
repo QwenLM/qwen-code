@@ -2464,6 +2464,21 @@ describe('ChannelBase', () => {
       expect(router.setBridge).toHaveBeenCalledWith(newBridge);
     });
 
+    it('registers channel loop tools again after setBridge', () => {
+      const ch = createChannel();
+      const newBridge = createBridge();
+
+      ch.setBridge(newBridge);
+
+      expect(newBridge.registerChannelLoopToolHandler).toHaveBeenCalledWith(
+        (
+          bridge as ReturnType<typeof createBridge> & {
+            getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+          }
+        ).getChannelLoopToolHandler(),
+      );
+    });
+
     it('moves direct bridge events and router bridge on setBridge', () => {
       const oldBridge = bridge;
       const newBridge = createBridge();

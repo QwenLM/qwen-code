@@ -448,6 +448,7 @@ export abstract class ChannelBase {
     }
     this.router.setBridge(bridge);
     this.bridge = bridge;
+    bridge.registerChannelLoopToolHandler?.(this.channelLoopToolHandler);
     if (this.registerBridgeEvents) {
       this.attachBridgeEvents(bridge);
     }
