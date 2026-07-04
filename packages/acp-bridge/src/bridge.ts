@@ -24,6 +24,7 @@ import type {
 import {
   DAEMON_TRACEPARENT_META_KEY,
   DAEMON_TRACESTATE_META_KEY,
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
   TrustGateError,
   ShellExecutionService,
   type ShellOutputEvent,
@@ -2716,10 +2717,25 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       candidate &&
       typeof candidate === 'object' &&
       !Array.isArray(candidate) &&
-      (candidate as { v?: unknown }).v === 2 &&
+      (candidate as { v?: unknown }).v ===
+        SESSION_ARTIFACT_PERSISTENCE_VERSION &&
       Array.isArray((candidate as { artifacts?: unknown }).artifacts)
     ) {
-      return candidate as RebuiltSessionArtifactSnapshot;
+      const snapshot = candidate as Partial<RebuiltSessionArtifactSnapshot>;
+      return {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId:
+          typeof snapshot.sessionId === 'string' ? snapshot.sessionId : '',
+        sequence: typeof snapshot.sequence === 'number' ? snapshot.sequence : 0,
+        artifacts: snapshot.artifacts ?? [],
+        tombstonedIds: Array.isArray(snapshot.tombstonedIds)
+          ? snapshot.tombstonedIds
+          : [],
+        stickyEphemeralIds: Array.isArray(snapshot.stickyEphemeralIds)
+          ? snapshot.stickyEphemeralIds
+          : [],
+        warnings: Array.isArray(snapshot.warnings) ? snapshot.warnings : [],
+      };
     }
     return undefined;
   };
@@ -4353,11 +4369,22 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const pruned = await entry.artifacts.pruneExpiredPins();
+      const warnings = [...(pruned.warnings ?? [])];
       if (pruned.changes.length > 0) {
         publishArtifactChanges(entry, pruned.changes);
-        await gcArtifactContent(entry);
+        try {
+          await gcArtifactContent(entry);
+        } catch (error) {
+          warnings.push('artifact content GC failed; stale content retained');
+          writeStderrLine(
+            `[artifacts] session=${entry.sessionId} action=get_gc_failed reason=${JSON.stringify(
+              error instanceof Error ? error.message : String(error),
+            )}`,
+          );
+        }
       }
-      return entry.artifacts.list();
+      const snapshot = await entry.artifacts.list();
+      return warnings.length > 0 ? { ...snapshot, warnings } : snapshot;
     },
 
     async addSessionArtifact(sessionId, artifact, context) {
@@ -4375,9 +4402,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
+      const removeOptions = artifactRemoveOptions(options);
       const artifact = await entry.artifacts.get(artifactId);
       const result = await entry.artifacts.remove(artifactId, { clientId });
-      const removeOptions = artifactRemoveOptions(options);
       const warnings = [...(result.warnings ?? [])];
       if (result.changes.length > 0) {
         try {
@@ -4459,11 +4486,21 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         artifactId,
         artifactUnpinOptions(options),
       );
+      const warnings = [...(result.warnings ?? [])];
       if (result.changes.length > 0) {
-        await gcArtifactContent(entry);
+        try {
+          await gcArtifactContent(entry);
+        } catch (error) {
+          warnings.push('content_delete_preserved');
+          writeStderrLine(
+            `[artifacts] session=${entry.sessionId} action=unpin_gc_failed reason=${JSON.stringify(
+              error instanceof Error ? error.message : String(error),
+            )}`,
+          );
+        }
       }
       publishArtifactChanges(entry, result.changes, clientId);
-      return result;
+      return warnings.length > 0 ? { ...result, warnings } : result;
     },
 
     async fsckSessionArtifacts(sessionId) {

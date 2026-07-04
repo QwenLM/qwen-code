@@ -7,6 +7,10 @@
 import { createHash } from 'node:crypto';
 import { promises as fs } from 'node:fs';
 import path from 'node:path';
+import {
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  stableSessionArtifactId,
+} from '@qwen-code/qwen-code-core';
 import type {
   PersistedSessionArtifact,
   RebuiltSessionArtifactSnapshot,
@@ -18,18 +22,6 @@ import type {
   SessionArtifactSnapshotRecordPayload,
 } from '@qwen-code/qwen-code-core';
 import { writeStderrLine } from './internal/stderrLine.js';
-
-const SESSION_ARTIFACT_PERSISTENCE_VERSION = 2 as const;
-
-function stableSessionArtifactId(
-  sessionId: string,
-  identityKey: string,
-): string {
-  return createHash('sha256')
-    .update(`${sessionId}:${identityKey}`)
-    .digest('hex')
-    .slice(0, 16);
-}
 
 export type DaemonSessionArtifactKind =
   | 'file'
@@ -133,6 +125,7 @@ export interface SessionArtifactsEnvelope {
   limits: {
     maxArtifacts: number;
   };
+  warnings?: string[];
 }
 
 export interface SessionArtifactMutationResult {
@@ -806,11 +799,14 @@ export class SessionArtifactStore {
       if (change.action === 'removed') continue;
       const stored = this.artifacts.get(change.artifactId);
       if (!stored) continue;
-      stored.persistedAt = recordedAt;
-      if (stored.contentRef) {
-        delete stored.persistenceWarning;
+      const artifact = {
+        ...toPublicArtifact(stored),
+        persistedAt: recordedAt,
+      };
+      if (artifact.contentRef) {
+        delete artifact.persistenceWarning;
       }
-      change.artifact = toPublicArtifact(stored);
+      change.artifact = artifact;
     }
 
     const payload: SessionArtifactEventRecordPayload = {
@@ -825,6 +821,16 @@ export class SessionArtifactStore {
 
     try {
       await this.persistence.recordEvent(payload);
+      for (const change of durableChanges) {
+        if (change.action === 'removed') continue;
+        const stored = this.artifacts.get(change.artifactId);
+        if (!stored) continue;
+        stored.persistedAt = recordedAt;
+        if (stored.contentRef) {
+          delete stored.persistenceWarning;
+        }
+        change.artifact = toPublicArtifact(stored);
+      }
       this.applyDurableMarkers(durableChanges);
       await this.maybeRecordSnapshot(recordedAt);
       return [];

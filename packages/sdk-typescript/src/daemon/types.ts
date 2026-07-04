@@ -561,6 +561,7 @@ export interface DaemonSessionArtifactsEnvelope {
   limits: {
     maxArtifacts: number;
   };
+  warnings?: string[];
 }
 
 export interface DaemonSessionArtifactMutationResult {

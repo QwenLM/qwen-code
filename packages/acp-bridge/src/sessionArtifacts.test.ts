@@ -2628,6 +2628,7 @@ describe('SessionArtifactContentStore', () => {
   });
 
   afterEach(async () => {
+    vi.restoreAllMocks();
     await fs.rm(workspace, { recursive: true, force: true });
     await fs.rm(contentRoot, { recursive: true, force: true });
   });
@@ -2740,6 +2741,26 @@ describe('SessionArtifactContentStore', () => {
     ))!;
 
     expect(second.contentId).toBe(first.contentId);
+  });
+
+  it('caches total content bytes after the first quota scan', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const first = await workspaceArtifact('cache-a.txt', 'a');
+    const second = await workspaceArtifact('cache-b.txt', 'b');
+    const readdirSpy = vi.spyOn(fs, 'readdir');
+
+    await contentStore.pinWorkspaceFile('content-session', first, workspace);
+    const rootScansAfterFirst = readdirSpy.mock.calls.filter(
+      ([dir]) => String(dir) === contentRoot,
+    ).length;
+
+    await contentStore.pinWorkspaceFile('content-session', second, workspace);
+    const rootScansAfterSecond = readdirSpy.mock.calls.filter(
+      ([dir]) => String(dir) === contentRoot,
+    ).length;
+
+    expect(rootScansAfterFirst).toBe(1);
+    expect(rootScansAfterSecond).toBe(rootScansAfterFirst);
   });
 
   it('rejects files over the per-artifact content limit before copying', async () => {

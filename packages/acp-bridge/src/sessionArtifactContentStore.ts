@@ -46,6 +46,7 @@ export class SessionArtifactContentStore {
   private readonly rootDir: string;
   private writeQueue: Promise<void> = Promise.resolve();
   private readonly leasedContentIds = new Set<string>();
+  private cachedTotalBytes: number | undefined;
 
   constructor(rootDir = defaultContentRoot()) {
     this.rootDir = rootDir;
@@ -82,6 +83,7 @@ export class SessionArtifactContentStore {
         `${process.pid}-${Date.now()}-${artifact.id}.bin`,
       );
       let sourceHandle: FileHandle | undefined;
+      let addedSizeBytes = 0;
       try {
         sourceHandle = await openRegularWorkspaceFile(source);
         const { sha256, sizeBytes } = await copyOpenFileToTemp(
@@ -99,7 +101,7 @@ export class SessionArtifactContentStore {
           await fs.rm(tmpPath, { force: true });
           tmpPath = undefined;
         } else {
-          const usedBytes = await this.usedBytes();
+          const usedBytes = await this.getUsedBytes();
           if (usedBytes + sizeBytes > MAX_CONTENT_STORE_BYTES) {
             throw new SessionArtifactValidationError(
               'Artifact content quota exceeded',
@@ -109,6 +111,7 @@ export class SessionArtifactContentStore {
           await fs.mkdir(contentDir, { recursive: true, mode: 0o700 });
           await fs.rename(tmpPath, dataPath);
           tmpPath = undefined;
+          addedSizeBytes = sizeBytes;
         }
 
         const createdAt = new Date().toISOString();
@@ -123,6 +126,9 @@ export class SessionArtifactContentStore {
           createdAt,
         };
         await writeManifestAtomic(contentDir, manifest);
+        if (addedSizeBytes > 0 && this.cachedTotalBytes !== undefined) {
+          this.cachedTotalBytes += addedSizeBytes;
+        }
         this.leasedContentIds.add(contentId);
         return {
           kind: 'managed_copy',
@@ -132,6 +138,9 @@ export class SessionArtifactContentStore {
           createdAt,
         };
       } catch (error) {
+        if (addedSizeBytes > 0) {
+          this.cachedTotalBytes = undefined;
+        }
         if (tmpPath) {
           await fs.rm(tmpPath, { force: true }).catch(() => {});
         }
@@ -261,13 +270,26 @@ export class SessionArtifactContentStore {
           continue;
         }
         await fs.rm(fullPath, { recursive: true, force: true });
+        if (this.cachedTotalBytes !== undefined) {
+          this.cachedTotalBytes = Math.max(
+            0,
+            this.cachedTotalBytes - manifest.sizeBytes,
+          );
+        }
         removed.push(entry);
       }
       return { removed, retained };
     });
   }
 
-  private async usedBytes(): Promise<number> {
+  private async getUsedBytes(): Promise<number> {
+    if (this.cachedTotalBytes === undefined) {
+      this.cachedTotalBytes = await this.scanUsedBytes();
+    }
+    return this.cachedTotalBytes;
+  }
+
+  private async scanUsedBytes(): Promise<number> {
     let total = 0;
     let entries: string[];
     try {

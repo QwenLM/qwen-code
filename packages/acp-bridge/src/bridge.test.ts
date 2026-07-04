@@ -45,7 +45,12 @@ import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
 import type { BridgeEvent } from './eventBus.js';
-import { ApprovalMode, ShellExecutionService } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
+  ShellExecutionService,
+  stableSessionArtifactId,
+} from '@qwen-code/qwen-code-core';
 import {
   FakeAgent,
   type ChannelHandle,
@@ -55,6 +60,7 @@ import {
   WS_B,
   SESS_A,
 } from './internal/testUtils.js';
+import { SessionArtifactContentStore } from './sessionArtifactContentStore.js';
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -180,6 +186,161 @@ describe('createAcpSessionBridge', () => {
       });
     } finally {
       await bridge.shutdown();
+    }
+  });
+
+  it('validates artifact remove options before changing live state', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Client link',
+          url: 'https://example.com/client',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+
+      await expect(
+        bridge.removeSessionArtifact(
+          session.sessionId,
+          artifactId,
+          { clientId: session.clientId },
+          { deleteContent: 'yes' } as unknown as { deleteContent: boolean },
+        ),
+      ).rejects.toThrow(/deleteContent must be a boolean/);
+
+      await expect(
+        bridge.getSessionArtifacts(session.sessionId),
+      ).resolves.toMatchObject({
+        artifacts: [{ id: artifactId }],
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('returns artifact snapshots when best-effort GET content GC fails', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-workspace-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-04T00:00:00.000Z'));
+    const gcSpy = vi
+      .spyOn(SessionArtifactContentStore.prototype, 'gc')
+      .mockRejectedValueOnce(new Error('disk unavailable'));
+    const bridge = makeBridge({
+      boundWorkspace: workspace,
+      channelFactory: async () => makeChannel().channel,
+    });
+    try {
+      await fsp.mkdir(path.join(workspace, 'reports'), { recursive: true });
+      await fsp.writeFile(path.join(workspace, 'reports', 'report.txt'), 'hi');
+      const session = await bridge.spawnOrAttach({ workspaceCwd: workspace });
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Report',
+          workspacePath: 'reports/report.txt',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      await bridge.pinSessionArtifact(
+        session.sessionId,
+        artifactId,
+        { clientId: session.clientId },
+        { mode: 'content', ttlDays: 1 },
+      );
+
+      vi.setSystemTime(new Date('2026-07-06T00:00:00.000Z'));
+      await expect(
+        bridge.getSessionArtifacts(session.sessionId),
+      ).resolves.toMatchObject({
+        artifacts: [
+          {
+            id: artifactId,
+            retention: 'restorable',
+            persistenceWarning: 'content_expired',
+          },
+        ],
+        warnings: ['artifact content GC failed; stale content retained'],
+      });
+      expect(gcSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      gcSpy.mockRestore();
+      vi.useRealTimers();
+      await bridge.shutdown();
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(tempHome, { recursive: true, force: true });
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps unpin successful when best-effort content GC fails', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-workspace-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    const bridge = makeBridge({
+      boundWorkspace: workspace,
+      channelFactory: async () => makeChannel().channel,
+    });
+    const gcSpy = vi
+      .spyOn(SessionArtifactContentStore.prototype, 'gc')
+      .mockRejectedValueOnce(new Error('disk unavailable'));
+    try {
+      await fsp.mkdir(path.join(workspace, 'reports'), { recursive: true });
+      await fsp.writeFile(path.join(workspace, 'reports', 'report.txt'), 'hi');
+      const session = await bridge.spawnOrAttach({ workspaceCwd: workspace });
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Report',
+          workspacePath: 'reports/report.txt',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      await bridge.pinSessionArtifact(
+        session.sessionId,
+        artifactId,
+        { clientId: session.clientId },
+        { mode: 'content' },
+      );
+
+      await expect(
+        bridge.unpinSessionArtifact(session.sessionId, artifactId, {
+          clientId: session.clientId,
+        }),
+      ).resolves.toMatchObject({
+        changes: [{ action: 'updated', artifactId }],
+        warnings: ['content_delete_preserved'],
+      });
+      expect(gcSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      gcSpy.mockRestore();
+      await bridge.shutdown();
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(tempHome, { recursive: true, force: true });
+      await fsp.rm(workspace, { recursive: true, force: true });
     }
   });
 
@@ -1237,6 +1398,59 @@ describe('createAcpSessionBridge', () => {
     ).resolves.toEqual({ stopReason: 'end_turn' });
     expect(handles[0]?.agent.promptCalls[0]?.sessionId).toBe('persisted-1');
 
+    await bridge.shutdown();
+  });
+
+  it('restores artifact snapshots that omit marker arrays after fork remap', async () => {
+    const sessionId = 'persisted-artifacts';
+    const artifactUrl = 'https://example.com/restored';
+    const artifactId = stableSessionArtifactId(sessionId, `url:${artifactUrl}`);
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId,
+                sequence: 7,
+                artifacts: [
+                  {
+                    id: artifactId,
+                    kind: 'link',
+                    storage: 'external_url',
+                    source: 'client',
+                    status: 'available',
+                    title: 'Restored link',
+                    url: artifactUrl,
+                    retention: 'restorable',
+                    clientRetained: true,
+                    createdAt: '2026-07-04T00:00:00.000Z',
+                    updatedAt: '2026-07-04T00:00:00.000Z',
+                  },
+                ],
+                warnings: [],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    const loaded = await bridge.loadSession({
+      sessionId,
+      workspaceCwd: WS_A,
+    });
+
+    await expect(
+      bridge.getSessionArtifacts(loaded.sessionId),
+    ).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifactId,
+          title: 'Restored link',
+          restoreState: 'restored',
+        },
+      ],
+    });
     await bridge.shutdown();
   });
 
