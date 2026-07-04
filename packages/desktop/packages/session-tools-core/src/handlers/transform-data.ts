@@ -11,6 +11,7 @@ import type { SessionToolContext } from '../context.ts';
 import type { ToolResult } from '../types.ts';
 import { successResponse, errorResponse } from '../response.ts';
 import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
@@ -19,7 +20,6 @@ import {
   applyFilesystemIsolation,
   type FilesystemIsolationPlan,
 } from '../runtime/filesystem-isolation.ts';
-import type { NetworkIsolationPlan } from '../runtime/network-isolation.ts';
 import {
   isPathWithinDirectory,
   isPathWithinDirectoryForCreation,
@@ -35,9 +35,16 @@ export interface TransformDataArgs {
 
 const TRANSFORM_DATA_TIMEOUT_MS = 30_000;
 
+interface TransformNetworkIsolationPlan {
+  status: FilesystemIsolationPlan['status'];
+  backend: FilesystemIsolationPlan['backend'] | 'none';
+  command: string;
+  args: string[];
+}
+
 function formatIsolationContext(
   filesystemIsolation: FilesystemIsolationPlan,
-  networkIsolation: NetworkIsolationPlan,
+  networkIsolation: TransformNetworkIsolationPlan,
 ): string {
   const commandLine = [
     filesystemIsolation.command,
@@ -48,6 +55,23 @@ function formatIsolationContext(
     `Isolation: filesystem=${filesystemIsolation.status} (${filesystemIsolation.backend}), network=${networkIsolation.status} (${networkIsolation.backend})`,
     `Command: ${commandLine.slice(0, 1000)}`,
   ].join('\n');
+}
+
+function killSandboxProcess(child: ChildProcess): void {
+  if (!child.pid) {
+    child.kill('SIGKILL');
+    return;
+  }
+
+  try {
+    if (process.platform === 'win32') {
+      child.kill('SIGKILL');
+    } else {
+      process.kill(-child.pid, 'SIGKILL');
+    }
+  } catch {
+    child.kill('SIGKILL');
+  }
 }
 
 /**
@@ -112,7 +136,7 @@ export async function handleTransformData(
   // Write script to temp file
   const ext = args.language === 'python3' ? '.py' : '.js';
   const tempScript = join(dataDir, `.craft-transform-${randomUUID()}${ext}`);
-  let networkIsolation: NetworkIsolationPlan | null = null;
+  let networkIsolation: TransformNetworkIsolationPlan | null = null;
   let filesystemIsolation: FilesystemIsolationPlan | null = null;
 
   try {
@@ -132,6 +156,7 @@ export async function handleTransformData(
       dataDir,
       {
         includeNetworkDeny: true,
+        isolateIpc: true,
       },
     );
     networkIsolation = {
@@ -147,12 +172,6 @@ export async function handleTransformData(
     if (filesystemIsolation.status !== 'enforced') {
       return errorResponse(
         'transform_data requires filesystem isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.',
-      );
-    }
-
-    if (networkIsolation.status !== 'enforced') {
-      return errorResponse(
-        'transform_data requires network isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.',
       );
     }
 
@@ -180,6 +199,7 @@ export async function handleTransformData(
           cwd: dataDir,
           env,
           stdio: ['ignore', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32',
         },
       );
 
@@ -189,7 +209,7 @@ export async function handleTransformData(
 
       const killTimer = setTimeout(() => {
         timedOut = true;
-        child.kill('SIGKILL');
+        killSandboxProcess(child);
       }, TRANSFORM_DATA_TIMEOUT_MS);
 
       child.stdout.on('data', (data: Buffer) => {

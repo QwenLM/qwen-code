@@ -11,6 +11,7 @@ export interface FilesystemIsolationPlan {
 
 export interface FilesystemIsolationOptions {
   includeNetworkDeny?: boolean;
+  isolateIpc?: boolean;
 }
 
 function existsOnPath(binary: string): boolean {
@@ -38,11 +39,7 @@ function canUseSandboxExec(): boolean {
 }
 
 function escapeSandboxPath(path: string): string {
-  return path
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\(/g, '\\(')
-    .replace(/\)/g, '\\)');
+  return path.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
 
 function sandboxWriteRoots(sessionDir: string): string[] {
@@ -53,26 +50,6 @@ function sandboxWriteRoots(sessionDir: string): string[] {
   } catch {
     return [resolved];
   }
-}
-
-export function combineFirejailFilesystemIsolation(
-  args: string[],
-  sessionRoot: string,
-): string[] | null {
-  const separatorIndex = args.indexOf('--');
-  if (separatorIndex === -1) {
-    return null;
-  }
-
-  const outerArgs = args.slice(0, separatorIndex);
-  const innerArgs = args.slice(separatorIndex + 1);
-  return [
-    ...outerArgs,
-    `--private=${sessionRoot}`,
-    `--whitelist=${sessionRoot}`,
-    '--',
-    ...innerArgs,
-  ];
 }
 
 export function buildDarwinSandboxProfile(
@@ -104,7 +81,7 @@ export function buildDarwinSandboxProfile(
  *
  * Current support:
  * - macOS: sandbox-exec profile
- * - Linux: bubblewrap (preferred) or firejail private/whitelist profile
+ * - Linux: bubblewrap
  * - others: unavailable (fail-safe for script_sandbox)
  */
 export function applyFilesystemIsolation(
@@ -130,7 +107,10 @@ export function applyFilesystemIsolation(
     if (existsOnPath('bwrap')) {
       // Read-only root + writable bind mount for the session subtree.
       // This limits writes to sessionRoot while preserving runtime/library access.
-      const namespaceArgs = ['--unshare-ipc'];
+      const namespaceArgs: string[] = [];
+      if (options?.isolateIpc) {
+        namespaceArgs.push('--unshare-ipc');
+      }
       if (options?.includeNetworkDeny) {
         namespaceArgs.push('--unshare-net');
       }
@@ -159,37 +139,8 @@ export function applyFilesystemIsolation(
       };
     }
 
-    if (existsOnPath('firejail')) {
-      if (command === 'firejail') {
-        const combinedArgs = combineFirejailFilesystemIsolation(
-          args,
-          sessionRoot,
-        );
-        if (combinedArgs) {
-          return {
-            status: 'enforced',
-            backend: 'firejail',
-            command: 'firejail',
-            args: combinedArgs,
-          };
-        }
-      }
-
-      return {
-        status: 'enforced',
-        backend: 'firejail',
-        command: 'firejail',
-        args: [
-          '--quiet',
-          ...(options?.includeNetworkDeny ? ['--net=none'] : []),
-          `--private=${sessionRoot}`,
-          `--whitelist=${sessionRoot}`,
-          '--',
-          command,
-          ...args,
-        ],
-      };
-    }
+    // firejail --private only affects $HOME, so it cannot provide the same
+    // write containment as bwrap's read-only root with one writable bind.
   }
 
   return {

@@ -8,10 +8,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import {
-  buildDarwinSandboxProfile,
-  combineFirejailFilesystemIsolation,
-} from './filesystem-isolation.ts';
+import { buildDarwinSandboxProfile } from './filesystem-isolation.ts';
 
 describe('buildDarwinSandboxProfile', () => {
   it('includes session subpath write allow', () => {
@@ -29,10 +26,10 @@ describe('buildDarwinSandboxProfile', () => {
     expect(profile).toContain('(deny network*)');
   });
 
-  it('escapes parentheses in session paths', () => {
+  it('keeps parentheses literal inside quoted session paths', () => {
     const profile = buildDarwinSandboxProfile('/tmp/craft-(session)');
     expect(profile).toContain(
-      '(allow file-write* (subpath "/tmp/craft-\\(session\\)"))',
+      '(allow file-write* (subpath "/tmp/craft-(session)"))',
     );
   });
 
@@ -74,30 +71,5 @@ describe('buildDarwinSandboxProfile', () => {
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
-  });
-});
-
-describe('combineFirejailFilesystemIsolation', () => {
-  it('adds filesystem flags to an existing firejail network wrapper', () => {
-    expect(
-      combineFirejailFilesystemIsolation(
-        ['--quiet', '--net=none', '--', 'node', 'script.js'],
-        '/tmp/session',
-      ),
-    ).toEqual([
-      '--quiet',
-      '--net=none',
-      '--private=/tmp/session',
-      '--whitelist=/tmp/session',
-      '--',
-      'node',
-      'script.js',
-    ]);
-  });
-
-  it('returns null when firejail args do not contain a command separator', () => {
-    expect(
-      combineFirejailFilesystemIsolation(['--quiet', '--net=none'], '/tmp/x'),
-    ).toBeNull();
   });
 });

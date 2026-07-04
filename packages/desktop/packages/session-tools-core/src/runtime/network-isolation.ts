@@ -2,7 +2,7 @@ import { spawnSync } from 'node:child_process';
 
 export interface NetworkIsolationPlan {
   status: 'enforced' | 'unavailable';
-  backend: 'sandbox-exec' | 'bwrap' | 'unshare' | 'firejail' | 'none';
+  backend: 'sandbox-exec' | 'unshare' | 'firejail' | 'none';
   command: string;
   args: string[];
 }
