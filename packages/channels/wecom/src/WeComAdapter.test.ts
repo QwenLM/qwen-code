@@ -1,4 +1,11 @@
-import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
@@ -245,6 +252,12 @@ function lastClient(): MockWSClient {
   return client;
 }
 
+function channelFileDirs(): string[] {
+  const parent = join(tmpdir(), 'channel-files');
+  if (!existsSync(parent)) return [];
+  return readdirSync(parent).map((entry) => join(parent, entry));
+}
+
 describe('WeComChannel', () => {
   beforeEach(() => {
     mocks.instances.length = 0;
@@ -260,11 +273,13 @@ describe('WeComChannel', () => {
     vi.clearAllMocks();
     mocks.decryptFile.mockImplementation((buffer: Buffer) => buffer);
     mocks.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
+    rmSync(join(tmpdir(), 'channel-files'), { recursive: true, force: true });
   });
 
   afterEach(() => {
     vi.useRealTimers();
     vi.unstubAllGlobals();
+    rmSync(join(tmpdir(), 'channel-files'), { recursive: true, force: true });
   });
 
   it('requires botId and secret', () => {
@@ -437,6 +452,28 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('removes SDK event handlers on disconnect', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    channel.disconnect();
+    client.emit('message.text', {
+      msgid: 'msg-after-disconnect',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: 'hello' },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(channel.envelopes).toHaveLength(0);
+    expect(client.handlers.get('message.text')).toHaveLength(0);
+    expect(client.handlers.get('message.image')).toHaveLength(0);
+    expect(client.handlers.get('error')).toHaveLength(0);
+    expect(client.handlers.get('disconnected')).toHaveLength(0);
+  });
+
   it('rejects sends when no SDK client is active', async () => {
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
 
@@ -571,7 +608,6 @@ describe('WeComChannel', () => {
     expect(file.attachments?.[0]?.type).toBe('file');
     expect(file.attachments?.[0]?.fileName).toBe('report.pdf');
     expect(file.attachments?.[0]?.filePath).toContain('report.pdf');
-    expect(existsSync(file.attachments?.[0]?.filePath ?? '')).toBe(true);
   });
 
   it('sanitizes downloaded image filenames before adding attachments', async () => {
@@ -865,6 +901,34 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('blocks uncompressed IPv4-mapped IPv6 media URLs before probing them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-uncompressed-mapped-ip',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://[0:0:0:0:0:ffff:7f00:1]/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
   it('blocks IPv6 transition media URLs before probing them', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -989,7 +1053,7 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(mocks.httpCalls).toHaveLength(1));
     const options = mocks.httpCalls[0]?.options as RequestOptionsWithLookup;
-    const callback = vi.fn<Parameters<LookupCallback>, void>();
+    const callback = vi.fn<LookupCallback>();
 
     options.lookup?.('example.invalid', { all: true }, callback);
 
@@ -1122,7 +1186,32 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
     expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('media download failed'),
+      expect.stringContaining('media download failed: HTTP 500'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('skips inbound attachments when the media response is empty', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    mocks.httpResponse.body = Buffer.alloc(0);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-empty-media',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://example.invalid/empty', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('empty media response'),
     );
     stderr.mockRestore();
   });
@@ -1160,7 +1249,49 @@ describe('WeComChannel', () => {
       { address: '169.254.169.254', family: 4 },
     ]);
     const options = mocks.httpCalls[0]?.options as RequestOptionsWithLookup;
-    const callback = vi.fn<Parameters<LookupCallback>, void>();
+    const callback = vi.fn<LookupCallback>();
+
+    options.lookup?.('example.invalid', { all: true }, callback);
+
+    await vi.waitFor(() =>
+      expect(callback).toHaveBeenCalledWith(expect.any(Error), '', 0),
+    );
+  });
+
+  it('rejects uncompressed mapped private addresses during request-time lookup validation', async () => {
+    type LookupCallback = (
+      err: Error | null,
+      address: string | Array<{ address: string; family: number }>,
+      family?: number,
+    ) => void;
+    type RequestOptionsWithLookup = {
+      lookup?: (
+        hostname: string,
+        options: { all?: boolean },
+        callback: LookupCallback,
+      ) => void;
+    };
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-lookup-uncompressed-mapped',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://example.invalid/image',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(mocks.httpCalls).toHaveLength(1));
+    mocks.lookup.mockResolvedValueOnce([
+      { address: '0:0:0:0:0:ffff:7f00:1', family: 6 },
+    ]);
+    const options = mocks.httpCalls[0]?.options as RequestOptionsWithLookup;
+    const callback = vi.fn<LookupCallback>();
 
     options.lookup?.('example.invalid', { all: true }, callback);
 
@@ -1252,6 +1383,25 @@ describe('WeComChannel', () => {
 
     client.emit('message.image', {
       msgid: 'msg-site-local',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://example.invalid/image', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+  });
+
+  it('rejects media URLs that resolve to IPv6 multicast addresses', async () => {
+    mocks.lookup.mockResolvedValue([{ address: 'ff02::1', family: 6 }]);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-multicast',
       msgtype: 'image',
       chattype: 'single',
       from: { userid: 'alice' },
@@ -1361,7 +1511,11 @@ describe('WeComChannel', () => {
 
   it('keeps downloaded file attachments for base prompt consumers', async () => {
     vi.useFakeTimers();
-    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    const bridge = makeBridge();
+    (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<string>(() => {}),
+    );
+    const channel = new WeComChannel('bot', makeConfig(), bridge);
     await channel.connect();
     const client = lastClient();
 
@@ -1376,8 +1530,10 @@ describe('WeComChannel', () => {
       },
     });
 
-    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
-    const filePath = channel.envelopes[0]?.attachments?.[0]?.filePath;
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as string;
+    const filePath = prompt.match(/saved to: (.*report\.txt)/)?.[1];
     expect(filePath).toBeDefined();
     expect(existsSync(dirname(filePath!))).toBe(true);
 
@@ -1410,6 +1566,94 @@ describe('WeComChannel', () => {
     const filePath = prompt.match(/saved to: (.*report\.txt)/)?.[1];
     expect(filePath).toBeDefined();
     await vi.waitFor(() => expect(existsSync(dirname(filePath!))).toBe(false));
+  });
+
+  it('removes downloaded file attachments when no prompt starts', async () => {
+    const bridge = makeBridge();
+    const channel = new WeComChannel('bot', makeConfig(), bridge);
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgid: 'msg-command-cleanup',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'report.txt',
+      },
+      text: {
+        content: '/status',
+      },
+    });
+
+    await vi.waitFor(() =>
+      expect(client.sendMessage).toHaveBeenCalledWith(
+        'alice',
+        expect.objectContaining({ msgtype: 'markdown' }),
+      ),
+    );
+    expect(bridge.prompt).not.toHaveBeenCalled();
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
+  });
+
+  it('removes every collected file attachment after the coalesced prompt finishes', async () => {
+    const bridge = makeBridge();
+    let finishPrompt: (() => void) | undefined;
+    (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () =>
+        new Promise<string>((resolve) => {
+          finishPrompt = () => resolve('');
+        }),
+    );
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ dispatchMode: 'collect' }),
+      bridge,
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgid: 'msg-active',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'active.txt',
+      },
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+    client.emit('message.file', {
+      msgid: 'msg-buffered-1',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'first.txt',
+      },
+    });
+    client.emit('message.file', {
+      msgid: 'msg-buffered-2',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'second.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(3));
+
+    finishPrompt?.();
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
   });
 
   it('sends markdown text and local media through the SDK', async () => {

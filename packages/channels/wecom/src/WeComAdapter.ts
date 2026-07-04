@@ -87,7 +87,14 @@ export class WeComChannel extends ChannelBase {
   private client?: WeComClient;
   private readonly seenMessages = new Map<string, number>();
   private readonly attachmentDirsByMessage = new Map<string, string[]>();
+  private readonly attachmentDirsBySession = new Map<string, string[]>();
+  private readonly bufferedAttachmentMessages = new Set<string>();
   private dedupTimer?: ReturnType<typeof setInterval>;
+  private clientHandlers?: {
+    message: (payload: unknown) => void;
+    error: (payload: unknown) => void;
+    disconnected: (payload: unknown) => void;
+  };
 
   constructor(
     name: string,
@@ -113,45 +120,53 @@ export class WeComChannel extends ChannelBase {
 
     const client = new ClientCtor(options);
     let authenticated = false;
-    for (const event of MESSAGE_EVENTS) {
-      client.on(event, (payload) => {
-        if (!authenticated) {
-          process.stderr.write(
-            `[WeCom:${this.name}] dropping message before authentication.\n`,
-          );
-          return;
-        }
-        this.onMessage(payload).catch((err: unknown) => {
-          process.stderr.write(
-            `[WeCom:${this.name}] message handling failed: ${sanitizeLogText(
-              String(err),
-              200,
-            )}\n`,
-          );
-        });
+    const messageHandler = (payload: unknown) => {
+      if (!authenticated) {
+        process.stderr.write(
+          `[WeCom:${this.name}] dropping message before authentication.\n`,
+        );
+        return;
+      }
+      this.onMessage(payload).catch((err: unknown) => {
+        process.stderr.write(
+          `[WeCom:${this.name}] message handling failed: ${sanitizeLogText(
+            String(err),
+            200,
+          )}\n`,
+        );
       });
-    }
-    client.on('error', (err) => {
+    };
+    const errorHandler = (err: unknown) => {
       process.stderr.write(
         `[WeCom:${this.name}] SDK error: ${sanitizeLogText(String(err), 200)}\n`,
       );
-    });
-    client.on('disconnected', (reason) =>
+    };
+    const disconnectedHandler = (reason: unknown) => {
       process.stderr.write(
         `[WeCom:${this.name}] WebSocket ${formatDisconnectReason(reason)}; waiting for SDK reconnect.\n`,
-      ),
-    );
+      );
+    };
+    for (const event of MESSAGE_EVENTS) {
+      client.on(event, messageHandler);
+    }
+    client.on('error', errorHandler);
+    client.on('disconnected', disconnectedHandler);
+    this.clientHandlers = {
+      message: messageHandler,
+      error: errorHandler,
+      disconnected: disconnectedHandler,
+    };
 
-    this.client = client;
     const authentication = waitForAuthentication(client);
     try {
       const connected = client.connect();
       if (isPromiseLike(connected)) await connected;
       await authentication.promise;
       authenticated = true;
+      this.client = client;
     } catch (err) {
       authentication.cancel();
-      if (this.client === client) this.client = undefined;
+      this.detachClientHandlers(client);
       client.disconnect();
       throw err;
     }
@@ -166,8 +181,10 @@ export class WeComChannel extends ChannelBase {
       this.dedupTimer = undefined;
     }
     this.seenMessages.clear();
+    this.cleanupAllAttachmentDirs();
     const client = this.client;
     this.client = undefined;
+    if (client) this.detachClientHandlers(client);
     client?.disconnect();
     process.stderr.write(`[WeCom:${this.name}] Disconnected.\n`);
   }
@@ -265,17 +282,25 @@ export class WeComChannel extends ChannelBase {
       isReplyToBot: false,
       referencedText: extractQuoteText(body),
     };
+    const sessionId = await this.router.resolve(
+      this.name,
+      envelope.senderId,
+      envelope.chatId,
+      envelope.threadId,
+      this.config.cwd,
+    );
 
     let attachments: Attachment[] = [];
     let processingStarted = false;
     try {
       if (!(await this.preflightInbound(envelope))) return;
-      if (messageId) this.seenMessages.set(messageId, Date.now());
       attachments = await this.downloadAttachments(
         body,
         attachments,
         messageId,
+        sessionId,
       );
+      if (messageId) this.seenMessages.set(messageId, Date.now());
       if (attachments.length) {
         envelope.attachments = attachments;
       }
@@ -294,6 +319,14 @@ export class WeComChannel extends ChannelBase {
         );
       }
       throw err;
+    } finally {
+      if (
+        messageId &&
+        !this.bufferedAttachmentMessages.has(messageId) &&
+        this.attachmentDirsByMessage.has(messageId)
+      ) {
+        this.cleanupAttachmentDirsForMessage(messageId);
+      }
     }
   }
 
@@ -301,6 +334,7 @@ export class WeComChannel extends ChannelBase {
     body: Record<string, unknown>,
     attachments: Attachment[] = [],
     messageId?: string,
+    sessionId?: string,
   ): Promise<Attachment[]> {
     const refs = collectInboundMediaRefs(body);
     for (const ref of refs) {
@@ -328,11 +362,7 @@ export class WeComChannel extends ChannelBase {
       } else {
         const dir = join(tmpdir(), 'channel-files', randomUUID());
         mkdirSync(dir, { recursive: true });
-        if (messageId) {
-          const dirs = this.attachmentDirsByMessage.get(messageId) ?? [];
-          dirs.push(dir);
-          this.attachmentDirsByMessage.set(messageId, dirs);
-        }
+        this.rememberAttachmentDir(dir, messageId, sessionId);
         const safeName = fileName || `wecom_${ref.type}`;
         const filePath = join(dir, safeName);
         writeFileSync(filePath, data);
@@ -347,18 +377,99 @@ export class WeComChannel extends ChannelBase {
     return attachments;
   }
 
-  protected override onPromptEnd(
+  protected override onPromptBuffered(
     _chatId: string,
     _sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId) return;
+    if (messageId) this.bufferedAttachmentMessages.add(messageId);
+  }
+
+  protected override onPromptEnd(
+    _chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    if (messageId) this.cleanupAttachmentDirsForMessage(messageId);
+    this.cleanupAttachmentDirsForSession(sessionId);
+  }
+
+  private rememberAttachmentDir(
+    dir: string,
+    messageId?: string,
+    sessionId?: string,
+  ): void {
+    if (messageId) {
+      const messageDirs = this.attachmentDirsByMessage.get(messageId) ?? [];
+      messageDirs.push(dir);
+      this.attachmentDirsByMessage.set(messageId, messageDirs);
+    }
+    if (sessionId) {
+      const sessionDirs = this.attachmentDirsBySession.get(sessionId) ?? [];
+      sessionDirs.push(dir);
+      this.attachmentDirsBySession.set(sessionId, sessionDirs);
+    }
+  }
+
+  private cleanupAttachmentDirsForMessage(messageId: string): void {
     const dirs = this.attachmentDirsByMessage.get(messageId);
     if (!dirs) return;
     this.attachmentDirsByMessage.delete(messageId);
-    for (const dir of dirs) {
-      rmSync(dir, { recursive: true, force: true });
+    this.bufferedAttachmentMessages.delete(messageId);
+    this.removeAttachmentDirsFromSessions(dirs);
+    cleanupAttachmentDirs(dirs);
+  }
+
+  private cleanupAttachmentDirsForSession(sessionId: string): void {
+    const dirs = this.attachmentDirsBySession.get(sessionId);
+    if (!dirs) return;
+    this.attachmentDirsBySession.delete(sessionId);
+    this.removeAttachmentDirsFromMessages(dirs);
+    cleanupAttachmentDirs(dirs);
+  }
+
+  private removeAttachmentDirsFromSessions(dirs: string[]): void {
+    const removed = new Set(dirs);
+    for (const [sessionId, sessionDirs] of this.attachmentDirsBySession) {
+      const remaining = sessionDirs.filter((dir) => !removed.has(dir));
+      if (remaining.length) {
+        this.attachmentDirsBySession.set(sessionId, remaining);
+      } else {
+        this.attachmentDirsBySession.delete(sessionId);
+      }
     }
+  }
+
+  private removeAttachmentDirsFromMessages(dirs: string[]): void {
+    const removed = new Set(dirs);
+    for (const [messageId, messageDirs] of this.attachmentDirsByMessage) {
+      const remaining = messageDirs.filter((dir) => !removed.has(dir));
+      if (remaining.length) {
+        this.attachmentDirsByMessage.set(messageId, remaining);
+      } else {
+        this.attachmentDirsByMessage.delete(messageId);
+        this.bufferedAttachmentMessages.delete(messageId);
+      }
+    }
+  }
+
+  private cleanupAllAttachmentDirs(): void {
+    const dirs = Array.from(this.attachmentDirsBySession.values()).flat();
+    this.attachmentDirsBySession.clear();
+    this.attachmentDirsByMessage.clear();
+    this.bufferedAttachmentMessages.clear();
+    cleanupAttachmentDirs(dirs);
+  }
+
+  private detachClientHandlers(client: WeComClient): void {
+    const handlers = this.clientHandlers;
+    if (!handlers) return;
+    for (const event of MESSAGE_EVENTS) {
+      client.off?.(event, handlers.message);
+    }
+    client.off?.('error', handlers.error);
+    client.off?.('disconnected', handlers.disconnected);
+    this.clientHandlers = undefined;
   }
 
   private cleanupSeenMessages(): void {
@@ -412,6 +523,12 @@ function waitForAuthentication(client: WeComClient): {
     promise,
     cancel: () => finish(),
   };
+}
+
+function cleanupAttachmentDirs(dirs: string[]): void {
+  for (const dir of dirs) {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 function formatDisconnectReason(reason: unknown): string {
@@ -800,7 +917,7 @@ function guardedHttpsDownload(
         }
         if (statusCode < 200 || statusCode >= 300) {
           res.resume();
-          finish(new Error('media download failed'));
+          finish(new Error(`media download failed: HTTP ${statusCode}`));
           return;
         }
 
@@ -824,8 +941,13 @@ function guardedHttpsDownload(
           chunks.push(buffer);
         });
         res.on('end', () => {
+          const buffer = Buffer.concat(chunks);
+          if (buffer.byteLength === 0) {
+            finish(new Error('empty media response'));
+            return;
+          }
           finish(undefined, {
-            buffer: Buffer.concat(chunks),
+            buffer,
             ...parseContentDispositionFileName(res.headers),
           });
         });
@@ -914,6 +1036,7 @@ function isPublicIpAddress(address: string): boolean {
       host === '::1' ||
       host.startsWith('fc') ||
       host.startsWith('fd') ||
+      host.startsWith('ff') ||
       isIpv6LinkLocal(host)
     );
   }
@@ -956,6 +1079,13 @@ function parseEmbeddedIpv4(host: string): number[] | undefined {
 
   const groups = expandIpv6Groups(host);
   if (!groups) return undefined;
+  if (
+    groups.slice(0, 5).every((group) => group === 0) &&
+    groups[5] === 0xffff &&
+    (groups[6] !== 0 || groups[7] !== 0)
+  ) {
+    return hexGroupsToIpv4(groups[6], groups[7]);
+  }
   if (
     groups.slice(0, 6).every((group) => group === 0) &&
     (groups[6] !== 0 || groups[7] !== 0)

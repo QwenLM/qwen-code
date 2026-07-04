@@ -925,6 +925,12 @@ export abstract class ChannelBase {
     _messageId?: string,
   ): void {}
 
+  protected onPromptBuffered(
+    _chatId: string,
+    _sessionId: string,
+    _messageId?: string,
+  ): void {}
+
   /**
    * Called when a prompt finishes (response sent or cancelled).
    * Override to hide the working indicator.
@@ -2375,6 +2381,17 @@ export abstract class ChannelBase {
           if (!buffer) {
             buffer = [];
             this.collectBuffers.set(sessionId, buffer);
+          }
+          try {
+            this.onPromptBuffered(
+              envelope.chatId,
+              sessionId,
+              envelope.messageId,
+            );
+          } catch (err) {
+            process.stderr.write(
+              `[${this.name}] onPromptBuffered threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+            );
           }
           buffer.push({ text: promptText, envelope });
           return;
