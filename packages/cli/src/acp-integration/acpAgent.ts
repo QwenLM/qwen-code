@@ -274,18 +274,35 @@ function isBulkLoadReplayRequest(params: LoadSessionRequest): boolean {
   return meta?.[LOAD_REPLAY_MODE_META_KEY] === LOAD_REPLAY_BULK_MODE;
 }
 
+function createReplayCumulativeUsage(): CumulativeUsage {
+  return {
+    promptTokens: 0,
+    cachedTokens: 0,
+    candidateTokens: 0,
+    apiTimeMs: 0,
+  };
+}
+
+function copyCumulativeUsage(
+  target: CumulativeUsage,
+  source: CumulativeUsage,
+): void {
+  target.promptTokens = source.promptTokens;
+  target.cachedTokens = source.cachedTokens;
+  target.candidateTokens = source.candidateTokens;
+  target.apiTimeMs = source.apiTimeMs;
+}
+
 async function collectHistoryReplayUpdates({
   sessionId,
   config,
   records,
   cumulativeUsage,
-  failOnReplayError,
 }: {
   sessionId: string;
   config: Config;
   records: ChatRecord[];
   cumulativeUsage: CumulativeUsage;
-  failOnReplayError: boolean;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
   const replayContext: SessionContext = {
@@ -300,9 +317,6 @@ async function collectHistoryReplayUpdates({
   try {
     await new HistoryReplayer(replayContext).replay(records);
   } catch (error) {
-    if (failOnReplayError) {
-      throw error;
-    }
     const replayError = error instanceof Error ? error.message : String(error);
     debugLogger.warn(
       '[historyReplay] History replay failed for session %s (partial updates: %d):',
@@ -3058,12 +3072,12 @@ class QwenAgent implements Agent {
         let replayUpdates: SessionUpdate[] = [];
         if (records) {
           session.primeTurnFromHistory(records);
+          const replayUsage = createReplayCumulativeUsage();
           const replay = await collectHistoryReplayUpdates({
             sessionId: params.sessionId,
             config,
             records,
-            cumulativeUsage: session.cumulativeUsage,
-            failOnReplayError: false,
+            cumulativeUsage: replayUsage,
           });
           replayUpdates = replay.updates;
           if (replay.replayError !== undefined) {
@@ -3073,6 +3087,8 @@ class QwenAgent implements Agent {
               partial: true,
               replayError: replay.replayError,
             };
+          } else {
+            copyCumulativeUsage(session.cumulativeUsage, replayUsage);
           }
         }
         replayEnvelope ??= {
@@ -7260,13 +7276,7 @@ class QwenAgent implements Agent {
           sessionId,
           config: this.config,
           records: sessionData.conversation.messages,
-          cumulativeUsage: {
-            promptTokens: 0,
-            cachedTokens: 0,
-            candidateTokens: 0,
-            apiTimeMs: 0,
-          },
-          failOnReplayError: false,
+          cumulativeUsage: createReplayCumulativeUsage(),
         });
 
         return {

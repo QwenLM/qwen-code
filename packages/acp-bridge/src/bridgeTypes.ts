@@ -125,6 +125,10 @@ export type BridgeSessionState = LoadSessionResponse | ResumeSessionResponse;
 export interface BridgeRestoredSession extends BridgeSession {
   /** ACP state returned by `session/load` / `session/resume`. */
   state: BridgeSessionState;
+  /** True when response-mode history replay aborted after emitting a prefix. */
+  partial?: true;
+  /** Agent-provided replay failure detail when `partial` is true. */
+  replayError?: string;
   /** Compacted events for all completed turns (O(turns) size). */
   compactedReplay?: BridgeEvent[];
   /** Raw events since last turn boundary (current incomplete turn). */

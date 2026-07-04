@@ -3758,6 +3758,9 @@ export class AcpDispatcher {
             snapshot.lastEventId,
           );
         } else {
+          writeStderrLine(
+            `qwen serve: /acp initial replay skipped (no snapshot) session=${logSafe(sessionId)}`,
+          );
           conn.markInitialReplayComplete(sessionId);
           conn.endReplayDeferral(sessionId, lastDeliveredId, false);
         }

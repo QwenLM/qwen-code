@@ -160,6 +160,7 @@ const KNOWN_SESSION_UPDATE_TYPES = new Set([
   'session_info_update',
   'usage_update',
 ]);
+const MAX_BULK_REPLAY_UPDATES = 10_000;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -182,6 +183,8 @@ function describeLoadReplayValue(value: unknown): string {
 function extractLoadReplayResponse(state: BridgeSessionState): {
   state: BridgeSessionState;
   updates: SessionUpdate[];
+  partial?: true;
+  replayError?: string;
 } {
   const meta = isRecord(state._meta) ? state._meta : undefined;
   const replay = meta?.[LOAD_REPLAY_META_KEY];
@@ -198,6 +201,26 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
     throw new Error(
       `Invalid qwen.session.loadReplay updates ` +
         `(version=${LOAD_REPLAY_VERSION}, count=not-array)`,
+    );
+  }
+  if (rawUpdates.length > MAX_BULK_REPLAY_UPDATES) {
+    throw new Error(
+      `qwen.session.loadReplay updates exceed limit ` +
+        `(${rawUpdates.length} > ${MAX_BULK_REPLAY_UPDATES})`,
+    );
+  }
+  const partial = replay['partial'];
+  if (partial !== undefined && partial !== true) {
+    throw new Error(
+      `Invalid qwen.session.loadReplay partial ` +
+        `(version=${LOAD_REPLAY_VERSION}, partial=${JSON.stringify(partial)})`,
+    );
+  }
+  const replayError = replay['replayError'];
+  if (replayError !== undefined && typeof replayError !== 'string') {
+    throw new Error(
+      `Invalid qwen.session.loadReplay replayError ` +
+        `(version=${LOAD_REPLAY_VERSION}, replayError=${describeLoadReplayValue(replayError)})`,
     );
   }
   const invalidUpdateIndex = rawUpdates.findIndex(
@@ -223,7 +246,12 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
   } else {
     delete cleanState._meta;
   }
-  return { state: cleanState, updates: rawUpdates };
+  return {
+    state: cleanState,
+    updates: rawUpdates,
+    ...(partial === true ? { partial: true as const } : {}),
+    ...(typeof replayError === 'string' ? { replayError } : {}),
+  };
 }
 
 /**
@@ -489,6 +517,9 @@ interface SessionEntry {
    * had an ACP load/resume response, so attaches return `state: {}`.
    */
   restoreState?: BridgeSessionState;
+  /** Response-mode `session/load` can return a partial replay prefix. */
+  restoreReplayPartial?: true;
+  restoreReplayError?: string;
   /**
    * Most recent heartbeat across any client on this session (Date.now()
    * epoch ms). Set on every `recordHeartbeat` call regardless of whether
@@ -2588,22 +2619,41 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
   };
 
   const replayFieldsFor = (
-    entry: { events: EventBus },
+    entry: Pick<
+      SessionEntry,
+      'events' | 'restoreReplayPartial' | 'restoreReplayError'
+    >,
     action: 'load' | 'resume',
   ): Pick<
     BridgeRestoredSession,
-    'compactedReplay' | 'liveJournal' | 'lastEventId'
+    | 'compactedReplay'
+    | 'liveJournal'
+    | 'lastEventId'
+    | 'partial'
+    | 'replayError'
   > => {
+    const replayStatus =
+      action === 'load' && entry.restoreReplayPartial === true
+        ? {
+            partial: true as const,
+            ...(typeof entry.restoreReplayError === 'string'
+              ? { replayError: entry.restoreReplayError }
+              : {}),
+          }
+        : {};
     const snapshot = entry.events.snapshotReplay();
-    if (!snapshot) return { lastEventId: entry.events.lastEventId };
+    if (!snapshot) {
+      return { lastEventId: entry.events.lastEventId, ...replayStatus };
+    }
     if (action === 'load') {
       return {
         compactedReplay: snapshot.compactedTurns,
         liveJournal: snapshot.liveJournal,
         lastEventId: snapshot.lastEventId,
+        ...replayStatus,
       };
     }
-    return { lastEventId: snapshot.lastEventId };
+    return { lastEventId: snapshot.lastEventId, ...replayStatus };
   };
 
   async function restoreSession(
@@ -2740,6 +2790,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       transportClosed.catch(() => {});
       let state: BridgeSessionState;
       let replayUpdates: SessionUpdate[] = [];
+      let replayPartial: true | undefined;
+      let replayError: string | undefined;
       try {
         if (action === 'load') {
           state = await Promise.race([
@@ -2784,6 +2836,8 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           const extracted = extractLoadReplayResponse(state);
           state = extracted.state;
           replayUpdates = extracted.updates;
+          replayPartial = extracted.partial;
+          replayError = extracted.replayError;
         }
       } catch (err) {
         restoreEvents.close();
@@ -2837,6 +2891,12 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         { drainEarlyEvents: replayUpdates.length === 0 },
       );
       entry.restoreState = state;
+      if (replayPartial === true) {
+        entry.restoreReplayPartial = true;
+      }
+      if (replayError !== undefined) {
+        entry.restoreReplayError = replayError;
+      }
       seedSnapshotCaches(entry, state);
       if (replayUpdates.length > 0) {
         await ci.client.seedSessionUpdates(entry, replayUpdates);

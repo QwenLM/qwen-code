@@ -7532,13 +7532,30 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       async (
         context: {
           config: Config;
-          cumulativeUsage?: unknown;
+          cumulativeUsage?: {
+            promptTokens: number;
+            cachedTokens: number;
+            candidateTokens: number;
+            apiTimeMs: number;
+          };
           sendUpdate: (update: unknown) => Promise<void>;
         },
         history: unknown,
       ) => {
         expect(context.config).toBe(innerConfig);
-        expect(context.cumulativeUsage).toBe(lastSessionMock?.cumulativeUsage);
+        expect(context.cumulativeUsage).not.toBe(
+          lastSessionMock?.cumulativeUsage,
+        );
+        expect(context.cumulativeUsage).toEqual({
+          promptTokens: 0,
+          cachedTokens: 0,
+          candidateTokens: 0,
+          apiTimeMs: 0,
+        });
+        context.cumulativeUsage!.promptTokens = 101;
+        context.cumulativeUsage!.cachedTokens = 17;
+        context.cumulativeUsage!.candidateTokens = 53;
+        context.cumulativeUsage!.apiTimeMs = 0;
         expect(history).toBe(messages);
         await context.sendUpdate(replayUpdate);
       },
@@ -7557,6 +7574,12 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     expect(response._meta?.['qwen.session.loadReplay']).toEqual({
       v: 1,
       updates: [replayUpdate],
+    });
+    expect(lastSessionMock?.cumulativeUsage).toEqual({
+      promptTokens: 101,
+      cachedTokens: 17,
+      candidateTokens: 53,
+      apiTimeMs: 0,
     });
     expect(lastSessionMock?.replayHistory).not.toHaveBeenCalled();
     expect(lastSessionMock?.primeTurnFromHistory).toHaveBeenCalledWith(
@@ -7589,7 +7612,14 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       },
     });
     mockHistoryReplay.mockReset();
-    mockHistoryReplay.mockRejectedValueOnce(new Error('replay boom'));
+    mockHistoryReplay.mockImplementationOnce(
+      async (context: { cumulativeUsage?: { promptTokens: number } }) => {
+        if (context.cumulativeUsage) {
+          context.cumulativeUsage.promptTokens = 999;
+        }
+        throw new Error('replay boom');
+      },
+    );
     const { agent, agentPromise } = await spawnAgent();
 
     const response = (await agent.loadSession({
@@ -7616,6 +7646,12 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
       replayError: 'replay boom',
     });
     expect(lastSessionMock?.dispose).not.toHaveBeenCalled();
+    expect(lastSessionMock?.cumulativeUsage).toEqual({
+      promptTokens: 7,
+      cachedTokens: 3,
+      candidateTokens: 5,
+      apiTimeMs: 11,
+    });
     expect(lastSessionMock?.installRewriter).toHaveBeenCalledTimes(1);
     expect(lastSessionMock?.startCronScheduler).toHaveBeenCalledTimes(1);
 

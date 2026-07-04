@@ -1289,6 +1289,8 @@ describe('createAcpSessionBridge', () => {
       _meta: { 'qwen.session.loadReplayMode': 'bulk' },
     });
     expect(loaded.state).toEqual({ _meta: { keep: 'state' } });
+    expect(loaded.partial).toBe(true);
+    expect(loaded.replayError).toBe('replay boom');
     expect(loaded.lastEventId).toBe(2);
     expect(loaded.compactedReplay).toEqual([]);
     expect(loaded.liveJournal).toHaveLength(2);
@@ -1305,6 +1307,35 @@ describe('createAcpSessionBridge', () => {
       data: { reason: 'seeded_replay_not_in_ring' },
     });
     await iterator.return?.();
+    await bridge.shutdown();
+  });
+
+  it('rejects oversized response-mode load replay payloads', async () => {
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              updates: Array.from({ length: 10_001 }, () => ({
+                sessionUpdate: 'agent_message_chunk',
+              })),
+            },
+          },
+        }),
+      }).channel;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    await expect(
+      bridge.loadSession({
+        sessionId: 'persisted-huge-bulk-history',
+        workspaceCwd: WS_A,
+        historyReplay: 'response',
+      }),
+    ).rejects.toThrow(
+      'qwen.session.loadReplay updates exceed limit (10001 > 10000)',
+    );
+
     await bridge.shutdown();
   });
 
