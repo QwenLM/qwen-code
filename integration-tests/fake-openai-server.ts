@@ -45,6 +45,11 @@ export type FakeOpenAIServer = {
   close: () => Promise<void>;
 };
 
+export type FakeOpenAIServerOptions = {
+  listenHost?: string;
+  baseUrlHost?: string;
+};
+
 export type FakeOpenAIHandler = (ctx: {
   body: JsonObject;
   requestIndex: number;
@@ -67,6 +72,7 @@ export function fakeToolCall(
 
 export async function startFakeOpenAIServer(
   handler: FakeOpenAIHandler,
+  options: FakeOpenAIServerOptions = {},
 ): Promise<FakeOpenAIServer> {
   const requests: FakeOpenAIRequest[] = [];
   const server = createServer(async (req, res) => {
@@ -125,7 +131,7 @@ export async function startFakeOpenAIServer(
     };
     server.once('error', onError);
     server.once('listening', onListening);
-    server.listen(0, '127.0.0.1');
+    server.listen(0, options.listenHost ?? '127.0.0.1');
   });
 
   const address = server.address();
@@ -134,7 +140,9 @@ export async function startFakeOpenAIServer(
   }
 
   return {
-    baseUrl: `http://127.0.0.1:${(address as AddressInfo).port}/v1`,
+    baseUrl: `http://${options.baseUrlHost ?? '127.0.0.1'}:${
+      (address as AddressInfo).port
+    }/v1`,
     requests,
     close: () => closeServer(server),
   };
