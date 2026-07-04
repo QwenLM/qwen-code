@@ -27,6 +27,8 @@ The raw invocation selects one mode:
   or change the required output contract.
 - Do not push, comment, create pull requests, edit labels, or use GitHub
   credentials. The workflow handles all network writes after verification.
+- Use additive commits only; do not amend, rebase, reset, or otherwise rewrite
+  Git history.
 - Keep changes minimal and scoped to the selected issue or review feedback. No
   drive-by refactors.
 - Do not run project code, tests, builds, package scripts, or the CLI yourself.

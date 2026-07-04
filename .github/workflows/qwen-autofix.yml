@@ -671,7 +671,7 @@ jobs:
           BRANCH="autofix/issue-${ISSUE}"
           git config --local --unset-all http.https://github.com/.extraheader || true
           git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-          git push --force-with-lease origin "${BRANCH}"
+          git push origin "${BRANCH}"
 
           PR_URL="$(gh pr create --repo "${REPO}" \
             --base main --head "${BRANCH}" \
@@ -691,6 +691,7 @@ jobs:
           COMMENT_ID: '${{ steps.claim.outputs.comment_id }}'
           PUBLISH_OUTCOME: '${{ steps.publish.outcome }}'
         run: |-
+          # shellcheck disable=SC2016
           if [[ -f "${WORKDIR}/failure.md" ]]; then
             REASON='no further automated attempts will be made on this issue.'
             DETAIL="$(head -c 1500 "${WORKDIR}/failure.md")"
@@ -1179,7 +1180,7 @@ jobs:
             NEXT_ROUND="$(( ROUND + 1 ))"
             git config --local --unset-all http.https://github.com/.extraheader || true
             git remote set-url origin "https://x-access-token:${GITHUB_TOKEN}@github.com/${REPO}.git"
-            git push --force-with-lease origin "${BRANCH}"
+            git push origin "${BRANCH}"
             {
               echo "🤖 Addressed the latest review feedback (round ${NEXT_ROUND}/${MAX_ROUNDS}). What changed, and what I pushed back on:"
               echo

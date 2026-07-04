@@ -451,6 +451,9 @@ describe('qwen-autofix workflow', () => {
     expect(skill).toContain('assess-candidates');
     expect(skill).toContain('develop-issue');
     expect(skill).toContain('address-review');
+    expect(skill.replace(/\s+/g, ' ')).toContain(
+      'Use additive commits only; do not amend, rebase, reset, or otherwise rewrite Git history.',
+    );
 
     expect(assessCandidatesStep).toContain(
       '/autofix assess-candidates --workdir /tmp/autofix',
@@ -520,6 +523,13 @@ describe('qwen-autofix workflow', () => {
     );
     expect(workflow).not.toContain('proxy_script="$(mktemp');
     expect(workflow).not.toContain('cat > "${proxy_script}"');
+  });
+
+  it('pushes autofix branches without rewriting remote history', () => {
+    expect(workflow).not.toMatch(/\bgit push\b[^\n]*--force(?:-with-lease)?/);
+    expect(workflow).not.toMatch(/\bgit push\b[^\n]*-[^\n\s]*f/);
+    expect(publishPrStep).toContain('git push origin "${BRANCH}"');
+    expect(pushAndReportStep).toContain('git push origin "${BRANCH}"');
   });
 
   it('keeps sandbox image fallback covered by a reusable script', () => {
