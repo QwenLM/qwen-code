@@ -4296,9 +4296,10 @@ class QwenAgent implements Agent {
   }
 
   /**
-   * Pure auth preflight check. Looks up the well-known env var keys for the
-   * configured auth method (via `AUTH_ENV_MAPPINGS`) and reports whether at
-   * least one is present.
+   * Pure auth preflight check. First looks up the well-known env var keys
+   * for the configured auth method, then falls back to the API key already
+   * resolved into the generation config (which folds settings.security.auth.apiKey,
+   * provider envKey from settings.env, and CLI flags into a single value).
    *
    * Deliberately does NOT call `validateAuthMethod` from `cli/config/auth.ts`:
    * that helper has side effects (reloads `.env` from disk via
@@ -4323,19 +4324,34 @@ class QwenAgent implements Agent {
       const presentVar = apiKeyVars.find((name: string) =>
         Boolean(process.env[name]),
       );
-      const hasToken = Boolean(presentVar);
+      let hasToken = Boolean(presentVar);
+      if (
+        !hasToken &&
+        !AUTH_PREFLIGHT_WAIVED_AUTH_TYPES.has(String(authType))
+      ) {
+        const resolvedApiKey = config
+          .getModelsConfig()
+          .getGenerationConfig()?.apiKey;
+        if (resolvedApiKey) {
+          hasToken = true;
+        }
+      }
       // No env-var registration → either OAuth-style auth (qwen-oauth) or
       // a custom provider whose key is sourced from settings rather than
-      // env. Surface as `unknown` (the SDK consumer can defer to the
-      // `/session` boot for definitive validation) rather than a false
-      // negative.
+      // env. If the resolved generation config already contains an apiKey
+      // we can report 'ok'; otherwise surface 'unknown' so the SDK
+      // consumer defers to the `/session` boot for definitive validation.
       if (apiKeyVars.length === 0) {
         return this.acpCell('auth', {
-          status: 'unknown',
-          hint: 'Auth credentials for this provider are not env-keyed; full validation runs at session start.',
+          status: hasToken ? 'ok' : 'unknown',
+          ...(hasToken
+            ? {}
+            : {
+                hint: 'Auth credentials for this provider are not env-keyed; full validation runs at session start.',
+              }),
           detail: {
             source: String(authType),
-            hasToken: 'unknown',
+            hasToken: hasToken || ('unknown' as const),
             envVarCandidates: [],
           },
         });
