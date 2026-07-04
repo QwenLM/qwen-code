@@ -207,8 +207,7 @@ describe('EchartsFullDataBlock', () => {
       notMerge: true,
     });
     const renderedOption = setOption.mock.calls[0]?.[0] as
-      | EchartsFullDataOption
-      | undefined;
+      EchartsFullDataOption | undefined;
     expect(renderedOption).toEqual(
       expect.not.objectContaining({ title: expect.anything() }),
     );
@@ -437,6 +436,29 @@ describe('EchartsFullDataBlock', () => {
     expect(container.querySelector('pre code')).toBeNull();
   });
 
+  it('rejects inline envelope cells that cannot be rendered safely', async () => {
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        version: 1,
+        data: {
+          kind: 'inline',
+          dimensions: ['day', 'orders'],
+          source: [['Mon', { nested: 120 }]],
+        },
+        option: {
+          xAxis: { type: 'category' },
+          yAxis: { type: 'value' },
+          series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+        },
+      }),
+    });
+
+    expect(container.textContent).toContain(
+      'Chart envelope data.source row 1 cell 2 must be a string, number, boolean, or null.',
+    );
+    expect(container.querySelector('pre code')).toBeNull();
+  });
+
   it('rejects legacy array-row dimension mismatches', async () => {
     const container = await renderEchartsMarkdown({
       code: JSON.stringify({
@@ -480,7 +502,7 @@ describe('EchartsFullDataBlock', () => {
         dispose: vi.fn(),
       })),
     };
-    const resolveDataRef = vi.fn(async () => ({
+    const resolveDataRef = vi.fn<EchartsFullDataRefResolver>(async () => ({
       dimensions: ['day', 'orders'],
       source: [
         ['Mon', 120],
@@ -530,6 +552,9 @@ describe('EchartsFullDataBlock', () => {
   });
 
   it('reports ref resolver rejections inside the chart card', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
     const setOption = vi.fn();
     const runtime: EchartsRuntime = {
       init: vi.fn(() => ({
@@ -560,12 +585,20 @@ describe('EchartsFullDataBlock', () => {
     expect(container.textContent).toContain(
       'Chart data reference could not be resolved: missing artifact',
     );
+    expect(consoleError).toHaveBeenCalledWith(
+      '[web-shell] echarts-fulldata data-ref resolution failed:',
+      'artifact://chart-data/missing',
+      expect.any(Error),
+    );
     expect(container.querySelector('pre code')).toBeNull();
     expect(setOption).not.toHaveBeenCalled();
   });
 
   it('reports ref resolver timeouts inside the chart card', async () => {
     vi.useFakeTimers();
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
     const setOption = vi.fn();
     const runtime: EchartsRuntime = {
       init: vi.fn(() => ({
@@ -601,6 +634,11 @@ describe('EchartsFullDataBlock', () => {
 
       expect(container.textContent).toContain(
         'Chart data reference could not be resolved: Data reference resolution timed out.',
+      );
+      expect(consoleError).toHaveBeenCalledWith(
+        '[web-shell] echarts-fulldata data-ref resolution failed:',
+        'artifact://chart-data/slow',
+        expect.any(Error),
       );
       expect(container.querySelector('pre code')).toBeNull();
       expect(setOption).not.toHaveBeenCalled();
@@ -718,7 +756,7 @@ describe('EchartsFullDataBlock', () => {
         dispose: vi.fn(),
       })),
     };
-    const resolveDataRef = vi.fn(async () => ({
+    const resolveDataRef = vi.fn<EchartsFullDataRefResolver>(async () => ({
       dimensions: ['day', 'orders'],
       source: [['Mon', 120]],
     }));
@@ -819,12 +857,32 @@ describe('EchartsFullDataBlock', () => {
       {
         ref: 'session-file://../../secret',
         message:
-          'Chart envelope data.ref path must use non-empty segments and cannot contain "..".',
+          'Chart envelope data.ref path must use non-empty normalized segments and cannot contain ".", "..", or drive-qualified segments.',
       },
       {
         ref: 'session-file://%2e%2e/secret',
         message:
-          'Chart envelope data.ref path must use non-empty segments and cannot contain "..".',
+          'Chart envelope data.ref path must use non-empty normalized segments and cannot contain ".", "..", or drive-qualified segments.',
+      },
+      {
+        ref: 'session-file://.',
+        message:
+          'Chart envelope data.ref path must use non-empty normalized segments and cannot contain ".", "..", or drive-qualified segments.',
+      },
+      {
+        ref: 'artifact://chart-data/./orders',
+        message:
+          'Chart envelope data.ref path must use non-empty normalized segments and cannot contain ".", "..", or drive-qualified segments.',
+      },
+      {
+        ref: 'session-file://C:/Users/alice/secret.csv',
+        message:
+          'Chart envelope data.ref path must use non-empty normalized segments and cannot contain ".", "..", or drive-qualified segments.',
+      },
+      {
+        ref: 'session-file://C:../secret.csv',
+        message:
+          'Chart envelope data.ref path must use non-empty normalized segments and cannot contain ".", "..", or drive-qualified segments.',
       },
       {
         ref: 'artifact://chart-data/orders?token=1',
@@ -904,13 +962,27 @@ describe('EchartsFullDataBlock', () => {
   });
 
   it('normalizes {c} label templates for object-row datasets', async () => {
+    const longDimension = 'x'.repeat(300);
+    const longFormatter = '{c}'.repeat(1_400);
     const option: EchartsFullDataOption = {
       title: { text: 'Monthly metrics' },
       dataset: {
-        dimensions: ['month', 'convRate', 'aov'],
+        dimensions: ['month', 'convRate', 'aov', 'cost$', longDimension],
         source: [
-          { month: 'Jan', convRate: 3.1, aov: 186 },
-          { month: 'Feb', convRate: 3.4, aov: 192 },
+          {
+            month: 'Jan',
+            convRate: 3.1,
+            aov: 186,
+            cost$: 42,
+            [longDimension]: 1,
+          },
+          {
+            month: 'Feb',
+            convRate: 3.4,
+            aov: 192,
+            cost$: 43,
+            [longDimension]: 2,
+          },
         ],
       },
       xAxis: { type: 'category' },
@@ -919,12 +991,32 @@ describe('EchartsFullDataBlock', () => {
         {
           type: 'line',
           encode: { x: 'month', y: 'convRate' },
-          label: { show: true, formatter: '{c}%' },
+          label: { show: true, formatter: '{c:.2f}%' },
         },
         {
           type: 'line',
           encode: { x: 'month', y: 'aov' },
           label: { show: true, formatter: '¥{c}' },
+        },
+        {
+          type: 'line',
+          encode: { x: 'month', y: 'cost$' },
+          label: { show: true, formatter: 'Cost {c:.1f}' },
+        },
+        {
+          type: 'line',
+          encode: { x: 'month', y: 'missing' },
+          label: { show: true, formatter: '{c}' },
+        },
+        {
+          type: 'line',
+          encode: { x: 'month', y: longDimension },
+          label: { show: true, formatter: '{c}' },
+        },
+        {
+          type: 'line',
+          encode: { x: 'month', y: 'convRate' },
+          label: { show: true, formatter: longFormatter },
         },
       ],
     };
@@ -949,8 +1041,56 @@ describe('EchartsFullDataBlock', () => {
     const renderedOption = setOption.mock.calls[0]?.[0] as {
       series?: Array<{ label?: { formatter?: string } }>;
     };
-    expect(renderedOption.series?.[0]?.label?.formatter).toBe('{@convRate}%');
+    expect(renderedOption.series?.[0]?.label?.formatter).toBe(
+      '{@convRate|.2f}%',
+    );
     expect(renderedOption.series?.[1]?.label?.formatter).toBe('¥{@aov}');
+    expect(renderedOption.series?.[2]?.label?.formatter).toBe(
+      'Cost {@cost$|.1f}',
+    );
+    expect(renderedOption.series?.[3]?.label?.formatter).toBe('{c}');
+    expect(renderedOption.series?.[4]?.label?.formatter).toBe('{c}');
+    expect(renderedOption.series?.[5]?.label?.formatter).toBe(longFormatter);
+  });
+
+  it('normalizes {c} label templates for inline array-row envelopes', async () => {
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    await renderEchartsMarkdown({
+      code: JSON.stringify({
+        version: 1,
+        data: {
+          kind: 'inline',
+          dimensions: ['day', 'orders'],
+          source: [['Mon', 120]],
+        },
+        option: {
+          xAxis: { type: 'category' },
+          yAxis: { type: 'value' },
+          series: [
+            {
+              type: 'bar',
+              encode: { x: 'day', y: 'orders' },
+              label: { show: true, formatter: '{c:.1f}' },
+            },
+          ],
+        },
+      }),
+      loadEcharts: () => runtime,
+    });
+    await flushChart();
+
+    const renderedOption = setOption.mock.calls[0]?.[0] as {
+      series?: Array<{ label?: { formatter?: string } }>;
+    };
+    expect(renderedOption.series?.[0]?.label?.formatter).toBe('{@orders|.1f}');
   });
 
   it('renders array-row datasets with named dimensions in the data view', async () => {
@@ -991,6 +1131,65 @@ describe('EchartsFullDataBlock', () => {
       ['Mon', '120'],
       ['Tue', '200'],
     ]);
+  });
+
+  it('coerces numeric dataset dimensions for chart and data views', async () => {
+    const option: EchartsFullDataOption = {
+      title: { text: 'Yearly orders' },
+      dataset: {
+        dimensions: ['month', 2023, 2024] as unknown as string[],
+        source: [['Jan', 100, 200]],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [
+        {
+          type: 'bar',
+          encode: { x: 'month', y: 2023 },
+          label: { show: true, formatter: '{c}' },
+        },
+      ],
+    };
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await render(
+      <EchartsFullDataBlock
+        option={option}
+        theme="dark"
+        loadEcharts={() => runtime}
+      />,
+    );
+    await flushChart();
+
+    const renderedOption = setOption.mock.calls[0]?.[0] as {
+      dataset?: { dimensions?: string[] };
+      series?: Array<{ label?: { formatter?: string } }>;
+    };
+    expect(renderedOption.dataset?.dimensions).toEqual([
+      'month',
+      '2023',
+      '2024',
+    ]);
+    expect(renderedOption.series?.[0]?.label?.formatter).toBe('{@2023}');
+
+    await act(async () => {
+      container.querySelectorAll('button')[1]?.click();
+    });
+
+    const headerTexts = Array.from(container.querySelectorAll('th')).map(
+      (cell) => cell.textContent?.trim() ?? '',
+    );
+    expect(headerTexts.some((text) => text.includes('month'))).toBe(true);
+    expect(headerTexts.some((text) => text.includes('2023'))).toBe(true);
+    expect(headerTexts.some((text) => text.includes('2024'))).toBe(true);
+    expect(getDataRows(container)).toEqual([['Jan', '100', '200']]);
   });
 
   it('uses the sanitized dataset consistently for chart and data views', async () => {
@@ -1634,6 +1833,92 @@ describe('EchartsFullDataBlock', () => {
     );
   });
 
+  it('clears stale chart errors while ref data is pending after option changes', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    let resolveRef: (value: {
+      dimensions: string[];
+      source: Array<Array<string | number>>;
+    }) => void = () => {};
+    const resolveDataRef = vi.fn<EchartsFullDataRefResolver>(
+      () =>
+        new Promise((resolve) => {
+          resolveRef = resolve;
+        }),
+    );
+    const setOption = vi
+      .fn()
+      .mockImplementationOnce(() => {
+        throw new Error('setOption failed');
+      })
+      .mockImplementation(() => {});
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+    const renderer = createEchartsFullDataRenderer({
+      loadEcharts: () => runtime,
+      resolveDataRef,
+    });
+    const tree = (content: string) => (
+      <I18nProvider language="en">
+        <ThemeProvider value="dark">
+          <WebShellCustomizationProvider
+            value={{ markdown: { renderCodeBlock: renderer } }}
+          >
+            <Markdown content={content} source="assistant" />
+          </WebShellCustomizationProvider>
+        </ThemeProvider>
+      </I18nProvider>
+    );
+    const directContent = `\`\`\`echarts-fulldata\n${JSON.stringify({
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [['Mon', 120]],
+      },
+      series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+    })}\n\`\`\``;
+    const refContent = `\`\`\`echarts-fulldata\n${JSON.stringify({
+      version: 1,
+      data: {
+        kind: 'ref',
+        ref: 'artifact://chart-data/orders',
+        format: 'json',
+        dimensions: ['day', 'orders'],
+      },
+      option: {
+        series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+      },
+    })}\n\`\`\``;
+
+    const { container, rerender } = await mount(tree(directContent));
+    await flushChart();
+    expect(container.textContent).toContain('setOption failed');
+
+    await rerender(tree(refContent));
+    await flushChart();
+
+    expect(resolveDataRef).toHaveBeenCalledOnce();
+    expect(container.textContent).not.toContain('setOption failed');
+    expect(
+      container.querySelector('[role="status"]')?.getAttribute('aria-label'),
+    ).toBe('Rendering chart');
+
+    await act(async () => {
+      resolveRef({
+        dimensions: ['day', 'orders'],
+        source: [['Tue', 200]],
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    await flushChart();
+
+    expect(setOption).toHaveBeenCalledTimes(2);
+  });
+
   it('sanitizes unsafe chart option fields before calling ECharts', async () => {
     const unsafeSeriesEntry: Record<string, unknown> = {
       type: 'line',
@@ -1647,8 +1932,18 @@ describe('EchartsFullDataBlock', () => {
       itemStyle: {
         image: 'file:///tmp/marker.png',
       },
+      markLine: {
+        data: [
+          {
+            yAxis: 150,
+            label: { formatter: 'Goal <Q4 2024>' },
+            lineStyle: { color: 'javascript:alert(1)' },
+          },
+        ],
+      },
       renderItem: 'javascript:alert(1)',
       src: 'https://example.test/marker.png',
+      stack: '//example.test/stack',
       symbol: 'image://https://example.test/marker.png',
       tooltip: {
         appendToBody: true,
@@ -1669,8 +1964,17 @@ describe('EchartsFullDataBlock', () => {
       value: null,
       enumerable: true,
     });
+    const businessTextSeriesEntry = {
+      type: 'line',
+      name: 'Latency <baseline>',
+      encode: { x: 'day', y: 'orders' },
+      label: {
+        formatter: 'Results <Q4 2024>',
+      },
+    };
 
     const option: EchartsFullDataOption = {
+      color: ['#ff0000', 'javascript:alert(1)', '#0000ff'],
       dataset: [
         {
           dimensions: ['day', 'orders'],
@@ -1690,9 +1994,13 @@ describe('EchartsFullDataBlock', () => {
         formatter: '<img src=x onerror=alert(1)>',
         extraCssText: 'background-image:url(https://example.test/x.png)',
       },
-      xAxis: { type: 'category', data: ['Mon', 'Tue'] },
+      xAxis: {
+        type: 'category',
+        data: ['Mon', 'Tue'],
+        name: '<img src=x onerror=alert(1)>',
+      },
       yAxis: { type: 'value' },
-      series: [unsafeSeriesEntry],
+      series: [unsafeSeriesEntry, businessTextSeriesEntry],
     };
     const setOption = vi.fn();
     const runtime: EchartsRuntime = {
@@ -1713,6 +2021,7 @@ describe('EchartsFullDataBlock', () => {
     await flushChart();
 
     const renderedOption = setOption.mock.calls[0]?.[0] as {
+      color?: unknown[];
       dataset?: Array<{
         source?: Array<Record<string, unknown>>;
         transform?: unknown;
@@ -1725,7 +2034,7 @@ describe('EchartsFullDataBlock', () => {
         renderMode?: string;
         enterable?: boolean;
       };
-      xAxis?: { data?: unknown };
+      xAxis?: { data?: unknown; name?: unknown };
       series?: Array<{
         cursor?: unknown;
         data?: unknown;
@@ -1733,10 +2042,19 @@ describe('EchartsFullDataBlock', () => {
         href?: unknown;
         id?: unknown;
         itemStyle?: { image?: unknown };
+        label?: { formatter?: string };
+        markLine?: {
+          data?: Array<{
+            yAxis?: number;
+            label?: { formatter?: string };
+            lineStyle?: { color?: unknown };
+          }>;
+        };
         name?: string;
         polluted?: boolean;
         renderItem?: unknown;
         src?: unknown;
+        stack?: unknown;
         symbol?: string;
         tooltip?: {
           appendToBody?: boolean;
@@ -1747,6 +2065,7 @@ describe('EchartsFullDataBlock', () => {
         };
       }>;
     };
+    expect(renderedOption.color).toEqual(['#ff0000', null, '#0000ff']);
     expect(renderedOption.graphic).toBeUndefined();
     expect(renderedOption.dataset).toHaveLength(2);
     expect(renderedOption.dataset?.[0]?.transform).toBeUndefined();
@@ -1772,12 +2091,20 @@ describe('EchartsFullDataBlock', () => {
       }),
     );
     expect(renderedOption.xAxis?.data).toBeUndefined();
+    expect(renderedOption.xAxis?.name).toBeUndefined();
     expect(renderedOption.series?.[0]?.cursor).toBeUndefined();
     expect(renderedOption.series?.[0]?.data).toBeUndefined();
     expect(renderedOption.series?.[0]?.datasetIndex).toBe(1);
     expect(renderedOption.series?.[0]?.href).toBeUndefined();
     expect(renderedOption.series?.[0]?.id).toBeUndefined();
     expect(renderedOption.series?.[0]?.itemStyle?.image).toBeUndefined();
+    expect(renderedOption.series?.[0]?.markLine?.data?.[0]?.yAxis).toBe(150);
+    expect(
+      renderedOption.series?.[0]?.markLine?.data?.[0]?.label?.formatter,
+    ).toBe('Goal <Q4 2024>');
+    expect(
+      renderedOption.series?.[0]?.markLine?.data?.[0]?.lineStyle?.color,
+    ).toBeUndefined();
     expect(renderedOption.series?.[0]?.name).toBeUndefined();
     expect(renderedOption.series?.[0]?.polluted).toBeUndefined();
     expect(Object.getPrototypeOf(renderedOption.series?.[0])).toBe(
@@ -1785,6 +2112,7 @@ describe('EchartsFullDataBlock', () => {
     );
     expect(renderedOption.series?.[0]?.renderItem).toBeUndefined();
     expect(renderedOption.series?.[0]?.src).toBeUndefined();
+    expect(renderedOption.series?.[0]?.stack).toBeUndefined();
     expect(renderedOption.series?.[0]?.symbol).toBe('circle');
     expect(renderedOption.series?.[0]?.tooltip?.formatter).toBeUndefined();
     expect(renderedOption.series?.[0]?.tooltip).toEqual(
@@ -1794,6 +2122,10 @@ describe('EchartsFullDataBlock', () => {
         enterable: false,
         renderMode: 'richText',
       }),
+    );
+    expect(renderedOption.series?.[1]?.name).toBe('Latency <baseline>');
+    expect(renderedOption.series?.[1]?.label?.formatter).toBe(
+      'Results <Q4 2024>',
     );
   });
 
@@ -1873,7 +2205,7 @@ describe('EchartsFullDataBlock', () => {
       container
         .querySelector('[data-testid="echarts-fulldata-rendered"]')
         ?.getAttribute('aria-label'),
-    ).toBe('图表');
+    ).toBe('图表加载中');
     expect(container.textContent).toContain('图表运行时不可用。');
     expect(
       container.querySelector('button[aria-label="显示图表"]'),

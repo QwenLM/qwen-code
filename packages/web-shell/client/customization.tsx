@@ -8,6 +8,7 @@ import type { Components, Options } from 'react-markdown';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
+import type { WebShellTheme } from './themeContext';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
 
@@ -31,7 +32,7 @@ export interface WebShellCodeBlockRenderInfo {
   /** True while the assistant message is still streaming partial content. */
   isStreaming: boolean;
   source: MarkdownContentSource;
-  theme: 'dark' | 'light';
+  theme: WebShellTheme;
 }
 
 /**
@@ -63,14 +64,7 @@ export interface WebShellMarkdownCustomization {
 export type MarkdownTableMode = 'basic' | 'advanced';
 
 export type ToolHeaderKind =
-  | 'agent'
-  | 'edit'
-  | 'fetch'
-  | 'read'
-  | 'shell'
-  | 'todo'
-  | 'write'
-  | 'other';
+  'agent' | 'edit' | 'fetch' | 'read' | 'shell' | 'todo' | 'write' | 'other';
 
 export interface ToolHeaderExtraRenderInfo {
   kind: ToolHeaderKind;
@@ -186,9 +180,7 @@ export interface WebShellMonitorTask extends WebShellTaskBase {
 }
 
 export type WebShellTaskInfo =
-  | WebShellAgentTask
-  | WebShellShellTask
-  | WebShellMonitorTask;
+  WebShellAgentTask | WebShellShellTask | WebShellMonitorTask;
 
 // ---- Model info (public type for footer renderer) ----
 

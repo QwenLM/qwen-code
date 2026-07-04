@@ -3,6 +3,7 @@ import type {
   CodeBlockRenderer,
   WebShellCodeBlockRenderInfo,
 } from '../../customization';
+import type { WebShellTheme } from '../../themeContext';
 import {
   EnhancedTable,
   MAX_ENHANCED_TABLE_COLUMNS,
@@ -19,7 +20,7 @@ type DatasetRow = Record<string, DatasetCell> | DatasetCell[];
 type DatasetSource = DatasetRow[];
 type DatasetDimension = string | { name?: string };
 type EchartsObject = Record<string, unknown>;
-type ChartTheme = 'dark' | 'light';
+type ChartTheme = WebShellTheme;
 
 interface EchartsDataset {
   dimensions?: DatasetDimension[];
@@ -43,8 +44,7 @@ export interface EchartsRuntime {
 }
 
 export type EchartsRuntimeLoader = () =>
-  | EchartsRuntime
-  | Promise<EchartsRuntime>;
+  EchartsRuntime | Promise<EchartsRuntime>;
 
 export interface EchartsFullDataResolvedDataset {
   dimensions: string[];
@@ -59,7 +59,8 @@ export interface EchartsFullDataRefMeta {
 /**
  * Resolves a renderer-validated data ref. The ref uses artifact:// or
  * session-file:// with normalized non-empty path segments and no traversal,
- * query/hash, whitespace, control, backslash, or double-encoded percent forms.
+ * dot, drive-qualified, query/hash, whitespace, control, backslash, or
+ * double-encoded percent forms.
  */
 export type EchartsFullDataRefResolver = (
   ref: string,
@@ -149,9 +150,15 @@ const MAX_OPTION_DEPTH = 40;
 const MAX_DATA_ROWS = 2_000;
 const MAX_DATA_CELLS = 40_000;
 const MAX_SERIES_COUNT = 100;
+const MAX_FORMATTER_TEMPLATE_LENGTH = 4_096;
+const MAX_FORMATTER_DIMENSION_LENGTH = 256;
 const DATA_REF_TIMEOUT_MS = 30_000;
 const SUPPORTED_DATA_REF_PREFIXES = ['artifact://', 'session-file://'];
 const SUPPORTED_DATA_REF_FORMATS = new Set(['csv', 'json']);
+const UNSAFE_URI_WITH_AUTHORITY_PATTERN = /^[a-z][a-z0-9+.-]*:\/\//;
+const UNSAFE_OPTION_HTML_TAG_PATTERN =
+  /<\/?(?:a|applet|base|button|embed|form|iframe|img|input|link|meta|object|script|style|svg)(?=[\s/>])/i;
+const WINDOWS_DRIVE_SEGMENT_PATTERN = /^[a-z]:/i;
 const noop = () => {};
 
 // Sanitization is intentionally two-layered: top-level option keys are an
@@ -290,11 +297,10 @@ function exceedsMaxDepth(value: unknown, maxDepth: number): boolean {
 function isUnsafeUriString(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   return (
+    normalized.startsWith('//') ||
+    UNSAFE_URI_WITH_AUTHORITY_PATTERN.test(normalized) ||
     normalized.startsWith('blob:') ||
     normalized.startsWith('data:') ||
-    normalized.startsWith('file:') ||
-    normalized.startsWith('http://') ||
-    normalized.startsWith('https://') ||
     normalized.startsWith('image://') ||
     normalized.startsWith('javascript:') ||
     normalized.startsWith('vbscript:')
@@ -302,7 +308,7 @@ function isUnsafeUriString(value: string): boolean {
 }
 
 function isUnsafeOptionString(value: string): boolean {
-  return isUnsafeUriString(value) || /<\/?[a-z]/i.test(value);
+  return isUnsafeUriString(value) || UNSAFE_OPTION_HTML_TAG_PATTERN.test(value);
 }
 
 function sanitizeDatasetCell(value: unknown): DatasetCell {
@@ -324,18 +330,26 @@ function sanitizeDatasetRow(row: unknown): DatasetRow | undefined {
   return sanitized;
 }
 
+function isAllowedAnnotationData(path: string[]): boolean {
+  const parentKey = path.at(-1);
+  return parentKey === 'markLine' || parentKey === 'markPoint';
+}
+
 function sanitizeOptionValue(value: unknown, path: string[] = []): unknown {
   if (Array.isArray(value)) {
-    return value
-      .map((entry) => sanitizeOptionValue(entry, path))
-      .filter((entry) => entry !== undefined);
+    return value.map((entry) => sanitizeOptionValue(entry, path) ?? null);
   }
 
   if (isObject(value)) {
     const sanitized: EchartsObject = {};
     for (const [key, entry] of Object.entries(value)) {
       if (key === '__proto__') continue;
-      if (UNSAFE_OPTION_KEYS.has(key)) continue;
+      if (
+        UNSAFE_OPTION_KEYS.has(key) &&
+        !(key === 'data' && isAllowedAnnotationData(path))
+      ) {
+        continue;
+      }
       if (key === 'formatter' && path.includes('tooltip')) continue;
 
       const next = sanitizeOptionValue(entry, [...path, key]);
@@ -354,10 +368,16 @@ function sanitizeDatasetValue(value: unknown): unknown {
     if (!isObject(entry)) return undefined;
     const dataset: EchartsDataset = {};
     if (Array.isArray(entry.dimensions)) {
-      dataset.dimensions = entry.dimensions.filter(
-        (dimension): dimension is DatasetDimension =>
-          typeof dimension === 'string' || isObject(dimension),
-      );
+      dataset.dimensions = entry.dimensions
+        .map((dimension) =>
+          typeof dimension === 'number' && Number.isFinite(dimension)
+            ? String(dimension)
+            : dimension,
+        )
+        .filter(
+          (dimension): dimension is DatasetDimension =>
+            typeof dimension === 'string' || isObject(dimension),
+        );
     }
     if (Array.isArray(entry.source)) {
       dataset.source = entry.source
@@ -401,9 +421,14 @@ function getEncodedDimension(
   dimensions: string[],
 ): string | undefined {
   const candidate = Array.isArray(value) ? value[0] : value;
-  if (typeof candidate === 'string') return candidate;
+  if (typeof candidate === 'string') {
+    return dimensions.includes(candidate) ? candidate : undefined;
+  }
   if (typeof candidate === 'number' && Number.isInteger(candidate)) {
-    return dimensions[candidate];
+    return (
+      dimensions[candidate] ??
+      dimensions.find((dimension) => dimension === String(candidate))
+    );
   }
   return undefined;
 }
@@ -413,7 +438,17 @@ function normalizeDatasetValueFormatter(
   dimension: string | undefined,
 ): unknown {
   if (typeof formatter !== 'string' || !dimension) return formatter;
-  return formatter.replace(/\{c(?::[^}]*)?\}/g, `{@${dimension}}`);
+  if (
+    formatter.length > MAX_FORMATTER_TEMPLATE_LENGTH ||
+    dimension.length > MAX_FORMATTER_DIMENSION_LENGTH
+  ) {
+    return formatter;
+  }
+  return formatter.replace(
+    /\{c(?::([^}]*))?\}/g,
+    (_match: string, format?: string) =>
+      format ? `{@${dimension}|${format}}` : `{@${dimension}}`,
+  );
 }
 
 function normalizeSeriesDatasetFormatters(
@@ -439,9 +474,6 @@ function normalizeSeriesDatasetFormatters(
 function normalizeObjectDatasetFormatters(
   option: EchartsFullDataOption,
 ): EchartsFullDataOption {
-  const firstRow = getRows(option)[0];
-  if (!isObject(firstRow)) return option;
-
   const dimensions = getColumns(option);
   if (dimensions.length === 0 || !('series' in option)) return option;
 
@@ -600,7 +632,7 @@ function applyDefaultChartStyle(
   const styled: EchartsFullDataOption = { ...option };
 
   styled.backgroundColor = option.backgroundColor ?? tokens.background;
-  styled.color = option.color ?? tokens.palette;
+  styled.color = option.color ?? [...tokens.palette];
   styled.textStyle = styleComponent(option.textStyle, {
     color: tokens.foreground,
     fontFamily:
@@ -781,6 +813,9 @@ function normalizeDimensions(
   if (!Array.isArray(dimensions)) return [];
   return dimensions.map((dimension, index) => {
     if (typeof dimension === 'string') return dimension;
+    if (typeof dimension === 'number' && Number.isFinite(dimension)) {
+      return String(dimension);
+    }
     return isObject(dimension) &&
       typeof dimension.name === 'string' &&
       dimension.name
@@ -976,21 +1011,16 @@ function normalizeEnvelopeDataset(value: unknown): {
 
     const nextRow: DatasetCell[] = [];
     for (const [cellIndex, cell] of row.entries()) {
-      if (
-        typeof cell === 'string' ||
-        typeof cell === 'boolean' ||
-        cell === null
-      ) {
-        nextRow.push(cell);
-        continue;
+      const cellError = validateDatasetCell(cell, rowIndex, cellIndex);
+      if (cellError) {
+        return {
+          parseError: cellError.replace(
+            'Chart data row',
+            'Chart envelope data.source row',
+          ),
+        };
       }
-      if (typeof cell === 'number' && Number.isFinite(cell)) {
-        nextRow.push(cell);
-        continue;
-      }
-      return {
-        parseError: `Chart envelope data.source row ${rowIndex + 1} cell ${cellIndex + 1} must be a string, number, boolean, or null.`,
-      };
+      nextRow.push(cell as DatasetCell);
     }
     rows.push(nextRow);
   }
@@ -1069,10 +1099,18 @@ function normalizeDataRef(ref: unknown): {
   }
 
   const segments = decodedPath.split('/');
-  if (segments.some((segment) => segment.length === 0 || segment === '..')) {
+  if (
+    segments.some(
+      (segment) =>
+        segment.length === 0 ||
+        segment === '.' ||
+        segment === '..' ||
+        WINDOWS_DRIVE_SEGMENT_PATTERN.test(segment),
+    )
+  ) {
     return {
       parseError:
-        'Chart envelope data.ref path must use non-empty segments and cannot contain "..".',
+        'Chart envelope data.ref path must use non-empty normalized segments and cannot contain ".", "..", or drive-qualified segments.',
     };
   }
   return { ref: `${prefix}${segments.join('/')}` };
@@ -1173,12 +1211,19 @@ function resolveEnvelopeDataRef(
       }
       return injectDatasetAndValidate(dataRef.option, result.dataset);
     })
-    .catch((error: unknown) => ({
-      parseError:
-        error instanceof Error
-          ? `Chart data reference could not be resolved: ${error.message}`
-          : 'Chart data reference could not be resolved.',
-    }));
+    .catch((error: unknown) => {
+      console.error(
+        '[web-shell] echarts-fulldata data-ref resolution failed:',
+        dataRef.ref,
+        error,
+      );
+      return {
+        parseError:
+          error instanceof Error
+            ? `Chart data reference could not be resolved: ${error.message}`
+            : 'Chart data reference could not be resolved.',
+      };
+    });
 }
 
 function parseOption(code: string): ParseOptionResult {
@@ -1413,25 +1458,27 @@ function EchartsDataTable({
   rows: DatasetSource;
 }) {
   const { t } = useI18n();
+  const isEmpty = columns.length === 0 || rows.length === 0;
+  const isOversized =
+    rows.length > MAX_ENHANCED_TABLE_ROWS ||
+    columns.length > MAX_ENHANCED_TABLE_COLUMNS;
   const table = useMemo(
-    () => toEnhancedTableData(columns, rows),
-    [columns, rows],
+    () =>
+      isEmpty || isOversized ? undefined : toEnhancedTableData(columns, rows),
+    [columns, isEmpty, isOversized, rows],
   );
 
-  if (columns.length === 0 || rows.length === 0) {
+  if (isEmpty) {
     return <div className={styles.state}>{t('echartsChart.noData')}</div>;
   }
 
-  if (
-    rows.length > MAX_ENHANCED_TABLE_ROWS ||
-    columns.length > MAX_ENHANCED_TABLE_COLUMNS
-  ) {
+  if (isOversized) {
     return <SimpleDatasetTable columns={columns} rows={rows} />;
   }
 
   return (
     <div data-testid="echarts-fulldata-table">
-      <EnhancedTable table={table} />
+      <EnhancedTable table={table!} />
     </div>
   );
 }
@@ -1505,6 +1552,7 @@ export function EchartsFullDataBlock({
       renderRequestRef.current += 1;
       disposeChart();
       setChartReady(false);
+      setChartError(null);
       return;
     }
     const requestId = (renderRequestRef.current += 1);

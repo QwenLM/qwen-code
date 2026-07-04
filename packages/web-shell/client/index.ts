@@ -3,6 +3,7 @@ export type { WebShellProps, BugReportInfo } from './App';
 export type { ComposerToolbarAction } from './components/ChatEditor';
 export type { ToastTone } from './components/ToastHost';
 export type { WebShellLanguage } from './i18n';
+export type { WebShellTheme } from './themeContext';
 export type {
   CodeBlockRenderer,
   MarkdownContentSource,

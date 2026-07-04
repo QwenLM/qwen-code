@@ -508,6 +508,42 @@ describe('Markdown custom code block rendering', () => {
     container.remove();
   });
 
+  it('extracts language prefixes from glued fence metadata', async () => {
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn(() => undefined);
+
+    await act(async () => {
+      root.render(
+        createElement(
+          WebShellCustomizationProvider,
+          { value: { markdown: { renderCodeBlock } } },
+          createElement(Markdown, {
+            content:
+              '```js{1,3}\nconst x = 1;\n```\n\n```c:main.c\nint main() {}\n```\n\n```vue{2}\n<template />\n```',
+            source: 'assistant',
+          }),
+        ),
+      );
+    });
+
+    const infos = renderCodeBlock.mock.calls.map(
+      ([info]) => info as WebShellCodeBlockRenderInfo,
+    );
+    expect(infos.map((info) => info.language)).toEqual(['js', 'c', 'vue']);
+    expect(infos.map((info) => info.resolvedLanguage)).toEqual([
+      'javascript',
+      'c',
+      'vue',
+    ]);
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
+  });
+
   it('does not pass unsafe fence-language characters to host renderers', async () => {
     const container = document.createElement('div');
     document.body.appendChild(container);
