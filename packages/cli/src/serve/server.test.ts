@@ -7090,6 +7090,9 @@ describe('createServeApp', () => {
       );
       expect(mismatchedCursor.status).toBe(400);
       expect(mismatchedCursor.body.code).toBe('invalid_cursor');
+      expect(mismatchedCursor.body.error).toContain(
+        'not a valid organized cursor',
+      );
 
       const invalidCursor = await host(
         request(app).get(
@@ -7100,6 +7103,9 @@ describe('createServeApp', () => {
       );
       expect(invalidCursor.status).toBe(400);
       expect(invalidCursor.body.code).toBe('invalid_cursor');
+      expect(invalidCursor.body.error).toContain(
+        'not a valid organized cursor',
+      );
     });
 
     it('allows session organization mutations on loopback without a token', async () => {

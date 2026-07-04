@@ -142,6 +142,21 @@ describe('SessionOrganizationService', () => {
     );
   });
 
+  it('treats an empty session organization update as a no-op', async () => {
+    const pinned = await service.updateSessionOrganization(sessionIdA, {
+      isPinned: true,
+    });
+    const storeBefore = await fs.readFile(service.getStorePath(), 'utf8');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+
+    const org = await service.updateSessionOrganization(sessionIdA, {});
+
+    expect(org).toEqual(pinned);
+    await expect(fs.readFile(service.getStorePath(), 'utf8')).resolves.toBe(
+      storeBefore,
+    );
+  });
+
   it('rejects unknown group updates and assignments', async () => {
     await expect(
       service.updateGroup('missing-group', { name: 'Missing' }),

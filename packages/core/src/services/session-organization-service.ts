@@ -333,9 +333,14 @@ export class SessionOrganizationService {
     sessionId: string,
     input: UpdateSessionOrganizationInput,
   ): Promise<SessionOrganizationView> {
+    const hasUpdate =
+      input.groupId !== undefined || input.isPinned !== undefined;
     return this.withStoreLock(async () => {
       const store = await this.readStore();
       const current = viewOrganization(store.sessions[sessionId]);
+      if (!hasUpdate) {
+        return current;
+      }
       const now = new Date().toISOString();
       if (input.groupId !== undefined) {
         if (

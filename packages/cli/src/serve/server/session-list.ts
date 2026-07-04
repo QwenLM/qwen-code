@@ -34,8 +34,8 @@ export interface ListWorkspaceSessionsResult {
 }
 
 export class InvalidCursorError extends Error {
-  constructor(cursor: string) {
-    super(`Invalid cursor: "${cursor}" is not a valid numeric cursor`);
+  constructor(cursor: string, kind: 'numeric' | 'organized' = 'numeric') {
+    super(`Invalid cursor: "${cursor}" is not a valid ${kind} cursor`);
     this.name = 'InvalidCursorError';
   }
 }
@@ -82,7 +82,7 @@ function parseOrganizedCursor(
     }
     return (parsed as OrganizedCursor).offset;
   } catch {
-    throw new InvalidCursorError(cursor);
+    throw new InvalidCursorError(cursor, 'organized');
   }
 }
 

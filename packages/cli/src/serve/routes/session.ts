@@ -1110,6 +1110,8 @@ export function registerSessionRoutes(
     if (sessionId === null) return;
     try {
       await archiveCoordinator.runSharedMany([sessionId], async () => {
+        // Organization is workspace-scoped sidecar state, not live-session
+        // metadata. It intentionally applies to persisted and archived sessions.
         const sessionService = new SessionService(boundWorkspace);
         let exists = await sessionService.sessionExistsInAnyState(sessionId);
         if (!exists) {
