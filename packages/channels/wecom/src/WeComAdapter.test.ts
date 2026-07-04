@@ -483,6 +483,28 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('preserves structured websocket disconnect reasons in logs', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('disconnected', {
+      code: 1006,
+      reason: 'abnormal closure',
+      wasClean: false,
+    });
+
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'code=1006 reason=abnormal closure wasClean=false',
+      ),
+    );
+    stderr.mockRestore();
+  });
+
   it('reconnects when WeCom kicks the connection for a newer client', async () => {
     vi.useFakeTimers();
     const stderr = vi
@@ -502,7 +524,7 @@ describe('WeComChannel', () => {
     expect(oldClient.disconnect).toHaveBeenCalled();
     expect(lastClient().connect).toHaveBeenCalledTimes(1);
     expect(stderr).toHaveBeenCalledWith(
-      '[WeCom:bot] WebSocket disconnected; reconnecting after server kick.\n',
+      '[WeCom:bot] WebSocket errcode=45009 errmsg=another client connected; reconnecting after server kick.\n',
     );
     channel.disconnect();
     stderr.mockRestore();
@@ -1086,6 +1108,42 @@ describe('WeComChannel', () => {
     client.emit('message.text', payload);
     await new Promise((resolve) => setTimeout(resolve, 0));
     expect(channel.processes).toHaveBeenCalledTimes(1);
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] dropping duplicate message msg-process-fails (already seen).\n',
+    );
+    stderr.mockRestore();
+  });
+
+  it('logs duplicate messages that are already in flight', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new BlockingPreflightWeComChannel(
+      'bot',
+      makeConfig(),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+    const payload = {
+      msgid: 'msg-in-flight',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: 'hello' },
+    };
+
+    client.emit('message.text', payload);
+    await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(1));
+
+    client.emit('message.text', payload);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(channel.preflights).toHaveBeenCalledTimes(1);
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] dropping duplicate message msg-in-flight (already in flight).\n',
+    );
+    channel.releasePreflights();
     stderr.mockRestore();
   });
 
@@ -1112,6 +1170,67 @@ describe('WeComChannel', () => {
     expect(client.downloadFile).not.toHaveBeenCalled();
     expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('blocks non-HTTPS media URLs before probing them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-http-image',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'http://169.254.169.254/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.lookup).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('blocks local and bare media hostnames before probing them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    for (const [index, url] of [
+      'https://localhost/latest/meta-data/',
+      'https://metadata.local/latest/meta-data/',
+      'https://metadata/latest/meta-data/',
+    ].entries()) {
+      client.emit('message.image', {
+        msgid: `msg-local-host-${index}`,
+        msgtype: 'image',
+        chattype: 'single',
+        from: { userid: 'alice' },
+        image: { url, aeskey: 'k1' },
+      });
+    }
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(3));
+    expect(channel.envelopes.every((entry) => !entry.attachments)).toBe(true);
+    expect(mocks.lookup).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('unsafe media URL'),
     );
@@ -1289,6 +1408,41 @@ describe('WeComChannel', () => {
       all: true,
     });
     expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('blocks media hostnames with mixed public and private DNS results', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    mocks.lookup.mockResolvedValueOnce([
+      { address: '93.184.216.34', family: 4 },
+      { address: '169.254.169.254', family: 4 },
+    ]);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-mixed-dns-host',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://metadata.example.com/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(mocks.lookup).toHaveBeenCalledWith('metadata.example.com', {
+      all: true,
+    });
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
     expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('unsafe media URL'),
@@ -2415,6 +2569,34 @@ describe('WeComChannel', () => {
       expect.stringContaining(secretPath),
     );
     stderr.mockRestore();
+  });
+
+  it('does not allow a hardcoded /tmp channel-files fallback', async () => {
+    if (tmpdir() === '/tmp') return;
+
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const parent = '/tmp/channel-files';
+    mkdirSync(parent, { recursive: true });
+    const dir = mkdtempSync(join(parent, 'wecom-test-'));
+    const imagePath = join(dir, 'out.png');
+    writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    try {
+      await channel.sendMessage('chat-1', `[IMAGE: ${imagePath}]`);
+
+      expect(client.uploadMedia).not.toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('outside allowed outbound directory'),
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+      stderr.mockRestore();
+    }
   });
 
   it('registers the wecom plugin with botId and secret fields', () => {

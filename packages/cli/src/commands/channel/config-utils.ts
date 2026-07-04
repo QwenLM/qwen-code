@@ -43,7 +43,12 @@ function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
   if (mode === 'available' && value.startsWith('$')) {
     const envName = value.substring(1);
     const envValue = process.env[envName];
-    if (envValue === undefined) return value;
+    if (envValue === undefined) {
+      process.stderr.write(
+        `[channel] warning: environment variable ${envName} is not set, using literal value.\n`,
+      );
+      return value;
+    }
     if (envValue === '') {
       throw new Error(
         `Environment variable ${envName} is empty (referenced as ${value})`,

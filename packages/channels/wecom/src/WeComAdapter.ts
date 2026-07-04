@@ -303,9 +303,14 @@ export class WeComChannel extends ChannelBase {
       return;
     }
 
-    const messageId = getString(body, 'msgid');
+    const messageId = getString(body, 'msgid') || undefined;
     const logMessageId = sanitizeLogText(messageId || '(no id)', 100);
-    if (messageId && this.seenMessages.has(messageId)) return;
+    if (messageId && this.seenMessages.has(messageId)) {
+      process.stderr.write(
+        `[WeCom:${this.name}] dropping duplicate message ${logMessageId} (already seen).\n`,
+      );
+      return;
+    }
 
     const from = getRecord(body, 'from');
     const senderId = getString(from, 'userid') || '';
@@ -322,7 +327,12 @@ export class WeComChannel extends ChannelBase {
       return;
     }
     if (messageId) {
-      if (this.inFlightMessages.has(messageId)) return;
+      if (this.inFlightMessages.has(messageId)) {
+        process.stderr.write(
+          `[WeCom:${this.name}] dropping duplicate message ${logMessageId} (already in flight).\n`,
+        );
+        return;
+      }
       this.inFlightMessages.add(messageId);
     }
 
@@ -766,7 +776,8 @@ function cleanupAttachmentDirs(dirs: string[]): void {
 }
 
 function formatDisconnectReason(reason: unknown): string {
-  const text = typeof reason === 'string' && reason ? reason : 'disconnected';
+  const text =
+    typeof reason === 'string' && reason ? reason : formatSdkError(reason);
   return sanitizeLogText(text, 120);
 }
 
@@ -778,6 +789,22 @@ function formatSdkError(err: unknown): string {
     const errmsg = record['errmsg'];
     if (typeof errcode === 'number' || typeof errmsg === 'string') {
       return `errcode=${String(errcode)} errmsg=${String(errmsg)}`;
+    }
+    const code = record['code'];
+    const reason = record['reason'];
+    const wasClean = record['wasClean'];
+    if (
+      typeof code === 'number' ||
+      typeof reason === 'string' ||
+      typeof wasClean === 'boolean'
+    ) {
+      return [
+        typeof code === 'number' ? `code=${code}` : undefined,
+        typeof reason === 'string' ? `reason=${reason}` : undefined,
+        typeof wasClean === 'boolean' ? `wasClean=${wasClean}` : undefined,
+      ]
+        .filter((part): part is string => Boolean(part))
+        .join(' ');
     }
     try {
       return JSON.stringify(record);
@@ -1060,7 +1087,6 @@ function readOutboundMedia(
 
   const allowedDirs = [
     ensureDirectoryRealpath(join(tmpdir(), 'channel-files')),
-    ensureDirectoryRealpath('/tmp/channel-files'),
   ].filter((dir): dir is string => Boolean(dir));
   if (!allowedDirs.some((dir) => isInsideDir(real, dir))) {
     throw new Error('Media path outside allowed outbound directory');

@@ -206,6 +206,9 @@ describe('parseChannelConfig', () => {
 
   it('leaves unavailable env vars literal in available mode', async () => {
     delete process.env['TEST_MISSING_SECRET'];
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
 
     const result = await parseChannelConfig(
       'bot',
@@ -219,6 +222,10 @@ describe('parseChannelConfig', () => {
     );
 
     expect(result['secret']).toBe('$TEST_MISSING_SECRET');
+    expect(stderr).toHaveBeenCalledWith(
+      '[channel] warning: environment variable TEST_MISSING_SECRET is not set, using literal value.\n',
+    );
+    stderr.mockRestore();
   });
 
   it('preserves explicit config values over defaults', async () => {
