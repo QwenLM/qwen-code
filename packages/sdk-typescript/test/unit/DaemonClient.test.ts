@@ -148,6 +148,42 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('daemonStatus', () => {
+    it('GETs /daemon/status without a detail param by default', async () => {
+      const body = { v: 1, detail: 'summary', status: 'ok', issues: [] };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+      });
+      const res = await client.daemonStatus();
+      expect(res).toEqual(body);
+      expect(calls[0]?.url).toBe('http://daemon/daemon/status');
+      expect(calls[0]?.method).toBe('GET');
+      expect(calls[0]?.headers['authorization']).toBe('Bearer secret');
+    });
+
+    it('GETs /daemon/status?detail=full when asked for full detail', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { v: 1, detail: 'full' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.daemonStatus('full');
+      expect(calls[0]?.url).toBe('http://daemon/daemon/status?detail=full');
+    });
+
+    it('throws DaemonHttpError on non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(500, { error: 'Failed to build daemon status' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.daemonStatus()).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+    });
+  });
+
   describe('capabilities', () => {
     it('GETs /capabilities and returns the v1 envelope', async () => {
       const envelope = {

@@ -16,6 +16,7 @@ export type {
   WebShellComposerApi,
   WebShellComposerInput,
   WebShellComposerTag,
+  WebShellComposerTagKind,
   WebShellComposerTagOptions,
   WebShellComposerTagPlacement,
   WebShellComposerToolbarRenderInfo,

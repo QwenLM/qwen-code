@@ -30,11 +30,14 @@ describe('LoopDetectionConfirmation', () => {
     expect(output).toContain(
       'This can happen due to repetitive tool calls or other model behavior',
     );
-    // The note must scope skipLoopDetection to the heuristics and flag the
-    // consecutive-identical guard as always-on (it cannot be turned off there).
+    // The note must scope skipLoopDetection to the heuristics, flag the
+    // always-on guards as unaffected by it, and point at the cap's own knob.
+    // (Assertions stay within single rendered lines — the frame wraps text.)
     expect(output).toContain('heuristic loop checks for future sessions');
-    expect(output).toContain('always-on guard against consecutive identical');
+    expect(output).toContain('always-on guards');
     expect(output).toContain('model.skipLoopDetection');
+    expect(output).toContain('model.maxToolCallsPerTurn');
+    expect(output).toContain('suppresses everything');
     expect(output).toContain('settings.json');
   });
 });

@@ -53,11 +53,15 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
+export type WebShellComposerTagKind = 'extension' | 'mcp' | 'file' | 'skill';
+
 export interface WebShellComposerTag {
   id: string;
   label?: string;
   value?: string;
   removable?: boolean;
+  kind?: WebShellComposerTagKind;
+  serialized?: string;
 }
 
 export type WebShellComposerTagPlacement = 'top' | 'inline';

@@ -33,6 +33,7 @@ interface WebShellSidebarProps {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
+  onOpenDaemonStatus: () => void;
   onNewSession: () => Promise<boolean> | boolean;
   onLoadSession: (sessionId: string) => Promise<void> | void;
   onError: (error: unknown, fallback: string) => void;
@@ -136,6 +137,14 @@ function IconSettings() {
   );
 }
 
+function IconPulse() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 12h4l3-8 4 16 3-8h4" />
+    </svg>
+  );
+}
+
 function IconRename() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -173,6 +182,7 @@ export function WebShellSidebar({
   collapsed,
   onCollapsedChange,
   onOpenSettings,
+  onOpenDaemonStatus,
   onNewSession,
   onLoadSession,
   onError,
@@ -953,6 +963,15 @@ export function WebShellSidebar({
             {versionLabel}
           </span>
         )}
+        <button
+          className={styles.collapseButton}
+          type="button"
+          title={t('sidebar.daemonStatus')}
+          aria-label={t('sidebar.daemonStatus')}
+          onClick={onOpenDaemonStatus}
+        >
+          <IconPulse />
+        </button>
         {!mobileOpen && (
           <button
             className={styles.collapseButton}

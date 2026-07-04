@@ -319,10 +319,26 @@ Response shape:
         "wsStreams": 0,
         "pendingClientRequests": 0
       }
+    },
+    "perf": {
+      "eventLoop": { "meanMs": 0, "p50Ms": 0, "p99Ms": 0, "maxMs": 0 },
+      "pipe": {
+        "inbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 },
+        "outbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 }
+      }
+    },
+    "activity": {
+      "activePrompts": 0,
+      "lastActivityAt": null,
+      "idleSinceMs": null
     }
   }
 }
 ```
+
+`runtime.perf` is optional. When present, it reports daemon-process event loop
+lag and daemon-child pipe byte counters only; ACP child event loop lag is not
+included in `/daemon/status`.
 
 `status` is `error` if any issue has error severity, `warning` if any issue has
 warning severity, otherwise `ok`. Issue codes are stable and include
@@ -334,6 +350,8 @@ the short window after the listener is ready but before the full runtime is
 mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
 runtime mount fails, it reports `daemon_runtime_failed` while non-status
 runtime routes return `503`.
+
+`runtime.activity` reports daemon-wide prompt activity. `activePrompts` counts sessions with an in-flight prompt. `lastActivityAt` is the ISO 8601 timestamp of the last prompt start/end or session spawn; `null` when the daemon has never processed any activity since boot. `idleSinceMs` is computed from `lastActivityAt` at response generation time.
 
 `runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
 not the channel-adapter worker. Daemon-managed channels use

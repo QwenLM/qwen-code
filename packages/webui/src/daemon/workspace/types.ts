@@ -51,6 +51,8 @@ import type {
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
   DaemonSessionSummary,
+  DaemonStatusReport,
+  DaemonStatusReportDetail,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
 } from '@qwen-code/sdk/daemon';
@@ -163,6 +165,11 @@ export interface DaemonWorkspaceActions {
     serverName: string,
     action: DaemonMcpManageAction,
   ): Promise<DaemonMcpManageResult>;
+
+  // Daemon status (read-only)
+  loadDaemonStatus(
+    detail?: DaemonStatusReportDetail,
+  ): Promise<DaemonStatusReport>;
 
   // Skills (read-only)
   loadSkillsStatus(): Promise<DaemonWorkspaceSkillsStatus>;

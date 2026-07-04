@@ -55,7 +55,6 @@ vi.mock('@agentclientprotocol/sdk', () => ({
       return mockConnectionState.promise;
     },
   })),
-  ndJsonStream: vi.fn().mockReturnValue({}),
   RequestError: class RequestError extends Error {
     static authRequired = vi
       .fn()
@@ -73,6 +72,10 @@ vi.mock('@agentclientprotocol/sdk', () => ({
       });
   },
   PROTOCOL_VERSION: '1.0.0',
+}));
+
+vi.mock('@qwen-code/acp-bridge/ndJsonStream', () => ({
+  ndJsonStream: vi.fn().mockReturnValue({}),
 }));
 
 vi.mock('node:stream', async (importOriginal) => {
@@ -98,10 +101,21 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     warn: vi.fn(),
     info: vi.fn(),
   }),
+  registerAcpEventLoopLagGauge: vi.fn(),
+  startEventLoopLagMonitor: vi.fn(() => ({
+    snapshot: vi.fn(() => ({
+      meanMs: 0,
+      p50Ms: 0,
+      p99Ms: 0,
+      maxMs: 0,
+    })),
+    dispose: vi.fn(),
+  })),
   APPROVAL_MODE_INFO: {},
   APPROVAL_MODES: [],
   DEFAULT_STOP_HOOK_BLOCK_CAP: 8,
   DEFAULT_MAX_SUBAGENT_DEPTH: 5,
+  DEFAULT_MAX_TOOL_CALLS_PER_TURN: 100,
   DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
   DEFAULT_TOOL_RESULTS_TOTAL_CHARS_THRESHOLD: 500_000,

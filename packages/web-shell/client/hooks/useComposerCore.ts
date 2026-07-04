@@ -52,6 +52,7 @@ import {
   inputHighlightTheme,
 } from '../extensions/inputHighlight';
 import { isEditableTarget } from '../utils/dom';
+import { getComposerTagIconUrl } from '../components/composerTagIcons';
 import type {
   WebShellComposerApi,
   WebShellComposerInput,
@@ -119,11 +120,22 @@ const TOOLTIP_STYLES = `
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li {
   display: flex !important;
-  align-items: baseline;
+  align-items: center;
   min-width: 0;
   padding: 4px 8px !important;
   color: var(--foreground, #e4e4e4) !important;
   overflow: hidden;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete .cm-at-ref-completion-icon {
+  display: block;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin-right: 10px;
+  background: currentColor;
+  mask: var(--composer-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li:hover {
@@ -142,14 +154,15 @@ const TOOLTIP_STYLES = `
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section {
   display: block !important;
-  height: 0;
-  margin: 6px 10px 3px;
-  padding: 0 !important;
+  height: auto;
+  margin: 6px 10px 4px;
+  padding: 2px 0 4px !important;
+  line-height: 1.2;
   border-bottom: 1px solid var(--border) !important;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete completion-section:first-of-type {
-  display: none !important;
+  margin-top: 6px;
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete .cm-completionLabel {
@@ -159,6 +172,12 @@ const TOOLTIP_STYLES = `
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li.cm-at-ref-completion-extension .cm-completionLabel,
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li.cm-at-ref-completion-mcp .cm-completionLabel,
+[data-web-shell-tooltip-portal] .cm-tooltip-autocomplete ul li.cm-at-ref-completion-file .cm-completionLabel {
+  width: calc(var(--web-shell-completion-label-width) - 20px);
 }
 
 [data-web-shell-tooltip-portal] .cm-tooltip-autocomplete .cm-completionDetail {
@@ -455,7 +474,9 @@ export function expandLargePastePlaceholders(
 // ---- Tag serialization (shared) ----
 
 export function serializeComposerTag(tag: WebShellComposerTag): string {
-  return tag.value?.trim() || tag.label?.trim() || tag.id;
+  return (
+    tag.serialized?.trim() || tag.value?.trim() || tag.label?.trim() || tag.id
+  );
 }
 
 function serializeComposerTags(tags: readonly WebShellComposerTag[]): string {
@@ -514,6 +535,8 @@ class ComposerTagWidget extends WidgetType {
       this.tag.id === other.tag.id &&
       this.tag.label === other.tag.label &&
       this.tag.value === other.tag.value &&
+      this.tag.kind === other.tag.kind &&
+      this.tag.serialized === other.tag.serialized &&
       this.tag.removable === other.tag.removable
     );
   }
@@ -522,8 +545,18 @@ class ComposerTagWidget extends WidgetType {
     const chip = document.createElement('span');
     chip.style.cssText =
       'display:inline-flex;align-items:center;max-width:min(44ch,100%);min-height:20px;margin:0 0.25ch;border:1px solid var(--border);border-radius:4px;background:var(--secondary);color:var(--foreground);font-family:var(--font-mono,monospace);font-size:12px;line-height:1.2;vertical-align:baseline;';
-    const tagLabel = getComposerTagLabel(this.tag);
+    const rawTagLabel = getComposerTagLabel(this.tag);
     const tagValue = getComposerTagValue(this.tag);
+    const tagLabel = this.tag.kind ? '' : rawTagLabel;
+    const iconUrl = getComposerTagIconUrl(this.tag.kind);
+
+    if (iconUrl) {
+      const icon = document.createElement('span');
+      icon.style.cssText =
+        'display:block;width:12px;height:12px;flex:0 0 auto;margin-left:7px;background:currentColor;mask:var(--composer-tag-icon-url) center / contain no-repeat;-webkit-mask:var(--composer-tag-icon-url) center / contain no-repeat;';
+      icon.style.setProperty('--composer-tag-icon-url', `url("${iconUrl}")`);
+      chip.appendChild(icon);
+    }
 
     if (tagLabel) {
       const label = document.createElement('span');
@@ -536,7 +569,7 @@ class ComposerTagWidget extends WidgetType {
     if (tagValue) {
       const value = document.createElement('span');
       value.style.cssText =
-        'max-width:32ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 0.5ch;color:var(--muted-foreground);';
+        'max-width:32ch;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:3px 0 3px 0.5ch;color:var(--foreground, #e4e4e4);';
       value.textContent = tagValue;
       chip.appendChild(value);
     } else if (!tagLabel) {
@@ -1789,12 +1822,14 @@ export function useComposerCore(
           override: [],
           activateOnTyping: true,
           icons: false,
-          optionClass: (completion) =>
-            completion.type === 'file'
-              ? 'cm-file-completion'
-              : hasCommandHoverInfo(completion)
-                ? 'cm-command-info-completion'
-                : '',
+          optionClass: (completion) => {
+            const classes: string[] = [];
+            if (completion.type === 'file') classes.push('cm-file-completion');
+            if (hasCommandHoverInfo(completion)) {
+              classes.push('cm-command-info-completion');
+            }
+            return classes.join(' ');
+          },
           addToOptions: [
             {
               render: renderCompletionHoverInfo,
