@@ -904,6 +904,11 @@ export interface ConfigParameters {
   accessibility?: AccessibilitySettings;
   showResponseTokensPerSecond?: boolean;
   telemetry?: TelemetrySettings;
+  /**
+   * Delay SDK startup for interactive render paths. Telemetry settings still
+   * remain readable from Config; only the global SDK side effect is deferred.
+   */
+  deferTelemetryInitialization?: boolean;
   outboundCorrelation?: OutboundCorrelationSettings;
   gitCoAuthor?: GitCoAuthorParam;
   usageStatisticsEnabled?: boolean;
@@ -1915,7 +1920,10 @@ export class Config {
       onModelChange: this.handleModelChange.bind(this),
     });
 
-    if (this.telemetrySettings.enabled) {
+    if (
+      this.telemetrySettings.enabled &&
+      !params.deferTelemetryInitialization
+    ) {
       initializeTelemetry(this);
     }
 

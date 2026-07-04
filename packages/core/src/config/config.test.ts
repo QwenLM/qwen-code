@@ -29,6 +29,7 @@ import {
   DEFAULT_OTLP_ENDPOINT,
   SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT,
   QwenLogger,
+  initializeTelemetry,
   isTelemetrySdkInitialized,
   shutdownTelemetry,
   refreshSessionContext,
@@ -3787,6 +3788,19 @@ describe('Server Config (config.ts)', () => {
     };
     const config = new Config(paramsWithTelemetry);
     expect(config.getTelemetryEnabled()).toBe(true);
+    expect(initializeTelemetry).toHaveBeenCalledWith(config);
+  });
+
+  it('Config constructor should defer telemetry initialization when requested', () => {
+    const paramsWithTelemetry: ConfigParameters = {
+      ...baseParams,
+      telemetry: { enabled: true },
+      deferTelemetryInitialization: true,
+    };
+    const config = new Config(paramsWithTelemetry);
+
+    expect(config.getTelemetryEnabled()).toBe(true);
+    expect(initializeTelemetry).not.toHaveBeenCalled();
   });
 
   it('Config shutdown should flush telemetry when SDK is initialized', async () => {

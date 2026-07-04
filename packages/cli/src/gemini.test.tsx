@@ -1051,6 +1051,14 @@ describe('gemini.tsx main function kitty protocol', () => {
         deferIdeConnection: true,
       },
     );
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      {
+        connectIde: true,
+        initializeTelemetry: true,
+      },
+    );
   });
 
   it('should await IDE connection when interactive mode has an initial prompt', async () => {
@@ -1145,6 +1153,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       maxSessionTurns: undefined,
       maxWallTime: undefined,
       maxToolCalls: undefined,
+      maxSubagentDepth: undefined,
       experimentalLsp: undefined,
       channel: undefined,
       chatRecording: undefined,
@@ -1158,6 +1167,14 @@ describe('gemini.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         deferIdeConnection: false,
+      },
+    );
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      expect.any(Object),
+      expect.any(Object),
+      {
+        connectIde: false,
+        initializeTelemetry: true,
       },
     );
   });
@@ -1470,7 +1487,31 @@ describe('startInteractiveUI', () => {
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
       mockConfig,
       mockSettings,
-      { connectIde: true },
+      { connectIde: true, initializeTelemetry: true },
+    );
+  });
+
+  it('can skip post-render IDE connection after prompt-interactive awaited it', async () => {
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+      { postRenderConnectIde: false },
+    );
+
+    expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
+      mockConfig,
+      mockSettings,
+      { connectIde: false, initializeTelemetry: true },
     );
   });
 
@@ -1504,7 +1545,7 @@ describe('startInteractiveUI', () => {
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
       mockConfig,
       settingsWithAutoUpdateDisabled,
-      { connectIde: true },
+      { connectIde: true, initializeTelemetry: true },
     );
   });
 });

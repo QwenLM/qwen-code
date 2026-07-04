@@ -42,12 +42,17 @@ import { getCliVersion } from '../utils/version.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
+export interface StartInteractiveUIOptions {
+  postRenderConnectIde?: boolean;
+}
+
 export async function startInteractiveUI(
   config: Config,
   settings: LoadedSettings,
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
   initializationResult: InitializationResult,
+  options: StartInteractiveUIOptions = {},
 ) {
   const version = await getCliVersion();
   setWindowTitle(settings, basename(workspaceRoot));
@@ -194,7 +199,10 @@ export async function startInteractiveUI(
   // after this — it carries the `config_initialize_*` and
   // `input_enabled` checkpoints that complete the first-screen picture.
   profileCheckpoint('first_paint');
-  startPostRenderPrefetches(config, settings, { connectIde: true });
+  startPostRenderPrefetches(config, settings, {
+    connectIde: options.postRenderConnectIde ?? true,
+    initializeTelemetry: true,
+  });
 
   registerCleanup(async () => {
     remoteInputWatcher?.shutdown();

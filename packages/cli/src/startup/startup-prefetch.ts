@@ -4,7 +4,11 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { createDebugLogger, type Config } from '@qwen-code/qwen-code-core';
+import {
+  createDebugLogger,
+  initializeTelemetry,
+  type Config,
+} from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import { preconnectApi } from '../utils/apiPreconnect.js';
 import { recordStartupEvent } from '../utils/startupProfiler.js';
@@ -70,7 +74,7 @@ export function startEarlyStartupPrefetches(config: Config): void {
 export function startPostRenderPrefetches(
   config: Config,
   settings: LoadedSettings,
-  options: { connectIde?: boolean } = {},
+  options: { connectIde?: boolean; initializeTelemetry?: boolean } = {},
 ): void {
   if (postRenderStarted.has(config)) return;
   postRenderStarted.add(config);
@@ -90,6 +94,12 @@ export function startPostRenderPrefetches(
     runDeferredTask('ide_connect', async () => {
       const { connectIdeForStartup } = await import('../core/initializer.js');
       await connectIdeForStartup(config);
+    });
+  }
+
+  if (options.initializeTelemetry) {
+    runDeferredTask('telemetry_init', () => {
+      initializeTelemetry(config);
     });
   }
 

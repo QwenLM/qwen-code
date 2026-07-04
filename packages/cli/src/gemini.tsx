@@ -842,6 +842,7 @@ export async function main() {
         startupWarnings,
         process.cwd(),
         initializationResult!,
+        { postRenderConnectIde: deferIdeConnection },
       );
       // Clean up corruption env vars so subsequent relaunch children
       // and subprocesses don't inherit stale state.

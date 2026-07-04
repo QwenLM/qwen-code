@@ -19,6 +19,7 @@ const mockRecordStartupEvent = vi.hoisted(() => vi.fn());
 const mockCheckForUpdates = vi.hoisted(() => vi.fn());
 const mockHandleAutoUpdate = vi.hoisted(() => vi.fn());
 const mockConnectIdeForStartup = vi.hoisted(() => vi.fn());
+const mockInitializeTelemetry = vi.hoisted(() => vi.fn());
 const mockStartBackgroundHousekeeping = vi.hoisted(() => vi.fn());
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
@@ -26,6 +27,7 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
     debug: mockDebug,
     warn: mockWarn,
   }),
+  initializeTelemetry: (...args: unknown[]) => mockInitializeTelemetry(...args),
 }));
 
 vi.mock('../utils/apiPreconnect.js', () => ({
@@ -160,6 +162,47 @@ describe('startupPrefetch', () => {
     await vi.dynamicImportSettled();
 
     expect(mockConnectIdeForStartup).not.toHaveBeenCalled();
+  });
+
+  it('initializes telemetry when requested', async () => {
+    const config = makeConfig();
+
+    startPostRenderPrefetches(config, makeSettings(), {
+      initializeTelemetry: true,
+    });
+
+    await vi.dynamicImportSettled();
+
+    expect(mockInitializeTelemetry).toHaveBeenCalledWith(config);
+  });
+
+  it('does not initialize telemetry unless requested', async () => {
+    const config = makeConfig();
+
+    startPostRenderPrefetches(config, makeSettings());
+
+    await vi.dynamicImportSettled();
+
+    expect(mockInitializeTelemetry).not.toHaveBeenCalled();
+  });
+
+  it('swallows telemetry initialization failures', async () => {
+    const config = makeConfig();
+    mockInitializeTelemetry.mockImplementation(() => {
+      throw new Error('otel unavailable');
+    });
+
+    expect(() =>
+      startPostRenderPrefetches(config, makeSettings(), {
+        initializeTelemetry: true,
+      }),
+    ).not.toThrow();
+
+    await vi.dynamicImportSettled();
+
+    expect(mockWarn).toHaveBeenCalledWith(
+      'telemetry_init failed: otel unavailable',
+    );
   });
 
   it('swallows deferred task failures', async () => {

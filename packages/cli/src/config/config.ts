@@ -2011,6 +2011,7 @@ export async function loadCliConfig(
     showResponseTokensPerSecond:
       settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
+    deferTelemetryInitialization: interactive && !isAcpMode,
     outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,
     clearContextOnIdle: settings.context?.clearContextOnIdle,
