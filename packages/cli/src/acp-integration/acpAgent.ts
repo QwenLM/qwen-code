@@ -4120,7 +4120,10 @@ class QwenAgent implements Agent {
         Boolean(process.env[name]),
       );
       let hasToken = Boolean(presentVar);
-      if (!hasToken && String(authType) !== AuthType.QWEN_OAUTH) {
+      if (
+        !hasToken &&
+        !AUTH_PREFLIGHT_WAIVED_AUTH_TYPES.has(String(authType))
+      ) {
         const resolvedApiKey = config
           .getModelsConfig()
           .getGenerationConfig()?.apiKey;

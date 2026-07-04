@@ -2150,6 +2150,11 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       getMcpServers: vi.fn().mockReturnValue({}),
       getAuthType: vi.fn().mockReturnValue('qwen'),
       getModel: vi.fn().mockReturnValue('qwen-plus'),
+      getModelsConfig: vi.fn().mockReturnValue({
+        getGenerationConfig: vi.fn().mockReturnValue({}),
+        getCurrentAuthType: vi.fn().mockReturnValue('qwen'),
+        syncAfterAuthRefresh: vi.fn(),
+      }),
       getSkillManager: vi.fn(() => {
         throw new Error('config getter exploded mid-eval');
       }),
