@@ -710,9 +710,8 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       const seenCanonicals = new Set<string>();
       const max = opts.maxResults ?? Number.POSITIVE_INFINITY;
       let escapedCount = 0;
-      let permissionErrorCount = 0;
-      let transientErrorCount = 0;
-      let successfulRootCount = 0;
+      let lastGlobError: unknown;
+      let sawSuccessfulRoot = false;
       for (const searchRoot of searchRoots) {
         if (out.length >= max) break;
         let matches: string[];
@@ -725,15 +724,10 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             ignore: ['**/node_modules/**', '**/.git/**'],
           });
         } catch (err) {
-          const code = (err as NodeJS.ErrnoException)?.code;
-          if (code === 'EACCES' || code === 'EPERM') {
-            permissionErrorCount += 1;
-          } else {
-            transientErrorCount += 1;
-          }
+          lastGlobError = err;
           continue;
         }
-        successfulRootCount += 1;
+        sawSuccessfulRoot = true;
         for (const hit of matches) {
           if (out.length >= max) break;
           const absolute = path.resolve(hit);
@@ -742,32 +736,12 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           // The literal path is in-workspace (the symlink itself
           // sits there), but the realpath isn't — so we resolve
           // each hit's symlink chain and compare the canonical to
-          // the canonical workspace root. Filtered hits are counted
-          // and reported via aggregated `fs.denied` events after
-          // the loop so per-hit emit doesn't flood the bus when a
-          // misconfigured tree contains many escape symlinks.
+          // the canonical workspace root.
           let canonical: string;
           try {
             canonical = await fsp.realpath(absolute);
-          } catch (err) {
-            // Three-way classification so monitoring pipelines can
-            // tell escapes from access denials from transient I/O:
-            //   - `ENOENT` / `ELOOP`  → real `symlink_escape`
-            //     (dangling symlink, symlink cycle)
-            //   - `EACCES` / `EPERM`  → `permission_denied`
-            //     (the literal access-denied case the kind names)
-            //   - everything else     → `io_error` (EIO, EBUSY,
-            //     ENAMETOOLONG, EMFILE, …) — environmental, NOT a
-            //     security signal. Conflating these poisons audit:
-            //     a failing disk would page security oncall.
-            const code = (err as NodeJS.ErrnoException)?.code;
-            if (code === 'ENOENT' || code === 'ELOOP') {
-              escapedCount += 1;
-            } else if (code === 'EACCES' || code === 'EPERM') {
-              permissionErrorCount += 1;
-            } else {
-              transientErrorCount += 1;
-            }
+          } catch {
+            escapedCount += 1;
             continue;
           }
           const inAnyWorkspace = this.deps.workspaces.some((workspace) =>
@@ -802,49 +776,14 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           out.push(canonical as ResolvedPath);
         }
       }
-      if (successfulRootCount === 0 && searchRoots.length > 0) {
-        throw new FsError(
-          transientErrorCount > 0 ? 'io_error' : 'permission_denied',
-          `glob failed for all workspace roots: ${pattern}`,
-          {
-            hint:
-              transientErrorCount > 0
-                ? 'all workspace roots failed during glob traversal'
-                : 'all workspace roots denied glob traversal',
-          },
-        );
-      }
+      if (!sawSuccessfulRoot && lastGlobError !== undefined)
+        throw lastGlobError;
       if (escapedCount > 0) {
         this.deps.audit.recordDenied(this.deps.ctx, {
           intent: 'glob',
           input: pattern,
           errorKind: 'symlink_escape',
           hint: `glob filtered ${escapedCount} hit(s) that resolved outside workspace`,
-          pattern,
-        });
-      }
-      if (permissionErrorCount > 0) {
-        this.deps.audit.recordDenied(this.deps.ctx, {
-          intent: 'glob',
-          input: pattern,
-          errorKind: 'permission_denied',
-          hint: `glob skipped ${permissionErrorCount} hit(s) due to EACCES/EPERM`,
-          pattern,
-        });
-      }
-      if (transientErrorCount > 0) {
-        this.deps.audit.recordDenied(this.deps.ctx, {
-          intent: 'glob',
-          input: pattern,
-          // `io_error` (not `permission_denied`) so monitoring
-          // pipelines that page security oncall on
-          // `permission_denied` aren't woken up by a failing disk
-          // or busy file. The kind was added to `FsErrorKind` for
-          // exactly this case (and for `wrapAsFsError`'s ENOSPC /
-          // EIO / EBUSY / ETXTBSY / ENAMETOOLONG / EMFILE / ENFILE
-          // mappings).
-          errorKind: 'io_error',
-          hint: `glob skipped ${transientErrorCount} hit(s) due to transient I/O errors (EIO/EBUSY/ENAMETOOLONG/EMFILE)`,
           pattern,
         });
       }

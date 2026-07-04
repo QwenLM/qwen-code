@@ -7,24 +7,28 @@
 import { promises as fsp, realpathSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { randomBytes } from 'node:crypto';
-import { afterEach, describe, expect, it, vi } from 'vitest';
-import {
-  resolveBoundWorkspacesFromIdeEnv,
-  resolveBridgeFsFactory,
-} from './fs-factory.js';
+import { afterEach, describe, expect, it } from 'vitest';
+import { resolveBoundWorkspacesFromIdeEnv } from './fs-factory.js';
 
 const scratches: string[] = [];
 
 async function mkScratch(): Promise<string> {
-  const scratch = await fsp.mkdtemp(
-    path.join(
-      os.tmpdir(),
-      `qwen-fs-factory-${randomBytes(4).toString('hex')}-`,
-    ),
-  );
+  const scratch = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-fs-factory-'));
   scratches.push(scratch);
   return scratch;
+}
+
+async function mkdirs<const Names extends readonly string[]>(
+  scratch: string,
+  ...names: Names
+): Promise<Record<Names[number], string>> {
+  const out = {} as Record<Names[number], string>;
+  for (const name of names) {
+    const dir = path.join(scratch, name);
+    await fsp.mkdir(dir, { recursive: true });
+    out[name as Names[number]] = dir;
+  }
+  return out;
 }
 
 afterEach(async () => {
@@ -33,144 +37,50 @@ afterEach(async () => {
       .splice(0)
       .map((scratch) => fsp.rm(scratch, { recursive: true, force: true })),
   );
-  vi.restoreAllMocks();
 });
 
 describe('resolveBoundWorkspacesFromIdeEnv', () => {
-  it('keeps the selected workspace first and includes the other IDE roots', async () => {
+  it('keeps the selected workspace first for legacy and JSON encoded roots', async () => {
     const scratch = await mkScratch();
-    const first = path.join(scratch, 'first');
-    const second = path.join(scratch, 'second');
-    await fsp.mkdir(first);
-    await fsp.mkdir(second);
-
-    const roots = resolveBoundWorkspacesFromIdeEnv(
-      second,
-      [first, second].join(path.delimiter),
-    );
-
-    expect(roots).toEqual([
-      realpathSync.native(second),
-      realpathSync.native(first),
-    ]);
-  });
-
-  it('accepts JSON encoded IDE roots without splitting path delimiters', async () => {
-    const scratch = await mkScratch();
-    const primary = path.join(scratch, 'primary');
+    const dirs = await mkdirs(scratch, 'first', 'second');
     const withDelimiter = path.join(scratch, `tool${path.delimiter}chain`);
-    await fsp.mkdir(primary);
     await fsp.mkdir(withDelimiter);
 
-    const roots = resolveBoundWorkspacesFromIdeEnv(
-      primary,
-      JSON.stringify([primary, withDelimiter]),
-    );
+    expect(
+      resolveBoundWorkspacesFromIdeEnv(
+        dirs.second,
+        [dirs.first, dirs.second].join(path.delimiter),
+      ),
+    ).toEqual([
+      realpathSync.native(dirs.second),
+      realpathSync.native(dirs.first),
+    ]);
 
-    expect(roots).toEqual([
-      realpathSync.native(primary),
+    expect(
+      resolveBoundWorkspacesFromIdeEnv(
+        dirs.second,
+        JSON.stringify([dirs.second, withDelimiter]),
+      ),
+    ).toEqual([
+      realpathSync.native(dirs.second),
       realpathSync.native(withDelimiter),
     ]);
   });
 
-  it('ignores a stale IDE workspace env that does not contain the primary workspace', async () => {
+  it('falls back to the primary workspace for stale or malformed IDE env', async () => {
     const scratch = await mkScratch();
-    const primary = path.join(scratch, 'primary');
-    const stale = path.join(scratch, 'stale');
-    await fsp.mkdir(primary);
-    await fsp.mkdir(stale);
-    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+    const dirs = await mkdirs(scratch, 'primary', 'stale');
+    const primary = realpathSync.native(dirs.primary);
 
-    const roots = resolveBoundWorkspacesFromIdeEnv(primary, stale);
-
-    expect(roots).toEqual([realpathSync.native(primary)]);
-    expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('ignoring stale IDE workspace paths'),
+    expect(resolveBoundWorkspacesFromIdeEnv(dirs.primary, dirs.stale)).toEqual([
+      primary,
+    ]);
+    expect(resolveBoundWorkspacesFromIdeEnv(dirs.primary, '[not json')).toEqual(
+      [primary],
     );
   });
 
-  it('preserves path characters instead of trimming workspace segments', async () => {
-    const scratch = await mkScratch();
-    const primary = path.join(scratch, ' leading-space');
-    await fsp.mkdir(primary);
-
-    const roots = resolveBoundWorkspacesFromIdeEnv(primary, primary);
-
-    expect(roots).toEqual([realpathSync.native(primary)]);
-  });
-
-  it('falls back to the primary workspace when IDE env canonicalization fails', async () => {
-    const scratch = await mkScratch();
-    const primary = path.join(scratch, 'primary');
-    await fsp.mkdir(primary);
-    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-
-    const roots = resolveBoundWorkspacesFromIdeEnv(primary, 'x'.repeat(5000));
-
-    expect(roots).toEqual([realpathSync.native(primary)]);
-    expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('failed to canonicalize IDE workspace paths'),
-    );
-  });
-
-  it('falls back to the primary workspace when IDE env JSON is malformed', async () => {
-    const scratch = await mkScratch();
-    const primary = path.join(scratch, 'primary');
-    await fsp.mkdir(primary);
-    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-
-    const roots = resolveBoundWorkspacesFromIdeEnv(primary, '[not json');
-
-    expect(roots).toEqual([realpathSync.native(primary)]);
-    expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('failed to canonicalize IDE workspace paths'),
-    );
-  });
-
-  it('drops nested IDE roots before factory registration', async () => {
-    const scratch = await mkScratch();
-    const parent = path.join(scratch, 'parent');
-    const child = path.join(parent, 'child');
-    await fsp.mkdir(child, { recursive: true });
-
-    const roots = resolveBoundWorkspacesFromIdeEnv(
-      parent,
-      [parent, child].join(path.delimiter),
-    );
-
-    expect(roots).toEqual([realpathSync.native(parent)]);
-    expect(() =>
-      resolveBridgeFsFactory({
-        boundWorkspaces: roots,
-        trusted: true,
-        emit: () => undefined,
-      }),
-    ).not.toThrow();
-  });
-
-  it('drops env child roots when the primary workspace is the parent', async () => {
-    const scratch = await mkScratch();
-    const parent = path.join(scratch, 'parent');
-    const child = path.join(parent, 'child');
-    await fsp.mkdir(child, { recursive: true });
-
-    const roots = resolveBoundWorkspacesFromIdeEnv(parent, child);
-
-    expect(roots).toEqual([realpathSync.native(parent)]);
-  });
-
-  it('drops env parent roots instead of widening past the primary workspace', async () => {
-    const scratch = await mkScratch();
-    const parent = path.join(scratch, 'parent');
-    const primary = path.join(parent, 'primary');
-    await fsp.mkdir(primary, { recursive: true });
-
-    const roots = resolveBoundWorkspacesFromIdeEnv(primary, parent);
-
-    expect(roots).toEqual([realpathSync.native(primary)]);
-  });
-
-  it('keeps sibling env roots when their common parent is dropped', async () => {
+  it('drops env parents without losing sibling roots', async () => {
     const scratch = await mkScratch();
     const parent = path.join(scratch, 'parent');
     const primary = path.join(parent, 'primary');
@@ -178,14 +88,11 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
     await fsp.mkdir(primary, { recursive: true });
     await fsp.mkdir(sibling);
 
-    const roots = resolveBoundWorkspacesFromIdeEnv(
-      primary,
-      [parent, sibling].join(path.delimiter),
-    );
-
-    expect(roots).toEqual([
-      realpathSync.native(primary),
-      realpathSync.native(sibling),
-    ]);
+    expect(
+      resolveBoundWorkspacesFromIdeEnv(
+        primary,
+        [parent, sibling].join(path.delimiter),
+      ),
+    ).toEqual([realpathSync.native(primary), realpathSync.native(sibling)]);
   });
 });

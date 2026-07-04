@@ -80,25 +80,22 @@ export function resolveBoundWorkspacesFromIdeEnv(
   primaryWorkspace: string,
   ideWorkspacePath = process.env[IDE_WORKSPACE_PATH_ENV_VAR],
 ): string[] {
-  let envCanonical: string[];
+  let primary: string | undefined;
+  let envCanonicals: string[];
   try {
     const envWorkspaces = parseIdeWorkspacePathEnv(ideWorkspacePath);
-    envCanonical = canonicalizeWorkspaces(envWorkspaces);
+    primary = canonicalizeWorkspaces([primaryWorkspace])[0];
+    envCanonicals = canonicalizeWorkspaces(envWorkspaces);
   } catch (err) {
     writeStderrLine(
       `qwen serve: failed to canonicalize IDE workspace paths, using primary only: ${err}`,
     );
     return canonicalizeWorkspaces([primaryWorkspace]);
   }
-  const workspaces = canonicalizeWorkspaces([
-    primaryWorkspace,
-    ...envCanonical,
-  ]);
-  const primary = workspaces[0];
   if (primary === undefined) return [];
   if (
-    envCanonical.length > 0 &&
-    !envCanonical.some(
+    envCanonicals.length > 0 &&
+    !envCanonicals.some(
       (workspace) =>
         isWithinRoot(primary, workspace) || isWithinRoot(workspace, primary),
     )
@@ -109,6 +106,7 @@ export function resolveBoundWorkspacesFromIdeEnv(
     );
     return [primary];
   }
+  const workspaces = [primary, ...envCanonicals.filter((w) => w !== primary)];
   return dropNestedWorkspacesPreservingPrimary(workspaces);
 }
 

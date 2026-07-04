@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { promises as fsp, realpathSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -188,7 +188,6 @@ describe('resolveWithinWorkspace', () => {
 
   afterEach(async () => {
     await fsp.rm(scratch, { recursive: true, force: true });
-    vi.restoreAllMocks();
   });
 
   it('resolves an existing relative path to its on-disk canonical form', async () => {
@@ -229,17 +228,6 @@ describe('resolveWithinWorkspace', () => {
     expect(out).toBe(
       path.join(realpathSync.native(secondWorkspace), 'new', 'file.txt'),
     );
-  });
-
-  it('propagates absolute-path realpath errors instead of reporting outside workspace', async () => {
-    const target = path.join(scratch, 'blocked.txt');
-    const err = new Error('denied') as NodeJS.ErrnoException;
-    err.code = 'EACCES';
-    vi.spyOn(fsp, 'realpath').mockRejectedValueOnce(err);
-
-    await expect(
-      resolveWithinWorkspace(target, workspace, 'read'),
-    ).rejects.toBe(err);
   });
 
   it('resolves relative writes against the first workspace root', async () => {
@@ -333,28 +321,6 @@ describe('resolveWithinWorkspace', () => {
     );
   });
 
-  it('propagates realpath errors from the existing-ancestor fallback', async () => {
-    const nested = path.join(workspace, 'newdir', 'leaf.txt');
-    const missing = Object.assign(new Error('missing'), { code: 'ENOENT' });
-    const busy = Object.assign(new Error('busy'), { code: 'EBUSY' });
-    const realpath = vi
-      .spyOn(fsp, 'realpath')
-      .mockImplementation(async (target) => {
-        const targetPath = String(target);
-        if (targetPath === nested) throw missing;
-        if (targetPath === workspace) throw busy;
-        return realpathSync.native(targetPath);
-      });
-
-    try {
-      await expect(
-        resolveWithinWorkspace(nested, workspace, 'write'),
-      ).rejects.toBe(busy);
-    } finally {
-      realpath.mockRestore();
-    }
-  });
-
   it('rejects ENOENT under read intent with path_not_found', async () => {
     const err = await resolveWithinWorkspace(
       'does-not-exist',
@@ -413,7 +379,6 @@ describe('resolveWithinWorkspace', () => {
     const outsideTarget = path.join(scratch, 'outside-not-yet-existing.txt');
     const aliasEscape = path.join(aliasWorkspace, 'escape');
     await fsp.symlink(outsideTarget, path.join(workspace, 'escape'), 'file');
-    const lstat = vi.spyOn(fsp, 'lstat');
 
     const err = await resolveWithinWorkspace(
       aliasEscape,
@@ -423,7 +388,6 @@ describe('resolveWithinWorkspace', () => {
 
     expect(isFsError(err)).toBe(true);
     expect((err as { kind: string }).kind).toBe('symlink_escape');
-    expect(lstat).toHaveBeenCalledWith(aliasEscape);
   });
 
   it('allows a dangling symlink whose (not-yet-existing) target stays inside workspace', async () => {

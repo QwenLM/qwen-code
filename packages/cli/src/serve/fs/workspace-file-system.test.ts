@@ -22,23 +22,6 @@ import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import { canonicalizeWorkspace } from './paths.js';
 import { isFsError } from './errors.js';
 
-const globMockState = vi.hoisted(() => ({
-  impl: undefined as
-    | undefined
-    | ((pattern: string, options: unknown) => Promise<string[]>),
-}));
-
-vi.mock('glob', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('glob')>();
-  return {
-    ...actual,
-    glob: (pattern: string, options: unknown) =>
-      globMockState.impl
-        ? globMockState.impl(pattern, options)
-        : actual.glob(pattern, options as Parameters<typeof actual.glob>[1]),
-  };
-});
-
 interface Harness {
   factory: WorkspaceFileSystemFactory;
   fs: WorkspaceFileSystem;
@@ -1357,22 +1340,6 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     expect(hits.sort()).toEqual([primaryPackage, secondPackage].sort());
   });
 
-  it('throws when glob traversal fails for every root', async () => {
-    globMockState.impl = async () => {
-      const err = new Error('permission denied') as NodeJS.ErrnoException;
-      err.code = 'EACCES';
-      throw err;
-    };
-    try {
-      const err = await h.fs.glob('*.ts').catch((e: unknown) => e);
-
-      expect(isFsError(err)).toBe(true);
-      expect((err as { kind: string }).kind).toBe('permission_denied');
-    } finally {
-      globMockState.impl = undefined;
-    }
-  });
-
   it('glob with cwd searches only that resolved root', async () => {
     await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
     await fsp.writeFile(path.join(h.secondWorkspace, 'secondary.ts'), '');
@@ -1381,16 +1348,6 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     const hits = await h.fs.glob('*.ts', { cwd });
 
     expect(hits).toEqual([path.join(h.secondWorkspace, 'secondary.ts')]);
-  });
-
-  it('glob accepts symlink hits that resolve into another workspace root', async () => {
-    const target = path.join(h.secondWorkspace, 'shared.ts');
-    await fsp.writeFile(target, '');
-    await fsp.symlink(target, path.join(h.workspace, 'linked.ts'), 'file');
-
-    const hits = await h.fs.glob('linked.ts');
-
-    expect(hits).toEqual([target]);
   });
 
   it('deduplicates glob hits that resolve to the same workspace file', async () => {

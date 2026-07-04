@@ -332,11 +332,9 @@ async function findExistingAncestor(
  *    realpath the ancestor, re-attach the unresolved tail. The tail
  *    can't introduce new symlinks (it doesn't exist), so the joined
  *    result is the actual write target the OS will use.
- * 6. Final containment check against the root that textually contained
- *    the request before symlink resolution.
- *    If the canonical landed outside but the resolved-without-realpath
- *    version was inside, classify as `symlink_escape`; otherwise as
- *    `path_outside_workspace`.
+ * 6. Final containment check against every registered workspace root.
+ *    If realpath leaves all roots after the literal request was admitted,
+ *    classify as `symlink_escape`; otherwise as `path_outside_workspace`.
  *
  * The brand on the return type is the contract that PR 19/20 routes
  * may not construct one without going through this function.
