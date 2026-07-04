@@ -86,6 +86,7 @@ import type {
   DiscoveredMCPResource,
   DiscoveredMCPPrompt,
   WorkspaceRememberContextMode,
+  ChatRecord,
 } from '@qwen-code/qwen-code-core';
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
@@ -155,7 +156,11 @@ import {
   type PermissionRuleSet,
 } from '../config/permission-settings.js';
 import { createLoadedSettingsAdapter } from '../config/loadedSettingsAdapter.js';
-import type { ApprovalModeValue, SessionContext } from './session/types.js';
+import type {
+  ApprovalModeValue,
+  CumulativeUsage,
+  SessionContext,
+} from './session/types.js';
 import { z } from 'zod';
 import type { CliArgs } from '../config/config.js';
 import {
@@ -241,7 +246,12 @@ import {
 } from '@qwen-code/acp-bridge/status';
 import {
   CLIENT_MCP_OVER_WS_CONFIG_FLAG,
+  LOAD_REPLAY_BULK_MODE,
+  LOAD_REPLAY_META_KEY,
+  LOAD_REPLAY_MODE_META_KEY,
+  LOAD_REPLAY_VERSION,
   type ClientMcpOverWsRuntimeConfig,
+  type BridgeLoadReplayEnvelope,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isValidServerName } from '../serve/validate-server-name.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from '../serve/workspace-memory-remember-constants.js';
@@ -257,6 +267,84 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isBulkLoadReplayRequest(params: LoadSessionRequest): boolean {
+  const meta = isObjectRecord(params._meta) ? params._meta : undefined;
+  return meta?.[LOAD_REPLAY_MODE_META_KEY] === LOAD_REPLAY_BULK_MODE;
+}
+
+function createReplayCumulativeUsage(): CumulativeUsage {
+  return {
+    promptTokens: 0,
+    cachedTokens: 0,
+    candidateTokens: 0,
+    apiTimeMs: 0,
+  };
+}
+
+function copyCumulativeUsage(
+  target: CumulativeUsage,
+  source: CumulativeUsage,
+): void {
+  target.promptTokens = source.promptTokens;
+  target.cachedTokens = source.cachedTokens;
+  target.candidateTokens = source.candidateTokens;
+  target.apiTimeMs = source.apiTimeMs;
+}
+
+async function collectHistoryReplayUpdates({
+  sessionId,
+  config,
+  records,
+  cumulativeUsage,
+}: {
+  sessionId: string;
+  config: Config;
+  records: ChatRecord[];
+  cumulativeUsage: CumulativeUsage;
+}): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
+  const updates: SessionUpdate[] = [];
+  const replayContext: SessionContext = {
+    sessionId,
+    config,
+    sendUpdate: async (update) => {
+      updates.push(update);
+    },
+    cumulativeUsage,
+  };
+
+  try {
+    await new HistoryReplayer(replayContext).replay(records);
+  } catch (error) {
+    const replayError = error instanceof Error ? error.message : String(error);
+    debugLogger.warn(
+      '[historyReplay] History replay failed for session %s (partial updates: %d):',
+      sessionId,
+      updates.length,
+      error,
+    );
+    return { updates, replayError };
+  }
+
+  return { updates };
+}
+
+function liftSessionUpdateTimestamps(
+  updates: SessionUpdate[],
+): SessionUpdate[] {
+  return updates.map((update) => {
+    const record = update as Record<string, unknown>;
+    const meta = record['_meta'];
+    const timestamp = isObjectRecord(meta) ? meta['timestamp'] : undefined;
+    return typeof timestamp === 'number' || typeof timestamp === 'string'
+      ? ({ ...record, timestamp } as unknown as SessionUpdate)
+      : update;
+  });
+}
 
 function createHiddenWorkspaceMemoryConfig(config: Config): Config {
   return new Proxy(config, {
@@ -2736,6 +2824,43 @@ class QwenAgent implements Agent {
     this.sessions.delete(sessionId);
   }
 
+  private discardStoredSessionIfCurrent(
+    sessionId: string,
+    session: Session,
+  ): void {
+    if (this.sessions.get(sessionId) !== session) {
+      return;
+    }
+    const logCleanupFailure = (action: string, err: unknown) => {
+      debugLogger.debug(
+        `Session ${sessionId} ${action} during failed restore cleanup failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    };
+    try {
+      session.dispose();
+    } catch (err) {
+      logCleanupFailure('dispose', err);
+    }
+    try {
+      unregisterGoalHook(session.getConfig(), sessionId);
+    } catch (err) {
+      logCleanupFailure('goal hook unregister', err);
+    }
+    try {
+      this.mcpPool?.releaseSession(sessionId);
+    } catch (err) {
+      logCleanupFailure('MCP pool release', err);
+    }
+    try {
+      uiTelemetryService.removeSession(sessionId);
+    } catch (err) {
+      logCleanupFailure('telemetry removal', err);
+    }
+    this.sessions.delete(sessionId);
+  }
+
   disposeSessions(): void {
     for (const session of this.sessions.values()) {
       session.dispose();
@@ -2952,11 +3077,51 @@ class QwenAgent implements Agent {
     this.setupFileSystem(config);
 
     const sessionData = config.getResumedSessionData();
+    const bulkReplay = isBulkLoadReplayRequest(params);
     const session = await this.createAndStoreSession(
       config,
       settings,
       sessionData,
+      bulkReplay
+        ? { replayHistory: false, startPostReplayServices: false }
+        : {},
     );
+    let replayEnvelope: BridgeLoadReplayEnvelope | undefined;
+    if (bulkReplay) {
+      try {
+        const records = sessionData?.conversation.messages;
+        let replayUpdates: SessionUpdate[] = [];
+        if (records) {
+          session.primeTurnFromHistory(records);
+          const replayUsage = createReplayCumulativeUsage();
+          const replay = await collectHistoryReplayUpdates({
+            sessionId: params.sessionId,
+            config,
+            records,
+            cumulativeUsage: replayUsage,
+          });
+          replayUpdates = liftSessionUpdateTimestamps(replay.updates);
+          copyCumulativeUsage(session.cumulativeUsage, replayUsage);
+          if (replay.replayError !== undefined) {
+            replayEnvelope = {
+              v: LOAD_REPLAY_VERSION,
+              updates: replayUpdates,
+              partial: true,
+              replayError: replay.replayError,
+            };
+          }
+        }
+        replayEnvelope ??= {
+          v: LOAD_REPLAY_VERSION,
+          updates: replayUpdates,
+        };
+        session.installRewriter();
+        session.startCronScheduler();
+      } catch (err) {
+        this.discardStoredSessionIfCurrent(params.sessionId, session);
+        throw err;
+      }
+    }
 
     await this.#restoreWorktreeOnResume(config, session);
 
@@ -2964,10 +3129,19 @@ class QwenAgent implements Agent {
     const availableModels = this.buildAvailableModels(config);
     const configOptions = this.buildConfigOptions(config);
 
-    return {
+    const response: LoadSessionResponse = {
       modes: modesData,
       models: availableModels,
       configOptions,
+    };
+    if (!replayEnvelope) {
+      return response;
+    }
+    return {
+      ...response,
+      _meta: {
+        [LOAD_REPLAY_META_KEY]: replayEnvelope,
+      },
     };
   }
 
@@ -7158,57 +7332,22 @@ class QwenAgent implements Agent {
           return { updates: [] };
         }
 
-        const updates: SessionUpdate[] = [];
-        const replayContext: SessionContext = {
+        const replay = await collectHistoryReplayUpdates({
           sessionId,
           config: this.config,
-          sendUpdate: async (update) => {
-            updates.push(update);
-          },
-          // Fresh accumulator for this replay: MessageEmitter advances it from
-          // replayed usage metadata (tokens only — no per-turn durations) and
-          // PlanEmitter snapshots it onto each todo update, so resumed sessions
-          // recover per-task token spend (API time stays live-only).
-          cumulativeUsage: {
-            promptTokens: 0,
-            cachedTokens: 0,
-            candidateTokens: 0,
-            apiTimeMs: 0,
-          },
-        };
-        let replayError: string | undefined;
-        try {
-          await new HistoryReplayer(replayContext).replay(
-            sessionData.conversation.messages,
-          );
-        } catch (error) {
-          replayError = error instanceof Error ? error.message : String(error);
-          debugLogger.warn(
-            '[loadUpdates] History replay failed for session %s (partial updates: %d):',
-            sessionId,
-            updates.length,
-            error,
-          );
-        }
-        const updatesWithTopLevelTimestamps = updates.map((update) => {
-          const record = update as Record<string, unknown>;
-          const meta = record['_meta'];
-          const timestamp =
-            meta && typeof meta === 'object' && !Array.isArray(meta)
-              ? (meta as Record<string, unknown>)['timestamp']
-              : undefined;
-          return typeof timestamp === 'number' || typeof timestamp === 'string'
-            ? { ...record, timestamp }
-            : record;
+          records: sessionData.conversation.messages,
+          cumulativeUsage: createReplayCumulativeUsage(),
         });
 
         return {
-          updates: updatesWithTopLevelTimestamps,
+          updates: liftSessionUpdateTimestamps(replay.updates),
           startTime: sessionData.conversation.startTime,
           lastUpdated: sessionData.conversation.lastUpdated,
           // Signal to the client that replay aborted partway so it doesn't
           // render a truncated replay as the full conversation.
-          ...(replayError !== undefined ? { partial: true, replayError } : {}),
+          ...(replay.replayError !== undefined
+            ? { partial: true, replayError: replay.replayError }
+            : {}),
         };
       }
       case 'restoreSessionHistory': {
@@ -8015,7 +8154,10 @@ class QwenAgent implements Agent {
     config: Config,
     settings: LoadedSettings,
     sessionData?: ResumedSessionData,
-    options: { replayHistory?: boolean } = {},
+    options: {
+      replayHistory?: boolean;
+      startPostReplayServices?: boolean;
+    } = {},
   ): Promise<Session> {
     const sessionId = config.getSessionId();
     const geminiClient = config.getGeminiClient();
@@ -8050,11 +8192,13 @@ class QwenAgent implements Agent {
       await session.replayHistory(sessionData.conversation.messages);
     }
 
-    // Install rewriter AFTER history replay to avoid rewriting historical messages
-    session.installRewriter();
+    if (options.startPostReplayServices !== false) {
+      // Install rewriter AFTER history replay to avoid rewriting historical messages
+      session.installRewriter();
 
-    // After replay so a durable cron fire can't interleave with it.
-    session.startCronScheduler();
+      // After replay so a durable cron fire can't interleave with it.
+      session.startCronScheduler();
+    }
 
     return session;
   }

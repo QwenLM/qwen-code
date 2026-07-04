@@ -670,6 +670,51 @@ describe('BridgeClient — token usage accounting', () => {
     // ...but its historical usage is NOT added to the live token-burn metric.
     expect(onTokenUsage).not.toHaveBeenCalled();
   });
+
+  it('does NOT count tokens when replaying history via seedSessionUpdates (batch load)', async () => {
+    // #6309 routes batch load-replay through seedSessionUpdates, which prepares
+    // frames and seeds them WITHOUT going through the live sessionUpdate token
+    // sniff. Even though a replayed assistant frame carries usage, it must not
+    // land in the live token-burn metric.
+    const onTokenUsage = vi.fn();
+    const sessionId = 'sess:seed';
+    const fakeEntry = {
+      sessionId,
+      events: {
+        publish: vi.fn().mockReturnValue(true),
+        seedReplayEvents: vi.fn(),
+      },
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      (() => undefined) as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      undefined, // clientMcpSender
+      undefined, // ownsSession
+      onTokenUsage,
+    );
+
+    await client.seedSessionUpdates(
+      fakeEntry as never,
+      [
+        {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { usage: { inputTokens: 9000, outputTokens: 2000 } },
+        },
+      ] as never,
+    );
+
+    // History is seeded into the event bus...
+    expect(fakeEntry.events.seedReplayEvents).toHaveBeenCalled();
+    // ...but the replayed usage is NOT counted as live burn.
+    expect(onTokenUsage).not.toHaveBeenCalled();
+  });
 });
 
 describe('BridgeClient — artifact ingress', () => {
