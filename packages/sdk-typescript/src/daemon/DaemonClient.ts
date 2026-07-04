@@ -21,6 +21,7 @@ import type {
   DaemonAuthStatusSnapshot,
   DaemonCapabilities,
   DaemonCreateAgentRequest,
+  DaemonArchiveSessionsResult,
   DaemonGeneratedAgentContent,
   DaemonDeviceFlowStartResult,
   DaemonDeviceFlowState,
@@ -32,10 +33,15 @@ import type {
   DaemonForkSessionResult,
   DaemonRestoredSession,
   DaemonSession,
+  DaemonSessionArchiveState,
+  DaemonSessionExportFormat,
+  DaemonSessionExportResult,
   DaemonSessionLspStatus,
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
+  DaemonStatusReport,
+  DaemonStatusReportDetail,
   DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   DaemonUpdateAgentRequest,
@@ -58,6 +64,10 @@ import type {
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
+  DaemonWorkspaceMemoryDreamOptions,
+  DaemonWorkspaceMemoryDreamTask,
+  DaemonWorkspaceMemoryForgetOptions,
+  DaemonWorkspaceMemoryForgetTask,
   DaemonWorkspaceMemoryRememberOptions,
   DaemonWorkspaceMemoryRememberTask,
   HeartbeatResult,
@@ -86,6 +96,9 @@ import type {
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
+  DaemonSessionArtifactsEnvelope,
   DaemonRewindSnapshotInfo,
   DaemonRewindResult,
   ForkSessionRequest,
@@ -112,9 +125,12 @@ import type {
   DaemonWorkspaceTrustChangeRequest,
   DaemonWorkspaceTrustChangeResult,
   DaemonWorkspaceTrustStatus,
+  DaemonUnarchiveSessionsResult,
 } from './types.js';
 
 const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
+const WORKSPACE_MEMORY_FORGET_PATH = '/workspace/memory/forget';
+const WORKSPACE_MEMORY_DREAM_PATH = '/workspace/memory/dream';
 
 /**
  * SDK-side HTTP client for the `qwen serve` daemon. Sibling to
@@ -664,6 +680,21 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Consolidated daemon status report (`GET /daemon/status`). The default
+   * `summary` detail reads cheap in-memory counters; `full` adds per-session,
+   * ACP-connection, auth, and workspace diagnostics sections.
+   */
+  async daemonStatus(
+    detail: DaemonStatusReportDetail = 'summary',
+  ): Promise<DaemonStatusReport> {
+    const query = detail === 'summary' ? '' : `?detail=${detail}`;
+    return await this.jsonRequest<DaemonStatusReport>(
+      `/daemon/status${query}`,
+      'GET /daemon/status',
+    );
+  }
+
   async workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp`,
@@ -1066,6 +1097,57 @@ export class DaemonClient {
     );
   }
 
+  async forgetWorkspaceMemory(
+    query: string,
+    opts: DaemonWorkspaceMemoryForgetOptions = {},
+  ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    return await this.jsonRequest<DaemonWorkspaceMemoryForgetTask>(
+      WORKSPACE_MEMORY_FORGET_PATH,
+      `POST ${WORKSPACE_MEMORY_FORGET_PATH}`,
+      {
+        method: 'POST',
+        body: { query },
+        clientId: opts.clientId,
+      },
+    );
+  }
+
+  async getWorkspaceMemoryForgetTask(
+    taskId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    return await this.jsonRequest(
+      `${WORKSPACE_MEMORY_FORGET_PATH}/${encodeURIComponent(taskId)}`,
+      `GET ${WORKSPACE_MEMORY_FORGET_PATH}/:taskId`,
+      { clientId: opts?.clientId },
+    );
+  }
+
+  async dreamWorkspaceMemory(
+    opts: DaemonWorkspaceMemoryDreamOptions = {},
+  ): Promise<DaemonWorkspaceMemoryDreamTask> {
+    return await this.jsonRequest<DaemonWorkspaceMemoryDreamTask>(
+      WORKSPACE_MEMORY_DREAM_PATH,
+      `POST ${WORKSPACE_MEMORY_DREAM_PATH}`,
+      {
+        method: 'POST',
+        body: {},
+        clientId: opts.clientId,
+      },
+    );
+  }
+
+  async getWorkspaceMemoryDreamTask(
+    taskId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspaceMemoryDreamTask> {
+    return await this.jsonRequest(
+      `${WORKSPACE_MEMORY_DREAM_PATH}/${encodeURIComponent(taskId)}`,
+      `GET ${WORKSPACE_MEMORY_DREAM_PATH}/:taskId`,
+      { clientId: opts?.clientId },
+    );
+  }
+
   // -- Workspace agents (workspace memory/agents) ------------------------------
 
   async listWorkspaceAgents(): Promise<DaemonWorkspaceAgentsStatus> {
@@ -1322,7 +1404,10 @@ export class DaemonClient {
    */
   async listWorkspaceSessions(
     workspaceCwd: string,
-    options?: { pageSize?: number },
+    options?: {
+      pageSize?: number;
+      archiveState?: DaemonSessionArchiveState;
+    },
   ): Promise<DaemonSessionSummary[]> {
     const requestedPageSize =
       options?.pageSize ?? DEFAULT_SESSION_LIST_PAGE_SIZE;
@@ -1337,10 +1422,14 @@ export class DaemonClient {
         ),
       ),
     );
+    const query = new URLSearchParams({ size: String(pageSize) });
+    if (options?.archiveState !== undefined) {
+      query.set('archiveState', options.archiveState);
+    }
     const body = await this.jsonRequest<{
       sessions: DaemonSessionSummary[];
     }>(
-      `/workspace/${encodeURIComponent(workspaceCwd)}/sessions?size=${pageSize}`,
+      `/workspace/${encodeURIComponent(workspaceCwd)}/sessions?${query.toString()}`,
       'GET /workspace/sessions',
     );
     return body.sessions;
@@ -1352,6 +1441,42 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonRestoredSession> {
     return this.restoreSession('load', sessionId, req, clientId);
+  }
+
+  async exportSession(
+    sessionId: string,
+    opts: {
+      format?: DaemonSessionExportFormat;
+      clientId?: string;
+    } = {},
+  ): Promise<DaemonSessionExportResult> {
+    const format = opts.format ?? 'html';
+    const query = opts.format
+      ? `?format=${encodeURIComponent(opts.format)}`
+      : '';
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/export${query}`,
+      { headers: this.headers({}, opts.clientId) },
+      async (res) => {
+        if (!res.ok) {
+          throw await this.failOnError(res, 'GET /session/:id/export');
+        }
+        const content = await res.text();
+        const mimeType = res.headers.get('content-type') ?? '';
+        const filename =
+          /filename="([^"]+)"/i.exec(
+            res.headers.get('content-disposition') ?? '',
+          )?.[1] ?? `export.${format}`;
+        return {
+          content,
+          filename,
+          mimeType,
+          format,
+        };
+      },
+      undefined,
+      'rest',
+    );
   }
 
   async resumeSession(
@@ -2707,6 +2832,28 @@ export class DaemonClient {
     );
   }
 
+  async detachSession(sessionId: string, clientId?: string): Promise<void> {
+    if (!clientId) return;
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/session/${encodeURIComponent(sessionId)}/detach`,
+      {
+        method: 'POST',
+        headers: this.headers({}, clientId),
+      },
+      async (res) => {
+        if (res.status === 204 || res.status === 404) {
+          try {
+            await res.body?.cancel();
+          } catch {
+            /* body already consumed or no body */
+          }
+          return;
+        }
+        throw await this.failOnError(res, 'POST /session/:id/detach');
+      },
+    );
+  }
+
   async deleteSessionsData(
     sessionIds: string[],
     clientId?: string,
@@ -2731,6 +2878,46 @@ export class DaemonClient {
           };
         }
         throw await this.failOnError(res, 'POST /sessions/delete');
+      },
+    );
+  }
+
+  async archiveSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+  ): Promise<DaemonArchiveSessionsResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/sessions/archive`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ sessionIds }),
+      },
+      async (res) => {
+        if (res.ok) {
+          return (await res.json()) as DaemonArchiveSessionsResult;
+        }
+        throw await this.failOnError(res, 'POST /sessions/archive');
+      },
+    );
+  }
+
+  async unarchiveSessionsData(
+    sessionIds: string[],
+    clientId?: string,
+  ): Promise<DaemonUnarchiveSessionsResult> {
+    return await this.fetchWithTimeout(
+      `${this.baseUrl}/sessions/unarchive`,
+      {
+        method: 'POST',
+        headers: this.headers({ 'Content-Type': 'application/json' }, clientId),
+        body: JSON.stringify({ sessionIds }),
+      },
+      async (res) => {
+        if (res.ok) {
+          return (await res.json()) as DaemonUnarchiveSessionsResult;
+        }
+        throw await this.failOnError(res, 'POST /sessions/unarchive');
       },
     );
   }
@@ -2884,6 +3071,50 @@ export class DaemonClient {
    */
   dispose(): void {
     this.transport.dispose();
+  }
+
+  // -- Session artifacts ---------------------------------------------------
+
+  async listSessionArtifacts(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactsEnvelope> {
+    return await this.jsonRequest<DaemonSessionArtifactsEnvelope>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts`,
+      'GET /session/:id/artifacts',
+      { clientId },
+    );
+  }
+
+  async addSessionArtifact(
+    sessionId: string,
+    artifact: DaemonSessionArtifactInput,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts`,
+      'POST /session/:id/artifacts',
+      {
+        method: 'POST',
+        body: artifact,
+        clientId,
+      },
+    );
+  }
+
+  async removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`,
+      'DELETE /session/:id/artifacts/:artifactId',
+      {
+        method: 'DELETE',
+        clientId,
+      },
+    );
   }
 
   // -- Session metadata ----------------------------------------------------

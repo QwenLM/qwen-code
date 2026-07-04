@@ -108,6 +108,14 @@ describe('composer tag serialization', () => {
         value: ' src/a.ts ',
       }),
     ).toBe('src/a.ts');
+    expect(
+      serializeComposerTag({
+        id: 'ext',
+        label: 'Extension',
+        value: 'clickhouse',
+        serialized: '@ext:clickhouse',
+      }),
+    ).toBe('@ext:clickhouse');
     expect(serializeComposerTag({ id: 'mode', label: ' Plan ' })).toBe('Plan');
     expect(serializeComposerTag({ id: 'plain' })).toBe('plain');
   });

@@ -1,5 +1,11 @@
 import type { CommandModule } from 'yargs';
-import { nextFireTime, parseCron } from '@qwen-code/qwen-code-core';
+import {
+  appendChannelMemory,
+  clearChannelMemory,
+  nextFireTime,
+  parseCron,
+  readChannelMemory,
+} from '@qwen-code/qwen-code-core';
 import { loadSettings } from '../../config/settings.js';
 import { writeStderrLine, writeStdoutLine } from '../../utils/stdioHelpers.js';
 import {
@@ -10,6 +16,7 @@ import {
 } from '@qwen-code/channel-base';
 import type {
   ChannelBase,
+  ChannelBaseOptions,
   ChannelLoopController,
 } from '@qwen-code/channel-base';
 import { findCliEntryPath, parseChannelConfig } from './config-utils.js';
@@ -44,6 +51,16 @@ function isFileExistsError(err: unknown): boolean {
     err !== null &&
     (err as NodeJS.ErrnoException).code === 'EEXIST'
   );
+}
+
+function channelMemoryOptions(): Pick<ChannelBaseOptions, 'channelMemory'> {
+  return {
+    channelMemory: {
+      readChannelMemory,
+      appendChannelMemory,
+      clearChannelMemory,
+    },
+  };
 }
 
 function createLoopController(store: ChannelLoopStore): ChannelLoopController {
@@ -169,6 +186,7 @@ async function startSingle(name: string, proxy?: string): Promise<void> {
   const channel = await createChannel(name, config, bridge, {
     router,
     proxy,
+    ...channelMemoryOptions(),
     loopController,
   });
   channels.set(name, channel);
@@ -326,6 +344,7 @@ async function startAll(proxy?: string): Promise<void> {
       await createChannel(name, config, bridge, {
         router,
         proxy,
+        ...channelMemoryOptions(),
         loopController,
       }),
     );

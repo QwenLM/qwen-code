@@ -80,7 +80,7 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
-  it('reports failed channel worker snapshots in runtime status', async () => {
+  it('reports permanently failed channel worker snapshots as errors', async () => {
     const response = await buildDaemonStatusResponse(
       'summary',
       makeOptions({
@@ -90,17 +90,22 @@ describe('buildDaemonStatusResponse', () => {
           channels: ['telegram'],
           pid: 1234,
           error: 'ipc failed',
+          restartCount: 2,
+          lastExitAt: '2026-07-01T01:00:00.000Z',
+          lastRestartAt: '2026-07-01T01:00:05.000Z',
+          lastHeartbeatAt: '2026-07-01T00:59:50.000Z',
         },
       }),
     );
 
     expect(response).toMatchObject({
-      status: 'warning',
+      status: 'error',
       issues: expect.arrayContaining([
         expect.objectContaining({
           code: 'channel_worker_exited',
-          severity: 'warning',
-          message: 'Channel worker is failed (pid=1234): ipc failed.',
+          severity: 'error',
+          message:
+            'Channel worker is failed (pid=1234, restarts=2, lastExitAt=2026-07-01T01:00:00.000Z, lastRestartAt=2026-07-01T01:00:05.000Z, lastHeartbeatAt=2026-07-01T00:59:50.000Z): ipc failed.',
           section: 'runtime.channelWorker',
         }),
       ]),
@@ -111,6 +116,72 @@ describe('buildDaemonStatusResponse', () => {
           channels: ['telegram'],
           pid: 1234,
           error: 'ipc failed',
+          restartCount: 2,
+          lastExitAt: '2026-07-01T01:00:00.000Z',
+          lastRestartAt: '2026-07-01T01:00:05.000Z',
+          lastHeartbeatAt: '2026-07-01T00:59:50.000Z',
+        },
+      },
+    });
+  });
+
+  it('warns for failed channel worker snapshots that still have a scheduled restart', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        channelWorkerSnapshot: {
+          enabled: true,
+          state: 'failed',
+          channels: ['telegram'],
+          error: 'restart failed',
+          restartCount: 1,
+          nextRestartAt: '2026-07-01T01:01:00.000Z',
+        },
+      }),
+    );
+
+    expect(response).toMatchObject({
+      status: 'warning',
+      issues: expect.arrayContaining([
+        expect.objectContaining({
+          code: 'channel_worker_exited',
+          severity: 'warning',
+          message:
+            'Channel worker is failed (restarts=1, nextRestartAt=2026-07-01T01:01:00.000Z): restart failed.',
+          section: 'runtime.channelWorker',
+        }),
+      ]),
+    });
+  });
+
+  it('does not warn for a running channel worker that restarted successfully', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        channelWorkerSnapshot: {
+          enabled: true,
+          state: 'running',
+          channels: ['telegram'],
+          requestedChannels: ['telegram'],
+          pid: 2345,
+          restartCount: 1,
+          lastRestartAt: '2026-07-01T01:00:00.000Z',
+          lastHeartbeatAt: '2026-07-01T01:00:10.000Z',
+        },
+      }),
+    );
+
+    expect(response).toMatchObject({
+      status: 'ok',
+      issues: [],
+      runtime: {
+        channelWorker: {
+          enabled: true,
+          state: 'running',
+          pid: 2345,
+          restartCount: 1,
+          lastRestartAt: '2026-07-01T01:00:00.000Z',
+          lastHeartbeatAt: '2026-07-01T01:00:10.000Z',
         },
       },
     });
@@ -126,6 +197,8 @@ describe('buildDaemonStatusResponse', () => {
           channels: ['telegram'],
           requestedChannels: ['telegram', 'feishu', 'dingtalk'],
           pid: 1234,
+          restartCount: 1,
+          lastHeartbeatAt: '2026-07-01T01:00:10.000Z',
         },
       }),
     );
@@ -234,6 +307,37 @@ describe('buildDaemonStatusResponse', () => {
     });
   });
 
+  it('summarizes MCP server health in workspace.mcp.summary', async () => {
+    const response = await buildDaemonStatusResponse(
+      'full',
+      makeOptions({
+        mcpStatus: {
+          v: 1,
+          workspaceCwd: BASE_WORKSPACE,
+          initialized: true,
+          servers: [
+            { name: 'a', mcpStatus: 'connected', disabled: false },
+            { name: 'b', mcpStatus: 'connected', disabled: false },
+            {
+              name: 'c',
+              mcpStatus: 'disconnected',
+              status: 'error',
+              disabled: false,
+            },
+            { name: 'd', disabled: true },
+          ],
+        },
+      }),
+    );
+    const mcpSummary = response.full?.workspace?.['mcp']?.summary;
+    expect(mcpSummary).toMatchObject({
+      serversCount: 4,
+      serversConnected: 2,
+      serversErrored: 1,
+      serversDisabled: 1,
+    });
+  });
+
   it('marks a timed-out full workspace section unavailable', async () => {
     vi.useFakeTimers();
 
@@ -297,6 +401,63 @@ describe('buildDaemonStatusResponse', () => {
       },
     });
   });
+
+  it('includes additive daemon performance data when provided', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        perfSnapshot: {
+          eventLoop: { meanMs: 1, p50Ms: 2, p99Ms: 3, maxMs: 4 },
+          pipe: {
+            inbound: { count: 5, totalBytes: 600, maxBytes: 300 },
+            outbound: { count: 7, totalBytes: 800, maxBytes: 400 },
+          },
+        },
+      }),
+    );
+
+    expect(response.runtime.perf).toEqual({
+      eventLoop: { meanMs: 1, p50Ms: 2, p99Ms: 3, maxMs: 4 },
+      pipe: {
+        inbound: { count: 5, totalBytes: 600, maxBytes: 300 },
+        outbound: { count: 7, totalBytes: 800, maxBytes: 400 },
+      },
+    });
+  });
+
+  it('omits daemon performance data when no provider is injected', async () => {
+    const response = await buildDaemonStatusResponse('summary', makeOptions());
+
+    expect(response.runtime).not.toHaveProperty('perf');
+  });
+
+  it('includes activity fields in runtime', async () => {
+    vi.useFakeTimers({ now: 1719990005000 });
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        activePromptCount: 3,
+        lastActivityAt: 1719990000000,
+      }),
+    );
+    expect(response.runtime.activity).toEqual({
+      activePrompts: 3,
+      lastActivityAt: '2024-07-03T07:00:00.000Z',
+      idleSinceMs: 5000,
+    });
+  });
+
+  it('reports null activity when daemon has never been active', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({ activePromptCount: 0, lastActivityAt: null }),
+    );
+    expect(response.runtime.activity).toEqual({
+      activePrompts: 0,
+      lastActivityAt: null,
+      idleSinceMs: null,
+    });
+  });
 });
 
 interface MakeOptionsInput {
@@ -309,6 +470,15 @@ interface MakeOptionsInput {
   hooksStatus?: unknown;
   extensionsStatus?: unknown;
   channelWorkerSnapshot?: ChannelWorkerSnapshot;
+  perfSnapshot?: {
+    eventLoop: { meanMs: number; p50Ms: number; p99Ms: number; maxMs: number };
+    pipe: {
+      inbound: { count: number; totalBytes: number; maxBytes: number };
+      outbound: { count: number; totalBytes: number; maxBytes: number };
+    };
+  };
+  activePromptCount?: number;
+  lastActivityAt?: number | null;
 }
 
 function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
@@ -322,6 +492,8 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     getDaemonStatusSnapshot: () => input.bridgeSnapshot ?? BASE_BRIDGE_SNAPSHOT,
     getWorkspaceToolsStatus: async () =>
       input.toolsStatus ?? okStatus({ tools: [] }),
+    activePromptCount: input.activePromptCount ?? 0,
+    lastActivityAt: input.lastActivityAt ?? null,
   } as unknown as AcpSessionBridge;
   const workspace = {
     getWorkspaceMcpStatus: async () =>
@@ -365,6 +537,9 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     sessionShellCommandEnabled: false,
     ...(input.channelWorkerSnapshot
       ? { getChannelWorkerSnapshot: () => input.channelWorkerSnapshot! }
+      : {}),
+    ...(input.perfSnapshot
+      ? { getPerfSnapshot: () => input.perfSnapshot! }
       : {}),
   };
 }

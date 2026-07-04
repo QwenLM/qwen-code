@@ -56,7 +56,10 @@ export class StreamInactivityTimeoutError extends Error {
     readonly streamLifetimeMs: number,
   ) {
     super(
-      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks (stream lifetime: ${streamLifetimeMs}ms)`,
+      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks ` +
+        `(stream lifetime: ${streamLifetimeMs}ms). Set ` +
+        `${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV} to increase this window ` +
+        `(or 0 to disable it).`,
     );
     this.name = 'StreamInactivityTimeoutError';
   }
@@ -778,7 +781,7 @@ export class ContentGenerationPipeline {
       ? new StreamingToolCallParser()
       : undefined;
     const responseParsingOptions =
-      this.config.provider.getResponseParsingOptions?.(effectiveModel);
+      this.config.provider.getResponseParsingOptions?.();
     const taggedThinkingParser =
       isStreaming && responseParsingOptions?.taggedThinkingTags
         ? new TaggedThinkingParser()

@@ -120,6 +120,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
     const choice = await vscode.window.showQuickPick(items, {
       title,
       placeHolder,
+      ignoreFocusOut: true,
     });
     if (!choice || choice.kind === vscode.QuickPickItemKind.Separator) {
       this.notifyAuthCancelled();
@@ -145,6 +146,7 @@ export class AuthMessageHandler extends BaseMessageHandler {
       placeHolder: opts.placeHolder,
       value: opts.value,
       password: opts.password ?? false,
+      ignoreFocusOut: true,
       validateInput: opts.required
         ? (v) => (!v?.trim() ? 'This field is required' : null)
         : undefined,

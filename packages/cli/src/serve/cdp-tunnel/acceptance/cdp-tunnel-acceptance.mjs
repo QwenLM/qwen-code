@@ -7,28 +7,19 @@
  *
  * Proves the REAL daemon `/cdp` path works with a MOCK extension standing in for
  * chrome.debugger (no real Chrome): a Node mock connects `/acp` and answers
- * `cdp_command` frames with page-domain CDP, then puppeteer connects to `/cdp`
- * and runs `page.evaluate(() => 1 + 1)`. PASS = evaluate === 2 through the real
- * daemon /cdp + emulator + reverse-link.
- *
- * puppeteer-core + ws load from the spike's node_modules; the daemon/CLI are the
- * real built artifacts.
+ * `cdp_command` frames with page-domain CDP, then a direct CDP JSON-RPC client
+ * connects to `/cdp` and runs `Runtime.evaluate`. PASS = evaluate === 2 through
+ * the real daemon /cdp + emulator + reverse-link.
  *
  * Run:
  *   node packages/cli/src/serve/cdp-tunnel/acceptance/cdp-tunnel-acceptance.mjs
  */
 
 import { spawn } from 'node:child_process';
-import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-
-const SPIKE_DIR = '/tmp/planc-spike';
-const spikeRequire = createRequire(`${SPIKE_DIR}/package.json`);
-const puppeteer = spikeRequire('puppeteer-core');
-const { WebSocket } = spikeRequire('ws');
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 // repo root = .../packages/cli/src/serve/cdp-tunnel/acceptance -> up 6
@@ -46,7 +37,7 @@ const out = {
   daemonHealthy: false,
   mockExtRegistered: false,
   cdpAttached: false,
-  puppeteerConnected: false,
+  cdpClientConnected: false,
   pages: 0,
   evaluate: null,
   error: null,
@@ -54,6 +45,157 @@ const out = {
 
 function log(...args) {
   console.error('[accept]', ...args);
+}
+
+function connectWebSocket(url) {
+  return new Promise((resolve, reject) => {
+    const ws = new WebSocket(url);
+    const onOpen = () => {
+      cleanup();
+      resolve(ws);
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error(`WebSocket connection failed: ${url}`));
+    };
+    const cleanup = () => {
+      ws.removeEventListener('open', onOpen);
+      ws.removeEventListener('error', onError);
+    };
+    ws.addEventListener('open', onOpen, { once: true });
+    ws.addEventListener('error', onError, { once: true });
+  });
+}
+
+async function messageDataToString(data) {
+  if (typeof data === 'string') return data;
+  if (data instanceof ArrayBuffer) {
+    return new TextDecoder().decode(data);
+  }
+  if (ArrayBuffer.isView(data)) {
+    return new TextDecoder().decode(data);
+  }
+  if (typeof Blob !== 'undefined' && data instanceof Blob) {
+    return await data.text();
+  }
+  return String(data);
+}
+
+class CdpClient {
+  constructor(ws) {
+    this.ws = ws;
+    this.nextId = 1;
+    this.pending = new Map();
+    this.eventWaiters = new Set();
+    ws.addEventListener('message', (event) => {
+      void this.handleMessage(event.data);
+    });
+  }
+
+  send(method, params = {}, sessionId) {
+    const id = this.nextId++;
+    const frame = { id, method, params };
+    if (sessionId) frame.sessionId = sessionId;
+    this.ws.send(JSON.stringify(frame));
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(`timeout waiting for CDP response id=${id}`));
+      }, 20_000);
+      timer.unref?.();
+      this.pending.set(id, { resolve, reject, timer });
+    });
+  }
+
+  waitForEvent(predicate, timeoutMs = 10_000) {
+    return new Promise((resolve, reject) => {
+      const waiter = {
+        predicate,
+        resolve,
+        reject,
+        timer: setTimeout(() => {
+          this.eventWaiters.delete(waiter);
+          reject(new Error('timeout waiting for CDP event'));
+        }, timeoutMs),
+      };
+      waiter.timer.unref?.();
+      this.eventWaiters.add(waiter);
+    });
+  }
+
+  async handleMessage(data) {
+    let frame;
+    try {
+      frame = JSON.parse(await messageDataToString(data));
+    } catch {
+      return;
+    }
+
+    if (frame.id !== undefined && this.pending.has(frame.id)) {
+      const pending = this.pending.get(frame.id);
+      clearTimeout(pending.timer);
+      this.pending.delete(frame.id);
+      if (frame.error) {
+        pending.reject(new Error(JSON.stringify(frame.error)));
+      } else {
+        pending.resolve(frame.result);
+      }
+    }
+
+    for (const waiter of [...this.eventWaiters]) {
+      if (!waiter.predicate(frame)) continue;
+      clearTimeout(waiter.timer);
+      this.eventWaiters.delete(waiter);
+      waiter.resolve(frame);
+    }
+  }
+}
+
+async function driveCdpEndpoint() {
+  const ws = await connectWebSocket(WS_CDP);
+  const client = new CdpClient(ws);
+  out.cdpClientConnected = true;
+
+  await client.send('Browser.getVersion');
+  await client.send('Target.setDiscoverTargets', { discover: true });
+
+  const tabAttached = client.waitForEvent(
+    (frame) =>
+      frame.method === 'Target.attachedToTarget' &&
+      frame.params?.targetInfo?.type === 'tab',
+  );
+  await client.send('Target.setAutoAttach', {
+    autoAttach: true,
+    flatten: true,
+    waitForDebuggerOnStart: false,
+  });
+  const tabSessionId = (await tabAttached).params.sessionId;
+
+  const pageAttached = client.waitForEvent(
+    (frame) =>
+      frame.method === 'Target.attachedToTarget' &&
+      frame.sessionId === tabSessionId &&
+      frame.params?.targetInfo?.type === 'page',
+  );
+  await client.send(
+    'Target.setAutoAttach',
+    {
+      autoAttach: true,
+      flatten: true,
+      waitForDebuggerOnStart: false,
+    },
+    tabSessionId,
+  );
+  const pageSessionId = (await pageAttached).params.sessionId;
+
+  const result = await client.send(
+    'Runtime.evaluate',
+    { expression: '1 + 1', returnByValue: true },
+    pageSessionId,
+  );
+  out.pages = 1;
+  out.evaluate = result?.result?.value;
+  ws.close();
 }
 
 /** Page-domain CDP answer, copied from /tmp/planc-spike/mock-cdp.mjs. */
@@ -123,12 +265,26 @@ async function waitForHealth(timeoutMs = 60_000) {
  * The MOCK EXTENSION: connect /acp, ACP initialize, mcp_register, then service
  * cdp_attach / cdp_command frames by answering page-domain CDP.
  */
-function startMockExtension() {
+async function startMockExtension(timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  let lastError = new Error('mock extension WebSocket failed');
+  while (Date.now() < deadline) {
+    try {
+      return await connectMockExtensionOnce();
+    } catch (e) {
+      lastError = e instanceof Error ? e : new Error(String(e));
+      await new Promise((r) => setTimeout(r, 250));
+    }
+  }
+  throw lastError;
+}
+
+function connectMockExtensionOnce() {
   return new Promise((resolveConn, rejectConn) => {
     const ws = new WebSocket(WS_ACP);
     let resolved = false;
 
-    ws.on('open', () => {
+    ws.addEventListener('open', () => {
       log('mock-ext: /acp open; sending ACP initialize');
       ws.send(
         JSON.stringify({
@@ -142,10 +298,14 @@ function startMockExtension() {
       );
     });
 
-    ws.on('message', (data) => {
+    ws.addEventListener('message', (event) => {
+      void handleMessage(event.data);
+    });
+
+    async function handleMessage(data) {
       let msg;
       try {
-        msg = JSON.parse(data.toString());
+        msg = JSON.parse(await messageDataToString(data));
       } catch {
         return;
       }
@@ -223,12 +383,12 @@ function startMockExtension() {
         return;
       }
       // ignore other /acp traffic
-    });
+    }
 
-    ws.on('error', (err) => {
-      if (!resolved) rejectConn(err);
+    ws.addEventListener('error', () => {
+      if (!resolved) rejectConn(new Error('mock extension WebSocket failed'));
     });
-    ws.on('close', () => log('mock-ext: /acp closed'));
+    ws.addEventListener('close', () => log('mock-ext: /acp closed'));
   });
 }
 
@@ -282,27 +442,11 @@ async function main() {
     // 2. Mock extension connects + registers over /acp.
     const extWs = await startMockExtension();
 
-    // 3. puppeteer connects to the REAL daemon /cdp and drives the page.
-    log('puppeteer.connect', WS_CDP);
-    const browser = await puppeteer.connect({
-      browserWSEndpoint: WS_CDP,
-      protocolTimeout: 20_000,
-    });
-    out.puppeteerConnected = true;
-    log('puppeteer connected');
+    // 3. A direct CDP client connects to the REAL daemon /cdp and drives the page.
+    log('direct CDP connect', WS_CDP);
+    await driveCdpEndpoint();
+    log('Runtime.evaluate 1 + 1 =>', out.evaluate);
 
-    const pages = await browser.pages();
-    out.pages = pages.length;
-    log('pages:', pages.length);
-
-    if (pages[0]) {
-      out.evaluate = await pages[0]
-        .evaluate(() => 1 + 1)
-        .catch((e) => 'EVAL-ERR:' + e.message);
-      log('page.evaluate(() => 1 + 1) =>', out.evaluate);
-    }
-
-    await browser.disconnect();
     extWs.close();
   } catch (e) {
     out.error = e.message;
@@ -314,14 +458,14 @@ async function main() {
   const pass =
     out.daemonHealthy &&
     out.mockExtRegistered &&
-    out.puppeteerConnected &&
+    out.cdpClientConnected &&
     out.pages > 0 &&
     out.evaluate === 2;
 
   console.log('\n=== PLAN C /cdp ACCEPTANCE RESULT ===');
   console.log(JSON.stringify(out, null, 2));
   console.log(
-    `\nACCEPTANCE: ${pass ? 'PASS' : 'FAIL'} — page.evaluate(() => 1 + 1) === ${out.evaluate} through the REAL daemon /cdp + emulator + reverse-link to the mock extension`,
+    `\nACCEPTANCE: ${pass ? 'PASS' : 'FAIL'} — Runtime.evaluate 1 + 1 === ${out.evaluate} through the REAL daemon /cdp + emulator + reverse-link to the mock extension`,
   );
   process.exit(pass ? 0 : 1);
 }

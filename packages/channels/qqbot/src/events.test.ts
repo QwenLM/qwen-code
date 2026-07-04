@@ -243,7 +243,7 @@ describe('handleC2C', () => {
       'replyMsgId'
     ] as Map<string, string>;
     const entry = replyMsgId.get('user-openid-1');
-    expect(entry).toBe('msg-c2c-001');
+    expect(entry?.msgId).toBe('msg-c2c-001');
   });
 
   it('触发 handleInbound 带正确参数', async () => {
@@ -344,7 +344,7 @@ describe('handleGroup', () => {
       'replyMsgId'
     ] as Map<string, string>;
     const entry = replyMsgId.get('group-openid-1');
-    expect(entry).toBe('msg-group-001');
+    expect(entry?.msgId).toBe('msg-group-001');
   });
 
   it('触发 handleInbound 带正确参数：isGroup=true, isMentioned=true', async () => {
@@ -459,7 +459,7 @@ describe('handleGroup', () => {
 
     await vi.advanceTimersByTimeAsync(600);
     expect(mockHandleInbound).toHaveBeenCalledTimes(1);
-    expect(replyMsgId.get('group-openid-1')).toBe('msg-group-001');
+    expect(replyMsgId.get('group-openid-1')?.msgId).toBe('msg-group-001');
   });
 
   it('groupActiveMsgEnabled=false 时 @bot 消息仍能通过（被动回复）', async () => {
@@ -598,7 +598,7 @@ describe('handleGroupAll', () => {
       'replyMsgId'
     ] as Map<string, string>;
     const entry = replyMsgId.get('group-openid-1');
-    expect(entry).toBe('msg-groupall-001');
+    expect(entry?.msgId).toBe('msg-groupall-001');
   });
 
   it('斜杠命令（isAtBot + /prefix）用 cleanText 发送', async () => {

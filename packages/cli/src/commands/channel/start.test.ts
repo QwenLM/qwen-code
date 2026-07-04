@@ -11,6 +11,9 @@ const mockNormalizeProxyUrl = vi.hoisted(() => vi.fn((url?: string) => url));
 const mockStorageGetGlobalQwenDir = vi.hoisted(() =>
   vi.fn(() => '/tmp/qwen-home'),
 );
+const mockReadChannelMemory = vi.hoisted(() => vi.fn());
+const mockAppendChannelMemory = vi.hoisted(() => vi.fn());
+const mockClearChannelMemory = vi.hoisted(() => vi.fn());
 const mockParseCron = vi.hoisted(() => vi.fn());
 const mockNextFireTime = vi.hoisted(() =>
   vi.fn((cron: string) => {
@@ -35,6 +38,7 @@ const mockChannelConnect = vi.hoisted(() => vi.fn());
 const mockChannelDisconnect = vi.hoisted(() => vi.fn());
 const mockChannelSetBridge = vi.hoisted(() => vi.fn());
 const mockChannelOnToolCall = vi.hoisted(() => vi.fn());
+const mockChannelDispatchToolCall = vi.hoisted(() => vi.fn());
 const mockChannelOnSessionDied = vi.hoisted(() => vi.fn());
 const mockCreateChannel = vi.hoisted(() => vi.fn());
 const mockBridgeStart = vi.hoisted(() => vi.fn());
@@ -95,9 +99,12 @@ vi.mock('undici', () => ({
 }));
 
 vi.mock('@qwen-code/qwen-code-core', () => ({
+  appendChannelMemory: mockAppendChannelMemory,
+  clearChannelMemory: mockClearChannelMemory,
   nextFireTime: mockNextFireTime,
   normalizeProxyUrl: mockNormalizeProxyUrl,
   parseCron: mockParseCron,
+  readChannelMemory: mockReadChannelMemory,
   Storage: {
     getGlobalQwenDir: mockStorageGetGlobalQwenDir,
   },
@@ -170,6 +177,7 @@ const mockChannel = {
   disconnect: mockChannelDisconnect,
   onSessionDied: mockChannelOnSessionDied,
   onToolCall: mockChannelOnToolCall,
+  dispatchToolCall: mockChannelDispatchToolCall,
   setBridge: mockChannelSetBridge,
 };
 
@@ -578,7 +586,8 @@ describe('startCommand.handler', () => {
     toolCallListener!(event);
 
     expect(mockRouterGetTarget).toHaveBeenCalledWith('s-1');
-    expect(mockChannelOnToolCall).toHaveBeenCalledWith('chat1', event);
+    expect(mockChannelDispatchToolCall).toHaveBeenCalledWith(event);
+    expect(mockChannelOnToolCall).not.toHaveBeenCalled();
   });
 
   it('dispatches session death to the owning channel when the route is known', async () => {
@@ -718,6 +727,84 @@ describe('startCommand.handler', () => {
     );
   });
 
+  it('passes channel memory callbacks when starting a named channel', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: { channels: { telegram: { type: 'telegram' } } },
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockCreateChannel).toHaveBeenCalledWith(
+      'telegram',
+      mockParsedChannelConfig,
+      expect.any(Object),
+      expect.objectContaining({
+        channelMemory: {
+          appendChannelMemory: mockAppendChannelMemory,
+          clearChannelMemory: mockClearChannelMemory,
+          readChannelMemory: mockReadChannelMemory,
+        },
+      }),
+    );
+  });
+
+  it('passes channel memory callbacks when starting all channels', async () => {
+    mockLoadSettings.mockReturnValue({
+      merged: {
+        channels: {
+          discord: { type: 'telegram' },
+          telegram: { type: 'telegram' },
+        },
+      },
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    expect(mockCreateChannel).toHaveBeenCalledTimes(2);
+    expect(mockCreateChannel).toHaveBeenNthCalledWith(
+      1,
+      'discord',
+      mockParsedChannelConfig,
+      expect.any(Object),
+      expect.objectContaining({
+        channelMemory: {
+          appendChannelMemory: mockAppendChannelMemory,
+          clearChannelMemory: mockClearChannelMemory,
+          readChannelMemory: mockReadChannelMemory,
+        },
+      }),
+    );
+    expect(mockCreateChannel).toHaveBeenNthCalledWith(
+      2,
+      'telegram',
+      mockParsedChannelConfig,
+      expect.any(Object),
+      expect.objectContaining({
+        channelMemory: {
+          appendChannelMemory: mockAppendChannelMemory,
+          clearChannelMemory: mockClearChannelMemory,
+          readChannelMemory: mockReadChannelMemory,
+        },
+      }),
+    );
+  });
+
   it('starts the scheduler with connected channels only', async () => {
     const channels = {
       first: { type: 'telegram' },
@@ -761,7 +848,6 @@ describe('startCommand.handler', () => {
     expect([...schedulerOptions!.channels.keys()]).toEqual(['second']);
     expect(mockChannelLoopSchedulerStart).toHaveBeenCalledOnce();
   });
-
   it('restarts all channels on shared bridge crash before restoring sessions', async () => {
     const channels = {
       first: { type: 'telegram' },

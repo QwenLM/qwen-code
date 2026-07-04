@@ -122,7 +122,7 @@ import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
-import { isSubagentLikeExecutionContext } from '../agents/runtime/subagent-plan-tool-policy.js';
+import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 
 // Hook types and utilities
 import {
@@ -2112,7 +2112,8 @@ export class GeminiClient {
             // SDK clients do not receive the interactive exit-plan flow, so
             // they need plan-only guidance even outside subagent contexts.
             getPlanModeSystemReminder(
-              isSubagentLikeExecutionContext() || this.config.getSdkMode(),
+              shouldUsePlanOnlyReminderInSubagentContext() ||
+                this.config.getSdkMode(),
             ),
           );
         }
@@ -2469,6 +2470,18 @@ export class GeminiClient {
               stopHookCount: response.stopHookCount ?? 1,
             },
           };
+
+          // A blocking Stop hook (e.g. /goal) feeds a fresh user-role prompt
+          // back to the model, starting a new logical turn — reset per-turn
+          // loop accounting so each continuation gets its own tool-call
+          // budget. Without this, a goal chain accumulates every iteration's
+          // tool calls into one "turn" and trips TURN_TOOL_CALL_CAP after a
+          // handful of healthy iterations. The ACP daemon path already has
+          // these semantics (fresh DaemonToolLoopState per continuation).
+          // Runaway protection is preserved: the cap still bounds each
+          // iteration, and the chain itself is bounded by
+          // stopHookBlockingCap / MAX_GOAL_ITERATIONS.
+          this.loopDetector.reset(prompt_id);
 
           const continueRequest = [{ text: continueReason }];
           const activeGoal = getActiveGoal(this.config.getSessionId());

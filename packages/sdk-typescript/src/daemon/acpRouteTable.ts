@@ -243,6 +243,39 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       }),
     },
   },
+  // GET /session/:id/artifacts → _qwen/session/artifacts
+  {
+    httpMethod: 'GET',
+    pattern: /^\/session\/([^/]+)\/artifacts$/,
+    mapping: {
+      method: '_qwen/session/artifacts',
+      extractParams: (segs) => ({ sessionId: segs[0] }),
+    },
+  },
+  // POST /session/:id/artifacts → _qwen/session/artifacts/add
+  {
+    httpMethod: 'POST',
+    pattern: /^\/session\/([^/]+)\/artifacts$/,
+    mapping: {
+      method: '_qwen/session/artifacts/add',
+      extractParams: (segs, body) => ({
+        ...(isRecord(body) ? body : {}),
+        sessionId: segs[0],
+      }),
+    },
+  },
+  // DELETE /session/:id/artifacts/:artifactId → _qwen/session/artifacts/remove
+  {
+    httpMethod: 'DELETE',
+    pattern: /^\/session\/([^/]+)\/artifacts\/([^/]+)$/,
+    mapping: {
+      method: '_qwen/session/artifacts/remove',
+      extractParams: (segs) => ({
+        sessionId: segs[0],
+        artifactId: segs[1],
+      }),
+    },
+  },
   // POST /session/:id/recap → _qwen/session/recap
   {
     httpMethod: 'POST',
@@ -519,6 +552,42 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       extractParams: (segs) => ({ taskId: segs[0] }),
     },
   },
+  // POST /workspace/memory/forget → _qwen/workspace/memory/forget
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/memory\/forget\/?$/,
+    mapping: {
+      method: '_qwen/workspace/memory/forget',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
+  // GET /workspace/memory/forget/:taskId → _qwen/workspace/memory/forget/get
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/memory\/forget\/([^/]+)$/,
+    mapping: {
+      method: '_qwen/workspace/memory/forget/get',
+      extractParams: (segs) => ({ taskId: segs[0] }),
+    },
+  },
+  // POST /workspace/memory/dream → _qwen/workspace/memory/dream
+  {
+    httpMethod: 'POST',
+    pattern: /^\/workspace\/memory\/dream\/?$/,
+    mapping: {
+      method: '_qwen/workspace/memory/dream',
+      extractParams: () => ({}),
+    },
+  },
+  // GET /workspace/memory/dream/:taskId → _qwen/workspace/memory/dream/get
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/memory\/dream\/([^/]+)$/,
+    mapping: {
+      method: '_qwen/workspace/memory/dream/get',
+      extractParams: (segs) => ({ taskId: segs[0] }),
+    },
+  },
   // GET /workspace/agents → _qwen/workspace/agents/list
   {
     httpMethod: 'GET',
@@ -655,6 +724,26 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     },
   },
 
+  // GET /workspace/:id/sessions → session/list
+  {
+    httpMethod: 'GET',
+    pattern: /^\/workspace\/(.+)\/sessions\/?$/,
+    mapping: {
+      method: 'session/list',
+      extractParams: (segs, _body, _method, query) => {
+        const size = query?.get('size');
+        return {
+          workspaceCwd: segs[0],
+          ...strParam(query, 'cursor'),
+          ...strParam(query, 'archiveState'),
+          ...(size == null || size === ''
+            ? {}
+            : { _meta: { size: Number(size) } }),
+        };
+      },
+    },
+  },
+
   // ---- Workspace catch-all (must be AFTER all specific workspace routes) --
   // Handles any workspace path not matched above (e.g., /workspace/custom/path).
   {
@@ -762,6 +851,24 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
     pattern: /^\/sessions\/delete\/?$/,
     mapping: {
       method: '_qwen/sessions/delete',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
+  // POST /sessions/archive → _qwen/sessions/archive
+  {
+    httpMethod: 'POST',
+    pattern: /^\/sessions\/archive\/?$/,
+    mapping: {
+      method: '_qwen/sessions/archive',
+      extractParams: (_s, body) => (isRecord(body) ? body : {}),
+    },
+  },
+  // POST /sessions/unarchive → _qwen/sessions/unarchive
+  {
+    httpMethod: 'POST',
+    pattern: /^\/sessions\/unarchive\/?$/,
+    mapping: {
+      method: '_qwen/sessions/unarchive',
       extractParams: (_s, body) => (isRecord(body) ? body : {}),
     },
   },

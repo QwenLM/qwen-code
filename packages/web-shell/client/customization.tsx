@@ -25,6 +25,8 @@ export interface WebShellMarkdownCustomization {
   rehypePlugins?: Options['rehypePlugins'];
 }
 
+export type MarkdownTableMode = 'basic' | 'advanced';
+
 export type ToolHeaderKind =
   | 'agent'
   | 'edit'
@@ -51,11 +53,15 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
+export type WebShellComposerTagKind = 'extension' | 'mcp' | 'file' | 'skill';
+
 export interface WebShellComposerTag {
   id: string;
   label?: string;
   value?: string;
   removable?: boolean;
+  kind?: WebShellComposerTagKind;
+  serialized?: string;
 }
 
 export type WebShellComposerTagPlacement = 'top' | 'inline';
@@ -88,7 +94,7 @@ export interface WebShellComposerApi {
   submit(input?: WebShellComposerInput): void;
 }
 
-export interface WebShellComposerToolbarStartRenderInfo {
+export interface WebShellComposerToolbarRenderInfo {
   disabled: boolean;
   isRunning: boolean;
   currentMode: string;
@@ -96,11 +102,20 @@ export interface WebShellComposerToolbarStartRenderInfo {
   sessionName?: string;
 }
 
+export type WebShellComposerToolbarStartRenderInfo =
+  WebShellComposerToolbarRenderInfo;
+
+export type WebShellComposerToolbarRightRenderInfo =
+  WebShellComposerToolbarRenderInfo;
+
 export type ComposerToolbarStartRenderer =
   ComponentType<WebShellComposerToolbarStartRenderInfo>;
 
 export type ComposerToolbarEndRenderer =
-  ComponentType<WebShellComposerToolbarStartRenderInfo>;
+  ComponentType<WebShellComposerToolbarRenderInfo>;
+
+export type ComposerToolbarRightRenderer =
+  ComponentType<WebShellComposerToolbarRightRenderInfo>;
 
 // ---- Background task info (public type for footer renderer) ----
 
@@ -197,6 +212,7 @@ export interface WebShellCustomization {
   renderWelcomeFooter?: WelcomeFooterRenderer;
   renderComposerToolbarStart?: ComposerToolbarStartRenderer;
   renderComposerToolbarEnd?: ComposerToolbarEndRenderer;
+  renderComposerToolbarRight?: ComposerToolbarRightRenderer;
   renderFooter?: FooterRenderer;
   compactThinking?: boolean;
   /**
@@ -206,6 +222,7 @@ export interface WebShellCustomization {
    * expanded. Defaults to enabled when unset.
    */
   collapseCompletedTurns?: boolean;
+  markdownTableMode?: MarkdownTableMode;
   markdown?: WebShellMarkdownCustomization;
   loadingPhrases?: LoadingPhrasesResolver;
 }

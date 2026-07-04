@@ -177,6 +177,7 @@ export default {
   'toolDisplayName.SaveMemory': '儲存記憶',
   'toolDisplayName.Agent': 'Agent',
   'toolDisplayName.Artifact': '製品',
+  'toolDisplayName.RecordArtifact': '記錄製品',
   'toolDisplayName.Skill': '技能',
   'toolDisplayName.EnterPlanMode': '進入計畫模式',
   'toolDisplayName.ExitPlanMode': '退出計畫模式',
@@ -195,6 +196,7 @@ export default {
   'toolDisplayName.TaskStop': '停止任務',
   'toolDisplayName.TeamCreate': '建立團隊',
   'toolDisplayName.TeamDelete': '刪除團隊',
+  'toolDisplayName.TeamPlanApproval': '團隊計畫審批',
   'toolDisplayName.SendMessage': '傳送訊息',
   'toolDisplayName.StructuredOutput': '結構化輸出',
   'toolDisplayName.Monitor': '監控',
@@ -1224,6 +1226,7 @@ export default {
   'Size:': '大小：',
   '{{count}} bytes': '{{count}} 位元組',
   'Reference in chat': '在對話中引用',
+  'MCP server': 'MCP 伺服器',
   'MCP resource server': 'MCP 資源伺服器',
   '{{count}} invalid tools': '{{count}} 個無效工具',
   invalid: '無效',
@@ -1914,6 +1917,8 @@ export default {
     '緊湊模式下隱藏工具輸出和思考過程，界面更簡潔（Ctrl+O 切換）。',
   'Press Ctrl+O to show full tool output': '按 Ctrl+O 查看詳細工具調用結果',
   'Switch to plan mode or exit plan mode': '切換到計劃模式或退出計劃模式',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    '設定具備推理能力的模型思考的強度（{{tiers}}）；依各供應商進行映射與鉗制。',
   'Set a goal — keep working until the condition is met':
     '設定目標 — 持續工作直到條件滿足',
   'Exited plan mode. Previous approval mode restored.':

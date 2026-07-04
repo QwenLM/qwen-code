@@ -61,8 +61,11 @@ import {
   unregisterGoalHook,
   ToolNames,
   FORK_SUBAGENT_TYPE,
+  runManagedAutoMemoryDream,
   runManagedRememberByAgent,
   matchesAnyServerPattern,
+  registerAcpEventLoopLagGauge,
+  startEventLoopLagMonitor,
 } from '@qwen-code/qwen-code-core';
 import { randomUUID } from 'node:crypto';
 import type {
@@ -87,7 +90,6 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   AgentSideConnection,
   RequestError,
-  ndJsonStream,
   PROTOCOL_VERSION,
 } from '@agentclientprotocol/sdk';
 import type { Content } from '@google/genai';
@@ -128,11 +130,11 @@ import {
   pickAuthMethodsForAuthRequired,
 } from './authMethods.js';
 import { AcpFileSystemService } from './service/filesystem.js';
+import { ndJsonStream } from '@qwen-code/acp-bridge/ndJsonStream';
 import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
 import * as fs from 'node:fs/promises';
-import { createRequire } from 'node:module';
 import * as path from 'node:path';
 import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
@@ -158,6 +160,8 @@ import {
   loadCliConfig,
 } from '../config/config.js';
 import { extractRememberErrorCode } from '../serve/workspace-remember-errors.js';
+import { formatWorkspaceMemoryForgetSummary } from '../serve/workspace-memory-summaries.js';
+import { mapSkillConfigToStatus } from '../serve/workspace-skills-mapping.js';
 import { Session, buildAvailableCommandsSnapshot } from './session/Session.js';
 import { buildSessionTasksStatus } from './session/tasksSnapshot.js';
 import { HistoryReplayer } from './session/HistoryReplayer.js';
@@ -217,7 +221,6 @@ import {
   type ServeWorkspaceProviderModel,
   type ServeWorkspaceProviderStatus,
   type ServeWorkspaceProvidersStatus,
-  type ServeWorkspaceSkillStatus,
   type ServeWorkspaceSkillsStatus,
   type ServeWorkspaceToolStatus,
   type ServeWorkspaceToolsStatus,
@@ -251,6 +254,21 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+
+function createHiddenWorkspaceMemoryConfig(config: Config): Config {
+  return new Proxy(config, {
+    get(target, prop) {
+      if (prop === 'getChatRecordingService') {
+        return () => undefined;
+      }
+      if (prop === 'getTranscriptPath') {
+        return () => '';
+      }
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function' ? value.bind(target) : value;
+    },
+  });
+}
 
 function collapseForkDirective(directive: string, maxLength: number): string {
   const oneLine = directive.replace(/\s+/g, ' ').trim();
@@ -2299,23 +2317,35 @@ export async function runAcpAgent(
     // client-hosted MCP server (#5626) round-trips over the parent WS.
     sendSdkMcpMessage: bootstrapClientMcpSender,
   });
+  const eventLoopMonitor = startEventLoopLagMonitor({
+    onNewMaxStall: (maxMs) => {
+      console.error(`[perf] acp agent event loop stall: max=${maxMs}ms`);
+    },
+  });
 
-  const stdout = Writable.toWeb(process.stdout) as WritableStream;
-  const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
-
-  // Stdout is used to send messages to the client, so console.log/console.info
-  // messages to stderr so that they don't interfere with ACP.
-  console.log = console.error;
-  console.info = console.error;
-  console.debug = console.error;
-
-  const stream = ndJsonStream(stdout, stdin);
   let agentInstance: QwenAgent | undefined;
-  const connection = new AgentSideConnection((conn) => {
-    acpConnection = conn;
-    agentInstance = new QwenAgent(config, settings, argv, conn);
-    return agentInstance;
-  }, stream);
+  let connection: AgentSideConnection;
+  try {
+    const stdout = Writable.toWeb(process.stdout) as WritableStream;
+    const stdin = Readable.toWeb(process.stdin) as ReadableStream<Uint8Array>;
+
+    // Stdout is used to send messages to the client, so console.log/console.info
+    // messages to stderr so that they don't interfere with ACP.
+    console.log = console.error;
+    console.info = console.error;
+    console.debug = console.error;
+
+    const stream = ndJsonStream(stdout, stdin);
+    connection = new AgentSideConnection((conn) => {
+      acpConnection = conn;
+      agentInstance = new QwenAgent(config, settings, argv, conn);
+      return agentInstance;
+    }, stream);
+  } catch (err) {
+    eventLoopMonitor.dispose();
+    throw err;
+  }
+  registerAcpEventLoopLagGauge(() => eventLoopMonitor.snapshot());
 
   // Both the SIGTERM handler and the IDE-initiated close path need
   // to drain the MCP pool before runExitCleanup. Single helper
@@ -2378,23 +2408,29 @@ export async function runAcpAgent(
     shuttingDown = true;
     debugLogger.debug('[ACP] Shutdown signal received, closing streams');
 
-    // Fire SessionEnd hook for all active sessions (aligned with core path)
-    await fireSessionEndOnce(SessionEndReason.Other);
-    agentInstance?.disposeSessions();
+    try {
+      // Fire SessionEnd hook for all active sessions (aligned with core path)
+      await fireSessionEndOnce(SessionEndReason.Other);
+      agentInstance?.disposeSessions();
 
-    try {
-      process.stdin.destroy();
-    } catch {
-      // stdin may already be closed
+      try {
+        process.stdin.destroy();
+      } catch {
+        // stdin may already be closed
+      }
+      try {
+        process.stdout.destroy();
+      } catch {
+        // stdout may already be closed
+      }
+      // Drain the workspace MCP pool BEFORE runExitCleanup so the
+      // descendant pid sweep can SIGTERM wrapper grandchildren.
+      await drainPoolBeforeExit('signal');
+    } catch (err) {
+      debugLogger.error('[ACP] Shutdown error:', err);
+    } finally {
+      eventLoopMonitor.dispose();
     }
-    try {
-      process.stdout.destroy();
-    } catch {
-      // stdout may already be closed
-    }
-    // Drain the workspace MCP pool BEFORE runExitCleanup so the
-    // descendant pid sweep can SIGTERM wrapper grandchildren.
-    await drainPoolBeforeExit('signal');
     // Clean up child processes (MCP servers, etc.) and force exit.
     // Without this, orphan subprocesses keep the Node.js event loop alive
     // and the CLI process never terminates after the IDE disconnects.
@@ -2409,16 +2445,19 @@ export async function runAcpAgent(
   process.on('SIGTERM', shutdownHandler);
   process.on('SIGINT', shutdownHandler);
 
-  await connection.closed;
-  // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
-  await fireSessionEndOnce(SessionEndReason.PromptInputExit);
-  // Mirror the SIGTERM handler's pool drain on the IDE-initiated
-  // normal close path to avoid leaking shared MCP entries.
-  await drainPoolBeforeExit('ide_close');
-  agentInstance?.disposeSessions();
-
-  process.off('SIGTERM', shutdownHandler);
-  process.off('SIGINT', shutdownHandler);
+  try {
+    await connection.closed;
+    // Connection closed by IDE - fire SessionEnd hook (aligned with core path)
+    await fireSessionEndOnce(SessionEndReason.PromptInputExit);
+    // Mirror the SIGTERM handler's pool drain on the IDE-initiated
+    // normal close path to avoid leaking shared MCP entries.
+    await drainPoolBeforeExit('ide_close');
+    agentInstance?.disposeSessions();
+  } finally {
+    process.off('SIGTERM', shutdownHandler);
+    process.off('SIGINT', shutdownHandler);
+    eventLoopMonitor.dispose();
+  }
 }
 
 export function toStdioServer(server: McpServer): McpServerStdio | undefined {
@@ -2616,11 +2655,36 @@ class QwenAgent implements Agent {
     }
   }
 
-  private async closeStoredSession(sessionId: string): Promise<void> {
+  private async closeStoredSession(
+    sessionId: string,
+    opts?: { requireFlush?: boolean },
+  ): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session) {
       this.mcpPool?.releaseSession(sessionId);
       return;
+    }
+
+    const requireFlush = opts?.requireFlush === true;
+    const flushRecording = async (): Promise<unknown> => {
+      try {
+        await session.getConfig().getChatRecordingService()?.flush();
+        return undefined;
+      } catch (err) {
+        debugLogger.debug(
+          `Session ${sessionId} chat recording flush during close failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return err;
+      }
+    };
+
+    if (requireFlush) {
+      const preCancelFlushError = await flushRecording();
+      if (preCancelFlushError !== undefined) {
+        throw preCancelFlushError;
+      }
     }
 
     try {
@@ -2631,6 +2695,11 @@ class QwenAgent implements Agent {
           err instanceof Error ? err.message : String(err)
         }`,
       );
+    }
+
+    const flushError = await flushRecording();
+    if (flushError !== undefined && requireFlush) {
+      throw flushError;
     }
 
     try {
@@ -2801,11 +2870,19 @@ class QwenAgent implements Agent {
     cwd,
     mcpServers,
   }: NewSessionRequest): Promise<NewSessionResponse> {
-    const config = await this.newSessionConfig(cwd, mcpServers);
+    // Per-request settings: session handlers run concurrently, and
+    // `this.settings` is only a "latest loaded" cache for agent-level
+    // readers. Threading the instance explicitly keeps a slow session
+    // creation from picking up whichever workspace loaded last — Session
+    // persists model changes through this instance, so a mix-up writes to
+    // another workspace's settings.json.
+    const settings = loadSettings(cwd);
+    this.settings = settings;
+    const config = await this.newSessionConfig(cwd, mcpServers, settings);
     await this.ensureAuthenticated(config);
     this.setupFileSystem(config);
 
-    const session = await this.createAndStoreSession(config);
+    const session = await this.createAndStoreSession(config, settings);
     const availableModels = this.buildAvailableModels(config);
     const modesData = this.buildModesData(config);
     const configOptions = this.buildConfigOptions(config);
@@ -2819,8 +2896,12 @@ class QwenAgent implements Agent {
   }
 
   async loadSession(params: LoadSessionRequest): Promise<LoadSessionResponse> {
+    // Load per-request settings BEFORE the existence check: the check must
+    // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
+    // whichever settings a concurrent handler loaded last.
+    const settings = loadSettings(params.cwd);
     const exists = await runWithAcpRuntimeOutputDir(
-      this.settings,
+      settings,
       params.cwd,
       async () => {
         const sessionService = new SessionService(params.cwd);
@@ -2830,6 +2911,10 @@ class QwenAgent implements Agent {
     if (!exists) {
       throw RequestError.resourceNotFound(`session:${params.sessionId}`);
     }
+    // Adopt into the "latest loaded" cache only once the session is
+    // confirmed — a failed probe for a stale id must not repoint
+    // agent-level readers at this request's workspace.
+    this.settings = settings;
 
     const config = await this.newSessionConfig(
       params.cwd,
@@ -2838,6 +2923,7 @@ class QwenAgent implements Agent {
       // future loosening — `newSessionConfig` iterates the list, so
       // a `null`/`undefined` would otherwise throw `TypeError`.
       params.mcpServers ?? [],
+      settings,
       params.sessionId,
       true,
     );
@@ -2845,7 +2931,11 @@ class QwenAgent implements Agent {
     this.setupFileSystem(config);
 
     const sessionData = config.getResumedSessionData();
-    const session = await this.createAndStoreSession(config, sessionData);
+    const session = await this.createAndStoreSession(
+      config,
+      settings,
+      sessionData,
+    );
 
     await this.#restoreWorktreeOnResume(config, session);
 
@@ -2863,8 +2953,10 @@ class QwenAgent implements Agent {
   async unstable_resumeSession(
     params: ResumeSessionRequest,
   ): Promise<ResumeSessionResponse> {
+    // Same per-request settings discipline as `loadSession`.
+    const settings = loadSettings(params.cwd);
     const exists = await runWithAcpRuntimeOutputDir(
-      this.settings,
+      settings,
       params.cwd,
       async () => {
         const sessionService = new SessionService(params.cwd);
@@ -2874,10 +2966,12 @@ class QwenAgent implements Agent {
     if (!exists) {
       throw RequestError.resourceNotFound(`session:${params.sessionId}`);
     }
+    this.settings = settings;
 
     const config = await this.newSessionConfig(
       params.cwd,
       params.mcpServers ?? [],
+      settings,
       params.sessionId,
       true,
     );
@@ -2886,6 +2980,7 @@ class QwenAgent implements Agent {
 
     const session = await this.createAndStoreSession(
       config,
+      settings,
       config.getResumedSessionData(),
       { replayHistory: false },
     );
@@ -3862,27 +3957,13 @@ class QwenAgent implements Agent {
     }
 
     try {
+      const disabled = config.getDisabledSkillNames();
       const skills = await skillManager.listSkills();
       return {
         v: STATUS_SCHEMA_VERSION,
         workspaceCwd: this.workspaceCwd(config),
         initialized: true,
-        skills: skills.map((skill): ServeWorkspaceSkillStatus => {
-          const modelInvocable = skill.disableModelInvocation !== true;
-          return {
-            kind: 'skill',
-            status: modelInvocable ? 'ok' : 'disabled',
-            name: skill.name,
-            description: skill.description,
-            level: skill.level,
-            modelInvocable,
-            ...(skill.argumentHint ? { argumentHint: skill.argumentHint } : {}),
-            ...(skill.model ? { model: skill.model } : {}),
-            ...(skill.extensionName
-              ? { extensionName: skill.extensionName }
-              : {}),
-          };
-        }),
+        skills: skills.map((skill) => mapSkillConfigToStatus(skill, disabled)),
       };
     } catch (error) {
       return {
@@ -5469,6 +5550,127 @@ class QwenAgent implements Agent {
           );
         }
       }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMemoryForget: {
+        const query = params['query'];
+        if (typeof query !== 'string' || !query.trim()) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing query',
+          );
+        }
+        const trimmedQuery = query.trim();
+        if (
+          Buffer.byteLength(trimmedQuery, 'utf8') > MAX_REMEMBER_CONTENT_BYTES
+        ) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Query exceeds maximum size',
+          );
+        }
+        if (!this.config.isManagedMemoryAvailable()) {
+          throw new RequestError(
+            -32009,
+            'Managed memory is unavailable for this daemon workspace',
+            { errorKind: 'managed_memory_unavailable' },
+          );
+        }
+
+        const childSignal = AbortSignal.timeout(
+          WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
+        );
+        try {
+          const projectRoot = this.config.getProjectRoot();
+          const hiddenConfig = createHiddenWorkspaceMemoryConfig(this.config);
+          const result = await this.config
+            .getMemoryManager()
+            .forget(projectRoot, trimmedQuery, {
+              config: hiddenConfig,
+              abortSignal: childSignal,
+            });
+          return {
+            summary:
+              result.systemMessage ??
+              formatWorkspaceMemoryForgetSummary(result.removedEntries.length),
+            removedEntries: result.removedEntries,
+            touchedTopics: result.touchedTopics,
+          } as unknown as Record<string, unknown>;
+        } catch (err) {
+          if (err instanceof RequestError) {
+            throw err;
+          }
+          if (childSignal.aborted) {
+            throw new RequestError(
+              -32099,
+              'Workspace memory forget timed out',
+              {
+                errorKind: 'forget_timeout',
+              },
+            );
+          }
+          const code = extractRememberErrorCode(err, 'forget_failed');
+          if (code === 'managed_memory_unavailable') {
+            throw new RequestError(
+              -32009,
+              'Managed memory is unavailable for this daemon workspace',
+              { errorKind: 'managed_memory_unavailable' },
+            );
+          }
+          throw new RequestError(-32099, 'Workspace memory forget failed', {
+            errorKind: code,
+          });
+        }
+      }
+      case SERVE_CONTROL_EXT_METHODS.workspaceMemoryDream: {
+        if (!this.config.isManagedMemoryAvailable()) {
+          throw new RequestError(
+            -32009,
+            'Managed memory is unavailable for this daemon workspace',
+            { errorKind: 'managed_memory_unavailable' },
+          );
+        }
+
+        const childSignal = AbortSignal.timeout(
+          WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS,
+        );
+        try {
+          const result = await runManagedAutoMemoryDream(
+            this.config.getProjectRoot(),
+            new Date(),
+            createHiddenWorkspaceMemoryConfig(this.config),
+            childSignal,
+            {
+              trigger: 'manual',
+              recordMetadata: true,
+              suppressChatRecording: true,
+            },
+          );
+          return {
+            summary: result.systemMessage,
+            touchedTopics: result.touchedTopics,
+            dedupedEntries: result.dedupedEntries,
+          } as unknown as Record<string, unknown>;
+        } catch (err) {
+          if (err instanceof RequestError) {
+            throw err;
+          }
+          if (childSignal.aborted) {
+            throw new RequestError(-32099, 'Workspace memory dream timed out', {
+              errorKind: 'dream_timeout',
+            });
+          }
+          const code = extractRememberErrorCode(err, 'dream_failed');
+          if (code === 'managed_memory_unavailable') {
+            throw new RequestError(
+              -32009,
+              'Managed memory is unavailable for this daemon workspace',
+              { errorKind: 'managed_memory_unavailable' },
+            );
+          }
+          throw new RequestError(-32099, 'Workspace memory dream failed', {
+            errorKind: code,
+          });
+        }
+      }
       case SERVE_CONTROL_EXT_METHODS.workspaceMcpRestart: {
         // Single-server MCP restart with budget pre-check. Soft skips
         // return structured 200 responses; hard errors propagate as
@@ -5874,7 +6076,9 @@ class QwenAgent implements Agent {
             'Invalid or missing sessionId',
           );
         }
-        await this.closeStoredSession(sessionId);
+        await this.closeStoredSession(sessionId, {
+          requireFlush: params['requireFlush'] === true,
+        });
         return { sessionId, closed: true };
       }
       case SERVE_CONTROL_EXT_METHODS.sessionCd: {
@@ -7496,10 +7700,10 @@ class QwenAgent implements Agent {
   private async newSessionConfig(
     cwd: string,
     mcpServers: McpServer[],
+    settings: LoadedSettings,
     sessionId?: string,
     resume?: boolean,
   ): Promise<Config> {
-    this.settings = loadSettings(cwd);
     // ACP/IDE-injected servers are session-level: they must outrank a project
     // `.mcp.json` and stay un-gated. Collect them separately and pass them as
     // `sessionMcpServers` (top precedence tier) rather than merging into
@@ -7560,16 +7764,8 @@ class QwenAgent implements Agent {
       }
     }
 
-    // CDP tunnel (Plan C, #5626): auto-register chrome-devtools-mcp when the
-    // daemon forwarded the tunnel flag, so the agent can drive the real browser.
-    const cdpTunnelMcp = buildCdpTunnelMcpServer();
-    // Don't clobber a `chrome-devtools` server the user configured themselves —
-    // their explicit session config wins over the tunnel auto-wire.
-    if (cdpTunnelMcp && !sessionMcpServers['chrome-devtools']) {
-      sessionMcpServers['chrome-devtools'] = cdpTunnelMcp;
-    }
+    const mergedSettings = settings.merged;
 
-    const settings = this.settings.merged;
     const argvForSession = {
       ...this.argv,
       ...(resume ? { resume: sessionId } : { sessionId }),
@@ -7577,7 +7773,7 @@ class QwenAgent implements Agent {
     };
 
     const config = await loadCliConfig(
-      settings,
+      mergedSettings,
       argvForSession,
       cwd,
       // ACP sessions do not provide an extension override. Passing [] is a
@@ -7586,16 +7782,16 @@ class QwenAgent implements Agent {
       undefined,
       // Pass separated hooks for proper source attribution
       {
-        userHooks: this.settings.getUserHooks(),
-        projectHooks: this.settings.getProjectHooks(),
+        userHooks: settings.getUserHooks(),
+        projectHooks: settings.getProjectHooks(),
       },
-      // CRITICAL: close over `this.settings` (LoadedSettings instance), NOT
-      // over the local `settings` snapshot built above. `LoadedSettings.
-      // setValue` replaces `_merged`, so a closure over the snapshot would
-      // never see workspace toggles applied during the session. ACP/Zed
-      // sessions otherwise leak persisted disabled skills into the first
-      // <available_skills> at cold start.
-      buildDisabledSkillNamesProvider(this.settings),
+      // CRITICAL: close over the per-request `settings` (LoadedSettings
+      // instance), NOT over the `mergedSettings` snapshot built above.
+      // `LoadedSettings.setValue` replaces `_merged`, so a closure over the
+      // snapshot would never see workspace toggles applied during the
+      // session. ACP/Zed sessions otherwise leak persisted disabled skills
+      // into the first <available_skills> at cold start.
+      buildDisabledSkillNamesProvider(settings),
       sessionMcpServers,
     );
     // ACP sessions run with piped stdio (non-TTY), so the default
@@ -7678,16 +7874,23 @@ class QwenAgent implements Agent {
       // (the daemon only adds SDK-type runtime servers for client MCP).
       sendSdkMcpMessage: this.buildClientMcpSender(),
     });
-    // Same reasoning as the top-level runAcpAgent path: ACP feeds session
-    // messages to the model immediately, so we cannot return a Config whose
-    // MCP discovery is still in flight.
-    await config.waitForMcpReady();
-    // Surface MCP failures to stderr — mirrors `runAcpAgent` (lines 95-107)
-    // and the other non-interactive entry points (`gemini.tsx`,
-    // `session.ts`). Without this, per-session ACP configs that lose MCP
-    // servers fall back to built-in-tools-only with no user-visible
-    // indication. Defensive against tests that pass a stubbed Config
-    // without `getFailedMcpServerNames`.
+    // ACP sessions served to WebUI clients are interactive: MCP tools can
+    // arrive progressively, but session creation/loading must not wait for a
+    // slow or wedged server discovery.
+    void this.surfaceMcpFailuresWhenReady(config);
+    return config;
+  }
+
+  private async surfaceMcpFailuresWhenReady(config: Config): Promise<void> {
+    try {
+      await config.waitForMcpReady();
+    } catch (err) {
+      debugLogger.error(
+        `MCP discovery readiness failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      return;
+    }
+
     const failedMcpServers =
       typeof config.getFailedMcpServerNames === 'function'
         ? config.getFailedMcpServerNames()
@@ -7698,7 +7901,6 @@ class QwenAgent implements Agent {
           `Continuing with built-in tools and any servers that did connect.\n`,
       );
     }
-    return config;
   }
 
   private async ensureAuthenticated(config: Config): Promise<void> {
@@ -7750,6 +7952,7 @@ class QwenAgent implements Agent {
 
   private async createAndStoreSession(
     config: Config,
+    settings: LoadedSettings,
     sessionData?: ResumedSessionData,
     options: { replayHistory?: boolean } = {},
   ): Promise<Session> {
@@ -7763,12 +7966,7 @@ class QwenAgent implements Agent {
 
     this.sessions.get(sessionId)?.dispose();
 
-    const session = new Session(
-      sessionId,
-      config,
-      this.connection,
-      this.settings,
-    );
+    const session = new Session(sessionId, config, this.connection, settings);
     this.sessions.set(sessionId, session);
 
     setTimeout(async () => {
@@ -7944,75 +8142,4 @@ function diffSettingsKeys(
     }
   }
   return changed;
-}
-
-/**
- * CDP tunnel auto-wiring (Plan C, issue #5626).
- *
- * Builds the `chrome-devtools` session MCP server entry when the daemon runs
- * with the CDP-tunnel flag. The daemon forwards `QWEN_SERVE_CDP_TUNNEL_OVER_WS`
- * + `QWEN_SERVE_CDP_TUNNEL_PORT` into this child's env; we point the patched
- * chrome-devtools-mcp at the daemon's `/cdp` endpoint.
- *
- * Returns `undefined` when the flag is off, the port is missing/invalid, or
- * chrome-devtools-mcp can't be resolved. `trust` is left unset so the tools
- * default to 'ask' — no silent auto-approval of browser control.
- */
-export function buildCdpTunnelMcpServer(): MCPServerConfig | undefined {
-  if (process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] !== '1') return undefined;
-  // Auth-gated `/cdp`: the daemon requires a bearer token on the tunnel, but
-  // this ACP child can't inherit QWEN_SERVER_TOKEN (the spawn path scrubs it)
-  // and chrome-devtools-mcp is launched with `--wsEndpoint` only — it has no way
-  // to send `--wsHeaders` auth. Auto-registering the browser tools here would
-  // surface tools that can't connect, so skip with a clear diagnostic instead.
-  if (process.env['QWEN_SERVE_CDP_TUNNEL_AUTH_REQUIRED'] === '1') {
-    process.stderr.write(
-      'qwen serve: browser tools (chrome-devtools-mcp) disabled — the /cdp ' +
-        'tunnel requires bearer auth, which is not yet supported for the ' +
-        'auto-registered browser MCP server.\n',
-    );
-    return undefined;
-  }
-  const port = Number(process.env['QWEN_SERVE_CDP_TUNNEL_PORT']);
-  if (!Number.isInteger(port) || port <= 0) {
-    // Don't disable the browser tools silently — the most common cause is an
-    // ephemeral `--port 0` daemon, whose real port is bound too late to thread
-    // into this child's (frozen) env. Tell the operator how to enable them.
-    process.stderr.write(
-      'qwen serve: browser tools (chrome-devtools-mcp) disabled — no valid ' +
-        `/cdp tunnel port (QWEN_SERVE_CDP_TUNNEL_PORT=${
-          process.env['QWEN_SERVE_CDP_TUNNEL_PORT'] ?? '<unset>'
-        }). Start the daemon with a fixed --port (ephemeral --port 0 is not ` +
-        'supported for the CDP tunnel).\n',
-    );
-    return undefined;
-  }
-  try {
-    const requireFromHere = createRequire(import.meta.url);
-    const pkgJsonPath = requireFromHere.resolve(
-      'chrome-devtools-mcp/package.json',
-    );
-    const pkg = requireFromHere('chrome-devtools-mcp/package.json') as {
-      bin?: string | Record<string, string>;
-    };
-    const binRel =
-      typeof pkg.bin === 'string' ? pkg.bin : Object.values(pkg.bin ?? {})[0];
-    if (!binRel) return undefined;
-    const pkgDir = path.dirname(pkgJsonPath);
-    const binPath = path.resolve(pkgDir, binRel);
-    // Containment: refuse to execute a bin path that escapes the package dir
-    // (a malformed/hostile `bin` field with `../` segments).
-    const binRelToPkg = path.relative(pkgDir, binPath);
-    if (binRelToPkg.startsWith('..') || path.isAbsolute(binRelToPkg)) {
-      return undefined;
-    }
-    return new MCPServerConfig(process.execPath, [
-      binPath,
-      '--wsEndpoint',
-      `ws://127.0.0.1:${port}/cdp`,
-    ]);
-  } catch {
-    // chrome-devtools-mcp not installed in this build — skip auto-wiring.
-    return undefined;
-  }
 }

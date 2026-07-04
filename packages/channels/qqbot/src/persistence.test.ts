@@ -70,6 +70,21 @@ vi.mock('@qwen-code/channel-base', () => ({
     }
   },
   getGlobalQwenDir: () => '/tmp/test-qwen',
+  sanitizeLogText: (text: string, maxLen: number): string => {
+    const sanitized = Array.from(text, (c) => {
+      const cp = c.codePointAt(0)!;
+      if (cp === 0x1b) return ' '; // ESC
+      if (cp === 0x9b) return ' '; // C1
+      if (cp === 0x85 || cp === 0x2028 || cp === 0x2029) return ' '; // line/paragraph sep
+      if (cp === 0x202e) return ' '; // RLO
+      if (cp === 0x0a || cp === 0x0d) return '\n';
+      if (cp < 0x20) return '';
+      return c;
+    }).join('');
+    return sanitized.length > maxLen
+      ? sanitized.slice(0, maxLen) + '...'
+      : sanitized;
+  },
 }));
 
 const { QQChannel } = await import('./QQChannel.js');
@@ -254,7 +269,7 @@ describe('restoreQQState', () => {
 
     const replyMsgId = (ch as unknown as { replyMsgId: Map<string, string> })
       .replyMsgId;
-    expect(replyMsgId.get('u1')).toBe('msg_abc');
+    expect(replyMsgId.get('u1')?.msgId).toBe('msg_abc');
   });
 
   it('restores msgSeqMap from disk', () => {
@@ -298,8 +313,8 @@ describe('restoreQQState', () => {
 
     const replyMsgId = (ch as unknown as { replyMsgId: Map<string, string> })
       .replyMsgId;
-    expect(replyMsgId.get('u1')).toBe('msg_old');
-    expect(replyMsgId.get('u2')).toBe('msg_new');
+    expect(replyMsgId.get('u1')?.msgId).toBe('msg_old');
+    expect(replyMsgId.get('u2')?.msgId).toBe('msg_new');
   });
 
   it('does not crash on invalid JSON', () => {
@@ -358,7 +373,7 @@ describe('restoreQQState', () => {
     const replyMsgId = (ch as unknown as { replyMsgId: Map<string, string> })
       .replyMsgId;
     const entry = replyMsgId.get('u1');
-    expect(entry).toBe('msg_old_fmt');
+    expect(entry?.msgId).toBe('msg_old_fmt');
   });
 });
 

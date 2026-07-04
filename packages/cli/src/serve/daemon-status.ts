@@ -94,6 +94,7 @@ export interface BuildDaemonStatusOptions {
   sessionShellCommandEnabled: boolean;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getPerfSnapshot?: () => DaemonPerfSnapshot;
 }
 
 interface DaemonStatusSection<T> {
@@ -168,7 +169,32 @@ interface DaemonStatusRuntime {
     enabled: boolean;
     rejectedSinceStart: Record<RateLimitTier, number>;
   };
+  perf?: DaemonPerfSnapshot;
+  activity: {
+    activePrompts: number;
+    lastActivityAt: string | null;
+    idleSinceMs: number | null;
+  };
   process: NodeJS.MemoryUsage;
+}
+
+export interface DaemonPipeStatsSnapshot {
+  count: number;
+  totalBytes: number;
+  maxBytes: number;
+}
+
+export interface DaemonPerfSnapshot {
+  eventLoop: {
+    meanMs: number;
+    p50Ms: number;
+    p99Ms: number;
+    maxMs: number;
+  };
+  pipe: {
+    inbound: DaemonPipeStatsSnapshot;
+    outbound: DaemonPipeStatsSnapshot;
+  };
 }
 
 export interface DaemonStatusResponse {
@@ -218,6 +244,7 @@ export async function buildDaemonStatusResponse(
   input: BuildDaemonStatusOptions,
 ): Promise<DaemonStatusResponse> {
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
+  const lastActivity = input.bridge.lastActivityAt ?? null;
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
   const channelWorker = input.getChannelWorkerSnapshot?.() ?? {
@@ -313,6 +340,13 @@ export async function buildDaemonStatusResponse(
       rateLimit: {
         enabled: input.opts.rateLimit === true,
         rejectedSinceStart: rateLimitHits,
+      },
+      ...(input.getPerfSnapshot ? { perf: input.getPerfSnapshot() } : {}),
+      activity: {
+        activePrompts: input.bridge.activePromptCount ?? 0,
+        lastActivityAt:
+          lastActivity !== null ? new Date(lastActivity).toISOString() : null,
+        idleSinceMs: lastActivity !== null ? Date.now() - lastActivity : null,
       },
       process: process.memoryUsage(),
     },
@@ -514,13 +548,33 @@ function pushRuntimeIssues(
         ? `code=${channelWorker.exitCode ?? 'null'}`
         : undefined,
       channelWorker.signal ? `signal=${channelWorker.signal}` : undefined,
+      channelWorker.restartCount !== undefined
+        ? `restarts=${channelWorker.restartCount}`
+        : undefined,
+      channelWorker.lastExitAt
+        ? `lastExitAt=${channelWorker.lastExitAt}`
+        : undefined,
+      channelWorker.lastRestartAt
+        ? `lastRestartAt=${channelWorker.lastRestartAt}`
+        : undefined,
+      channelWorker.nextRestartAt
+        ? `nextRestartAt=${channelWorker.nextRestartAt}`
+        : undefined,
+      channelWorker.lastHeartbeatAt
+        ? `lastHeartbeatAt=${channelWorker.lastHeartbeatAt}`
+        : undefined,
+      channelWorker.staleHeartbeatAt
+        ? `staleHeartbeatAt=${channelWorker.staleHeartbeatAt}`
+        : undefined,
     ].filter(Boolean);
     const details =
       detailParts.length > 0 ? ` (${detailParts.join(', ')})` : '';
     const error = channelWorker.error ? `: ${channelWorker.error}` : '';
+    const isPermanentFailure =
+      channelWorker.state === 'failed' && !channelWorker.nextRestartAt;
     issues.push({
       code: 'channel_worker_exited',
-      severity: 'warning',
+      severity: isPermanentFailure ? 'error' : 'warning',
       message: `Channel worker is ${channelWorker.state}${details}${error}.`,
       section: 'runtime.channelWorker',
     });
@@ -627,7 +681,33 @@ function summarizeStatusData(data: unknown): SectionSummary {
     }
   }
 
+  summarizeMcpServers(data, summary);
+
   return summary;
+}
+
+function summarizeMcpServers(
+  data: StatusRecord,
+  summary: SectionSummary,
+): void {
+  const servers = data['servers'];
+  if (!Array.isArray(servers)) return;
+  let connected = 0;
+  let errored = 0;
+  let disabled = 0;
+  for (const server of servers) {
+    if (!isRecord(server)) continue;
+    if (server['disabled'] === true) {
+      disabled++;
+    } else if (server['status'] === 'error') {
+      errored++;
+    } else if (server['mcpStatus'] === 'connected') {
+      connected++;
+    }
+  }
+  summary['serversConnected'] = connected;
+  summary['serversErrored'] = errored;
+  summary['serversDisabled'] = disabled;
 }
 
 function collectStatuses(data: unknown): string[] {

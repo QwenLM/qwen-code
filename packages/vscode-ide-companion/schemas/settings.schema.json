@@ -567,6 +567,16 @@
           "description": "Base URL paired with model.name; disambiguates which provider to use when multiple modelProviders entries share the same model id.",
           "type": "string"
         },
+        "reasoningEffort": {
+          "description": "How hard reasoning-capable models think, applied across all providers. Set with /effort. Each provider maps and clamps this to what the active model supports (e.g. Gemini caps at \"high\"; Anthropic clamps tiers a model lacks). Leave unset to use the model/provider default. Options: low, medium, high, xhigh, max",
+          "enum": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ]
+        },
         "maxSessionTurns": {
           "description": "Maximum number of user/model/tool turns to keep in a session. -1 means unlimited.",
           "type": "number",
@@ -581,6 +591,11 @@
           "description": "Cumulative tool-call budget for a run (counts every executed tool, success or failure; structured_output under --json-schema is exempt). -1 means unlimited; 0 means \"no tool calls allowed\" (first call aborts). Capped at 1,000,000 to catch typos. Overridable via --max-tool-calls.",
           "type": "number",
           "default": -1
+        },
+        "maxSubagentDepth": {
+          "description": "Maximum sub-agent nesting depth (1-based levels: a top-level sub-agent is level 1). 1 keeps sub-agents available but disables nesting; the default 5 allows nesting up to five levels deep. Values clamp to the range 1-100; non-finite values fall back to the default. Teammates, forks, and workflow-spawned agents never nest regardless of this setting. Overridable via --max-subagent-depth.",
+          "type": "number",
+          "default": 5
         },
         "chatCompression": {
           "description": "Chat compression settings.",
@@ -602,9 +617,14 @@
           "default": false
         },
         "skipLoopDetection": {
-          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap) still runs regardless of this setting.",
+          "description": "Skip the opt-in streaming loop-detection heuristics (content/thought repetition, read-file and action stagnation, global-duplicate and alternating tool-call patterns). Defaults to true to avoid false-positive interruptions; set to false to re-enable them as an unattended-run guardrail. A minimal always-on guard (consecutive identical tool calls plus a per-turn tool-call cap, see model.maxToolCallsPerTurn) still runs regardless of this setting.",
           "type": "boolean",
           "default": true
+        },
+        "maxToolCallsPerTurn": {
+          "description": "Hard cap on tool calls within a single turn (one model turn plus its tool-result continuations; blocking Stop-hook continuations such as /goal iterations start a fresh budget). An always-on circuit breaker against runaway turns, independent of model.skipLoopDetection. Set to 0 or a negative value to disable the cap.",
+          "type": "number",
+          "default": 100
         },
         "skipStartupContext": {
           "description": "Avoid sending the workspace startup context at the beginning of each session.",
@@ -936,6 +956,11 @@
               "items": {
                 "type": "string"
               }
+            },
+            "classifyAllShell": {
+              "description": "Route ALL shell commands through the auto-mode classifier, including read-only commands that would otherwise be auto-approved. Provides defense-in-depth for production environments.",
+              "type": "boolean",
+              "default": false
             }
           }
         }
@@ -1136,6 +1161,13 @@
           "items": {
             "type": "string"
           }
+        },
+        "toolIdleTimeoutMs": {
+          "description": "Idle timeout in milliseconds for MCP tool calls. If the MCP server does not produce any response or progress update within this time, the call is aborted. Default: 300000 (5 minutes). Can be overridden via QWEN_CODE_MCP_TOOL_IDLE_TIMEOUT_MS environment variable.",
+          "type": "number",
+          "default": 300000,
+          "minimum": 10000,
+          "maximum": 3600000
         }
       }
     },
@@ -2741,13 +2773,19 @@
           "type": "boolean",
           "default": true
         },
+        "cronRecurringMaxAgeDays": {
+          "type": "number",
+          "minimum": 0,
+          "default": 7,
+          "description": "Days a recurring cron/loop job lives before auto-expiring (it fires one final time, then is deleted). Set to 0 to disable expiry so jobs run until deleted — useful for long-running daemon deployments. Can be overridden via the QWEN_CODE_CRON_MAX_AGE_DAYS environment variable."
+        },
         "agentTeam": {
           "description": "Enable agent team collaboration tools (experimental). When enabled, the model can create agent teams and coordinate work using team_create, team_delete, send_message, task_create, task_update, and task_list tools. Can also be enabled via QWEN_CODE_ENABLE_AGENT_TEAM=1 environment variable.",
           "type": "boolean",
           "default": false
         },
         "artifact": {
-          "description": "Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. Can also be enabled via QWEN_CODE_ENABLE_ARTIFACT=1, or hard-disabled via QWEN_CODE_DISABLE_ARTIFACT=1.",
+          "description": "Enable the Artifact tool (experimental). When enabled, the model can publish a self-contained HTML page as an interactive Artifact and open it in the browser. Interactive, non-SDK sessions only. QWEN_CODE_ENABLE_ARTIFACT=1 enables the metadata-only record_artifact tool for non-SDK daemon sessions, and also enables the Artifact tool in interactive sessions. QWEN_CODE_DISABLE_ARTIFACT=1 hard-disables both.",
           "type": "boolean",
           "default": false
         },

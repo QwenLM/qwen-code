@@ -119,6 +119,7 @@ import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
+import { useEffortCommand } from './hooks/use-effort-command.js';
 import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
@@ -874,6 +875,12 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useGeminiStream).
   const isIdleRef = useRef(true);
+  // Live content-area height, kept in a ref so useGeminiStream (called above the
+  // point where availableTerminalHeight is computed) can read the current value
+  // when bounding the pending item's rendered height. terminalWidthRef pairs
+  // with it so the commit loop reads width and height consistently (both live).
+  const availableTerminalHeightRef = useRef(0);
+  const terminalWidthRef = useRef(0);
   const updateHandlerRef = useRef<{
     cleanup: () => void;
     flush: () => void;
@@ -1019,6 +1026,9 @@ export const AppContainer = (props: AppContainerProps) => {
     openApprovalModeDialog,
     handleApprovalModeSelect,
   } = useApprovalModeCommand(settings, config);
+
+  const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
+    useEffortCommand(settings, config, historyManager.addItem);
 
   const auth = useAuthCommand(
     settings,
@@ -1320,6 +1330,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
+      openEffortDialog,
       quit: (messages: HistoryItem[]) => {
         setQuittingMessages(messages);
         // Signal the client to skip background memory tasks (extract, dream,
@@ -1363,6 +1374,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openTrustDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
+      openEffortDialog,
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
@@ -1658,6 +1670,8 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalHeight,
     midTurnDrainRef,
     logger,
+    availableTerminalHeightRef,
+    terminalWidthRef,
   );
 
   // Now that streamingState is available, keep isIdleRef in sync and
@@ -2642,6 +2656,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isHooksDialogOpen ||
     isStatsDialogOpen ||
     isApprovalModeDialogOpen ||
+    isEffortDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
     isHelpDialogOpen ||
@@ -2725,6 +2740,9 @@ export const AppContainer = (props: AppContainerProps) => {
       mainContentHeightReservation -
       tabBarHeight,
   );
+  // Expose to useGeminiStream (called earlier) for rendered-height-aware commit.
+  availableTerminalHeightRef.current = availableTerminalHeight;
+  terminalWidthRef.current = terminalWidth;
 
   config.setShellExecutionConfig({
     terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
@@ -3159,6 +3177,8 @@ export const AppContainer = (props: AppContainerProps) => {
     handleThemeSelect,
     isApprovalModeDialogOpen,
     handleApprovalModeSelect,
+    isEffortDialogOpen,
+    handleEffortSelect,
     isAuthDialogOpen,
     closeAuthDialog,
     pendingAuthType,
@@ -3671,6 +3691,7 @@ export const AppContainer = (props: AppContainerProps) => {
       activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
+      isEffortDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -3810,6 +3831,7 @@ export const AppContainer = (props: AppContainerProps) => {
       activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
+      isEffortDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -3940,6 +3962,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
+      handleEffortSelect,
       auth: authActions,
       handleEditorSelect,
       exitEditorDialog,
@@ -4030,6 +4053,7 @@ export const AppContainer = (props: AppContainerProps) => {
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
+      handleEffortSelect,
       authActions,
       handleEditorSelect,
       exitEditorDialog,

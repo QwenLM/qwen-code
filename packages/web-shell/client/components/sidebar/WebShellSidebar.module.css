@@ -331,9 +331,9 @@
 
 .sessionMetaSlot {
   position: relative;
-  width: 34px;
+  width: 82px;
   height: 30px;
-  flex: 0 0 auto;
+  flex: 0 0 82px;
   margin-left: auto;
   display: flex;
   align-items: center;
@@ -578,6 +578,16 @@
   flex: 0 0 auto;
 }
 
+.version {
+  flex: 0 0 auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  user-select: text;
+}
+
 .collapsed .newChatButton,
 .collapsed .footerButton,
 .collapsed .projectRow {
@@ -626,6 +636,189 @@
 
 .collapsed .resizeHandle {
   display: none;
+}
+
+.sessionActionButtonActive,
+.sessionActionButtonActive:hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+.menuActive .sessionActions {
+  opacity: 1;
+}
+
+.actionMenu {
+  position: fixed;
+  z-index: 1100;
+  min-width: 168px;
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--popover);
+  color: var(--popover-foreground);
+  box-shadow:
+    0 2px 4px -2px rgb(0 0 0 / 10%),
+    0 8px 16px -4px rgb(0 0 0 / 18%);
+}
+
+.actionMenuItem {
+  appearance: none;
+  width: 100%;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--popover-foreground);
+  font: inherit;
+  font-size: 13px;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.actionMenuItem:hover:not(:disabled),
+.actionMenuItem:focus-visible:not(:disabled) {
+  background: var(--accent);
+  color: var(--accent-foreground);
+  outline: none;
+}
+
+.actionMenuItem:disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+}
+
+.actionMenuItemDanger:not(:disabled) {
+  color: var(--error-color);
+}
+
+.actionMenuItemDanger:hover:not(:disabled),
+.actionMenuItemDanger:focus-visible:not(:disabled) {
+  background: var(--error-bg);
+  color: var(--error-color);
+}
+
+.actionMenuIcon {
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.actionMenuIcon svg {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.actionMenuLabel {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.archivedSection {
+  display: flex;
+  flex-direction: column;
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid var(--sidebar-border);
+}
+
+.archivedHeader {
+  appearance: none;
+  width: 100%;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--muted-foreground);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 20px;
+  cursor: pointer;
+}
+
+.archivedHeader:hover,
+.archivedHeader:focus-visible {
+  background: var(--sidebar-accent);
+  color: var(--sidebar-accent-foreground);
+  outline: none;
+}
+
+.archivedChevron {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.archivedChevron svg {
+  width: 14px;
+  height: 14px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.8;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.archivedTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: left;
+}
+
+.archivedCount {
+  flex: 0 0 auto;
+  min-width: 20px;
+  height: 18px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: var(--secondary);
+  color: var(--secondary-foreground);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.archivedList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+}
+
+.archivedRow {
+  cursor: default;
 }
 
 @media (max-width: 760px) {

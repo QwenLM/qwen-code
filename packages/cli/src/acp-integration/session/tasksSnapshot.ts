@@ -53,6 +53,11 @@ function serializeAgentTask(
     ...optionalField('endTime', entry.endTime),
     ...optionalField('subagentType', entry.subagentType),
     isBackgrounded: entry.isBackgrounded,
+    // Nested-agent lineage for client-side tree rendering. AgentTask uses
+    // `null` parentAgentId for top-level launches — normalize to absent.
+    ...optionalField('parentAgentId', entry.parentAgentId ?? undefined),
+    ...optionalField('parentName', entry.parentName),
+    ...optionalField('depth', entry.depth),
     ...optionalField('error', entry.error),
     ...optionalField('resumeBlockedReason', entry.resumeBlockedReason),
     ...optionalField('stats', entry.stats),

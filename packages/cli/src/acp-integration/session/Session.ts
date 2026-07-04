@@ -31,6 +31,8 @@ import type {
   ToolCallRequestInfo,
   ToolCallResponseInfo,
   LoopTickResult,
+  ToolArtifact,
+  VisionBridgeResult,
 } from '@qwen-code/qwen-code-core';
 import {
   AuthType,
@@ -94,6 +96,7 @@ import {
   recordAllow,
   recordFallbackApprove,
   shouldFallback,
+  shouldClassifyAllShellForAutoMode,
   shouldForceAutoModeReviewForAllow,
   shouldFirePermissionDeniedForAutoMode,
   shouldRunAutoModeForCall,
@@ -117,6 +120,11 @@ import {
   getProviderToolCallId,
   parsePositiveIntegerEnv,
   DEFAULT_TOKEN_LIMIT,
+  hasImageParts,
+  normalizeParts,
+  runVisionBridge,
+  shouldRunVisionBridge,
+  splitImageParts,
 } from '@qwen-code/qwen-code-core';
 import { NOT_CURRENTLY_GENERATING_CANCEL_MESSAGE } from '@qwen-code/acp-bridge/bridgeErrors';
 // Single source of truth shared with the daemon-side answerer (BridgeClient),
@@ -164,12 +172,18 @@ import {
 import { parseAcpModelOption } from '../../utils/acpModelUtils.js';
 import { classifyApiError } from '../../ui/hooks/useGeminiStream.js';
 import { getPersistScopeForModelSelection } from '../../config/modelProvidersScope.js';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import {
   buildExtensionMentionContext,
   EXTENSION_CONTEXT_BUDGET,
   matchExtensionByRef,
   parseExtensionRef,
 } from '../../utils/extension-mention.js';
+import {
+  buildMcpServerContextText,
+  matchMcpServerByRef,
+  parseMcpServerRef,
+} from '../../utils/mcp-server-mention.js';
 
 // Import modular session components
 import type {
@@ -221,7 +235,6 @@ type DaemonToolLoopState = {
   loopDetected: boolean;
 };
 
-const DAEMON_TURN_TOOL_CALL_CAP = 100;
 const DAEMON_INVALID_TOOL_PARAMS_THRESHOLD = 3;
 
 const PERMISSION_CANCEL_SKIP_MESSAGE =
@@ -263,7 +276,12 @@ function recordDaemonToolCalls(
   if (!loopState || loopState.loopDetected)
     return loopState?.loopDetected ?? false;
   loopState.totalToolCalls += count;
-  if (loopState.totalToolCalls <= DAEMON_TURN_TOOL_CALL_CAP) return false;
+  // Same per-turn cap as the core LoopDetectionService (getMaxToolCallsPerTurn
+  // resolves model.maxToolCallsPerTurn to an effective value, Infinity when
+  // disabled). Unlike core there is no in-session disable check — that flag is
+  // only set by the interactive loop-detection dialog, which has no ACP
+  // equivalent.
+  if (loopState.totalToolCalls <= config.getMaxToolCallsPerTurn()) return false;
   return recordDaemonLoopDetected(
     config,
     promptId,
@@ -547,6 +565,24 @@ interface CronQueueItem {
 
 const MAX_NOTIFICATION_QUEUE = 20;
 
+export function resolveHomeLoopResolverRoots({
+  homeQwenDir = Storage.getGlobalQwenDir(),
+  homeDir = os.homedir(),
+  qwenHome = process.env['QWEN_HOME'],
+}: {
+  homeQwenDir?: string;
+  homeDir?: string;
+  qwenHome?: string;
+} = {}): { homeConfineRoot: string; homeQwenDir: string } {
+  // qwenHome truthy → QWEN_HOME is itself the global dir, so confine within
+  // homeQwenDir; the homeDir param is only consulted when qwenHome is unset.
+  return {
+    homeConfineRoot:
+      (qwenHome ? homeQwenDir : homeDir) || path.dirname(homeQwenDir),
+    homeQwenDir,
+  };
+}
+
 export function computeInitialTurnFromHistory(
   records: ChatRecord[],
   sessionId: string,
@@ -661,6 +697,20 @@ function collectExtensionMentionRefs(
   }
 }
 
+function collectMcpServerMentionRefs(
+  text: string,
+  mentions: Map<string, string>,
+): void {
+  for (const match of text.matchAll(AT_TOKEN_RE)) {
+    const pathName = match[1];
+    if (!pathName) continue;
+    const ref = parseMcpServerRef(pathName);
+    if (ref) {
+      mentions.set(ref.name.toLowerCase(), ref.name);
+    }
+  }
+}
+
 export interface AvailableCommandsSnapshot {
   availableCommands: AvailableCommand[];
   availableSkills?: string[];
@@ -685,35 +735,43 @@ export async function buildAvailableCommandsSnapshot(
     'acp',
     settings,
   );
+  const disabledSkillNames = config.getDisabledSkillNames();
 
-  const availableCommands: AvailableCommand[] = slashCommands.map((cmd) => {
-    const acceptsInput =
-      cmd.acceptsInput ??
-      (cmd.kind !== CommandKind.BUILT_IN ||
-        cmd.completion != null ||
-        cmd.argumentHint != null ||
-        (cmd.subCommands != null && cmd.subCommands.length > 0));
-    return {
-      name: cmd.name,
-      description: cmd.description,
-      input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
-      _meta: {
-        argumentHint: cmd.argumentHint,
-        source: cmd.source,
-        sourceLabel: cmd.sourceLabel,
-        supportedModes: getEffectiveSupportedModes(cmd),
-        subcommands: getCommandSubcommandNames(cmd),
-        modelInvocable: cmd.modelInvocable === true,
-        // Carry aliases so a channel consumer (which only sees the wire snapshot,
-        // not the command registry) can recognize an aliased command and avoid
-        // tagging it. _meta is ACP's extension point; omitted when there are none
-        // so command entries without aliases stay byte-identical on the wire.
-        ...(cmd.altNames && cmd.altNames.length > 0
-          ? { altNames: cmd.altNames }
-          : {}),
-      },
-    };
+  const visibleSlashCommands = slashCommands.filter((cmd) => {
+    if (cmd.kind !== CommandKind.SKILL || !cmd.skillDetail) return true;
+    return !disabledSkillNames.has(cmd.skillDetail.name.toLowerCase());
   });
+
+  const availableCommands: AvailableCommand[] = visibleSlashCommands.map(
+    (cmd) => {
+      const acceptsInput =
+        cmd.acceptsInput ??
+        (cmd.kind !== CommandKind.BUILT_IN ||
+          cmd.completion != null ||
+          cmd.argumentHint != null ||
+          (cmd.subCommands != null && cmd.subCommands.length > 0));
+      return {
+        name: cmd.name,
+        description: cmd.description,
+        input: acceptsInput ? { hint: cmd.argumentHint ?? '' } : null,
+        _meta: {
+          argumentHint: cmd.argumentHint,
+          source: cmd.source,
+          sourceLabel: cmd.sourceLabel,
+          supportedModes: getEffectiveSupportedModes(cmd),
+          subcommands: getCommandSubcommandNames(cmd),
+          modelInvocable: cmd.modelInvocable === true,
+          // Carry aliases so a channel consumer (which only sees the wire snapshot,
+          // not the command registry) can recognize an aliased command and avoid
+          // tagging it. _meta is ACP's extension point; omitted when there are none
+          // so command entries without aliases stay byte-identical on the wire.
+          ...(cmd.altNames && cmd.altNames.length > 0
+            ? { altNames: cmd.altNames }
+            : {}),
+        },
+      };
+    },
+  );
 
   let availableSkills: string[] | undefined;
   const skillDetailsByName = new Map<
@@ -723,7 +781,9 @@ export async function buildAvailableCommandsSnapshot(
   try {
     const skillManager = config.getSkillManager();
     if (skillManager) {
-      const skills = await skillManager.listSkills();
+      const skills = (await skillManager.listSkills()).filter(
+        (skill) => !disabledSkillNames.has(skill.name.toLowerCase()),
+      );
       availableSkills = skills.map((skill) => skill.name);
       for (const skill of skills) {
         skillDetailsByName.set(skill.name, {
@@ -740,7 +800,7 @@ export async function buildAvailableCommandsSnapshot(
     debugLogger.error('Error loading available skills:', error);
   }
 
-  for (const command of slashCommands) {
+  for (const command of visibleSlashCommands) {
     if (command.kind !== CommandKind.SKILL || !command.skillDetail) {
       continue;
     }
@@ -2797,18 +2857,7 @@ export class Session implements SessionContext {
       // Resolve the home/global loop.md from the QWEN_HOME-aware global dir (the
       // rest of Qwen honors QWEN_HOME for `.qwen`); reading raw os.homedir() here
       // would always hit the real `~/.qwen` and ignore a relocated config home.
-      const homeQwenDir = Storage.getGlobalQwenDir();
-      // Confinement root for the home candidate's resolved target: $QWEN_HOME
-      // when set (it IS the global dir), else $HOME — keeps the earlier
-      // confinement (an in-root dotfile symlink resolves; an escape is refused).
-      // The `|| path.dirname(homeQwenDir)` guards an empty os.homedir() (minimal
-      // containers with no HOME): an empty root makes isWithin('', target) always
-      // true, trivially bypassing the symlink confinement. homeQwenDir
-      // (Storage.getGlobalQwenDir()) is always non-empty, so its parent is a
-      // sound non-empty fallback root.
-      const homeConfineRoot =
-        (process.env['QWEN_HOME'] ? homeQwenDir : os.homedir()) ||
-        path.dirname(homeQwenDir);
+      const { homeConfineRoot, homeQwenDir } = resolveHomeLoopResolverRoots();
       this.loopTickResolver = new LoopTickResolver({
         projectRoot: root,
         homeDir: homeConfineRoot,
@@ -3954,7 +4003,6 @@ export class Session implements SessionContext {
         parts.push(await recordSkippedToolCall(remainingCall, message));
       }
     };
-
     // Bounded-concurrency runner: matches core's `runConcurrently`
     // behaviour (`coreToolScheduler.ts:1506`), capped by
     // `QWEN_CODE_MAX_TOOL_CONCURRENCY` (default 10). Results are returned
@@ -4490,7 +4538,8 @@ export class Session implements SessionContext {
           // prompt right after an allow-rule call just worked.
           const forceAutoReviewForAllow =
             approvalMode === ApprovalMode.AUTO &&
-            shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd());
+            (shouldForceAutoModeReviewForAllow(pmCtx, this.config.getCwd()) ||
+              shouldClassifyAllShellForAutoMode(toolName, this.config));
           const confirmationPermission = getEffectivePermissionForConfirmation(
             finalPermission,
             forceAutoReviewForAllow,
@@ -4986,6 +5035,11 @@ export class Session implements SessionContext {
               ? 'error'
               : 'success';
           const succeeded = status === 'success';
+          const responseError = toolResult.error
+            ? new Error(toolResult.error.message)
+            : aborted
+              ? new Error('Tool execution was cancelled')
+              : undefined;
 
           // Fire PostToolUse hook on successful execution (aligned with core path)
           if (
@@ -5028,6 +5082,12 @@ export class Session implements SessionContext {
               const contextPart = { text: postHookResult.additionalContext };
               responseParts.push(contextPart);
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUse',
+              toolName,
+              toolCallId: callId,
+              artifacts: postHookResult.artifacts,
+            });
           } else if (
             hooksEnabledForTool &&
             messageBusForTool &&
@@ -5053,6 +5113,12 @@ export class Session implements SessionContext {
                 `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
               );
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUseFailure',
+              toolName,
+              toolCallId: callId,
+              artifacts: failureHookResult.artifacts,
+            });
           }
 
           // Handle TodoWriteTool: extract todos and send plan update
@@ -5071,20 +5137,15 @@ export class Session implements SessionContext {
             // Still log and return function response for LLM
           } else {
             // Normal tool handling: emit result using ToolCallEmitter
-            const error = toolResult.error
-              ? new Error(toolResult.error.message)
-              : aborted
-                ? new Error('Tool execution was cancelled')
-                : undefined;
-
             await this.toolCallEmitter.emitResult({
               callId,
               toolName,
               args,
               message: responseParts,
               resultDisplay: toolResult.returnDisplay,
-              error,
+              error: responseError,
               success: succeeded,
+              artifacts: toolResult.artifacts,
             });
           }
 
@@ -5160,6 +5221,12 @@ export class Session implements SessionContext {
                 `PostToolUseFailure hook additional context for ${toolName}: ${failureHookResult.additionalContext}`,
               );
             }
+            await this.emitHookArtifactsNotification({
+              hookEventName: 'PostToolUseFailure',
+              toolName,
+              toolCallId: callId,
+              artifacts: failureHookResult.artifacts,
+            });
           }
 
           // Use ToolCallEmitter for error handling
@@ -5196,8 +5263,9 @@ export class Session implements SessionContext {
               error,
             );
 
+          const responseParts = errorResponse(error);
           return {
-            parts: errorResponse(error),
+            parts: responseParts,
             stopAfterPermissionCancel: nestedPermissionCancelled,
             loopDetected,
           };
@@ -5358,13 +5426,32 @@ export class Session implements SessionContext {
 
     const embeddedContext: EmbeddedResourceResource[] = [];
     const extensionMentions = new Map<string, string>();
+    const mcpServerMentions = new Map<string, string>();
+    const preserveUnsupportedImageForBridge = shouldRunVisionBridge(
+      this.config,
+    );
 
     const parts = message.map((part) => {
       switch (part.type) {
         case 'text':
           collectExtensionMentionRefs(part.text, extensionMentions);
+          collectMcpServerMentionRefs(part.text, mcpServerMentions);
           return { text: part.text };
         case 'image':
+          if (preserveUnsupportedImageForBridge) {
+            return {
+              inlineData: {
+                mimeType: part.mimeType,
+                data: part.data,
+              },
+            };
+          }
+          return clampInlineMediaPart({
+            inlineData: {
+              mimeType: part.mimeType,
+              data: part.data,
+            },
+          });
         case 'audio':
           return clampInlineMediaPart({
             inlineData: {
@@ -5401,17 +5488,23 @@ export class Session implements SessionContext {
       extensionMentions,
       abortSignal,
     );
+    const mcpServerParts =
+      this.#resolveMcpServerMentionParts(mcpServerMentions);
 
     if (
       atPathCommandParts.length === 0 &&
       embeddedContext.length === 0 &&
-      extensionParts.length === 0
+      extensionParts.length === 0 &&
+      mcpServerParts.length === 0
     ) {
-      return parts;
+      return this.#applyVisionBridgeIfNeeded(parts, abortSignal);
     }
 
     if (atPathCommandParts.length === 0 && embeddedContext.length === 0) {
-      return [...parts, ...extensionParts];
+      return this.#applyVisionBridgeIfNeeded(
+        [...parts, ...extensionParts, ...mcpServerParts],
+        abortSignal,
+      );
     }
 
     // Extract paths from @ commands - pass directly to readManyFiles without filtering
@@ -5446,6 +5539,9 @@ export class Session implements SessionContext {
       const readResult = await readManyFiles(this.config, {
         paths: pathSpecsToRead,
         signal: abortSignal,
+        ...(preserveUnsupportedImageForBridge
+          ? { preserveUnsupportedImageForBridge }
+          : {}),
       });
 
       const contentParts = Array.isArray(readResult.contentParts)
@@ -5455,11 +5551,14 @@ export class Session implements SessionContext {
       // Add initial query text first
       processedQueryParts.push({ text: initialQueryText });
       processedQueryParts.push(...extensionParts);
+      processedQueryParts.push(...mcpServerParts);
 
       // Then add content parts (preserving binary files as inlineData)
       for (const part of contentParts) {
         if (typeof part === 'string') {
           processedQueryParts.push({ text: part });
+        } else if (preserveUnsupportedImageForBridge && hasImageParts([part])) {
+          processedQueryParts.push(part);
         } else {
           processedQueryParts.push(clampInlineMediaPart(part));
         }
@@ -5467,6 +5566,7 @@ export class Session implements SessionContext {
     } else {
       processedQueryParts.push({ text: initialQueryText.trim() });
       processedQueryParts.push(...extensionParts);
+      processedQueryParts.push(...mcpServerParts);
     }
 
     // Process embedded context from resource blocks
@@ -5479,18 +5579,102 @@ export class Session implements SessionContext {
       }
       // Type guard for blob resources
       if ('blob' in contextPart && contextPart.blob) {
+        const inlinePart = {
+          inlineData: {
+            mimeType: contextPart.mimeType ?? 'application/octet-stream',
+            data: contextPart.blob,
+          },
+        };
         processedQueryParts.push(
-          clampInlineMediaPart({
-            inlineData: {
-              mimeType: contextPart.mimeType ?? 'application/octet-stream',
-              data: contextPart.blob,
-            },
-          }),
+          preserveUnsupportedImageForBridge && hasImageParts([inlinePart])
+            ? inlinePart
+            : clampInlineMediaPart(inlinePart),
         );
       }
     }
 
-    return processedQueryParts;
+    return this.#applyVisionBridgeIfNeeded(processedQueryParts, abortSignal);
+  }
+
+  async #applyVisionBridgeIfNeeded(
+    parts: Part[],
+    abortSignal: AbortSignal,
+  ): Promise<Part[]> {
+    if (!hasImageParts(parts) || !shouldRunVisionBridge(this.config)) {
+      return parts;
+    }
+
+    let bridgeResult: VisionBridgeResult;
+    try {
+      debugLogger.debug('vision bridge: gate matched, running conversion');
+      bridgeResult = await runVisionBridge({
+        config: this.config,
+        parts,
+        signal: abortSignal,
+      });
+    } catch (error) {
+      debugLogger.debug(
+        `vision bridge: failed before replacement; falling back to text-only parts error=${String(error instanceof Error ? error.message : error)}`,
+      );
+      return splitImageParts(parts).nonImageParts;
+    }
+    debugLogger.debug(
+      `vision bridge: status=${bridgeResult.status} applied=${bridgeResult.applied} model=${bridgeResult.modelId ?? '(none)'}${bridgeResult.error ? ` error=${bridgeResult.error}` : ''}`,
+    );
+
+    if (bridgeResult.status !== 'skipped' || bridgeResult.egressOccurred) {
+      try {
+        await this.messageEmitter.emitAgentMessage(
+          this.#formatVisionBridgeNotice(bridgeResult),
+        );
+      } catch (error) {
+        debugLogger.debug(
+          `vision bridge: failed to emit notice; continuing with bridge result error=${String(error instanceof Error ? error.message : error)}`,
+        );
+      }
+    }
+
+    if (abortSignal.aborted) {
+      debugLogger.debug('vision bridge: turn aborted after bridge returned');
+      return splitImageParts(parts).nonImageParts;
+    }
+
+    if (bridgeResult.applied && bridgeResult.parts != null) {
+      return normalizeParts(bridgeResult.parts);
+    }
+
+    // Bridge did not apply (e.g. skipped after cancel). Strip images before
+    // forwarding to the text-only primary model — never send raw inlineData to
+    // a model that cannot interpret it.
+    return splitImageParts(parts).nonImageParts;
+  }
+
+  #formatVisionBridgeNotice(result: VisionBridgeResult): string {
+    const modelName = result.modelId ?? 'vision model';
+    const target = result.modelEndpoint
+      ? `${modelName} (${result.modelEndpoint})`
+      : modelName;
+    const egressNote = result.egressOccurred
+      ? ` Your image and prompt/context were sent to ${target}.`
+      : '';
+
+    if (result.status === 'failed') {
+      const reason = result.egressOccurred
+        ? 'the vision model request failed'
+        : 'the vision bridge could not run';
+      return `Vision bridge (${modelName}) failed: ${reason}.${egressNote} The image was not interpreted.`;
+    }
+
+    if (result.status === 'skipped') {
+      return `Vision bridge cancelled.${egressNote}`;
+    }
+
+    // On success the image was always sent, so disclose egress unconditionally.
+    const omitted =
+      result.omittedCount > 0
+        ? ` (${result.omittedCount} image(s) omitted)`
+        : '';
+    return `Converted ${result.convertedCount} image(s)${omitted} to text via ${target}. Your image and prompt/context were sent to that model.`;
   }
 
   async #resolveExtensionMentionParts(
@@ -5526,9 +5710,62 @@ export class Session implements SessionContext {
     return extensionParts;
   }
 
+  #resolveMcpServerMentionParts(
+    mcpServerMentions: Map<string, string>,
+  ): Part[] {
+    if (mcpServerMentions.size === 0) return [];
+    const servers = this.config.getMcpServers?.() ?? {};
+    if (Object.keys(servers).length === 0) return [];
+
+    const parts: Part[] = [];
+    for (const name of mcpServerMentions.values()) {
+      const matched = matchMcpServerByRef(name, servers);
+      if (!matched) {
+        this.debug(
+          `MCP server "${name}" not found among configured MCP servers. ` +
+            `Available: ${Object.keys(servers).join(', ') || '(none)'}`,
+        );
+        continue;
+      }
+      parts.push({
+        text: buildMcpServerContextText(this.config, matched.serverName),
+      });
+    }
+    return parts;
+  }
+
   debug(msg: string): void {
     if (this.config.getDebugMode()) {
       debugLogger.warn(msg);
+    }
+  }
+
+  private async emitHookArtifactsNotification(args: {
+    hookEventName: 'PostToolUse' | 'PostToolUseFailure';
+    toolName?: string;
+    toolCallId?: string;
+    artifacts?: ToolArtifact[];
+  }): Promise<void> {
+    if (!args.artifacts || args.artifacts.length === 0) {
+      return;
+    }
+
+    try {
+      await this.client.extNotification('qwen/notify/session/artifact-event', {
+        v: 1,
+        sessionId: this.sessionId,
+        source: 'hook',
+        hookEventName: args.hookEventName,
+        toolName: args.toolName,
+        toolCallId: args.toolCallId,
+        artifacts: args.artifacts,
+      });
+    } catch (error) {
+      writeStderrLine(
+        `Hook artifact notification dropped for ${args.toolName ?? args.hookEventName}: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
     }
   }
 

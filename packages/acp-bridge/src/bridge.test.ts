@@ -105,6 +105,84 @@ describe('createAcpSessionBridge', () => {
     );
   });
 
+  it('sanitizes client artifact provenance fields', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Client link',
+          url: 'https://example.com/client',
+          toolName: 'artifact',
+          hookEventName: 'PostToolUse',
+          toolCallId: 'call-forged',
+          clientId: 'forged-client',
+        },
+        { clientId: session.clientId },
+      );
+
+      const snapshot = await bridge.getSessionArtifacts(session.sessionId);
+      expect(snapshot.artifacts).toMatchObject([
+        {
+          title: 'Client link',
+          source: 'client',
+          clientId: session.clientId,
+        },
+      ]);
+      expect(snapshot.artifacts[0]).not.toHaveProperty('toolName');
+      expect(snapshot.artifacts[0]).not.toHaveProperty('hookEventName');
+      expect(snapshot.artifacts[0]).not.toHaveProperty('toolCallId');
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
+  it('keeps client artifacts owned by the issuing client', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () => makeChannel().channel,
+    });
+    const first = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const second = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    try {
+      const created = await bridge.addSessionArtifact(
+        first.sessionId,
+        {
+          title: 'Client link',
+          url: 'https://example.com/client',
+        },
+        { clientId: first.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+
+      await expect(
+        bridge.removeSessionArtifact(first.sessionId, artifactId, {
+          clientId: second.clientId,
+        }),
+      ).resolves.toMatchObject({ changes: [] });
+      await expect(
+        bridge.removeSessionArtifact(first.sessionId, artifactId),
+      ).resolves.toMatchObject({ changes: [] });
+      await expect(
+        bridge.getSessionArtifacts(first.sessionId),
+      ).resolves.toMatchObject({
+        artifacts: [{ id: artifactId, clientId: first.clientId }],
+      });
+
+      await expect(
+        bridge.removeSessionArtifact(first.sessionId, artifactId, {
+          clientId: first.clientId,
+        }),
+      ).resolves.toMatchObject({
+        changes: [{ action: 'removed', artifactId, reason: 'explicit' }],
+      });
+    } finally {
+      await bridge.shutdown();
+    }
+  });
+
   it('uses bridge telemetry for channel/session/prompt dispatch and prompt metadata injection', async () => {
     const handle = makeChannel();
     const operations: string[] = [];
@@ -514,6 +592,175 @@ describe('createAcpSessionBridge', () => {
         contextMode: 'workspace',
       }),
     ).rejects.toThrow('Malformed workspace memory remember response');
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+
+    await bridge.shutdown();
+  });
+
+  it('runs workspace memory forget without creating a session', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/workspace/memory/forget') {
+              return {
+                summary: 'forgot',
+                removedEntries: [
+                  {
+                    topic: 'project',
+                    summary: 'old preference',
+                    filePath: '/mem/project.md',
+                  },
+                ],
+                touchedTopics: ['project'],
+                querySeen: params['query'],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const result = await bridge.runWorkspaceMemoryForget({
+      query: 'old preference',
+    });
+
+    expect(result).toMatchObject({
+      summary: 'forgot',
+      touchedTopics: ['project'],
+      removedEntries: [
+        {
+          topic: 'project',
+          summary: 'old preference',
+          filePath: '/mem/project.md',
+        },
+      ],
+    });
+    expect(handles[0]?.agent.extMethodCalls).toEqual([
+      {
+        method: 'qwen/control/workspace/memory/forget',
+        params: { cwd: WS_A, query: 'old preference' },
+      },
+    ]);
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
+  it('rejects malformed workspace memory forget responses', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/control/workspace/memory/forget') {
+              return {
+                summary: 'forgot',
+                removedEntries: [
+                  {
+                    topic: 'not-a-topic',
+                    summary: 'old preference',
+                    filePath: '/mem/project.md',
+                  },
+                ],
+                touchedTopics: ['project'],
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    await expect(
+      bridge.runWorkspaceMemoryForget({
+        query: 'old preference',
+      }),
+    ).rejects.toThrow('Malformed workspace memory forget response');
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+
+    await bridge.shutdown();
+  });
+
+  it('runs workspace memory dream without creating a session', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/control/workspace/memory/dream') {
+              return {
+                summary: 'dreamed',
+                touchedTopics: ['project'],
+                dedupedEntries: 1,
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    const result = await bridge.runWorkspaceMemoryDream();
+
+    expect(result).toMatchObject({
+      summary: 'dreamed',
+      touchedTopics: ['project'],
+      dedupedEntries: 1,
+    });
+    expect(handles[0]?.agent.extMethodCalls).toEqual([
+      {
+        method: 'qwen/control/workspace/memory/dream',
+        params: { cwd: WS_A },
+      },
+    ]);
+    expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
+    expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
+    expect(bridge.listWorkspaceSessions(WS_A)).toEqual([]);
+
+    await bridge.shutdown();
+  });
+
+  it('rejects malformed workspace memory dream responses', async () => {
+    const handles: ChannelHandle[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () => {
+        const h = makeChannel({
+          extMethodImpl: (method) => {
+            if (method === 'qwen/control/workspace/memory/dream') {
+              return {
+                summary: 'dreamed',
+                touchedTopics: ['project'],
+                dedupedEntries: Number.NaN,
+              };
+            }
+            throw new Error(`unexpected extMethod ${method}`);
+          },
+        });
+        handles.push(h);
+        return h.channel;
+      },
+    });
+
+    await expect(bridge.runWorkspaceMemoryDream()).rejects.toThrow(
+      'Malformed workspace memory dream response',
+    );
     expect(handles[0]?.agent.newSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.loadSessionCalls).toHaveLength(0);
     expect(handles[0]?.agent.resumeSessionCalls).toHaveLength(0);
@@ -8970,6 +9217,54 @@ describe('createAcpSessionBridge', () => {
       await expect(bridge.closeSession('nonexistent')).rejects.toThrow(
         SessionNotFoundError,
       );
+      await bridge.shutdown();
+    });
+
+    it('preserves bridge state when required agent close fails so retry can flush', async () => {
+      let failClose = true;
+      const handle = makeChannel({
+        extMethodImpl: (method) => {
+          if (method === 'qwen/control/session/close' && failClose) {
+            failClose = false;
+            throw new Error('flush failed');
+          }
+          return {};
+        },
+      });
+      const bridge = makeBridge({
+        channelFactory: async () => handle.channel,
+      });
+      const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+
+      await expect(
+        bridge.closeSession(session.sessionId, undefined, {
+          requireAgentClose: true,
+        }),
+      ).rejects.toThrow();
+
+      expect(handle.agent.extMethodCalls).toHaveLength(1);
+      expect(handle.agent.extMethodCalls[0]).toEqual({
+        method: 'qwen/control/session/close',
+        params: { sessionId: session.sessionId, requireFlush: true },
+      });
+      expect(bridge.sessionCount).toBe(1);
+      expect(() =>
+        bridge.recordHeartbeat(session.sessionId, {
+          clientId: session.clientId,
+        }),
+      ).not.toThrow();
+
+      await bridge.closeSession(session.sessionId, undefined, {
+        requireAgentClose: true,
+      });
+
+      expect(handle.agent.extMethodCalls).toHaveLength(2);
+      expect(() =>
+        bridge.recordHeartbeat(session.sessionId, {
+          clientId: session.clientId,
+        }),
+      ).toThrow(SessionNotFoundError);
+
       await bridge.shutdown();
     });
 

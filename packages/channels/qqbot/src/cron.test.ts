@@ -170,7 +170,7 @@ describe('cronTextHandler', () => {
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat/messages',
       'test-token',
-      { content: 'hello world', msg_type: 0 },
+      { msg_type: 2, markdown: { content: 'hello world' } },
     );
 
     expect(cronBuffer.has('sess-1')).toBe(false);
@@ -229,7 +229,7 @@ describe('cronTextHandler', () => {
       'https://api.sgroup.qq.com',
       '/v2/users/test-chat/messages',
       'test-token',
-      { content: 'routed text', msg_type: 0 },
+      { msg_type: 2, markdown: { content: 'routed text' } },
     );
   });
 

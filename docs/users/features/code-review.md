@@ -28,8 +28,7 @@ The `/review` command runs a multi-stage pipeline:
 ```
 Step 1:  Determine scope (local diff / PR worktree / file)
 Step 2:  Load project review rules
-Step 3:  Run deterministic analysis (linter, typecheck)    [zero LLM cost]
-Step 4:  9 parallel review agents                          [9 LLM calls]
+Step 3:  9 parallel review agents                          [9 LLM calls]
            |-- Agent 1: Correctness
            |-- Agent 2: Security
            |-- Agent 3: Code Quality
@@ -37,13 +36,12 @@ Step 4:  9 parallel review agents                          [9 LLM calls]
            |-- Agent 5: Test Coverage
            |-- Agent 6: Undirected Audit (3 personas: 6a/6b/6c)
            '-- Agent 7: Build & Test (runs shell commands)
-Step 5:  Deduplicate --> Batch verify --> Aggregate         [1 LLM call]
-Step 6:  Iterative reverse audit (1-3 rounds, gap finding) [1-3 LLM calls]
-Step 7:  Present findings + verdict
-Step 8:  Autofix (user-confirmed, optional)
-Step 9:  Post PR inline comments (if requested)
-Step 10: Save report + incremental cache
-Step 11: Clean up (remove worktree + temp files)
+Step 4:  Deduplicate --> Batch verify --> Aggregate         [1 LLM call]
+Step 5:  Iterative reverse audit (1-3 rounds, gap finding) [1-3 LLM calls]
+Step 6:  Present findings + verdict
+Step 7:  Submit PR review (inline comments, if requested)
+Step 8:  Save report + incremental cache
+Step 9:  Clean up (remove worktree + temp files)
 ```
 
 ### Review Agents
@@ -60,29 +58,6 @@ Step 11: Clean up (remove worktree + temp files)
 
 All agents run in parallel (Agent 6 launches 3 persona variants concurrently, totaling 9 parallel tasks for same-repo reviews). Findings from Agents 1-6 are verified in a **single batch verification pass** (one agent reviews all findings at once, keeping verification cost fixed regardless of finding count). After verification, **iterative reverse audit** runs 1-3 rounds of gap-finding — each round receives the cumulative finding list from prior rounds, so successive rounds focus on whatever's left undiscovered. The loop stops as soon as a round returns "No issues found", or after 3 rounds (hard cap). Reverse audit findings skip verification (the agent already has full context) and are included as high-confidence results.
 
-## Deterministic Analysis
-
-Before the LLM agents run, `/review` automatically runs your project's existing linters and type checkers:
-
-| Language              | Tools detected                                                   |
-| --------------------- | ---------------------------------------------------------------- |
-| TypeScript/JavaScript | `tsc --noEmit`, `npm run lint`, `eslint`                         |
-| Python                | `ruff`, `mypy`, `flake8`                                         |
-| Rust                  | `cargo clippy`                                                   |
-| Go                    | `go vet`, `golangci-lint`                                        |
-| Java                  | `mvn compile`, `checkstyle`, `spotbugs`, `pmd`                   |
-| C/C++                 | `clang-tidy` (if `compile_commands.json` available)              |
-| Other                 | Auto-discovered from CI config (`.github/workflows/*.yml`, etc.) |
-
-For projects that don't match standard patterns (e.g., OpenJDK), `/review` reads CI configuration files to discover what lint/check commands the project uses. No user configuration needed.
-
-Deterministic findings are tagged with `[linter]` or `[typecheck]` and skip LLM verification — they are ground truth.
-
-- **Errors** → Critical severity
-- **Warnings** → Nice to have (terminal only, not posted as PR comments)
-
-If a tool is not installed or times out, it is skipped with an informational note.
-
 ## Severity Levels
 
 | Severity         | Meaning                                                             | Posted as PR comment?      |
@@ -93,26 +68,12 @@ If a tool is not installed or times out, it is skipped with an informational not
 
 Low-confidence findings appear in a separate "Needs Human Review" section in the terminal and are never posted as PR comments.
 
-## Autofix
-
-After presenting findings, `/review` offers to auto-apply fixes for Critical and Suggestion findings that have clear solutions:
-
-```
-Found 3 issues with auto-fixable suggestions. Apply auto-fixes? (y/n)
-```
-
-- Fixes are applied using the `edit` tool (targeted replacements, not full-file rewrites)
-- Per-file linter checks run after fixes to verify they don't introduce new issues
-- For PR reviews, fixes are committed and pushed from the worktree automatically — your working tree stays clean
-- Nice to have and low-confidence findings are never auto-fixed
-- PR review submission always uses the **pre-fix verdict** (e.g., "Request changes") since the remote PR hasn't been updated until the autofix push completes
-
 ## Worktree Isolation
 
 When reviewing a PR, `/review` creates a temporary git worktree (`.qwen/tmp/review-pr-<number>`) instead of switching your current branch. This means:
 
 - Your working tree, staged changes, and current branch are **never touched**
-- Dependencies are installed in the worktree (`npm ci`, etc.) so linting and build/test work
+- Dependencies are installed in the worktree (`npm ci`, etc.) so build/test work
 - Build and test commands run in isolation without polluting your local build cache
 - If anything goes wrong, your environment is unaffected — just delete the worktree
 - The worktree is automatically cleaned up after the review completes
@@ -127,15 +88,13 @@ You can review PRs from other repositories by passing the full URL:
 /review https://github.com/other-org/other-repo/pull/456
 ```
 
-This runs in **lightweight mode** — no worktree, no linter, no build/test, no autofix. The review is based on the diff text only (fetched via GitHub API). PR comments can still be posted if you have write access.
+This runs in **lightweight mode** — no worktree, no build/test. The review is based on the diff text only (fetched via GitHub API). PR comments can still be posted if you have write access.
 
 | Capability                                                 | Same-repo | Cross-repo                    |
 | ---------------------------------------------------------- | --------- | ----------------------------- |
 | LLM review (Agents 1-6 + verify + iterative reverse audit) | ✅        | ✅                            |
 | Agent 7: Build & test                                      | ✅        | ❌ (no local codebase)        |
-| Deterministic analysis (linter/typecheck)                  | ✅        | ❌                            |
 | Cross-file impact analysis                                 | ✅        | ❌                            |
-| Autofix                                                    | ✅        | ❌                            |
 | PR inline comments                                         | ✅        | ✅ (if you have write access) |
 | Incremental review cache                                   | ✅        | ❌                            |
 
@@ -158,7 +117,7 @@ Or, after running `/review 123`, type `post comments` to publish findings withou
 
 **What stays terminal-only:**
 
-- Nice to have findings (including linter warnings)
+- Nice to have findings
 - Low-confidence findings
 
 **Self-authored PRs:** GitHub does not allow you to submit `APPROVE` or `REQUEST_CHANGES` reviews on your own pull request — both fail with HTTP 422. When `/review` detects that the PR author matches the current authenticated user, it automatically downgrades the API event to `COMMENT` regardless of verdict, so the submission still succeeds. The terminal still shows the honest verdict ("Approve" / "Request changes" / "Comment") — only the GitHub-side review event is neutralized. The actual findings still appear as inline comments on specific lines, so substantive feedback is unchanged.
@@ -178,7 +137,7 @@ After the review, context-aware tips appear as ghost text. Press Tab to accept:
 | PR review, zero findings           | `post comments`    | Approves the PR on GitHub (LGTM)        |
 | Local review, all clear            | `commit`           | Commits your changes                    |
 
-Note: `fix these issues` is only available for local reviews. For PR reviews, use Autofix (Step 8) — the worktree is cleaned up after the review, so post-review interactive fixing is not possible.
+Note: `fix these issues` is only available for local reviews. For PR reviews the worktree is cleaned up after the review, so post-review interactive fixing is not possible — use `--comment` or `post comments` to publish findings instead.
 
 ## Project Review Rules
 
@@ -241,7 +200,7 @@ For same-repo reviews, results are saved as a Markdown file in your project's `.
 .qwen/reviews/2026-04-06-150510-local.md
 ```
 
-Reports include: timestamp, diff stats, deterministic analysis results, all findings with verification status, and the verdict.
+Reports include: timestamp, diff stats, build/test results, all findings with verification status, and the verdict.
 
 ## Cross-file Impact Analysis
 
@@ -260,10 +219,9 @@ The review pipeline uses a bounded number of LLM calls regardless of how many fi
 
 | Stage                            | LLM calls         | Notes                                               |
 | -------------------------------- | ----------------- | --------------------------------------------------- |
-| Deterministic analysis (Step 3)  | 0                 | Shell commands only                                 |
-| Review agents (Step 4)           | 9 (or 8)          | Run in parallel; Agent 7 skipped in cross-repo mode |
-| Batch verification (Step 5)      | 1                 | Single agent verifies all findings at once          |
-| Iterative reverse audit (Step 6) | 1-3               | Loops until "No issues found" or 3-round cap        |
+| Review agents (Step 3)           | 9 (or 8)          | Run in parallel; Agent 7 skipped in cross-repo mode |
+| Batch verification (Step 4)      | 1                 | Single agent verifies all findings at once          |
+| Iterative reverse audit (Step 5) | 1-3               | Loops until "No issues found" or 3-round cap        |
 | **Total**                        | **11-13 (10-12)** | Same-repo: 11-13; cross-repo: 10-12 (no Agent 7)    |
 
 Most PRs converge to the lower end of the range (1 reverse audit round); the cap prevents runaway cost on pathological cases.
@@ -273,8 +231,7 @@ Most PRs converge to the lower end of the range (1 reverse audit round); the cap
 The review intentionally excludes:
 
 - Pre-existing issues in unchanged code (focus on the diff only)
-- Style/formatting/naming that matches your codebase conventions
-- Issues a linter or type checker would catch (handled by deterministic analysis)
+- Style or formatting a formatter would auto-normalize, or naming matching your codebase conventions — but NOT substantive issues a linter or type checker would flag (unused variables, unreachable code, type errors), which are in scope
 - Subjective "consider doing X" suggestions without a real problem
 - Minor refactoring that doesn't fix a bug or risk
 - Missing documentation unless the logic is genuinely confusing
@@ -285,7 +242,6 @@ The review intentionally excludes:
 > **Silence is better than noise.** Every comment should be worth the reader's time.
 
 - If unsure whether something is a problem → don't report it
-- Linter/typecheck issues are handled by tools, not LLM guesses
 - Same pattern across N files → aggregated into one finding
 - PR comments are high-confidence only
-- Style/formatting issues matching codebase conventions are excluded
+- Cosmetic style/formatting matching codebase conventions is excluded

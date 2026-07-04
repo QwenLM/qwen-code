@@ -35,6 +35,8 @@ export {
   useDaemonResource,
   useDaemonSessions,
   useDaemonSkills,
+  useDaemonStatusReport,
   useDaemonTools,
   useDaemonSettings,
 } from './hooks/index.js';
+export type { DaemonStatusReportOptions } from './hooks/index.js';

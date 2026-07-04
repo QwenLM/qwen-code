@@ -72,6 +72,8 @@ export interface DaemonConnectionState {
   supportedCommands?: DaemonSessionSupportedCommandsStatus;
   context?: DaemonSessionContextStatus;
   capabilities?: DaemonCapabilities;
+  /** True while the current session transcript is being loaded. */
+  loadingTranscript?: boolean;
   /** True while replaying buffered events after a reconnect. */
   catchingUp?: boolean;
   error?: string;
@@ -92,8 +94,8 @@ export interface DaemonSessionProviderProps {
   token?: string;
   /** Workspace cwd used when creating, loading, or resuming daemon sessions. */
   workspaceCwd?: string;
-  /** Session id to load on mount instead of creating or attaching automatically. */
-  initialSessionId?: string;
+  /** Session id to load. Undefined keeps the page empty until a prompt creates one. */
+  sessionId?: string;
   /** Stable client identity to reuse for session-scoped daemon requests. */
   clientId?: string;
   /** Extra create-session options, excluding workspaceCwd which is owned by the provider. */
@@ -110,8 +112,6 @@ export interface DaemonSessionProviderProps {
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
-  /** Behavior when the active session is missing (404/410). Defaults to create. */
-  missingSessionBehavior?: 'create' | 'disconnect';
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
   /** Maximum reconnect delay in milliseconds after backoff. */
@@ -152,6 +152,7 @@ export type DaemonNoticeOperation =
   | 'set_approval_mode'
   | 'submit_permission'
   | 'cancel_prompt'
+  | 'attach_session'
   | 'load_session'
   | 'resume_session'
   | 'create_session'
@@ -309,9 +310,15 @@ export interface DaemonSessionActions {
   listSessions(options?: {
     pageSize?: number;
   }): Promise<DaemonSessionSummary[]>;
-  loadSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
-  resumeSession(sessionId: string, opts?: SessionSwitchOptions): Promise<void>;
+  loadSession(sessionId: string): Promise<void>;
+  resumeSession(sessionId: string): Promise<void>;
+  /**
+   * Create a daemon session and update local session state. Callers that need
+   * transcript/event streaming must follow with `attachSession()`.
+   */
   createSession(): Promise<DaemonSession>;
+  attachSession(): Promise<void>;
+  clearSession(): Promise<void>;
   newSession(): Promise<void>;
   releaseSession(sessionId: string): Promise<void>;
   closeSession(): Promise<void>;
@@ -362,10 +369,6 @@ export interface DaemonSessionActions {
   forkSession(directive: string): Promise<DaemonForkSessionResult>;
 }
 
-export interface SessionSwitchOptions {
-  deferTranscriptReset?: boolean;
-}
-
 export interface DaemonSessionContextValue {
   store: DaemonTranscriptStore;
   connection: DaemonConnectionState;
@@ -413,7 +416,7 @@ export type SettledPrompt =
 export interface PendingSessionLoad {
   id: number;
   sessionId: string;
-  mode: 'load' | 'resume';
+  mode: 'load' | 'resume' | 'attach';
   timeout: ReturnType<typeof setTimeout>;
   resolve: () => void;
   reject: (error: unknown) => void;
