@@ -496,5 +496,31 @@ describe('readManyFiles', () => {
       const decision = await checkPriorRead(cache, absolutePath, 'editing');
       expect(decision.ok).toBe(false);
     });
+
+    it('records a binary file as a full but non-cacheable read', async () => {
+      // A `.bin` file with a null byte is classified as `binary`: unlike an
+      // image it returns `stats` (so it IS recorded), but it carries no
+      // `originalLineCount`, so `cacheable` must be `false`. This guards the
+      // `originalLineCount !== undefined` clause of the cacheable derivation
+      // — dropping it would wrongly let a non-text payload clear prior-read
+      // enforcement for Edit / WriteFile.
+      const relativePath = 'payload.bin';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(
+        absolutePath,
+        Buffer.from([0x00, 0x01, 0x02, 0x00, 0xff]),
+      );
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const stats = nodeFs.statSync(absolutePath);
+      const status = cache.check(stats);
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadCacheable).toBe(false);
+      }
+    });
   });
 });
