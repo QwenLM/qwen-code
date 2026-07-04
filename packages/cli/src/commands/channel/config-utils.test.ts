@@ -228,6 +228,30 @@ describe('parseChannelConfig', () => {
     stderr.mockRestore();
   });
 
+  it('warns once for unavailable required credential env vars', async () => {
+    delete process.env['TEST_MISSING_TOKEN'];
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    const result = await parseChannelConfig(
+      'bot',
+      {
+        type: 'telegram',
+        token: '$TEST_MISSING_TOKEN',
+      },
+      process.cwd(),
+      { resolveEnvVars: 'available' },
+    );
+
+    expect(result.token).toBe('$TEST_MISSING_TOKEN');
+    expect(stderr).toHaveBeenCalledTimes(1);
+    expect(stderr).toHaveBeenCalledWith(
+      '[channel] warning: environment variable TEST_MISSING_TOKEN is not set, using literal value.\n',
+    );
+    stderr.mockRestore();
+  });
+
   it('preserves explicit config values over defaults', async () => {
     const result = await parseChannelConfig('bot', {
       type: 'bare',

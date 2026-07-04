@@ -659,6 +659,24 @@ describe('WeComChannel', () => {
     );
   });
 
+  it('logs when sendMessage produces an empty payload', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    await channel.sendMessage('chat-1', '   ');
+
+    expect(client.sendMessage).not.toHaveBeenCalled();
+    expect(client.uploadMedia).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] sendMessage produced empty payload for chatId=chat-1.\n',
+    );
+    stderr.mockRestore();
+  });
+
   it('normalizes text messages into envelopes', async () => {
     const channel = new TestWeComChannel(
       'bot',
@@ -1288,7 +1306,7 @@ describe('WeComChannel', () => {
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
     expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('unsafe media URL'),
+      expect.stringContaining('unsafe media URL (private address ::)'),
     );
     stderr.mockRestore();
   });
@@ -1410,7 +1428,9 @@ describe('WeComChannel', () => {
     expect(client.downloadFile).not.toHaveBeenCalled();
     expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('unsafe media URL'),
+      expect.stringContaining(
+        'unsafe media URL (resolved to private address 169.254.169.254)',
+      ),
     );
     stderr.mockRestore();
   });

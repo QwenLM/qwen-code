@@ -255,7 +255,18 @@ export class WeComChannel extends ChannelBase {
     }
 
     const { cleanedText, media } = parseOutboundMediaMarkers(text);
-    for (const chunk of splitMarkdownChunks(cleanedText)) {
+    const chunks = splitMarkdownChunks(cleanedText);
+    if (chunks.length === 0 && media.length === 0) {
+      process.stderr.write(
+        `[WeCom:${this.name}] sendMessage produced empty payload for chatId=${sanitizeLogText(
+          chatId,
+          100,
+        )}.\n`,
+      );
+      return;
+    }
+
+    for (const chunk of chunks) {
       await client.sendMessage(chatId, {
         msgtype: 'markdown',
         markdown: { content: chunk },
@@ -1115,39 +1126,62 @@ function isInsideDir(filePath: string, dir: string): boolean {
   );
 }
 
-async function isSafeInboundMediaUrl(rawUrl: string): Promise<boolean> {
+type SafeInboundMediaUrlResult =
+  | { safe: true }
+  | { safe: false; reason: string };
+
+async function isSafeInboundMediaUrl(
+  rawUrl: string,
+): Promise<SafeInboundMediaUrlResult> {
   let url: URL;
   try {
     url = new URL(rawUrl);
   } catch {
-    return false;
+    return { safe: false, reason: 'invalid URL' };
   }
-  if (url.protocol !== 'https:') return false;
+  if (url.protocol !== 'https:') {
+    return { safe: false, reason: 'non-HTTPS protocol' };
+  }
 
   const host = url.hostname.toLowerCase().replace(/^\[|\]$/g, '');
   if (!host || host === 'localhost' || host.endsWith('.localhost')) {
-    return false;
+    return { safe: false, reason: 'local hostname' };
   }
-  if (host.endsWith('.local')) return false;
+  if (host.endsWith('.local')) {
+    return { safe: false, reason: 'local hostname' };
+  }
 
-  if (isIP(host)) return isPublicIpAddress(host);
-  if (!host.includes('.')) return false;
+  if (isIP(host)) {
+    return isPublicIpAddress(host)
+      ? { safe: true }
+      : { safe: false, reason: `private address ${host}` };
+  }
+  if (!host.includes('.')) return { safe: false, reason: 'bare hostname' };
   try {
     const records = await lookup(host, { all: true });
-    return (
-      records.length > 0 &&
-      records.every((record) => isPublicIpAddress(record.address))
+    if (records.length === 0) {
+      return { safe: false, reason: 'no DNS records' };
+    }
+    const privateRecord = records.find(
+      (record) => !isPublicIpAddress(record.address),
     );
+    return privateRecord
+      ? {
+          safe: false,
+          reason: `resolved to private address ${privateRecord.address}`,
+        }
+      : { safe: true };
   } catch {
-    return false;
+    return { safe: false, reason: 'DNS lookup failed' };
   }
 }
 
 async function downloadInboundMedia(
   ref: InboundMediaRef,
 ): Promise<{ buffer: Buffer; filename?: string }> {
-  if (!(await isSafeInboundMediaUrl(ref.url))) {
-    throw new Error('unsafe media URL');
+  const urlSafety = await isSafeInboundMediaUrl(ref.url);
+  if (!urlSafety.safe) {
+    throw new Error(`unsafe media URL (${urlSafety.reason})`);
   }
   // Intentionally bypass WSClient.downloadFile(): its axios path follows
   // redirects, lacks a byte cap, and does not pin resolved public IPs.

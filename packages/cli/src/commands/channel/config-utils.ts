@@ -37,6 +37,7 @@ function resolveOptionalStringField(
 }
 
 type EnvResolution = boolean | 'available';
+const KNOWN_CREDENTIAL_FIELDS = new Set(['token', 'clientId', 'clientSecret']);
 
 function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
   if (mode === false) return value;
@@ -144,7 +145,7 @@ export async function parseChannelConfig(
         `Channel "${name}" (${channelType}) requires "${field}".`,
       );
     }
-    if (typeof value === 'string') {
+    if (typeof value === 'string' && !KNOWN_CREDENTIAL_FIELDS.has(field)) {
       resolvedRawConfig[field] = resolveConfigEnvVar(value, envResolution);
     }
   }
