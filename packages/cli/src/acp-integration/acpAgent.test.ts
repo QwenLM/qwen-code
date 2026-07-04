@@ -149,8 +149,8 @@ vi.mock('@qwen-code/qwen-code-core', () => ({
   },
   FORK_SUBAGENT_TYPE: 'fork',
   IMAGE_CAPABILITY: Object.freeze({
-    autoRoutesToVisionBridge: true,
-    capsImageSize: true,
+    autoHandlesWrongModel: true,
+    maxBytes: 10380902,
     maxImagesPerTurn: 4,
   }),
   ALL_PROVIDERS: [
@@ -1305,8 +1305,8 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
         },
         _meta: {
           imageCapability: {
-            autoRoutesToVisionBridge: true,
-            capsImageSize: true,
+            autoHandlesWrongModel: true,
+            maxBytes: 10380902,
             maxImagesPerTurn: 4,
           },
         },

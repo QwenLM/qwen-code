@@ -987,8 +987,8 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       };
     };
     expect(result.agentCapabilities._meta.imageCapability).toEqual({
-      autoRoutesToVisionBridge: true,
-      capsImageSize: true,
+      autoHandlesWrongModel: true,
+      maxBytes: 10380902,
       maxImagesPerTurn: 4,
     });
   });
