@@ -215,6 +215,33 @@ describe('resolveWithinWorkspace', () => {
     expect(out).toBe(realpathSync.native(target));
   });
 
+  it('resolves a missing absolute write target inside a secondary root', async () => {
+    const secondWorkspace = path.join(scratch, 'second-workspace');
+    await fsp.mkdir(secondWorkspace);
+    const target = path.join(secondWorkspace, 'new', 'file.txt');
+
+    const out = await resolveWithinWorkspace(
+      target,
+      [workspace, secondWorkspace],
+      'write',
+    );
+
+    expect(out).toBe(
+      path.join(realpathSync.native(secondWorkspace), 'new', 'file.txt'),
+    );
+  });
+
+  it('propagates absolute-path realpath errors instead of reporting outside workspace', async () => {
+    const target = path.join(scratch, 'blocked.txt');
+    const err = new Error('denied') as NodeJS.ErrnoException;
+    err.code = 'EACCES';
+    vi.spyOn(fsp, 'realpath').mockRejectedValueOnce(err);
+
+    await expect(
+      resolveWithinWorkspace(target, workspace, 'read'),
+    ).rejects.toBe(err);
+  });
+
   it('resolves relative writes against the first workspace root', async () => {
     const secondWorkspace = path.join(scratch, 'second-workspace');
     await fsp.mkdir(secondWorkspace);

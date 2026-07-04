@@ -13370,7 +13370,7 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
     }
   });
 
-  it('default fsFactory consumes IDE multi-root workspace env', async () => {
+  it('default REST fsFactory stays scoped to the primary workspace', async () => {
     const { createServeApp } = await import('./server.js');
     const scratch = await fsp.mkdtemp(
       path.join(os.tmpdir(), 'qwen-serve-multi-root-'),
@@ -13406,7 +13406,7 @@ describe('createServeApp ServeAppDeps.fsFactory wiring (#4175 PR 18)', () => {
 
       await expect(
         fs.resolve(path.join(second, 'file.txt'), 'read'),
-      ).resolves.toBe(realpathSync.native(path.join(second, 'file.txt')));
+      ).rejects.toMatchObject({ kind: 'path_outside_workspace' });
     } finally {
       if (previous === undefined) {
         delete process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];

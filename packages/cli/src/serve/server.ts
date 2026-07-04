@@ -316,11 +316,20 @@ export function createServeApp(
         'Inject deps.fsFactory (with explicit trust) or deps.bridge to override.\n',
     );
   }
-  const fsFactory = resolveBridgeFsFactory({
-    boundWorkspaces: resolveBoundWorkspacesFromIdeEnv(boundWorkspace),
+  const boundWorkspaces = resolveBoundWorkspacesFromIdeEnv(boundWorkspace);
+  const bridgeFsFactory = resolveBridgeFsFactory({
+    boundWorkspaces,
     injected: deps.fsFactory,
     trusted: false,
   });
+  const routeFsFactory = deps.fsFactory
+    ? bridgeFsFactory
+    : resolveBridgeFsFactory({
+        // REST responses are still serialized relative to the primary root.
+        // Keep REST scoped to one root until the response schema is root-aware.
+        boundWorkspaces: [boundWorkspace],
+        trusted: false,
+      });
   const tokenConfigured =
     typeof opts.token === 'string' && opts.token.length > 0;
   const sessionShellCommandEnabled =
@@ -376,7 +385,7 @@ export function createServeApp(
       statusProvider,
       // Wire the WorkspaceFileSystem adapter so ACP writeTextFile /
       // readTextFile pick up trust / TOCTOU / audit.
-      fileSystem: createBridgeFileSystemAdapter(fsFactory),
+      fileSystem: createBridgeFileSystemAdapter(bridgeFsFactory),
       // Reverse tool channel: answer the child's `client_mcp/message`
       // ext-method by reaching the WS connection that hosts the named server.
       clientMcpSender: clientMcpSenderRegistry.lookup,
@@ -389,7 +398,7 @@ export function createServeApp(
   // via `req.app.locals.fsFactory` without re-threading the value
   // through every handler signature.
   (app.locals as { fsFactory?: WorkspaceFileSystemFactory }).fsFactory =
-    fsFactory;
+    routeFsFactory;
   // Surface the bound workspace on `app.locals` so file routes can
   // compute workspace-relative response paths without re-resolving.
   (app.locals as { boundWorkspace?: string }).boundWorkspace = boundWorkspace;
@@ -803,7 +812,7 @@ export function createServeApp(
     boundWorkspace,
     archiveCoordinator,
     workspace,
-    fsFactory,
+    fsFactory: bridgeFsFactory,
     deviceFlowRegistry,
     token: opts.token,
     // Mirror the REST CORS allowlist onto the WS CSRF wall so an

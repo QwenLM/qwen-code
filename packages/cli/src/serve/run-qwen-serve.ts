@@ -2053,9 +2053,33 @@ export async function runQwenServe(
     });
     const customIgnoreFiles =
       runtimeBootSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
-    const boundWorkspaces =
-      runtime.resolveBoundWorkspacesFromIdeEnv(boundWorkspace);
+    const boundWorkspaces = runtime
+      .resolveBoundWorkspacesFromIdeEnv(boundWorkspace)
+      .filter((workspace: string, index: number) => {
+        if (index === 0) return true;
+        if (!runtimeBootSettings) {
+          daemonLog.warn(
+            'excluding secondary workspace root because trust settings are unavailable',
+            { workspace },
+          );
+          return false;
+        }
+        const trustedSecondary =
+          settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+            runtimeBootSettings.merged,
+            workspace,
+          ).effective.state === 'trusted';
+        if (!trustedSecondary) {
+          daemonLog.warn(
+            'excluding untrusted secondary workspace root from file-system access',
+            { workspace },
+          );
+        }
+        return trustedSecondary;
+      });
     const fsFactory = runtime.resolveBridgeFsFactory({
+      // Secondary roots share a write-capable factory only after their own
+      // folder trust check passes; untrusted secondary roots stay outside.
       boundWorkspaces,
       injected: deps.fsFactory,
       trusted: trustedWorkspace,
@@ -2243,7 +2267,15 @@ export async function runQwenServe(
       boundWorkspace,
       qwenCodeVersion: resolvedCliVersion,
       startup,
-      fsFactory,
+      fsFactory: runtime.resolveBridgeFsFactory({
+        // REST routes still return primary-relative paths, so keep their
+        // filesystem boundary primary-only until responses carry root IDs.
+        boundWorkspaces: [boundWorkspace],
+        injected: deps.fsFactory,
+        trusted: trustedWorkspace,
+        emit: deps.fsAuditEmit,
+        ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+      }),
       daemonLog,
       getChannelWorkerSnapshot,
       getPerfSnapshot: () => ({

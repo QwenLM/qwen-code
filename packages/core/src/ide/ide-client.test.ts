@@ -625,6 +625,26 @@ describe('IdeClient', () => {
     });
   });
 
+  describe('validateWorkspacePath', () => {
+    it('accepts JSON encoded multi-root workspace paths', () => {
+      const result = IdeClient.validateWorkspacePath(
+        JSON.stringify(['/test/other', '/test/workspace']),
+        '/test/workspace/sub-dir',
+      );
+
+      expect(result.isValid).toBe(true);
+    });
+
+    it('keeps delimiter encoded workspace paths working', () => {
+      const result = IdeClient.validateWorkspacePath(
+        ['/test/other', '/test/workspace'].join(path.delimiter),
+        '/test/workspace/sub-dir',
+      );
+
+      expect(result.isValid).toBe(true);
+    });
+  });
+
   describe('getPortFromEnv', () => {
     const invalidPorts = [
       undefined,

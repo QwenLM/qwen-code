@@ -391,6 +391,9 @@ export async function resolveWithinWorkspace(
             canonicalCandidate,
             boundCanonicals,
           );
+          if (boundCanonical !== undefined) {
+            preResolvedCanonical = canonicalCandidate;
+          }
         } catch (innerErr) {
           const innerCode = (innerErr as NodeJS.ErrnoException)?.code;
           if (innerCode !== 'ENOENT' && innerCode !== 'ENOTDIR') {
@@ -401,6 +404,8 @@ export async function resolveWithinWorkspace(
           // a registered root; missing-path failures should keep the
           // normal path_outside_workspace classification below.
         }
+      } else {
+        throw err;
       }
     }
   }

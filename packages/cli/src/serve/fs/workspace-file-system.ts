@@ -711,6 +711,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       let escapedCount = 0;
       let permissionErrorCount = 0;
       let transientErrorCount = 0;
+      let successfulRootCount = 0;
       for (const searchRoot of searchRoots) {
         if (out.length >= max) break;
         let matches: string[];
@@ -731,6 +732,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           }
           continue;
         }
+        successfulRootCount += 1;
         for (const hit of matches) {
           if (out.length >= max) break;
           const absolute = path.resolve(hit);
@@ -796,6 +798,18 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           if (verdict.ignored && !opts.includeIgnored) continue;
           out.push(canonical as ResolvedPath);
         }
+      }
+      if (successfulRootCount === 0 && searchRoots.length > 0) {
+        throw new FsError(
+          transientErrorCount > 0 ? 'io_error' : 'permission_denied',
+          `glob failed for all workspace roots: ${pattern}`,
+          {
+            hint:
+              transientErrorCount > 0
+                ? 'all workspace roots failed during glob traversal'
+                : 'all workspace roots denied glob traversal',
+          },
+        );
       }
       if (escapedCount > 0) {
         this.deps.audit.recordDenied(this.deps.ctx, {

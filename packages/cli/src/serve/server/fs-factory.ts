@@ -109,7 +109,7 @@ export function resolveBoundWorkspacesFromIdeEnv(
     );
     return [primary];
   }
-  return dropNestedWorkspaces(workspaces);
+  return dropNestedWorkspacesPreservingPrimary(workspaces);
 }
 
 function parseIdeWorkspacePathEnv(value: string | undefined): string[] {
@@ -129,13 +129,24 @@ function parseIdeWorkspacePathEnv(value: string | undefined): string[] {
     .filter((workspace) => workspace.length > 0);
 }
 
-function dropNestedWorkspaces(workspaces: readonly string[]): string[] {
+function dropNestedWorkspacesPreservingPrimary(
+  workspaces: readonly string[],
+): string[] {
+  const primary = workspaces[0];
+  if (primary === undefined) return [];
   const filtered = workspaces.filter(
     (workspace, i) =>
-      !workspaces.some(
-        (other, j) =>
-          i !== j && workspace !== other && isWithinRoot(workspace, other),
-      ),
+      i === 0 ||
+      (workspace !== primary &&
+        !isWithinRoot(workspace, primary) &&
+        !isWithinRoot(primary, workspace) &&
+        !workspaces.some(
+          (other, j) =>
+            i !== j &&
+            j !== 0 &&
+            workspace !== other &&
+            isWithinRoot(workspace, other),
+        )),
   );
   if (filtered.length < workspaces.length) {
     writeStderrLine(
