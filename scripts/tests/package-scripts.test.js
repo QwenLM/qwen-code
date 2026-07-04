@@ -448,7 +448,7 @@ describe('package scripts', () => {
       expect(verifyStep).toContain(
         'npm run test --workspace "${p}" --if-present -- --changed "origin/main...${BRANCH}" --passWithNoTests',
       );
-      expect(verifyStep).toContain('package.json');
+      expect(verifyStep).toContain("grep -oE '^packages/[^/]+'");
       expect(verifyStep).not.toContain(
         'npm run test --workspace "${p}" --if-present\n',
       );
