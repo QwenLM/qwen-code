@@ -528,7 +528,12 @@ export class QQChannel extends ChannelBase {
   }
 
   private idleFlush(sessionId: string, reconnectId: number): void {
-    if (this.reconnectId !== reconnectId) return;
+    if (this.reconnectId !== reconnectId) {
+      process.stderr.write(
+        `[QQ:${this.name}] idleFlush discarded (reconnect) session=${sanitizeLogText(sessionId, 32)}\n`,
+      );
+      return;
+    }
     const state = this.streamState.get(sessionId);
     if (!state || !state.buffer) return;
     if (this.flushingSessions.has(sessionId)) {
@@ -583,9 +588,9 @@ export class QQChannel extends ChannelBase {
           const s = this.streamState.get(sessionId);
           if (s === state && s.buffer) {
             // Don't clear buffer or retryCount — idleFlush will pick them up.
-            // idleFlush has flushingSessions guard so this is safe.
             this.idleFlush(sessionId, this.reconnectId);
-            return;
+            // Don't return — let .finally() clear flushingSessions
+            // so deferred idleFlush can proceed.
           }
         }
 
@@ -597,7 +602,7 @@ export class QQChannel extends ChannelBase {
       })
       .catch((e: unknown) => {
         process.stderr.write(
-          `[QQ:${this.name}] ${logLabel} send failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}`,
+          `[QQ:${this.name}] ${logLabel} send failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
         );
         // #1: Never undo previously-succeeded flush records on failure
 
@@ -623,7 +628,7 @@ export class QQChannel extends ChannelBase {
               // #2: Clean up flushedSessions on retry exhaustion
               this.flushedSessions.delete(sessionId);
               process.stderr.write(
-                `[QQ:${this.name}] ${logLabel} retries exhausted for ${sanitizeLogText(sessionId, 64)}`,
+                `[QQ:${this.name}] ${logLabel} retries exhausted for ${sanitizeLogText(sessionId, 64)}\n`,
               );
             }
           }
@@ -635,30 +640,31 @@ export class QQChannel extends ChannelBase {
             current.buffer = buffer + (current.buffer || '');
             // #3: If re-buffer exceeds max length, flush immediately
             if (current.buffer.length >= QQChannel.MAX_BUFFER_LENGTH) {
-              // Schedule via idleFlush to maintain flushingSessions guard
               this.idleFlush(sessionId, this.reconnectId);
-              return;
-            }
-            current.retryCount++;
-            if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
-              if (!current.timer) {
-                const reconnectId = this.reconnectId;
-                const delay =
-                  current.retryCount > 1
-                    ? QQChannel.IDLE_FLUSH_BACKOFF_MS
-                    : QQChannel.IDLE_FLUSH_MS;
-                current.timer = setTimeout(() => {
-                  this.idleFlush(sessionId, reconnectId);
-                }, delay);
-                current.timer.unref?.();
-              }
+              // Don't return — let .finally() clear flushingSessions.
+              // Skip retry scheduling: idleFlush handles it.
             } else {
-              this.streamState.delete(sessionId);
-              // #2: Clean up flushedSessions on retry exhaustion
-              this.flushedSessions.delete(sessionId);
-              process.stderr.write(
-                `[QQ:${this.name}] ${logLabel} retries exhausted for ${sanitizeLogText(sessionId, 64)}`,
-              );
+              current.retryCount++;
+              if (current.retryCount < QQChannel.MAX_FLUSH_RETRIES) {
+                if (!current.timer) {
+                  const reconnectId = this.reconnectId;
+                  const delay =
+                    current.retryCount > 1
+                      ? QQChannel.IDLE_FLUSH_BACKOFF_MS
+                      : QQChannel.IDLE_FLUSH_MS;
+                  current.timer = setTimeout(() => {
+                    this.idleFlush(sessionId, reconnectId);
+                  }, delay);
+                  current.timer.unref?.();
+                }
+              } else {
+                this.streamState.delete(sessionId);
+                // #2: Clean up flushedSessions on retry exhaustion
+                this.flushedSessions.delete(sessionId);
+                process.stderr.write(
+                  `[QQ:${this.name}] ${logLabel} retries exhausted for ${sanitizeLogText(sessionId, 64)}\n`,
+                );
+              }
             }
           }
         }
@@ -697,6 +703,9 @@ export class QQChannel extends ChannelBase {
     }
     if (state && this.flushingSessions.has(sessionId)) {
       this.pendingStreamDelete.add(sessionId);
+      process.stderr.write(
+        `[QQ:${this.name}] onResponseComplete deferred (flush in-flight) session=${sanitizeLogText(sessionId, 32)}\n`,
+      );
       return;
     }
     const wasFlushed = this.flushedSessions.has(sessionId);
@@ -1104,6 +1113,7 @@ export class QQChannel extends ChannelBase {
       this.ws.close(4002, 'READY timeout');
       reject(new Error(`[QQ:${this.name}] READY timeout after 30s`));
     }, 30_000);
+    this.readyTimeout.unref?.();
 
     this.ws.on('open', () => {
       process.stderr.write(`[QQ:${this.name}] WebSocket connected\n`);
