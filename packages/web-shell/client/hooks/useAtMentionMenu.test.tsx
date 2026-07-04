@@ -1397,6 +1397,37 @@ describe('useAtMentionMenu', () => {
     });
   });
 
+  it('escapes provider-prefix delimiters in file insert paths', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [
+        {
+          name: 'ext:config.json',
+          kind: 'file',
+          ignored: false,
+        },
+      ],
+      truncated: false,
+    });
+    mount({ actions: { listDirectory }, view });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept(1)).toBe(true);
+    });
+
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '@ext\\:config.json ' },
+      selection: { anchor: 18 },
+      scrollIntoView: true,
+    });
+  });
+
   it('unescapes parser delimiters when reopening a file mention', async () => {
     vi.useFakeTimers();
     const listDirectory = vi.fn().mockResolvedValue({
@@ -1420,6 +1451,32 @@ describe('useAtMentionMenu', () => {
       level: 'items',
       selectedProviderId: 'files',
       items: [expect.objectContaining({ label: 'space name(1)?.md' })],
+    });
+  });
+
+  it('reopens escaped provider-prefix file mentions as files', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [
+        {
+          name: 'ext:config.json',
+          kind: 'file',
+          ignored: false,
+        },
+      ],
+      truncated: false,
+    });
+    mount({ actions: { listDirectory } });
+
+    act(() => latest!.refreshForView(makeView('@ext\\:config.json')));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'files',
+      items: [expect.objectContaining({ label: 'ext:config.json' })],
     });
   });
 
@@ -1464,9 +1521,9 @@ describe('useAtMentionMenu', () => {
       changes: {
         from: 0,
         to: 1,
-        insert: '@docs:res://doc\\?version=1\\ path\\@x. ',
+        insert: '@docs\\:res\\://doc\\?version=1\\ path\\@x. ',
       },
-      selection: { anchor: 37 },
+      selection: { anchor: 39 },
       scrollIntoView: true,
     });
   });

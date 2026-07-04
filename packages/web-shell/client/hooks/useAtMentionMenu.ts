@@ -162,7 +162,7 @@ const ANSI_RE = new RegExp(`${ESC}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`, 'g');
 // Strip zero-width and BiDi controls so provider text cannot spoof paths/URIs.
 const BIDI_CONTROL_RE = /[\u200B\u200E\u200F\u061C\u2066-\u2069\u202A-\u202E]/g;
 const SAFE_DISPLAY_FALLBACK = '[invalid]';
-const AT_REFERENCE_SPECIAL_CHARS = /[ \t()[\]{};!?\\,@]/g;
+const AT_REFERENCE_SPECIAL_CHARS = /[ \t()[\]{};!?\\,@:]/g;
 
 function isBuiltinProviderId(providerId: string): boolean {
   return (
