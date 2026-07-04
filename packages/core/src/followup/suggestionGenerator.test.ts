@@ -161,6 +161,8 @@ describe('shouldFilterSuggestion', () => {
     expect(shouldFilterSuggestion('Do this. Then do that.')).toBe(true);
     // Abbreviation skipped, then real sentence boundary detected
     expect(shouldFilterSuggestion('Check Dr. Smith. Then commit.')).toBe(true);
+    // Non-word char before punctuation — still detected as sentence boundary
+    expect(shouldFilterSuggestion('Run (see docs). Then deploy')).toBe(true);
   });
 
   it('does not filter abbreviations as multiple sentences', () => {
@@ -184,6 +186,9 @@ describe('shouldFilterSuggestion', () => {
     // Latin shorthands with an internal period
     expect(shouldFilterSuggestion('Use e.g. Docker to build')).toBe(false);
     expect(shouldFilterSuggestion('Use i.e. Docker to build')).toBe(false);
+    // Capitalized variants still recognized as abbreviations
+    expect(shouldFilterSuggestion('Use E.g. Docker to build')).toBe(false);
+    expect(shouldFilterSuggestion('Use I.e. Docker to build')).toBe(false);
   });
 
   it('filters formatting', () => {

@@ -262,8 +262,8 @@ function hasSentenceBoundary(suggestion: string): boolean {
     const word = wordMatch[1];
     if (KNOWN_ABBREVIATIONS.has(word)) continue;
     if (
-      (word === 'g' && /e\.g$/.test(before)) ||
-      (word === 'e' && /i\.e$/.test(before))
+      (word === 'g' && /e\.g$/i.test(before)) ||
+      (word === 'e' && /i\.e$/i.test(before))
     )
       continue;
     return true;
