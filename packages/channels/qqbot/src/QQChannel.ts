@@ -446,6 +446,10 @@ export class QQChannel extends ChannelBase {
     }
     this.flushQQState();
     this.backupGlobalSessions();
+    if (this.readyTimeout) {
+      clearTimeout(this.readyTimeout);
+      this.readyTimeout = null;
+    }
     if (this.ws) {
       this.ws.close(1000);
       this.ws = null;
@@ -631,9 +635,8 @@ export class QQChannel extends ChannelBase {
             current.buffer = buffer + (current.buffer || '');
             // #3: If re-buffer exceeds max length, flush immediately
             if (current.buffer.length >= QQChannel.MAX_BUFFER_LENGTH) {
-              const buf = current.buffer;
-              current.buffer = '';
-              this.flushAndTrack(sessionId, buf, state, logLabel);
+              // Schedule via idleFlush to maintain flushingSessions guard
+              this.idleFlush(sessionId, this.reconnectId);
               return;
             }
             current.retryCount++;
