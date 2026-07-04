@@ -131,6 +131,26 @@ describe('RemoteInputWatcher', () => {
     expect(submitted).toEqual(['split']);
   });
 
+  it('consumes complete records but defers a trailing partial in the same poll', async () => {
+    watcher = new RemoteInputWatcher(inputFile);
+    const submitted: string[] = [];
+    watcher.setSubmitFn((text) => {
+      submitted.push(text);
+    });
+
+    fs.appendFileSync(
+      inputFile,
+      '{"type":"submit","text":"first"}\n{"type":"submit","text":"sec',
+    );
+    await watcher.checkForNewInput();
+    expect(submitted).toEqual(['first']);
+
+    fs.appendFileSync(inputFile, 'ond"}\n');
+    await watcher.checkForNewInput();
+
+    expect(submitted).toEqual(['first', 'second']);
+  });
+
   it('does not consume a trailing partial confirmation before newline', async () => {
     watcher = new RemoteInputWatcher(inputFile);
     const handler = vi.fn();
