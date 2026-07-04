@@ -45,7 +45,6 @@ export function AtMentionPanel({
   const { t } = useI18n();
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
-  const [searchFocused, setSearchFocused] = useState(false);
   const [anchorRect, setAnchorRect] = useState<{
     left: number;
     bottom: number;
@@ -180,7 +179,7 @@ export function AtMentionPanel({
       : t('at.menu');
   const listboxId = 'at-mention-listbox';
   const activeOptionId =
-    searchFocused && menu.selectedIndex >= 0 && menu.selectedIndex < rows.length
+    menu.selectedIndex >= 0 && menu.selectedIndex < rows.length
       ? `at-mention-option-${menu.selectedIndex}`
       : undefined;
 
@@ -233,8 +232,6 @@ export function AtMentionPanel({
               aria-label={t('common.search')}
               aria-controls={listboxId}
               aria-activedescendant={activeOptionId}
-              onFocus={() => setSearchFocused(true)}
-              onBlur={() => setSearchFocused(false)}
               onMouseDown={(event) => event.stopPropagation()}
               onClick={(event) => event.stopPropagation()}
               onChange={(event) => onSearch(event.currentTarget.value)}

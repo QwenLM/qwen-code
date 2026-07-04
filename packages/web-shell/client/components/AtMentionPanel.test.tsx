@@ -133,6 +133,12 @@ describe('AtMentionPanel', () => {
     expect(input.getAttribute('aria-activedescendant')).toBe(
       'at-mention-option-0',
     );
+    act(() => {
+      input.blur();
+    });
+    expect(input.getAttribute('aria-activedescendant')).toBe(
+      'at-mention-option-0',
+    );
     expect(document.getElementById('at-mention-option-0')).not.toBeNull();
     act(() => {
       input.dispatchEvent(

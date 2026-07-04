@@ -873,9 +873,11 @@ export function useAtMentionMenu({
           }
           setMenu((prev) => {
             if (!prev || prev.level !== 'items') return prev;
+            const maxItems =
+              providerId === FILE_PROVIDER_ID && query.length === 0 ? 51 : 50;
             return {
               ...prev,
-              items: items.map(sanitizeAtMentionItem).slice(0, 50),
+              items: items.slice(0, maxItems).map(sanitizeAtMentionItem),
               selectedIndex: 0,
               loading: false,
             };
@@ -1412,6 +1414,7 @@ export function useAtMentionMenu({
       }
       const view = viewRef.current;
       if (!view) return false;
+      if (current.loading) return true;
       const item = current.items[index ?? current.selectedIndex];
       if (!item) return false;
       if (current.selectedProviderId) {
@@ -1450,7 +1453,6 @@ export function useAtMentionMenu({
         });
         return true;
       }
-      if (current.loading && index === undefined) return true;
       const insert =
         item.insertText ?? `@${escapeAtReferenceText(item.label)} `;
       const docLength = view.state.doc.length;

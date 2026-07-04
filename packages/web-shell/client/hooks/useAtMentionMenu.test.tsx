@@ -463,6 +463,31 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.items).toHaveLength(50);
   });
 
+  it('keeps the current directory item plus fifty file entries', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: Array.from({ length: 55 }, (_, index) => ({
+        name: `file-${String(index).padStart(2, '0')}.ts`,
+        kind: 'file',
+        ignored: false,
+      })),
+      truncated: false,
+    });
+    mount({
+      actions: { listDirectory },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+
+    expect(latest!.state?.items).toHaveLength(51);
+    expect(latest!.state?.items[0]?.id).toBe('current:.');
+    expect(latest!.state?.items[50]?.label).toBe('file-49.ts');
+  });
+
   it('keeps built-in providers when custom provider ids collide', () => {
     const search = vi.fn().mockResolvedValue([]);
     mount({
@@ -517,6 +542,51 @@ describe('useAtMentionMenu', () => {
       scrollIntoView: true,
     });
     expect(latest!.state).toBeNull();
+  });
+
+  it('does not accept stale items while a provider search is loading', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    let resolveSecond!: (items: []) => void;
+    const secondSearch = new Promise<[]>((resolve) => {
+      resolveSecond = resolve;
+    });
+    const search = vi
+      .fn()
+      .mockResolvedValueOnce([
+        {
+          id: 'old',
+          label: 'old',
+          insertText: '@old ',
+        },
+      ])
+      .mockReturnValueOnce(secondSearch);
+    mount({
+      view,
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search,
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => latest!.updateSearch('new'));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept(0)).toBe(true);
+    });
+
+    expect(view.dispatch).not.toHaveBeenCalled();
+    act(() => resolveSecond([]));
+    await act(async () => {
+      await Promise.resolve();
+    });
   });
 
   it('accepts a directory item by drilling into that directory', async () => {
@@ -1146,6 +1216,32 @@ describe('useAtMentionMenu', () => {
     });
     expect(warn).toHaveBeenCalledWith(
       '[@mention] provider="broken" query=<redacted> failed',
+      expect.any(Error),
+    );
+    warn.mockRestore();
+  });
+
+  it('recovers from built-in provider search failures', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mount({
+      actions: {
+        loadExtensionsStatus: vi.fn().mockRejectedValue(new Error('boom')),
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(1));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'extensions',
+      loading: false,
+      items: [],
+    });
+    expect(warn).toHaveBeenCalledWith(
+      'Failed to load @ extension suggestions',
       expect.any(Error),
     );
     warn.mockRestore();
