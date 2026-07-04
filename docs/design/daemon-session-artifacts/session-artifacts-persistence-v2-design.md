@@ -150,6 +150,23 @@ V2 默认只使用 Chat JSONL system records：
 - sidecar 只能是可删除缓存，不能承载协议正确性。
 - 即使 sidecar 命中，也必须对每个 artifact 执行恢复校验，不能绕过 JSONL restore validation。
 
+sidecar 对 V2 持久化不是 correctness requirement。当前 `loadSession()` 为恢复会读取完整 session JSONL 并重建对话树；artifact restore 在同一轮读取里提取 snapshot/event records 时，不会增加额外文件 I/O。因此，sidecar 在当前架构下只能节省 artifact records 的少量 parse/replay 成本，不能消除 session load 的主要读取成本。
+
+把 sidecar 纳入当前 PR 会明显扩大实现面：
+
+- JSONL 与 sidecar 的双写顺序、fsync 和 crash recovery。
+- stale/corrupt sidecar 的校验、失效和 fallback。
+- archive/unarchive/delete/fork/remap 时 sidecar 生命周期同步。
+- sidecar 是否可信、是否可能绕过 restore validation 的安全边界。
+- orphan sidecar/cache cleanup 和额外测试矩阵。
+
+因此 V2 发布门槛保持 JSONL-only。sidecar 只在以下任一条件被 profiling 或产品需求证明后再进入独立设计：
+
+- `loadSession()` 不再需要读取完整 JSONL，sidecar 可以避免一次 cold-start 全量扫描。
+- artifact list 需要在不 load session history 的场景下冷启动展示。
+- 实测 artifact restore，而不是对话历史重建，成为 session load 的主耗时。
+- 需要跨 session/project 的 artifact 搜索或全局索引。
+
 ### 4.2 JSONL system record
 
 给 `ChatRecord.subtype` 增加：
