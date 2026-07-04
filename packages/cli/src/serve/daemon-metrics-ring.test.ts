@@ -19,6 +19,8 @@ const GAUGES: DaemonMetricsGauges = {
   wsConnections: 1,
   acpConnections: 2,
   rateLimitRejected: 5,
+  childCpuPercent: 7,
+  childRssBytes: 200,
 };
 
 describe('DaemonMetricsRing', () => {
@@ -79,6 +81,8 @@ describe('DaemonMetricsRing', () => {
     expect(b.wsConnections).toBe(1);
     expect(b.acpConnections).toBe(2);
     expect(b.rateLimitRejected).toBe(5);
+    expect(b.childCpuPercent).toBe(7);
+    expect(b.childRssBytes).toBe(200);
     // window aggregates reset on the next seal
     ring.sample(2000, GAUGES);
     const nb = ring.snapshot()[1];

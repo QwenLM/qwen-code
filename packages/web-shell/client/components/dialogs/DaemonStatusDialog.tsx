@@ -405,21 +405,31 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
       ])}
       {chart('daemon.charts.cpu', formatPercent, [
         {
-          label: 'CPU',
+          label: t('daemon.charts.cpuDaemon'),
           values: col((b) => b.cpuPercent),
+          color: 'var(--muted-foreground)',
+        },
+        {
+          label: t('daemon.charts.cpuChild'),
+          values: col((b) => b.childCpuPercent),
           color: 'var(--primary)',
         },
       ])}
       {chart('daemon.charts.memory', formatBytes, [
         {
-          label: 'RSS',
+          label: t('daemon.charts.rssDaemon'),
           values: col((b) => b.rssBytes),
-          color: 'var(--primary)',
+          color: 'var(--muted-foreground)',
         },
         {
           label: t('daemon.charts.heap'),
           values: col((b) => b.heapUsedBytes),
           color: 'var(--agent-blue-400)',
+        },
+        {
+          label: t('daemon.charts.rssChild'),
+          values: col((b) => b.childRssBytes),
+          color: 'var(--primary)',
         },
       ])}
       {chart('daemon.charts.pipe', formatBytes, [

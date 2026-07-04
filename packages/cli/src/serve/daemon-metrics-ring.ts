@@ -96,6 +96,14 @@ export interface DaemonMetricsBucket {
   tokensIn: number;
   /** Output (completion) tokens attributed to model turns in this window. */
   tokensOut: number;
+
+  // —— ACP child process (gauge @ seal; self-reported over ACP) ——
+  /** ACP child process CPU utilization at seal time, percent of one core —
+   *  where the real LLM/tool work runs (the daemon itself mostly just forwards).
+   *  0 when no child exists or it has not reported yet. */
+  childCpuPercent: number;
+  /** ACP child process resident set size at seal time (bytes); 0 when none. */
+  childRssBytes: number;
 }
 
 /** Instantaneous gauges the host reads and hands to {@link DaemonMetricsRing.sample}. */
@@ -112,6 +120,10 @@ export interface DaemonMetricsGauges {
   acpConnections: number;
   /** Per-window rate-limit rejections (host diffs the since-start counter). */
   rateLimitRejected: number;
+  /** ACP child process CPU % (self-reported over ACP); 0 when no child. */
+  childCpuPercent: number;
+  /** ACP child process RSS bytes (self-reported over ACP); 0 when no child. */
+  childRssBytes: number;
 }
 
 export interface DaemonMetricsRingOptions {
@@ -226,6 +238,8 @@ export class DaemonMetricsRing {
       rateLimitRejected: gauges.rateLimitRejected,
       tokensIn: this.curTokensIn,
       tokensOut: this.curTokensOut,
+      childCpuPercent: gauges.childCpuPercent,
+      childRssBytes: gauges.childRssBytes,
     });
     if (this.buckets.length > this.capacity) {
       this.buckets.splice(0, this.buckets.length - this.capacity);

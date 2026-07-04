@@ -2338,6 +2338,10 @@ export async function runQwenServe(
       const rejectedTotal = hits ? hits.prompt + hits.mutation + hits.read : 0;
       const rateLimitRejected = Math.max(0, rejectedTotal - prevRateRejected);
       prevRateRejected = rejectedTotal;
+      // ACP child resource: read this tick's cached snapshot synchronously and
+      // kick an async refresh for the next tick, keeping the sampler sync.
+      const child = bridge.getChildResourceSnapshot();
+      void bridge.refreshChildResource();
       metricsRing.sample(nowMs, {
         cpuPercent,
         rssBytes: mem.rss,
@@ -2350,6 +2354,8 @@ export async function runQwenServe(
         wsConnections: acp?.wsStreams ?? 0,
         acpConnections: acp?.connectionCount ?? 0,
         rateLimitRejected,
+        childCpuPercent: child?.cpuPercent ?? 0,
+        childRssBytes: child?.rssBytes ?? 0,
       });
     }, DAEMON_METRICS_SAMPLE_MS);
     metricsSamplerTimer.unref();

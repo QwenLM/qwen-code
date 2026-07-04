@@ -135,6 +135,7 @@ import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
@@ -2612,6 +2613,21 @@ function parseAcpSessionListCursor(
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
+  // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
+  // (Daemon Status child-resource chart). The daemon polls this at a fixed
+  // cadence, so successive calls form a clean delta window independent of tool
+  // activity. Init is guarded — `process.cpuUsage()` can throw in restricted
+  // containers.
+  private readonly childCpuCoreCount =
+    os.availableParallelism?.() ?? os.cpus().length ?? 1;
+  private prevChildCpu: NodeJS.CpuUsage = (() => {
+    try {
+      return process.cpuUsage();
+    } catch {
+      return { user: 0, system: 0 };
+    }
+  })();
+  private prevChildCpuAt = Date.now();
 
   /**
    * Workspace-shared MCP transport pool. Eagerly constructed; lazy
@@ -5334,6 +5350,40 @@ class QwenAgent implements Agent {
         return (await this.buildAcpPreflightCells(
           this.config,
         )) as unknown as Record<string, unknown>;
+      case SERVE_STATUS_EXT_METHODS.workspaceResource: {
+        // Process-wide rss/cpu of this ACP child, for the Daemon Status
+        // child-resource chart. cpuPercent is a delta since the previous poll
+        // (mirrors the daemon's own self-sampler), normalized by core count and
+        // clamped to [0,100].
+        const now = Date.now();
+        let cpu = this.prevChildCpu;
+        try {
+          cpu = process.cpuUsage();
+        } catch {
+          /* keep prev on failure → this window reads 0 */
+        }
+        const elapsedMs = now - this.prevChildCpuAt;
+        const cpuUs =
+          cpu.user -
+          this.prevChildCpu.user +
+          (cpu.system - this.prevChildCpu.system);
+        const cpuPercent =
+          elapsedMs > 0
+            ? Math.min(
+                100,
+                Math.max(
+                  0,
+                  ((cpuUs / (elapsedMs * 1000)) * 100) / this.childCpuCoreCount,
+                ),
+              )
+            : 0;
+        this.prevChildCpu = cpu;
+        this.prevChildCpuAt = now;
+        return {
+          rssBytes: process.memoryUsage().rss,
+          cpuPercent,
+        };
+      }
       case SERVE_STATUS_EXT_METHODS.sessionContext: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {

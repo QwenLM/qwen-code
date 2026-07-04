@@ -213,6 +213,15 @@ interface ChannelInfo {
    */
   statusClosedReject?: Promise<never>;
   /**
+   * Latest self-reported ACP-child resource sample (rss/cpu), refreshed by the
+   * daemon's metrics sampler via `refreshChildResource`. Kept on the channel so
+   * it drops automatically on a channel swap — the sampler always reads the
+   * live channel's cache.
+   */
+  childRssBytes?: number;
+  childCpuPercent?: number;
+  childResourceAt?: number;
+  /**
    * MUST be set to `true` synchronously by any teardown path BEFORE
    * awaiting `channel.kill()`. `ensureChannel` treats a dying channel
    * as absent and spawns a fresh one — without this flag a concurrent
@@ -2081,6 +2090,42 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return response as unknown as T;
   };
 
+  // Daemon Status child-resource: poll the live child's `workspaceResource`
+  // extMethod and cache rss/cpu on the channel. The daemon's metrics sampler
+  // fires this fire-and-forget, then reads the cache synchronously — keeping the
+  // async round-trip off the sampler's hot path.
+  const refreshChildResource = async (): Promise<void> => {
+    const info = liveChannelInfo();
+    if (!info) return;
+    try {
+      const res = await requestWorkspaceStatus<{
+        rssBytes?: unknown;
+        cpuPercent?: unknown;
+      }>(SERVE_STATUS_EXT_METHODS.workspaceResource, () => ({}));
+      // A channel swap during the await would otherwise stamp a dead channel;
+      // only write if this is still the live one.
+      if (liveChannelInfo() !== info) return;
+      if (typeof res.rssBytes === 'number') info.childRssBytes = res.rssBytes;
+      if (typeof res.cpuPercent === 'number') {
+        info.childCpuPercent = res.cpuPercent;
+      }
+      info.childResourceAt = Date.now();
+    } catch {
+      // Child unreachable / mid-swap — keep the last good cache (or nothing
+      // before the first success); the chart reads 0 until then.
+    }
+  };
+  const getChildResourceSnapshot = ():
+    | { rssBytes: number; cpuPercent: number }
+    | undefined => {
+    const info = liveChannelInfo();
+    if (!info || info.childResourceAt === undefined) return undefined;
+    return {
+      rssBytes: info.childRssBytes ?? 0,
+      cpuPercent: info.childCpuPercent ?? 0,
+    };
+  };
+
   const requestSessionStatus = async <T>(
     sessionId: string,
     method: string,
@@ -2965,6 +3010,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       for (const entry of byId.values()) total += entry.pendingPromptCount;
       return total;
     },
+
+    // Daemon Status child-resource: sync cache read for the sampler + the async
+    // refresh it fires each tick to update that cache.
+    getChildResourceSnapshot,
+    refreshChildResource,
 
     get activePromptCount() {
       return activePromptCounter;

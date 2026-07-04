@@ -1025,6 +1025,17 @@ export interface AcpSessionBridge {
    *  queue-depth gauge for the Daemon Status charts. */
   readonly pendingPromptTotal: number;
 
+  /** Latest self-reported ACP-child rss/cpu (Daemon Status child-resource
+   *  chart), or undefined before the first successful poll / when no child is
+   *  live. Synchronous cache read for the metrics sampler. */
+  getChildResourceSnapshot():
+    | { rssBytes: number; cpuPercent: number }
+    | undefined;
+  /** Poll the live child's resource extMethod and refresh the cache that
+   *  {@link getChildResourceSnapshot} reads. Fired fire-and-forget by the
+   *  sampler each tick. */
+  refreshChildResource(): Promise<void>;
+
   /**
    * Epoch-ms timestamp of the last "activity" event (prompt start/end,
    * session spawn/restore). `null` when the daemon has never processed

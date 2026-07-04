@@ -236,6 +236,11 @@ export interface DaemonMetricsSeriesBucket {
   tokensIn: number;
   /** Output (completion) tokens burned in the window. */
   tokensOut: number;
+  /** ACP child process CPU % at seal time (self-reported over ACP); where the
+   *  real LLM/tool work runs. 0 when no child. */
+  childCpuPercent: number;
+  /** ACP child process RSS at seal time (bytes; self-reported). 0 when none. */
+  childRssBytes: number;
 }
 
 /**
