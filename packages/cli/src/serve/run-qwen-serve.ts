@@ -1247,7 +1247,7 @@ function isCorsPreflightRequest(req: Request): boolean {
     Boolean(req.headers.origin) &&
     Boolean(
       req.headers['access-control-request-method'] ||
-      req.headers['access-control-request-headers'],
+        req.headers['access-control-request-headers'],
     )
   );
 }
@@ -2276,7 +2276,6 @@ export async function runQwenServe(
         // REST routes still return primary-relative paths, so keep their
         // filesystem boundary primary-only until responses carry root IDs.
         boundWorkspaces: [boundWorkspace],
-        injected: deps.fsFactory,
         trusted: trustedWorkspace,
         emit: deps.fsAuditEmit,
         ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),

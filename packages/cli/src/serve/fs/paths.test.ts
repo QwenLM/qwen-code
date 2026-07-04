@@ -411,16 +411,19 @@ describe('resolveWithinWorkspace', () => {
     const aliasWorkspace = path.join(scratch, 'alias-workspace');
     await fsp.symlink(workspace, aliasWorkspace, 'dir');
     const outsideTarget = path.join(scratch, 'outside-not-yet-existing.txt');
+    const aliasEscape = path.join(aliasWorkspace, 'escape');
     await fsp.symlink(outsideTarget, path.join(workspace, 'escape'), 'file');
+    const lstat = vi.spyOn(fsp, 'lstat');
 
     const err = await resolveWithinWorkspace(
-      path.join(aliasWorkspace, 'escape'),
+      aliasEscape,
       workspace,
       'write',
     ).catch((e: unknown) => e);
 
     expect(isFsError(err)).toBe(true);
     expect((err as { kind: string }).kind).toBe('symlink_escape');
+    expect(lstat).toHaveBeenCalledWith(aliasEscape);
   });
 
   it('allows a dangling symlink whose (not-yet-existing) target stays inside workspace', async () => {

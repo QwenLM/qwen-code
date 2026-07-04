@@ -12215,17 +12215,10 @@ describe('runQwenServe', () => {
     }
   });
 
-  it('honors deps.fsFactory override (#4175 PR 19 follow-up #2)', async () => {
-    // The injection point exists so embedded callers (other tools
-    // wrapping the daemon, future runtime locality contracts) can
-    // swap in a remote-fronting factory. This test asserts
-    // `runQwenServe` does NOT silently shadow a caller-supplied
-    // factory with its built-in default. A regression that ignored
-    // `deps.fsFactory` and fell back to the built-in factory would
-    // resolve `a.txt` against `process.cwd()`, find no such file,
-    // and return 404 `path_not_found`. The sentinel-throwing
-    // factory ensures we see 400 with `sentinel-from-fake-factory`
-    // in the body — proof the override actually drives the request.
+  it('keeps deps.fsFactory override out of REST routes', async () => {
+    // The bridge can use an injected multi-root factory, but REST routes
+    // still serialize primary-relative paths. Pin that REST gets the
+    // primary-only factory built by runQwenServe instead of the injected one.
     const sentinelMessage = 'sentinel-from-fake-factory';
     const fsFactory: WorkspaceFileSystemFactory = {
       assertCanWrite: () => {},
@@ -12269,21 +12262,28 @@ describe('runQwenServe', () => {
       }),
     };
     const bridge = fakeBridge();
-    handle = await runQwenServe(
-      {
-        hostname: '127.0.0.1',
-        port: 0,
-        mode: 'http-bridge',
-        workspace: process.cwd(),
-      },
-      { bridge, fsFactory },
+    const wsRoot = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-runqwen-rest-fs-'),
     );
-    const port = (handle.server.address() as { port: number }).port;
-    const res = await fetch(`http://127.0.0.1:${port}/file?path=a.txt`);
-    expect(res.status).toBe(400);
-    const body = (await res.json()) as { error: string; errorKind: string };
-    expect(body.errorKind).toBe('parse_error');
-    expect(body.error).toContain(sentinelMessage);
+    try {
+      handle = await runQwenServe(
+        {
+          hostname: '127.0.0.1',
+          port: 0,
+          mode: 'http-bridge',
+          workspace: wsRoot,
+        },
+        { bridge, fsFactory },
+      );
+      const port = (handle.server.address() as { port: number }).port;
+      const res = await fetch(`http://127.0.0.1:${port}/file?path=a.txt`);
+      expect(res.status).toBe(404);
+      const body = (await res.json()) as { error: string; errorKind: string };
+      expect(body.errorKind).toBe('path_not_found');
+      expect(body.error).not.toContain(sentinelMessage);
+    } finally {
+      await fsp.rm(wsRoot, { recursive: true, force: true });
+    }
   });
 
   it('trust snapshot defaults to true (operator-chosen workspace)', async () => {
