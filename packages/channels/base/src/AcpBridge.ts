@@ -29,6 +29,8 @@ import {
 } from './ChannelLoopTools.js';
 export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
 
+const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
+
 export interface AcpBridgeOptions {
   cliEntryPath: string;
   cwd: string;
@@ -343,7 +345,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
     if (method === CLIENT_MCP_MESSAGE_METHOD) {
       return this.handleClientMcpMessage(params);
     }
-    if (method === 'craft/drainMidTurnQueue') {
+    if (method === MID_TURN_QUEUE_DRAIN_METHOD) {
       return { messages: [] };
     }
     throw new Error(`Method not found: ${method}`);

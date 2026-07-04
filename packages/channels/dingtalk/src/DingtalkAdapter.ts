@@ -481,6 +481,11 @@ export class DingtalkChannel extends ChannelBase {
   ): Promise<void> {
     const robotCode = this.config.clientId;
     if (!robotCode || !this.config.clientSecret || !msgId || !conversationId) {
+      if (!this.config.clientSecret) {
+        process.stderr.write(
+          `[DingTalk:${this.name}] emotion/${endpoint} skipped: clientSecret not configured\n`,
+        );
+      }
       return;
     }
 

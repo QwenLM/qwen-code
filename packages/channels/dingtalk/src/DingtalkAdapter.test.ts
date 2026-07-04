@@ -523,6 +523,33 @@ describe('DingtalkChannel prompt reactions', () => {
       ],
     ).toBe('proactive-token');
   });
+
+  it('logs when emotion replies require a missing clientSecret', async () => {
+    const channel = createChannel();
+    (
+      channel as unknown as { config: { clientSecret?: string } }
+    ).config.clientSecret = undefined;
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      await (
+        channel as unknown as {
+          attachReaction(msgId: string, conversationId: string): Promise<void>;
+        }
+      ).attachReaction('msg-1', 'cid-123');
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(stderr).toHaveBeenCalledWith(
+        '[DingTalk:test-dingtalk] emotion/reply skipped: clientSecret not configured\n',
+      );
+    } finally {
+      stderr.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
 });
 
 describe('DingtalkChannel.isUnroutableGroupMessage', () => {

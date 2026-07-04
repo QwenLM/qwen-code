@@ -8,6 +8,10 @@ type TestableAcpBridge = AcpBridge & {
   channelLoopMcpServer: unknown;
   channelLoopToolHandlers: ChannelLoopToolHandler[];
   channelLoopMcpRegistered: boolean;
+  handleExtMethod(
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<unknown>;
   handleClientMcpMessage(params: Record<string, unknown>): Promise<unknown>;
   registerChannelLoopMcpServer(): Promise<void>;
   resolveChannelLoopToolHandler(sessionId: string): ChannelLoopToolHandler;
@@ -53,6 +57,19 @@ describe('AcpBridge', () => {
     ).resolves.toStrictEqual({
       payload: { jsonrpc: '2.0', id: 0, result: {} },
     });
+  });
+
+  it('handles mid-turn queue drain requests from the ACP child', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+
+    await expect(
+      bridge.handleExtMethod('craft/drainMidTurnQueue', {
+        sessionId: 's-1',
+      }),
+    ).resolves.toStrictEqual({ messages: [] });
   });
 
   it('rejects channel loop tool calls when no handler matches the session', () => {
