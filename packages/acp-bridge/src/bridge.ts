@@ -161,6 +161,7 @@ const KNOWN_SESSION_UPDATE_TYPES = new Set([
   'usage_update',
 ]);
 const MAX_BULK_REPLAY_UPDATES = 10_000;
+const MAX_LOAD_REPLAY_ERROR_LENGTH = 4096;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -178,6 +179,16 @@ function describeLoadReplayValue(value: unknown): string {
   if (Array.isArray(value)) return 'array';
   if (value === null) return 'null';
   return typeof value;
+}
+
+function truncateReplayError(replayError: string): string {
+  const suffix = '...(truncated)';
+  if (replayError.length <= MAX_LOAD_REPLAY_ERROR_LENGTH) {
+    return replayError;
+  }
+  return (
+    replayError.slice(0, MAX_LOAD_REPLAY_ERROR_LENGTH - suffix.length) + suffix
+  );
 }
 
 function extractLoadReplayResponse(state: BridgeSessionState): {
@@ -223,6 +234,10 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
         `(version=${LOAD_REPLAY_VERSION}, replayError=${describeLoadReplayValue(replayError)})`,
     );
   }
+  const boundedReplayError =
+    typeof replayError === 'string'
+      ? truncateReplayError(replayError)
+      : undefined;
   const invalidUpdateIndex = rawUpdates.findIndex(
     (update) => !isBulkReplayUpdate(update),
   );
@@ -250,7 +265,9 @@ function extractLoadReplayResponse(state: BridgeSessionState): {
     state: cleanState,
     updates: rawUpdates,
     ...(partial === true ? { partial: true as const } : {}),
-    ...(typeof replayError === 'string' ? { replayError } : {}),
+    ...(boundedReplayError !== undefined
+      ? { replayError: boundedReplayError }
+      : {}),
   };
 }
 

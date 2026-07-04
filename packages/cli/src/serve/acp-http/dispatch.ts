@@ -3851,6 +3851,7 @@ export class AcpDispatcher {
       // so the caller's `.catch()` closes the stream. Returning would leave a
       // zombie SSE stream (heartbeats, no events, no reconnect signal).
       if (!signal.aborted) {
+        conn.markInitialReplayComplete(sessionId);
         // The iterator has terminated (errored), so no more content frames will
         // arrive through this pump and the ordering constraint the deferral
         // protected against no longer applies. Flush any still-deferred session

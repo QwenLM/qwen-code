@@ -56,6 +56,8 @@ import {
   SESS_A,
 } from './internal/testUtils.js';
 
+const MAX_LOAD_REPLAY_ERROR_LENGTH = 4096;
+
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (value: T) => void;
@@ -1335,6 +1337,35 @@ describe('createAcpSessionBridge', () => {
     ).rejects.toThrow(
       'qwen.session.loadReplay updates exceed limit (10001 > 10000)',
     );
+
+    await bridge.shutdown();
+  });
+
+  it('truncates oversized response-mode replay errors', async () => {
+    const oversizedError = 'x'.repeat(MAX_LOAD_REPLAY_ERROR_LENGTH + 100);
+    const factory: ChannelFactory = async () =>
+      makeChannel({
+        loadSessionImpl: () => ({
+          _meta: {
+            'qwen.session.loadReplay': {
+              v: 1,
+              partial: true,
+              replayError: oversizedError,
+              updates: [],
+            },
+          },
+        }),
+      }).channel;
+    const bridge = makeBridge({ channelFactory: factory });
+
+    const loaded = await bridge.loadSession({
+      sessionId: 'persisted-long-replay-error',
+      workspaceCwd: WS_A,
+      historyReplay: 'response',
+    });
+
+    expect(loaded.replayError).toHaveLength(MAX_LOAD_REPLAY_ERROR_LENGTH);
+    expect(loaded.replayError).toMatch(/\.\.\.\(truncated\)$/);
 
     await bridge.shutdown();
   });

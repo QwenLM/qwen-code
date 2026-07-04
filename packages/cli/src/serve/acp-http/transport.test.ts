@@ -54,6 +54,7 @@ import {
   type DaemonWorkspaceService,
 } from '../workspace-service/types.js';
 import { type AcpHttpHandle, mountAcpHttp } from './index.js';
+import { AcpConnection } from './connection-registry.js';
 import { CdpTunnelRegistry } from '../cdp-tunnel/cdp-tunnel-registry.js';
 import {
   mountWorkspaceMemoryRememberRoutes,
@@ -3365,6 +3366,49 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       lastEventId: 5,
     });
     await resumed.body?.cancel();
+  });
+
+  it('does not leave an initial replay binding when subscription setup throws', async () => {
+    const markCompleteSpy = vi.spyOn(
+      AcpConnection.prototype,
+      'markInitialReplayComplete',
+    );
+    try {
+      bridge.replaySnapshot = {
+        lastEventId: 1,
+        compactedTurns: [],
+        liveJournal: [],
+      };
+      const connId = await initialize();
+      const connStream = await openStream(connId);
+      const loadReply = takeFrames(connStream, 1);
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 20,
+        method: 'session/load',
+        params: { sessionId: 'loaded-1' },
+      });
+      await loadReply;
+
+      bridge.subscribeThrows = true;
+      const failed = await openStream(connId, 'loaded-1');
+      const ac = new AbortController();
+      const timer = setTimeout(() => ac.abort(), 3000);
+      try {
+        for await (const _f of readSse(failed, ac.signal)) {
+          // drain until the server closes the errored stream
+        }
+      } finally {
+        clearTimeout(timer);
+        ac.abort();
+      }
+      expect(acpHandle?.registry.get(connId)?.sessions.has('loaded-1')).toBe(
+        false,
+      );
+      expect(markCompleteSpy).toHaveBeenCalledWith('loaded-1');
+    } finally {
+      markCompleteSpy.mockRestore();
+    }
   });
 
   it('session/resume owns the session + replies state', async () => {

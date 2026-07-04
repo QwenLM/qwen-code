@@ -264,6 +264,8 @@ const debugLogger = createDebugLogger('ACP_AGENT');
 const BTW_CHILD_TIMEOUT_MS = 55_000;
 // Must be less than WORKSPACE_MEMORY_REMEMBER_TIMEOUT_MS (300s) in bridge.ts.
 const WORKSPACE_MEMORY_REMEMBER_CHILD_TIMEOUT_MS = 295_000;
+const MAX_BULK_REPLAY_UPDATES = 10_000;
+const MAX_LOAD_REPLAY_ERROR_LENGTH = 4096;
 
 function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -293,22 +295,40 @@ function copyCumulativeUsage(
   target.apiTimeMs = source.apiTimeMs;
 }
 
+function truncateReplayError(replayError: string): string {
+  const suffix = '...(truncated)';
+  if (replayError.length <= MAX_LOAD_REPLAY_ERROR_LENGTH) {
+    return replayError;
+  }
+  return (
+    replayError.slice(0, MAX_LOAD_REPLAY_ERROR_LENGTH - suffix.length) + suffix
+  );
+}
+
 async function collectHistoryReplayUpdates({
   sessionId,
   config,
   records,
   cumulativeUsage,
+  maxUpdates,
 }: {
   sessionId: string;
   config: Config;
   records: ChatRecord[];
   cumulativeUsage: CumulativeUsage;
+  maxUpdates?: number;
 }): Promise<{ updates: SessionUpdate[]; replayError?: string }> {
   const updates: SessionUpdate[] = [];
   const replayContext: SessionContext = {
     sessionId,
     config,
     sendUpdate: async (update) => {
+      if (maxUpdates !== undefined && updates.length >= maxUpdates) {
+        throw new Error(
+          `qwen.session.loadReplay updates exceeded limit ` +
+            `(${updates.length + 1} > ${maxUpdates})`,
+        );
+      }
       updates.push(update);
     },
     cumulativeUsage,
@@ -3078,6 +3098,7 @@ class QwenAgent implements Agent {
             config,
             records,
             cumulativeUsage: replayUsage,
+            maxUpdates: MAX_BULK_REPLAY_UPDATES,
           });
           replayUpdates = liftSessionUpdateTimestamps(replay.updates);
           copyCumulativeUsage(session.cumulativeUsage, replayUsage);
@@ -3086,7 +3107,7 @@ class QwenAgent implements Agent {
               v: LOAD_REPLAY_VERSION,
               updates: replayUpdates,
               partial: true,
-              replayError: replay.replayError,
+              replayError: truncateReplayError(replay.replayError),
             };
           }
         }

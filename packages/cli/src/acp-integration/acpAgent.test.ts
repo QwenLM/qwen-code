@@ -638,6 +638,8 @@ import {
 } from '../utils/languageUtils.js';
 import { buildAuthMethods } from './authMethods.js';
 
+const MAX_BULK_REPLAY_UPDATES = 10_000;
+
 describe('runAcpAgent shutdown cleanup', () => {
   let processExitSpy: MockInstance<typeof process.exit>;
   let processOnSpy: MockInstance<typeof process.on>;
@@ -7654,6 +7656,51 @@ describe('QwenAgent loadSession / unstable_resumeSession', () => {
     });
     expect(lastSessionMock?.installRewriter).toHaveBeenCalledTimes(1);
     expect(lastSessionMock?.startCronScheduler).toHaveBeenCalledTimes(1);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('loadSession caps bulk replay updates and returns partial status', async () => {
+    const messages = [{ role: 'user', parts: [{ text: 'hi' }] }];
+    bindRestoreMocks({
+      sessionExists: true,
+      resumedConversation: {
+        messages,
+      },
+    });
+    mockHistoryReplay.mockReset();
+    mockHistoryReplay.mockImplementationOnce(
+      async (context: { sendUpdate: (update: unknown) => Promise<void> }) => {
+        for (let i = 0; i < MAX_BULK_REPLAY_UPDATES + 1; i++) {
+          await context.sendUpdate({ sessionUpdate: 'agent_message_chunk' });
+        }
+      },
+    );
+    const { agent, agentPromise } = await spawnAgent();
+
+    const response = (await agent.loadSession({
+      cwd: '/tmp',
+      sessionId: 'persisted-1',
+      mcpServers: [],
+      _meta: { 'qwen.session.loadReplayMode': 'bulk' },
+    })) as {
+      _meta?: Record<
+        string,
+        {
+          updates: unknown[];
+          partial?: boolean;
+          replayError?: string;
+        }
+      >;
+    };
+    const replay = response._meta?.['qwen.session.loadReplay'];
+
+    expect(replay?.updates).toHaveLength(MAX_BULK_REPLAY_UPDATES);
+    expect(replay?.partial).toBe(true);
+    expect(replay?.replayError).toContain(
+      `(${MAX_BULK_REPLAY_UPDATES + 1} > ${MAX_BULK_REPLAY_UPDATES})`,
+    );
 
     mockConnectionState.resolve();
     await agentPromise;
