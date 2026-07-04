@@ -65,6 +65,14 @@ describe('qwen resolve workflow', () => {
     );
   });
 
+  it('cancels in-flight lifecycle reviews when the PR closes', () => {
+    expect(workflow).toContain("- 'closed'");
+    expect(workflow).toContain("github.event.action == 'closed'");
+    expect(workflow).toContain(
+      "format('qwen-pr-review-pr-{0}', github.event.pull_request.number)",
+    );
+  });
+
   it('listens for /resolve comments', () => {
     expect(workflow).toContain(
       "github.event.comment.body == '@qwen-code /resolve'",
