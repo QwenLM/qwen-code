@@ -493,6 +493,17 @@ function cleanupEmptyStandaloneDir(standaloneDir: string): void {
   }
 }
 
+export type ShellPathUpdate = {
+  rcFile?: string;
+  blockAdded: boolean;
+};
+
+export type BinWrapperArtifacts = {
+  wrapperPath?: string;
+  wrapperCreated: boolean;
+  shellPathUpdate?: ShellPathUpdate;
+};
+
 const UNSAFE_SHELL_CHARS = /[\0\n\r]/;
 const UNSAFE_CMD_CHARS = /[&|<>^%!"`\n\r]/;
 
@@ -632,8 +643,12 @@ function atomicReplace(
  * Ensures ~/.local/bin/qwen exists and points to the standalone install.
  * Required for npm→standalone migration so the new binary is on PATH.
  */
-export function ensureBinWrapper(standaloneDir: string, target: string): void {
+export function ensureBinWrapper(
+  standaloneDir: string,
+  target: string,
+): BinWrapperArtifacts {
   const binDir = path.join(path.dirname(standaloneDir), '..', 'bin');
+  const artifacts: BinWrapperArtifacts = { wrapperCreated: false };
 
   try {
     fs.mkdirSync(binDir, { recursive: true });
@@ -644,9 +659,11 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
         );
       }
       const wrapperPath = path.join(binDir, 'qwen.cmd');
+      artifacts.wrapperPath = wrapperPath;
       try {
         const content = `@echo off\r\ncall "${standaloneDir}\\bin\\qwen.cmd" %*\r\n`;
         fs.writeFileSync(wrapperPath, content, { flag: 'wx' });
+        artifacts.wrapperCreated = true;
       } catch (err) {
         if (!isAlreadyExistsError(err)) {
           throw err;
@@ -655,6 +672,7 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
     } else {
       assertSafeForSingleQuotedShellPath(standaloneDir, 'standaloneDir');
       const wrapperPath = path.join(binDir, 'qwen');
+      artifacts.wrapperPath = wrapperPath;
       try {
         // Match install-qwen-standalone.sh's write_unix_wrapper:
         // uses /usr/bin/env sh for portability, and single-quoted paths.
@@ -663,13 +681,15 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
         );
         const content = `#!/usr/bin/env sh\nexec ${quotedQwenBin} "$@"\n`;
         fs.writeFileSync(wrapperPath, content, { mode: 0o755, flag: 'wx' });
+        artifacts.wrapperCreated = true;
       } catch (err) {
         if (!isAlreadyExistsError(err)) {
           throw err;
         }
       }
-      ensurePathInShellRc(binDir);
+      artifacts.shellPathUpdate = ensurePathInShellRc(binDir);
     }
+    return artifacts;
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to create bin wrapper: ${detail}`);
@@ -680,7 +700,7 @@ export function ensureBinWrapper(standaloneDir: string, target: string): void {
  * Appends binDir to the user's shell rc file if not already present.
  * Mirrors the logic in install-qwen-standalone.sh maybe_update_shell_path.
  */
-export function ensurePathInShellRc(binDir: string): void {
+export function ensurePathInShellRc(binDir: string): ShellPathUpdate {
   assertSafeForSingleQuotedShellPath(binDir, 'binDir');
 
   const shell = process.env['SHELL'] || '';
@@ -706,7 +726,7 @@ export function ensurePathInShellRc(binDir: string): void {
     rcFile = path.join(home, '.config', 'fish', 'config.fish');
   }
 
-  if (!rcFile) return;
+  if (!rcFile) return { blockAdded: false };
 
   try {
     const content = fs.existsSync(rcFile)
@@ -718,8 +738,10 @@ export function ensurePathInShellRc(binDir: string): void {
     const beginMarker = '# Qwen Code PATH block begin';
     const endMarker = '# Qwen Code PATH block end';
     const legacyMarker = '# Added by Qwen Code standalone installer';
-    if (content.includes(beginMarker) && content.includes(endMarker)) return;
-    if (content.includes(legacyMarker)) return;
+    if (content.includes(beginMarker) && content.includes(endMarker)) {
+      return { rcFile, blockAdded: false };
+    }
+    if (content.includes(legacyMarker)) return { rcFile, blockAdded: false };
 
     const exportLine = shell.endsWith('/fish')
       ? `set -gx PATH ${shellQuoteForFish(binDir)} $PATH`
@@ -729,8 +751,44 @@ export function ensurePathInShellRc(binDir: string): void {
     fs.mkdirSync(path.dirname(rcFile), { recursive: true });
     fs.appendFileSync(rcFile, block);
     debugLogger.info(`Added ${binDir} to ${rcFile}`);
+    return { rcFile, blockAdded: true };
   } catch (err) {
     debugLogger.debug('Failed to update shell rc:', err);
+    return { rcFile, blockAdded: false };
+  }
+}
+
+function cleanupShellPathBlock(rcFile: string): void {
+  try {
+    if (!fs.existsSync(rcFile)) return;
+    const content = fs.readFileSync(rcFile, 'utf-8');
+    const blockPattern =
+      /\n?# Qwen Code PATH block begin\n(?:.|\n)*?\n# Qwen Code PATH block end\n?/;
+    const nextContent = content.replace(blockPattern, '');
+    if (nextContent !== content) {
+      fs.writeFileSync(rcFile, nextContent);
+    }
+  } catch (err) {
+    debugLogger.debug('Failed to roll back shell rc PATH block:', err);
+  }
+}
+
+export function cleanupFirstTimeMigrationArtifacts(
+  artifacts?: BinWrapperArtifacts,
+): void {
+  if (!artifacts) return;
+  if (artifacts.wrapperCreated && artifacts.wrapperPath) {
+    try {
+      fs.unlinkSync(artifacts.wrapperPath);
+    } catch (err) {
+      debugLogger.debug('Failed to roll back bin wrapper:', err);
+    }
+  }
+  if (
+    artifacts.shellPathUpdate?.blockAdded &&
+    artifacts.shellPathUpdate.rcFile
+  ) {
+    cleanupShellPathBlock(artifacts.shellPathUpdate.rcFile);
   }
 }
 
@@ -808,6 +866,7 @@ export async function performStandaloneUpdate(
   const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'qwen-code-update-'));
   let extractDir: string;
   let updateResult: 'done' | 'deferred' | undefined;
+  let migrationArtifacts: BinWrapperArtifacts | undefined;
   try {
     extractDir = fs.mkdtempSync(path.join(parentDir, '.qwen-code-update-'));
   } catch (err) {
@@ -847,7 +906,7 @@ export async function performStandaloneUpdate(
     // Ensure the PATH wrapper can be created before mutating the active install.
     // This is critical for npm→standalone migration: a wrapper failure should not
     // be reported as a generic update failure after the install has been swapped.
-    ensureBinWrapper(standaloneDir, target);
+    migrationArtifacts = ensureBinWrapper(standaloneDir, target);
 
     debugLogger.info('Replacing installation...');
     updateResult = atomicReplace(standaloneDir, newInstallDir, lockPath);
@@ -893,6 +952,9 @@ export async function performStandaloneUpdate(
       fs.rmSync(pendingDir, { recursive: true, force: true });
     }
     cleanupEmptyStandaloneDir(standaloneDir);
+    if (isFirstTimeMigration) {
+      cleanupFirstTimeMigrationArtifacts(migrationArtifacts);
+    }
     throw err;
   } finally {
     // Only keep the lock alive when the bat script was spawned (deferred).

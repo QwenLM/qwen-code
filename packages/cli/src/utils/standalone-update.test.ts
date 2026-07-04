@@ -12,6 +12,7 @@ import {
   rollbackStandaloneUpdate,
   ensureBinWrapper,
   ensurePathInShellRc,
+  cleanupFirstTimeMigrationArtifacts,
   performStandaloneUpdate,
   isSafeTarEntryPath,
   isSafeTarEntry,
@@ -454,6 +455,41 @@ describe('standalone-update', () => {
         );
       }
     });
+  });
+
+  describe('cleanupFirstTimeMigrationArtifacts', () => {
+    it.skipIf(process.platform === 'win32')(
+      'removes the wrapper and PATH block created during a failed migration',
+      () => {
+        const originalHome = process.env['HOME'];
+        const originalShell = process.env['SHELL'];
+        const home = path.join(tempDir, 'home');
+        process.env['HOME'] = home;
+        process.env['SHELL'] = '/bin/bash';
+
+        try {
+          const standaloneDir = path.join(home, '.local', 'lib', 'qwen-code');
+          const artifacts = ensureBinWrapper(standaloneDir, 'linux-x64');
+          const wrapperPath = path.join(home, '.local', 'bin', 'qwen');
+          const bashrc = path.join(home, '.bashrc');
+
+          expect(fs.existsSync(wrapperPath)).toBe(true);
+          expect(fs.readFileSync(bashrc, 'utf-8')).toContain(
+            '# Qwen Code PATH block begin',
+          );
+
+          cleanupFirstTimeMigrationArtifacts(artifacts);
+
+          expect(fs.existsSync(wrapperPath)).toBe(false);
+          expect(fs.readFileSync(bashrc, 'utf-8')).not.toContain(
+            '# Qwen Code PATH block begin',
+          );
+        } finally {
+          process.env['HOME'] = originalHome;
+          process.env['SHELL'] = originalShell;
+        }
+      },
+    );
   });
 
   describe('rollbackStandaloneUpdate — concurrent lock protection', () => {

@@ -26,11 +26,12 @@ import { VimModeProvider } from './contexts/VimModeContext.js';
 import { AgentViewProvider } from './contexts/AgentViewContext.js';
 import { BackgroundTaskViewProvider } from './contexts/BackgroundTaskViewContext.js';
 import { useKittyKeyboardProtocol } from './hooks/useKittyKeyboardProtocol.js';
-import { checkForUpdates } from './utils/updateCheck.js';
+import { checkForUpdatesDetailed } from './utils/updateCheck.js';
 import { disableKittyProtocol } from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
 import { handleAutoUpdate } from '../utils/handleAutoUpdate.js';
+import { updateEventEmitter } from '../utils/updateEventEmitter.js';
 import { registerCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
 import { profileCheckpoint } from '../utils/startupProfiler.js';
@@ -40,6 +41,7 @@ import {
   writeTerminalTitle,
 } from '../utils/windowTitle.js';
 import { getCliVersion } from '../utils/version.js';
+import { t } from '../i18n/index.js';
 
 const debugLogger = createDebugLogger('STARTUP');
 
@@ -199,13 +201,25 @@ export async function startInteractiveUI(
   // Check for updates only if enableAutoUpdate is not explicitly disabled.
   // Using !== false ensures updates are enabled by default when undefined.
   if (settings.merged.general?.enableAutoUpdate !== false) {
-    checkForUpdates()
-      .then((info) => {
-        handleAutoUpdate(info, settings, config.getProjectRoot());
+    checkForUpdatesDetailed()
+      .then((result) => {
+        if (result.status === 'update') {
+          handleAutoUpdate(result.info, settings, config.getProjectRoot());
+        } else if (result.status === 'error') {
+          updateEventEmitter.emit('update-failed', {
+            message: t(
+              'Failed to check for updates. Please check your network or registry configuration.',
+            ),
+          });
+        }
       })
       .catch((err) => {
-        // Silently ignore update check errors.
         debugLogger.warn(`Update check failed: ${err}`);
+        updateEventEmitter.emit('update-failed', {
+          message: t(
+            'Failed to check for updates. Please check your network or registry configuration.',
+          ),
+        });
       });
   }
 

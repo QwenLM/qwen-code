@@ -285,6 +285,27 @@ describe('parseArguments', () => {
     mockExit.mockRestore();
   });
 
+  it('propagates non-zero exitCode from the update handler', async () => {
+    process.argv = ['node', 'script.js', 'update'];
+    mockUpdateHandler.mockImplementation(() => {
+      process.exitCode = 1;
+    });
+    const mockExit = vi.spyOn(process, 'exit').mockImplementation(() => {
+      throw new Error('process.exit called');
+    });
+
+    try {
+      await expect(parseArguments()).rejects.toThrow('process.exit called');
+
+      expect(mockUpdateHandler).toHaveBeenCalled();
+      expect(mockExit).toHaveBeenCalledWith(1);
+    } finally {
+      mockExit.mockRestore();
+      mockUpdateHandler.mockReset();
+      process.exitCode = undefined;
+    }
+  });
+
   it('should allow --prompt-interactive without --prompt', async () => {
     process.argv = [
       'node',

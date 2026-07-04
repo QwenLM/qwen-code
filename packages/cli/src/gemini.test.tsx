@@ -1249,7 +1249,17 @@ describe('startInteractiveUI', () => {
   }));
 
   vi.mock('./ui/utils/updateCheck.js', () => ({
-    checkForUpdates: vi.fn(() => Promise.resolve(null)),
+    checkForUpdatesDetailed: vi.fn(() =>
+      Promise.resolve({ status: 'up-to-date', currentVersion: '1.0.0' }),
+    ),
+  }));
+
+  vi.mock('./utils/updateEventEmitter.js', () => ({
+    updateEventEmitter: {
+      emit: vi.fn(),
+      on: vi.fn(),
+      off: vi.fn(),
+    },
   }));
 
   vi.mock('./utils/cleanup.js', () => ({
@@ -1302,7 +1312,9 @@ describe('startInteractiveUI', () => {
 
   it('should perform all startup tasks in correct order', async () => {
     const { getCliVersion } = await import('./utils/version.js');
-    const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
+    const { checkForUpdatesDetailed } = await import(
+      './ui/utils/updateCheck.js'
+    );
     const { registerCleanup } = await import('./utils/cleanup.js');
 
     const mockInitializationResult = {
@@ -1331,11 +1343,13 @@ describe('startInteractiveUI', () => {
     // checkForUpdates should be called asynchronously (not waited for)
     // We need a small delay to let it execute
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(checkForUpdates).toHaveBeenCalledTimes(1);
+    expect(checkForUpdatesDetailed).toHaveBeenCalledTimes(1);
   });
 
   it('should not call checkForUpdates when enableAutoUpdate is false', async () => {
-    const { checkForUpdates } = await import('./ui/utils/updateCheck.js');
+    const { checkForUpdatesDetailed } = await import(
+      './ui/utils/updateCheck.js'
+    );
 
     const settingsWithAutoUpdateDisabled = {
       merged: {
@@ -1366,6 +1380,40 @@ describe('startInteractiveUI', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     // checkForUpdates should NOT be called when enableAutoUpdate is false
-    expect(checkForUpdates).not.toHaveBeenCalled();
+    expect(checkForUpdatesDetailed).not.toHaveBeenCalled();
+  });
+
+  it('should surface startup update check errors', async () => {
+    const { checkForUpdatesDetailed } = await import(
+      './ui/utils/updateCheck.js'
+    );
+    const { updateEventEmitter } = await import(
+      './utils/updateEventEmitter.js'
+    );
+    vi.mocked(checkForUpdatesDetailed).mockResolvedValueOnce({
+      status: 'error',
+      error: new Error('registry unavailable'),
+    });
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(updateEventEmitter.emit).toHaveBeenCalledWith('update-failed', {
+      message: expect.any(String),
+    });
   });
 });
