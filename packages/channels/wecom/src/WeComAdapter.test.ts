@@ -472,6 +472,7 @@ describe('WeComChannel', () => {
   });
 
   it('reconnects when WeCom kicks the connection for a newer client', async () => {
+    vi.useFakeTimers();
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -484,6 +485,7 @@ describe('WeComChannel', () => {
       errmsg: 'another client connected',
     });
 
+    await vi.advanceTimersByTimeAsync(1_000);
     await vi.waitFor(() => expect(mocks.instances).toHaveLength(2));
     expect(oldClient.disconnect).toHaveBeenCalled();
     expect(lastClient().connect).toHaveBeenCalledTimes(1);
@@ -492,6 +494,75 @@ describe('WeComChannel', () => {
     );
     channel.disconnect();
     stderr.mockRestore();
+  });
+
+  it('does not clear adapter state when reconnecting after a kick', async () => {
+    vi.useFakeTimers();
+    const bridge = makeBridge();
+    (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<string>(() => {}),
+    );
+    const channel = new WeComChannel('bot', makeConfig(), bridge);
+    await channel.connect();
+    const oldClient = lastClient();
+
+    oldClient.emit('message.file', {
+      msgid: 'msg-kick-preserve',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'report.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as string;
+    const filePath = prompt.match(/saved to: (.*report\.txt)/)?.[1];
+    expect(filePath).toBeDefined();
+
+    oldClient.emit('event.disconnected_event', {
+      errcode: 45009,
+      errmsg: 'another client connected',
+    });
+    expect(oldClient.disconnect).toHaveBeenCalled();
+    expect(existsSync(filePath!)).toBe(true);
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(2));
+    const newClient = lastClient();
+    newClient.emit('message.file', {
+      msgid: 'msg-kick-preserve',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'report.txt',
+      },
+    });
+
+    await Promise.resolve();
+    expect(bridge.prompt).toHaveBeenCalledTimes(1);
+    expect(existsSync(filePath!)).toBe(true);
+    channel.disconnect();
+  });
+
+  it('fails a pending authentication promptly when the connection is kicked', async () => {
+    mocks.state.autoAuthenticate = false;
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+
+    const connecting = channel.connect();
+    const client = lastClient();
+    client.emit('event.disconnected_event', {
+      errcode: 45009,
+      errmsg: 'another client connected',
+    });
+
+    await expect(connecting).rejects.toThrow('kicked');
+    expect(client.disconnect).toHaveBeenCalled();
   });
 
   it('removes SDK event handlers on disconnect', async () => {
@@ -1791,6 +1862,89 @@ describe('WeComChannel', () => {
 
     finishSecond?.();
 
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
+  });
+
+  it('keeps files buffered during a coalesced prompt for the next prompt', async () => {
+    const bridge = makeBridge();
+    let finishFirst: (() => void) | undefined;
+    let finishSecond: (() => void) | undefined;
+    let finishThird: (() => void) | undefined;
+    (bridge.prompt as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishFirst = () => resolve('');
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishSecond = () => resolve('');
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishThird = () => resolve('');
+          }),
+      );
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ dispatchMode: 'collect' }),
+      bridge,
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgid: 'msg-active',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'active.txt',
+      },
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+    client.emit('message.file', {
+      msgid: 'msg-buffered-1',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'first.txt',
+      },
+    });
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(2));
+
+    finishFirst?.();
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+    client.emit('message.file', {
+      msgid: 'msg-buffered-2',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'second.txt',
+      },
+    });
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(2));
+
+    finishSecond?.();
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(3));
+    const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+      .calls[2][1] as string;
+    const filePath = prompt.match(/saved to: (.*second\.txt)/)?.[1];
+    expect(filePath).toBeDefined();
+    expect(existsSync(filePath!)).toBe(true);
+
+    finishThird?.();
     await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
   });
 

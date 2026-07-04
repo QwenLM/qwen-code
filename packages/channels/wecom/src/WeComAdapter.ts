@@ -81,6 +81,9 @@ const DEDUP_TTL_MS = 5 * 60 * 1000;
 const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const MARKDOWN_CHUNK_BYTES = 3800;
 const AUTHENTICATION_TIMEOUT_MS = 30_000;
+const KICK_RECONNECT_MAX_ATTEMPTS = 3;
+const KICK_RECONNECT_BASE_DELAY_MS = 1_000;
+const KICK_RECONNECT_RESET_MS = 60_000;
 
 export class WeComChannel extends ChannelBase {
   private readonly wecom: WeComConfig;
@@ -90,7 +93,13 @@ export class WeComChannel extends ChannelBase {
   private readonly attachmentDirsByMessage = new Map<string, string[]>();
   private readonly attachmentDirsBySession = new Map<string, string[]>();
   private readonly bufferedAttachmentMessages = new Set<string>();
+  private readonly coalescedAttachmentMessages = new Map<string, string[]>();
   private dedupTimer?: ReturnType<typeof setInterval>;
+  private kickReconnectReset?: ReturnType<typeof setTimeout>;
+  private connecting?: Promise<void>;
+  private connectingClient?: WeComClient;
+  private authentication?: ReturnType<typeof waitForAuthentication>;
+  private disconnectGeneration = 0;
   private clientHandlers?: {
     message: (payload: unknown) => void;
     error: (payload: unknown) => void;
@@ -98,6 +107,7 @@ export class WeComChannel extends ChannelBase {
     kicked: (payload: unknown) => void;
   };
   private reconnectingAfterKick = false;
+  private kickReconnectAttempts = 0;
 
   constructor(
     name: string,
@@ -111,7 +121,18 @@ export class WeComChannel extends ChannelBase {
 
   async connect(): Promise<void> {
     if (this.client) return;
+    if (this.connecting) return this.connecting;
 
+    const connecting = this.openClient();
+    this.connecting = connecting;
+    try {
+      await connecting;
+    } finally {
+      if (this.connecting === connecting) this.connecting = undefined;
+    }
+  }
+
+  private async openClient(): Promise<void> {
     const options: WeComClientOptions = {
       botId: this.wecom.botId,
       secret: this.wecom.secret,
@@ -152,38 +173,57 @@ export class WeComChannel extends ChannelBase {
     const kickedHandler = (reason: unknown) => {
       void this.reconnectAfterKick(reason);
     };
+    const handlers = {
+      message: messageHandler,
+      error: errorHandler,
+      disconnected: disconnectedHandler,
+      kicked: kickedHandler,
+    };
     for (const event of MESSAGE_EVENTS) {
       client.on(event, messageHandler);
     }
     client.on('error', errorHandler);
     client.on('disconnected', disconnectedHandler);
     client.on('event.disconnected_event', kickedHandler);
-    this.clientHandlers = {
-      message: messageHandler,
-      error: errorHandler,
-      disconnected: disconnectedHandler,
-      kicked: kickedHandler,
-    };
+    this.clientHandlers = handlers;
+    this.connectingClient = client;
 
     const authentication = waitForAuthentication(client);
+    this.authentication = authentication;
     try {
       const connected = client.connect();
       if (isPromiseLike(connected)) await connected;
       await authentication.promise;
       authenticated = true;
+      if (this.connectingClient !== client) {
+        throw new Error('WeCom connection was replaced before authentication.');
+      }
       this.client = client;
+      this.connectingClient = undefined;
+      this.authentication = undefined;
     } catch (err) {
       authentication.cancel();
-      this.detachClientHandlers(client);
+      this.detachClientHandlers(client, handlers);
+      if (this.connectingClient === client) this.connectingClient = undefined;
+      if (this.authentication === authentication)
+        this.authentication = undefined;
       client.disconnect();
       throw err;
     }
-    this.dedupTimer = setInterval(() => this.cleanupSeenMessages(), 60_000);
-    this.dedupTimer.unref?.();
+    if (!this.dedupTimer) {
+      this.dedupTimer = setInterval(() => this.cleanupSeenMessages(), 60_000);
+      this.dedupTimer.unref?.();
+    }
     process.stderr.write(`[WeCom:${this.name}] Connected via smart bot.\n`);
   }
 
   disconnect(): void {
+    this.disconnectGeneration += 1;
+    this.kickReconnectAttempts = 0;
+    if (this.kickReconnectReset) {
+      clearTimeout(this.kickReconnectReset);
+      this.kickReconnectReset = undefined;
+    }
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
       this.dedupTimer = undefined;
@@ -191,10 +231,7 @@ export class WeComChannel extends ChannelBase {
     this.seenMessages.clear();
     this.inFlightMessages.clear();
     this.cleanupAllAttachmentDirs();
-    const client = this.client;
-    this.client = undefined;
-    if (client) this.detachClientHandlers(client);
-    client?.disconnect();
+    this.disconnectClientOnly(new Error('WeCom channel disconnected.'));
     process.stderr.write(`[WeCom:${this.name}] Disconnected.\n`);
   }
 
@@ -399,18 +436,41 @@ export class WeComChannel extends ChannelBase {
     if (messageId) this.bufferedAttachmentMessages.add(messageId);
   }
 
+  protected override onPromptBufferDrained(
+    _chatId: string,
+    _sessionId: string,
+    messageIds: string[],
+  ): void {
+    const lastMessageId = messageIds.at(-1);
+    if (lastMessageId) {
+      this.coalescedAttachmentMessages.set(lastMessageId, messageIds);
+    }
+  }
+
+  protected override onPromptBufferDropped(
+    _sessionId: string,
+    messageIds: string[],
+  ): void {
+    for (const messageId of messageIds) {
+      this.cleanupAttachmentDirsForMessage(messageId);
+    }
+  }
+
   protected override onPromptEnd(
     _chatId: string,
-    sessionId: string,
+    _sessionId: string,
     messageId?: string,
   ): void {
-    const wasBuffered =
-      messageId !== undefined && this.bufferedAttachmentMessages.has(messageId);
-    if (messageId) {
-      this.cleanupAttachmentDirsForMessage(messageId);
-      if (!wasBuffered) return;
+    if (!messageId) return;
+    const coalescedMessageIds = this.coalescedAttachmentMessages.get(messageId);
+    if (coalescedMessageIds) {
+      this.coalescedAttachmentMessages.delete(messageId);
+      for (const coalescedMessageId of coalescedMessageIds) {
+        this.cleanupAttachmentDirsForMessage(coalescedMessageId);
+      }
+      return;
     }
-    this.cleanupAttachmentDirsForSession(sessionId);
+    this.cleanupAttachmentDirsForMessage(messageId);
   }
 
   private rememberAttachmentDir(
@@ -439,14 +499,6 @@ export class WeComChannel extends ChannelBase {
     cleanupAttachmentDirs(dirs);
   }
 
-  private cleanupAttachmentDirsForSession(sessionId: string): void {
-    const dirs = this.attachmentDirsBySession.get(sessionId);
-    if (!dirs) return;
-    this.attachmentDirsBySession.delete(sessionId);
-    this.removeAttachmentDirsFromMessages(dirs);
-    cleanupAttachmentDirs(dirs);
-  }
-
   private removeAttachmentDirsFromSessions(dirs: string[]): void {
     const removed = new Set(dirs);
     for (const [sessionId, sessionDirs] of this.attachmentDirsBySession) {
@@ -459,29 +511,19 @@ export class WeComChannel extends ChannelBase {
     }
   }
 
-  private removeAttachmentDirsFromMessages(dirs: string[]): void {
-    const removed = new Set(dirs);
-    for (const [messageId, messageDirs] of this.attachmentDirsByMessage) {
-      const remaining = messageDirs.filter((dir) => !removed.has(dir));
-      if (remaining.length) {
-        this.attachmentDirsByMessage.set(messageId, remaining);
-      } else {
-        this.attachmentDirsByMessage.delete(messageId);
-        this.bufferedAttachmentMessages.delete(messageId);
-      }
-    }
-  }
-
   private cleanupAllAttachmentDirs(): void {
     const dirs = Array.from(this.attachmentDirsBySession.values()).flat();
     this.attachmentDirsBySession.clear();
     this.attachmentDirsByMessage.clear();
     this.bufferedAttachmentMessages.clear();
+    this.coalescedAttachmentMessages.clear();
     cleanupAttachmentDirs(dirs);
   }
 
-  private detachClientHandlers(client: WeComClient): void {
-    const handlers = this.clientHandlers;
+  private detachClientHandlers(
+    client: WeComClient,
+    handlers = this.clientHandlers,
+  ): void {
     if (!handlers) return;
     for (const event of MESSAGE_EVENTS) {
       client.off?.(event, handlers.message);
@@ -489,28 +531,70 @@ export class WeComChannel extends ChannelBase {
     client.off?.('error', handlers.error);
     client.off?.('disconnected', handlers.disconnected);
     client.off?.('event.disconnected_event', handlers.kicked);
-    this.clientHandlers = undefined;
+    if (this.clientHandlers === handlers) this.clientHandlers = undefined;
+  }
+
+  private disconnectClientOnly(err: Error): void {
+    const client = this.client ?? this.connectingClient;
+    this.authentication?.cancel(err);
+    this.authentication = undefined;
+    this.client = undefined;
+    this.connectingClient = undefined;
+    if (client) this.detachClientHandlers(client);
+    client?.disconnect();
   }
 
   private async reconnectAfterKick(reason: unknown): Promise<void> {
     if (this.reconnectingAfterKick) return;
     this.reconnectingAfterKick = true;
+    const previousConnecting = this.connecting;
+    const disconnectGeneration = this.disconnectGeneration;
     process.stderr.write(
       `[WeCom:${this.name}] WebSocket ${formatDisconnectReason(reason)}; reconnecting after server kick.\n`,
     );
-    this.disconnect();
     try {
-      await this.connect();
-    } catch (err) {
+      this.disconnectClientOnly(
+        new Error(
+          `WeCom connection was kicked: ${formatDisconnectReason(reason)}`,
+        ),
+      );
+      if (previousConnecting) {
+        await previousConnecting.catch(() => {});
+      }
+      while (this.kickReconnectAttempts < KICK_RECONNECT_MAX_ATTEMPTS) {
+        const attempt = ++this.kickReconnectAttempts;
+        await delay(
+          KICK_RECONNECT_BASE_DELAY_MS * 2 ** Math.max(0, attempt - 1),
+        );
+        if (this.disconnectGeneration !== disconnectGeneration) return;
+        try {
+          await this.connect();
+          this.scheduleKickReconnectReset();
+          return;
+        } catch (err) {
+          process.stderr.write(
+            `[WeCom:${this.name}] reconnect after server kick attempt ${attempt} failed: ${sanitizeLogText(
+              formatSdkError(err),
+              200,
+            )}\n`,
+          );
+        }
+      }
       process.stderr.write(
-        `[WeCom:${this.name}] reconnect after server kick failed: ${sanitizeLogText(
-          formatSdkError(err),
-          200,
-        )}\n`,
+        `[WeCom:${this.name}] reconnect after server kick gave up after ${KICK_RECONNECT_MAX_ATTEMPTS} attempts.\n`,
       );
     } finally {
       this.reconnectingAfterKick = false;
     }
+  }
+
+  private scheduleKickReconnectReset(): void {
+    if (this.kickReconnectReset) clearTimeout(this.kickReconnectReset);
+    this.kickReconnectReset = setTimeout(() => {
+      this.kickReconnectAttempts = 0;
+      this.kickReconnectReset = undefined;
+    }, KICK_RECONNECT_RESET_MS);
+    this.kickReconnectReset.unref?.();
   }
 
   private cleanupSeenMessages(): void {
@@ -525,7 +609,7 @@ export class WeComChannel extends ChannelBase {
 
 function waitForAuthentication(client: WeComClient): {
   promise: Promise<void>;
-  cancel(): void;
+  cancel(err?: Error): void;
 } {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let settled = false;
@@ -537,6 +621,14 @@ function waitForAuthentication(client: WeComClient): {
         `WeCom authentication failed: ${sanitizeLogText(String(err), 200)}`,
       ),
     );
+  const onKicked = (reason: unknown) =>
+    finish(
+      new Error(
+        `WeCom authentication interrupted by server kick: ${formatDisconnectReason(
+          reason,
+        )}`,
+      ),
+    );
 
   const promise = new Promise<void>((resolvePromise, rejectPromise) => {
     finish = (err?: Error): void => {
@@ -545,6 +637,7 @@ function waitForAuthentication(client: WeComClient): {
       if (timeout) clearTimeout(timeout);
       client.off?.('authenticated', onAuth);
       client.off?.('error', onError);
+      client.off?.('event.disconnected_event', onKicked);
       if (err) {
         rejectPromise(err);
       } else {
@@ -559,11 +652,19 @@ function waitForAuthentication(client: WeComClient): {
 
     client.on('authenticated', onAuth);
     client.on('error', onError);
+    client.on('event.disconnected_event', onKicked);
   });
   return {
     promise,
-    cancel: () => finish(),
+    cancel: (err?: Error) => finish(err),
   };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolveDelay) => {
+    const timer = setTimeout(resolveDelay, ms);
+    timer.unref?.();
+  });
 }
 
 function cleanupAttachmentDirs(dirs: string[]): void {

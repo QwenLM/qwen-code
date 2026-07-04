@@ -90,6 +90,7 @@ export interface ChannelLoopPromptOptions {
 
 /** Handler for a slash command. Return true if handled, false to forward to agent. */
 type CommandHandler = (envelope: Envelope, args: string) => Promise<boolean>;
+type CollectBufferEntry = { text: string; envelope: Envelope };
 type ActivePrompt = {
   cancelled: boolean;
   cancelPending?: boolean;
@@ -188,10 +189,7 @@ export abstract class ChannelBase {
   /** Per-session active prompt tracking for dispatch modes. */
   private activePrompts: Map<string, ActivePrompt> = new Map();
   /** Per-session message buffer for collect mode. */
-  private collectBuffers: Map<
-    string,
-    Array<{ text: string; envelope: Envelope }>
-  > = new Map();
+  private collectBuffers: Map<string, CollectBufferEntry[]> = new Map();
   private readonly bridgeToolCallListener = (event: ToolCallEvent): void => {
     this.dispatchToolCall(event);
   };
@@ -720,6 +718,11 @@ export abstract class ChannelBase {
           const lost = buffer.length;
           const coalesced = buffer.map((b) => b.text).join('\n\n');
           const lastEnvelope = buffer[buffer.length - 1]!.envelope;
+          this.notifyPromptBufferDrained(
+            lastEnvelope.chatId,
+            sessionId,
+            buffer,
+          );
           const syntheticEnvelope: Envelope = {
             ...lastEnvelope,
             text: coalesced,
@@ -864,10 +867,47 @@ export abstract class ChannelBase {
         }
         active.cancelled = true;
         this.stopActiveStreaming(active, sessionId, reason);
-        this.collectBuffers.delete(sessionId);
+        this.dropCollectBuffer(sessionId);
         this.emitTaskCancellation(active, sessionId, reason);
         return true;
       });
+  }
+
+  private dropCollectBuffer(sessionId: string): void {
+    const buffer = this.collectBuffers.get(sessionId);
+    if (!buffer) return;
+    this.collectBuffers.delete(sessionId);
+    const messageIds = this.collectBufferMessageIds(buffer);
+    if (messageIds.length === 0) return;
+    try {
+      this.onPromptBufferDropped(sessionId, messageIds);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] onPromptBufferDropped threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private notifyPromptBufferDrained(
+    chatId: string,
+    sessionId: string,
+    buffer: CollectBufferEntry[],
+  ): void {
+    const messageIds = this.collectBufferMessageIds(buffer);
+    if (messageIds.length === 0) return;
+    try {
+      this.onPromptBufferDrained(chatId, sessionId, messageIds);
+    } catch (err) {
+      process.stderr.write(
+        `[${this.name}] onPromptBufferDrained threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
+      );
+    }
+  }
+
+  private collectBufferMessageIds(buffer: CollectBufferEntry[]): string[] {
+    return buffer
+      .map((entry) => entry.envelope.messageId)
+      .filter((id): id is string => typeof id === 'string' && id.length > 0);
   }
 
   private logCancelSessionFailure(sessionId: string, err: unknown): void {
@@ -929,6 +969,17 @@ export abstract class ChannelBase {
     _chatId: string,
     _sessionId: string,
     _messageId?: string,
+  ): void {}
+
+  protected onPromptBufferDrained(
+    _chatId: string,
+    _sessionId: string,
+    _messageIds: string[],
+  ): void {}
+
+  protected onPromptBufferDropped(
+    _sessionId: string,
+    _messageIds: string[],
   ): void {}
 
   /**
@@ -1055,7 +1106,7 @@ export abstract class ChannelBase {
           // purging, so a running prompt can't deliver a stale response into —
           // or resurrect via collect-drain — the just-cleared session.
           const active = this.activePrompts.get(id);
-          this.collectBuffers.delete(id);
+          this.dropCollectBuffer(id);
           if (active) {
             // Bounded cancel + wind-down wait; purge regardless of the result.
             const settled = await this.cancelAndAwaitActive(active, id);
@@ -2768,6 +2819,11 @@ export abstract class ChannelBase {
           const lost = buffer.length;
           const coalesced = buffer.map((b) => b.text).join('\n\n');
           const lastEnvelope = buffer[buffer.length - 1]!.envelope;
+          this.notifyPromptBufferDrained(
+            lastEnvelope.chatId,
+            sessionId,
+            buffer,
+          );
           // Re-enter handleInbound with the coalesced message
           const syntheticEnvelope: Envelope = {
             ...lastEnvelope,
