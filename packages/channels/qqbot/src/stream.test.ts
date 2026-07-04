@@ -273,6 +273,11 @@ describe('idle-flush timer', () => {
     await drain();
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    // Verify content was sent (sendQQMessage takes 4 args, body is 4th)
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe(
+      'auto-flush me',
+    );
   });
 
   it('deletes streamState on successful idle flush', async () => {
@@ -282,8 +287,11 @@ describe('idle-flush timer', () => {
     vi.advanceTimersByTime(2000);
     await drain();
 
-    // streamState cleaned up on success (wasPending=false path)
+    // streamState cleaned up on success
     expect(streamState(ch).has('sess-1')).toBe(false);
+    // Verify content was sent
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe('hello');
   });
 
   it('does not flush if buffer was already emptied by onToolCall', async () => {
@@ -333,6 +341,10 @@ describe('onToolCall flush', () => {
     await drain();
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe(
+      'let me search...',
+    );
   });
 
   it('does nothing when there is no buffer for the session', () => {
@@ -439,13 +451,18 @@ describe('onResponseComplete', () => {
     await onResponseComplete(ch, 'test-chat', 'remaining text', 'sess-1');
 
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe(
+      'remaining text',
+    );
     expect(streamState(ch).has('sess-1')).toBe(false);
   });
 
   it('falls back to fullText when no streamState', async () => {
     const ch = makeChannel();
     await onResponseComplete(ch, 'test-chat', 'nothing', 'sess-none');
-    expect(mockSendQQMessage).toHaveBeenCalled();
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe('nothing');
   });
 
   it('does not send when buffer is empty (already flushed)', async () => {
@@ -772,8 +789,13 @@ describe('error recovery paths', () => {
     const ch = makeChannel();
     onResponseChunk(ch, 'test-chat', 'alive', 'sess-1');
 
+    vi.spyOn(global, 'clearTimeout');
+    const entry = streamState(ch).get('sess-1');
+    const timer = entry!.timer;
+
     ch.onSessionDied('sess-1');
 
+    expect(clearTimeout).toHaveBeenCalledWith(timer);
     expect(streamState(ch).has('sess-1')).toBe(false);
 
     const chp = ch as unknown as Record<string, unknown>;
@@ -853,5 +875,229 @@ describe('error recovery paths', () => {
     expect(streamState(ch).get('sess-1')!.buffer).toBe('tool text');
     // sendMessage should NOT have been called
     expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe('buffer limit flush (#11)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockSendQQMessage.mockResolvedValue(mockResponse(true));
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('flushes immediately when buffer exceeds MAX_BUFFER_LENGTH', async () => {
+    const ch = makeChannel();
+    // MAX_BUFFER_LENGTH = 4096, send a chunk that pushes past it
+    const bigChunk = 'a'.repeat(3000);
+    onResponseChunk(ch, 'test-chat', bigChunk, 'sess-1');
+
+    // Buffer is under limit, no immediate flush
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+
+    // Push over the limit
+    onResponseChunk(ch, 'test-chat', 'b'.repeat(2000), 'sess-1');
+    await drain();
+
+    // Should flush immediately
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+    const body = mockSendQQMessage.mock.calls[0][3] as Record<string, unknown>;
+    expect((body.markdown as Record<string, string>).content).toBe(
+      bigChunk + 'b'.repeat(2000),
+    );
+  });
+});
+
+describe('idleFlush guard re-schedule (#5)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('re-schedules timer when flushing guard blocks idleFlush', async () => {
+    const ch = makeChannel();
+    // Resolve the send eventually
+    let resolveSend: (v: MockResponse) => void;
+    const sendPromise = new Promise<MockResponse>((r) => {
+      resolveSend = r;
+    });
+    mockSendQQMessage.mockReturnValue(sendPromise);
+
+    onResponseChunk(ch, 'test-chat', 'hello', 'sess-1');
+
+    // Fire idleFlush timer
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+
+    // Now the session is flushing. Simulate another idleFlush firing.
+    // idleFlush should set a new timer and return.
+    const st = streamState(ch).get('sess-1')!;
+    expect(st.buffer).toBe(''); // buffer was cleared
+
+    // Simulate: buffer gets content while flushing
+    st.buffer = 'new content';
+
+    // Another idleFlush fires but flushingSessions guard blocks
+    const chp = ch as unknown as Record<string, unknown>;
+    const prevTimer = st.timer;
+    (chp['idleFlush'] as (sid: string, rid: number) => void)('sess-1', chp['_reconnectId'] as number);
+
+    // A new timer should have been set for re-schedule
+    expect(st.timer).not.toBeNull();
+    expect(st.timer).not.toBe(prevTimer);
+
+    // Clean up
+    resolveSend!(mockResponse(true));
+    // Clean up
+    resolveSend!(mockResponse(true));
+  });
+});
+
+describe('in-flight send + new chunk + onResponseComplete (#4)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('new content during send re-scheduled by .then() after onResponseComplete', async () => {
+    const ch = makeChannel();
+    let resolveSend: (v: MockResponse) => void;
+    const sendPromise = new Promise<MockResponse>((r) => {
+      resolveSend = r;
+    });
+    mockSendQQMessage.mockReturnValue(sendPromise);
+
+    onResponseChunk(ch, 'test-chat', 'part1', 'sess-1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // First send in-flight. New content arrives.
+    onResponseChunk(ch, 'test-chat', ' part2', 'sess-1');
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const pendingStreamDelete = chp['pendingStreamDelete'] as Set<string>;
+    pendingStreamDelete.add('sess-1');
+
+    // Resolve the send
+    resolveSend!(mockResponse(true));
+    await drain();
+
+    // .then() should: delete pendingStreamDelete, see non-empty buffer,
+    // and schedule a new idleFlush timer
+    expect(pendingStreamDelete.has('sess-1')).toBe(false);
+    expect(streamState(ch).has('sess-1')).toBe(true);
+    expect(streamState(ch).get('sess-1')!.buffer).toBe(' part2');
+    expect(streamState(ch).get('sess-1')!.timer).not.toBeNull();
+
+  });
+});
+
+describe('.then() retains streamState during send (#12)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('retains streamState when new chunk arrives during in-flight send', async () => {
+    const ch = makeChannel();
+    let resolveSend: (v: MockResponse) => void;
+    const sendPromise = new Promise<MockResponse>((r) => {
+      resolveSend = r;
+    });
+    mockSendQQMessage.mockReturnValue(sendPromise);
+
+    onResponseChunk(ch, 'test-chat', 'initial', 'sess-1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // First send is in-flight
+    expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
+
+    // New chunk arrives while send is in-flight
+    onResponseChunk(ch, 'test-chat', ' additional', 'sess-1');
+
+    const st = streamState(ch);
+    expect(st.has('sess-1')).toBe(true);
+    expect(st.get('sess-1')!.buffer).toContain('additional');
+
+    // Resolve the send
+    resolveSend!(mockResponse(true));
+    await drain();
+
+    // .then() should see buffer is non-empty and retain streamState
+    expect(st.has('sess-1')).toBe(true);
+    expect(st.get('sess-1')!.buffer).toBe(' additional');
+  });
+});
+
+describe('identity guard (#3, #6)', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('.then() does not modify state when session died during send', async () => {
+    const ch = makeChannel();
+    let resolveSend: (v: MockResponse) => void;
+    const sendPromise = new Promise<MockResponse>((r) => {
+      resolveSend = r;
+    });
+    mockSendQQMessage.mockReturnValue(sendPromise);
+
+    onResponseChunk(ch, 'test-chat', 'dying session', 'sess-1');
+    vi.advanceTimersByTime(2000);
+    await drain();
+
+    // First send is in-flight
+    // Kill the session
+    ch.onSessionDied('sess-1');
+
+    expect(streamState(ch).has('sess-1')).toBe(false);
+
+    // Now a new session starts with the same ID
+    onResponseChunk(ch, 'test-chat', 'new session', 'sess-1');
+
+    const newState = streamState(ch).get('sess-1');
+    expect(newState).toBeDefined();
+    expect(newState!.buffer).toBe('new session');
+
+    const chp = ch as unknown as Record<string, unknown>;
+    const flushedSessions = chp['flushedSessions'] as Set<string>;
+
+    // Now resolve the OLD send
+    resolveSend!(mockResponse(true));
+    await drain();
+
+    // .then() should detect current !== state and return early
+    // The NEW session should NOT be affected
+    expect(streamState(ch).has('sess-1')).toBe(true);
+    expect(streamState(ch).get('sess-1')!.buffer).toBe('new session');
+    // flushedSessions should NOT include the new session (old send added it,
+    // but the guard skips that addition for the wrong state)
+    // The old send would add flushedSessions but since the session was re-created,
+    // it's a different state object, so the guard returns early.
+    // flushedSessions may or may not have sess-1 depending on if the first send
+    // added it before onSessionDied cleared it. onSessionDied clears flushedSessions.
   });
 });
