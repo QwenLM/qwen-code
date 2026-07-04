@@ -61,6 +61,7 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { resolveShellOutputMaxLines } from './components/messages/ToolGroup';
@@ -1156,6 +1157,7 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
+  const [showDaemonStatusDialog, setShowDaemonStatusDialog] = useState(false);
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
@@ -1360,6 +1362,7 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
+    showDaemonStatusDialog ||
     showExtensionsDialog ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
@@ -3554,6 +3557,15 @@ export function App({
               <ToolsDialog />
             </DialogShell>
           )}
+          {showDaemonStatusDialog && (
+            <DialogShell
+              title={t('daemon.title')}
+              size="xl"
+              onClose={() => setShowDaemonStatusDialog(false)}
+            >
+              <DaemonStatusDialog />
+            </DialogShell>
+          )}
           {showExtensionsDialog && (
             <DialogShell
               title={t('extensions.manage.title')}
@@ -3786,6 +3798,10 @@ export function App({
                   onOpenSettings={() => {
                     closeMobileDrawer();
                     setShowSettingsDialog(true);
+                  }}
+                  onOpenDaemonStatus={() => {
+                    closeMobileDrawer();
+                    setShowDaemonStatusDialog(true);
                   }}
                   onNewSession={createNewSession}
                   onLoadSession={loadSidebarSession}

@@ -36,6 +36,7 @@ const sdkMocks = vi.hoisted(() => {
   const workspaceProviders = vi.fn();
   const listWorkspaceSessions = vi.fn();
   const deleteSessionsData = vi.fn();
+  const daemonStatus = vi.fn();
 
   class MockDaemonClient {
     constructor(_opts: unknown) {}
@@ -58,6 +59,7 @@ const sdkMocks = vi.hoisted(() => {
     workspaceProviders = workspaceProviders;
     listWorkspaceSessions = listWorkspaceSessions;
     deleteSessionsData = deleteSessionsData;
+    daemonStatus = daemonStatus;
     dispose = vi.fn();
   }
 
@@ -81,6 +83,7 @@ const sdkMocks = vi.hoisted(() => {
     workspaceProviders,
     listWorkspaceSessions,
     deleteSessionsData,
+    daemonStatus,
     reset() {
       capabilities.mockReset();
       capabilities.mockResolvedValue({
@@ -162,6 +165,13 @@ const sdkMocks = vi.hoisted(() => {
         removed: [],
         notFound: [],
         errors: [],
+      });
+      daemonStatus.mockReset();
+      daemonStatus.mockResolvedValue({
+        v: 1,
+        detail: 'summary',
+        status: 'ok',
+        issues: [],
       });
     },
   };
@@ -550,5 +560,43 @@ describe('DaemonWorkspaceProvider', () => {
       's-2',
       's-3',
     ]);
+  });
+
+  it('actions.loadDaemonStatus forwards the detail level to client.daemonStatus', async () => {
+    const report = {
+      v: 1,
+      detail: 'full',
+      status: 'warning',
+      issues: [
+        {
+          code: 'pending_permissions',
+          severity: 'warning',
+          message: '2 pending permissions',
+        },
+      ],
+    };
+    sdkMocks.daemonStatus.mockResolvedValueOnce(report);
+    let actions: DaemonWorkspaceActions | undefined;
+
+    function Harness() {
+      const workspace = useOptionalDaemonWorkspace();
+      actions = workspace?.actions;
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    if (!actions) throw new Error('actions not defined');
+
+    let result: unknown;
+    await act(async () => {
+      result = await actions!.loadDaemonStatus('full');
+    });
+
+    expect(result).toEqual(report);
+    expect(sdkMocks.daemonStatus).toHaveBeenCalledWith('full');
   });
 });
