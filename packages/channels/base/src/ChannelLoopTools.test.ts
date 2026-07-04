@@ -62,6 +62,56 @@ describe('ChannelLoopMcpServer', () => {
     });
   });
 
+  it('routes list calls with the current channel session id', async () => {
+    const list = vi.fn().mockResolvedValue('No loops.');
+    const server = new ChannelLoopMcpServer({
+      create: vi.fn(),
+      list,
+      cancel: vi.fn(),
+    });
+
+    const response = await server.handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'tools/call',
+        params: { name: 'channel_loop_list' },
+      },
+      { sessionId: 's-1' },
+    );
+
+    expect(list).toHaveBeenCalledWith('s-1');
+    expect(response).toMatchObject({
+      result: {
+        content: [{ type: 'text', text: 'No loops.' }],
+      },
+    });
+  });
+
+  it('returns a JSON-RPC error when sessionId is missing', async () => {
+    const server = new ChannelLoopMcpServer({
+      create: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+    });
+
+    const response = await server.handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 5,
+        method: 'tools/call',
+        params: { name: 'channel_loop_list' },
+      },
+      {},
+    );
+
+    expect(response).toMatchObject({
+      jsonrpc: '2.0',
+      id: 5,
+      error: { code: -32603, message: 'Missing channel session id.' },
+    });
+  });
+
   it('does not respond to JSON-RPC notifications', async () => {
     const server = new ChannelLoopMcpServer({
       create: vi.fn(),

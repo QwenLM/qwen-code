@@ -581,6 +581,8 @@ export abstract class ChannelBase {
         resolve: doneResolve,
         chatId: job.target.chatId,
         messageId: job.id,
+        senderId: job.target.senderId,
+        senderName: job.createdBy,
         loopPrompt: true,
       };
       this.activePrompts.set(sessionId, promptState);
@@ -1587,14 +1589,8 @@ export abstract class ChannelBase {
     if (this.config.sessionScope === 'single') {
       return 'Loops are not supported when sessionScope is single.';
     }
-    const target = this.router.getTarget(sessionId);
-    if (!target) return 'No channel target is bound to this session.';
-    if (target.channelName !== this.name) {
-      return 'No channel target is bound to this session.';
-    }
-    if (!this.isAuthorizedForSharedSessionToolCall(target, sessionId)) {
-      return 'Only authorized members can use loops in this shared session.';
-    }
+    const target = this.loopToolTarget(sessionId);
+    if (typeof target === 'string') return target;
     if (!this.supportsProactiveTarget(target)) {
       return 'This channel does not support proactive loop messages for this chat target.';
     }
@@ -1648,14 +1644,8 @@ export abstract class ChannelBase {
 
   private async listLoopsFromTool(sessionId: string): Promise<string> {
     if (!this.loopController) return 'Channel loops are not configured.';
-    const target = this.router.getTarget(sessionId);
-    if (!target) return 'No channel target is bound to this session.';
-    if (target.channelName !== this.name) {
-      return 'No channel target is bound to this session.';
-    }
-    if (!this.isAuthorizedForSharedSessionToolCall(target, sessionId)) {
-      return 'Only authorized members can use loops in this shared session.';
-    }
+    const target = this.loopToolTarget(sessionId);
+    if (typeof target === 'string') return target;
     const jobs = await this.loopController.listForTarget(this.name, target);
     if (jobs.length === 0) return 'No loops.';
     return jobs.map((job) => this.formatLoopListLine(job)).join('\n');
@@ -1666,14 +1656,8 @@ export abstract class ChannelBase {
     id: string,
   ): Promise<string> {
     if (!this.loopController) return 'Channel loops are not configured.';
-    const target = this.router.getTarget(sessionId);
-    if (!target) return 'No channel target is bound to this session.';
-    if (target.channelName !== this.name) {
-      return 'No channel target is bound to this session.';
-    }
-    if (!this.isAuthorizedForSharedSessionToolCall(target, sessionId)) {
-      return 'Only authorized members can use loops in this shared session.';
-    }
+    const target = this.loopToolTarget(sessionId);
+    if (typeof target === 'string') return target;
     const jobs = await this.loopController.listForTarget(this.name, target);
     const match = jobs.find((job) => job.id === id);
     if (!match) return `No loop ${id}.`;
@@ -1800,6 +1784,21 @@ export abstract class ChannelBase {
       threadId: envelope.threadId,
       isGroup: envelope.isGroup === true,
     };
+  }
+
+  private loopToolTarget(sessionId: string): SessionTarget | string {
+    const target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) {
+      return 'No channel target is bound to this session.';
+    }
+    if (!this.isAuthorizedForSharedSessionToolCall(target, sessionId)) {
+      return 'Only authorized members can use loops in this shared session.';
+    }
+    const senderId = this.activePrompts.get(sessionId)?.senderId;
+    if (senderId && this.isSharedSessionTarget(target)) {
+      return { ...target, senderId };
+    }
+    return target;
   }
 
   private isStoredLoopTargetAuthorized(

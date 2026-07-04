@@ -1756,6 +1756,111 @@ describe('ChannelBase', () => {
       await strangerPrompt;
     });
 
+    it('channel loop tools use the active shared-session caller target', async () => {
+      let finishPrompt: (() => void) | undefined;
+      const job: ChannelLoop = {
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'admin',
+          chatId: 'group1',
+          isGroup: true,
+        },
+        cwd: '/tmp',
+        cron: '* * * * *',
+        prompt: 'drink water',
+        recurring: true,
+        enabled: true,
+        createdBy: 'admin',
+        createdAt: '2026-06-30T01:02:03.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      };
+      const createForTarget = vi.fn().mockResolvedValue(job);
+      const listForTarget = vi.fn().mockResolvedValue([job]);
+      const disable = vi.fn().mockResolvedValue(true);
+      const ch = createChannel(
+        {
+          allowedUsers: ['owner', 'admin'],
+          groupPolicy: 'open',
+          sessionScope: 'thread',
+        },
+        {
+          loopController: {
+            create: vi.fn(),
+            createForTarget,
+            listForTarget,
+            disable,
+            validateCron: vi.fn(),
+          },
+        },
+      );
+      ch.proactiveSupported = true;
+      await ch.handleInbound(
+        envelope({
+          senderId: 'owner',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot hello',
+        }),
+      );
+      vi.mocked(bridge.prompt).mockImplementation(
+        () =>
+          new Promise((resolve) => {
+            finishPrompt = () => resolve('agent response');
+          }),
+      );
+      const adminPrompt = ch.handleInbound(
+        envelope({
+          senderId: 'admin',
+          chatId: 'group1',
+          isGroup: true,
+          isMentioned: true,
+          text: '@bot manage loops',
+        }),
+      );
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      const handler = (
+        bridge as unknown as {
+          getChannelLoopToolHandler(): ChannelLoopToolHandler | undefined;
+        }
+      ).getChannelLoopToolHandler();
+      await expect(
+        handler!.create('s-1', {
+          cron: '* * * * *',
+          prompt: 'drink water',
+        }),
+      ).resolves.toBe('Loop job-1: * * * * *');
+      await expect(handler!.list('s-1')).resolves.toContain('job-1');
+      await expect(handler!.cancel('s-1', 'job-1')).resolves.toBe(
+        'Cancelled loop job-1.',
+      );
+
+      expect(createForTarget).toHaveBeenCalledWith(
+        expect.objectContaining({
+          target: expect.objectContaining({ senderId: 'admin' }),
+        }),
+        10,
+      );
+      expect(listForTarget).toHaveBeenNthCalledWith(
+        1,
+        'test-chan',
+        expect.objectContaining({ senderId: 'admin' }),
+      );
+      expect(listForTarget).toHaveBeenNthCalledWith(
+        2,
+        'test-chan',
+        expect.objectContaining({ senderId: 'admin' }),
+      );
+      expect(disable).toHaveBeenCalledWith('job-1');
+
+      finishPrompt?.();
+      await adminPrompt;
+    });
+
     it('channel loop tool keeps group targets proactive-capable', async () => {
       const created: ChannelLoop = {
         id: 'job-1',
