@@ -224,12 +224,24 @@ describe('qwen resolve workflow', () => {
       ? workflow.slice(resolveJobStart)
       : workflow.slice(resolveJobStart, resolveJobStart + 1 + nextJob);
   const reviewJob = job(workflow, 'review-pr');
+  const delayAutomaticReviewJob = job(workflow, 'delay-automatic-review');
   const authorizeJob = job(workflow, 'authorize');
   const precheckJob = job(workflow, 'precheck-pr');
 
   it('keeps closed PR events from running precheck or authorize jobs', () => {
     expect(precheckJob).toContain("github.event.action != 'closed'");
     expect(authorizeJob).toContain("github.event.action != 'closed'");
+  });
+
+  it('keeps automatic review jobs cancellable by concurrency', () => {
+    for (const lifecycleJob of [
+      authorizeJob,
+      delayAutomaticReviewJob,
+      reviewJob,
+    ]) {
+      expect(lifecycleJob).toContain('!cancelled() &&');
+      expect(lifecycleJob).not.toContain('\n      always() &&');
+    }
   });
 
   it('does not require fork PR authors to have write permission for automatic review', () => {

@@ -80,7 +80,7 @@ jobs:
     # this `if` only matches the /review command shape.
     needs: ['authorize']
     if: |-
-      always() &&
+      !cancelled() &&
       needs.authorize.outputs.should_review == 'true' &&
       ((github.event_name == 'issue_comment' &&
         github.event.issue.pull_request &&
@@ -101,7 +101,7 @@ jobs:
     concurrency:
       group: 'qwen-pr-ack-${{ github.event.issue.number || github.event.pull_request.number }}'
       cancel-in-progress: false
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       pull-requests: 'write'
@@ -145,7 +145,7 @@ jobs:
     if: |-
       github.event_name == 'pull_request_target' &&
       github.event.action == 'review_requested'
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions: {}
     outputs:
       bot_login: '${{ steps.values.outputs.bot_login }}'
@@ -158,7 +158,7 @@ jobs:
   delay-automatic-review:
     needs: ['authorize']
     if: |-
-      always() &&
+      !cancelled() &&
       github.event_name == 'pull_request_target' &&
       (github.event.action == 'opened' ||
        github.event.action == 'synchronize') &&
@@ -209,7 +209,7 @@ jobs:
     # unrelated comment — to avoid spawning a job per comment. The downstream
     # `if`s still do the exact command body match; this prefix is just a filter.
     if: |-
-      always() &&
+      !cancelled() &&
       (github.event_name != 'pull_request_target' ||
        github.event.action != 'closed') &&
       (github.event_name != 'pull_request_target' ||
@@ -229,7 +229,7 @@ jobs:
     # Canonical same-repo guard: this job loads CI_BOT_PAT, so fork-triggered
     # runs stay on hosted (ephemeral); only in-repo PR events on QwenLM/qwen-code
     # use the persistent ECS runner.
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'' && github.event.pull_request && github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     timeout-minutes: 5
     permissions:
       contents: 'read'
@@ -315,7 +315,7 @@ jobs:
     # - reopened/ready_for_review runs immediately
     # KEEP IN SYNC with ack-review-request.if (explicit-trigger branches).
     if: |-
-      always() &&
+      !cancelled() &&
       ((github.event_name == 'workflow_dispatch' &&
        (github.event.inputs.command == 'review' || github.event.inputs.command == '')) ||
       (github.event_name == 'pull_request_target' &&
@@ -348,7 +348,7 @@ jobs:
          startsWith(github.event.review.body, format('@qwen-code /review{0}', '\n'))) &&
         needs.authorize.outputs.should_review == 'true'))
     timeout-minutes: 200
-    runs-on: "${{ (github.repository == 'QwenLM/qwen-code' && vars.MAINTAINER_ECS_RUNNER_DISABLED != 'true') && fromJSON('[\"self-hosted\", \"linux\", \"x64\", \"ecs-qwen\"]') || fromJSON('[\"ubuntu-latest\"]') }}"
+    runs-on: '${{ (github.repository == ''QwenLM/qwen-code'' && vars.MAINTAINER_ECS_RUNNER_DISABLED != ''true'') && fromJSON(''["self-hosted", "linux", "x64", "ecs-qwen"]'') || fromJSON(''["ubuntu-latest"]'') }}'
     permissions:
       contents: 'read'
       pull-requests: 'write'
@@ -708,7 +708,7 @@ jobs:
   resolve-pr:
     needs: ['authorize']
     if: |-
-      always() &&
+      !cancelled() &&
       github.repository == 'QwenLM/qwen-code' &&
       needs.authorize.outputs.should_review == 'true' &&
       (
