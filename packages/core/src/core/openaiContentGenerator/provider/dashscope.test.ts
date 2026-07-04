@@ -62,7 +62,15 @@ vi.mock('../constants.js', () => ({
     'https://dashscope.aliyuncs.com/compatible-mode/v1',
   DEFAULT_DEEPSEEK_BASE_URL: 'https://api.deepseek.com/v1',
   DEFAULT_OPEN_ROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
-  resolveRequestTimeout: (timeout: number | null | undefined): number => {
+vi.mock('../constants.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../constants.js')>();
+  return {
+    ...actual,
+    get DASHSCOPE_PROXY_BASE_URL() {
+      return process.env['DASHSCOPE_PROXY_BASE_URL'];
+    },
+  };
+});
     if (timeout === undefined || timeout === null) return 120000;
     return timeout <= 0 ? 2_147_483_647 : timeout;
   },
