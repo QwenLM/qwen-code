@@ -129,6 +129,10 @@ describe('startupPrefetch', () => {
 
     expect(mockCheckForUpdates).toHaveBeenCalledTimes(1);
     expect(mockConnectIdeForStartup).toHaveBeenCalledWith(config);
+    expect(mockStartBackgroundHousekeeping).toHaveBeenCalledWith(
+      config,
+      expect.any(Object),
+    );
   });
 
   it('does not run update check when auto-update is disabled', async () => {
