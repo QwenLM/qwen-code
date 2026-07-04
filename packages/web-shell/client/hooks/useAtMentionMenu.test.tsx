@@ -114,36 +114,33 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.items[0]?.description).toBe('Reviewtxt');
   });
 
-  it('refreshes extension provider data on each search', async () => {
+  it('filters cached extension provider data while searching', async () => {
     vi.useFakeTimers();
-    const loadExtensionsStatus = vi
-      .fn()
-      .mockResolvedValueOnce({
-        extensions: [
-          {
-            name: 'first',
-            isActive: true,
-          },
-        ],
-      })
-      .mockResolvedValueOnce({
-        extensions: [
-          {
-            name: 'second',
-            isActive: true,
-          },
-        ],
-      });
+    const loadExtensionsStatus = vi.fn().mockResolvedValue({
+      extensions: [
+        {
+          name: 'first',
+          isActive: true,
+        },
+        {
+          name: 'second',
+          isActive: true,
+        },
+      ],
+    });
     mount({ actions: { loadExtensionsStatus } });
 
     act(() => latest!.refreshForView(makeView('@')));
     act(() => latest!.enterCategory(1));
     await runDebounce();
-    expect(latest!.state?.items.map((item) => item.label)).toEqual(['first']);
+    expect(latest!.state?.items.map((item) => item.label)).toEqual([
+      'first',
+      'second',
+    ]);
 
     act(() => latest!.updateSearch('second'));
     await runDebounce();
-    expect(loadExtensionsStatus).toHaveBeenCalledTimes(2);
+    expect(loadExtensionsStatus).toHaveBeenCalledTimes(1);
     expect(latest!.state?.items.map((item) => item.label)).toEqual(['second']);
   });
 
@@ -252,9 +249,7 @@ describe('useAtMentionMenu', () => {
     );
     await runDebounce();
 
-    expect(loadMcpResources).toHaveBeenLastCalledWith('docs', {
-      signal: expect.any(AbortSignal),
-    });
+    expect(loadMcpResources).toHaveBeenLastCalledWith('docs');
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'mcp-resources',
@@ -312,9 +307,7 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(makeView('@src/foo')));
     await runDebounce();
 
-    expect(listDirectory).toHaveBeenLastCalledWith('src', {
-      signal: expect.any(AbortSignal),
-    });
+    expect(listDirectory).toHaveBeenLastCalledWith('src');
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'files',
@@ -339,6 +332,7 @@ describe('useAtMentionMenu', () => {
       selectedProviderId: 'files',
       query: 'src/fo',
     });
+    expect(listDirectory).toHaveBeenCalledTimes(2);
   });
 
   it('opens typed file queries without provider history', async () => {
@@ -360,9 +354,7 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(makeView('@pac')));
     await runDebounce();
 
-    expect(listDirectory).toHaveBeenLastCalledWith('.', {
-      signal: expect.any(AbortSignal),
-    });
+    expect(listDirectory).toHaveBeenCalledTimes(1);
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'files',
@@ -552,9 +544,7 @@ describe('useAtMentionMenu', () => {
     });
     await runDebounce();
 
-    expect(listDirectory).toHaveBeenLastCalledWith('src', {
-      signal: expect.any(AbortSignal),
-    });
+    expect(listDirectory).toHaveBeenLastCalledWith('src');
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'files',
@@ -564,9 +554,7 @@ describe('useAtMentionMenu', () => {
       expect(latest!.backToCategories()).toBe('items');
     });
     await runDebounce();
-    expect(listDirectory).toHaveBeenLastCalledWith('.', {
-      signal: expect.any(AbortSignal),
-    });
+    expect(listDirectory).toHaveBeenCalledTimes(2);
   });
 
   it('accepts an MCP server item by drilling into its resources', async () => {
@@ -597,9 +585,7 @@ describe('useAtMentionMenu', () => {
     });
     await runDebounce();
 
-    expect(loadMcpResources).toHaveBeenCalledWith('docs', {
-      signal: expect.any(AbortSignal),
-    });
+    expect(loadMcpResources).toHaveBeenCalledWith('docs');
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'mcp-resources',
@@ -696,9 +682,7 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.updateSearch('../secret'));
     await runDebounce();
 
-    expect(listDirectory).toHaveBeenCalledWith('.', {
-      signal: expect.any(AbortSignal),
-    });
+    expect(listDirectory).toHaveBeenCalledWith('.');
   });
 
   it('escapes glob metacharacters in the fallback file search', async () => {
@@ -713,7 +697,6 @@ describe('useAtMentionMenu', () => {
 
     expect(globWorkspace).toHaveBeenCalledWith('foo\\*bar\\?*', {
       maxResults: 50,
-      signal: expect.any(AbortSignal),
     });
   });
 
@@ -1077,9 +1060,7 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(makeView('@my:server:res://doc')));
     await runDebounce();
 
-    expect(loadMcpResources).toHaveBeenLastCalledWith('my:server', {
-      signal: expect.any(AbortSignal),
-    });
+    expect(loadMcpResources).toHaveBeenLastCalledWith('my:server');
     expect(latest!.state).toMatchObject({
       selectedProviderId: 'mcp-resources',
       itemMode: 'mcpResources',
@@ -1225,6 +1206,7 @@ describe('useAtMentionMenu', () => {
       query: 'two',
       items: [expect.objectContaining({ label: 'Two' })],
     });
+    expect(loadMcpResources).toHaveBeenCalledTimes(1);
   });
 
   it('does not reuse an items-level panel after the cursor moves inside the reference', async () => {

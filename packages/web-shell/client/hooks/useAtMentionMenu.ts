@@ -93,6 +93,44 @@ type LoadMcpResourcesFn = (
   }>;
 }>;
 
+type DirectoryListing = Awaited<ReturnType<ListDirectoryFn>>;
+type GlobWorkspaceResult = Awaited<ReturnType<GlobWorkspaceFn>>;
+type ExtensionsStatus = Awaited<ReturnType<LoadExtensionsStatusFn>>;
+type McpStatus = Awaited<ReturnType<LoadMcpStatusFn>>;
+type McpResources = Awaited<ReturnType<LoadMcpResourcesFn>>;
+
+interface BuiltinProviderCache {
+  directories: Map<string, Promise<DirectoryListing>>;
+  globResults: Map<string, Promise<GlobWorkspaceResult>>;
+  extensionsStatus?: Promise<ExtensionsStatus>;
+  mcpStatus?: Promise<McpStatus>;
+  mcpResources: Map<string, Promise<McpResources>>;
+}
+
+function createBuiltinProviderCache(): BuiltinProviderCache {
+  return {
+    directories: new Map(),
+    globResults: new Map(),
+    mcpResources: new Map(),
+  };
+}
+
+function getCached<K, V>(
+  cache: Map<K, Promise<V>>,
+  key: K,
+  load: () => Promise<V>,
+) {
+  let promise = cache.get(key);
+  if (!promise) {
+    promise = load().catch((error) => {
+      cache.delete(key);
+      throw error;
+    });
+    cache.set(key, promise);
+  }
+  return promise;
+}
+
 interface LoadMcpResourceOptions {
   validateServer?: boolean;
 }
@@ -124,6 +162,14 @@ const ANSI_RE = new RegExp(`${ESC}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`, 'g');
 const BIDI_CONTROL_RE = /[\u200B\u200E\u200F\u061C\u2066-\u2069\u202A-\u202E]/g;
 const SAFE_DISPLAY_FALLBACK = '[invalid]';
 const AT_REFERENCE_SPECIAL_CHARS = /[ \t()[\]{};!?\\,]/g;
+
+function isBuiltinProviderId(providerId: string): boolean {
+  return (
+    providerId === FILE_PROVIDER_ID ||
+    providerId === EXTENSIONS_PROVIDER_ID ||
+    providerId === MCP_RESOURCES_PROVIDER_ID
+  );
+}
 
 function joinWorkspacePath(dirPath: string, name: string): string {
   if (dirPath === '.' || dirPath === '') return name;
@@ -240,9 +286,10 @@ async function isEnabledMcpServer(
   actions: AtMentionWorkspaceActions | undefined,
   serverName: string,
   signal?: AbortSignal,
+  loadStatus?: () => Promise<McpStatus>,
 ) {
   if (signal?.aborted) return false;
-  const loadMcpStatus = actions?.loadMcpStatus;
+  const loadMcpStatus = loadStatus ?? actions?.loadMcpStatus;
   if (!loadMcpStatus) return false;
   try {
     const status = await loadMcpStatus();
@@ -351,6 +398,7 @@ function sanitizeAtMentionItem(item: AtMentionItem): AtMentionItem {
 function createFileProvider(
   getActions: () => AtMentionWorkspaceActions | undefined,
   getCurrentDir: () => string,
+  getCache: () => BuiltinProviderCache,
   label: string,
   description: string,
 ): WebShellAtProvider {
@@ -367,7 +415,9 @@ function createFileProvider(
         try {
           const { dirPath, entryQuery } = splitFileQuery(query, currentDir);
           const lowerQuery = entryQuery.toLowerCase();
-          const listing = await listDirectory(dirPath, { signal });
+          const listing = await getCached(getCache().directories, dirPath, () =>
+            listDirectory(dirPath),
+          );
           if (signal.aborted) return [];
           const entries = listing.entries
             .filter((entry) => !entry.ignored)
@@ -425,10 +475,9 @@ function createFileProvider(
       }
       try {
         const pattern = query ? `${escapeGlobQuery(query)}*` : '**/*';
-        const result = await globWorkspace(pattern, {
-          maxResults: 50,
-          signal,
-        });
+        const result = await getCached(getCache().globResults, pattern, () =>
+          globWorkspace(pattern, { maxResults: 50 }),
+        );
         if (signal.aborted) return [];
         return result.matches
           .filter((file) => file !== '.')
@@ -450,6 +499,7 @@ function createFileProvider(
 
 function createExtensionProvider(
   getActions: () => AtMentionWorkspaceActions | undefined,
+  getCache: () => BuiltinProviderCache,
   label: string,
   description: string,
 ): WebShellAtProvider {
@@ -462,7 +512,12 @@ function createExtensionProvider(
       const loadExtensionsStatus = getActions()?.loadExtensionsStatus;
       if (!loadExtensionsStatus) return [];
       try {
-        const status = await loadExtensionsStatus();
+        const cache = getCache();
+        cache.extensionsStatus ??= loadExtensionsStatus().catch((error) => {
+          cache.extensionsStatus = undefined;
+          throw error;
+        });
+        const status = await cache.extensionsStatus;
         if (signal.aborted) return [];
         const lowerQuery = query.toLowerCase();
         return status.extensions
@@ -508,6 +563,7 @@ function createExtensionProvider(
 
 function createMcpResourcesProvider(
   getActions: () => AtMentionWorkspaceActions | undefined,
+  getCache: () => BuiltinProviderCache,
   label: string,
   description: string,
 ): WebShellAtProvider {
@@ -520,7 +576,12 @@ function createMcpResourcesProvider(
       const loadMcpStatus = getActions()?.loadMcpStatus;
       if (!loadMcpStatus) return [];
       try {
-        const status = await loadMcpStatus();
+        const cache = getCache();
+        cache.mcpStatus ??= loadMcpStatus().catch((error) => {
+          cache.mcpStatus = undefined;
+          throw error;
+        });
+        const status = await cache.mcpStatus;
         if (signal.aborted) return [];
         const lowerQuery = query.toLowerCase();
         return status.servers
@@ -585,6 +646,9 @@ export function useAtMentionMenu({
   const abortRef = useRef<AbortController | null>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const fileDirectoryRef = useRef('.');
+  const builtinCacheRef = useRef<BuiltinProviderCache>(
+    createBuiltinProviderCache(),
+  );
   const lastSelectedProviderIdRef = useRef<string | null>(null);
   const lastSelectedMcpServerNameRef = useRef<string | null>(null);
 
@@ -593,16 +657,19 @@ export function useAtMentionMenu({
       createFileProvider(
         () => workspaceActionsRef.current,
         () => fileDirectoryRef.current,
+        () => builtinCacheRef.current,
         t('at.category.files'),
         t('at.category.files.description'),
       ),
       createExtensionProvider(
         () => workspaceActionsRef.current,
+        () => builtinCacheRef.current,
         t('at.category.extensions'),
         t('at.category.extensions.description'),
       ),
       createMcpResourcesProvider(
         () => workspaceActionsRef.current,
+        () => builtinCacheRef.current,
         t('at.category.mcpResources'),
         t('at.category.mcpResources.description'),
       ),
@@ -655,6 +722,7 @@ export function useAtMentionMenu({
 
   const close = useCallback(() => {
     clearPendingLoad();
+    builtinCacheRef.current = createBuiltinProviderCache();
     setMenu(null);
   }, [clearPendingLoad, setMenu]);
 
@@ -690,6 +758,7 @@ export function useAtMentionMenu({
       abortRef.current?.abort();
       abortRef.current = null;
       fileDirectoryRef.current = '.';
+      builtinCacheRef.current = createBuiltinProviderCache();
     },
     [],
   );
@@ -704,11 +773,13 @@ export function useAtMentionMenu({
       if (
         current?.level !== 'items' ||
         current.selectedProviderId !== providerId ||
-        current.query !== query ||
         current.itemMode !== baseState.itemMode ||
         current.mcpServerName !== baseState.mcpServerName ||
         current.fileDirectory !== baseState.fileDirectory
       ) {
+        return [];
+      }
+      if (current.query !== query && !isBuiltinProviderId(providerId)) {
         return [];
       }
       if (
@@ -721,6 +792,34 @@ export function useAtMentionMenu({
       return current.items;
     },
     [],
+  );
+
+  const hasCachedProviderData = useCallback(
+    (providerId: string, query: string) => {
+      const actions = workspaceActionsRef.current;
+      const cache = builtinCacheRef.current;
+      if (providerId === FILE_PROVIDER_ID) {
+        if (actions?.listDirectory) {
+          const { dirPath } = splitFileQuery(
+            query,
+            normalizeDirectoryPath(fileDirectoryRef.current),
+          );
+          return cache.directories.has(dirPath);
+        }
+        const pattern = query ? `${escapeGlobQuery(query)}*` : '**/*';
+        return (
+          Boolean(actions?.globWorkspace) && cache.globResults.has(pattern)
+        );
+      }
+      if (providerId === EXTENSIONS_PROVIDER_ID) {
+        return cache.extensionsStatus !== undefined;
+      }
+      if (providerId === MCP_RESOURCES_PROVIDER_ID) {
+        return cache.mcpStatus !== undefined;
+      }
+      return false;
+    },
+    [workspaceActionsRef],
   );
 
   const loadItems = useCallback(
@@ -808,12 +907,16 @@ export function useAtMentionMenu({
         baseState,
       );
       setMenu({ ...baseState, items: previousItems, loading: true });
+      if (hasCachedProviderData(providerId, query)) {
+        loadItems(providerId, query, baseState, { loadingAlreadySet: true });
+        return;
+      }
       searchTimerRef.current = setTimeout(() => {
         searchTimerRef.current = null;
         loadItems(providerId, query, baseState, { loadingAlreadySet: true });
       }, SEARCH_DEBOUNCE_MS);
     },
-    [getPreviousProviderItems, loadItems, setMenu],
+    [getPreviousProviderItems, hasCachedProviderData, loadItems, setMenu],
   );
 
   const loadMcpResourceItems = useCallback(
@@ -840,20 +943,38 @@ export function useAtMentionMenu({
       const previousItems =
         stateRef.current?.level === 'items' &&
         stateRef.current.itemMode === 'mcpResources' &&
-        stateRef.current.mcpServerName === serverName &&
-        stateRef.current.query === query
+        stateRef.current.mcpServerName === serverName
           ? stateRef.current.items
           : [];
       setMenu({ ...baseState, items: previousItems, loading: true });
+      const loadMcpStatus = actions?.loadMcpStatus;
       const enabledPromise = options.validateServer
-        ? isEnabledMcpServer(actions, serverName, abort.signal)
+        ? isEnabledMcpServer(
+            actions,
+            serverName,
+            abort.signal,
+            loadMcpStatus
+              ? () => {
+                  const cache = builtinCacheRef.current;
+                  cache.mcpStatus ??= loadMcpStatus().catch((error) => {
+                    cache.mcpStatus = undefined;
+                    throw error;
+                  });
+                  return cache.mcpStatus;
+                }
+              : undefined,
+          )
         : Promise.resolve(true);
       enabledPromise
         .then((enabled) => {
           if (!enabled || abort.signal.aborted) {
             return { resources: [] };
           }
-          return loadMcpResources(serverName, { signal: abort.signal });
+          return getCached(
+            builtinCacheRef.current.mcpResources,
+            serverName,
+            () => loadMcpResources(serverName),
+          );
         })
         .then((status) => {
           if (abort.signal.aborted || requestIdRef.current !== requestId) {
@@ -931,10 +1052,14 @@ export function useAtMentionMenu({
         stateRef.current?.level === 'items' &&
         stateRef.current.itemMode === 'mcpResources' &&
         stateRef.current.mcpServerName === serverName &&
-        stateRef.current.query === query
+        baseState.itemMode === 'mcpResources'
           ? stateRef.current.items
           : [];
       setMenu({ ...baseState, items: previousItems, loading: true });
+      if (builtinCacheRef.current.mcpResources.has(serverName)) {
+        loadMcpResourceItems(serverName, query, baseState, options);
+        return;
+      }
       searchTimerRef.current = setTimeout(() => {
         searchTimerRef.current = null;
         loadMcpResourceItems(serverName, query, baseState, options);
