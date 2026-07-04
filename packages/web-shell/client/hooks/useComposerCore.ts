@@ -1064,11 +1064,12 @@ export function useComposerCore(
     closeAtMenuState();
   }, [clearAutoAtTriggerIfIntact, closeAtMenuState]);
 
+  const closeAtMenuIfOpenFn = atMenu.closeIfOpen;
   const closeAtMenuIfOpen = useCallback(() => {
-    if (!atMenu.closeIfOpen()) return false;
+    if (!closeAtMenuIfOpenFn()) return false;
     clearAutoAtTriggerIfIntact();
     return true;
-  }, [atMenu, clearAutoAtTriggerIfIntact]);
+  }, [clearAutoAtTriggerIfIntact, closeAtMenuIfOpenFn]);
 
   const refreshSlashMenuForView = useCallback(
     (view: EditorView | null, preferredIndex?: number) => {

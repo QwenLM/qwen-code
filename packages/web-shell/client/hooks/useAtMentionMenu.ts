@@ -416,7 +416,7 @@ function createFileProvider(
           const { dirPath, entryQuery } = splitFileQuery(query, currentDir);
           const lowerQuery = entryQuery.toLowerCase();
           const listing = await getCached(getCache().directories, dirPath, () =>
-            listDirectory(dirPath),
+            listDirectory(dirPath, { signal }),
           );
           if (signal.aborted) return [];
           const entries = listing.entries
@@ -476,7 +476,7 @@ function createFileProvider(
       try {
         const pattern = query ? `${escapeGlobQuery(query)}*` : '**/*';
         const result = await getCached(getCache().globResults, pattern, () =>
-          globWorkspace(pattern, { maxResults: 50 }),
+          globWorkspace(pattern, { maxResults: 50, signal }),
         );
         if (signal.aborted) return [];
         return result.matches
@@ -523,20 +523,24 @@ function createExtensionProvider(
         return status.extensions
           .filter((ext) => ext.isActive)
           .map((ext) => {
+            const label = safeDisplayText(ext.name);
+            const insertName = escapeAtReferenceText(
+              sanitizeInsertText(ext.name),
+            );
             const displayName = sanitizeDisplayText(ext.displayName ?? '');
             const description = sanitizeDisplayText(ext.description ?? '');
             return {
               id: ext.name,
-              label: ext.name,
+              label,
               description:
-                displayName && displayName !== ext.name
+                displayName && displayName !== label
                   ? displayName
                   : description,
               detail:
                 displayName && description
                   ? `${displayName} - ${description}`
                   : (displayName ?? description),
-              insertText: `@ext:${ext.name} `,
+              insertText: `@ext:${insertName} `,
             };
           })
           .filter((ext) => {
@@ -566,6 +570,7 @@ function createMcpResourcesProvider(
   getCache: () => BuiltinProviderCache,
   label: string,
   description: string,
+  formatResourceCount: (count: number) => string,
 ): WebShellAtProvider {
   return {
     id: MCP_RESOURCES_PROVIDER_ID,
@@ -594,14 +599,14 @@ function createMcpResourcesProvider(
             const count =
               server.resourceCount === undefined
                 ? undefined
-                : `${server.resourceCount}`;
+                : formatResourceCount(server.resourceCount);
             return {
               id: `mcp-server:${server.name}`,
               label: safeDisplayText(server.name),
               description:
                 count === undefined
                   ? sanitizeDisplayText(server.description ?? '')
-                  : `${count} resources`,
+                  : count,
               detail: sanitizeDisplayText(server.description ?? ''),
               kind: 'mcp-server',
               serverName: server.name,
@@ -672,6 +677,7 @@ export function useAtMentionMenu({
         () => builtinCacheRef.current,
         t('at.category.mcpResources'),
         t('at.category.mcpResources.description'),
+        (count) => t('mcp.resourceCount', { count }),
       ),
     ];
     const builtinProviderIds = new Set(
@@ -720,11 +726,18 @@ export function useAtMentionMenu({
     }
   }, []);
 
-  const close = useCallback(() => {
-    clearPendingLoad();
-    builtinCacheRef.current = createBuiltinProviderCache();
-    setMenu(null);
-  }, [clearPendingLoad, setMenu]);
+  const close = useCallback(
+    (options: { preserveProviderSelection?: boolean } = {}) => {
+      clearPendingLoad();
+      builtinCacheRef.current = createBuiltinProviderCache();
+      if (!options.preserveProviderSelection) {
+        lastSelectedProviderIdRef.current = null;
+        lastSelectedMcpServerNameRef.current = null;
+      }
+      setMenu(null);
+    },
+    [clearPendingLoad, setMenu],
+  );
 
   const closeIfOpen = useCallback(() => {
     const current = stateRef.current;
@@ -852,8 +865,8 @@ export function useAtMentionMenu({
       if (!options.loadingAlreadySet) {
         setMenu({ ...baseState, items: previousItems, loading: true });
       }
-      provider
-        .search({ query, signal: abort.signal })
+      Promise.resolve()
+        .then(() => provider.search({ query, signal: abort.signal }))
         .then((items) => {
           if (abort.signal.aborted || requestIdRef.current !== requestId) {
             return;
@@ -973,7 +986,7 @@ export function useAtMentionMenu({
           return getCached(
             builtinCacheRef.current.mcpResources,
             serverName,
-            () => loadMcpResources(serverName),
+            () => loadMcpResources(serverName, { signal: abort.signal }),
           );
         })
         .then((status) => {
@@ -1460,7 +1473,7 @@ export function useAtMentionMenu({
         scrollIntoView: true,
       });
       view.focus();
-      close();
+      close({ preserveProviderSelection: true });
       return true;
     },
     [

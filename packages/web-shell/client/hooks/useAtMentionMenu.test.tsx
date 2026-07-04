@@ -225,6 +225,7 @@ describe('useAtMentionMenu', () => {
       ],
     });
     mount({
+      view: makeView('@'),
       actions: {
         loadMcpStatus: vi.fn().mockResolvedValue({
           servers: [
@@ -243,13 +244,17 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(makeView('@')));
     act(() => latest!.enterCategory(2));
     await runDebounce();
-    act(() => latest!.close());
+    act(() => latest!.accept());
+    await runDebounce();
+    act(() => latest!.accept());
     act(() =>
       latest!.refreshForView(makeView('@docs:https://example.com/doc')),
     );
     await runDebounce();
 
-    expect(loadMcpResources).toHaveBeenLastCalledWith('docs');
+    expect(loadMcpResources).toHaveBeenLastCalledWith('docs', {
+      signal: expect.any(AbortSignal),
+    });
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'mcp-resources',
@@ -307,7 +312,9 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(makeView('@src/foo')));
     await runDebounce();
 
-    expect(listDirectory).toHaveBeenLastCalledWith('src');
+    expect(listDirectory).toHaveBeenLastCalledWith('src', {
+      signal: expect.any(AbortSignal),
+    });
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'files',
@@ -544,7 +551,9 @@ describe('useAtMentionMenu', () => {
     });
     await runDebounce();
 
-    expect(listDirectory).toHaveBeenLastCalledWith('src');
+    expect(listDirectory).toHaveBeenLastCalledWith('src', {
+      signal: expect.any(AbortSignal),
+    });
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'files',
@@ -585,7 +594,9 @@ describe('useAtMentionMenu', () => {
     });
     await runDebounce();
 
-    expect(loadMcpResources).toHaveBeenCalledWith('docs');
+    expect(loadMcpResources).toHaveBeenCalledWith('docs', {
+      signal: expect.any(AbortSignal),
+    });
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'mcp-resources',
@@ -682,7 +693,9 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.updateSearch('../secret'));
     await runDebounce();
 
-    expect(listDirectory).toHaveBeenCalledWith('.');
+    expect(listDirectory).toHaveBeenCalledWith('.', {
+      signal: expect.any(AbortSignal),
+    });
   });
 
   it('escapes glob metacharacters in the fallback file search', async () => {
@@ -697,6 +710,7 @@ describe('useAtMentionMenu', () => {
 
     expect(globWorkspace).toHaveBeenCalledWith('foo\\*bar\\?*', {
       maxResults: 50,
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -1056,16 +1070,17 @@ describe('useAtMentionMenu', () => {
     });
     act(() => latest!.accept());
     await runDebounce();
-    act(() => latest!.close());
     act(() => latest!.refreshForView(makeView('@my:server:res://doc')));
     await runDebounce();
 
-    expect(loadMcpResources).toHaveBeenLastCalledWith('my:server');
+    expect(loadMcpResources).toHaveBeenLastCalledWith('my:server', {
+      signal: expect.any(AbortSignal),
+    });
     expect(latest!.state).toMatchObject({
       selectedProviderId: 'mcp-resources',
       itemMode: 'mcpResources',
       mcpServerName: 'my:server',
-      query: 'res://doc',
+      query: '',
     });
   });
 
@@ -1100,8 +1115,8 @@ describe('useAtMentionMenu', () => {
     expect(loadMcpResources).not.toHaveBeenCalled();
     expect(latest!.state).toMatchObject({
       level: 'items',
-      selectedProviderId: 'mcp-resources',
-      itemMode: 'mcpResources',
+      selectedProviderId: 'files',
+      itemMode: 'default',
       items: [],
       loading: false,
     });
@@ -1116,6 +1131,37 @@ describe('useAtMentionMenu', () => {
           id: 'broken',
           label: 'Broken',
           search: vi.fn().mockRejectedValue(new Error('boom')),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      loading: false,
+      items: [],
+    });
+    expect(warn).toHaveBeenCalledWith(
+      '[@mention] provider="broken" query=<redacted> failed',
+      expect.any(Error),
+    );
+    warn.mockRestore();
+  });
+
+  it('recovers from synchronous provider search failures', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mount({
+      providers: [
+        {
+          id: 'broken',
+          label: 'Broken',
+          search: vi.fn(() => {
+            throw new Error('boom');
+          }),
         },
       ],
     });
