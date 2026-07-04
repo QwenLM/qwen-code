@@ -5,11 +5,68 @@
   min-width: 0;
 }
 
+.plot {
+  position: relative;
+  min-width: 0;
+}
+
 .svg {
   display: block;
   width: 100%;
   height: 52px;
   overflow: visible;
+  cursor: crosshair;
+  touch-action: none;
+}
+
+/* Vertical hover cursor: the time line the tooltip reads from. */
+.cursor {
+  stroke: var(--muted-foreground);
+  stroke-width: 1;
+  stroke-dasharray: 2 2;
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/* Hover readout: floats above the plot, centered on the cursor, and never
+   intercepts the pointer so moving along the line stays smooth. */
+.tooltip {
+  position: absolute;
+  bottom: calc(100% + 4px);
+  transform: translateX(-50%);
+  z-index: 2;
+  pointer-events: none;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+  background: var(--popover, var(--card));
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.18);
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+
+.tooltipTime {
+  color: var(--muted-foreground);
+  font-variant-numeric: tabular-nums;
+  margin-bottom: 3px;
+}
+
+.tooltipRow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.tooltipLabel {
+  color: var(--muted-foreground);
+}
+
+.tooltipValue {
+  margin-left: auto;
+  color: var(--foreground);
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
 }
 
 /* Baseline: faint so it grounds the line without competing with it. */

@@ -157,6 +157,28 @@
   transform: rotate(-45deg);
 }
 
+/* Shared header icon-button styling (fullscreen toggle); mirrors .close's hover
+   treatment without the ::before/::after "X". */
+.iconButton {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.iconButton:hover,
+.iconButton:focus-visible {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
 .body {
   display: flex;
   flex-direction: column;
@@ -165,6 +187,18 @@
   min-height: 0;
   overflow-y: auto;
   padding: 14px;
+}
+
+/* Fullscreen: expand to (near) the whole viewport, overriding the size width
+   and the 80vh caps on the panel and its scrolling body. */
+.panelFullscreen {
+  width: calc(100vw - 32px);
+  max-width: none;
+  max-height: calc(100vh - 32px);
+}
+
+.panelFullscreen .body {
+  max-height: calc(100vh - 32px - 46px);
 }
 
 @media (max-width: 560px) {
