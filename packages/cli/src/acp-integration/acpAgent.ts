@@ -2900,7 +2900,6 @@ class QwenAgent implements Agent {
     // resolve `advanced.runtimeOutputDir` from THIS request's cwd, not from
     // whichever settings a concurrent handler loaded last.
     const settings = loadSettings(params.cwd);
-    this.settings = settings;
     const exists = await runWithAcpRuntimeOutputDir(
       settings,
       params.cwd,
@@ -2912,6 +2911,10 @@ class QwenAgent implements Agent {
     if (!exists) {
       throw RequestError.resourceNotFound(`session:${params.sessionId}`);
     }
+    // Adopt into the "latest loaded" cache only once the session is
+    // confirmed — a failed probe for a stale id must not repoint
+    // agent-level readers at this request's workspace.
+    this.settings = settings;
 
     const config = await this.newSessionConfig(
       params.cwd,
@@ -2952,7 +2955,6 @@ class QwenAgent implements Agent {
   ): Promise<ResumeSessionResponse> {
     // Same per-request settings discipline as `loadSession`.
     const settings = loadSettings(params.cwd);
-    this.settings = settings;
     const exists = await runWithAcpRuntimeOutputDir(
       settings,
       params.cwd,
@@ -2964,6 +2966,7 @@ class QwenAgent implements Agent {
     if (!exists) {
       throw RequestError.resourceNotFound(`session:${params.sessionId}`);
     }
+    this.settings = settings;
 
     const config = await this.newSessionConfig(
       params.cwd,
