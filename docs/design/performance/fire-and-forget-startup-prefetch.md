@@ -1,19 +1,19 @@
-# Fire-and-Forget Startup Prefetch 启动优化设计
+# Fire-and-Forget Startup Prefetch Optimization Design
 
-## 背景与目标
+## Background and Goals
 
-父 issue #3011 将 qwen-code 启动优化拆成多项子任务。当前仓库已经落地了部分基础能力：
+The parent issue #3011 breaks down qwen-code startup optimization into multiple subtasks. The current repository has already landed several foundational capabilities:
 
-- #3219：启动性能 profiler 已接入，支持 `QWEN_CODE_PROFILE_STARTUP=1` 输出启动阶段 JSON。
-- #3221：工具注册已改为 lazy factory，`Config.initialize()` 不再静态实例化所有工具。
-- #3223：API preconnect 已存在，当前在 `loadCliConfig()` 后以 fire-and-forget 方式触发。
-- early input capture、MCP 渐进发现、AppContainer 渲染后 `config.initialize()` 也已部分实现。
+- #3219: Startup performance profiler is integrated, supporting `QWEN_CODE_PROFILE_STARTUP=1` to output startup phase JSON.
+- #3221: Tool registration has been converted to lazy factory; `Config.initialize()` no longer statically instantiates all tools.
+- #3223: API preconnect already exists, currently triggered in a fire-and-forget fashion after `loadCliConfig()`.
+- Early input capture, progressive MCP discovery, and `config.initialize()` after AppContainer render are also partially implemented.
 
-#3222 的目标不是重做这些能力，而是把仍散落在启动路径中的非关键启动操作统一收敛成 fire-and-forget prefetch：首屏前只等待确实影响正确性的操作，首屏后启动不影响首次交互正确性的后台任务，同时保持非交互模式的兼容语义。
+The goal of #3222 is not to redo these capabilities, but to consolidate the non-critical startup operations still scattered across the startup path into a unified fire-and-forget prefetch layer: before first paint, only await operations that truly affect correctness; after first paint, launch background tasks that do not affect the correctness of the first interaction, while preserving compatible semantics for non-interactive modes.
 
-## 现有启动流程
+## Current Startup Flow
 
-当前交互式启动路径的关键流程如下：
+The key flow of the current interactive startup path is as follows:
 
 ```mermaid
 flowchart TD
@@ -39,19 +39,19 @@ flowchart TD
   T --> U[runNonInteractive]
 ```
 
-现状判断：
+Current state assessment:
 
-- `initializeApp()` 仍在首屏前串行执行 i18n、auth、theme validation、IDE client connection。
-- auth 和 i18n 必须留在首屏前；IDE connection 对无初始 prompt 的普通 TUI 首屏不是硬依赖，可以在普通 TUI 路径延后；但对 `qwen -i "prompt"`、`qwen -p`、stream-json、ACP/Zed 这类没有安全 post-render 空窗或首个请求需要 IDE context/status 的路径，必须继续在首个请求前 await。
-- `checkForUpdates()` 已在 `startInteractiveUI()` 的 render 后 fire-and-forget，但逻辑散落在 UI 启动函数里。
-- `preconnectApi()` 已是 fire-and-forget，应该保留尽早触发，但纳入统一调度。
-- telemetry SDK init 以前在 `Config` 构造期同步发生；普通 interactive TUI 可以延后到 render 后，非交互路径仍保留首个请求前初始化语义。
-- interactive 路径中，`config.initialize()` 已在 React mount 后执行；MCP discovery 已在 core 内部后台运行，并由 AppContainer 批量刷新工具列表。
-- non-interactive 路径仍需要等待 `config.waitForMcpReady()`，否则第一个 prompt 可能看不到 MCP 工具，造成脚本行为回退。
+- `initializeApp()` still executes i18n, auth, theme validation, and IDE client connection serially before first paint.
+- Auth and i18n must remain before first paint; IDE connection is not a hard dependency for the first paint of a plain TUI without an initial prompt, and can be deferred on the plain TUI path. However, for paths like `qwen -i "prompt"`, `qwen -p`, stream-json, and ACP/Zed — which have no safe post-render window or whose first request needs IDE context/status — IDE connection must continue to be awaited before the first request.
+- `checkForUpdates()` is already fire-and-forget after render in `startInteractiveUI()`, but the logic is scattered within the UI startup function.
+- `preconnectApi()` is already fire-and-forget and should be kept triggering as early as possible, but brought under unified scheduling.
+- Telemetry SDK init previously occurred synchronously during `Config` construction; for plain interactive TUI it can be deferred to after render, while non-interactive paths retain the pre-first-request initialization semantics.
+- On the interactive path, `config.initialize()` already executes after React mount; MCP discovery already runs in the background inside core, with AppContainer batch-refreshing the tool list.
+- The non-interactive path still needs to await `config.waitForMcpReady()`, otherwise the first prompt might not see MCP tools, causing scripted behavior to regress.
 
-## 目标架构
+## Target Architecture
 
-新增一个很小的启动预取调度层，统一管理“启动但不等待”的任务，按触发时机分为 early 和 post-render 两类。
+Introduce a small startup prefetch scheduling layer that uniformly manages "start but don't await" tasks, split into two categories by trigger timing: early and post-render.
 
 ```mermaid
 flowchart LR
@@ -87,7 +87,7 @@ flowchart LR
   end
 ```
 
-新方案的交互式启动时序：
+The interactive startup sequence under the new design:
 
 ```mermaid
 sequenceDiagram
@@ -115,11 +115,11 @@ sequenceDiagram
   App-->>MCP: geminiClient.setTools()
 ```
 
-## 设计改动
+## Design Changes
 
-### 1. 新增统一启动预取调度器
+### 1. New Unified Startup Prefetch Scheduler
 
-新增 `packages/cli/src/startup/startup-prefetch.ts`，提供两个入口：
+Add `packages/cli/src/startup/startup-prefetch.ts`, providing two entry points:
 
 ```ts
 startEarlyStartupPrefetches(config: Config): void;
@@ -130,43 +130,43 @@ startPostRenderPrefetches(
 ): void;
 ```
 
-调度器只做三件事：
+The scheduler does exactly three things:
 
-- 按名称启动预取任务。
-- 用 `void task().catch(...)` 明确不等待、不抛出。
-- 记录 debug 日志和 profiler async event，便于验证任务是否在 render 前后启动。
+- Launches prefetch tasks by name.
+- Uses `void task().catch(...)` to explicitly not await and not throw.
+- Records debug logs and profiler async events to verify whether tasks are launched before or after render.
 
-调度器需要保证每个阶段幂等，避免 React StrictMode、测试重复调用或异常重入导致同一任务启动多次。
+The scheduler must guarantee idempotency per phase, preventing React StrictMode, repeated test calls, or anomalous re-entries from launching the same task multiple times.
 
-### 2. early prefetch：保留最大提前量
+### 2. Early Prefetch: Maximize Head Start
 
-`startEarlyStartupPrefetches(config)` 在 `loadCliConfig()` 成功后立即调用。
+`startEarlyStartupPrefetches(config)` is called immediately after `loadCliConfig()` succeeds.
 
-第一阶段只纳入 API preconnect：
+The first phase includes only API preconnect:
 
-- 从 `config.getModelsConfig()` 读取当前 auth type 和 resolved base URL。
-- 从 `config.getProxy()` 读取 proxy。
-- 调用现有 `preconnectApi(authType, { resolvedBaseUrl, proxy })`。
-- 保留现有环境门控：`QWEN_CODE_DISABLE_PRECONNECT`、sandbox、custom CA、非 Node runtime、无 proxy 等。
+- Reads the current auth type and resolved base URL from `config.getModelsConfig()`.
+- Reads proxy from `config.getProxy()`.
+- Calls the existing `preconnectApi(authType, { resolvedBaseUrl, proxy })`.
+- Preserves existing environment gates: `QWEN_CODE_DISABLE_PRECONNECT`, sandbox, custom CA, non-Node runtime, no proxy, etc.
 
-这部分不新增设置项。preconnect 失败只写 debug 日志，不影响启动。
+This adds no new configuration options. Preconnect failures only write debug logs and do not affect startup.
 
-### 3. post-render prefetch：首屏后启动
+### 3. Post-Render Prefetch: Launch After First Paint
 
-`startPostRenderPrefetches(config, settings)` 在 `startInteractiveUI()` 中 Ink `render()` 返回并记录 `first_paint` 后调用。
+`startPostRenderPrefetches(config, settings)` is called in `startInteractiveUI()` after Ink `render()` returns and `first_paint` is recorded.
 
-首批纳入：
+First batch includes:
 
-- update check：迁移现有 `checkForUpdates().then(handleAutoUpdate)` 逻辑，保留 `settings.merged.general?.enableAutoUpdate !== false` 的门控。
-- IDE client connection：只在无初始 prompt 的普通 interactive TUI 路径中移到 post-render prefetch。调用方必须显式传入 `connectIde: true`，并且调度器内部仍需检查 `config.getIdeMode()`。`qwen -i "prompt"`、非交互、stream-json、ACP/Zed 不通过这个入口延后 IDE 连接。
-- telemetry SDK init：只在 interactive TUI 路径中移到 post-render prefetch。`Config` 仍保留 telemetry settings，但通过 `deferTelemetryInitialization` 跳过构造期 SDK side effect；post-render prefetch 通过 `initializeTelemetry(config)` 启动 SDK。非交互、stream-json、ACP/Zed 不延后。
-- background housekeeping：可从 `gemini.tsx` 迁移到 post-render prefetch，使所有后台启动任务有统一入口；仍限定 interactive，仍保持 dynamic import 和错误吞噬。
+- Update check: migrate the existing `checkForUpdates().then(handleAutoUpdate)` logic, preserving the `settings.merged.general?.enableAutoUpdate !== false` gate.
+- IDE client connection: moved to post-render prefetch only on the plain interactive TUI path without an initial prompt. Callers must explicitly pass `connectIde: true`, and the scheduler internally still checks `config.getIdeMode()`. `qwen -i "prompt"`, non-interactive, stream-json, and ACP/Zed do not defer IDE connection through this entry point.
+- Telemetry SDK init: moved to post-render prefetch only on the interactive TUI path. `Config` still retains telemetry settings, but skips the construction-time SDK side effect via `deferTelemetryInitialization`; post-render prefetch launches the SDK via `initializeTelemetry(config)`. Non-interactive, stream-json, and ACP/Zed do not defer.
+- Background housekeeping: can be migrated from `gemini.tsx` to post-render prefetch, giving all background startup tasks a unified entry point; still limited to interactive, still uses dynamic import and error swallowing.
 
-这些任务都不能影响 `startInteractiveUI()` 的返回值，也不能向 TUI stderr 写用户可见错误。失败只进入 debug log。
+None of these tasks may affect the return value of `startInteractiveUI()`, nor may they write user-visible errors to the TUI stderr. Failures only go to debug logs.
 
-### 4. 拆分 `initializeApp()` 的关键路径，并保留非 TUI awaited IDE 连接
+### 4. Split `initializeApp()` Critical Path, Preserve Non-TUI Awaited IDE Connection
 
-新增一个共享 helper，避免 TUI deferred 路径和非 TUI awaited 路径复制 IDE 连接逻辑：
+Add a shared helper to avoid duplicating IDE connection logic between the TUI deferred path and the non-TUI awaited path:
 
 ```ts
 export async function connectIdeForStartup(config: Config): Promise<void> {
@@ -178,7 +178,7 @@ export async function connectIdeForStartup(config: Config): Promise<void> {
 }
 ```
 
-`initializeApp()` 保留为首屏前关键初始化，但增加一个显式选项：
+`initializeApp()` remains as pre-first-paint critical initialization, but gains an explicit option:
 
 ```ts
 interface InitializeAppOptions {
@@ -186,18 +186,18 @@ interface InitializeAppOptions {
 }
 ```
 
-默认值必须保持兼容：`deferIdeConnection` 默认为 `false`。也就是说，不传选项时仍会在 `initializeApp()` 内 await IDE 连接。
+The default must remain backward-compatible: `deferIdeConnection` defaults to `false`. That is, when no option is passed, IDE connection is still awaited within `initializeApp()`.
 
-`initializeApp()` 的 awaited 内容变为：
+The awaited content of `initializeApp()` becomes:
 
 - `initializeI18n(...)`
 - `performInitialAuth(...)`
 - `validateTheme(settings)`
-- 当 `deferIdeConnection !== true` 时，`await connectIdeForStartup(config)`
-- 计算 `shouldOpenAuthDialog`
-- 读取 `config.getGeminiMdFileCount()`
+- When `deferIdeConnection !== true`, `await connectIdeForStartup(config)`
+- Compute `shouldOpenAuthDialog`
+- Read `config.getGeminiMdFileCount()`
 
-`gemini.tsx` 调用处负责按运行模式选择：
+The call site in `gemini.tsx` is responsible for selecting based on the run mode:
 
 ```ts
 const deferIdeConnection =
@@ -208,140 +208,140 @@ const initializationResult = await initializeApp(config, settings, {
 });
 ```
 
-随后只有当 `deferIdeConnection === true` 时，`startInteractiveUI()` 才通过 `startPostRenderPrefetches(..., { connectIde: true })` fire-and-forget 启动 IDE 连接；prompt-interactive 因为会自动提交首个问题，继续在 render 前 await IDE，并传入 `connectIde: false` 避免 post-render 重复连接。
+Subsequently, only when `deferIdeConnection === true`, `startInteractiveUI()` fires-and-forgets the IDE connection via `startPostRenderPrefetches(..., { connectIde: true })`; prompt-interactive, which auto-submits the first question, continues to await IDE before render and passes `connectIde: false` to avoid post-render duplicate connection.
 
-这个分流修正 review 指出的兼容性风险：
+This split addresses the compatibility risk flagged in review:
 
-- 普通 interactive TUI：IDE socket/IPC 连接不再阻塞首屏。
-- `qwen -i "prompt"`：继续在首个自动提交请求前 await IDE 连接，且 post-render 不重复连接。
-- `qwen -p` / piped stdin：继续在首个模型请求前 await IDE 连接。
-- stream-json：继续在 session/control 请求处理前完成 IDE 连接。
-- ACP/Zed：继续保留 awaited IDE startup，避免首个请求缺 IDE context/status。
+- Plain interactive TUI: IDE socket/IPC connection no longer blocks first paint.
+- `qwen -i "prompt"`: continues to await IDE connection before the first auto-submitted request, and post-render does not reconnect.
+- `qwen -p` / piped stdin: continues to await IDE connection before the first model request.
+- stream-json: continues to complete IDE connection before session/control request handling.
+- ACP/Zed: continues to retain awaited IDE startup, avoiding missing IDE context/status on the first request.
 
-### 5. MCP 与非交互语义保持不变
+### 5. MCP and Non-Interactive Semantics Remain Unchanged
 
-本方案不改 core MCP 状态机。
+This design does not change the core MCP state machine.
 
-interactive：
+Interactive:
 
-- 继续由 `AppContainer` 在 mount effect 中调用 `config.initialize()`。
-- `Config.initialize()` 继续启动 background MCP discovery。
-- AppContainer 继续监听 `mcp-client-update` 并以约 16ms 批量调用 `geminiClient.setTools()`。
-- 首屏和输入可用不等待 MCP 全部 settle。
+- Continues to call `config.initialize()` in the mount effect of `AppContainer`.
+- `Config.initialize()` continues to launch background MCP discovery.
+- AppContainer continues to listen for `mcp-client-update` and batch-call `geminiClient.setTools()` at ~16ms intervals.
+- First paint and input availability do not wait for MCP to fully settle.
 
-non-interactive / stream-json / ACP：
+Non-interactive / stream-json / ACP:
 
-- 继续在首个模型请求前 await IDE 连接。
-- 继续在首个模型请求前等待 `config.waitForMcpReady()`。
-- 保持旧同步路径的工具可见性语义。
-- 保持 MCP 失败时 stderr warning 的现有行为。
+- Continues to await IDE connection before the first model request.
+- Continues to await `config.waitForMcpReady()` before the first model request.
+- Preserves the tool visibility semantics of the old synchronous path.
+- Preserves the existing behavior of stderr warnings on MCP failure.
 
-## 性能收益预估
+## Estimated Performance Gains
 
-收益分为两类。
+Gains fall into two categories.
 
-第一类是首屏前关键路径缩短：
+The first is shortened critical path before first paint:
 
-- 普通 interactive TUI 的 IDE client connection 不再阻塞首屏；收益取决于 IDE socket/IPC 连接耗时，预期为几十毫秒到数百毫秒。
-- 普通 interactive TUI 的 telemetry SDK init 不再阻塞首屏；收益取决于 OTel SDK/exporter 构造成本，通常是小到中等的同步启动开销。
-- update check、housekeeping、preconnect 等任务有统一 fire-and-forget 入口，不会被未来维护误放回 awaited path。
+- IDE client connection for plain interactive TUI no longer blocks first paint; gains depend on IDE socket/IPC connection time, expected to be tens to hundreds of milliseconds.
+- Telemetry SDK init for plain interactive TUI no longer blocks first paint; gains depend on OTel SDK/exporter construction cost, typically a small to moderate synchronous startup overhead.
+- Update check, housekeeping, preconnect, and similar tasks have a unified fire-and-forget entry point, preventing future maintenance from accidentally placing them back on the awaited path.
 
-第二类是首个 API 请求收益：
+The second is first API request gains:
 
-- 继续保留 #3223 的 API preconnect 设计。
-- 当 proxy/shared dispatcher 可复用时，首个 API 请求可减少 TCP+TLS 握手成本，预期 100-200ms。
+- Continues to preserve the #3223 API preconnect design.
+- When proxy/shared dispatcher is reusable, the first API request can avoid TCP+TLS handshake costs, expected 100-200ms.
 
-需要注意：#3219 的历史 baseline 显示模块加载曾占启动总耗时约 94%，#3221 lazy tool registration 已经针对最大瓶颈做过优化。#3222 的核心收益更偏 perceived TTI 和首屏响应，而不是消除全部模块加载成本。
+Note: #3219's historical baseline showed module loading once accounted for ~94% of total startup time; #3221's lazy tool registration has already addressed the largest bottleneck. The core benefit of #3222 is more about perceived TTI and first-paint responsiveness, rather than eliminating all module loading costs.
 
-## 风险与影响范围
+## Risks and Scope of Impact
 
-### 风险
+### Risks
 
-- 普通 TUI 的 IDE 能力可能从“首屏前已连接”变为“首屏后很快连接”。缓解方式：只在普通 interactive TUI 路径延后；非交互、stream-json、ACP/Zed 保持首个请求前 awaited 连接。
-- render 前 telemetry event 可能在 SDK 未初始化时被 no-op 丢弃。缓解方式：只延后 interactive TUI；非交互首个请求相关 telemetry 仍保持原语义，不新增缓冲队列。
-- deferred task 失败可能不明显。缓解方式：统一 wrapper 记录 debug log 和 profiler async event。
-- 迁移 update/preconnect 时可能改变原有门控。缓解方式：逐字保留现有 settings/env 条件。
-- 过度 defer 可能导致首个用户输入依赖的能力未就绪。缓解方式：auth、config construction、permissions、hooks、memory、tool registry、non-interactive MCP ready 全部保持 awaited。
+- IDE capabilities on plain TUI may shift from "connected before first paint" to "connected very shortly after first paint". Mitigation: only defer on the plain interactive TUI path; non-interactive, stream-json, and ACP/Zed maintain awaited connection before the first request.
+- Pre-render telemetry events may be no-op dropped when the SDK is not yet initialized. Mitigation: only defer for interactive TUI; non-interactive pre-first-request telemetry retains its original semantics, no new buffering queue added.
+- Deferred task failures may not be prominent. Mitigation: unified wrapper records debug logs and profiler async events.
+- Migrating update/preconnect may inadvertently change existing gates. Mitigation: verbatim preservation of existing settings/env conditions.
+- Over-deferring may leave capabilities unready when the first user input depends on them. Mitigation: auth, config construction, permissions, hooks, memory, tool registry, and non-interactive MCP ready all remain awaited.
 
-### 影响范围
+### Scope of Impact
 
-预计只涉及 CLI 启动层：
+Expected to only involve the CLI startup layer:
 
 - `packages/cli/src/startup/startup-prefetch.ts`
 - `packages/cli/src/core/initializer.ts`
 - `packages/cli/src/gemini.tsx`
 - `packages/cli/src/ui/startInteractiveUI.tsx`
-- 对应单元测试
+- Corresponding unit tests
 
-不改动：
+No changes to:
 
-- CLI 参数与配置 schema
-- core tool registry 协议
-- MCP discovery 状态机
-- 模型请求协议
-- 用户可见命令行为
+- CLI arguments and configuration schema
+- Core tool registry protocol
+- MCP discovery state machine
+- Model request protocol
+- User-visible command behavior
 
-## 单元测试计划
+## Unit Test Plan
 
 ### `packages/cli/src/startup/startup-prefetch.test.ts`
 
-覆盖：
+Coverage:
 
-- `startEarlyStartupPrefetches()` 会调用 `preconnectApi()`，并传入 auth type、resolved base URL、proxy。
-- early prefetch 不 await 任务完成。
-- repeated call 幂等，不重复启动同一 early task。
-- `startPostRenderPrefetches()` 在 `enableAutoUpdate !== false` 时启动 update check。
-- `enableAutoUpdate === false` 时不启动 update check。
-- `options.connectIde === true` 且 `config.getIdeMode() === true` 时启动 IDE connect 并调用 `logIdeConnection()`。
-- `options.connectIde !== true` 时不触发 IDE connect。
-- `config.getIdeMode() === false` 时即使 `options.connectIde === true` 也不触发 IDE connect。
-- `options.initializeTelemetry === true` 时启动 telemetry SDK init。
-- `options.initializeTelemetry !== true` 时不触发 telemetry SDK init。
-- deferred task reject 不会让 public API throw，只写 debug log。
+- `startEarlyStartupPrefetches()` calls `preconnectApi()` with auth type, resolved base URL, and proxy.
+- Early prefetch does not await task completion.
+- Repeated calls are idempotent, not launching the same early task again.
+- `startPostRenderPrefetches()` launches update check when `enableAutoUpdate !== false`.
+- Does not launch update check when `enableAutoUpdate === false`.
+- Launches IDE connect and calls `logIdeConnection()` when `options.connectIde === true` and `config.getIdeMode() === true`.
+- Does not trigger IDE connect when `options.connectIde !== true`.
+- Does not trigger IDE connect when `config.getIdeMode() === false` even if `options.connectIde === true`.
+- Launches telemetry SDK init when `options.initializeTelemetry === true`.
+- Does not trigger telemetry SDK init when `options.initializeTelemetry !== true`.
+- Deferred task rejections do not cause the public API to throw, only write debug logs.
 
 ### `packages/cli/src/core/initializer.test.ts`
 
-调整并新增：
+Adjustments and additions:
 
-- `initializeApp()` 默认会 await `connectIdeForStartup()`，保持非 TUI 路径兼容。
-- `initializeApp(..., { deferIdeConnection: true })` 不调用 `IdeClient.getInstance()` 或 `connect()`。
-- `initializeApp(..., { deferIdeConnection: false })` 在 `config.getIdeMode() === true` 时调用并 await IDE connect。
-- 仍会 await `initializeI18n()`。
-- 仍会 await `performInitialAuth()`。
-- auth 失败时保留 `authError` 和 `shouldOpenAuthDialog === true`。
-- theme 校验失败时保留 `themeError`。
-- auth type 显式提供且 auth 成功时 `shouldOpenAuthDialog === false`。
+- `initializeApp()` by default awaits `connectIdeForStartup()`, preserving non-TUI path compatibility.
+- `initializeApp(..., { deferIdeConnection: true })` does not call `IdeClient.getInstance()` or `connect()`.
+- `initializeApp(..., { deferIdeConnection: false })` calls and awaits IDE connect when `config.getIdeMode() === true`.
+- Still awaits `initializeI18n()`.
+- Still awaits `performInitialAuth()`.
+- On auth failure, retains `authError` and `shouldOpenAuthDialog === true`.
+- On theme validation failure, retains `themeError`.
+- When auth type is explicitly provided and auth succeeds, `shouldOpenAuthDialog === false`.
 
 ### `packages/cli/src/ui/startInteractiveUI.test.tsx`
 
-覆盖：
+Coverage:
 
-- Ink `render()` 返回并记录 `first_paint` 后，调用 `startPostRenderPrefetches(config, settings)`。
-- 普通 TUI 路径传入 `{ connectIde: true, initializeTelemetry: true }`。
-- 当 prompt-interactive 已在 render 前 await IDE 时，传入 `{ connectIde: false, initializeTelemetry: true }`，避免重复 IDE connect。
-- 非 TUI 路径不通过 `startInteractiveUI()` 触发 IDE/telemetry post-render prefetch。
-- post-render prefetch reject 不会导致 `startInteractiveUI()` reject。
-- update check 从 `startInteractiveUI()` 内联逻辑移走后，不再被直接调用。
+- After Ink `render()` returns and `first_paint` is recorded, calls `startPostRenderPrefetches(config, settings)`.
+- Plain TUI path passes `{ connectIde: true, initializeTelemetry: true }`.
+- When prompt-interactive has already awaited IDE before render, passes `{ connectIde: false, initializeTelemetry: true }` to avoid duplicate IDE connect.
+- Non-TUI paths do not trigger IDE/telemetry post-render prefetch through `startInteractiveUI()`.
+- Post-render prefetch rejections do not cause `startInteractiveUI()` to reject.
+- After update check is moved out of `startInteractiveUI()` inline logic, it is no longer directly called.
 
 ### `packages/cli/src/gemini.test.tsx`
 
-调整并新增：
+Adjustments and additions:
 
-- 普通 interactive TUI 调用 `initializeApp(config, settings, { deferIdeConnection: true })`，并在 post-render prefetch 中连接 IDE。
-- prompt-interactive 调用 `initializeApp(config, settings, { deferIdeConnection: false })`，并且 post-render prefetch 不再连接 IDE。
-- `qwen -p` / piped stdin / stream-json 调用 `initializeApp(config, settings, { deferIdeConnection: false })` 或使用默认值，确保首个请求前 IDE 已连接。
-- ACP/Zed 路径不启用 IDE deferred prefetch，继续走 awaited IDE startup。
+- Plain interactive TUI calls `initializeApp(config, settings, { deferIdeConnection: true })`, and connects IDE in post-render prefetch.
+- Prompt-interactive calls `initializeApp(config, settings, { deferIdeConnection: false })`, and post-render prefetch does not reconnect IDE.
+- `qwen -p` / piped stdin / stream-json calls `initializeApp(config, settings, { deferIdeConnection: false })` or uses defaults, ensuring IDE is connected before the first request.
+- ACP/Zed path does not enable IDE deferred prefetch, continues through awaited IDE startup.
 
 ### `packages/core/src/config/config.test.ts`
 
-覆盖：
+Coverage:
 
-- telemetry enabled 且未传 `deferTelemetryInitialization` 时，`Config` 构造期仍调用 `initializeTelemetry(config)`。
-- telemetry enabled 且 `deferTelemetryInitialization === true` 时，`Config` 构造期不调用 `initializeTelemetry(config)`，但 `config.getTelemetryEnabled()` 仍为 true。
+- When telemetry is enabled and `deferTelemetryInitialization` is not passed, `Config` construction still calls `initializeTelemetry(config)`.
+- When telemetry is enabled and `deferTelemetryInitialization === true`, `Config` construction does not call `initializeTelemetry(config)`, but `config.getTelemetryEnabled()` still returns true.
 
-### 回归测试
+### Regression Tests
 
-建议执行：
+Recommended execution:
 
 ```bash
 cd packages/cli && npx vitest run src/core/initializer.test.ts src/startup/startup-prefetch.test.ts
@@ -349,21 +349,21 @@ cd packages/cli && npx vitest run src/gemini.test.tsx
 cd packages/core && npx vitest run src/config/config.test.ts -t "telemetry"
 ```
 
-## 验收标准
+## Acceptance Criteria
 
-- interactive REPL 首屏不等待 IDE connection、telemetry init、update check、housekeeping。
-- non-interactive、stream-json、ACP/Zed 在首个请求前仍 await IDE connection。
-- non-interactive、stream-json、ACP/Zed 不延后 telemetry SDK init。
-- API preconnect 仍在 `loadCliConfig()` 后尽早 fire-and-forget。
-- auth、config、permissions、hooks、memory 等关键正确性初始化仍在需要的位置 await。
-- non-interactive 首个 prompt 仍等待 MCP ready。
-- 所有 deferred task 失败都不影响 REPL 渲染。
-- profiler 能看出 deferred task 在 first_paint 前后按预期启动。
-- 单元测试覆盖关键路径、幂等、错误吞噬和非交互兼容约束。
+- Interactive REPL first paint does not wait for IDE connection, telemetry init, update check, or housekeeping.
+- Non-interactive, stream-json, and ACP/Zed still await IDE connection before the first request.
+- Non-interactive, stream-json, and ACP/Zed do not defer telemetry SDK init.
+- API preconnect still fires-and-forgets as early as possible after `loadCliConfig()`.
+- Auth, config, permissions, hooks, memory, and other correctness-critical initializations remain awaited where needed.
+- Non-interactive first prompt still waits for MCP ready.
+- All deferred task failures do not affect REPL rendering.
+- Profiler shows deferred tasks launching as expected around first_paint.
+- Unit tests cover critical paths, idempotency, error swallowing, and non-interactive compatibility constraints.
 
-## 默认假设
+## Default Assumptions
 
-- #3221 在 GitHub 上实际是 issue，不是 PR；当前仓库已经包含 lazy tool registry 实现。
-- 本方案不新增配置项，避免把启动优化变成用户可配置复杂度。
-- “REPL renders before deferred operations complete” 指 Ink 首屏返回和输入可用，不要求所有后台能力在用户看到 UI 前完成。
-- 非交互模式优先兼容性，不追求和 interactive 一样激进的首屏优化。
+- #3221 is actually an issue on GitHub, not a PR; the current repository already contains the lazy tool registry implementation.
+- This design adds no new configuration options, avoiding turning startup optimization into user-configurable complexity.
+- "REPL renders before deferred operations complete" means Ink first-paint return and input availability, not requiring all background capabilities to finish before the user sees the UI.
+- Non-interactive mode prioritizes compatibility, not pursuing first-paint optimization as aggressively as interactive mode.
