@@ -55,9 +55,10 @@ export interface RequestContext {
    */
   legacyFunctionCallWithoutArguments?: { name: string };
   /**
-   * Marks that this stream used legacy `function_call` chunks. If the parser
-   * later detects truncated JSON, the converter suppresses repaired partial
-   * legacy calls while preserving the existing modern `tool_calls` behavior.
+   * Marks that this stream used legacy `function_call` chunks. At finalization,
+   * the converter uses this with the name-only sentinel to suppress only the
+   * zero-argument fallback when the stream is explicitly truncated, while still
+   * allowing `StreamingToolCallParser` to emit repaired partial argument calls.
    */
   legacyFunctionCallInProgress?: boolean;
   responseParsingOptions?: OpenAIResponseParsingOptions;

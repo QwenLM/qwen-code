@@ -1081,14 +1081,21 @@ function convertOpenAITextToParts(
   return parseTaggedThinkingText(text);
 }
 
-function normalizeToolCallArgs(args: unknown): Record<string, unknown> {
+function normalizeToolCallArgs(
+  args: unknown,
+  logDiscard = false,
+): Record<string, unknown> {
   if (args && typeof args === 'object' && !Array.isArray(args)) {
     return args as Record<string, unknown>;
   }
 
-  debugLogger.debug(
-    `Discarding non-object tool call arguments, using {}: ${typeof args}`,
-  );
+  if (logDiscard && args !== undefined && args !== null) {
+    debugLogger.debug(
+      `Discarding non-object tool call arguments, using {}: ${
+        Array.isArray(args) ? 'array' : typeof args
+      }`,
+    );
+  }
   return {};
 }
 
@@ -1410,7 +1417,7 @@ export function convertOpenAIChunkToGemini(
             functionCall: {
               id: toolCall.id || generateToolCallId(),
               name: toolCall.name,
-              args: normalizeToolCallArgs(toolCall.args),
+              args: normalizeToolCallArgs(toolCall.args, true),
             },
           });
         }
