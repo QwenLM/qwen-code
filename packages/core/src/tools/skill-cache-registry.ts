@@ -12,7 +12,7 @@
 import type { CollectedAvailableSkills } from './skill-utils.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 
-const debugLogger = createDebugLogger('SKILL_CACHE');
+const debugLogger = createDebugLogger('SKILL_CACHE_REGISTRY');
 
 /**
  * WeakMap-based cache keyed by `(skillManager, config)` identity.
