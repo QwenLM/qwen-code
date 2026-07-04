@@ -747,6 +747,66 @@ describe('EchartsFullDataBlock', () => {
     );
   });
 
+  it('does not refetch resolved ref data when streaming toggles with unchanged code', async () => {
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+    const resolveDataRef = vi.fn<EchartsFullDataRefResolver>(async () => ({
+      dimensions: ['day', 'orders'],
+      source: [['Mon', 120]],
+    }));
+    const renderer = createEchartsFullDataRenderer({
+      loadEcharts: () => runtime,
+      resolveDataRef,
+    });
+    const content = `\`\`\`echarts-fulldata\n${JSON.stringify({
+      version: 1,
+      data: {
+        kind: 'ref',
+        ref: 'artifact://chart-data/orders',
+        format: 'json',
+        dimensions: ['day', 'orders'],
+      },
+      option: {
+        series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+      },
+    })}\n\`\`\``;
+    const tree = (isStreaming: boolean) => (
+      <I18nProvider language="en">
+        <ThemeProvider value="dark">
+          <WebShellCustomizationProvider
+            value={{ markdown: { renderCodeBlock: renderer } }}
+          >
+            <Markdown
+              content={content}
+              source="assistant"
+              isStreaming={isStreaming}
+            />
+          </WebShellCustomizationProvider>
+        </ThemeProvider>
+      </I18nProvider>
+    );
+
+    const { rerender } = await mount(tree(false));
+    await flushChart();
+    expect(resolveDataRef).toHaveBeenCalledOnce();
+    expect(setOption).toHaveBeenCalledOnce();
+
+    await rerender(tree(true));
+    await flushChart();
+    expect(resolveDataRef).toHaveBeenCalledOnce();
+
+    await rerender(tree(false));
+    await flushChart();
+    expect(resolveDataRef).toHaveBeenCalledOnce();
+    expect(setOption).toHaveBeenCalledTimes(2);
+  });
+
   it('reports ref resolver rejections inside the chart card', async () => {
     const consoleError = vi
       .spyOn(console, 'error')
@@ -831,6 +891,52 @@ describe('EchartsFullDataBlock', () => {
       'missing artifact',
     );
     expect(container.querySelector('pre code')).toBeNull();
+  });
+
+  it('reports invalid ref resolver data with a resolver-specific diagnostic', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        version: 1,
+        data: {
+          kind: 'ref',
+          ref: 'artifact://chart-data/invalid',
+          format: 'json',
+          dimensions: ['day', 'orders'],
+        },
+        option: {
+          series: [{ type: 'line', encode: { x: 'day', y: 'orders' } }],
+        },
+      }),
+      loadEcharts: () => runtime,
+      resolveDataRef: () =>
+        null as unknown as ReturnType<EchartsFullDataRefResolver>,
+    });
+    await flushChart();
+
+    expect(container.textContent).toContain(
+      'Chart data resolver returned an invalid dataset.',
+    );
+    expect(container.textContent).not.toContain(
+      'Chart envelope data.dimensions must be a string array.',
+    );
+    expect(consoleError).toHaveBeenCalledWith(
+      '[web-shell] echarts-fulldata resolver returned invalid dataset:',
+      'artifact://chart-data/invalid',
+      null,
+    );
+    expect(setOption).not.toHaveBeenCalled();
   });
 
   it('reports ref resolver timeouts inside the chart card', async () => {
@@ -1229,6 +1335,8 @@ describe('EchartsFullDataBlock', () => {
             convRate: 3.4,
             aov: 192,
             cost$: 43,
+            'profit|margin': 0.34,
+            'close}rate': 0.78,
             [longDimension]: 2,
           },
         ],
@@ -1260,6 +1368,16 @@ describe('EchartsFullDataBlock', () => {
           type: 'line',
           encode: { x: 'month', y: longDimension },
           label: { show: true, formatter: '{c}' },
+        },
+        {
+          type: 'line',
+          encode: { x: 'month', y: 'profit|margin' },
+          label: { show: true, formatter: '{c}%' },
+        },
+        {
+          type: 'line',
+          encode: { x: 'month', y: 'close}rate' },
+          label: { show: true, formatter: '{c:.1f}' },
         },
         {
           type: 'line',
@@ -1298,7 +1416,9 @@ describe('EchartsFullDataBlock', () => {
     );
     expect(renderedOption.series?.[3]?.label?.formatter).toBe('{c}');
     expect(renderedOption.series?.[4]?.label?.formatter).toBe('{c}');
-    expect(renderedOption.series?.[5]?.label?.formatter).toBe(longFormatter);
+    expect(renderedOption.series?.[5]?.label?.formatter).toBe('{c}%');
+    expect(renderedOption.series?.[6]?.label?.formatter).toBe('{c:.1f}');
+    expect(renderedOption.series?.[7]?.label?.formatter).toBe(longFormatter);
   });
 
   it('normalizes {c} label templates for inline array-row envelopes', async () => {
@@ -1768,6 +1888,53 @@ describe('EchartsFullDataBlock', () => {
 
     expect(container.querySelector('[role="status"]')).toBeNull();
     expect(runtime.init).toHaveBeenCalledOnce();
+  });
+
+  it('reports chart runtime loader timeouts instead of spinning forever', async () => {
+    vi.useFakeTimers();
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const option: EchartsFullDataOption = {
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [{ day: 'Mon', orders: 120 }],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+    };
+
+    try {
+      const container = await render(
+        <EchartsFullDataBlock
+          option={option}
+          theme="dark"
+          loadEcharts={() => new Promise(() => {})}
+        />,
+      );
+
+      expect(container.querySelector('[role="status"]')).not.toBeNull();
+
+      await act(async () => {
+        vi.advanceTimersByTime(30_000);
+        await Promise.resolve();
+        await Promise.resolve();
+      });
+
+      expect(container.textContent).toContain('Chart runtime load timed out.');
+      expect(console.warn).toHaveBeenCalledWith(
+        '[web-shell] echarts-fulldata runtime load timed out after %dms',
+        30_000,
+      );
+      expect(consoleError).toHaveBeenCalledWith(
+        '[web-shell] echarts-fulldata render failed:',
+        expect.any(Error),
+      );
+      expect(container.querySelector('[role="status"]')).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('observes chart container resize after initialization', async () => {

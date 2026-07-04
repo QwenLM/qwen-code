@@ -163,6 +163,7 @@ const UNSAFE_DIMENSION_NAMES = new Set([
 ]);
 const UNSAFE_OPTION_HTML_TAG_PATTERN =
   /<\/?(?:a|applet|base|button|embed|form|iframe|img|input|link|meta|object|script|style|svg)(?=[\s/>])/i;
+const ECHARTS_TEMPLATE_DIMENSION_METACHAR_PATTERN = /[|{}]/;
 const WINDOWS_DRIVE_SEGMENT_PATTERN = /^[a-z]:/i;
 const noop = () => {};
 
@@ -473,6 +474,9 @@ function normalizeDatasetValueFormatter(
   dimension: string | undefined,
 ): unknown {
   if (typeof formatter !== 'string' || !dimension) return formatter;
+  if (ECHARTS_TEMPLATE_DIMENSION_METACHAR_PATTERN.test(dimension)) {
+    return formatter;
+  }
   if (
     formatter.length > MAX_FORMATTER_TEMPLATE_LENGTH ||
     dimension.length > MAX_FORMATTER_DIMENSION_LENGTH
@@ -1273,16 +1277,36 @@ function resolveDataRefWithTimeout(
   });
 }
 
+function isResolvedDataset(
+  value: unknown,
+): value is EchartsFullDataResolvedDataset {
+  return (
+    isObject(value) &&
+    Array.isArray(value.dimensions) &&
+    Array.isArray(value.source)
+  );
+}
+
 function resolveEnvelopeDataRef(
   resolveDataRef: EchartsFullDataRefResolver,
   dataRef: EchartsFullDataRefDescriptor,
 ): Promise<ParseOptionResult> {
   return resolveDataRefWithTimeout(resolveDataRef, dataRef.ref, dataRef.meta)
     .then((resolved) => {
+      if (!isResolvedDataset(resolved)) {
+        console.error(
+          '[web-shell] echarts-fulldata resolver returned invalid dataset:',
+          dataRef.ref,
+          resolved,
+        );
+        return {
+          parseError: 'Chart data resolver returned an invalid dataset.',
+        };
+      }
       const result = normalizeEnvelopeDataset({
         kind: 'inline',
-        dimensions: resolved?.dimensions,
-        source: resolved?.source,
+        dimensions: resolved.dimensions,
+        source: resolved.source,
       });
       if (result.parseError || !result.dataset) {
         return { parseError: result.parseError };
@@ -1343,6 +1367,18 @@ function parseOption(code: string): ParseOptionResult {
   return result;
 }
 
+function getDataRefKey(
+  dataRef: EchartsFullDataRefDescriptor,
+  code: string,
+): string {
+  return JSON.stringify([
+    dataRef.ref,
+    dataRef.meta.format,
+    dataRef.meta.dimensions,
+    code,
+  ]);
+}
+
 export function createEchartsFullDataRenderer({
   loadEcharts,
   resolveDataRef,
@@ -1394,10 +1430,16 @@ function EchartsFullDataBlockFromCode({
   );
   const [resolvedParsed, setResolvedParsed] = useState<ParseOptionResult>({});
   const { dataRef } = parsed;
+  const dataRefKey = dataRef ? getDataRefKey(dataRef, code) : undefined;
+  const dataRefRef = useRef(dataRef);
+  const resolvedDataRefCacheRef = useRef<
+    { key: string; result: ParseOptionResult } | undefined
+  >(undefined);
+  dataRefRef.current = dataRef;
 
   useEffect(() => {
-    if (!dataRef) {
-      setResolvedParsed({});
+    const currentDataRef = dataRefRef.current;
+    if (!dataRefKey || !currentDataRef) {
       return;
     }
     if (!hasResolveDataRef) {
@@ -1406,16 +1448,25 @@ function EchartsFullDataBlockFromCode({
       });
       return;
     }
+    if (resolvedDataRefCacheRef.current?.key === dataRefKey) {
+      setResolvedParsed(resolvedDataRefCacheRef.current.result);
+      return;
+    }
 
     let cancelled = false;
     setResolvedParsed({});
-    resolveEnvelopeDataRef(stableResolveDataRef, dataRef).then((result) => {
-      if (!cancelled) setResolvedParsed(result);
-    });
+    resolveEnvelopeDataRef(stableResolveDataRef, currentDataRef).then(
+      (result) => {
+        if (!cancelled) {
+          resolvedDataRefCacheRef.current = { key: dataRefKey, result };
+          setResolvedParsed(result);
+        }
+      },
+    );
     return () => {
       cancelled = true;
     };
-  }, [dataRef, hasResolveDataRef, stableResolveDataRef]);
+  }, [dataRefKey, hasResolveDataRef, stableResolveDataRef]);
 
   const { option, parseError } = dataRef ? resolvedParsed : parsed;
 
@@ -1583,6 +1634,25 @@ function ChartLoadingState() {
   );
 }
 
+function loadEchartsWithTimeout(
+  loadRuntime: EchartsRuntimeLoader,
+): Promise<EchartsRuntime> {
+  return new Promise((resolve, reject) => {
+    const timeoutId = globalThis.setTimeout(() => {
+      console.warn(
+        '[web-shell] echarts-fulldata runtime load timed out after %dms',
+        DATA_REF_TIMEOUT_MS,
+      );
+      reject(new Error('Chart runtime load timed out.'));
+    }, DATA_REF_TIMEOUT_MS);
+
+    Promise.resolve()
+      .then(loadRuntime)
+      .then(resolve, reject)
+      .finally(() => globalThis.clearTimeout(timeoutId));
+  });
+}
+
 export function EchartsFullDataBlock({
   option,
   parseError,
@@ -1685,7 +1755,7 @@ export function EchartsFullDataBlock({
         if (!chart) {
           const loadRuntime = loadEchartsRef.current;
           if (!loadRuntime || !chartRef.current) return;
-          const runtime = await Promise.resolve().then(loadRuntime);
+          const runtime = await loadEchartsWithTimeout(loadRuntime);
           if (requestId !== renderRequestRef.current || !chartRef.current) {
             return;
           }
