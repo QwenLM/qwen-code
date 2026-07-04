@@ -3,15 +3,13 @@ import {
   mkdirSync,
   readFileSync,
   realpathSync,
-  rmdirSync,
   statSync,
-  unlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { request as httpsRequest } from 'node:https';
 import type { IncomingHttpHeaders } from 'node:http';
 import { randomUUID } from 'node:crypto';
-import { basename, dirname, join, resolve, win32, posix } from 'node:path';
+import { basename, join, resolve, win32, posix } from 'node:path';
 import { tmpdir } from 'node:os';
 import { Buffer } from 'node:buffer';
 import { isIP, type LookupFunction } from 'node:net';
@@ -273,10 +271,8 @@ export class WeComChannel extends ChannelBase {
       }
       processingStarted = true;
       await this.processInbound(envelope);
-      scheduleAttachmentCleanup(attachments);
     } catch (err) {
       if (messageId && !processingStarted) this.seenMessages.delete(messageId);
-      scheduleAttachmentCleanup(attachments);
       throw err;
     }
   }
@@ -403,23 +399,6 @@ function parseWeComConfig(
     throw new Error(`Channel "${name}" requires wsUrl to use wss://.`);
   }
   return wsUrl ? { botId, secret, wsUrl } : { botId, secret };
-}
-
-function scheduleAttachmentCleanup(attachments: Attachment[]): void {
-  if (!attachments.some((attachment) => attachment.filePath)) return;
-  setTimeout(() => cleanupAttachmentFiles(attachments), 60_000).unref?.();
-}
-
-function cleanupAttachmentFiles(attachments: Attachment[]): void {
-  for (const attachment of attachments) {
-    if (!attachment.filePath) continue;
-    try {
-      unlinkSync(attachment.filePath);
-      rmdirSync(dirname(attachment.filePath));
-    } catch {
-      // Best effort cleanup only.
-    }
-  }
 }
 
 function readRequiredString(
@@ -782,7 +761,7 @@ function guardedHttpsDownload(
 
         const contentLength = getHeaderNumber(res.headers, 'content-length');
         if (contentLength !== undefined && contentLength > MAX_MEDIA_BYTES) {
-          res.resume();
+          req.destroy();
           finish(new Error(`oversized attachment (${contentLength} bytes)`));
           return;
         }
@@ -813,7 +792,7 @@ function guardedHttpsDownload(
   });
 }
 
-const safePublicLookup: LookupFunction = (hostname, _options, callback) => {
+const safePublicLookup: LookupFunction = (hostname, options, callback) => {
   lookup(hostname, { all: true })
     .then((records) => {
       if (
@@ -821,6 +800,10 @@ const safePublicLookup: LookupFunction = (hostname, _options, callback) => {
         records.some((record) => !isPublicIpAddress(record.address))
       ) {
         callback(new Error('unsafe resolved media address'), '', 0);
+        return;
+      }
+      if (options.all) {
+        callback(null, records);
         return;
       }
       const record = records[0]!;

@@ -18,8 +18,19 @@ const mocks = vi.hoisted(() => {
     ): MockHttpResponse;
     resume: ReturnType<typeof vi.fn>;
   };
+  type MockHttpRequest = {
+    on: ReturnType<typeof vi.fn>;
+    end: ReturnType<typeof vi.fn>;
+    destroy: ReturnType<typeof vi.fn>;
+  };
+  type MockHttpCall = {
+    options: unknown;
+    request: MockHttpRequest;
+    response: MockHttpResponse;
+  };
 
   const instances: MockWSClient[] = [];
+  const httpCalls: MockHttpCall[] = [];
   const lookup = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
   const decryptFile = vi.fn((buffer: Buffer, _aesKey: string) => buffer);
   const httpResponse = {
@@ -53,7 +64,7 @@ const mocks = vi.hoisted(() => {
           handler(value);
         }
       };
-      const request = {
+      const request: MockHttpRequest = {
         on: vi.fn(() => request),
         end: vi.fn(() => {
           queueMicrotask(() => {
@@ -67,6 +78,7 @@ const mocks = vi.hoisted(() => {
         }),
         destroy: vi.fn(() => request),
       };
+      httpCalls.push({ options: _options, request, response });
       return request;
     },
   );
@@ -122,6 +134,7 @@ const mocks = vi.hoisted(() => {
   return {
     MockWSClient,
     instances,
+    httpCalls,
     lookup,
     decryptFile,
     httpResponse,
@@ -215,6 +228,7 @@ function lastClient(): MockWSClient {
 describe('WeComChannel', () => {
   beforeEach(() => {
     mocks.instances.length = 0;
+    mocks.httpCalls.length = 0;
     mocks.state.autoAuthenticate = true;
     mocks.httpResponse.statusCode = 200;
     mocks.httpResponse.headers = {};
@@ -836,6 +850,47 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('returns all resolved addresses when Node requests lookup all mode', async () => {
+    type LookupCallback = (
+      err: Error | null,
+      address: string | Array<{ address: string; family: number }>,
+      family?: number,
+    ) => void;
+    type RequestOptionsWithLookup = {
+      lookup?: (
+        hostname: string,
+        options: { all?: boolean },
+        callback: LookupCallback,
+      ) => void;
+    };
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-lookup-all',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://example.invalid/image',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(mocks.httpCalls).toHaveLength(1));
+    const options = mocks.httpCalls[0]?.options as RequestOptionsWithLookup;
+    const callback = vi.fn<Parameters<LookupCallback>, void>();
+
+    options.lookup?.('example.invalid', { all: true }, callback);
+
+    await vi.waitFor(() =>
+      expect(callback).toHaveBeenCalledWith(null, [
+        { address: '93.184.216.34', family: 4 },
+      ]),
+    );
+  });
+
   it('does not follow redirects while probing inbound media', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -898,6 +953,7 @@ describe('WeComChannel', () => {
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
     expect(client.downloadFile).not.toHaveBeenCalled();
     expect(mocks.httpsRequest).toHaveBeenCalled();
+    expect(mocks.httpCalls[0]?.request.destroy).toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('oversized attachment'),
     );
@@ -982,7 +1038,7 @@ describe('WeComChannel', () => {
     expect(mocks.httpsRequest).not.toHaveBeenCalled();
   });
 
-  it('removes empty attachment directories during delayed cleanup', async () => {
+  it('keeps downloaded file attachments for base prompt consumers', async () => {
     vi.useFakeTimers();
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
@@ -1006,8 +1062,8 @@ describe('WeComChannel', () => {
 
     await vi.advanceTimersByTimeAsync(60_000);
 
-    expect(existsSync(filePath!)).toBe(false);
-    expect(existsSync(dirname(filePath!))).toBe(false);
+    expect(existsSync(filePath!)).toBe(true);
+    expect(existsSync(dirname(filePath!))).toBe(true);
   });
 
   it('sends markdown text and local media through the SDK', async () => {
