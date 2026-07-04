@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act, type ReactNode } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 import { WebShellCustomizationProvider } from '../../customization';
@@ -104,6 +104,10 @@ function getDataRows(container: HTMLElement): string[][] {
       .map((cell) => cell.textContent?.trim() ?? ''),
   );
 }
+
+beforeEach(() => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
+});
 
 afterEach(async () => {
   for (const { root, container } of mounted.splice(0)) {
@@ -312,6 +316,51 @@ describe('EchartsFullDataBlock', () => {
       tooltip?: { trigger?: string };
     };
     expect(renderedOption.tooltip?.trigger).toBe('item');
+  });
+
+  it('styles multi-axis chart options with index-based defaults', async () => {
+    const setOption = vi.fn();
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption,
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    await render(
+      <EchartsFullDataBlock
+        option={{
+          dataset: {
+            dimensions: ['day', 'orders', 'revenue'],
+            source: [{ day: 'Mon', orders: 120, revenue: 360 }],
+          },
+          xAxis: [{ type: 'category' }, { type: 'category' }],
+          yAxis: [{ type: 'value' }, { type: 'value' }],
+          series: [
+            { type: 'bar', encode: { x: 'day', y: 'orders' } },
+            { type: 'line', encode: { x: 'day', y: 'revenue' } },
+          ],
+        }}
+        theme="dark"
+        loadEcharts={() => runtime}
+      />,
+    );
+    await flushChart();
+
+    const renderedOption = setOption.mock.calls[0]?.[0] as {
+      xAxis?: Array<{ axisTick?: { show?: boolean } }>;
+      yAxis?: Array<{
+        nameTextStyle?: { align?: string };
+        splitLine?: { show?: boolean };
+      }>;
+    };
+    expect(renderedOption.xAxis?.[0]?.axisTick?.show).toBe(true);
+    expect(renderedOption.xAxis?.[1]?.axisTick?.show).toBe(true);
+    expect(renderedOption.yAxis?.[0]?.splitLine?.show).toBe(true);
+    expect(renderedOption.yAxis?.[0]?.nameTextStyle?.align).toBe('left');
+    expect(renderedOption.yAxis?.[1]?.splitLine?.show).toBe(false);
+    expect(renderedOption.yAxis?.[1]?.nameTextStyle?.align).toBe('right');
   });
 
   it('keeps legacy ECharts option block bodies compatible', async () => {
@@ -574,12 +623,18 @@ describe('EchartsFullDataBlock', () => {
   ])(
     'rejects invalid full-data envelopes: $name',
     async ({ envelope, error }) => {
+      const code = JSON.stringify(envelope);
       const container = await renderEchartsMarkdown({
-        code: JSON.stringify(envelope),
+        code,
       });
 
       expect(container.textContent).toContain(error);
       expect(container.querySelector('pre code')).toBeNull();
+      expect(console.warn).toHaveBeenCalledWith(
+        '[web-shell] echarts-fulldata parse failed: %s (code length=%d)',
+        error,
+        code.length,
+      );
     },
   );
 
@@ -736,12 +791,53 @@ describe('EchartsFullDataBlock', () => {
     expect(setOption).not.toHaveBeenCalled();
   });
 
+  it('reports non-error ref resolver rejections with the generic message', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+    const runtime: EchartsRuntime = {
+      init: vi.fn(() => ({
+        setOption: vi.fn(),
+        resize: vi.fn(),
+        dispose: vi.fn(),
+      })),
+    };
+
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        version: 1,
+        data: {
+          kind: 'ref',
+          ref: 'artifact://chart-data/missing',
+          format: 'json',
+          dimensions: ['day', 'orders'],
+        },
+        option: {
+          series: [{ type: 'line', encode: { x: 'day', y: 'orders' } }],
+        },
+      }),
+      loadEcharts: () => runtime,
+      resolveDataRef: () => Promise.reject('missing artifact'),
+    });
+    await flushChart();
+
+    expect(container.textContent).toContain(
+      'Chart data reference could not be resolved.',
+    );
+    expect(container.textContent).not.toContain('missing artifact');
+    expect(consoleError).toHaveBeenCalledWith(
+      '[web-shell] echarts-fulldata data-ref resolution failed:',
+      'artifact://chart-data/missing',
+      'missing artifact',
+    );
+    expect(container.querySelector('pre code')).toBeNull();
+  });
+
   it('reports ref resolver timeouts inside the chart card', async () => {
     vi.useFakeTimers();
     const consoleError = vi
       .spyOn(console, 'error')
       .mockImplementation(() => {});
-    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const setOption = vi.fn();
     const runtime: EchartsRuntime = {
       init: vi.fn(() => ({
@@ -781,7 +877,7 @@ describe('EchartsFullDataBlock', () => {
       expect(container.textContent).not.toContain(
         'Data reference resolution timed out.',
       );
-      expect(consoleWarn).toHaveBeenCalledWith(
+      expect(console.warn).toHaveBeenCalledWith(
         '[web-shell] echarts-fulldata data-ref resolution timed out after %dms (ref=%s, format=%s)',
         30_000,
         'artifact://chart-data/slow',

@@ -1301,7 +1301,7 @@ function resolveEnvelopeDataRef(
     });
 }
 
-function parseOption(code: string): ParseOptionResult {
+function parseOptionInner(code: string): ParseOptionResult {
   if (code.length > MAX_CHART_CODE_LENGTH) {
     return {
       parseError: `Chart data is too large. Maximum supported size: ${MAX_CHART_CODE_LENGTH} characters.`,
@@ -1329,6 +1329,18 @@ function parseOption(code: string): ParseOptionResult {
         error instanceof Error ? error.message : 'Chart data is invalid.',
     };
   }
+}
+
+function parseOption(code: string): ParseOptionResult {
+  const result = parseOptionInner(code);
+  if (result.parseError) {
+    console.warn(
+      '[web-shell] echarts-fulldata parse failed: %s (code length=%d)',
+      result.parseError,
+      code.length,
+    );
+  }
+  return result;
 }
 
 export function createEchartsFullDataRenderer({
