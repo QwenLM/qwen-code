@@ -43,6 +43,7 @@ interface WeComClient {
   connect(): unknown;
   disconnect(): void;
   on(event: string, handler: (payload: unknown) => void): void;
+  off?(event: string, handler: (payload: unknown) => void): void;
   sendMessage(chatId: string, message: unknown): Promise<unknown>;
   uploadMedia(
     data: Buffer,
@@ -145,6 +146,7 @@ export class WeComChannel extends ChannelBase {
       throw err;
     }
     this.dedupTimer = setInterval(() => this.cleanupSeenMessages(), 60_000);
+    this.dedupTimer.unref?.();
     process.stderr.write(`[WeCom:${this.name}] Connected via smart bot.\n`);
   }
 
@@ -224,7 +226,6 @@ export class WeComChannel extends ChannelBase {
 
     const messageId = getString(body, 'msgid');
     if (messageId && this.seenMessages.has(messageId)) return;
-    if (messageId) this.seenMessages.set(messageId, Date.now());
 
     const from = getRecord(body, 'from');
     const senderId = getString(from, 'userid') || '';
@@ -260,6 +261,7 @@ export class WeComChannel extends ChannelBase {
     let processingStarted = false;
     try {
       if (!(await this.preflightInbound(envelope))) return;
+      if (messageId) this.seenMessages.set(messageId, Date.now());
       attachments = await this.downloadAttachments(body, attachments);
       if (attachments.length) {
         envelope.attachments = attachments;
@@ -273,6 +275,11 @@ export class WeComChannel extends ChannelBase {
       await this.processInbound(envelope);
     } catch (err) {
       if (messageId && !processingStarted) this.seenMessages.delete(messageId);
+      else if (messageId) {
+        process.stderr.write(
+          `[WeCom:${this.name}] message ${messageId} failed after processing started; dedup entry retained.\n`,
+        );
+      }
       throw err;
     }
   }
@@ -296,7 +303,7 @@ export class WeComChannel extends ChannelBase {
         continue;
       }
       const data = downloaded.buffer;
-      const fileName = ref.fileName || downloaded.filename;
+      const fileName = sanitizeFileName(ref.fileName || downloaded.filename);
       if (ref.type === 'image') {
         attachments.push({
           type: 'image',
@@ -307,7 +314,7 @@ export class WeComChannel extends ChannelBase {
       } else {
         const dir = join(tmpdir(), 'channel-files', randomUUID());
         mkdirSync(dir, { recursive: true });
-        const safeName = sanitizeFileName(fileName) || `wecom_${ref.type}`;
+        const safeName = fileName || `wecom_${ref.type}`;
         const filePath = join(dir, safeName);
         writeFileSync(filePath, data);
         attachments.push({
@@ -338,12 +345,21 @@ function waitForAuthentication(client: WeComClient): {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   let settled = false;
   let finish: (err?: Error) => void = () => {};
+  const onAuth = () => finish();
+  const onError = (err: unknown) =>
+    finish(
+      new Error(
+        `WeCom authentication failed: ${sanitizeLogText(String(err), 200)}`,
+      ),
+    );
 
   const promise = new Promise<void>((resolvePromise, rejectPromise) => {
     finish = (err?: Error): void => {
       if (settled) return;
       settled = true;
       if (timeout) clearTimeout(timeout);
+      client.off?.('authenticated', onAuth);
+      client.off?.('error', onError);
       if (err) {
         rejectPromise(err);
       } else {
@@ -356,14 +372,8 @@ function waitForAuthentication(client: WeComClient): {
     }, AUTHENTICATION_TIMEOUT_MS);
     timeout.unref?.();
 
-    client.on('authenticated', () => finish());
-    client.on('error', (err) =>
-      finish(
-        new Error(
-          `WeCom authentication failed: ${sanitizeLogText(String(err), 200)}`,
-        ),
-      ),
-    );
+    client.on('authenticated', onAuth);
+    client.on('error', onError);
   });
   return {
     promise,
@@ -640,7 +650,8 @@ function readOutboundMedia(
   const resolved = resolve(cwd, rawPath);
   const real = realpathSync(resolved);
   const stat = statSync(real);
-  if (!stat.isFile()) throw new Error(`Not a regular file: ${real}`);
+  if (!stat.isFile())
+    throw new Error(`Not a regular file: ${basename(rawPath)}`);
   if (stat.size > MAX_MEDIA_BYTES) {
     throw new Error(`Media file too large: ${stat.size} bytes`);
   }
@@ -650,7 +661,7 @@ function readOutboundMedia(
     ensureDirectoryRealpath('/tmp/channel-files'),
   ].filter((dir): dir is string => Boolean(dir));
   if (!allowedDirs.some((dir) => isInsideDir(real, dir))) {
-    throw new Error(`Media path outside allowed outbound directory: ${real}`);
+    throw new Error('Media path outside allowed outbound directory');
   }
   return { data: readFileSync(real), fileName: basename(real) };
 }
@@ -710,6 +721,8 @@ async function downloadInboundMedia(
   if (!(await isSafeInboundMediaUrl(ref.url))) {
     throw new Error('unsafe media URL');
   }
+  // Intentionally bypass WSClient.downloadFile(): its axios path follows
+  // redirects, lacks a byte cap, and does not pin resolved public IPs.
   const downloaded = await guardedHttpsDownload(ref.url);
   return {
     buffer: ref.aesKey
@@ -873,7 +886,7 @@ function isPublicIpAddress(address: string): boolean {
 
 function isIpv6LinkLocal(host: string): boolean {
   const firstGroup = Number.parseInt(host.split(':', 1)[0] ?? '', 16);
-  return firstGroup >= 0xfe80 && firstGroup <= 0xfebf;
+  return firstGroup >= 0xfe80 && firstGroup <= 0xfeff;
 }
 
 function parseIpv4Parts(host: string): number[] | undefined {
@@ -917,7 +930,7 @@ function parseEmbeddedIpv4(host: string): number[] | undefined {
     return hexGroupsToIpv4(groups[1], groups[2]);
   }
   if (groups[0] === 0x2001 && groups[1] === 0) {
-    return hexGroupsToIpv4(groups[6], groups[7]);
+    return hexGroupsToIpv4(groups[6]! ^ 0xffff, groups[7]! ^ 0xffff);
   }
   return undefined;
 }

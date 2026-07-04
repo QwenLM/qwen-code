@@ -124,6 +124,14 @@ const mocks = vi.hoisted(() => {
       this.handlers.set(event, handlers);
     }
 
+    off(event: string, handler: (payload: unknown) => void): void {
+      const handlers = this.handlers.get(event) ?? [];
+      this.handlers.set(
+        event,
+        handlers.filter((candidate) => candidate !== handler),
+      );
+    }
+
     emit(event: string, payload: unknown): void {
       for (const handler of this.handlers.get(event) ?? []) {
         handler(payload);
@@ -201,6 +209,16 @@ class FailingPreflightWeComChannel extends WeComChannel {
   readonly preflights = vi.fn(async (_envelope: Envelope) => {
     throw new Error('preflight failed');
   });
+
+  protected override async preflightInbound(
+    envelope: Envelope,
+  ): Promise<boolean> {
+    return this.preflights(envelope);
+  }
+}
+
+class RejectingPreflightWeComChannel extends WeComChannel {
+  readonly preflights = vi.fn(async (_envelope: Envelope) => false);
 
   protected override async preflightInbound(
     envelope: Envelope,
@@ -330,6 +348,16 @@ describe('WeComChannel', () => {
       '[WeCom:bot] Connected via smart bot.\n',
     );
     stderr.mockRestore();
+  });
+
+  it('removes temporary authentication listeners after connect settles', async () => {
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+
+    await channel.connect();
+
+    const client = lastClient();
+    expect(client.handlers.get('authenticated')).toHaveLength(0);
+    expect(client.handlers.get('error')).toHaveLength(1);
   });
 
   it('keeps waiting when the SDK disconnects before authentication', async () => {
@@ -508,6 +536,26 @@ describe('WeComChannel', () => {
     expect(existsSync(file.attachments?.[0]?.filePath ?? '')).toBe(true);
   });
 
+  it('sanitizes downloaded image filenames before adding attachments', async () => {
+    mocks.httpResponse.headers = {
+      'content-disposition': 'attachment; filename="../secret.png"',
+    };
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-image-filename',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://example.invalid/image', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments?.[0]?.fileName).toBe('secret.png');
+  });
+
   it('honors explicit group mention metadata when present', async () => {
     const channel = new TestWeComChannel(
       'bot',
@@ -666,6 +714,29 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('rolls back message dedup when preflight rejects the envelope', async () => {
+    const channel = new RejectingPreflightWeComChannel(
+      'bot',
+      makeConfig(),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+    const payload = {
+      msgid: 'msg-preflight-rejected',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: 'hello' },
+    };
+
+    client.emit('message.text', payload);
+    await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(1));
+
+    client.emit('message.text', payload);
+    await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(2));
+  });
+
   it('keeps message dedup when processing fails after side effects start', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -768,7 +839,7 @@ describe('WeComChannel', () => {
       'https://[::]/internal-api',
       'https://[::a9fe:a9fe]/latest/meta-data/',
       'https://[2002:a9fe:a9fe::]/latest/meta-data/',
-      'https://[2001::a9fe:a9fe]/latest/meta-data/',
+      'https://[2001::ffff:ffff:ffff:5601:5601]/latest/meta-data/',
     ].entries()) {
       client.emit('message.image', {
         msgid: `msg-ipv6-transition-${index}`,
@@ -963,6 +1034,99 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('aborts inbound attachments that exceed the streaming size cap', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+    mocks.httpResponse.body = Buffer.alloc(20 * 1024 * 1024 + 1);
+
+    client.emit('message.image', {
+      msgid: 'msg-stream-large-image',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://example.invalid/stream-large', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpCalls[0]?.request.destroy).toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('oversized attachment'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('skips inbound attachments when the media request returns non-success', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    mocks.httpResponse.statusCode = 500;
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-download-fails',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://example.invalid/fails', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('media download failed'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('rejects private addresses during request-time lookup validation', async () => {
+    type LookupCallback = (
+      err: Error | null,
+      address: string | Array<{ address: string; family: number }>,
+      family?: number,
+    ) => void;
+    type RequestOptionsWithLookup = {
+      lookup?: (
+        hostname: string,
+        options: { all?: boolean },
+        callback: LookupCallback,
+      ) => void;
+    };
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-lookup-private',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://example.invalid/image',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(mocks.httpCalls).toHaveLength(1));
+    mocks.lookup.mockResolvedValueOnce([
+      { address: '169.254.169.254', family: 4 },
+    ]);
+    const options = mocks.httpCalls[0]?.options as RequestOptionsWithLookup;
+    const callback = vi.fn<Parameters<LookupCallback>, void>();
+
+    options.lookup?.('example.invalid', { all: true }, callback);
+
+    await vi.waitFor(() =>
+      expect(callback).toHaveBeenCalledWith(expect.any(Error), '', 0),
+    );
+  });
+
   it('limits quote recursion when collecting inbound attachments', async () => {
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
@@ -1036,6 +1200,53 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
     expect(mocks.httpsRequest).not.toHaveBeenCalled();
+  });
+
+  it('rejects media URLs that resolve to IPv6 site-local addresses', async () => {
+    mocks.lookup.mockResolvedValue([{ address: 'fec0::1', family: 6 }]);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-site-local',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://example.invalid/image', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+  });
+
+  it('decodes Teredo media URLs before checking embedded IPv4 safety', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-teredo-xor',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://[2001::ffff:ffff:ffff:561:561]/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
   });
 
   it('keeps downloaded file attachments for base prompt consumers', async () => {
@@ -1287,6 +1498,9 @@ describe('WeComChannel', () => {
     expect(client.uploadMedia).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('outside allowed outbound directory'),
+    );
+    expect(stderr).not.toHaveBeenCalledWith(
+      expect.stringContaining(secretPath),
     );
     stderr.mockRestore();
   });
