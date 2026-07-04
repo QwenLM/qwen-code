@@ -3,6 +3,38 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
 
+const {
+  mockConnection,
+  mockActive,
+  mockArchived,
+  renameSessionSpy,
+  mockExportSession,
+} = vi.hoisted(() => {
+  const makeStore = () => ({
+    sessions: [] as MockSession[],
+    loading: false,
+    error: null as unknown,
+    reload: vi.fn(),
+    deleteSession: vi.fn().mockResolvedValue(true),
+    archiveSession: vi.fn().mockResolvedValue(true),
+    unarchiveSession: vi.fn().mockResolvedValue(true),
+  });
+  return {
+    mockConnection: {
+      status: 'connected',
+      sessionId: null as string | null,
+      workspaceCwd: '/tmp/project',
+      capabilities: { qwenCodeVersion: '1.2.3', features: [] as string[] } as
+        | { qwenCodeVersion?: string; features?: string[] }
+        | undefined,
+    },
+    mockActive: makeStore(),
+    mockArchived: makeStore(),
+    renameSessionSpy: vi.fn(),
+    mockExportSession: vi.fn(),
+  };
+});
+
 type MockSession = {
   sessionId: string;
   workspaceCwd: string;
@@ -14,37 +46,13 @@ type MockSession = {
   isArchived?: boolean;
 };
 
-const { mockConnection, mockActive, mockArchived, renameSessionSpy } =
-  vi.hoisted(() => {
-    const makeStore = () => ({
-      sessions: [] as MockSession[],
-      loading: false,
-      error: null as unknown,
-      reload: vi.fn(),
-      deleteSession: vi.fn().mockResolvedValue(true),
-      archiveSession: vi.fn().mockResolvedValue(true),
-      unarchiveSession: vi.fn().mockResolvedValue(true),
-    });
-    return {
-      mockConnection: {
-        status: 'connected',
-        sessionId: null as string | null,
-        workspaceCwd: '/tmp/project',
-        capabilities: { qwenCodeVersion: '1.2.3' } as
-          | { qwenCodeVersion?: string }
-          | undefined,
-      },
-      mockActive: makeStore(),
-      mockArchived: makeStore(),
-      renameSessionSpy: vi.fn(),
-    };
-  });
-
 vi.mock('@qwen-code/webui/daemon-react-sdk', () => ({
   useConnection: () => mockConnection,
   useActions: () => ({ renameSession: renameSessionSpy }),
   useSessions: (options?: { archiveState?: 'active' | 'archived' }) =>
-    options?.archiveState === 'archived' ? mockArchived : mockActive,
+    options?.archiveState === 'archived'
+      ? mockArchived
+      : { ...mockActive, exportSession: mockExportSession },
 }));
 
 function makeSession(
@@ -79,6 +87,8 @@ function renderSidebar(
   overrides: Partial<{
     onOpenSettings: () => void;
     onOpenDaemonStatus: () => void;
+    onLoadSession: (sessionId: string) => Promise<void> | void;
+    onError: (error: unknown, message: string) => void;
   }> = {},
 ): HTMLElement {
   const container = document.createElement('div');
@@ -105,18 +115,28 @@ function renderSidebar(
 }
 
 beforeEach(() => {
-  mockConnection.capabilities = { qwenCodeVersion: '1.2.3' };
   mockConnection.sessionId = null;
+  mockConnection.capabilities = { qwenCodeVersion: '1.2.3', features: [] };
   for (const store of [mockActive, mockArchived]) {
     store.sessions = [];
     store.loading = false;
     store.error = null;
-    store.reload.mockClear();
-    store.deleteSession.mockClear();
-    store.archiveSession.mockClear();
-    store.unarchiveSession.mockClear();
+    store.reload.mockReset();
+    store.deleteSession.mockReset();
+    store.archiveSession.mockReset();
+    store.unarchiveSession.mockReset();
+    store.deleteSession.mockResolvedValue(true);
+    store.archiveSession.mockResolvedValue(true);
+    store.unarchiveSession.mockResolvedValue(true);
   }
   renameSessionSpy.mockClear();
+  mockExportSession.mockReset();
+  mockExportSession.mockResolvedValue({
+    content: '<html>export</html>',
+    filename: 'session.html',
+    mimeType: 'text/html',
+    format: 'html',
+  });
 });
 
 afterEach(() => {
@@ -124,6 +144,8 @@ afterEach(() => {
     act(() => root.unmount());
     container.remove();
   }
+  vi.restoreAllMocks();
+  vi.unstubAllGlobals();
 });
 
 describe('WebShellSidebar — version footer', () => {
@@ -199,6 +221,122 @@ async function clickAsync(el: Element | null): Promise<void> {
     el!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
   });
 }
+
+describe('WebShellSidebar — session export', () => {
+  it('hides export action when daemon does not advertise session_export', () => {
+    mockActive.sessions = [makeSession('session-1')];
+    const container = renderSidebar(false);
+
+    expect(
+      container.querySelector('[aria-label="Export conversation record"]'),
+    ).toBeNull();
+  });
+
+  it('downloads an HTML export when export action is clicked', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_export'],
+    };
+    mockActive.sessions = [makeSession('session-1')];
+    const createObjectURL = vi.fn(() => 'blob:session-export');
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL,
+      revokeObjectURL,
+    });
+    const clickSpy = vi
+      .spyOn(HTMLAnchorElement.prototype, 'click')
+      .mockImplementation(() => {});
+    const container = renderSidebar(false);
+    const button = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Export conversation record"]',
+    );
+
+    expect(button).not.toBeNull();
+    await act(async () => {
+      button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(mockExportSession).toHaveBeenCalledWith('session-1', 'html');
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+    expect(clickSpy).toHaveBeenCalledTimes(1);
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:session-export');
+  });
+
+  it('does not block switching sessions while an export is running', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_export'],
+    };
+    mockActive.sessions = [makeSession('session-1'), makeSession('session-2')];
+    let resolveExport:
+      | ((value: Awaited<ReturnType<typeof mockExportSession>>) => void)
+      | undefined;
+    mockExportSession.mockReturnValueOnce(
+      new Promise((resolve) => {
+        resolveExport = resolve;
+      }),
+    );
+    const createObjectURL = vi.fn(() => 'blob:session-export');
+    vi.stubGlobal('URL', {
+      ...URL,
+      createObjectURL,
+      revokeObjectURL: vi.fn(),
+    });
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    const onLoadSession = vi.fn();
+    const container = renderSidebar(false, { onLoadSession });
+    const exportButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Export conversation record"]',
+    );
+
+    await act(async () => {
+      exportButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const secondSessionRow = Array.from(
+      container.querySelectorAll<HTMLElement>('[role="button"]'),
+    ).find((el) => el.textContent?.includes('Session session-2'));
+    click(secondSessionRow ?? null);
+
+    expect(onLoadSession).toHaveBeenCalledWith('session-2');
+
+    await act(async () => {
+      resolveExport?.({
+        content: '<html>export</html>',
+        filename: 'session.html',
+        mimeType: 'text/html',
+        format: 'html',
+      });
+      await Promise.resolve();
+    });
+    expect(createObjectURL).toHaveBeenCalledWith(expect.any(Blob));
+  });
+
+  it('reports export failures through onError', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_export'],
+    };
+    mockActive.sessions = [makeSession('session-1')];
+    const error = new Error('download failed');
+    mockExportSession.mockRejectedValueOnce(error);
+    const onError = vi.fn();
+    const container = renderSidebar(false, { onError });
+    const button = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Export conversation record"]',
+    );
+
+    expect(button).not.toBeNull();
+    await act(async () => {
+      button!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(onError).toHaveBeenCalledWith(error, 'Failed to export session');
+  });
+});
 
 describe('WebShellSidebar — archive actions', () => {
   it('archives an active session from the quick action button', async () => {

@@ -5,7 +5,10 @@
  */
 
 import { useCallback } from 'react';
-import type { DaemonSessionArchiveState } from '@qwen-code/sdk/daemon';
+import type {
+  DaemonSessionArchiveState,
+  DaemonSessionExportFormat,
+} from '@qwen-code/sdk/daemon';
 import { useOptionalDaemonActions } from '../../session/DaemonSessionProvider.js';
 import { useDaemonWorkspace } from '../DaemonWorkspaceProvider.js';
 import type { DaemonResourceOptions } from '../types.js';
@@ -47,6 +50,11 @@ export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
     },
     [workspace.actions, reload],
   );
+  const exportSession = useCallback(
+    (sessionId: string, format: DaemonSessionExportFormat = 'html') =>
+      workspace.actions.exportSession(sessionId, format),
+    [workspace.actions],
+  );
   const archiveSession = useCallback(
     async (sessionId: string) => {
       const archived = await workspace.actions.archiveSession(sessionId);
@@ -72,6 +80,7 @@ export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
     releaseSession: sessionActions?.releaseSession,
     deleteSession,
     deleteSessions,
+    exportSession,
     archiveSession,
     unarchiveSession,
   };
