@@ -227,6 +227,39 @@ describe('EventBus', () => {
     abort.abort();
   });
 
+  it('reports frames_and_bytes when both warning thresholds are crossed', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 4, signal: abort.signal });
+
+    for (let i = 1; i <= 3; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'x'.repeat(300),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const collected: BridgeEvent[] = [];
+    const it = iter[Symbol.asyncIterator]();
+    for (let i = 0; i < 4; i++) collected.push((await it.next()).value);
+
+    const warning = collected.find((e) => e.type === 'slow_client_warning');
+    expect(warning?.data).toMatchObject({
+      queueSize: 3,
+      maxQueued: 4,
+      maxQueuedBytes: 1200,
+      threshold: 'frames_and_bytes',
+      lastEventId: 3,
+    });
+    expect(
+      (warning?.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThanOrEqual(900);
+    abort.abort();
+  });
+
   it('slow_client_warning frame has no id (synthetic, no sequence slot)', async () => {
     const bus = new EventBus();
     const abort = new AbortController();

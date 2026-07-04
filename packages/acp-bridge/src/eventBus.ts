@@ -408,14 +408,6 @@ export class EventBus {
           },
         };
         sub.queue.forcePush(warningFrame);
-      } else if (
-        sub.warned &&
-        liveSize <= sub.warnResetThreshold &&
-        liveBytes <= sub.warnBytesResetThreshold
-      ) {
-        // Hysteresis: subscriber recovered well below the warn line,
-        // re-arm so a future lag spike produces a fresh warning.
-        sub.warned = false;
       }
     }
     return event;
