@@ -147,7 +147,7 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.items.map((item) => item.label)).toEqual(['second']);
   });
 
-  it('opens extension items without the inserted ref prefix as search text', async () => {
+  it('opens extension items using the inserted ref suffix as search text', async () => {
     vi.useFakeTimers();
     mount({
       view: makeView('@'),
@@ -173,7 +173,7 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'extensions',
-      query: '',
+      query: 'revie',
     });
     expect(latest!.state?.items.map((item) => item.label)).toEqual(['review']);
 
@@ -183,7 +183,7 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'extensions',
-      query: '',
+      query: 'revie',
     });
 
     act(() => latest!.refreshForView(makeView('@ext:revi')));
@@ -192,7 +192,7 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'extensions',
-      query: '',
+      query: 'revi',
     });
 
     act(() => {
@@ -217,7 +217,7 @@ describe('useAtMentionMenu', () => {
     });
   });
 
-  it('opens MCP resource items without the inserted ref as search text', async () => {
+  it('opens MCP resource items using the inserted ref suffix as search text', async () => {
     vi.useFakeTimers();
     const loadMcpResources = vi.fn().mockResolvedValue({
       resources: [
@@ -260,7 +260,7 @@ describe('useAtMentionMenu', () => {
       selectedProviderId: 'mcp-resources',
       itemMode: 'mcpResources',
       mcpServerName: 'docs',
-      query: '',
+      query: 'https://example.com/doc',
     });
     expect(latest!.state?.items.map((item) => item.label)).toEqual(['Docs']);
 
@@ -274,7 +274,7 @@ describe('useAtMentionMenu', () => {
       selectedProviderId: 'mcp-resources',
       itemMode: 'mcpResources',
       mcpServerName: 'docs',
-      query: '',
+      query: 'https://example.com/doc',
     });
 
     act(() => latest!.refreshForView(makeView('@docs:https://example.com/do')));
@@ -285,18 +285,18 @@ describe('useAtMentionMenu', () => {
       selectedProviderId: 'mcp-resources',
       itemMode: 'mcpResources',
       mcpServerName: 'docs',
-      query: '',
+      query: 'https://example.com/do',
     });
   });
 
-  it('opens file items without the inserted ref as search text', async () => {
+  it('opens file items using the typed mention text as search text', async () => {
     vi.useFakeTimers();
     const listDirectory = vi.fn().mockResolvedValue({
       kind: 'list',
       path: '.',
       entries: [
         {
-          name: 'README.md',
+          name: 'foo.ts',
           kind: 'file',
           ignored: false,
         },
@@ -312,17 +312,15 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(makeView('@src/foo')));
     await runDebounce();
 
-    expect(listDirectory).toHaveBeenLastCalledWith('.', {
+    expect(listDirectory).toHaveBeenLastCalledWith('src', {
       signal: expect.any(AbortSignal),
     });
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'files',
-      query: '',
+      query: 'src/foo',
     });
-    expect(latest!.state?.items.map((item) => item.label)).toContain(
-      'README.md',
-    );
+    expect(latest!.state?.items.map((item) => item.label)).toContain('foo.ts');
 
     act(() => latest!.refreshForView(makeView('@src/foo')));
     await runDebounce();
@@ -330,7 +328,7 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'files',
-      query: '',
+      query: 'src/foo',
     });
 
     act(() => latest!.refreshForView(makeView('@src/fo')));
@@ -339,8 +337,41 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'files',
-      query: '',
+      query: 'src/fo',
     });
+  });
+
+  it('opens typed file queries without provider history', async () => {
+    vi.useFakeTimers();
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [
+        {
+          name: 'package.json',
+          kind: 'file',
+          ignored: false,
+        },
+      ],
+      truncated: false,
+    });
+    mount({ actions: { listDirectory } });
+
+    act(() => latest!.refreshForView(makeView('@pac')));
+    await runDebounce();
+
+    expect(listDirectory).toHaveBeenLastCalledWith('.', {
+      signal: expect.any(AbortSignal),
+    });
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'files',
+      query: 'pac',
+      inputMode: 'context',
+    });
+    expect(latest!.state?.items.map((item) => item.label)).toEqual([
+      'package.json',
+    ]);
   });
 
   it('clears a pending provider search when closing from items', async () => {
@@ -389,12 +420,15 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state?.level).toBe('categories');
   });
 
-  it('keeps arrow keys owned when the active list is empty', () => {
+  it('keeps arrow keys owned when the active list is empty', async () => {
+    vi.useFakeTimers();
     mount();
 
-    act(() => latest!.refreshForView(makeView('@zzzz')));
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(1));
+    await runDebounce();
 
-    expect(latest!.state?.providers).toEqual([]);
+    expect(latest!.state?.items).toEqual([]);
     expect(latest!.moveSelection('down')).toBe(true);
   });
 
@@ -1050,7 +1084,7 @@ describe('useAtMentionMenu', () => {
       selectedProviderId: 'mcp-resources',
       itemMode: 'mcpResources',
       mcpServerName: 'my:server',
-      query: '',
+      query: 'res://doc',
     });
   });
 
@@ -1195,26 +1229,32 @@ describe('useAtMentionMenu', () => {
 
   it('does not reuse an items-level panel after the cursor moves inside the reference', async () => {
     vi.useFakeTimers();
-    mount({
-      providers: [
+    const listDirectory = vi.fn().mockResolvedValue({
+      kind: 'list',
+      path: '.',
+      entries: [
         {
-          id: 'custom',
-          label: 'Custom',
-          search: vi.fn().mockResolvedValue([{ id: 'item', label: 'item' }]),
+          name: 'item',
+          kind: 'file',
+          ignored: false,
         },
       ],
+      truncated: false,
+    });
+    mount({
+      actions: { listDirectory },
     });
 
-    act(() => latest!.refreshForView(makeView('@')));
-    act(() => latest!.enterCategory(0));
+    act(() => latest!.refreshForView(makeView('@item')));
     await runDebounce();
     act(() => latest!.refreshForView(makeViewAt('@item', 3)));
+    await runDebounce();
 
     expect(latest!.state).toMatchObject({
       level: 'items',
       from: 0,
       to: 3,
-      query: '',
+      query: 'it',
     });
   });
 });

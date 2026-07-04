@@ -1009,7 +1009,7 @@ export function useComposerCore(
   const clearAutoAtTriggerIfIntact = useCallback(() => {
     const trigger = autoTriggerRef.current;
     const view = viewRef.current;
-    if (!trigger || trigger.text !== '@' || !view) return;
+    if (!trigger || !view) return;
     const doc = view.state.doc;
     if (
       doc.length === trigger.from + trigger.text.length &&
@@ -1030,6 +1030,12 @@ export function useComposerCore(
     clearAutoAtTriggerIfIntact();
     closeAtMenuState();
   }, [clearAutoAtTriggerIfIntact, closeAtMenuState]);
+
+  const closeAtMenuIfOpen = useCallback(() => {
+    if (!atMenu.closeIfOpen()) return false;
+    clearAutoAtTriggerIfIntact();
+    return true;
+  }, [atMenu, clearAutoAtTriggerIfIntact]);
 
   const refreshSlashMenuForView = useCallback(
     (view: EditorView | null, preferredIndex?: number) => {
@@ -1494,7 +1500,7 @@ export function useComposerCore(
       {
         key: 'Escape',
         run: () => {
-          if (atMenu.closeIfOpen()) {
+          if (closeAtMenuIfOpen()) {
             return true;
           }
           if (slashMenuRef.current) {
@@ -1543,7 +1549,7 @@ export function useComposerCore(
           } else {
             closeCompletion(view);
             closeSlashMenu();
-            atMenu.close();
+            closeAtMenu();
           }
           const multilineBoundary = handleMultilineHistoryBoundary(view, 'up');
           if (multilineBoundary === 'handled') return true;
@@ -1594,7 +1600,7 @@ export function useComposerCore(
           } else {
             closeCompletion(view);
             closeSlashMenu();
-            atMenu.close();
+            closeAtMenu();
           }
           const multilineBoundary = handleMultilineHistoryBoundary(
             view,
@@ -1755,7 +1761,13 @@ export function useComposerCore(
               d.length === from + trigger.text.length &&
               d.sliceString(from) === trigger.text
             ) {
-              view.dispatch({ changes: { from, to: d.length, insert: '' } });
+              view.dispatch({
+                changes: {
+                  from,
+                  to: from + trigger.text.length,
+                  insert: '',
+                },
+              });
             }
           }, 0);
         }
@@ -1861,6 +1873,15 @@ export function useComposerCore(
         EditorView.domEventHandlers({
           blur() {
             closeSlashMenu();
+            window.setTimeout(() => {
+              if (
+                document.activeElement instanceof Element &&
+                document.activeElement.closest('[data-at-mention-panel="true"]')
+              ) {
+                return;
+              }
+              closeAtMenu();
+            }, 0);
             return false;
           },
           paste(event) {

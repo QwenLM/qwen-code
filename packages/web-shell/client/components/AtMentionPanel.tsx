@@ -189,6 +189,7 @@ export function AtMentionPanel({
       <div
         ref={panelRef}
         className={styles.atPanel}
+        data-at-mention-panel="true"
         style={
           {
             ...themeVars,
