@@ -147,6 +147,8 @@ Classify every feedback point:
 - Suggestion, nit, or optional hardening: use engineering judgment. Implement
   only suggestions that are reasonable, valuable, and within the PR scope. Skip
   low-value or over-engineered suggestions and explain why.
+- Re-read the full diff as a skeptical reviewer before writing the final
+  summary.
 
 If `--conflict true`, merge `origin/<base>`, resolve every conflict by
 understanding both sides, and include conflict notes in the summary. If false,
