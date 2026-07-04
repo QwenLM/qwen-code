@@ -2718,14 +2718,13 @@ export class GeminiChat {
                     resolveError instanceof Error
                       ? resolveError.message
                       : String(resolveError);
-                  lastError = resolveError;
                   debugLogger.warn(
                     `[FALLBACK] Failed to resolve fallback model ` +
                       `"${fallbackModelId}": ` +
                       `${resolveErrorMessage}. ` +
-                      `Stopping fallback chain.`,
+                      `Trying next fallback.`,
                   );
-                  break;
+                  continue;
                 }
                 fallbackIndex++;
 
