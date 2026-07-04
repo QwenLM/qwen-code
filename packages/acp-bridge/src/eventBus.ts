@@ -135,10 +135,10 @@ function normalizeMaxQueuedBytes(value: number | undefined): number {
 function serializedByteLength(event: BridgeEvent): number {
   try {
     const serialized = JSON.stringify(event);
-    if (serialized === undefined) return Number.MAX_SAFE_INTEGER;
+    if (serialized === undefined) return 0;
     return Buffer.byteLength(serialized, 'utf8');
   } catch {
-    return Number.MAX_SAFE_INTEGER;
+    return 0;
   }
 }
 

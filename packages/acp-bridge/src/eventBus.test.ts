@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from 'vitest';
 import {
+  DEFAULT_MAX_QUEUED_BYTES,
   EventBus,
   EVENT_SCHEMA_VERSION,
   type BridgeEvent,
@@ -185,6 +186,18 @@ describe('EventBus', () => {
     expect(collected[1]?.data).toBe(2);
     expect(collected[2]?.type).toBe('slow_client_warning');
     expect(collected[3]?.type).toBe('client_evicted');
+    expect(collected[3]?.data).toMatchObject({
+      reason: 'queue_overflow',
+      queueSize: 2,
+      maxQueued: 2,
+      maxQueuedBytes: DEFAULT_MAX_QUEUED_BYTES,
+    });
+    expect(
+      (collected[3]?.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThan(0);
+    expect(
+      (collected[3]?.data as { eventBytes?: number }).eventBytes,
+    ).toBeUndefined();
     expect(bus.subscriberCount).toBe(0);
     abort.abort();
   });
@@ -207,7 +220,10 @@ describe('EventBus', () => {
     }
     const warnings = collected.filter((e) => e.type === 'slow_client_warning');
     expect(warnings).toHaveLength(1);
-    expect(warnings[0]?.data).toMatchObject({ maxQueued: 8 });
+    expect(warnings[0]?.data).toMatchObject({
+      maxQueued: 8,
+      threshold: 'frames',
+    });
     abort.abort();
   });
 
@@ -372,6 +388,41 @@ describe('EventBus', () => {
     const delivered = await next;
     expect(delivered.done).toBe(false);
     expect(delivered.value.type).toBe('foo');
+    await it.return?.();
+    abort.abort();
+  });
+
+  it('does not poison queued bytes when buffered event sizing fails', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 256,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+
+    expect(() => {
+      bus.publish({
+        type: 'foo',
+        data: circular,
+        _meta: { serverTimestamp: 1 },
+      });
+      bus.publish({
+        type: 'foo',
+        data: 'tail',
+        _meta: { serverTimestamp: 2 },
+      });
+    }).not.toThrow();
+
+    const first = await it.next();
+    const second = await it.next();
+    expect(first.done).toBe(false);
+    expect(first.value.type).toBe('foo');
+    expect(second.done).toBe(false);
+    expect(second.value.type).toBe('foo');
+    expect(second.value.data).toBe('tail');
+    expect(bus.subscriberCount).toBe(1);
     await it.return?.();
     abort.abort();
   });
