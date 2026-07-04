@@ -249,7 +249,7 @@ describe('LspServerManager', () => {
       );
     });
 
-    it('waits for a server startup before removing it', async () => {
+    it('aborts a server startup before removing it', async () => {
       const { manager, privateView } = createReconcileManager();
       manager.setServerConfigs([serverConfig]);
       const handle = manager.getHandles().get('clangd');
@@ -258,9 +258,12 @@ describe('LspServerManager', () => {
       handle!.startingPromise = new Promise<void>((resolve) => {
         resolveStartup = resolve;
       });
+      handle!.startupAbortController = new AbortController();
+      const abortSpy = vi.spyOn(handle!.startupAbortController, 'abort');
 
       const reconcile = manager.reconcileServerConfigs([]);
       await Promise.resolve();
+      expect(abortSpy).toHaveBeenCalledOnce();
       expect(privateView.stopServer).not.toHaveBeenCalled();
 
       resolveStartup();
@@ -270,7 +273,7 @@ describe('LspServerManager', () => {
       expect(manager.getHandles().has('clangd')).toBe(false);
     });
 
-    it('waits for a server startup before restarting it', async () => {
+    it('aborts a server startup before restarting it', async () => {
       const { manager, privateView } = createReconcileManager();
       manager.setServerConfigs([serverConfig]);
       const handle = manager.getHandles().get('clangd');
@@ -279,11 +282,14 @@ describe('LspServerManager', () => {
       handle!.startingPromise = new Promise<void>((resolve) => {
         resolveStartup = resolve;
       });
+      handle!.startupAbortController = new AbortController();
+      const abortSpy = vi.spyOn(handle!.startupAbortController, 'abort');
 
       const reconcile = manager.reconcileServerConfigs([
         { ...serverConfig, args: ['--log=verbose'] },
       ]);
       await Promise.resolve();
+      expect(abortSpy).toHaveBeenCalledOnce();
       expect(privateView.stopServer).not.toHaveBeenCalled();
 
       resolveStartup();
@@ -1309,6 +1315,112 @@ describe('LspServerManager', () => {
     );
   });
 
+  it('cleans up a socket connection that resolves after startup abort wins', async () => {
+    const manager = createTrustedManager();
+    const controller = new AbortController();
+    const connection = { connection: { end: vi.fn() } };
+    let resolveConnection!: (value: typeof connection) => void;
+    const privateView = manager as unknown as {
+      raceStartupAbort<T>(
+        promise: Promise<T>,
+        signal: AbortSignal,
+        cleanupAfterAbort: (value: T) => void,
+      ): Promise<T>;
+    };
+    const connectionPromise = new Promise<typeof connection>((resolve) => {
+      resolveConnection = resolve;
+    });
+
+    const wait = privateView.raceStartupAbort(
+      connectionPromise,
+      controller.signal,
+      (value) => value.connection.end(),
+    );
+    controller.abort();
+    await expect(wait).rejects.toThrow('LSP server startup cancelled');
+
+    resolveConnection(connection);
+    await Promise.resolve();
+
+    expect(connection.connection.end).toHaveBeenCalledOnce();
+  });
+
+  it('observes a startup promise that rejects after abort wins', async () => {
+    const manager = createTrustedManager();
+    const controller = new AbortController();
+    let rejectStartup!: (error: Error) => void;
+    const privateView = manager as unknown as {
+      raceStartupAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T>;
+    };
+    const startupPromise = new Promise<void>((_resolve, reject) => {
+      rejectStartup = reject;
+    });
+
+    const wait = privateView.raceStartupAbort(
+      startupPromise,
+      controller.signal,
+    );
+    controller.abort();
+    await expect(wait).rejects.toThrow('LSP server startup cancelled');
+
+    rejectStartup(new Error('late socket failure'));
+    await Promise.resolve();
+  });
+
+  it('cancels a startup that is waiting for protocol initialization', async () => {
+    const manager = createTrustedManager();
+    vi.spyOn(
+      manager as unknown as {
+        checkWorkspaceTrust: () => Promise<boolean>;
+      },
+      'checkWorkspaceTrust',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        isPathSafe: () => boolean;
+      },
+      'isPathSafe',
+    ).mockReturnValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        commandExists: () => Promise<boolean>;
+      },
+      'commandExists',
+    ).mockResolvedValue(true);
+    vi.spyOn(
+      manager as unknown as {
+        createLspConnection: (
+          config: LspServerConfig,
+        ) => Promise<LspConnectionResult>;
+      },
+      'createLspConnection',
+    ).mockResolvedValue({
+      connection: createMockConnection(),
+      process: createMockProcess() as unknown as ChildProcess,
+    } as unknown as LspConnectionResult);
+    vi.spyOn(
+      manager as unknown as {
+        initializeLspServer: () => Promise<void>;
+      },
+      'initializeLspServer',
+    ).mockReturnValue(new Promise<void>(() => {}));
+
+    manager.setServerConfigs([serverConfig]);
+    const startAll = manager.startAll();
+    await vi.waitFor(() => {
+      expect(manager.getHandles().get('clangd')?.status).toBe('IN_PROGRESS');
+    });
+
+    const stopped = await Promise.race([
+      manager.stopAll().then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 1000)),
+    ]);
+    await startAll;
+
+    expect(stopped).toBe(true);
+    expect(manager.getHandles().size).toBe(0);
+  });
+
   it('fails socket startup early when the child exits before connect', async () => {
     const manager = createTrustedManager();
     vi.spyOn(
@@ -1362,7 +1474,7 @@ describe('LspServerManager', () => {
     });
   });
 
-  it('registers the restart handler before protocol initialization completes', async () => {
+  it('does not crash-restart a server that exits during protocol initialization', async () => {
     const manager = createTrustedManager();
     let exitHandler: ((code: number | null) => void) | undefined;
     const process = createMockProcess();
@@ -1426,10 +1538,8 @@ describe('LspServerManager', () => {
     resolveInitialize();
     await startAll;
 
-    expect(process.once).toHaveBeenCalledWith('exit', expect.any(Function));
-    await vi.waitFor(() => {
-      expect(createLspConnection).toHaveBeenCalledTimes(2);
-    });
+    expect(createLspConnection).toHaveBeenCalledOnce();
+    expect(manager.getHandles().get('clangd')?.status).toBe('FAILED');
   });
 
   it('logs and continues when killing an owned process throws', async () => {
@@ -1495,6 +1605,26 @@ describe('LspServerManager', () => {
 
     expect(shutdownTimer).toBeDefined();
     expect(shutdownTimer?.hasRef()).toBe(false);
+  });
+
+  it('unrefs and clears command probe timeout when the command errors first', async () => {
+    const manager = createTrustedManager();
+    const timer = {
+      unref: vi.fn(),
+    } as unknown as ReturnType<typeof setTimeout>;
+    vi.spyOn(globalThis, 'setTimeout').mockReturnValue(timer);
+    const clearTimeout = vi
+      .spyOn(globalThis, 'clearTimeout')
+      .mockImplementation(() => undefined);
+    const commandExists = (
+      manager as unknown as {
+        commandExists(command: string): Promise<boolean>;
+      }
+    ).commandExists('__qwen_lsp_missing_command__');
+
+    await expect(commandExists).resolves.toBe(false);
+    expect(timer.unref).toHaveBeenCalledOnce();
+    expect(clearTimeout).toHaveBeenCalledWith(timer);
   });
 
   it('ends the connection when shutdown timeout fires', async () => {
@@ -1588,15 +1718,18 @@ function createMockProcess(
     exitCode?: number | null;
     kill?: ReturnType<typeof vi.fn>;
     once?: ReturnType<typeof vi.fn>;
+    off?: ReturnType<typeof vi.fn>;
   } = {},
 ): {
   exitCode: number | null;
   kill: ReturnType<typeof vi.fn>;
   once: ReturnType<typeof vi.fn>;
+  off: ReturnType<typeof vi.fn>;
 } {
   return {
     exitCode: overrides.exitCode ?? null,
     kill: overrides.kill ?? vi.fn(),
     once: overrides.once ?? vi.fn(),
+    off: overrides.off ?? vi.fn(),
   };
 }

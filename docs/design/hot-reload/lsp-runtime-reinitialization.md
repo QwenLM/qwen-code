@@ -270,10 +270,14 @@ strictness:
 - `loadUserConfigs()` stays lenient for startup compatibility. It skips invalid
   server entries and returns the valid entries that can be built.
 - `loadUserConfigsStrict()` is used by hot reload. If the existing `.lsp.json`
-  is syntactically valid but contains an invalid top-level shape or invalid
-  server entry, it returns an error and `reinitialize()` does not reconcile.
-  This preserves the currently running LSP state for invalid edits. If the file
-  is missing or is deleted during the strict load, treat that `ENOENT` as a
+  is syntactically valid but contains an invalid top-level shape or a server
+  entry that cannot be built, it returns an error and `reinitialize()` does not
+  reconcile. This preserves the currently running LSP state for invalid edits.
+  The strict path must not introduce field-level validation that cold startup
+  does not also enforce, because that would make a config valid at startup but
+  invalid on the next save. Tightening known-field validation should be handled
+  as a separate compatibility decision for both startup and hot reload. If the
+  file is missing or is deleted during the strict load, treat that `ENOENT` as a
   valid empty user config, because deleting `.lsp.json` is the explicit way to
   remove all workspace user LSP servers.
 
@@ -534,8 +538,9 @@ real language servers.
   to manager reconcile;
 - `.lsp.json` parse failure preserves old runtime state and does not call
   manager reconcile;
-- strict hot reload rejects invalid server entries without reconciling, while
-  cold startup keeps loading valid entries from the same file;
+- strict hot reload rejects invalid top-level shapes and server entries that
+  cannot be built without reconciling, while cold startup keeps loading valid
+  entries from the same file;
 - deleting `.lsp.json` treats workspace config as empty and triggers reconcile;
 - strict loading treats `ENOENT` as an empty user config, including the
   deletion race where the file disappears between watcher notification and

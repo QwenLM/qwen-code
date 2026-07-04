@@ -193,9 +193,7 @@ export class LspServerManager {
     for (const [name, handle] of Array.from(this.serverHandles)) {
       const nextConfig = desiredConfigs.get(name);
       if (!nextConfig) {
-        if (handle.startingPromise) {
-          await handle.startingPromise;
-        }
+        await this.abortAndWaitForStartup(handle);
         await this.stopServer(name, handle);
         this.serverHandles.delete(name);
         this.serverConfigHashes.delete(name);
@@ -205,9 +203,7 @@ export class LspServerManager {
 
       const nextHash = desiredHashes.get(name);
       if (this.serverConfigHashes.get(name) !== nextHash) {
-        if (handle.startingPromise) {
-          await handle.startingPromise;
-        }
+        await this.abortAndWaitForStartup(handle);
         await this.stopServer(name, handle);
         const nextHandle: LspServerHandle = {
           config: nextConfig,
@@ -465,12 +461,21 @@ export class LspServerManager {
       handle.process = connection.process;
       handle.processDiagnostics = connection.processDiagnostics;
 
-      this.attachRestartHandler(name, handle);
-
-      // Initialize LSP server
-      await this.initializeLspServer(connection, handle.config);
+      const startupExit = this.createStartupExitWatcher(name, handle);
+      try {
+        // Initialize LSP server
+        await this.raceStartupAbort(
+          this.initializeLspServer(connection, handle.config),
+          startupAbortController.signal,
+          undefined,
+          startupExit?.promise,
+        );
+      } finally {
+        startupExit?.dispose();
+      }
 
       handle.status = 'READY';
+      this.attachRestartHandler(name, handle);
       debugLogger.info(`LSP server ${name} started successfully`);
     } catch (error) {
       handle.status = 'FAILED';
@@ -522,6 +527,14 @@ export class LspServerManager {
     handle.warmedUp = false;
     handle.restartAttempts = 0;
     debugLogger.info(`LSP server ${name} stopped`);
+  }
+
+  private async abortAndWaitForStartup(handle: LspServerHandle): Promise<void> {
+    if (!handle.startingPromise) {
+      return;
+    }
+    handle.startupAbortController?.abort();
+    await handle.startingPromise.catch(() => undefined);
   }
 
   /**
@@ -641,6 +654,44 @@ export class LspServerManager {
       );
       this.enqueueCrashRestart(name, handle);
     });
+  }
+
+  private createStartupExitWatcher(
+    name: string,
+    handle: LspServerHandle,
+  ):
+    | {
+        promise: Promise<never>;
+        dispose: () => void;
+      }
+    | undefined {
+    if (!handle.process) {
+      return undefined;
+    }
+    let onExit:
+      | ((code: number | null, signal: NodeJS.Signals | null) => void)
+      | undefined;
+    const promise = new Promise<never>((_, reject) => {
+      onExit = (code, signal) => {
+        handle.processExitedUnexpectedly = true;
+        reject(
+          new Error(
+            `LSP server ${name} exited before initialization completed (code ${
+              code ?? 'unknown'
+            }, signal ${signal ?? 'unknown'})`,
+          ),
+        );
+      };
+      handle.process!.once('exit', onExit);
+    });
+    return {
+      promise,
+      dispose: () => {
+        if (onExit) {
+          handle.process?.off('exit', onExit);
+        }
+      },
+    };
   }
 
   private enqueueCrashRestart(name: string, handle: LspServerHandle): void {
@@ -767,6 +818,7 @@ export class LspServerManager {
         return await this.raceStartupAbort(
           LspConnectionFactory.createSocketConnection(socket, remaining),
           signal,
+          (connection) => connection.connection.end(),
         );
       } catch (error) {
         attempt += 1;
@@ -814,23 +866,51 @@ export class LspServerManager {
   private async raceStartupAbort<T>(
     promise: Promise<T>,
     signal: AbortSignal | undefined,
+    cleanupAfterAbort?: (value: T) => void,
+    failurePromise?: Promise<never>,
   ): Promise<T> {
     if (!signal) {
-      return promise;
+      if (!failurePromise) {
+        return promise;
+      }
+      void promise.catch(() => undefined);
+      void failurePromise.catch(() => undefined);
+      return Promise.race([promise, failurePromise]);
     }
     this.throwIfStartupAborted(signal);
+    let abortWon = false;
+    const observedPromise = promise.then(
+      (value) => {
+        if (abortWon) {
+          cleanupAfterAbort?.(value);
+        }
+        return value;
+      },
+      (error: unknown) => {
+        throw error;
+      },
+    );
+    void observedPromise.catch(() => undefined);
+    if (failurePromise) {
+      void failurePromise.catch(() => undefined);
+    }
     let onAbort: (() => void) | undefined;
     try {
-      return await Promise.race([
-        promise,
+      const raceInputs: Array<Promise<T> | Promise<never>> = [
+        observedPromise,
         new Promise<T>((_, reject) => {
           onAbort = () => {
+            abortWon = true;
             signal.removeEventListener('abort', onAbort!);
             reject(new Error('LSP server startup cancelled'));
           };
           signal.addEventListener('abort', onAbort, { once: true });
         }),
-      ]);
+      ];
+      if (failurePromise) {
+        raceInputs.push(failurePromise);
+      }
+      return await Promise.race(raceInputs);
     } finally {
       if (onAbort) {
         signal.removeEventListener('abort', onAbort);
@@ -1154,6 +1234,14 @@ export class LspServerManager {
   ): Promise<boolean> {
     return new Promise((resolve) => {
       let settled = false;
+      const settle = (value: boolean) => {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        clearTimeout(timerId);
+        resolve(value);
+      };
       const child = spawn(command, ['--version'], {
         stdio: ['ignore', 'ignore', 'ignore'],
         cwd: cwd ?? this.workspaceRoot,
@@ -1161,29 +1249,30 @@ export class LspServerManager {
       });
 
       child.on('error', () => {
-        settled = true;
-        resolve(false);
+        settle(false);
       });
 
       child.on('exit', (code) => {
-        if (settled) {
-          return;
-        }
-        settled = true;
         // 127 typically indicates command not found in shell
-        resolve(code !== 127);
+        settle(code !== 127);
       });
 
       // If the process is still running after the timeout, it means the
       // command was found and started — it just didn't finish in time.
       // This is expected for servers like jdtls that don't support --version.
-      setTimeout(() => {
+      const timerId = setTimeout(() => {
         if (!settled) {
-          settled = true;
           child.kill();
-          resolve(true);
+          settle(true);
         }
       }, DEFAULT_LSP_COMMAND_CHECK_TIMEOUT_MS);
+      if (
+        typeof timerId === 'object' &&
+        timerId !== null &&
+        'unref' in timerId
+      ) {
+        timerId.unref();
+      }
     });
   }
 

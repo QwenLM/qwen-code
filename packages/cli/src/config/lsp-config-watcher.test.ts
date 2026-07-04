@@ -302,6 +302,45 @@ describe('LspConfigWatcher', () => {
     expect(chokidarMock.watcher.close).toHaveBeenCalledOnce();
   });
 
+  it('does not replace the active drain with a no-op drain', async () => {
+    vi.useFakeTimers();
+    const dir = makeTempDir();
+    const configPath = path.join(dir, '.lsp.json');
+    let resolveListener: (() => void) | undefined;
+    const listener = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveListener = resolve;
+        }),
+    );
+    const watcher = new LspConfigWatcher(dir);
+    watcher.startWatching(listener);
+    const onAll = chokidarMock.handlers.get('all');
+    expect(onAll).toBeDefined();
+
+    fs.writeFileSync(configPath, '{"typescript":{"command":"tsserver"}}');
+    onAll?.('add', configPath);
+    await vi.advanceTimersByTimeAsync(LspConfigWatcher.DEBOUNCE_MS);
+    expect(listener).toHaveBeenCalledTimes(1);
+
+    fs.writeFileSync(configPath, '{"typescript":{"command":"pyright"}}');
+    onAll?.('change', configPath);
+    await vi.advanceTimersByTimeAsync(LspConfigWatcher.DEBOUNCE_MS);
+
+    let stopped = false;
+    const stopPromise = watcher.stopWatching().then(() => {
+      stopped = true;
+    });
+    await Promise.resolve();
+
+    expect(stopped).toBe(false);
+    resolveListener?.();
+    await stopPromise;
+
+    expect(stopped).toBe(true);
+    expect(chokidarMock.watcher.close).toHaveBeenCalledOnce();
+  });
+
   // Listener timeout is the isolation boundary between file watching and the
   // running CLI session: a hung reload callback should be logged and swallowed.
   it('times out a hanging listener without throwing', async () => {

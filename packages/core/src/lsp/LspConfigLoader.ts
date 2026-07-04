@@ -241,7 +241,6 @@ export class LspConfigLoader {
           ),
         };
       }
-
       const languages = [key];
       const name =
         typeof spec['command'] === 'string' ? (spec['command'] as string) : key;

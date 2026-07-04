@@ -123,6 +123,7 @@ export class LspConfigWatcher {
     if (this.refreshTimer) clearTimeout(this.refreshTimer);
     this.refreshTimer = setTimeout(() => {
       this.refreshTimer = null;
+      if (this.processing) return;
       const activeDrain = this.drainPendingChange().catch((error) => {
         debugLogger.warn('LSP config watcher refresh error:', error);
       });
@@ -291,7 +292,7 @@ function sortJsonValue(value: unknown): unknown {
     return value.map(sortJsonValue);
   }
   if (value && typeof value === 'object') {
-    const sorted: Record<string, unknown> = {};
+    const sorted = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(value).sort()) {
       sorted[key] = sortJsonValue((value as Record<string, unknown>)[key]);
     }
