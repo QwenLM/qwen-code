@@ -164,10 +164,10 @@ describe('DingTalk markdown utilities', () => {
   });
 
   describe('normalizeDingTalkMarkdown', () => {
-    it('preserves markdown tables while splitting into chunks', () => {
+    it('converts markdown tables to readable text while splitting into chunks', () => {
       const input = ['| A | B |', '| --- | --- |', '| 1 | 2 |'].join('\n');
       const result = normalizeDingTalkMarkdown(input);
-      expect(result).toEqual([input]);
+      expect(result).toEqual(['A | B  \n1 | 2']);
     });
 
     it('passes through plain text', () => {
