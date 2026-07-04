@@ -2110,6 +2110,7 @@ export class GeminiChat {
         let transportStreamRetryCount = 0;
         let reactiveCompressionAttempted = false;
         let suppressNextRetryEvent = false;
+        let streamYieldedAnyChunk = false;
 
         // Read per-config overrides; fall back to built-in defaults.
         const cgConfig = self.config.getContentGeneratorConfig();
@@ -2158,6 +2159,7 @@ export class GeminiChat {
             lastFinishReason = undefined;
             for await (const chunk of stream) {
               streamYieldedChunk = true;
+              streamYieldedAnyChunk = true;
               const fr = chunk.candidates?.[0]?.finishReason;
               if (fr) lastFinishReason = fr;
               yield { type: StreamEventType.CHUNK, value: chunk };
@@ -2682,7 +2684,11 @@ export class GeminiChat {
           //   not for auth/billing/client errors.
           const fallbackModels = self.config.getModelFallbacks();
 
-          if (fallbackModels.length > 0 && !isUnattendedMode()) {
+          if (
+            fallbackModels.length > 0 &&
+            !isUnattendedMode() &&
+            !streamYieldedAnyChunk
+          ) {
             let currentErrorClassification = classifyRetryError(lastError, {
               authType: cgConfig?.authType,
               extraRetryErrorCodes,
@@ -2712,6 +2718,8 @@ export class GeminiChat {
                 model,
                 resolvedPrimaryModel,
               ]);
+              const fallbackFailures: string[] = [];
+              let fallbackRequestContents = requestContents;
 
               for (const fallbackModelId of fallbackModels) {
                 // Skip fallback models that match the current/primary model
@@ -2787,7 +2795,7 @@ export class GeminiChat {
                 try {
                   for await (const event of self.makeFallbackStreamWithRetries(
                     resolvedFallbackModel,
-                    requestContents,
+                    fallbackRequestContents,
                     currentUserContent,
                     params,
                     prompt_id,
@@ -2841,6 +2849,9 @@ export class GeminiChat {
                   const canTryNextFallback = isFallbackEligible(
                     fallbackClassification,
                   );
+                  fallbackFailures.push(
+                    `${resolvedFallbackModel} (${fallbackClassification.reason})`,
+                  );
                   debugLogger.warn(
                     `[FALLBACK] Fallback model "${resolvedFallbackModel}" also ` +
                       `failed (reason: ${fallbackClassification.reason}, ` +
@@ -2868,25 +2879,48 @@ export class GeminiChat {
                     );
                     break;
                   }
+                  fallbackRequestContents =
+                    self.getRequestHistory(currentUserContent);
                   lastError = fallbackError;
                 }
               }
 
               if (!fallbackSucceeded) {
                 self.popPendingPartialAssistantTurn();
+                if (fallbackFailures.length > 0 && lastError) {
+                  lastError = new Error(
+                    `Primary model "${model}" failed ` +
+                      `(${initialFallbackClassification.reason}); ` +
+                      `fallback chain failed after trying: ` +
+                      `${fallbackFailures.join(', ')}.`,
+                    { cause: lastError },
+                  );
+                }
                 debugLogger.warn(
                   '[FALLBACK] Fallback chain exhausted without success. ' +
                     'Throwing last error.',
                 );
               }
             } else {
-              debugLogger.info(
+              debugLogger.warn(
                 '[FALLBACK] Fallback chain skipped: primary error is not ' +
                   'fallback-eligible ' +
                   `(reason: ${currentErrorClassification.reason}, ` +
-                  `diagnosis: ${currentErrorClassification.diagnosis}).`,
+                  `diagnosis: ${currentErrorClassification.diagnosis}, ` +
+                  `status: ${currentErrorClassification.statusCode ?? 'unknown'}, ` +
+                  `error: ${lastError instanceof Error ? lastError.message : String(lastError)}).`,
               );
             }
+          } else if (
+            fallbackModels.length > 0 &&
+            !isUnattendedMode() &&
+            streamYieldedAnyChunk
+          ) {
+            self.popPendingPartialAssistantTurn();
+            debugLogger.warn(
+              '[FALLBACK] Fallback chain skipped because the primary model ' +
+                'already emitted user-visible output.',
+            );
           }
 
           if (lastError) {
