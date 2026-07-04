@@ -200,6 +200,8 @@ const EXPECTED_STAGE1_FEATURES = [
   'auth_provider_install',
   'workspace_memory',
   'workspace_memory_remember',
+  'workspace_memory_forget',
+  'workspace_memory_dream',
   'workspace_agents',
   'workspace_agent_generate',
   'workspace_env',
@@ -564,6 +566,20 @@ interface FakeBridgeOpts {
     filesTouched: string[];
     touchedScopes: Array<'user' | 'project'>;
   }>;
+  workspaceMemoryForgetImpl?: (request: { query: string }) => Promise<{
+    summary?: string;
+    removedEntries: Array<{
+      topic: 'user' | 'feedback' | 'project' | 'reference';
+      summary: string;
+      filePath: string;
+    }>;
+    touchedTopics: Array<'user' | 'feedback' | 'project' | 'reference'>;
+  }>;
+  workspaceMemoryDreamImpl?: () => Promise<{
+    summary?: string;
+    touchedTopics: Array<'user' | 'feedback' | 'project' | 'reference'>;
+    dedupedEntries: number;
+  }>;
   daemonStatusSnapshotImpl?: () => BridgeDaemonStatusSnapshot;
 }
 
@@ -696,6 +712,8 @@ interface FakeBridge extends AcpSessionBridge {
     content: string;
     contextMode: 'workspace' | 'clean';
   }>;
+  workspaceMemoryForgetCalls: Array<{ query: string }>;
+  workspaceMemoryDreamCalls: number;
   setToolEnabledCalls: Array<{
     toolName: string;
     enabled: boolean;
@@ -792,6 +810,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const setModelCalls: FakeBridge['setModelCalls'] = [];
   const workspaceMemoryRememberCalls: FakeBridge['workspaceMemoryRememberCalls'] =
     [];
+  const workspaceMemoryForgetCalls: FakeBridge['workspaceMemoryForgetCalls'] =
+    [];
+  let workspaceMemoryDreamCalls = 0;
   const closeCalls: FakeBridge['closeCalls'] = [];
   const updateMetadataCalls: FakeBridge['updateMetadataCalls'] = [];
   const heartbeatCalls: FakeBridge['heartbeatCalls'] = [];
@@ -833,6 +854,20 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       summary: 'remembered',
       filesTouched: [],
       touchedScopes: [],
+    }));
+  const workspaceMemoryForgetImpl =
+    opts.workspaceMemoryForgetImpl ??
+    (async () => ({
+      summary: 'forgot',
+      removedEntries: [],
+      touchedTopics: [],
+    }));
+  const workspaceMemoryDreamImpl =
+    opts.workspaceMemoryDreamImpl ??
+    (async () => ({
+      summary: 'dreamed',
+      touchedTopics: [],
+      dedupedEntries: 0,
     }));
   const cancelImpl = opts.cancelImpl ?? (async () => {});
   const respondImpl = opts.respondImpl ?? (() => true);
@@ -1270,6 +1305,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     generateSessionRecapCalls,
     forkCalls,
     workspaceMemoryRememberCalls,
+    workspaceMemoryForgetCalls,
     setToolEnabledCalls,
     initWorkspaceCalls,
     restartMcpServerCalls,
@@ -1284,6 +1320,9 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     },
     get workspaceMcpCalls() {
       return workspaceMcpCalls;
+    },
+    get workspaceMemoryDreamCalls() {
+      return workspaceMemoryDreamCalls;
     },
     get workspaceSkillsCalls() {
       return workspaceSkillsCalls;
@@ -1548,6 +1587,14 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     async runWorkspaceMemoryRemember(request) {
       workspaceMemoryRememberCalls.push(request);
       return workspaceMemoryRememberImpl(request);
+    },
+    async runWorkspaceMemoryForget(request) {
+      workspaceMemoryForgetCalls.push(request);
+      return workspaceMemoryForgetImpl(request);
+    },
+    async runWorkspaceMemoryDream() {
+      workspaceMemoryDreamCalls++;
+      return workspaceMemoryDreamImpl();
     },
     async isWorkspaceMemoryRememberAvailable() {
       return true;

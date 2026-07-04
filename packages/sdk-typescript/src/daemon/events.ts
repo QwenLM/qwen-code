@@ -477,7 +477,11 @@ export interface DaemonFileMemoryChangedData {
 
 export interface DaemonManagedMemoryChangedData {
   scope: 'managed';
-  source: 'workspace_memory_remember' | (string & {});
+  source:
+    | 'workspace_memory_remember'
+    | 'workspace_memory_forget'
+    | 'workspace_memory_dream'
+    | (string & {});
   taskId: string;
   touchedScopes: Array<'user' | 'project'>;
   [key: string]: unknown;

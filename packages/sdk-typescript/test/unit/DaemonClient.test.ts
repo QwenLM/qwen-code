@@ -148,6 +148,42 @@ describe('DaemonClient', () => {
     });
   });
 
+  describe('daemonStatus', () => {
+    it('GETs /daemon/status without a detail param by default', async () => {
+      const body = { v: 1, detail: 'summary', status: 'ok', issues: [] };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, body));
+      const client = new DaemonClient({
+        baseUrl: 'http://daemon',
+        token: 'secret',
+        fetch,
+      });
+      const res = await client.daemonStatus();
+      expect(res).toEqual(body);
+      expect(calls[0]?.url).toBe('http://daemon/daemon/status');
+      expect(calls[0]?.method).toBe('GET');
+      expect(calls[0]?.headers['authorization']).toBe('Bearer secret');
+    });
+
+    it('GETs /daemon/status?detail=full when asked for full detail', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, { v: 1, detail: 'full' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await client.daemonStatus('full');
+      expect(calls[0]?.url).toBe('http://daemon/daemon/status?detail=full');
+    });
+
+    it('throws DaemonHttpError on non-2xx', async () => {
+      const { fetch } = recordingFetch(() =>
+        jsonResponse(500, { error: 'Failed to build daemon status' }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(client.daemonStatus()).rejects.toBeInstanceOf(
+        DaemonHttpError,
+      );
+    });
+  });
+
   describe('capabilities', () => {
     it('GETs /capabilities and returns the v1 envelope', async () => {
       const envelope = {
@@ -3597,6 +3633,102 @@ describe('DaemonClient', () => {
       expect(calls[0]).toMatchObject({
         method: 'GET',
         url: 'http://daemon/workspace/memory/remember/remember%2Fa%20b',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+    });
+
+    it('POSTs /workspace/memory/forget and forwards client id', async () => {
+      const reply = {
+        taskId: 'forget-1',
+        status: 'queued' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.forgetWorkspaceMemory('old preference', {
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/forget');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({
+        query: 'old preference',
+      });
+    });
+
+    it('GETs /workspace/memory/forget/:taskId', async () => {
+      const reply = {
+        taskId: 'forget/a b',
+        status: 'completed' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:01.000Z',
+        result: {
+          summary: 'forgot',
+          removedEntries: [],
+          touchedTopics: ['project' as const],
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getWorkspaceMemoryForgetTask('forget/a b', {
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/memory/forget/forget%2Fa%20b',
+      });
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+    });
+
+    it('POSTs /workspace/memory/dream and forwards client id', async () => {
+      const reply = {
+        taskId: 'dream-1',
+        status: 'queued' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:00.000Z',
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(202, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+      await expect(
+        client.dreamWorkspaceMemory({ clientId: 'client-7' }),
+      ).resolves.toEqual(reply);
+
+      expect(calls[0]?.method).toBe('POST');
+      expect(calls[0]?.url).toBe('http://daemon/workspace/memory/dream');
+      expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
+      expect(JSON.parse(calls[0]!.body!)).toEqual({});
+    });
+
+    it('GETs /workspace/memory/dream/:taskId', async () => {
+      const reply = {
+        taskId: 'dream/a b',
+        status: 'completed' as const,
+        createdAt: '2026-07-03T00:00:00.000Z',
+        updatedAt: '2026-07-03T00:00:01.000Z',
+        result: {
+          summary: 'dreamed',
+          touchedTopics: ['project' as const],
+          dedupedEntries: 1,
+        },
+      };
+      const { fetch, calls } = recordingFetch(() => jsonResponse(200, reply));
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      await expect(
+        client.getWorkspaceMemoryDreamTask('dream/a b', {
+          clientId: 'client-7',
+        }),
+      ).resolves.toEqual(reply);
+      expect(calls[0]).toMatchObject({
+        method: 'GET',
+        url: 'http://daemon/workspace/memory/dream/dream%2Fa%20b',
       });
       expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-7');
     });

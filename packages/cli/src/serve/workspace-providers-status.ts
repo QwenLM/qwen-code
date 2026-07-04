@@ -102,6 +102,11 @@ function buildWorkspaceProvidersStatus(
       typeof settings.fastModel === 'string' && settings.fastModel.length > 0
         ? settings.fastModel
         : undefined;
+    const visionModelId =
+      typeof settings.visionModel === 'string' &&
+      settings.visionModel.length > 0
+        ? settings.visionModel
+        : undefined;
     const approvalMode = resolveApprovalMode(settings);
     const providers = new Map<string, ServeWorkspaceProviderStatus>();
     const explicitModelBaseUrls = buildExplicitModelBaseUrls(
@@ -167,6 +172,7 @@ function buildWorkspaceProvidersStatus(
       currentAcpModelId,
       currentBaseUrl,
       fastModelId,
+      visionModelId,
     );
 
     return {
@@ -391,12 +397,15 @@ function buildCurrent(
   modelId: string | undefined,
   baseUrl: string | undefined,
   fastModelId: string | undefined,
+  visionModelId: string | undefined,
 ): ServeWorkspaceProviderCurrent | undefined {
-  if (!authType && !modelId && !baseUrl && !fastModelId) return undefined;
+  if (!authType && !modelId && !baseUrl && !fastModelId && !visionModelId)
+    return undefined;
   return {
     ...(authType ? { authType: String(authType) } : {}),
     ...(modelId ? { modelId } : {}),
     ...(baseUrl ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) } : {}),
     ...(fastModelId ? { fastModelId } : {}),
+    ...(visionModelId ? { visionModelId } : {}),
   };
 }

@@ -319,10 +319,26 @@ Response shape:
         "wsStreams": 0,
         "pendingClientRequests": 0
       }
+    },
+    "perf": {
+      "eventLoop": { "meanMs": 0, "p50Ms": 0, "p99Ms": 0, "maxMs": 0 },
+      "pipe": {
+        "inbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 },
+        "outbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 }
+      }
+    },
+    "activity": {
+      "activePrompts": 0,
+      "lastActivityAt": null,
+      "idleSinceMs": null
     }
   }
 }
 ```
+
+`runtime.perf` is optional. When present, it reports daemon-process event loop
+lag and daemon-child pipe byte counters only; ACP child event loop lag is not
+included in `/daemon/status`.
 
 `status` is `error` if any issue has error severity, `warning` if any issue has
 warning severity, otherwise `ok`. Issue codes are stable and include
@@ -334,6 +350,8 @@ the short window after the listener is ready but before the full runtime is
 mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
 runtime mount fails, it reports `daemon_runtime_failed` while non-status
 runtime routes return `503`.
+
+`runtime.activity` reports daemon-wide prompt activity. `activePrompts` counts sessions with an in-flight prompt. `lastActivityAt` is the ISO 8601 timestamp of the last prompt start/end or session spawn; `null` when the daemon has never processed any activity since boot. `idleSinceMs` is computed from `lastActivityAt` at response generation time.
 
 `runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
 not the channel-adapter worker. Daemon-managed channels use
@@ -1063,6 +1081,21 @@ names only; clients must not expect skill bodies or paths over this route.
       "outputFile": "/tmp/agent-1.jsonl",
       "isBackgrounded": true,
       "subagentType": "reviewer"
+    },
+    {
+      "kind": "agent",
+      "id": "agent-2",
+      "label": "general-purpose: run the failing test",
+      "description": "run the failing test",
+      "status": "running",
+      "startTime": 1699999999500,
+      "runtimeMs": 500,
+      "outputFile": "/tmp/agent-2.jsonl",
+      "isBackgrounded": false,
+      "subagentType": "general-purpose",
+      "parentAgentId": "agent-1",
+      "parentName": "reviewer",
+      "depth": 1
     }
   ]
 }
@@ -1073,6 +1106,15 @@ prompt and can be queried while the session is streaming. The response only
 contains whitelisted metadata from the agent, shell, and monitor task
 registries; controllers, timers, offsets, pending messages, and raw registry
 objects are never exposed.
+
+Agent tasks spawned by another sub-agent (nested sub-agents, bounded by
+`maxSubagentDepth`) carry three optional lineage fields: `parentAgentId` (the
+spawning agent task's `id`), `parentName` (the spawning agent's
+`subagentType`, captured at registration so it survives the parent's eviction
+from the registry), and `depth` (0-based launch depth; 0 = spawned by the
+top-level session). Agents launched by the top-level session omit
+`parentAgentId` and `parentName`; clients should treat all three fields as
+optional and fall back to a flat list when they are absent.
 
 ### `GET /session/:id/lsp`
 

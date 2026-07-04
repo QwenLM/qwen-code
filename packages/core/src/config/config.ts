@@ -111,6 +111,7 @@ import { BackgroundShellRegistry } from '../services/backgroundShellRegistry.js'
 import { WorkflowRunRegistry } from '../agents/workflow-run-registry.js';
 import { FileReadCache } from '../services/fileReadCache.js';
 import { resolveStopHookBlockingCap } from '../hooks/stopHookCap.js';
+import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import { buildContextUsage } from '../hooks/context-usage.js';
 import {
   DEFAULT_OTLP_ENDPOINT,
@@ -1041,6 +1042,8 @@ export interface ConfigParameters {
   skipNextSpeakerCheck?: boolean;
   shellExecutionConfig?: ShellExecutionConfig;
   skipLoopDetection?: boolean;
+  /** Per-turn tool-call cap; <= 0 disables. See getMaxToolCallsPerTurn. */
+  maxToolCallsPerTurn?: number;
   truncateToolOutputThreshold?: number;
   truncateToolOutputLines?: number;
   toolOutputBatchBudget?: number;
@@ -1482,7 +1485,7 @@ export class Config {
    * the model later calls a tool that no longer exists (see
    * `CoreToolScheduler.getToolNotFoundMessage`). Self-heals: a name is dropped
    * from the set the moment the server reappears in the effective map.
-  */
+   */
   private readonly recentlyRemovedMcpServers = new Set<string>();
   private readonly topTierMcpServers:
     | Record<string, MCPServerConfig>
@@ -1612,6 +1615,7 @@ export class Config {
   private readonly agentsSettings: AgentsCollabSettings;
   private readonly worktreeSettings: WorktreeSettings;
   private readonly skipLoopDetection: boolean;
+  private readonly maxToolCallsPerTurn: number;
   private readonly skipStartupContext: boolean;
   private readonly bareMode: boolean;
   private readonly safeMode: boolean;
@@ -1844,6 +1848,8 @@ export class Config {
     this.interactive = params.interactive ?? false;
     this.trustedFolder = params.trustedFolder;
     this.skipLoopDetection = params.skipLoopDetection ?? false;
+    this.maxToolCallsPerTurn =
+      params.maxToolCallsPerTurn ?? DEFAULT_MAX_TOOL_CALLS_PER_TURN;
     this.skipStartupContext = params.skipStartupContext ?? false;
     this.bareMode = params.bareMode ?? false;
     this.safeMode = params.safeMode ?? isSafeModeEnv();
@@ -5637,6 +5643,18 @@ export class Config {
 
   getSkipLoopDetection(): boolean {
     return this.skipLoopDetection;
+  }
+
+  /**
+   * Effective per-turn tool-call cap. A configured value <= 0 disables the
+   * cap and is returned as Infinity so callers can compare unconditionally
+   * (mirrors getTruncateToolOutputThreshold).
+   */
+  getMaxToolCallsPerTurn(): number {
+    if (this.maxToolCallsPerTurn <= 0) {
+      return Number.POSITIVE_INFINITY;
+    }
+    return this.maxToolCallsPerTurn;
   }
 
   getSkipStartupContext(): boolean {

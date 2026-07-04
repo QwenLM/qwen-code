@@ -94,6 +94,7 @@ export async function planManagedAutoMemoryDreamByAgent(
   config: Config,
   projectRoot: string,
   abortSignal?: AbortSignal,
+  options: { suppressChatRecording?: boolean } = {},
 ): Promise<ForkedAgentResult> {
   const memoryRoot = getAutoMemoryRoot(projectRoot);
   const transcriptDir = getTranscriptDir(projectRoot);
@@ -118,6 +119,7 @@ export async function planManagedAutoMemoryDreamByAgent(
       ToolNames.EDIT,
     ],
     abortSignal,
+    suppressChatRecording: options.suppressChatRecording,
   });
 
   if (result.status === 'failed') {
