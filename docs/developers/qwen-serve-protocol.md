@@ -1702,7 +1702,7 @@ data: {"id":8,"v":1,"type":"permission_request","data":{"requestId":"<uuid>","se
 : heartbeat              ← every 15s, no payload
 
 event: client_evicted    ← terminal frame, no id (synthetic)
-data: {"v":1,"type":"client_evicted","data":{"reason":"queue_overflow","droppedAfter":42}}
+data: {"v":1,"type":"client_evicted","data":{"reason":"queue_overflow","droppedAfter":42,"queueSize":256,"maxQueued":256,"queuedBytes":1800000,"maxQueuedBytes":2097152}}
 
 event: client_evicted    ← terminal frame for byte overflow, no id (synthetic)
 data: {"v":1,"type":"client_evicted","data":{"reason":"queue_bytes_overflow","droppedAfter":43,"queueSize":1,"maxQueued":256,"queuedBytes":1900000,"maxQueuedBytes":2097152,"eventBytes":300000}}

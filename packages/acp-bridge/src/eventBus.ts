@@ -142,6 +142,16 @@ function serializedByteLength(event: BridgeEvent): number {
   }
 }
 
+function logSubscriberEvicted(data: Record<string, unknown>): void {
+  try {
+    process.stderr.write(
+      `qwen serve: EventBus subscriber evicted ${JSON.stringify(data)}\n`,
+    );
+  } catch {
+    // Best-effort diagnostic; logging must not break publish()'s never-throws contract.
+  }
+}
+
 type QueueWarningThreshold = 'frames' | 'bytes' | 'frames_and_bytes';
 
 interface InternalSub {
@@ -330,6 +340,7 @@ export class EventBus {
             ? { eventBytes: pushResult.eventBytes }
             : {}),
         };
+        logSubscriberEvicted(evictionData);
         const evictionFrame: BridgeEvent = {
           v: EVENT_SCHEMA_VERSION,
           type: 'client_evicted',

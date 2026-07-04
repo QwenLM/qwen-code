@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   DEFAULT_MAX_QUEUED_BYTES,
   EventBus,
@@ -25,6 +25,14 @@ async function collect(
 }
 
 describe('EventBus', () => {
+  beforeEach(() => {
+    vi.spyOn(process.stderr, 'write').mockReturnValue(true);
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('assigns monotonic ids and the right schema version', () => {
     const bus = new EventBus();
     const a = bus.publish({ type: 'foo', data: 1 });
@@ -198,6 +206,11 @@ describe('EventBus', () => {
     expect(
       (collected[3]?.data as { eventBytes?: number }).eventBytes,
     ).toBeUndefined();
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus subscriber evicted {"reason":"queue_overflow"',
+      ),
+    );
     expect(bus.subscriberCount).toBe(0);
     abort.abort();
   });
@@ -318,6 +331,48 @@ describe('EventBus', () => {
     abort.abort();
   });
 
+  it('does not rearm slow_client_warning until frame and byte backlogs both reset', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 16000,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 8, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+
+    for (let i = 1; i <= 6; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'x'.repeat(2400),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const partiallyDrained: BridgeEvent[] = [];
+    for (let i = 0; i < 3; i++) {
+      partiallyDrained.push((await it.next()).value);
+    }
+    expect(
+      partiallyDrained.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(0);
+
+    for (let i = 7; i <= 9; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'y'.repeat(2400),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const afterPartialDrain: BridgeEvent[] = [];
+    for (let i = 0; i < 7; i++) {
+      afterPartialDrain.push((await it.next()).value);
+    }
+    expect(
+      afterPartialDrain.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+    abort.abort();
+  });
+
   it('evicts a slow subscriber when live queued bytes overflow', async () => {
     const bus = new EventBus(100, undefined, undefined, {
       maxQueuedBytes: 1200,
@@ -359,6 +414,61 @@ describe('EventBus', () => {
     ).toBeGreaterThan(0);
     expect(bus.subscriberCount).toBe(0);
     abort.abort();
+  });
+
+  it('keeps sibling subscribers alive after one subscriber is byte-evicted', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const slowAbort = new AbortController();
+    const fastAbort = new AbortController();
+    const slowIter = bus.subscribe({
+      maxQueued: 100,
+      signal: slowAbort.signal,
+    });
+    const fastIter = bus.subscribe({
+      maxQueued: 100,
+      signal: fastAbort.signal,
+    });
+    const fastIt = fastIter[Symbol.asyncIterator]();
+
+    const fastFirst = fastIt.next();
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1000),
+      _meta: { serverTimestamp: 1 },
+    });
+    expect((await fastFirst).value.data).toBe('x'.repeat(1000));
+
+    const fastSecond = fastIt.next();
+    bus.publish({
+      type: 'foo',
+      data: 'y'.repeat(1000),
+      _meta: { serverTimestamp: 2 },
+    });
+    expect((await fastSecond).value.data).toBe('y'.repeat(1000));
+
+    const slowEvents: BridgeEvent[] = [];
+    for await (const e of slowIter) slowEvents.push(e);
+    expect(
+      slowEvents.find((e) => e.type === 'client_evicted')?.data,
+    ).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      droppedAfter: 2,
+    });
+    expect(bus.subscriberCount).toBe(1);
+
+    const fastThird = fastIt.next();
+    bus.publish({
+      type: 'foo',
+      data: 'tail',
+      _meta: { serverTimestamp: 3 },
+    });
+    expect((await fastThird).value.data).toBe('tail');
+
+    await fastIt.return?.();
+    slowAbort.abort();
+    fastAbort.abort();
   });
 
   it('allows one oversized live event on an empty queue before byte eviction', async () => {
