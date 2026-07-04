@@ -469,6 +469,38 @@ function acquireLock(lockPath: string, standaloneDir?: string): boolean {
       return false;
     }
 
+    // Check .deferred marker: a previous Windows update spawned a bat script
+    // that may still be running the swap. The marker contains the bat PID.
+    if (standaloneDir) {
+      const deferredMarker = `${standaloneDir}.deferred`;
+      if (fs.existsSync(deferredMarker)) {
+        try {
+          const batPid = parseInt(
+            fs.readFileSync(deferredMarker, 'utf-8').trim(),
+            10,
+          );
+          if (!Number.isNaN(batPid) && isProcessAlive(batPid)) {
+            throw new Error(
+              'A previous update is still being applied. Please wait a moment and try again.',
+            );
+          }
+        } catch (readErr) {
+          if (
+            readErr instanceof Error &&
+            readErr.message.startsWith('A previous update')
+          ) {
+            throw readErr;
+          }
+        }
+        // Bat script has exited (or crashed) — clean up stale marker
+        try {
+          fs.unlinkSync(deferredMarker);
+        } catch {
+          // already gone
+        }
+      }
+    }
+
     if (standaloneDir && fs.existsSync(`${standaloneDir}.new`)) {
       throw new Error(
         'A previous update is pending swap. Restart the CLI to apply it before updating again.',
@@ -574,6 +606,7 @@ function atomicReplace(
     fs.renameSync(newDir, pendingDir);
 
     const lockFile = lockPath;
+    const deferredMarker = `${standaloneDir}.deferred`;
     const logFile = path.join(path.dirname(standaloneDir), 'qwen-update.log');
     // Bat script runs detached after Node exits. It must:
     // 1. Wait for this Node process to release file locks (<= 30s).
@@ -581,6 +614,9 @@ function atomicReplace(
     //    move #1 so the user is never left without a working install.
     // 3. Log success/failure to qwen-update.log for post-mortem (the bat
     //    runs with stdio:ignore — the log is the only diagnostic surface).
+    // 4. Delete the .deferred marker so future `qwen update` calls know the
+    //    swap is complete (the lock file alone is insufficient because
+    //    acquireLock falls through when the Node PID is dead).
     const script = [
       '@echo off',
       'set /a TRIES=0',
@@ -608,6 +644,7 @@ function atomicReplace(
       `  echo [%DATE% %TIME%] rollback succeeded >> "${logFile}"`,
       ')',
       ':cleanup',
+      `del /F /Q "${deferredMarker}" 2>nul`,
       `del /F /Q "${lockFile}" 2>nul`,
       `del "%~f0"`,
     ].join('\r\n');
@@ -616,11 +653,18 @@ function atomicReplace(
       'qwen-update.bat',
     );
     fs.writeFileSync(scriptPath, script);
-    spawn('cmd.exe', ['/c', scriptPath], {
+    const child = spawn('cmd.exe', ['/c', scriptPath], {
       detached: true,
       stdio: 'ignore',
       windowsHide: true,
-    }).unref();
+    });
+    child.unref();
+    // Write .deferred marker with the bat script PID so future `qwen update`
+    // calls can detect the in-flight swap via isProcessAlive(batPid).
+    // acquireLock checks this marker before allowing lock theft.
+    if (child.pid) {
+      fs.writeFileSync(deferredMarker, String(child.pid));
+    }
     return 'deferred';
   } else {
     // Unix: rename is atomic on same filesystem. newDir is a sibling of
@@ -852,9 +896,10 @@ export async function performStandaloneUpdate(
   // On first-time migration, standaloneDir (and its parent) may not exist yet.
   fs.mkdirSync(parentDir, { recursive: true });
 
-  // Use a lockfile to prevent concurrent updates.
-  // Acquire lock BEFORE creating standaloneDir to prevent a concurrent
-  // process from seeing the empty directory and throwing a misleading error.
+  // Use a lockfile (+ .deferred marker on Windows) to prevent concurrent
+  // updates. Acquire lock BEFORE creating standaloneDir to prevent a
+  // concurrent process from seeing the empty directory and throwing a
+  // misleading error.
   const lockPath = path.join(parentDir, '.qwen-update.lock');
   if (!acquireLock(lockPath, standaloneDir)) {
     throw new Error('Another update is already in progress');
@@ -961,6 +1006,15 @@ export async function performStandaloneUpdate(
     if (fs.existsSync(pendingDir)) {
       fs.rmSync(pendingDir, { recursive: true, force: true });
     }
+    // Clean up .deferred marker if atomicReplace created it before throwing
+    const deferredMarker = `${standaloneDir}.deferred`;
+    if (fs.existsSync(deferredMarker)) {
+      try {
+        fs.unlinkSync(deferredMarker);
+      } catch {
+        // already gone
+      }
+    }
     cleanupEmptyStandaloneDir(standaloneDir);
     if (isFirstTimeMigration) {
       cleanupFirstTimeMigrationArtifacts(migrationArtifacts);
@@ -971,6 +1025,17 @@ export async function performStandaloneUpdate(
     // On failure or on Unix, release immediately.
     if (updateResult !== 'deferred') {
       releaseLock(lockPath);
+      // Clean up .deferred marker if a previous run's bat script exited
+      // without removing it (e.g. crash). The current run's marker was
+      // never created (non-deferred path), so this is always safe.
+      const deferredMarker = `${standaloneDir}.deferred`;
+      if (fs.existsSync(deferredMarker)) {
+        try {
+          fs.unlinkSync(deferredMarker);
+        } catch {
+          // already gone
+        }
+      }
     }
     try {
       fs.rmSync(tempDir, { recursive: true, force: true });
