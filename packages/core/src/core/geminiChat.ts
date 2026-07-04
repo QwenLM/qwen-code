@@ -2719,7 +2719,6 @@ export class GeminiChat {
                 resolvedPrimaryModel,
               ]);
               const fallbackFailures: string[] = [];
-              let fallbackRequestContents = requestContents;
 
               for (const fallbackModelId of fallbackModels) {
                 // Skip fallback models that match the current/primary model
@@ -2791,15 +2790,13 @@ export class GeminiChat {
                 // fallback model starts producing its own response.
                 self.popPendingPartialAssistantTurn();
 
-                // Run the fallback model with its own retry loop.
+                // Run the fallback model through the existing API-call wiring.
                 try {
-                  for await (const event of self.makeFallbackStreamWithRetries(
+                  for await (const event of self.makeFallbackStream(
                     resolvedFallbackModel,
-                    fallbackRequestContents,
-                    currentUserContent,
+                    requestContents,
                     params,
                     prompt_id,
-                    effectiveReservedOutput,
                     fallbackGenerator,
                     fallbackRetryAuthType,
                     fallbackRetryErrorCodes,
@@ -2879,8 +2876,6 @@ export class GeminiChat {
                     );
                     break;
                   }
-                  fallbackRequestContents =
-                    self.getRequestHistory(currentUserContent);
                   lastError = fallbackError;
                 }
               }
@@ -3045,456 +3040,38 @@ export class GeminiChat {
     return this.processStreamResponse(model, streamResponse);
   }
 
-  // TODO(#6116): This retry loop mirrors the primary sendMessageStream retry
-  // structure. Refactor both paths to share a single parameterised retry loop
-  // to reduce duplication once the fallback feature stabilises.
-  private async *makeFallbackStreamWithRetries(
+  private async *makeFallbackStream(
     model: string,
     requestContents: Content[],
-    currentUserContent: Content,
     params: SendMessageParameters,
     prompt_id: string,
-    effectiveReservedOutput: number,
     contentGenerator: ContentGenerator,
     retryAuthType?: string,
     retryErrorCodes?: readonly number[],
   ): AsyncGenerator<StreamEvent> {
-    let lastError: unknown = new Error('Fallback request failed.');
-    let rateLimitRetryCount = 0;
-    let invalidStreamRetryCount = 0;
-    let transportStreamRetryCount = 0;
-    let reactiveCompressionAttempted = false;
-    let suppressNextRetryEvent = false;
-    let maxTokensEscalated = false;
-    const cgConfig = this.config.getContentGeneratorConfig();
-    const maxRateLimitRetries =
-      cgConfig?.maxRetries ?? RATE_LIMIT_RETRY_OPTIONS.maxRetries;
-    const parsedEnvMaxTokens = parsePositiveIntegerEnvValue(
-      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
-    );
-    const hasUserMaxTokensOverride =
-      (cgConfig?.samplingParams?.max_tokens !== undefined &&
-        cgConfig?.samplingParams?.max_tokens !== null) ||
-      parsedEnvMaxTokens !== undefined;
-    let lastFinishReason: string | undefined;
-
-    for (
-      let attempt = 0;
-      attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts;
-      attempt++
-    ) {
-      let streamYieldedChunk = false;
-      try {
-        if (suppressNextRetryEvent) {
-          suppressNextRetryEvent = false;
-        } else if (
-          attempt > 0 ||
-          rateLimitRetryCount > 0 ||
-          invalidStreamRetryCount > 0 ||
-          transportStreamRetryCount > 0
-        ) {
-          yield { type: StreamEventType.RETRY };
-        }
-
-        const stream = await this.makeApiCallAndProcessStream(
-          model,
-          requestContents,
-          params,
-          prompt_id,
-          { contentGenerator, retryAuthType, retryErrorCodes },
-        );
-
-        lastFinishReason = undefined;
-        for await (const chunk of stream) {
-          streamYieldedChunk = true;
-          const fr = chunk.candidates?.[0]?.finishReason;
-          if (fr) lastFinishReason = fr;
-          yield { type: StreamEventType.CHUNK, value: chunk };
-        }
-        lastError = null;
-        break;
-      } catch (error) {
-        lastError = error;
-        if (streamYieldedChunk) {
-          this.popPendingPartialAssistantTurn();
-          // Once fallback output has reached callers, retrying the same
-          // fallback or moving to the next fallback would replay visible
-          // content. In NDJSON mode that can also leave an emitted tool_use
-          // without a matching tool_result, so stop instead of retrying.
-          throw new FallbackStreamOutputError(model, error);
-        }
-        const classification = classifyRetryError(error, {
-          authType: retryAuthType,
-          extraRetryErrorCodes: retryErrorCodes,
-        });
-
-        if (isRateLimitError(error, retryErrorCodes)) {
-          const details = getRateLimitErrorDetails(error);
-          const diagnosticFields = {
-            classificationDiagnosis: classification.diagnosis,
-            errorKind: classification.kind,
-            classificationReason: classification.reason,
-            ...details,
-          };
-
-          if (rateLimitRetryCount < maxRateLimitRetries) {
-            this.popPendingPartialAssistantTurn();
-            rateLimitRetryCount++;
-            const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
-              ...RATE_LIMIT_RETRY_OPTIONS,
-              error,
-            });
-            const message = parseAndFormatApiError(
-              error instanceof Error ? error.message : String(error),
-            );
-            debugLogger.warn('Rate limit retry scheduled', {
-              retryPath: 'fallback-stream',
-              retryDecision: 'retry',
-              attempt: rateLimitRetryCount,
-              maxRetries: maxRateLimitRetries,
-              retryDelayMs: delayMs,
-              ...diagnosticFields,
-            });
-            const { promise: delayPromise, skip } = delay(
-              delayMs,
-              params.config?.abortSignal,
-            );
-            yield {
-              type: StreamEventType.RETRY,
-              retryInfo: {
-                message,
-                attempt: rateLimitRetryCount,
-                maxRetries: maxRateLimitRetries,
-                delayMs,
-                skipDelay: skip,
-              },
-            };
-            attempt--;
-            await delayPromise;
-            continue;
-          }
-
-          debugLogger.warn('Rate limit retry exhausted', {
-            retryPath: 'fallback-stream',
-            retryDecision: 'exhausted',
-            attempts: rateLimitRetryCount,
-            maxRetries: maxRateLimitRetries,
-            ...diagnosticFields,
-          });
-        }
-
-        const isRetryableStreamTransportError =
-          classification.kind === 'transport' &&
-          classification.transportCode !== undefined &&
-          RETRYABLE_STREAM_TRANSPORT_CODES.has(classification.transportCode);
-        if (
-          isRetryableStreamTransportError &&
-          !streamYieldedChunk &&
-          transportStreamRetryCount < TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
-        ) {
-          this.popPendingPartialAssistantTurn();
-          transportStreamRetryCount++;
-          const delayMs =
-            TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
-            transportStreamRetryCount;
-          debugLogger.warn('Transport stream retry scheduled', {
-            retryPath: 'fallback-stream',
-            retryDecision: 'retry',
-            attempt: transportStreamRetryCount,
-            maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
-            retryDelayMs: delayMs,
-            errorKind: classification.kind,
-            transportCode: classification.transportCode,
-          });
-          yield { type: StreamEventType.RETRY };
-          suppressNextRetryEvent = true;
-          attempt--;
-          await delay(delayMs, params.config?.abortSignal).promise;
-          continue;
-        }
-        if (isRetryableStreamTransportError) {
-          debugLogger.warn('Transport stream retry not taken', {
-            retryPath: 'fallback-stream',
-            retryDecision: streamYieldedChunk
-              ? 'skipped_after_chunk'
-              : 'exhausted',
-            attempts: transportStreamRetryCount,
-            maxRetries: TRANSPORT_STREAM_RETRY_CONFIG.maxRetries,
-            errorKind: classification.kind,
-            transportCode: classification.transportCode,
-          });
-        }
-
-        const contextOverflow = getContextLengthExceededInfo(error);
-        if (contextOverflow.isExceeded) {
-          if (!reactiveCompressionAttempted) {
-            reactiveCompressionAttempted = true;
-            const reactiveOriginalTokenCount =
-              contextOverflow.actualTokens ??
-              contextOverflow.limitTokens ??
-              this.config.getContentGeneratorConfig()?.contextWindowSize ??
-              DEFAULT_TOKEN_LIMIT;
-            debugLogger.warn(
-              'Context length exceeded; attempting reactive compression.',
-            );
-            try {
-              const reactiveInfo = await this.tryCompress(
-                prompt_id,
-                model,
-                true,
-                params.config?.abortSignal,
-                {
-                  originalTokenCountOverride: reactiveOriginalTokenCount,
-                  trigger: 'auto',
-                  reservedOutputTokens: effectiveReservedOutput,
-                },
-              );
-
-              if (
-                reactiveInfo.compressionStatus === CompressionStatus.COMPRESSED
-              ) {
-                this.popPendingPartialAssistantTurn();
-                requestContents = this.getRequestHistory(currentUserContent);
-                debugLogger.info(
-                  `Reactive compression succeeded: ` +
-                    `${reactiveInfo.originalTokenCount} -> ` +
-                    `${reactiveInfo.newTokenCount} tokens.`,
-                );
-                yield {
-                  type: StreamEventType.COMPRESSED,
-                  info: reactiveInfo,
-                };
-                yield { type: StreamEventType.RETRY };
-                suppressNextRetryEvent = true;
-                attempt--;
-                continue;
-              }
-
-              debugLogger.warn(
-                `Reactive compression did not recover context overflow: ` +
-                  `status=${reactiveInfo.compressionStatus}.`,
-              );
-              if (isCompressionFailureStatus(reactiveInfo.compressionStatus)) {
-                this.consecutiveFailures += 1;
-                if (this.consecutiveFailures >= MAX_CONSECUTIVE_FAILURES) {
-                  debugLogger.warn(
-                    `[compaction] circuit breaker tripped after ${this.consecutiveFailures} consecutive failures (reactive overflow path); auto-compaction will NOOP on the cheap-gate until a successful force compaction resets the counter.`,
-                  );
-                }
-              }
-            } catch (compressionError) {
-              if (
-                params.config?.abortSignal?.aborted ||
-                isAbortError(compressionError)
-              ) {
-                throw compressionError;
-              }
-              debugLogger.warn(
-                'Reactive compression failed.',
-                compressionError,
-              );
-            }
-          } else {
-            debugLogger.warn(
-              'Reactive compression already attempted; ' +
-                'propagating the context overflow error to caller.',
-            );
-          }
-          break;
-        }
-
-        if (
-          error instanceof InvalidStreamError &&
-          invalidStreamRetryCount < INVALID_STREAM_RETRY_CONFIG.maxRetries
-        ) {
-          this.popPendingPartialAssistantTurn();
-          invalidStreamRetryCount++;
-          const delayMs =
-            INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
-            invalidStreamRetryCount;
-          debugLogger.warn(
-            `Invalid stream [${error.type}] ` +
-              `(retry ${invalidStreamRetryCount}/${INVALID_STREAM_RETRY_CONFIG.maxRetries}). ` +
-              `Waiting ${delayMs / 1000}s before retrying...`,
-          );
-          logContentRetry(
-            this.config,
-            new ContentRetryEvent(
-              invalidStreamRetryCount - 1,
-              error.type,
-              delayMs,
-              model,
-            ),
-          );
-          yield { type: StreamEventType.RETRY };
-          attempt--;
-          await delay(delayMs, params.config?.abortSignal).promise;
-          continue;
-        }
-
-        throw error;
-      }
-    }
-
-    const requestedMaxOutputTokens = params.config?.maxOutputTokens;
-    const escalatedLimit = Math.max(
-      ESCALATED_MAX_TOKENS,
-      tokenLimit(model, 'output'),
-    );
-    const shouldEscalateMaxOutputTokens =
-      requestedMaxOutputTokens === undefined ||
-      requestedMaxOutputTokens < escalatedLimit;
-
-    if (
-      lastError === null &&
-      lastFinishReason === FinishReason.MAX_TOKENS &&
-      !maxTokensEscalated &&
-      !hasUserMaxTokensOverride &&
-      shouldEscalateMaxOutputTokens
-    ) {
-      maxTokensEscalated = true;
-      const startingLimitLabel =
-        requestedMaxOutputTokens === undefined
-          ? 'default max_tokens'
-          : `${requestedMaxOutputTokens} tokens`;
-      debugLogger.info(
-        `Output truncated at ${startingLimitLabel}. Escalating to ${escalatedLimit} tokens.`,
+    let streamYieldedChunk = false;
+    try {
+      const stream = await this.makeApiCallAndProcessStream(
+        model,
+        requestContents,
+        params,
+        prompt_id,
+        { contentGenerator, retryAuthType, retryErrorCodes },
       );
-      if (
-        this.history.length > 0 &&
-        this.history[this.history.length - 1].role === 'model'
-      ) {
-        this.history.pop();
-      }
-      yield {
-        type: StreamEventType.RETRY,
-        maxOutputTokensEscalated: escalatedLimit,
-      };
-      const escalatedParams: SendMessageParameters = {
-        ...params,
-        config: {
-          ...params.config,
-          maxOutputTokens: escalatedLimit,
-        },
-      };
-      let escalatedFinishReason: string | undefined;
-      let escalatedYieldedChunk = false;
-      try {
-        const escalatedStream = await this.makeApiCallAndProcessStream(
-          model,
-          requestContents,
-          escalatedParams,
-          prompt_id,
-          { contentGenerator, retryAuthType, retryErrorCodes },
-        );
-        for await (const chunk of escalatedStream) {
-          escalatedYieldedChunk = true;
-          const fr = chunk.candidates?.[0]?.finishReason;
-          if (fr) escalatedFinishReason = fr;
-          yield { type: StreamEventType.CHUNK, value: chunk };
-        }
-      } catch (error) {
-        if (escalatedYieldedChunk) {
-          this.popPendingPartialAssistantTurn();
-          throw new FallbackStreamOutputError(model, error);
-        }
-        throw error;
-      }
 
-      let recoveryCount = 0;
-      let successfulRecoveries = 0;
-      while (
-        escalatedFinishReason === FinishReason.MAX_TOKENS &&
-        recoveryCount < MAX_OUTPUT_RECOVERY_ATTEMPTS
-      ) {
-        const lastEntry = this.history[this.history.length - 1];
-        const hasFunctionCall =
-          lastEntry?.role === 'model' &&
-          lastEntry.parts?.some((p) => p.functionCall) === true;
-        if (hasFunctionCall) {
-          debugLogger.info(
-            'Skipping recovery: truncated turn contains functionCall; ' +
-              'deferring to tool scheduler fallback.',
-          );
-          break;
-        }
-
-        recoveryCount++;
-        debugLogger.info(
-          `Output still truncated after escalation. ` +
-            `Recovery attempt ${recoveryCount}/${MAX_OUTPUT_RECOVERY_ATTEMPTS}.`,
-        );
-        this.history.push(
-          createUserContent([{ text: buildOutputRecoveryMessage(lastEntry) }]),
-        );
-        yield { type: StreamEventType.RETRY, isContinuation: true };
-        const recoveryContents = this.getRequestHistory(currentUserContent);
-        escalatedFinishReason = undefined;
-        try {
-          const recoveryStream = await this.makeApiCallAndProcessStream(
-            model,
-            recoveryContents,
-            escalatedParams,
-            prompt_id,
-            { contentGenerator, retryAuthType, retryErrorCodes },
-          );
-          for await (const chunk of recoveryStream) {
-            const fr = chunk.candidates?.[0]?.finishReason;
-            if (fr) escalatedFinishReason = fr;
-            yield { type: StreamEventType.CHUNK, value: chunk };
-          }
-          successfulRecoveries++;
-        } catch (recoveryError) {
-          const expectedIdx = this.pendingPartialAssistantTurnIndex;
-          const lastIdx = this.history.length - 1;
-          if (
-            expectedIdx !== null &&
-            this.history.length > 0 &&
-            this.history[lastIdx]?.role === 'model'
-          ) {
-            if (expectedIdx !== lastIdx) {
-              debugLogger.warn(
-                `[RECOVERY_POP] Marker/last-index mismatch: ` +
-                  `marker=${expectedIdx}, lastIdx=${lastIdx}, ` +
-                  `historyLength=${this.history.length}. Popping ` +
-                  `last entry as best-effort rollback — investigate ` +
-                  `any history mutation between processStreamResponse's ` +
-                  `partial push and this catch.`,
-              );
-            }
-            this.history.pop();
-            this.clearPendingPartialState();
-          }
-          if (
-            this.history.length > 0 &&
-            this.history[this.history.length - 1].role === 'user'
-          ) {
-            this.history.pop();
-          }
-          debugLogger.warn(
-            `Recovery attempt ${recoveryCount} failed: ${recoveryError}`,
-          );
-          yield {
-            type: StreamEventType.CHUNK,
-            value: {
-              candidates: [
-                {
-                  content: { role: 'model', parts: [] },
-                  finishReason: FinishReason.STOP,
-                },
-              ],
-            } as unknown as GenerateContentResponse,
-          };
-          break;
-        }
+      for await (const chunk of stream) {
+        streamYieldedChunk = true;
+        yield { type: StreamEventType.CHUNK, value: chunk };
       }
-
-      if (successfulRecoveries > 0) {
-        this.coalesceRecoveryPairs(successfulRecoveries);
+    } catch (error) {
+      if (streamYieldedChunk) {
+        this.popPendingPartialAssistantTurn();
+        // Once fallback output has reached callers, moving to another fallback
+        // would replay visible content and can orphan NDJSON tool_use blocks.
+        throw new FallbackStreamOutputError(model, error);
       }
+      throw error;
     }
-
-    if (lastError) throw lastError;
   }
 
   /**
