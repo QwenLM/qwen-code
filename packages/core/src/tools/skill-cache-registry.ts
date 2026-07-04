@@ -20,10 +20,10 @@ const debugLogger = createDebugLogger('SKILL_CACHE');
  * The old module-level singleton (`cachedEntries` + `cacheInvalidated`) was
  * shared across all callers regardless of which `SkillManager` / `Config`
  * instance was used.  This broke tests because different test fixtures created
- * distinct mock instances but read the same cached result.  A WeakMap keyed by
- * `(skillManager, config)` guarantees per-instance isolation: each unique pair
- * gets its own cache entry, and entries are automatically reclaimed when the
- * key objects are garbage-collected.
+ * distinct mock instances but read the same cached result.  A nested WeakMap
+ * keyed by `(skillManager, config)` guarantees per-instance isolation: each
+ * unique pair gets its own cache entry, and entries are automatically
+ * reclaimed when the key objects are garbage-collected.
  *
  * Stores `Promise<CollectedAvailableSkills>` during the first compute so that
  * concurrent callers (e.g. SkillCommandLoader, BundledSkillLoader,
@@ -37,7 +37,7 @@ const debugLogger = createDebugLogger('SKILL_CACHE');
  */
 let cacheByManager = new WeakMap<
   object,
-  Map<unknown, CollectedAvailableSkills | Promise<CollectedAvailableSkills>>
+  WeakMap<object, CollectedAvailableSkills | Promise<CollectedAvailableSkills>>
 >();
 
 /**
@@ -79,7 +79,7 @@ export function getCachedOrCompute(
       if (cacheByManager !== cacheSnapshot) return result;
       let mc = cacheSnapshot.get(skillManager);
       if (!mc) {
-        mc = new Map();
+        mc = new WeakMap();
         cacheSnapshot.set(skillManager, mc);
       }
       // Overwrite the in-flight Promise with the resolved value so subsequent
@@ -107,7 +107,7 @@ export function getCachedOrCompute(
 
   let mc = cacheByManager.get(skillManager);
   if (!mc) {
-    mc = new Map();
+    mc = new WeakMap();
     cacheByManager.set(skillManager, mc);
   }
   mc.set(config, promise);

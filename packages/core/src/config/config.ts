@@ -91,7 +91,6 @@ import { InputFormat, OutputFormat } from '../output/types.js';
 import { PromptRegistry } from '../prompts/prompt-registry.js';
 import { ResourceRegistry } from '../resources/resource-registry.js';
 import { SkillManager } from '../skills/skill-manager.js';
-import { invalidateCollectedSkillEntriesCache } from '../tools/skill-cache-registry.js';
 import { PermissionManager } from '../permissions/permission-manager.js';
 import {
   type AutoModeDenialState,
@@ -5850,7 +5849,9 @@ export class Config {
     provider: () => ReadonlyArray<{ name: string; description: string }>,
   ): void {
     this.modelInvocableCommandsProvider = provider;
-    invalidateCollectedSkillEntriesCache();
+    // notifyConfigChanged invalidates the cache and fires change listeners
+    // so that SkillTool.refreshSkills() picks up late-arriving MCP prompts.
+    void this.skillManager?.notifyConfigChanged().catch(() => {});
   }
 
   /**

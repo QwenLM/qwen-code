@@ -383,4 +383,38 @@ describe('collectAvailableSkillEntries cache', () => {
       new Set(['active-gated', 'pending-gated']),
     );
   });
+
+  it('resolved value is not written to new WeakMap after mid-compute invalidation', async () => {
+    // Start a compute, invalidate mid-flight, then resolve. The stale result
+    // must not be written into the fresh WeakMap — otherwise the next call
+    // would return stale data instead of recomputing.
+    const sm = createMockSkillManager();
+    const cfg = createMockConfig();
+    const listSkillsMock = sm.listSkills as ReturnType<typeof vi.fn>;
+
+    // Deferred promise so we control when listSkills resolves.
+    let resolveListSkills!: (value: unknown[]) => void;
+    const deferredPromise = new Promise<unknown[]>((resolve) => {
+      resolveListSkills = resolve;
+    });
+    listSkillsMock.mockReturnValueOnce(deferredPromise);
+
+    // Start first call — hangs on listSkills.
+    const firstCall = collectAvailableSkillEntries(sm, cfg);
+
+    // Invalidate mid-flight (replaces the WeakMap).
+    invalidateCollectedSkillEntriesCache();
+
+    // Resolve the first call. The .then() handler sees cacheByManager !== cacheSnapshot
+    // and returns without writing the stale result.
+    resolveListSkills([]);
+    await firstCall;
+
+    // Second call with same instances: cacheByManager is fresh, no entry for (sm, cfg),
+    // so it must trigger a fresh listSkills().
+    listSkillsMock.mockResolvedValueOnce([]);
+    await collectAvailableSkillEntries(sm, cfg);
+
+    expect(listSkillsMock).toHaveBeenCalledTimes(2);
+  });
 });

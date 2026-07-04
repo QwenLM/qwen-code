@@ -399,23 +399,18 @@ function VirtualizedList<T>(
         setIsStickingToBottom(true);
       }
     } else if (
+      !justScrolled &&
       (scrollAnchor.index >= data.length ||
         actualScrollTop > totalHeight - scrollableContainerHeight) &&
       data.length > 0
     ) {
-      // Only clamp aggressively when totalHeight grew (new content).
-      // When it shrinks (e.g. pending→height key transition losing measured
-      // height), preserving the current anchor avoids a jump-to-top artifact
-      // (#5941).
+      const maxScrollTop = Math.max(0, totalHeight - scrollableContainerHeight);
       if (
         totalHeight >= prevTotalHeight.current ||
-        scrollAnchor.index >= data.length
+        scrollAnchor.index >= data.length ||
+        actualScrollTop > maxScrollTop
       ) {
-        const newScrollTop = Math.max(
-          0,
-          totalHeight - scrollableContainerHeight,
-        );
-        const newAnchor = getAnchorForScrollTop(newScrollTop, offsets);
+        const newAnchor = getAnchorForScrollTop(maxScrollTop, offsets);
         if (
           scrollAnchor.index !== newAnchor.index ||
           scrollAnchor.offset !== newAnchor.offset
