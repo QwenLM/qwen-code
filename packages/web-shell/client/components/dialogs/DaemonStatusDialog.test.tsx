@@ -2,6 +2,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
+import type { DaemonMetricsSeriesBucket } from '@qwen-code/webui/daemon-react-sdk';
 import { I18nProvider } from '../../i18n';
 
 Object.assign(globalThis, { IS_REACT_ACT_ENVIRONMENT: true });
@@ -128,6 +129,50 @@ const fullReport = {
     },
   },
 };
+
+// A full metrics bucket (typed, so a dropped field is a compile error) for the
+// Metrics-tab tests.
+function makeBucket(t: number): DaemonMetricsSeriesBucket {
+  return {
+    t,
+    activeSessions: 1,
+    activePrompts: 0,
+    pendingPrompts: 0,
+    requests: 5,
+    errors: 0,
+    latencyP50Ms: 2,
+    latencyP95Ms: 8,
+    promptsCompleted: 0,
+    promptQueueWaitP95Ms: 0,
+    promptDurationP95Ms: 0,
+    llmApiP50Ms: 0,
+    llmApiP95Ms: 0,
+    cpuPercent: 1,
+    rssBytes: 200 * 1024 * 1024,
+    heapUsedBytes: 50 * 1024 * 1024,
+    eventLoopLagP99Ms: 3,
+    pipeInBytes: 0,
+    pipeOutBytes: 0,
+    sseConnections: 1,
+    wsConnections: 0,
+    acpConnections: 2,
+    rateLimitRejected: 0,
+    tokensIn: 0,
+    tokensOut: 0,
+    childCpuPercent: 0,
+    childRssBytes: 0,
+  };
+}
+
+function summaryWithSeries(count: number) {
+  const series = Array.from({ length: count }, (_, i) =>
+    makeBucket(1000 + i * 5000),
+  );
+  return {
+    ...summaryReport,
+    runtime: { ...summaryReport.runtime, metrics: { series } },
+  };
+}
 
 type HookState = {
   report: unknown;
@@ -297,6 +342,42 @@ describe('DaemonStatusDialog', () => {
     expect(text).toContain('mcp');
     expect(text).toContain('OK');
     expect(text).toContain('servers: 2');
+  });
+
+  it('renders charts on the Metrics tab from the series and hides Overview', () => {
+    summaryState = {
+      report: summaryWithSeries(2),
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    // Overview is the default tab.
+    expect(container!.textContent ?? '').toContain('4242'); // pid (Overview)
+    const metricsTab = container!.querySelectorAll('[role="tab"]')[1];
+    act(() => {
+      metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const text = container!.textContent ?? '';
+    // Chart cards render (spot-check i18n'd titles across the set)...
+    expect(text).toContain('Concurrency');
+    expect(text).toContain('LLM API latency');
+    expect(text).toContain('Token burn');
+    // ...one SvgLineChart per card...
+    expect(
+      container!.querySelectorAll('svg[role="img"]').length,
+    ).toBeGreaterThanOrEqual(10);
+    // ...and the panels are mutually exclusive: Overview content is gone.
+    expect(text).not.toContain('4242');
+  });
+
+  it('shows the collecting-metrics placeholder when the series is empty', () => {
+    // summaryReport carries no runtime.metrics.
+    mount();
+    const metricsTab = container!.querySelectorAll('[role="tab"]')[1];
+    act(() => {
+      metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(container!.textContent ?? '').toContain('Collecting metrics');
   });
 
   it('auto-refresh reloads only the cheap summary, never the full report', async () => {
