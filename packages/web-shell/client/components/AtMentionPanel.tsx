@@ -197,7 +197,7 @@ export function AtMentionPanel({
             '--at-anchor-width': `${anchorRect.width}px`,
           } as CSSProperties
         }
-        role="dialog"
+        role="region"
         aria-label={listboxLabel}
         onMouseDown={(event) => {
           if (event.target instanceof HTMLInputElement) return;
@@ -210,6 +210,7 @@ export function AtMentionPanel({
               <button
                 type="button"
                 className={styles.atBackButton}
+                aria-label={t('common.back')}
                 onMouseDown={(event) => {
                   event.preventDefault();
                   event.stopPropagation();
@@ -321,7 +322,9 @@ export function AtMentionPanel({
                   </span>
                 )}
                 {row.trailing && (
-                  <span className={styles.atItemTrailing}>{row.trailing}</span>
+                  <span className={styles.atItemTrailing} aria-hidden="true">
+                    {row.trailing}
+                  </span>
                 )}
               </button>
             ))

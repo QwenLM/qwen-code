@@ -93,7 +93,7 @@ afterEach(() => {
   container?.remove();
   anchor?.remove();
   document.body
-    .querySelectorAll('[role="listbox"]')
+    .querySelectorAll('[role="listbox"], [role="region"]')
     .forEach((node) => node.remove());
   container = null;
   anchor = null;
@@ -106,7 +106,7 @@ describe('AtMentionPanel', () => {
 
     expect(
       document.body
-        .querySelector('[role="dialog"]')
+        .querySelector('[role="region"]')
         ?.getAttribute('aria-label'),
     ).toBe('Reference menu');
     expect(

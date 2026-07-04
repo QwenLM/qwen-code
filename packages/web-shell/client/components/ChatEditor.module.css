@@ -473,6 +473,7 @@
   overflow-x: hidden;
   overflow-y: auto;
   border-radius: 6px;
+  scroll-padding-bottom: 6px;
   scrollbar-color: var(--chat-editor-border-color) transparent;
   scrollbar-width: thin;
 }

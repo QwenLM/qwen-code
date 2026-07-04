@@ -272,10 +272,22 @@ function getProviderQueryFromMention(
   }
   if (
     providerId === MCP_RESOURCES_PROVIDER_ID &&
+    parsedQuery.startsWith('mcp:')
+  ) {
+    return parsedQuery.slice('mcp:'.length);
+  }
+  if (
+    providerId === MCP_RESOURCES_PROVIDER_ID &&
     mcpServerName &&
     parsedQuery.startsWith(`${mcpServerName}:`)
   ) {
     return parsedQuery.slice(mcpServerName.length + 1);
+  }
+  if (
+    !isBuiltinProviderId(providerId) &&
+    parsedQuery.startsWith(`${providerId}:`)
+  ) {
+    return parsedQuery.slice(providerId.length + 1);
   }
   return parsedQuery;
 }

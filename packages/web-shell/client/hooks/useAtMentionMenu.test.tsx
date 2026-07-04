@@ -277,6 +277,56 @@ describe('useAtMentionMenu', () => {
       selectedProviderId: 'custom',
       query: 'one',
     });
+
+    act(() => latest!.refreshForView(makeView('@custom:on')));
+    await runDebounce();
+
+    expect(search).toHaveBeenLastCalledWith({
+      query: 'on',
+      signal: expect.any(AbortSignal),
+    });
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'custom',
+      query: 'on',
+    });
+  });
+
+  it('strips the mcp prefix while refreshing MCP server searches', async () => {
+    vi.useFakeTimers();
+    const loadMcpStatus = vi.fn().mockResolvedValue({
+      servers: [
+        {
+          kind: 'mcp_server',
+          name: 'docs',
+          disabled: false,
+          resourceCount: 1,
+        },
+      ],
+    });
+    mount({
+      actions: {
+        loadMcpStatus,
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@mcp:do')));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'mcp-resources',
+      query: 'do',
+    });
+
+    act(() => latest!.refreshForView(makeView('@mcp:d')));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      selectedProviderId: 'mcp-resources',
+      query: 'd',
+    });
   });
 
   it('opens MCP resource items using the inserted ref suffix as search text', async () => {
