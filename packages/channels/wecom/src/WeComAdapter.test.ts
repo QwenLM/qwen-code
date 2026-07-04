@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readdirSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -41,6 +42,9 @@ const mocks = vi.hoisted(() => {
   const httpCalls: MockHttpCall[] = [];
   const lookup = vi.fn(async () => [{ address: '93.184.216.34', family: 4 }]);
   const decryptFile = vi.fn((buffer: Buffer, _aesKey: string) => buffer);
+  const readFile = vi.fn(async (_path: string) =>
+    Buffer.from([0x89, 0x50, 0x4e, 0x47]),
+  );
   const httpResponse = {
     statusCode: 200,
     headers: {} as Record<string, string>,
@@ -159,6 +163,7 @@ const mocks = vi.hoisted(() => {
     httpCalls,
     lookup,
     decryptFile,
+    readFile,
     httpResponse,
     httpsRequest,
     state,
@@ -174,6 +179,9 @@ vi.mock('node:dns/promises', () => ({
 }));
 vi.mock('node:https', () => ({
   request: mocks.httpsRequest,
+}));
+vi.mock('node:fs/promises', () => ({
+  readFile: mocks.readFile,
 }));
 
 import { WeComChannel } from './WeComAdapter.js';
@@ -303,6 +311,7 @@ describe('WeComChannel', () => {
     );
     vi.clearAllMocks();
     mocks.decryptFile.mockImplementation((buffer: Buffer) => buffer);
+    mocks.readFile.mockResolvedValue(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
     mocks.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
     rmSync(join(tmpdir(), 'channel-files'), { recursive: true, force: true });
   });
@@ -1135,6 +1144,9 @@ describe('WeComChannel', () => {
   });
 
   it('rolls back message dedup when preflight rejects the envelope', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
     const bridge = makeBridge();
     const channel = new RejectingPreflightWeComChannel(
       'bot',
@@ -1154,11 +1166,26 @@ describe('WeComChannel', () => {
     client.emit('message.text', payload);
     await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(1));
     expect(bridge.newSession).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(stderr).toHaveBeenCalledWith(
+        '[WeCom:bot] dropping message msg-preflight-rejected: preflight rejected.\n',
+      ),
+    );
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     client.emit('message.text', payload);
     await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(2));
     expect(bridge.newSession).not.toHaveBeenCalled();
+    await vi.waitFor(() =>
+      expect(
+        stderr.mock.calls.filter(
+          ([message]) =>
+            message ===
+            '[WeCom:bot] dropping message msg-preflight-rejected: preflight rejected.\n',
+        ),
+      ).toHaveLength(2),
+    );
+    stderr.mockRestore();
   });
 
   it('deduplicates repeated messages while preflight is pending', async () => {
@@ -2574,6 +2601,9 @@ describe('WeComChannel', () => {
 
     await channel.sendMessage('chat-1', '[IMAGE: out.png]');
 
+    expect(mocks.readFile).toHaveBeenCalledWith(
+      realpathSync(join(dir, 'out.png')),
+    );
     expect(client.uploadMedia).toHaveBeenCalledWith(expect.any(Buffer), {
       type: 'image',
       filename: 'out.png',

@@ -1,12 +1,12 @@
 import {
   lstatSync,
   mkdirSync,
-  readFileSync,
   realpathSync,
   rmSync,
   statSync,
   writeFileSync,
 } from 'node:fs';
+import { readFile } from 'node:fs/promises';
 import { request as httpsRequest } from 'node:https';
 import type { IncomingHttpHeaders } from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -281,7 +281,7 @@ export class WeComChannel extends ChannelBase {
         continue;
       }
       try {
-        const file = readOutboundMedia(item.path, this.config.cwd);
+        const file = await readOutboundMedia(item.path, this.config.cwd);
         const upload = await client.uploadMedia(file.data, {
           type: item.type,
           filename: file.fileName,
@@ -364,7 +364,12 @@ export class WeComChannel extends ChannelBase {
     let attachments: Attachment[] = [];
     let processingStarted = false;
     try {
-      if (!(await this.preflightInbound(envelope))) return;
+      if (!(await this.preflightInbound(envelope))) {
+        process.stderr.write(
+          `[WeCom:${this.name}] dropping message ${logMessageId}: preflight rejected.\n`,
+        );
+        return;
+      }
       attachments = await this.downloadAttachments(
         body,
         attachments,
@@ -1081,13 +1086,13 @@ function splitMarkdownChunks(text: string): string[] {
   return chunks;
 }
 
-function readOutboundMedia(
+async function readOutboundMedia(
   rawPath: string,
   cwd: string,
-): {
+): Promise<{
   data: Buffer;
   fileName: string;
-} {
+}> {
   const resolved = resolve(cwd, rawPath);
   const real = realpathSync(resolved);
   const stat = statSync(real);
@@ -1103,7 +1108,7 @@ function readOutboundMedia(
   if (!allowedDirs.some((dir) => isInsideDir(real, dir))) {
     throw new Error('Media path outside allowed outbound directory');
   }
-  return { data: readFileSync(real), fileName: basename(real) };
+  return { data: await readFile(real), fileName: basename(real) };
 }
 
 function ensureDirectoryRealpath(path: string): string | undefined {
