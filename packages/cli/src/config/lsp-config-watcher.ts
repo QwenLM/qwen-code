@@ -292,6 +292,7 @@ function sortJsonValue(value: unknown): unknown {
     return value.map(sortJsonValue);
   }
   if (value && typeof value === 'object') {
+    // Object.create(null) avoids prototype pollution from __proto__ keys
     const sorted = Object.create(null) as Record<string, unknown>;
     for (const key of Object.keys(value).sort()) {
       sorted[key] = sortJsonValue((value as Record<string, unknown>)[key]);
