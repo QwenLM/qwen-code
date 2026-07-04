@@ -45,15 +45,22 @@ export type FakeOpenAIServer = {
   close: () => Promise<void>;
 };
 
-export type FakeOpenAIServerOptions = {
-  listenHost?: string;
-  baseUrlHost?: string;
-};
+export type FakeOpenAIServerOptions =
+  | { listenHost?: undefined; baseUrlHost?: undefined }
+  | { listenHost: string; baseUrlHost: string };
 
 export type FakeOpenAIHandler = (ctx: {
   body: JsonObject;
   requestIndex: number;
 }) => FakeOpenAIResponse | Promise<FakeOpenAIResponse>;
+
+const MAX_REQUEST_BODY_BYTES = 10 * 1024 * 1024;
+
+class RequestBodyTooLargeError extends Error {
+  constructor() {
+    super('fake OpenAI request body too large');
+  }
+}
 
 export function fakeToolCall(
   name: string,
@@ -100,7 +107,13 @@ export async function startFakeOpenAIServer(
       } else {
         writeNonStreamed(res, getModel(body), response);
       }
-    } catch {
+    } catch (error) {
+      if (error instanceof RequestBodyTooLargeError) {
+        res.writeHead(413);
+        res.end('request body too large');
+        return;
+      }
+
       if (res.headersSent) {
         if (!res.writableEnded) {
           res.destroy();
@@ -151,8 +164,21 @@ export async function startFakeOpenAIServer(
 function readRequestBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    req.on('data', (chunk: Buffer) => chunks.push(chunk));
-    req.on('end', () => resolve(Buffer.concat(chunks).toString('utf8')));
+    let totalLength = 0;
+    let tooLarge = false;
+    req.on('data', (chunk: Buffer) => {
+      if (tooLarge) return;
+      totalLength += chunk.length;
+      if (totalLength > MAX_REQUEST_BODY_BYTES) {
+        tooLarge = true;
+        reject(new RequestBodyTooLargeError());
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end', () => {
+      if (!tooLarge) resolve(Buffer.concat(chunks).toString('utf8'));
+    });
     req.on('error', reject);
   });
 }

@@ -33,9 +33,8 @@ import {
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
 const TEST_TIMEOUT = 60000;
 const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
-const IS_CONTAINER_SANDBOX = Boolean(
-  SANDBOX_MODE && SANDBOX_MODE !== 'false' && SANDBOX_MODE !== '0',
-);
+const IS_CONTAINER_SANDBOX =
+  SANDBOX_MODE === 'docker' || SANDBOX_MODE === 'podman';
 const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
   ? '127.0.0.1,localhost,host.docker.internal'
   : '127.0.0.1,localhost';
