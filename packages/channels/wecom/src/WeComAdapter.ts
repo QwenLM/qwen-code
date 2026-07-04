@@ -86,6 +86,7 @@ export class WeComChannel extends ChannelBase {
   private readonly wecom: WeComConfig;
   private client?: WeComClient;
   private readonly seenMessages = new Map<string, number>();
+  private readonly inFlightMessages = new Set<string>();
   private readonly attachmentDirsByMessage = new Map<string, string[]>();
   private readonly attachmentDirsBySession = new Map<string, string[]>();
   private readonly bufferedAttachmentMessages = new Set<string>();
@@ -181,6 +182,7 @@ export class WeComChannel extends ChannelBase {
       this.dedupTimer = undefined;
     }
     this.seenMessages.clear();
+    this.inFlightMessages.clear();
     this.cleanupAllAttachmentDirs();
     const client = this.client;
     this.client = undefined;
@@ -267,6 +269,10 @@ export class WeComChannel extends ChannelBase {
       );
       return;
     }
+    if (messageId) {
+      if (this.inFlightMessages.has(messageId)) return;
+      this.inFlightMessages.add(messageId);
+    }
 
     const text = extractText(body);
     const explicitMention = getExplicitMention(body, this.wecom.botId);
@@ -282,13 +288,19 @@ export class WeComChannel extends ChannelBase {
       isReplyToBot: false,
       referencedText: extractQuoteText(body),
     };
-    const sessionId = await this.router.resolve(
-      this.name,
-      envelope.senderId,
-      envelope.chatId,
-      envelope.threadId,
-      this.config.cwd,
-    );
+    let sessionId: string;
+    try {
+      sessionId = await this.router.resolve(
+        this.name,
+        envelope.senderId,
+        envelope.chatId,
+        envelope.threadId,
+        this.config.cwd,
+      );
+    } catch (err) {
+      if (messageId) this.inFlightMessages.delete(messageId);
+      throw err;
+    }
 
     let attachments: Attachment[] = [];
     let processingStarted = false;
@@ -320,6 +332,7 @@ export class WeComChannel extends ChannelBase {
       }
       throw err;
     } finally {
+      if (messageId) this.inFlightMessages.delete(messageId);
       if (
         messageId &&
         !this.bufferedAttachmentMessages.has(messageId) &&

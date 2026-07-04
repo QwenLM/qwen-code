@@ -236,6 +236,25 @@ class RejectingPreflightWeComChannel extends WeComChannel {
   }
 }
 
+class BlockingPreflightWeComChannel extends TestWeComChannel {
+  readonly preflights = vi.fn();
+  private readonly preflightResolvers: Array<() => void> = [];
+
+  releasePreflights(): void {
+    this.preflightResolvers.splice(0).forEach((resolve) => resolve());
+  }
+
+  protected override async preflightInbound(
+    envelope: Envelope,
+  ): Promise<boolean> {
+    this.preflights(envelope);
+    await new Promise<void>((resolve) => {
+      this.preflightResolvers.push(resolve);
+    });
+    return super.preflightInbound(envelope);
+  }
+}
+
 class FailingProcessWeComChannel extends WeComChannel {
   readonly processes = vi.fn(async (_envelope: Envelope) => {
     throw new Error('process failed after side effects started');
@@ -809,6 +828,33 @@ describe('WeComChannel', () => {
 
     client.emit('message.text', payload);
     await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(2));
+  });
+
+  it('deduplicates repeated messages while preflight is pending', async () => {
+    const channel = new BlockingPreflightWeComChannel(
+      'bot',
+      makeConfig(),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+    const payload = {
+      msgid: 'msg-preflight-pending',
+      msgtype: 'text',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      text: { content: 'hello' },
+    };
+
+    client.emit('message.text', payload);
+    await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(1));
+    client.emit('message.text', payload);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(channel.preflights).toHaveBeenCalledTimes(1);
+
+    channel.releasePreflights();
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
   });
 
   it('keeps message dedup when processing fails after side effects start', async () => {
