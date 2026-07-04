@@ -5439,6 +5439,13 @@ describe('Truncated tool call detection in streaming', () => {
       name: 'truncated legacy streaming function_call',
       chunks: [{ name: 'read_file', arguments: '{"path"' }],
       expectedFinishReason: FinishReason.MAX_TOKENS,
+      expectedParts: [legacyFunctionCallPart('read_file', { path: null })],
+    },
+    {
+      name: 'truncated legacy streaming function_call without arguments',
+      chunks: [{ name: 'read_file' }],
+      finishReason: 'length',
+      expectedFinishReason: FinishReason.MAX_TOKENS,
       expectedParts: [],
     },
     {

@@ -1082,9 +1082,14 @@ function convertOpenAITextToParts(
 }
 
 function normalizeToolCallArgs(args: unknown): Record<string, unknown> {
-  return args && typeof args === 'object' && !Array.isArray(args)
-    ? (args as Record<string, unknown>)
-    : {};
+  if (args && typeof args === 'object' && !Array.isArray(args)) {
+    return args as Record<string, unknown>;
+  }
+
+  debugLogger.debug(
+    `Discarding non-object tool call arguments, using {}: ${typeof args}`,
+  );
+  return {};
 }
 
 function parseToolCallArgs(argsJson?: string | null): Record<string, unknown> {
@@ -1385,17 +1390,18 @@ export function convertOpenAIChunkToGemini(
 
     // Only emit function calls when streaming is complete (finish_reason is present)
     let toolCallsTruncated = false;
+    let legacyFunctionCallNameOnlyTruncated = false;
     if (choice.finish_reason) {
       // Detect truncation the provider may not report correctly.
       // Some providers (e.g. DashScope/Qwen) send "stop" or "tool_calls"
       // even when output was cut off mid-JSON due to max_tokens.
       toolCallsTruncated = toolCallParser.hasIncompleteToolCalls();
-      const legacyFunctionCallTruncated =
-        toolCallsTruncated && requestContext.legacyFunctionCallInProgress;
+      legacyFunctionCallNameOnlyTruncated =
+        choice.finish_reason === 'length' &&
+        Boolean(requestContext.legacyFunctionCallWithoutArguments) &&
+        Boolean(requestContext.legacyFunctionCallInProgress);
 
-      const completedToolCalls = legacyFunctionCallTruncated
-        ? []
-        : toolCallParser.getCompletedToolCalls();
+      const completedToolCalls = toolCallParser.getCompletedToolCalls();
 
       for (const toolCall of completedToolCalls) {
         if (toolCall.name) {
@@ -1411,7 +1417,7 @@ export function convertOpenAIChunkToGemini(
       }
       if (
         requestContext.legacyFunctionCallWithoutArguments &&
-        !legacyFunctionCallTruncated
+        !legacyFunctionCallNameOnlyTruncated
       ) {
         parts.push(
           createFunctionCallPart(
@@ -1427,7 +1433,8 @@ export function convertOpenAIChunkToGemini(
     // If tool call JSON was truncated, override to "length" so downstream
     // (turn.ts) correctly sets wasOutputTruncated=true.
     const effectiveFinishReason =
-      toolCallsTruncated && choice.finish_reason !== 'length'
+      (toolCallsTruncated || legacyFunctionCallNameOnlyTruncated) &&
+      choice.finish_reason !== 'length'
         ? 'length'
         : choice.finish_reason;
 
