@@ -33,6 +33,8 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import * as settingsRuntime from '../config/settings.js';
+import * as trustedFoldersRuntime from '../config/trustedFolders.js';
 import type {
   ChannelWorkerSnapshot,
   CreateChannelWorkerSupervisorOptions,
@@ -1204,6 +1206,133 @@ describe('runQwenServe runtime startup failures', () => {
       } else {
         process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = originalCdpTunnelOverWs;
       }
+      await handle.close();
+    }
+  });
+
+  it('filters secondary workspace roots before constructing the bridge filesystem', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-roots-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const trustedSecondary = path.join(tmpDir, 'trusted-secondary');
+    const untrustedSecondary = path.join(tmpDir, 'untrusted-secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(trustedSecondary);
+    fs.mkdirSync(untrustedSecondary);
+    const roots = [primary, trustedSecondary, untrustedSecondary].map((root) =>
+      canonicalizeWorkspace(root),
+    );
+    const bridgeFsBoundWorkspaces: string[][] = [];
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(
+      trustedFoldersRuntime,
+      'getWorkspaceTrustStatus',
+    ).mockImplementation(
+      (_settings, workspace) =>
+        ({
+          effective: {
+            state: workspace === untrustedSecondary ? 'untrusted' : 'trusted',
+          },
+        }) as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>,
+    );
+    vi.spyOn(serverModule, 'resolveBoundWorkspacesFromIdeEnv').mockReturnValue(
+      roots,
+    );
+    vi.spyOn(serverModule, 'resolveBridgeFsFactory').mockImplementation(
+      (input) => {
+        bridgeFsBoundWorkspaces.push([...input.boundWorkspaces]);
+        return {} as ReturnType<typeof serverModule.resolveBridgeFsFactory>;
+      },
+    );
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue(express());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: primary,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        bootSettings: {},
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bridgeFsBoundWorkspaces[0]).toEqual([roots[0], roots[1]]);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('excludes secondary workspace roots when runtime trust settings are unavailable', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-roots-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const roots = [primary, secondary].map((root) =>
+      canonicalizeWorkspace(root),
+    );
+    const bridgeFsBoundWorkspaces: string[][] = [];
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(() => {
+      throw new Error('settings unavailable');
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus');
+    vi.spyOn(serverModule, 'resolveBoundWorkspacesFromIdeEnv').mockReturnValue(
+      roots,
+    );
+    vi.spyOn(serverModule, 'resolveBridgeFsFactory').mockImplementation(
+      (input) => {
+        bridgeFsBoundWorkspaces.push([...input.boundWorkspaces]);
+        return {} as ReturnType<typeof serverModule.resolveBridgeFsFactory>;
+      },
+    );
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue(express());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: primary,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        bootSettings: {},
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bridgeFsBoundWorkspaces[0]).toEqual([roots[0]]);
+      expect(
+        trustedFoldersRuntime.getWorkspaceTrustStatus,
+      ).not.toHaveBeenCalled();
+    } finally {
       await handle.close();
     }
   });

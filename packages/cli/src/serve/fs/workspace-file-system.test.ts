@@ -1366,6 +1366,25 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     expect(resolved).toBe(path.join(h.workspace, 'src', 'new.ts'));
   });
 
+  it('writes absolute paths inside a secondary root', async () => {
+    const target = path.join(h.secondWorkspace, 'src', 'created.ts');
+    await fsp.mkdir(path.dirname(target));
+
+    const resolved = await h.fs.resolve(target, 'write');
+    await h.fs.writeText(resolved, 'export const created = true;\n');
+
+    await expect(fsp.readFile(target, 'utf8')).resolves.toBe(
+      'export const created = true;\n',
+    );
+    expect(
+      h.events.find(
+        (e) =>
+          e.type === FS_ACCESS_EVENT_TYPE &&
+          (e.data as { intent?: string }).intent === 'write',
+      ),
+    ).toBeDefined();
+  });
+
   it('glob searches every root and returns absolute paths without relative dedup', async () => {
     const primaryPackage = path.join(h.workspace, 'package.json');
     const secondPackage = path.join(h.secondWorkspace, 'package.json');
@@ -1377,6 +1396,18 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     expect(hits.sort()).toEqual([primaryPackage, secondPackage].sort());
   });
 
+  it('glob enforces maxResults across all roots', async () => {
+    for (const workspace of [h.workspace, h.secondWorkspace]) {
+      await fsp.writeFile(path.join(workspace, 'a.ts'), '');
+      await fsp.writeFile(path.join(workspace, 'b.ts'), '');
+      await fsp.writeFile(path.join(workspace, 'c.ts'), '');
+    }
+
+    const hits = await h.fs.glob('*.ts', { maxResults: 3 });
+
+    expect(hits).toHaveLength(3);
+  });
+
   it('throws when one workspace root glob fails instead of returning partial results', async () => {
     await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
     await fsp.chmod(h.secondWorkspace, 0o000);
@@ -1385,6 +1416,22 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
         kind: 'permission_denied',
       });
     } finally {
+      await fsp.chmod(h.secondWorkspace, 0o700);
+    }
+  });
+
+  it('throws AggregateError when every workspace root glob fails', async () => {
+    await fsp.chmod(h.workspace, 0o000);
+    await fsp.chmod(h.secondWorkspace, 0o000);
+    try {
+      const err = await h.fs.glob('*.ts').catch((e: unknown) => e);
+      const cause = (err as Error & { cause?: unknown }).cause;
+
+      expect(isFsError(err)).toBe(true);
+      expect(cause).toBeInstanceOf(AggregateError);
+      expect((cause as AggregateError).errors).toHaveLength(2);
+    } finally {
+      await fsp.chmod(h.workspace, 0o700);
       await fsp.chmod(h.secondWorkspace, 0o700);
     }
   });
