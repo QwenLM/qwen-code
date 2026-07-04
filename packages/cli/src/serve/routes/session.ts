@@ -1335,6 +1335,7 @@ export function registerSessionRoutes(
         sessions: result.sessions,
         ...(result.nextCursor != null ? { nextCursor: result.nextCursor } : {}),
         ...(result.liveMergeFailed ? { liveMergeFailed: true } : {}),
+        ...(result.truncated ? { truncated: true } : {}),
       });
     } catch (err) {
       if (err instanceof InvalidCursorError) {

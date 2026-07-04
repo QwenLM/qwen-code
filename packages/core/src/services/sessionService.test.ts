@@ -911,15 +911,25 @@ describe('SessionService', () => {
     });
 
     it('should clear session organization when removing a session', async () => {
+      const warnings: string[] = [];
+      sessionService = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
       const removeOrganizationSpy = vi
         .spyOn(SessionOrganizationService.prototype, 'removeSession')
-        .mockResolvedValue(undefined);
+        .mockImplementation(function (this: {
+          onWarning?: (message: string) => void;
+        }) {
+          this.onWarning?.('sidecar warning');
+          return Promise.resolve();
+        });
       vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
 
       const result = await sessionService.removeSession(sessionIdA);
 
       expect(result).toBe(true);
       expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA);
+      expect(warnings).toEqual(['sidecar warning']);
     });
 
     it('should return false when session does not exist', async () => {

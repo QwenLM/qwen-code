@@ -235,6 +235,37 @@ describe('SessionOrganizationService', () => {
     );
   });
 
+  it('warns once when reading orphaned group references', async () => {
+    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
+    await fs.writeFile(
+      service.getStorePath(),
+      JSON.stringify({
+        schemaVersion: 1,
+        groups: [],
+        sessions: {
+          [sessionIdA]: {
+            groupId: 'missing-group',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        },
+      }),
+      'utf8',
+    );
+
+    const snapshot = await service.readSnapshot();
+    expect(snapshot.sessions.get(sessionIdA)).toEqual(
+      expect.objectContaining({
+        groupId: null,
+        isPinned: false,
+      }),
+    );
+    await service.readSnapshot();
+
+    expect(warnings).toEqual([
+      `Dropped orphaned session group reference: session ${sessionIdA} references missing group missing-group`,
+    ]);
+  });
+
   it('treats a malformed sidecar as empty for reads and refuses to overwrite it', async () => {
     await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
     await fs.writeFile(service.getStorePath(), '{not-json', 'utf8');

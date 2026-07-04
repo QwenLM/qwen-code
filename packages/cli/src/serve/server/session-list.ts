@@ -32,6 +32,7 @@ export interface ListWorkspaceSessionsResult {
   sessions: BridgeSessionSummary[];
   nextCursor?: string;
   liveMergeFailed?: boolean;
+  truncated?: boolean;
 }
 
 export class InvalidCursorError extends Error {
@@ -135,10 +136,11 @@ function toSummary(item: {
 async function listAllPersistedSummaries(
   sessionService: SessionService,
   archiveState: SessionArchiveState,
-): Promise<BridgeSessionSummary[]> {
+): Promise<{ sessions: BridgeSessionSummary[]; truncated: boolean }> {
   // Organized view needs global pin/group ordering before pagination; v1 keeps
   // the storage API unchanged and performs that merge in memory.
   const sessions: BridgeSessionSummary[] = [];
+  let truncated = false;
   let cursor: number | undefined;
   do {
     const page = await sessionService.listSessions({
@@ -156,10 +158,11 @@ async function listAllPersistedSummaries(
       writeStderrLine(
         `qwen serve: organized session list truncated at ${MAX_ORGANIZED_SESSIONS} sessions`,
       );
+      truncated = true;
       break;
     }
   } while (cursor !== undefined);
-  return sessions;
+  return { sessions, truncated };
 }
 
 function getSummaryActivityTime(session: BridgeSessionSummary): number {
@@ -252,10 +255,11 @@ async function listOrganizedWorkspaceSessionsForResponse(
   let liveMergeFailed = false;
 
   const bySessionId = new Map<string, BridgeSessionSummary>();
-  for (const session of await listAllPersistedSummaries(
+  const persisted = await listAllPersistedSummaries(
     sessionService,
     archiveState,
-  )) {
+  );
+  for (const session of persisted.sessions) {
     bySessionId.set(
       session.sessionId,
       applyOrganization(session, snapshot.sessions.get(session.sessionId)),
@@ -347,6 +351,7 @@ async function listOrganizedWorkspaceSessionsForResponse(
     sessions: page,
     ...(nextCursor !== undefined ? { nextCursor } : {}),
     ...(liveMergeFailed ? { liveMergeFailed: true } : {}),
+    ...(persisted.truncated ? { truncated: true } : {}),
   };
 }
 

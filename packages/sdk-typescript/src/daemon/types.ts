@@ -465,6 +465,7 @@ export interface DaemonSessionListPage {
   sessions: DaemonSessionSummary[];
   nextCursor?: string;
   liveMergeFailed?: boolean;
+  truncated?: boolean;
 }
 
 export interface DaemonArchiveSessionsResult {

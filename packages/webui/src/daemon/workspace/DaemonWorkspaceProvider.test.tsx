@@ -652,6 +652,68 @@ describe('DaemonWorkspaceProvider', () => {
     });
   });
 
+  it('useDaemonSessions exposes session list page metadata', async () => {
+    const session = {
+      sessionId: 'session-123',
+      workspaceCwd: '/mock-workspace',
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+      displayName: 'Session 123',
+      clientCount: 0,
+      hasActivePrompt: false,
+    };
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValueOnce({
+      sessions: [session],
+      nextCursor: 'next-page',
+      liveMergeFailed: true,
+      truncated: true,
+    });
+    let result: ReturnType<typeof useDaemonSessions> | undefined;
+
+    function Harness() {
+      result = useDaemonSessions({
+        autoLoad: true,
+        view: 'organized',
+        group: 'all',
+        cursor: 'cursor-1',
+        pageSize: 10,
+      });
+      return null;
+    }
+
+    await renderWithProvider(<Harness />);
+    await act(async () => {
+      await new Promise((r) => setTimeout(r, 0));
+    });
+
+    expect(sdkMocks.listWorkspaceSessionsPage).toHaveBeenCalledWith(
+      '/mock-workspace',
+      {
+        pageSize: 10,
+        cursor: 'cursor-1',
+        view: 'organized',
+        group: 'all',
+      },
+    );
+    expect(result?.data).toEqual([session]);
+    expect(result?.sessions).toEqual([session]);
+    expect(result?.nextCursor).toBe('next-page');
+    expect(result?.liveMergeFailed).toBe(true);
+    expect(result?.truncated).toBe(true);
+
+    sdkMocks.listWorkspaceSessionsPage.mockResolvedValueOnce({
+      sessions: [session],
+      nextCursor: 'after-reload',
+    });
+    let reloaded:
+      | Awaited<ReturnType<ReturnType<typeof useDaemonSessions>['reload']>>
+      | undefined;
+    await act(async () => {
+      reloaded = await result?.reload();
+    });
+    expect(reloaded).toEqual([session]);
+  });
+
   it('actions.loadDaemonStatus forwards the detail level to client.daemonStatus', async () => {
     const report = {
       v: 1,

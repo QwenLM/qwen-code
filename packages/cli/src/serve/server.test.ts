@@ -49,6 +49,7 @@ import {
   Storage,
   TrustGateError,
   type Extension,
+  type SessionListItem,
 } from '@qwen-code/qwen-code-core';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
@@ -7116,6 +7117,52 @@ describe('createServeApp', () => {
       expect(invalidCursor.body.error).toContain(
         'not a valid organized cursor',
       );
+    });
+
+    it('reports organized session truncation in the response', async () => {
+      const items: SessionListItem[] = Array.from(
+        { length: 50_001 },
+        (_, i) => {
+          const timestamp = new Date(
+            Date.UTC(2026, 4, 17, 12, 0, i),
+          ).toISOString();
+          return {
+            sessionId: `session-${i}`,
+            cwd: WS_BOUND,
+            startTime: timestamp,
+            mtime: Date.parse(timestamp),
+            prompt: `prompt ${i}`,
+            filePath: `/tmp/session-${i}.jsonl`,
+          };
+        },
+      );
+      const listSessionsSpy = vi
+        .spyOn(SessionService.prototype, 'listSessions')
+        .mockResolvedValue({
+          items,
+          nextCursor: 1,
+          hasMore: true,
+        });
+
+      try {
+        const bridge = fakeBridge();
+        const app = createServeApp(
+          { ...baseOpts, workspace: WS_BOUND },
+          undefined,
+          { bridge, boundWorkspace: WS_BOUND },
+        );
+        const res = await request(app)
+          .get(
+            `/workspace/${encodeURIComponent(WS_BOUND)}/sessions?view=organized`,
+          )
+          .set('Host', `127.0.0.1:${baseOpts.port}`);
+
+        expect(res.status).toBe(200);
+        expect(res.body.sessions).toHaveLength(20);
+        expect(res.body.truncated).toBe(true);
+      } finally {
+        listSessionsSpy.mockRestore();
+      }
     });
 
     it('allows session organization mutations on loopback without a token', async () => {

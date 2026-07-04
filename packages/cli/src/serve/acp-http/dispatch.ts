@@ -1239,6 +1239,7 @@ export class AcpDispatcher {
               ? { nextCursor: result.nextCursor }
               : {}),
             ...(result.liveMergeFailed ? { liveMergeFailed: true } : {}),
+            ...(result.truncated ? { truncated: true } : {}),
           });
           return;
         }

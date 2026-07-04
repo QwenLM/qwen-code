@@ -412,9 +412,9 @@ export class SessionService {
 
   private async removeSessionOrganization(sessionId: string): Promise<void> {
     try {
-      await new SessionOrganizationService(this.projectRoot).removeSession(
-        sessionId,
-      );
+      await new SessionOrganizationService(this.projectRoot, (message) => {
+        this.warn(message);
+      }).removeSession(sessionId);
     } catch (error) {
       this.warn(
         `removeSession: failed to clear session organization for ${sessionId}: ${error}`,

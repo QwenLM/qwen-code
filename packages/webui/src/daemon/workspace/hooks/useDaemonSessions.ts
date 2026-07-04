@@ -36,14 +36,20 @@ export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
       ...(view !== undefined ? { view } : {}),
       ...(group !== undefined ? { group } : {}),
     };
-    return workspace.actions.listSessions(listOptions);
+    return workspace.actions.listSessionsPage(listOptions);
   }, [archiveState, cursor, group, pageSize, view, workspace.actions]);
   const workspaceReady = !!workspace.workspaceCwd;
   const result = useDaemonResource(load, {
     ...resourceOptions,
     enabled: (resourceOptions.enabled ?? true) && workspaceReady,
   });
-  const { reload } = result;
+  const reloadPage = result.reload;
+  const reload = useCallback(async () => {
+    const reloaded = await reloadPage();
+    return reloaded?.sessions;
+  }, [reloadPage]);
+  const page = result.data;
+  const sessions = page?.sessions ?? [];
   const deleteSession = useCallback(
     async (sessionId: string) => {
       const removed = await workspace.actions.deleteSession(sessionId);
@@ -83,7 +89,12 @@ export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
   );
   return {
     ...result,
-    sessions: result.data ?? [],
+    data: page !== undefined ? sessions : undefined,
+    reload,
+    sessions,
+    nextCursor: page?.nextCursor,
+    liveMergeFailed: page?.liveMergeFailed === true,
+    truncated: page?.truncated === true,
     loadSession: sessionActions?.loadSession,
     resumeSession: sessionActions?.resumeSession,
     newSession: sessionActions?.newSession,

@@ -218,6 +218,7 @@ function serializeOrganization(
 export class SessionOrganizationService {
   private readonly storage: Storage;
   private readFailed = false;
+  private readonly warnedOrphanedGroupRefs = new Set<string>();
 
   constructor(
     cwd: string,
@@ -245,6 +246,7 @@ export class SessionOrganizationService {
     for (const [sessionId, raw] of Object.entries(store.sessions)) {
       const view = viewOrganization(raw);
       if (view.groupId !== null && !validGroupIds.has(view.groupId)) {
+        this.warnOrphanedGroupReference(sessionId, view.groupId);
         view.groupId = null;
       }
       sessions.set(sessionId, view);
@@ -514,5 +516,14 @@ export class SessionOrganizationService {
       deduped.push(group);
     }
     return deduped;
+  }
+
+  private warnOrphanedGroupReference(sessionId: string, groupId: string): void {
+    const key = `${sessionId}\0${groupId}`;
+    if (this.warnedOrphanedGroupRefs.has(key)) return;
+    this.warnedOrphanedGroupRefs.add(key);
+    this.onWarning?.(
+      `Dropped orphaned session group reference: session ${sessionId} references missing group ${groupId}`,
+    );
   }
 }
