@@ -29,6 +29,21 @@ describe('markdownUtilities', () => {
       expect(findLastSafeSplitPoint(content)).toBe(content.length);
     });
 
+    it('should not split at a \n\n inside a tilde (~~~) fenced code block', () => {
+      // Same as the backtick case but with ~~~ fences: the internal blank line
+      // must not be chosen as a split point.
+      const content = '~~~\nignore this\n\nnewline\n~~~KeepThis';
+      expect(findLastSafeSplitPoint(content)).toBe(content.length);
+    });
+
+    it('should not split inside a 4+ backtick fenced block (no phantom fence)', () => {
+      // A 6-backtick fence must count as ONE delimiter. Matching only the first
+      // three characters would produce a phantom close-then-reopen, mark the
+      // internal blank line as outside the block, and split there.
+      const content = '``````\nignore this\n\nnewline\n``````KeepThis';
+      expect(findLastSafeSplitPoint(content)).toBe(content.length);
+    });
+
     it('should correctly identify the last \n\n even if it is followed by text not in a code block', () => {
       const content =
         'First part.\n\nSecond part.\n\nThird part, then some more text.';

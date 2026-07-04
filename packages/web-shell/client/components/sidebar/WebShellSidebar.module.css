@@ -331,9 +331,9 @@
 
 .sessionMetaSlot {
   position: relative;
-  width: 34px;
+  width: 82px;
   height: 30px;
-  flex: 0 0 auto;
+  flex: 0 0 82px;
   margin-left: auto;
   display: flex;
   align-items: center;

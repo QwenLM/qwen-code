@@ -58,6 +58,14 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async exportSession(sessionId, format = 'html') {
+      const client = requireClient(getClient, 'Export session failed');
+      return withActionTimeout(
+        client.exportSession(sessionId, { format }),
+        'Export session timed out',
+      );
+    },
+
     async archiveSession(sessionId: string) {
       const client = requireClient(getClient, 'Archive session failed');
       const result = await withActionTimeout(

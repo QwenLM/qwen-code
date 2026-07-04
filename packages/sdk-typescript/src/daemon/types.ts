@@ -464,6 +464,15 @@ export interface DaemonSessionSummary {
   isArchived?: boolean;
 }
 
+export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
+
+export interface DaemonSessionExportResult {
+  content: string;
+  filename: string;
+  mimeType: string;
+  format: DaemonSessionExportFormat;
+}
+
 export type DaemonSessionArchiveState = 'active' | 'archived';
 
 export interface DaemonArchiveSessionsResult {

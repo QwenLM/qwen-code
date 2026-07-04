@@ -387,6 +387,8 @@ export type {
   DaemonRestoredSession,
   DaemonSession,
   DaemonSessionArchiveState,
+  DaemonSessionExportFormat,
+  DaemonSessionExportResult,
   DaemonAuthProviderId,
   DaemonAuthProviderBaseUrlOption,
   DaemonAuthProviderCatalog,
