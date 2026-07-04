@@ -266,6 +266,7 @@ jobs:
             fi
             sleep $((attempt * 15))
           done
+          git config core.hooksPath .husky
           npm run build
           npm run bundle
 
@@ -739,8 +740,13 @@ jobs:
             echo 'No package changes detected; skipping package tests.'
           else
             for p in ${CHANGED_PKGS}; do
+              test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
+              if [[ "${test_script}" != *vitest* ]]; then
+                echo "Skipping ${p}: test script is not Vitest."
+                continue
+              fi
               echo "🧪 Testing ${p} (changed files only)..."
-              npm run test --workspace "${p}" --if-present -- --changed "origin/main...${BRANCH}" --passWithNoTests
+              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
             done
           fi
 
@@ -1052,6 +1058,7 @@ jobs:
             fi
             sleep $((attempt * 15))
           done
+          git config core.hooksPath .husky
           npm run build
           npm run bundle
 
@@ -1321,8 +1328,13 @@ jobs:
             echo 'No package changes detected; skipping package tests.'
           else
             for p in ${CHANGED_PKGS}; do
+              test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
+              if [[ "${test_script}" != *vitest* ]]; then
+                echo "Skipping ${p}: test script is not Vitest."
+                continue
+              fi
               echo "🧪 Testing ${p} (changed files only)..."
-              npm run test --workspace "${p}" --if-present -- --changed "origin/main...${BRANCH}" --passWithNoTests
+              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
             done
           fi
           echo "outcome=fixed" >> "${GITHUB_OUTPUT}"

@@ -411,7 +411,10 @@ describe('package scripts', () => {
       issueJob.indexOf(assessStep),
     );
     expect(fastTrackStep).toContain("id: 'fasttrack'");
+    expect(fastTrackStep).toContain('FAST_TRACK=false');
     expect(fastTrackStep).toContain('FAST_TRACK=true');
+    expect(fastTrackStep).toContain('fast_tracked=false');
+    expect(fastTrackStep).toContain('-n "${FORCED_ISSUE}"');
     expect(fastTrackStep).toContain(
       'Fast-tracked: trusted trigger bypasses LLM assessment.',
     );
@@ -434,6 +437,7 @@ describe('package scripts', () => {
       expect(installStep).toContain(
         'npm ci --prefer-offline --no-audit --progress=false',
       );
+      expect(installStep).toContain('git config core.hooksPath .husky');
       expect(installStep).not.toContain('--ignore-scripts');
     }
   });
@@ -446,9 +450,11 @@ describe('package scripts', () => {
       const verifyStep = getWorkflowStep(job, 'Verification gate');
 
       expect(verifyStep).toContain(
-        'npm run test --workspace "${p}" --if-present -- --changed "origin/main...${BRANCH}" --passWithNoTests',
+        'npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests',
       );
       expect(verifyStep).toContain("grep -oE '^packages/[^/]+'");
+      expect(verifyStep).toContain('pkg.scripts?.test');
+      expect(verifyStep).toContain('!= *vitest*');
       expect(verifyStep).not.toContain(
         'npm run test --workspace "${p}" --if-present\n',
       );
