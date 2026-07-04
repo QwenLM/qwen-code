@@ -63,7 +63,7 @@ The per-subscriber queue. Two pivotal behaviors:
 
 - **Live caps are on live items only.** Items inserted via `forcePush()` carry a `forced: true` tag per entry and never count toward `liveCount` or `liveBytes`. This lets the `Last-Event-ID` replay path force-push hundreds of historical frames into a fresh subscriber without immediately tripping the live caps and evicting the just-resumed subscriber.
 - **`liveCount` and `liveBytes` are maintained as fields**, not derived from `forcedInBuf` position. The earlier position-based heuristic broke when `slow_client_warning` started force-pushing mid-stream (warnings go to the BACK of the queue, not the front like replays). Per-entry `forced` tags are position-independent; live entries also store their serialized byte estimate so draining the queue decrements `liveBytes`.
-- **Serialized bytes are estimated lazily.** `push()` computes `Buffer.byteLength(JSON.stringify(event), 'utf8')` only when the event will be buffered. If a subscriber is already awaiting `next()`, the event is delivered directly and no byte estimate is computed. If serialization fails, that event skips byte accounting while preserving `publish()`'s never-throws contract; it still counts toward the live frame cap.
+- **Serialized bytes are estimated lazily.** `push()` computes `Buffer.byteLength(JSON.stringify(event), 'utf8')` only when the event will be buffered. If a subscriber is already awaiting `next()`, the event is delivered directly and no byte estimate is computed. If serialization fails, the daemon emits a best-effort stderr diagnostic and that event skips byte accounting while preserving `publish()`'s never-throws contract; it still counts toward the live frame cap.
 
 `push(value, getBytes)` returns an accepted / rejected result instead of blocking or throwing. Frame overflow rejects with `queue_overflow`; byte overflow rejects with `queue_bytes_overflow`. A single oversized event is allowed when the live queue is empty, but a second live event behind it evicts the subscriber. `forcePush(value)` bypasses both caps. `close({drain?: boolean})` drains pending items by default; abort-path passes `drain: false` to drop them immediately.
 
@@ -83,11 +83,13 @@ flowchart TD
     EVCK -->|no| PUSH["sub.queue.push(event, lazy getBytes)"]
     PUSH --> OK{"accepted?"}
     OK -->|no| EVICT["mark evicted; force-push client_evicted; queue.close; sub.dispose"]
-    OK -->|yes| WARN{"!warned && frame/byte warn threshold reached?"}
-    WARN -->|yes| FW["force-push slow_client_warning; warned = true"]
-    WARN -->|no| RES{"warned && frame/byte backlog below reset?"}
+    OK -->|yes| RES{"warned && frame/byte backlog below reset?"}
     RES -->|yes| RA["warned = false (hysteresis re-arm)"]
-    RES -->|no| NEXT
+    RES -->|no| WARN{"!warned && frame/byte warn threshold reached?"}
+    RA --> WARN
+    WARN -->|yes| FW["force-push slow_client_warning; warned = true"]
+    WARN -->|no| NEXT
+    FW --> NEXT
 ```
 
 `publish` never throws. Closing the bus mid-publish (the shutdown path closes per-session buses before awaiting `channel.kill()`) returns `undefined` rather than throwing because the agent may still emit `sessionUpdate` notifications in the small window between bus close and channel kill.

@@ -138,7 +138,18 @@ function serializedByteLength(event: BridgeEvent): number {
     if (serialized === undefined) return 0;
     return Buffer.byteLength(serialized, 'utf8');
   } catch {
+    logEventSizingFailed(event.type);
     return 0;
+  }
+}
+
+function logEventSizingFailed(type: string): void {
+  try {
+    process.stderr.write(
+      `qwen serve: EventBus event sizing failed ${JSON.stringify({ type })}\n`,
+    );
+  } catch {
+    // Best-effort diagnostic; logging must not break publish()'s never-throws contract.
   }
 }
 
@@ -313,10 +324,6 @@ export class EventBus {
     // Set we're iterating.
     for (const sub of Array.from(this.subs)) {
       if (sub.evicted) continue;
-      const wasBelowWarnReset =
-        sub.warned &&
-        sub.queue.size <= sub.warnResetThreshold &&
-        sub.queue.bytes <= sub.warnBytesResetThreshold;
       const pushResult = sub.queue.push(event, getEventBytes);
       if (!pushResult.ok) {
         sub.evicted = true;
@@ -362,7 +369,6 @@ export class EventBus {
         sub.dispose();
         continue;
       }
-      if (wasBelowWarnReset) sub.warned = false;
       // Backpressure warning: synthetic `slow_client_warning` frame to
       // the at-risk subscriber when its live backlog crosses
       // `WARN_THRESHOLD_RATIO`. Fires ONCE per overflow episode (the
@@ -393,6 +399,13 @@ export class EventBus {
       // boolean read).
       const liveSize = pushResult.liveSize;
       const liveBytes = pushResult.liveBytes;
+      if (
+        sub.warned &&
+        liveSize <= sub.warnResetThreshold &&
+        liveBytes <= sub.warnBytesResetThreshold
+      ) {
+        sub.warned = false;
+      }
       const frameThresholdReached = liveSize >= sub.warnThreshold;
       const byteThresholdReached = liveBytes >= sub.warnBytesThreshold;
       if (!sub.warned && (frameThresholdReached || byteThresholdReached)) {

@@ -370,6 +370,29 @@ describe('EventBus', () => {
     expect(
       afterPartialDrain.filter((e) => e.type === 'slow_client_warning'),
     ).toHaveLength(1);
+
+    bus.publish({
+      type: 'foo',
+      data: 'small',
+      _meta: { serverTimestamp: 10 },
+    });
+    expect((await it.next()).value.data).toBe('small');
+
+    for (let i = 11; i <= 16; i++) {
+      bus.publish({
+        type: 'foo',
+        data: 'z'.repeat(2400),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const afterFullReset: BridgeEvent[] = [];
+    for (let i = 0; i < 7; i++) {
+      afterFullReset.push((await it.next()).value);
+    }
+    expect(
+      afterFullReset.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
     abort.abort();
   });
 
@@ -565,6 +588,11 @@ describe('EventBus', () => {
     expect(second.done).toBe(false);
     expect(second.value.type).toBe('foo');
     expect(second.value.data).toBe('tail');
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus event sizing failed {"type":"foo"}',
+      ),
+    );
     expect(bus.subscriberCount).toBe(1);
     await it.return?.();
     abort.abort();
@@ -627,10 +655,26 @@ describe('EventBus', () => {
       firstEpisode.filter((e) => e.type === 'slow_client_warning'),
     ).toHaveLength(1);
 
+    // A large event can jump from fully drained to above the byte warn
+    // threshold; that single publish must not both re-arm and warn.
     bus.publish({
       type: 'foo',
       data: 'y'.repeat(1000),
       _meta: { serverTimestamp: 2 },
+    });
+    expect((await it.next()).value.data).toBe('y'.repeat(1000));
+
+    bus.publish({
+      type: 'foo',
+      data: 'reset',
+      _meta: { serverTimestamp: 3 },
+    });
+    expect((await it.next()).value.data).toBe('reset');
+
+    bus.publish({
+      type: 'foo',
+      data: 'z'.repeat(1000),
+      _meta: { serverTimestamp: 4 },
     });
     const secondEpisode: BridgeEvent[] = [];
     secondEpisode.push((await it.next()).value);
