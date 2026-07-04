@@ -5361,29 +5361,35 @@ class QwenAgent implements Agent {
         // (mirrors the daemon's own self-sampler), normalized by core count and
         // clamped to [0,100].
         const now = Date.now();
-        let cpu = this.prevChildCpu;
+        let cpu: NodeJS.CpuUsage | null = null;
         try {
           cpu = process.cpuUsage();
         } catch {
-          /* keep prev on failure → this window reads 0 */
+          /* keep prev baseline on failure → this window reads 0, and the next
+             successful poll still measures a correct delta window */
         }
         const elapsedMs = now - this.prevChildCpuAt;
-        const cpuUs =
-          cpu.user -
-          this.prevChildCpu.user +
-          (cpu.system - this.prevChildCpu.system);
-        const cpuPercent =
-          elapsedMs > 0
-            ? Math.min(
-                100,
-                Math.max(
-                  0,
-                  ((cpuUs / (elapsedMs * 1000)) * 100) / this.childCpuCoreCount,
-                ),
-              )
-            : 0;
-        this.prevChildCpu = cpu;
-        this.prevChildCpuAt = now;
+        let cpuPercent = 0;
+        if (cpu && elapsedMs > 0) {
+          const cpuUs =
+            cpu.user -
+            this.prevChildCpu.user +
+            (cpu.system - this.prevChildCpu.system);
+          cpuPercent = Math.min(
+            100,
+            Math.max(
+              0,
+              ((cpuUs / (elapsedMs * 1000)) * 100) / this.childCpuCoreCount,
+            ),
+          );
+        }
+        // Advance the baseline ONLY on a successful read. Advancing prevAt
+        // after a throw would pair a full since-last-success cpuUs with a short
+        // since-last-failure elapsedMs on the next poll → a ~2x phantom spike.
+        if (cpu) {
+          this.prevChildCpu = cpu;
+          this.prevChildCpuAt = now;
+        }
         return {
           rssBytes: process.memoryUsage().rss,
           cpuPercent,

@@ -111,12 +111,14 @@ const DAEMON_METRICS_SAMPLE_MS = 5_000;
 const DAEMON_METRICS_CAPACITY = 180;
 
 // `process.cpuUsage()` can throw in restricted containers that lack the
-// syscall; fall back to zero so the metrics sampler never crashes on it.
-function safeCpuUsage(): NodeJS.CpuUsage {
+// syscall; return null so the sampler can skip the delta (and leave its
+// baseline untouched) rather than treating a failed read as zero usage —
+// which would turn the next successful read's since-start total into a spike.
+function safeCpuUsage(): NodeJS.CpuUsage | null {
   try {
     return process.cpuUsage();
   } catch {
-    return { user: 0, system: 0 };
+    return null;
   }
 }
 const DEFAULT_RUNTIME_STARTUP_TIMEOUT_MS = 120_000;
@@ -1262,7 +1264,7 @@ function isCorsPreflightRequest(req: Request): boolean {
     Boolean(req.headers.origin) &&
     Boolean(
       req.headers['access-control-request-method'] ||
-      req.headers['access-control-request-headers'],
+        req.headers['access-control-request-headers'],
     )
   );
 }
@@ -2309,54 +2311,106 @@ export async function runQwenServe(
     const cpuCoreCount = os.availableParallelism?.() ?? os.cpus().length ?? 1;
     let prevCpu = safeCpuUsage();
     let prevCpuAt = Date.now();
-    let prevRateRejected = 0;
+    // undefined until the first tick sets the baseline, so the first sealed
+    // window reports 0 rejects instead of the entire since-start backlog as a
+    // y-axis-flattening spike.
+    let prevRateRejected: number | undefined;
     const metricsSamplerTimer = setInterval(() => {
       const nowMs = Date.now();
-      const mem = process.memoryUsage();
-      const eventLoopLagP99Ms = metricsLoopDelay.percentile(99) / 1_000_000;
-      metricsLoopDelay.reset();
-      const cpu = safeCpuUsage();
-      const elapsedMs = nowMs - prevCpuAt;
-      const cpuUs = cpu.user - prevCpu.user + (cpu.system - prevCpu.system);
-      const cpuPercent =
-        elapsedMs > 0
-          ? Math.min(
-              100,
-              Math.max(0, ((cpuUs / (elapsedMs * 1000)) * 100) / cpuCoreCount),
-            )
+      try {
+        const mem = process.memoryUsage();
+        const eventLoopLagP99Ms = metricsLoopDelay.percentile(99) / 1_000_000;
+        // CPU%: skip the delta AND leave the baseline untouched when
+        // cpuUsage() throws, so a transient failure can't turn the next
+        // successful read's since-start total into one giant window spike.
+        const cpu = safeCpuUsage();
+        const elapsedMs = nowMs - prevCpuAt;
+        let cpuPercent = 0;
+        if (cpu && prevCpu && elapsedMs > 0) {
+          const cpuUs = cpu.user - prevCpu.user + (cpu.system - prevCpu.system);
+          cpuPercent = Math.min(
+            100,
+            Math.max(0, ((cpuUs / (elapsedMs * 1000)) * 100) / cpuCoreCount),
+          );
+        }
+        if (cpu) {
+          prevCpu = cpu;
+          prevCpuAt = nowMs;
+        }
+        // Connections + rate limiter live on `app` (the createServeApp const
+        // just below); read lazily — the first tick is ≥5s out, so the forward
+        // reference is assigned by call time. Guard with `?.` (ACP HTTP and the
+        // limiter are both toggleable).
+        const acp = (
+          app.locals?.['acpHandle'] as AcpHttpHandle | undefined
+        )?.registry.getSnapshot();
+        const hits = getRateLimiter(app)?.getHitCounts();
+        const rejectedTotal = hits
+          ? hits.prompt + hits.mutation + hits.read
           : 0;
-      prevCpu = cpu;
-      prevCpuAt = nowMs;
-      // Connections + rate limiter live on `app` (the createServeApp const just
-      // below); read lazily — the first tick is ≥5s out, so the forward
-      // reference is assigned by call time. Guard with `?.` (ACP HTTP and the
-      // limiter are both toggleable).
-      const acp = (
-        app.locals?.['acpHandle'] as AcpHttpHandle | undefined
-      )?.registry.getSnapshot();
-      const hits = getRateLimiter(app)?.getHitCounts();
-      const rejectedTotal = hits ? hits.prompt + hits.mutation + hits.read : 0;
-      const rateLimitRejected = Math.max(0, rejectedTotal - prevRateRejected);
-      prevRateRejected = rejectedTotal;
-      // ACP child resource: read this tick's cached snapshot synchronously and
-      // kick an async refresh for the next tick, keeping the sampler sync.
-      const child = bridge.getChildResourceSnapshot();
-      void bridge.refreshChildResource();
-      metricsRing.sample(nowMs, {
-        cpuPercent,
-        rssBytes: mem.rss,
-        heapUsedBytes: mem.heapUsed,
-        activeSessions: bridge.sessionCount,
-        activePrompts: bridge.activePromptCount,
-        pendingPrompts: bridge.pendingPromptTotal,
-        eventLoopLagP99Ms,
-        sseConnections: runtime.getActiveSseCount(),
-        wsConnections: acp?.wsStreams ?? 0,
-        acpConnections: acp?.connectionCount ?? 0,
-        rateLimitRejected,
-        childCpuPercent: child?.cpuPercent ?? 0,
-        childRssBytes: child?.rssBytes ?? 0,
-      });
+        const rateLimitRejected =
+          prevRateRejected === undefined
+            ? 0
+            : Math.max(0, rejectedTotal - prevRateRejected);
+        prevRateRejected = rejectedTotal;
+        // ACP child resource: read this tick's cached snapshot synchronously
+        // and kick an async refresh for the next tick, keeping the sampler
+        // sync. Optional-chained: an injected bridge (RunQwenServeDeps.bridge)
+        // built against the older contract may not implement these hooks.
+        const child = bridge.getChildResourceSnapshot?.();
+        void bridge.refreshChildResource?.();
+        metricsRing.sample(nowMs, {
+          cpuPercent,
+          rssBytes: mem.rss,
+          heapUsedBytes: mem.heapUsed,
+          activeSessions: bridge.sessionCount,
+          activePrompts: bridge.activePromptCount,
+          pendingPrompts: bridge.pendingPromptTotal ?? 0,
+          eventLoopLagP99Ms,
+          sseConnections: runtime.getActiveSseCount(),
+          wsConnections: acp?.wsStreams ?? 0,
+          acpConnections: acp?.connectionCount ?? 0,
+          rateLimitRejected,
+          childCpuPercent: child?.cpuPercent ?? 0,
+          childRssBytes: child?.rssBytes ?? 0,
+        });
+      } catch (err) {
+        // A gauge getter threw (e.g. process.memoryUsage() in a restricted
+        // container, or a bridge getter mid-teardown). Never let it surface as
+        // an uncaughtException that takes down the daemon; seal a zeroed bucket
+        // so the timeline stays contiguous rather than silently gapping.
+        daemonLog.warn(
+          `metrics sampler tick failed: ${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        try {
+          metricsRing.sample(nowMs, {
+            cpuPercent: 0,
+            rssBytes: 0,
+            heapUsedBytes: 0,
+            activeSessions: 0,
+            activePrompts: 0,
+            pendingPrompts: 0,
+            eventLoopLagP99Ms: 0,
+            sseConnections: 0,
+            wsConnections: 0,
+            acpConnections: 0,
+            rateLimitRejected: 0,
+            childCpuPercent: 0,
+            childRssBytes: 0,
+          });
+        } catch {
+          // The ring is pure data; a throw here is unexpected, but never let
+          // the fallback path crash the timer either.
+        }
+      } finally {
+        // Reset the window histogram AFTER sampling (or after a failed tick) so
+        // a thrown tick can't permanently discard event-loop lag — which would
+        // otherwise leave the chart reading a healthy 0ms while the daemon was
+        // actually stalling.
+        metricsLoopDelay.reset();
+      }
     }, DAEMON_METRICS_SAMPLE_MS);
     metricsSamplerTimer.unref();
     daemonMetricsSampler = {

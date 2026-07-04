@@ -5,7 +5,10 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { DaemonMetricsRing, type DaemonMetricsGauges } from './daemon-metrics-ring.js';
+import {
+  DaemonMetricsRing,
+  type DaemonMetricsGauges,
+} from './daemon-metrics-ring.js';
 
 const GAUGES: DaemonMetricsGauges = {
   cpuPercent: 12,
@@ -130,6 +133,53 @@ describe('DaemonMetricsRing', () => {
     expect(b.requests).toBe(1);
     expect(b.latencyP50Ms).toBe(0);
     expect(b.promptQueueWaitP95Ms).toBe(0);
+  });
+
+  it('rejects non-finite / negative pipe byte counts defensively', () => {
+    const ring = new DaemonMetricsRing({ capacity: 10 });
+    ring.recordPipe('inbound', NaN); // rejected
+    ring.recordPipe('inbound', -100); // rejected (negative)
+    ring.recordPipe('outbound', Infinity); // rejected
+    ring.recordPipe('outbound', -1); // rejected (negative)
+    ring.recordPipe('inbound', 512); // valid → counts
+    ring.sample(1000, GAUGES);
+    const [b] = ring.snapshot();
+    expect(b.pipeInBytes).toBe(512);
+    expect(b.pipeOutBytes).toBe(0);
+  });
+
+  it('caps per-window percentile samples but still counts every request', () => {
+    const ring = new DaemonMetricsRing({ capacity: 10 });
+    // Push well past MAX_SAMPLES_PER_WINDOW (4096) durations in one window.
+    for (let i = 0; i < 5000; i++) {
+      ring.recordRequest(i + 1, 200); // duration 1..5000, all finite/positive
+    }
+    ring.sample(1000, GAUGES);
+    const [b] = ring.snapshot();
+    // The plain counter accrues the full 5000 requests past the cap...
+    expect(b.requests).toBe(5000);
+    // ...but only the first 4096 durations feed the percentile sample, so p95
+    // is nearest-rank over [1..4096] = ceil(0.95*4096)=3892 → 3892. Were the
+    // full 5000 sampled it would be ceil(0.95*5000)=4750 → 4750, so this value
+    // pins the truncation.
+    expect(b.latencyP95Ms).toBe(3892);
+  });
+
+  it('sanitizes non-finite gauges to 0 so they never serialize as JSON null', () => {
+    const ring = new DaemonMetricsRing({ capacity: 10 });
+    ring.sample(1000, {
+      ...GAUGES,
+      cpuPercent: NaN,
+      eventLoopLagP99Ms: Number.POSITIVE_INFINITY,
+      rssBytes: Number.NEGATIVE_INFINITY,
+    });
+    const [b] = ring.snapshot();
+    expect(b.cpuPercent).toBe(0);
+    expect(b.eventLoopLagP99Ms).toBe(0);
+    expect(b.rssBytes).toBe(0);
+    // finite gauges still pass through untouched
+    expect(b.activeSessions).toBe(2);
+    expect(b.childRssBytes).toBe(200);
   });
 
   it('snapshot returns a copy (mutating it does not corrupt the ring)', () => {

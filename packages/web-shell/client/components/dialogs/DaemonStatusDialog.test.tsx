@@ -380,6 +380,77 @@ describe('DaemonStatusDialog', () => {
     expect(container!.textContent ?? '').toContain('Collecting metrics');
   });
 
+  it('formats large legend values via the compact-count, percent, and KB branches', () => {
+    const big = makeBucket(1000);
+    big.requests = 15000; // formatCount ≥10k branch → "15k"
+    big.cpuPercent = 120; // formatPercent ≥100 branch → "120%" (no decimal)
+    big.pipeInBytes = 5 * 1024; // formatBytes sub-MB branch → "5.0 KB"
+    summaryState = {
+      report: {
+        ...summaryReport,
+        runtime: { ...summaryReport.runtime, metrics: { series: [big] } },
+      },
+      loading: false,
+      error: undefined,
+    };
+    mount();
+    const metricsTab = container!.querySelectorAll('[role="tab"]')[1];
+    act(() => {
+      metricsTab.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const text = container!.textContent ?? '';
+    expect(text).toContain('15k');
+    expect(text).toContain('120%');
+    expect(text).toContain('5.0 KB');
+  });
+
+  it('moves between tabs with arrow / Home / End keys (roving tabindex)', () => {
+    mount();
+    const tabs = container!.querySelectorAll('[role="tab"]');
+    expect(tabs).toHaveLength(3);
+    // Overview active by default; ArrowRight advances to Metrics.
+    act(() => {
+      tabs[0].dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowRight',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(tabs[1].getAttribute('aria-selected')).toBe('true');
+    expect(tabs[0].getAttribute('aria-selected')).toBe('false');
+    // Roving tabindex: only the active tab stays in the tab order.
+    expect(tabs[1].getAttribute('tabindex')).toBe('0');
+    expect(tabs[0].getAttribute('tabindex')).toBe('-1');
+    // End jumps to the last tab, Home back to the first (with wrap-around via
+    // the modulo also covered: ArrowLeft from the first tab would land on End).
+    act(() => {
+      tabs[1].dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'End',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(tabs[2].getAttribute('aria-selected')).toBe('true');
+    act(() => {
+      tabs[2].dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Home',
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    });
+    expect(tabs[0].getAttribute('aria-selected')).toBe('true');
+    // Each tab points at its panel for assistive tech.
+    expect(tabs[0].getAttribute('aria-controls')).toBe(
+      'daemon-tabpanel-overview',
+    );
+  });
+
   it('auto-refresh reloads only the cheap summary, never the full report', async () => {
     vi.useFakeTimers();
     mount();

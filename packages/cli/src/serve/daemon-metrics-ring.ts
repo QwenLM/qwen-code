@@ -212,11 +212,17 @@ export class DaemonMetricsRing {
    * accumulators for the next window.
    */
   sample(now: number, gauges: DaemonMetricsGauges): void {
+    // Gauges come from host getters (process.memoryUsage(), the event-loop
+    // histogram, bridge counters); sanitize each so a NaN/±Infinity from an
+    // unexpected state (e.g. a histogram percentile queried right after reset)
+    // serializes as 0 rather than JSON `null`, which would gap the chart. The
+    // window aggregates below are already finite: percentile() returns 0 for an
+    // empty sample and the counters only accumulate finite values.
     this.buckets.push({
       t: now,
-      activeSessions: gauges.activeSessions,
-      activePrompts: gauges.activePrompts,
-      pendingPrompts: gauges.pendingPrompts,
+      activeSessions: finiteGauge(gauges.activeSessions),
+      activePrompts: finiteGauge(gauges.activePrompts),
+      pendingPrompts: finiteGauge(gauges.pendingPrompts),
       requests: this.curRequests,
       errors: this.curErrors,
       latencyP50Ms: percentile(this.curDurations, 0.5),
@@ -226,20 +232,20 @@ export class DaemonMetricsRing {
       promptDurationP95Ms: percentile(this.curPromptDurations, 0.95),
       llmApiP50Ms: percentile(this.curLlmDurations, 0.5),
       llmApiP95Ms: percentile(this.curLlmDurations, 0.95),
-      cpuPercent: gauges.cpuPercent,
-      rssBytes: gauges.rssBytes,
-      heapUsedBytes: gauges.heapUsedBytes,
-      eventLoopLagP99Ms: gauges.eventLoopLagP99Ms,
+      cpuPercent: finiteGauge(gauges.cpuPercent),
+      rssBytes: finiteGauge(gauges.rssBytes),
+      heapUsedBytes: finiteGauge(gauges.heapUsedBytes),
+      eventLoopLagP99Ms: finiteGauge(gauges.eventLoopLagP99Ms),
       pipeInBytes: this.curPipeInBytes,
       pipeOutBytes: this.curPipeOutBytes,
-      sseConnections: gauges.sseConnections,
-      wsConnections: gauges.wsConnections,
-      acpConnections: gauges.acpConnections,
-      rateLimitRejected: gauges.rateLimitRejected,
+      sseConnections: finiteGauge(gauges.sseConnections),
+      wsConnections: finiteGauge(gauges.wsConnections),
+      acpConnections: finiteGauge(gauges.acpConnections),
+      rateLimitRejected: finiteGauge(gauges.rateLimitRejected),
       tokensIn: this.curTokensIn,
       tokensOut: this.curTokensOut,
-      childCpuPercent: gauges.childCpuPercent,
-      childRssBytes: gauges.childRssBytes,
+      childCpuPercent: finiteGauge(gauges.childCpuPercent),
+      childRssBytes: finiteGauge(gauges.childRssBytes),
     });
     if (this.buckets.length > this.capacity) {
       this.buckets.splice(0, this.buckets.length - this.capacity);
@@ -261,6 +267,12 @@ export class DaemonMetricsRing {
   snapshot(): DaemonMetricsBucket[] {
     return this.buckets.slice();
   }
+}
+
+/** Coerce a host-supplied gauge to a finite number (NaN/±Infinity → 0) so a
+ *  bad reading serializes as 0 rather than JSON null and never gaps the chart. */
+function finiteGauge(value: number): number {
+  return Number.isFinite(value) ? value : 0;
 }
 
 /** Append a finite, non-negative duration up to the per-window cap. */

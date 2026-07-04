@@ -2118,10 +2118,17 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         info.childCpuPercent = res.cpuPercent;
       }
       info.childResourceAt = Date.now();
-    } catch {
+    } catch (err) {
       // Child unreachable / mid-swap — keep the last good cache (or nothing
       // before the first success). The staleness guard in the reader drops it
       // once it ages out, so a stuck child reads 0 rather than a frozen value.
+      // Log at debug so an operator watching child rss/cpu flatline to 0 can
+      // tell "the poll is failing" apart from "the child is genuinely idle".
+      teeServeDebugLine(
+        `child-resource refresh failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
     } finally {
       childResourceRefreshing = false;
     }
@@ -3020,11 +3027,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     },
 
     get pendingPromptTotal() {
-      // Sum per-session pendingPromptCount (running + queued) — the queue-depth
-      // gauge for the Daemon Status charts. Cheap: one pass over the session
-      // map, avoiding a full getDaemonStatusSnapshot() allocation per sample.
+      // Queue-depth gauge for the Daemon Status "Queued" chart: count only
+      // prompts still waiting in the per-session FIFO (`state === 'queued'`),
+      // NOT the running one. `pendingPromptCount` bundles running + queued, so
+      // summing it would overstate backpressure by the number of in-flight
+      // prompts and shadow the separate "Active tasks" line. Cheap: each list
+      // is bounded by maxPendingPromptsPerSession.
       let total = 0;
-      for (const entry of byId.values()) total += entry.pendingPromptCount;
+      for (const entry of byId.values()) {
+        for (const pending of entry.pendingPromptList) {
+          if (pending.state === 'queued') total += 1;
+        }
+      }
       return total;
     },
 

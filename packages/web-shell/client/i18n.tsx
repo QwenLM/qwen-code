@@ -10,7 +10,8 @@ export const WEB_SHELL_LANGUAGES = ['en', 'zh-CN'] as const;
 export type WebShellLanguage = (typeof WEB_SHELL_LANGUAGES)[number];
 
 type MessageValue =
-  string | ((vars?: Record<string, string | number>) => string);
+  | string
+  | ((vars?: Record<string, string | number>) => string);
 
 type Messages = Record<string, MessageValue>;
 
@@ -438,6 +439,7 @@ const EN: Messages = {
   'daemon.charts.tokens': 'Token burn',
   'daemon.charts.tokensIn': 'Input',
   'daemon.charts.tokensOut': 'Output',
+  'daemon.charts.peak': 'peak',
   'delete.cannotCurrent': 'Cannot delete the current active session.',
   'delete.action': 'Delete',
   'delete.deleted': 'Session deleted.',
@@ -1813,6 +1815,7 @@ const ZH: Messages = {
   'daemon.charts.tokens': 'Token 消耗',
   'daemon.charts.tokensIn': '输入',
   'daemon.charts.tokensOut': '输出',
+  'daemon.charts.peak': '峰值',
   'delete.cannotCurrent': '无法删除当前活动会话。',
   'delete.action': '删除',
   'delete.deleted': '会话已删除。',

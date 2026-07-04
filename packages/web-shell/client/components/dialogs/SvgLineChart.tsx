@@ -25,6 +25,8 @@ interface SvgLineChartProps {
   zeroBased?: boolean;
   /** Accessible description of what the chart shows. */
   ariaLabel?: string;
+  /** Localized prefix for the peak-value label (default `'peak'`). */
+  peakLabel?: string;
 }
 
 // A wide, short viewBox stretched to the card width. `preserveAspectRatio:none`
@@ -58,6 +60,7 @@ export function SvgLineChart({
   formatTime = defaultFormatTime,
   zeroBased = true,
   ariaLabel,
+  peakLabel = 'peak',
 }: SvgLineChartProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
@@ -255,7 +258,7 @@ export function SvgLineChart({
           );
         })}
         {hasData && (
-          <span className={styles.peak}>{`peak ${format(maxV)}`}</span>
+          <span className={styles.peak}>{`${peakLabel} ${format(maxV)}`}</span>
         )}
       </div>
     </div>

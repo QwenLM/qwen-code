@@ -664,7 +664,15 @@ export class BridgeClient implements Client {
     // once — subagent frames carry usage too (tagged `parentToolCallId`) and
     // are independent turns, so counting every frame once is the correct total.
     // Read defensively: `_meta`/`usage` are optional and untyped here.
-    if (this.onTokenUsage) {
+    // Only count live turns: guard on `entry`. History replay (the
+    // `session/load` path) re-emits saved assistant usage as live
+    // `session/update` frames that arrive *before* the session entry is
+    // registered (createSessionEntry runs after loadSession resolves), so
+    // `entry` is undefined for replayed frames but always set during an active
+    // prompt. Without this, opening a saved session dumps its entire historical
+    // token total into the current metrics window as a phantom burn spike with
+    // no model call.
+    if (this.onTokenUsage && entry) {
       const usage = updateMeta?.['usage'];
       if (usage !== null && typeof usage === 'object') {
         const inputTokens = (usage as { inputTokens?: unknown }).inputTokens;

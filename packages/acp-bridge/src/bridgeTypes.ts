@@ -1021,20 +1021,24 @@ export interface AcpSessionBridge {
   /** Number of sessions with an active prompt. */
   readonly activePromptCount: number;
 
-  /** Total pending prompts (running + queued) across all sessions — the
-   *  queue-depth gauge for the Daemon Status charts. */
-  readonly pendingPromptTotal: number;
+  /** Queued prompts across all sessions — accepted but not yet dispatched,
+   *  excluding the one running per session — i.e. the queue-depth gauge for the
+   *  Daemon Status charts (distinct from `activePromptCount`). Optional: a
+   *  bridge injected via `RunQwenServeDeps.bridge` may predate these Daemon
+   *  Status hooks, so the sampler treats them as absent (→ 0 / skipped). */
+  readonly pendingPromptTotal?: number;
 
   /** Latest self-reported ACP-child rss/cpu (Daemon Status child-resource
    *  chart), or undefined before the first successful poll / when no child is
-   *  live. Synchronous cache read for the metrics sampler. */
-  getChildResourceSnapshot():
+   *  live. Synchronous cache read for the metrics sampler. Optional — see
+   *  {@link pendingPromptTotal}. */
+  getChildResourceSnapshot?():
     | { rssBytes: number; cpuPercent: number }
     | undefined;
   /** Poll the live child's resource extMethod and refresh the cache that
    *  {@link getChildResourceSnapshot} reads. Fired fire-and-forget by the
-   *  sampler each tick. */
-  refreshChildResource(): Promise<void>;
+   *  sampler each tick. Optional — see {@link pendingPromptTotal}. */
+  refreshChildResource?(): Promise<void>;
 
   /**
    * Epoch-ms timestamp of the last "activity" event (prompt start/end,

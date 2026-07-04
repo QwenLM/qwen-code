@@ -628,6 +628,48 @@ describe('BridgeClient — token usage accounting', () => {
     // No `_meta.durationMs` on this frame → the round-trip arg is undefined.
     expect(onTokenUsage).toHaveBeenCalledWith(0, 50, undefined);
   });
+
+  it('does NOT count tokens for replayed history frames (no live entry yet)', async () => {
+    // Regression guard for the `session/load` replay path: HistoryReplayer
+    // re-emits saved assistant usage as live `session/update` frames that reach
+    // sessionUpdate *before* the session entry is registered, so `resolveEntry`
+    // returns undefined and events flow through the pending-restore bus instead.
+    // Counting those would dump the whole session's historical token total into
+    // the current window as a phantom burn spike; the `&& entry` guard blocks it.
+    const onTokenUsage = vi.fn();
+    const publish = vi.fn().mockReturnValue(true);
+    const sessionId = 'sess:replay';
+    const client = new BridgeClient(
+      (() => undefined) as never, // resolveEntry → no live entry yet (replay)
+      ((sid: string) => (sid === sessionId ? { publish } : undefined)) as never, // restore bus
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      undefined, // clientMcpSender
+      undefined, // ownsSession → default () => true
+      onTokenUsage,
+    );
+
+    await client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          usage: { inputTokens: 5000, outputTokens: 1200, totalTokens: 6200 },
+          durationMs: 900,
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    // The frame is still published to the restore bus (history replay works)...
+    expect(publish).toHaveBeenCalled();
+    // ...but its historical usage is NOT added to the live token-burn metric.
+    expect(onTokenUsage).not.toHaveBeenCalled();
+  });
 });
 
 describe('BridgeClient — artifact ingress', () => {

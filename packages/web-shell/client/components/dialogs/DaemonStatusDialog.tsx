@@ -3,6 +3,7 @@ import {
   useEffect,
   useRef,
   useState,
+  type KeyboardEvent,
   type ReactNode,
 } from 'react';
 import {
@@ -57,7 +58,13 @@ function formatDurationMs(ms: number): string {
 }
 
 function formatBytes(bytes: number): string {
-  const mb = bytes / (1024 * 1024);
+  // Adaptive unit: sub-MB windows (idle-pipe keep-alive traffic) would read a
+  // misleading "0.0 MB", so drop to KB/B and show a nonzero value. RSS/heap are
+  // always ≥ 1 MB, so those charts stay in MB/GB unchanged.
+  const kb = bytes / 1024;
+  if (kb < 1) return `${Math.round(bytes)} B`;
+  const mb = kb / 1024;
+  if (mb < 1) return `${kb.toFixed(kb < 10 ? 1 : 0)} KB`;
   return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
 }
 
@@ -321,6 +328,7 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
         timestamps={times}
         format={format}
         ariaLabel={t(titleKey)}
+        peakLabel={t('daemon.charts.peak')}
       />
     </Card>
   );
@@ -480,6 +488,31 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
 function DaemonStatusDialogInner() {
   const { t } = useI18n();
   const [activeTab, setActiveTab] = useState<DaemonTab>('overview');
+  // WAI-ARIA tabs keyboard support: roving tabindex (only the active tab is in
+  // the tab order) + Arrow/Home/End moving focus and selection across the
+  // tablist, so keyboard-only users can switch tabs without tabbing through all
+  // the panel content in between.
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const handleTabKeyDown = (
+    e: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ): void => {
+    let next: number;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      next = (index + 1) % DAEMON_TABS.length;
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      next = (index - 1 + DAEMON_TABS.length) % DAEMON_TABS.length;
+    } else if (e.key === 'Home') {
+      next = 0;
+    } else if (e.key === 'End') {
+      next = DAEMON_TABS.length - 1;
+    } else {
+      return;
+    }
+    e.preventDefault();
+    setActiveTab(DAEMON_TABS[next].id);
+    tabRefs.current[next]?.focus();
+  };
   // Two independent fetches: the summary drives the always-live top cards and
   // rides the auto-refresh interval; the full report backs the detail sections
   // and is only pulled on open (autoLoad) and on manual refresh.
@@ -611,16 +644,23 @@ function DaemonStatusDialogInner() {
         role="tablist"
         aria-label={t('daemon.title')}
       >
-        {DAEMON_TABS.map((tab) => (
+        {DAEMON_TABS.map((tab, index) => (
           <button
             key={tab.id}
+            ref={(el) => {
+              tabRefs.current[index] = el;
+            }}
             type="button"
             role="tab"
+            id={`daemon-tab-${tab.id}`}
             aria-selected={tab.id === activeTab}
+            aria-controls={`daemon-tabpanel-${tab.id}`}
+            tabIndex={tab.id === activeTab ? 0 : -1}
             className={`${styles.tab} ${
               tab.id === activeTab ? styles.tabActive : ''
             }`}
             onClick={() => setActiveTab(tab.id)}
+            onKeyDown={(e) => handleTabKeyDown(e, index)}
           >
             {t(tab.labelKey)}
           </button>
@@ -628,7 +668,13 @@ function DaemonStatusDialogInner() {
       </div>
 
       {activeTab === 'overview' && (
-        <div className={styles.grid}>
+        <div
+          role="tabpanel"
+          id="daemon-tabpanel-overview"
+          aria-labelledby="daemon-tab-overview"
+          tabIndex={0}
+          className={styles.grid}
+        >
           <Card title={t('daemon.overview.title')}>
             {daemon.qwenCodeVersion && (
               <Row
@@ -871,33 +917,47 @@ function DaemonStatusDialogInner() {
           continuously-refreshed summary report so the curves advance on every
           poll; the daemon retains the history, so it survives dialog close. */}
       {activeTab === 'metrics' && (
-        <MetricsCharts series={report.runtime.metrics?.series ?? []} />
+        <div
+          role="tabpanel"
+          id="daemon-tabpanel-metrics"
+          aria-labelledby="daemon-tab-metrics"
+          tabIndex={0}
+        >
+          <MetricsCharts series={report.runtime.metrics?.series ?? []} />
+        </div>
       )}
 
       {/* Contain a crash in the detail sections (e.g. a partial detail=full
           payload) to this region so the healthy summary cards above stay live,
           rather than letting the outer boundary replace the whole dialog. */}
       {activeTab === 'diagnostics' && (
-        <ErrorBoundary
-          label="daemon-status-detail"
-          fallback={
-            <div className={styles.empty}>{t('daemon.details.failed')}</div>
-          }
+        <div
+          role="tabpanel"
+          id="daemon-tabpanel-diagnostics"
+          aria-labelledby="daemon-tab-diagnostics"
+          tabIndex={0}
         >
-          {fullReport?.full ? (
-            <FullDetail report={fullReport} />
-          ) : full.loading ? (
-            <div className={styles.empty}>{t('daemon.details.loading')}</div>
-          ) : full.error ? (
-            <div className={styles.empty}>
-              {t('daemon.details.failed')}: {full.error.message}
-            </div>
-          ) : (
-            // Fetch resolved but the daemon omitted the `full` section — don't
-            // hang on the loading placeholder forever.
-            <div className={styles.empty}>{t('daemon.details.failed')}</div>
-          )}
-        </ErrorBoundary>
+          <ErrorBoundary
+            label="daemon-status-detail"
+            fallback={
+              <div className={styles.empty}>{t('daemon.details.failed')}</div>
+            }
+          >
+            {fullReport?.full ? (
+              <FullDetail report={fullReport} />
+            ) : full.loading ? (
+              <div className={styles.empty}>{t('daemon.details.loading')}</div>
+            ) : full.error ? (
+              <div className={styles.empty}>
+                {t('daemon.details.failed')}: {full.error.message}
+              </div>
+            ) : (
+              // Fetch resolved but the daemon omitted the `full` section — don't
+              // hang on the loading placeholder forever.
+              <div className={styles.empty}>{t('daemon.details.failed')}</div>
+            )}
+          </ErrorBoundary>
+        </div>
       )}
     </div>
   );
