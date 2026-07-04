@@ -5,7 +5,6 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import * as path from 'node:path';
 import * as vscode from 'vscode';
 import { activate } from './extension.js';
 import { IDE_DEFINITIONS, detectIdeFromEnv } from '@qwen-code/qwen-code-core';
@@ -162,10 +161,10 @@ describe('activate', () => {
       expect.objectContaining({
         cwd: '/workspace/second',
         env: {
-          QWEN_CODE_IDE_WORKSPACE_PATH: [
+          QWEN_CODE_IDE_WORKSPACE_PATH: JSON.stringify([
             '/workspace/first',
             '/workspace/second',
-          ].join(path.delimiter),
+          ]),
         },
       }),
     );

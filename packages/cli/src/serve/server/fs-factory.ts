@@ -80,12 +80,9 @@ export function resolveBoundWorkspacesFromIdeEnv(
   primaryWorkspace: string,
   ideWorkspacePath = process.env[IDE_WORKSPACE_PATH_ENV_VAR],
 ): string[] {
-  const envWorkspaces =
-    ideWorkspacePath
-      ?.split(path.delimiter)
-      .filter((workspace) => workspace.length > 0) ?? [];
   let envCanonical: string[];
   try {
+    const envWorkspaces = parseIdeWorkspacePathEnv(ideWorkspacePath);
     envCanonical = canonicalizeWorkspaces(envWorkspaces);
   } catch (err) {
     writeStderrLine(
@@ -112,5 +109,39 @@ export function resolveBoundWorkspacesFromIdeEnv(
     );
     return [primary];
   }
-  return workspaces;
+  return dropNestedWorkspaces(workspaces);
+}
+
+function parseIdeWorkspacePathEnv(value: string | undefined): string[] {
+  if (value === undefined || value.length === 0) return [];
+  if (value.trimStart().startsWith('[')) {
+    const parsed = JSON.parse(value) as unknown;
+    if (
+      Array.isArray(parsed) &&
+      parsed.every((item) => typeof item === 'string')
+    ) {
+      return parsed.filter((workspace) => workspace.length > 0);
+    }
+    throw new Error('IDE workspace path JSON must be a string array');
+  }
+  return value
+    .split(path.delimiter)
+    .filter((workspace) => workspace.length > 0);
+}
+
+function dropNestedWorkspaces(workspaces: readonly string[]): string[] {
+  const filtered = workspaces.filter(
+    (workspace, i) =>
+      !workspaces.some(
+        (other, j) =>
+          i !== j && workspace !== other && isWithinRoot(workspace, other),
+      ),
+  );
+  if (filtered.length < workspaces.length) {
+    writeStderrLine(
+      'qwen serve: dropping nested IDE workspace roots ' +
+        '(parent folders already cover children)',
+    );
+  }
+  return filtered;
 }

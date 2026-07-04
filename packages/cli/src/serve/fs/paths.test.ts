@@ -264,6 +264,23 @@ describe('resolveWithinWorkspace', () => {
     expect(out).toBe(realpathSync.native(real));
   });
 
+  it('allows a symlink target inside another bound workspace', async () => {
+    const second = path.join(scratch, 'second');
+    await fsp.mkdir(second);
+    const real = path.join(second, 'real.txt');
+    await fsp.writeFile(real, 'ok');
+    const link = path.join(workspace, 'link-to-second.txt');
+    await fsp.symlink(real, link, 'file');
+
+    const out = await resolveWithinWorkspace(
+      'link-to-second.txt',
+      [workspace, second],
+      'read',
+    );
+
+    expect(out).toBe(realpathSync.native(real));
+  });
+
   it('tolerates ENOENT for write intent and resolves via existing ancestor', async () => {
     const nested = 'newdir/leaf.txt';
     const out = await resolveWithinWorkspace(nested, workspace, 'write');
@@ -377,6 +394,22 @@ describe('resolveWithinWorkspace', () => {
       'write',
     );
     expect(typeof out).toBe('string');
+  });
+
+  it('allows a dangling symlink target inside another bound workspace', async () => {
+    const second = path.join(scratch, 'second');
+    await fsp.mkdir(second);
+    const target = path.join(second, 'will-create.txt');
+    const link = path.join(workspace, 'pending-link-to-second');
+    await fsp.symlink(target, link, 'file');
+
+    const out = await resolveWithinWorkspace(
+      'pending-link-to-second',
+      [workspace, second],
+      'write',
+    );
+
+    expect(out).toBe(path.join(realpathSync.native(second), 'will-create.txt'));
   });
 
   it('rejects a multi-hop dangling symlink chain that escapes the workspace', async () => {

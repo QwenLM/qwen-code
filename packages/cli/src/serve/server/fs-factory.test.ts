@@ -55,6 +55,24 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
     ]);
   });
 
+  it('accepts JSON encoded IDE roots without splitting path delimiters', async () => {
+    const scratch = await mkScratch();
+    const primary = path.join(scratch, 'primary');
+    const withDelimiter = path.join(scratch, `tool${path.delimiter}chain`);
+    await fsp.mkdir(primary);
+    await fsp.mkdir(withDelimiter);
+
+    const roots = resolveBoundWorkspacesFromIdeEnv(
+      primary,
+      JSON.stringify([primary, withDelimiter]),
+    );
+
+    expect(roots).toEqual([
+      realpathSync.native(primary),
+      realpathSync.native(withDelimiter),
+    ]);
+  });
+
   it('ignores a stale IDE workspace env that does not contain the primary workspace', async () => {
     const scratch = await mkScratch();
     const primary = path.join(scratch, 'primary');
@@ -95,7 +113,7 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
     );
   });
 
-  it('passes nested IDE roots through so registration rejects them loudly', async () => {
+  it('drops nested IDE roots before factory registration', async () => {
     const scratch = await mkScratch();
     const parent = path.join(scratch, 'parent');
     const child = path.join(parent, 'child');
@@ -106,20 +124,17 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
       [parent, child].join(path.delimiter),
     );
 
-    expect(roots).toEqual([
-      realpathSync.native(parent),
-      realpathSync.native(child),
-    ]);
+    expect(roots).toEqual([realpathSync.native(parent)]);
     expect(() =>
       resolveBridgeFsFactory({
         boundWorkspaces: roots,
         trusted: true,
         emit: () => undefined,
       }),
-    ).toThrow(/nested/i);
+    ).not.toThrow();
   });
 
-  it('passes env child roots through when the primary workspace is the parent', async () => {
+  it('drops env child roots when the primary workspace is the parent', async () => {
     const scratch = await mkScratch();
     const parent = path.join(scratch, 'parent');
     const child = path.join(parent, 'child');
@@ -127,9 +142,6 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
 
     const roots = resolveBoundWorkspacesFromIdeEnv(parent, child);
 
-    expect(roots).toEqual([
-      realpathSync.native(parent),
-      realpathSync.native(child),
-    ]);
+    expect(roots).toEqual([realpathSync.native(parent)]);
   });
 });

@@ -792,12 +792,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
             dirent = null;
           }
           const kind = dirent?.isDirectory() ? 'directory' : 'file';
-          const verdict = shouldIgnore(
-            canonical as ResolvedPath,
-            searchRoot.workspace.path,
-            searchRoot.workspace.ignore,
-            kind,
-          );
+          const verdict = this.ignoreVerdict(canonical as ResolvedPath, kind);
           if (verdict.ignored && !opts.includeIgnored) continue;
           out.push(canonical as ResolvedPath);
         }

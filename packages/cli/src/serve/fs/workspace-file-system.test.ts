@@ -57,7 +57,9 @@ async function makeHarness(opts?: {
   return { factory, fs, events, workspace, scratch };
 }
 
-async function makeMultiRootHarness(): Promise<
+async function makeMultiRootHarness(
+  setup?: (primaryDir: string, secondDir: string) => Promise<void>,
+): Promise<
   Harness & {
     secondWorkspace: string;
   }
@@ -69,6 +71,7 @@ async function makeMultiRootHarness(): Promise<
   const secondDir = path.join(scratch, 'second');
   await fsp.mkdir(primaryDir);
   await fsp.mkdir(secondDir);
+  await setup?.(primaryDir, secondDir);
   const workspace = canonicalizeWorkspace(primaryDir);
   const secondWorkspace = canonicalizeWorkspace(secondDir);
   const events: BridgeEvent[] = [];
@@ -1355,6 +1358,20 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     const hits = await h.fs.glob('linked.ts');
 
     expect(hits).toEqual([target]);
+  });
+
+  it('glob applies ignore rules from the canonical target workspace', async () => {
+    await teardown(h);
+    h = await makeMultiRootHarness((_primaryDir, secondDir) =>
+      fsp.writeFile(path.join(secondDir, '.gitignore'), '*.log\n'),
+    );
+    const target = path.join(h.secondWorkspace, 'secret.log');
+    await fsp.writeFile(target, '');
+    await fsp.symlink(target, path.join(h.workspace, 'linked.log'), 'file');
+
+    const hits = await h.fs.glob('linked.log');
+
+    expect(hits).toEqual([]);
   });
 
   it('rejects nested workspace roots at factory construction', async () => {

@@ -522,7 +522,9 @@ export async function resolveWithinWorkspace(
           const canonicalTarget = targetTail
             ? path.join(targetAncestorReal, targetTail)
             : targetAncestorReal;
-          if (!isWithinRoot(canonicalTarget, boundCanonical)) {
+          if (
+            !boundCanonicals.some((root) => isWithinRoot(canonicalTarget, root))
+          ) {
             throw new FsError(
               'symlink_escape',
               `dangling symlink target escapes workspace: ${input}`,
@@ -585,7 +587,7 @@ export async function resolveWithinWorkspace(
     }
   }
 
-  if (!isWithinRoot(canonical, boundCanonical)) {
+  if (!boundCanonicals.some((root) => isWithinRoot(canonical, root))) {
     const kind: FsErrorKind =
       canonical !== absolute ? 'symlink_escape' : 'path_outside_workspace';
     throw new FsError(

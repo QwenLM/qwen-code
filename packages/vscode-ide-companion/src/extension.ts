@@ -5,7 +5,6 @@
  */
 
 import * as vscode from 'vscode';
-import * as path from 'node:path';
 import { IDEServer } from './ide-server.js';
 import semver from 'semver';
 import { DiffContentProvider, DiffManager } from './diff-manager.js';
@@ -365,9 +364,9 @@ export async function activate(context: vscode.ExtensionContext) {
             name: `Qwen Code (${selectedFolder.name})`,
             cwd: selectedFolder.uri.fsPath,
             env: {
-              [IDE_WORKSPACE_PATH_ENV_VAR]: workspaceFolders
-                .map((folder) => folder.uri.fsPath)
-                .join(path.delimiter),
+              [IDE_WORKSPACE_PATH_ENV_VAR]: JSON.stringify(
+                workspaceFolders.map((folder) => folder.uri.fsPath),
+              ),
             },
             location,
           };
