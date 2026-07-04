@@ -411,6 +411,22 @@
 
 .tagLabel,
 .tagValue {
+  color: var(--chat-editor-text-primary);
+}
+
+.tagIcon {
+  display: block;
+  width: 12px;
+  height: 12px;
+  flex: 0 0 auto;
+  margin-left: 7px;
+  background: currentColor;
+  mask: var(--composer-tag-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--composer-tag-icon-url) center / contain no-repeat;
+}
+
+.tagLabel,
+.tagValue {
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -422,10 +438,15 @@
   color: var(--chat-editor-accent-color);
 }
 
+.tagIcon + .tagLabel {
+  padding-left: 0.5ch;
+}
+
 .tagValue {
   max-width: 32ch;
   padding: 3px 0 3px 0.5ch;
-  color: var(--chat-editor-text-secondary);
+  color: var(--foreground, #e4e4e4);
+  opacity: 1;
 }
 
 .tagRemove {

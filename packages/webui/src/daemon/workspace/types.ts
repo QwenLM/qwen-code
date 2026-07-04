@@ -29,6 +29,7 @@ import type {
   DaemonMcpRestartResult,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
+  DaemonSessionArchiveState,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
@@ -146,6 +147,7 @@ export interface DaemonWorkspaceActions {
   // Sessions
   listSessions(options?: {
     pageSize?: number;
+    archiveState?: DaemonSessionArchiveState;
   }): Promise<DaemonSessionSummary[]>;
   deleteSession(sessionId: string): Promise<boolean>;
   deleteSessions(sessionIds: string[]): Promise<{
@@ -153,6 +155,14 @@ export interface DaemonWorkspaceActions {
     notFound: string[];
     errors: Array<{ sessionId: string; error: string }>;
   }>;
+  /**
+   * Move a session to the archived directory. Idempotent: an
+   * already-archived session resolves `true`. Rejects if the daemon
+   * reports a per-session error (e.g. an archive/unarchive conflict).
+   */
+  archiveSession(sessionId: string): Promise<boolean>;
+  /** Restore an archived session to the active directory. Idempotent. */
+  unarchiveSession(sessionId: string): Promise<boolean>;
 
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;
