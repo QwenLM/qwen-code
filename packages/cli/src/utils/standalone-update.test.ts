@@ -335,6 +335,30 @@ describe('standalone-update', () => {
       // Clean up lock
       fs.unlinkSync(lockPath);
     });
+
+    it('rejects a stale lock when a Windows deferred swap is pending', async () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const parentDir = path.dirname(standaloneDir);
+      fs.mkdirSync(standaloneDir, { recursive: true });
+      fs.mkdirSync(`${standaloneDir}.new`);
+      fs.writeFileSync(
+        path.join(standaloneDir, 'manifest.json'),
+        JSON.stringify({
+          name: '@qwen-code/qwen-code',
+          target: 'win-x64',
+        }),
+      );
+
+      const lockPath = path.join(parentDir, '.qwen-update.lock');
+      fs.writeFileSync(lockPath, '999999999');
+
+      await expect(
+        performStandaloneUpdate(standaloneDir, '1.0.0'),
+      ).rejects.toThrow('A previous update is pending swap');
+
+      expect(fs.existsSync(lockPath)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
+    });
   });
 
   describe('isSafeTarEntryPath', () => {

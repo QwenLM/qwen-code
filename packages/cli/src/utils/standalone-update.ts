@@ -451,27 +451,37 @@ async function smokeTest(newInstallDir: string, target: string): Promise<void> {
   debugLogger.info(`Smoke test passed: ${version}`);
 }
 
-function acquireLock(lockPath: string): boolean {
+function acquireLock(lockPath: string, standaloneDir?: string): boolean {
   try {
     fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
     return true;
   } catch {
+    let pidStr: string;
     try {
-      const pidStr = fs.readFileSync(lockPath, 'utf-8').trim();
-      const pid = parseInt(pidStr, 10);
-      if (Number.isNaN(pid) || !isProcessAlive(pid)) {
-        fs.unlinkSync(lockPath);
-        try {
-          fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
-          return true;
-        } catch {
-          return false;
-        }
-      }
+      pidStr = fs.readFileSync(lockPath, 'utf-8').trim();
     } catch {
       // lock is held by another live process
+      return false;
     }
-    return false;
+
+    const pid = parseInt(pidStr, 10);
+    if (!Number.isNaN(pid) && isProcessAlive(pid)) {
+      return false;
+    }
+
+    if (standaloneDir && fs.existsSync(`${standaloneDir}.new`)) {
+      throw new Error(
+        'A previous update is pending swap. Restart the CLI to apply it before updating again.',
+      );
+    }
+
+    try {
+      fs.unlinkSync(lockPath);
+      fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -846,7 +856,7 @@ export async function performStandaloneUpdate(
   // Acquire lock BEFORE creating standaloneDir to prevent a concurrent
   // process from seeing the empty directory and throwing a misleading error.
   const lockPath = path.join(parentDir, '.qwen-update.lock');
-  if (!acquireLock(lockPath)) {
+  if (!acquireLock(lockPath, standaloneDir)) {
     throw new Error('Another update is already in progress');
   }
 
