@@ -1922,6 +1922,8 @@ export function useComposerCore(
               return false;
             }
             window.setTimeout(() => {
+              const currentView = viewRef.current;
+              if (currentView?.hasFocus) return;
               if (
                 document.activeElement instanceof Element &&
                 document.activeElement.closest('[data-at-mention-panel="true"]')

@@ -34,6 +34,13 @@ function makeViewAt(doc: string, anchor: number): EditorView {
   } as unknown as EditorView;
 }
 
+function setViewState(view: EditorView, doc: string, anchor = doc.length) {
+  Object.defineProperty(view, 'state', {
+    value: EditorState.create({ doc, selection: { anchor } }),
+    configurable: true,
+  });
+}
+
 function Harness({
   actions,
   providers,
@@ -506,10 +513,7 @@ describe('useAtMentionMenu', () => {
     });
     view.dispatch = vi.fn((spec) => {
       if ('changes' in spec) {
-        view.state = EditorState.create({
-          doc: '@ext:review ',
-          selection: { anchor: '@ext:review '.length },
-        });
+        setViewState(view, '@ext:review ');
         act(() => latest!.refreshForView(view));
       }
     });
@@ -520,10 +524,7 @@ describe('useAtMentionMenu', () => {
     act(() => {
       expect(latest!.accept()).toBe(true);
     });
-    view.state = EditorState.create({
-      doc: '@ext:revie',
-      selection: { anchor: '@ext:revie'.length },
-    });
+    setViewState(view, '@ext:revie');
     act(() => latest!.refreshForView(view));
     await runDebounce();
 
@@ -717,6 +718,40 @@ describe('useAtMentionMenu', () => {
     expect(latest!.state).toBeNull();
   });
 
+  it('sanitizes custom item label fallbacks before insertion', async () => {
+    vi.useFakeTimers();
+    const view = makeView('@');
+    mount({
+      view,
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search: vi.fn().mockResolvedValue([
+            {
+              id: 'item',
+              label: 'snip\u0001pet',
+            },
+          ]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept()).toBe(true);
+    });
+
+    expect(view.dispatch).toHaveBeenCalledWith({
+      changes: { from: 0, to: 1, insert: '@snippet ' },
+      selection: { anchor: 9 },
+      scrollIntoView: true,
+    });
+  });
+
   it('does not accept stale items while a provider search is loading', async () => {
     vi.useFakeTimers();
     const view = makeView('@');
@@ -787,7 +822,7 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(view));
     act(() => latest!.enterCategory(0));
     await runDebounce();
-    view.state = EditorState.create({ doc: 'x', selection: { anchor: 1 } });
+    setViewState(view, 'x', 1);
     act(() => {
       expect(latest!.accept()).toBe(true);
     });
@@ -1054,6 +1089,37 @@ describe('useAtMentionMenu', () => {
       description: 'Desc',
       detail: 'Detail',
     });
+  });
+
+  it('does not allow custom items to masquerade as navigable directories', async () => {
+    vi.useFakeTimers();
+    mount({
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search: vi.fn().mockResolvedValue([
+            {
+              id: 'custom-item',
+              label: 'Custom item',
+              kind: 'directory',
+              targetPath: 'src',
+            },
+          ]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+
+    expect(latest!.state?.items[0]).toMatchObject({
+      label: 'Custom item',
+      kind: 'insert',
+    });
+    expect(latest!.state?.items[0]?.targetPath).toBeUndefined();
   });
 
   it('sanitizes custom provider category display text', () => {
@@ -1449,6 +1515,46 @@ describe('useAtMentionMenu', () => {
       itemMode: 'mcpResources',
       mcpServerName: 'my:server',
       query: '',
+    });
+  });
+
+  it('prefers the selected MCP server name over generic provider prefixes', async () => {
+    vi.useFakeTimers();
+    const loadMcpResources = vi.fn().mockResolvedValue({ resources: [] });
+    mount({
+      view: makeView('@'),
+      actions: {
+        loadMcpStatus: vi.fn().mockResolvedValue({
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'ext',
+              disabled: false,
+              resourceCount: 1,
+            },
+          ],
+        }),
+        loadMcpResources,
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(2));
+    await runDebounce();
+    act(() => latest!.accept());
+    await runDebounce();
+    act(() => latest!.closeIfOpen());
+    act(() => latest!.refreshForView(makeView('@ext:resource')));
+    await runDebounce();
+
+    expect(loadMcpResources).toHaveBeenLastCalledWith('ext', {
+      signal: expect.any(AbortSignal),
+    });
+    expect(latest!.state).toMatchObject({
+      selectedProviderId: 'mcp-resources',
+      itemMode: 'mcpResources',
+      mcpServerName: 'ext',
+      query: 'resource',
     });
   });
 

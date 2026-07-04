@@ -159,6 +159,7 @@ const EXTENSIONS_PROVIDER_ID = 'extensions';
 export const MCP_RESOURCES_PROVIDER_ID = 'mcp-resources';
 const ESC = String.fromCharCode(27);
 const ANSI_RE = new RegExp(`${ESC}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`, 'g');
+// Strip zero-width and BiDi controls so provider text cannot spoof paths/URIs.
 const BIDI_CONTROL_RE = /[\u200B\u200E\u200F\u061C\u2066-\u2069\u202A-\u202E]/g;
 const SAFE_DISPLAY_FALLBACK = '[invalid]';
 const AT_REFERENCE_SPECIAL_CHARS = /[ \t()[\]{};!?\\,@]/g;
@@ -235,18 +236,6 @@ function splitInsertedReferenceQuery(
   itemQuery: string;
   validateServer?: boolean;
 } | null {
-  if (query.startsWith('ext:')) {
-    return {
-      providerId: EXTENSIONS_PROVIDER_ID,
-      itemQuery: query.slice('ext:'.length),
-    };
-  }
-  if (query.startsWith('mcp:')) {
-    return {
-      providerId: MCP_RESOURCES_PROVIDER_ID,
-      itemQuery: query.slice('mcp:'.length),
-    };
-  }
   if (
     lastSelectedProviderId === MCP_RESOURCES_PROVIDER_ID &&
     lastSelectedMcpServerName &&
@@ -257,6 +246,18 @@ function splitInsertedReferenceQuery(
       serverName: lastSelectedMcpServerName,
       itemQuery: query.slice(lastSelectedMcpServerName.length + 1),
       validateServer: true,
+    };
+  }
+  if (query.startsWith('ext:')) {
+    return {
+      providerId: EXTENSIONS_PROVIDER_ID,
+      itemQuery: query.slice('ext:'.length),
+    };
+  }
+  if (query.startsWith('mcp:')) {
+    return {
+      providerId: MCP_RESOURCES_PROVIDER_ID,
+      itemQuery: query.slice('mcp:'.length),
     };
   }
   return null;
@@ -390,8 +391,11 @@ function safeDisplayText(raw: string | undefined): string {
   return sanitizeDisplayText(raw) ?? SAFE_DISPLAY_FALLBACK;
 }
 
-function sanitizeAtMentionItem(item: AtMentionItem): AtMentionItem {
-  return {
+function sanitizeAtMentionItem(
+  item: AtMentionItem,
+  options?: { customProvider?: boolean },
+): AtMentionItem {
+  const sanitized = {
     ...item,
     label: sanitizeDisplayText(item.label) ?? safeDisplayText(item.id),
     description:
@@ -404,6 +408,16 @@ function sanitizeAtMentionItem(item: AtMentionItem): AtMentionItem {
       item.insertText === undefined
         ? undefined
         : sanitizeInsertText(item.insertText),
+  };
+  if (!options?.customProvider) {
+    return sanitized;
+  }
+  const safe = { ...sanitized };
+  delete safe.targetPath;
+  delete safe.serverName;
+  return {
+    ...safe,
+    kind: 'insert',
   };
 }
 
@@ -901,7 +915,11 @@ export function useAtMentionMenu({
               providerId === FILE_PROVIDER_ID && query.length === 0 ? 51 : 50;
             return {
               ...prev,
-              items: items.slice(0, maxItems).map(sanitizeAtMentionItem),
+              items: items.slice(0, maxItems).map((item) =>
+                sanitizeAtMentionItem(item, {
+                  customProvider: !isBuiltinProviderId(providerId),
+                }),
+              ),
               selectedIndex: 0,
               loading: false,
             };
@@ -1501,7 +1519,8 @@ export function useAtMentionMenu({
         return true;
       }
       const insert =
-        item.insertText ?? `@${escapeAtReferenceText(item.label)} `;
+        item.insertText ??
+        `@${escapeAtReferenceText(sanitizeInsertText(item.label))} `;
       const docLength = view.state.doc.length;
       if (
         current.from < 0 ||
