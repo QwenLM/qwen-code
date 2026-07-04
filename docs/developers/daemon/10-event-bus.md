@@ -105,7 +105,7 @@ sequenceDiagram
 
     SR->>EB: subscribe({lastEventId: 42, maxQueued: 256, signal})
     EB->>EB: refuse if subs.size >= maxSubscribers<br/>(throws SubscriberLimitExceededError)
-    EB->>Q: new BoundedAsyncQueue(256)
+    EB->>Q: new BoundedAsyncQueue(maxQueued, maxQueuedBytes)
     EB->>EB: subs.add(sub)
     EB->>EB: epochReset = lastEventId >= nextId
     alt epochReset (old bus epoch)
@@ -165,7 +165,7 @@ Critical contracts (and what the #4360 review corrected):
 When a subscriber's live backlog reaches a cap and the next `push()` rejects:
 
 1. Mark `sub.evicted = true`.
-2. Construct `client_evicted` frame **without `id`**. Frame overflow uses `reason: 'queue_overflow'`; byte overflow uses `reason: 'queue_bytes_overflow'`. Both include `queueSize`, `maxQueued`, `queuedBytes`, and `maxQueuedBytes`; byte overflow also includes `eventBytes`.
+2. Build eviction data, emit `logSubscriberEvicted(evictionData)` to stderr, then construct a `client_evicted` frame **without `id`**. Frame overflow uses `reason: 'queue_overflow'`; byte overflow uses `reason: 'queue_bytes_overflow'`. Both include `queueSize`, `maxQueued`, `queuedBytes`, and `maxQueuedBytes`; byte overflow also includes `eventBytes`.
 3. `queue.forcePush(evictionFrame)` so the consumer iterator sees one terminal frame.
 4. `queue.close()` so iteration unwinds after the terminal frame.
 5. Call `sub.dispose()` — removes from `subs` and detaches the `AbortSignal` listener; without this cleanup, stalled consumers' closures remain live until `AbortSignal` garbage collection.

@@ -435,6 +435,11 @@ describe('EventBus', () => {
     expect(
       (evicted!.data as { eventBytes?: number }).eventBytes,
     ).toBeGreaterThan(0);
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus subscriber evicted {"reason":"queue_bytes_overflow"',
+      ),
+    );
     expect(bus.subscriberCount).toBe(0);
     abort.abort();
   });
