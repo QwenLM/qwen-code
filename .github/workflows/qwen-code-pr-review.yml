@@ -56,12 +56,7 @@ concurrency:
     ${{ github.event_name == 'pull_request_target' &&
     format('qwen-pr-review-pr-{0}', github.event.pull_request.number) ||
     format('qwen-pr-review-run-{0}', github.run_id) }}
-  cancel-in-progress: >-
-    ${{
-      github.event_name == 'pull_request_target' &&
-      (github.event.action == 'synchronize' ||
-       github.event.action == 'closed')
-    }}
+  cancel-in-progress: "${{ github.event_name == 'pull_request_target' && (github.event.action == 'synchronize' || github.event.action == 'closed') }}"
 
 jobs:
   precheck-pr:
@@ -610,6 +605,14 @@ jobs:
           if [ "$PR_STATE" != "OPEN" ]; then
             echo "Skipping: PR #${PR_NUMBER} is ${PR_STATE}." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
+          fi
+          if [ "${{ github.event_name }}" = "pull_request_target" ]; then
+            EVENT_HEAD_SHA="${{ github.event.pull_request.head.sha }}"
+            CURRENT_HEAD_SHA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq '.headRefOid')"
+            if [ "$CURRENT_HEAD_SHA" != "$EVENT_HEAD_SHA" ]; then
+              echo "Skipping stale review run: event head ${EVENT_HEAD_SHA} is no longer current (current head ${CURRENT_HEAD_SHA})." | tee -a "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
           fi
 
           PROMPT="/review ${REVIEW_URL}"

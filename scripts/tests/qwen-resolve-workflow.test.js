@@ -79,6 +79,18 @@ describe('qwen resolve workflow', () => {
     );
   });
 
+  it('keeps synchronize cancellation expression simple for workflow-level concurrency', () => {
+    const concurrencyStart = workflow.indexOf('\nconcurrency:');
+    const concurrency = workflow.slice(
+      concurrencyStart,
+      workflow.indexOf('\njobs:', concurrencyStart),
+    );
+
+    expect(concurrency).toContain(
+      "cancel-in-progress: \"${{ github.event_name == 'pull_request_target' && (github.event.action == 'synchronize' || github.event.action == 'closed') }}\"",
+    );
+  });
+
   it('listens for /resolve comments', () => {
     expect(workflow).toContain(
       "github.event.comment.body == '@qwen-code /resolve'",
@@ -175,6 +187,27 @@ describe('qwen resolve workflow', () => {
     expect(fallbackStep).not.toContain(
       '_Qwen Code review did not complete successfully:',
     );
+  });
+
+  it('skips stale automatic review runs before invoking qwen', () => {
+    const runStep = step(reviewJob, 'Run review');
+    const staleHeadCheck = runStep.slice(
+      runStep.indexOf(
+        'if [ "${{ github.event_name }}" = "pull_request_target" ]; then',
+      ),
+      runStep.indexOf('PROMPT="/review ${REVIEW_URL}"'),
+    );
+
+    expect(staleHeadCheck).toContain(
+      'EVENT_HEAD_SHA="${{ github.event.pull_request.head.sha }}"',
+    );
+    expect(staleHeadCheck).toContain(
+      'CURRENT_HEAD_SHA="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json headRefOid --jq \'.headRefOid\')"',
+    );
+    expect(staleHeadCheck).toContain(
+      'Skipping stale review run: event head ${EVENT_HEAD_SHA} is no longer current',
+    );
+    expect(staleHeadCheck).toContain('exit 0');
   });
 
   // Whole-file `toContain` cannot tell which job a guard lives on. Slice the
