@@ -2684,6 +2684,7 @@ export class GeminiChat {
               let fallbackSucceeded = false;
               let fallbackIndex = 0;
               let currentModel = model;
+              let fallbackStreamYieldedAnyChunk = false;
 
               for (const fallbackModelId of fallbackModels) {
                 // Skip fallback models that match the current/primary model
@@ -2752,6 +2753,7 @@ export class GeminiChat {
                 self.popPendingPartialAssistantTurn();
 
                 // Run the fallback model through the existing API-call wiring.
+                let currentFallbackYieldedAnyChunk = false;
                 try {
                   for await (const event of self.makeFallbackStream(
                     resolvedFallbackModel,
@@ -2762,6 +2764,8 @@ export class GeminiChat {
                     fallbackRetryAuthType,
                     fallbackRetryErrorCodes,
                   )) {
+                    currentFallbackYieldedAnyChunk = true;
+                    fallbackStreamYieldedAnyChunk = true;
                     yield event;
                   }
 
@@ -2775,6 +2779,16 @@ export class GeminiChat {
                   return;
                 } catch (fallbackError) {
                   if (isAbortError(fallbackError)) throw fallbackError;
+                  lastError = fallbackError;
+
+                  if (currentFallbackYieldedAnyChunk) {
+                    debugLogger.warn(
+                      `[FALLBACK] Fallback model "${resolvedFallbackModel}" ` +
+                        `failed after emitting output. Stopping fallback ` +
+                        `chain to avoid duplicating user-visible output.`,
+                    );
+                    break;
+                  }
 
                   // Classify the fallback error to decide whether to continue
                   // to the next fallback or give up
@@ -2798,7 +2812,6 @@ export class GeminiChat {
 
                   currentModel = resolvedFallbackModel;
                   currentErrorClassification = fallbackClassification;
-                  lastError = fallbackError;
 
                   // Only continue to next fallback if this error is also
                   // fallback-eligible. Auth/client errors should fail immediately.
@@ -2814,7 +2827,9 @@ export class GeminiChat {
               }
 
               if (!fallbackSucceeded) {
-                self.popPendingPartialAssistantTurn();
+                if (!fallbackStreamYieldedAnyChunk) {
+                  self.popPendingPartialAssistantTurn();
+                }
                 debugLogger.warn(
                   '[FALLBACK] Fallback chain exhausted without success. ' +
                     'Throwing last error.',
