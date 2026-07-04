@@ -12,6 +12,7 @@ import {
   stableSessionArtifactId,
   type PersistedSessionArtifact,
   type SessionArtifactEventRecordPayload,
+  type SessionArtifactSnapshotRecordPayload,
 } from './session-artifact-persistence.js';
 
 function artifact(
@@ -168,5 +169,48 @@ describe('session artifact persistence records', () => {
     });
     expect(forked).not.toHaveProperty('contentRef');
     expect(forked).not.toHaveProperty('expiresAt');
+  });
+
+  it('remaps forked snapshot payloads and clears inherited tombstone state', () => {
+    const source = artifact('source-session', 'https://example.com/snapshot', {
+      retention: 'pinned',
+      contentRef: {
+        kind: 'managed_copy',
+        contentId: 'content-1',
+        sha256: 'a'.repeat(64),
+        sizeBytes: 12,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      },
+      expiresAt: '2026-08-01T00:00:00.000Z',
+    });
+
+    const remapped = remapSessionArtifactPayloadForFork(
+      {
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 'source-session',
+        sequence: 7,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        artifacts: [source],
+        tombstonedIds: ['deleted-in-source'],
+        stickyEphemeralIds: ['ephemeral-in-source'],
+      },
+      'source-session',
+      'forked-session',
+    ) as SessionArtifactSnapshotRecordPayload;
+
+    expect(remapped.sessionId).toBe('forked-session');
+    expect(remapped.tombstonedIds).toBeUndefined();
+    expect(remapped.stickyEphemeralIds).toBeUndefined();
+    expect(remapped.artifacts[0]).toMatchObject({
+      id: stableSessionArtifactId(
+        'forked-session',
+        'url:https://example.com/snapshot',
+      ),
+      retention: 'restorable',
+      restoreState: 'restored',
+      persistenceWarning: 'metadata_only_restore',
+    });
+    expect(remapped.artifacts[0]).not.toHaveProperty('contentRef');
+    expect(remapped.artifacts[0]).not.toHaveProperty('expiresAt');
   });
 });

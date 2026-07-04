@@ -125,6 +125,35 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('returns pinned content refs for gc and fsck callers', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-content-refs',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Report', url: 'https://example.com/report' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    const contentRef = {
+      kind: 'managed_copy' as const,
+      contentId: 'content-ref-1',
+      sha256: 'a'.repeat(64),
+      sizeBytes: 12,
+      createdAt: '2026-07-04T00:00:00.000Z',
+    };
+
+    await store.pin(artifactId, contentRef);
+    await expect(store.contentRefs()).resolves.toEqual([contentRef]);
+
+    await store.unpin(artifactId);
+    await expect(store.contentRefs()).resolves.toEqual([]);
+  });
+
   it('serializes concurrent store operations', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-queue',
@@ -1951,6 +1980,23 @@ describe('SessionArtifactContentStore', () => {
     return (await store.list()).artifacts[0]!;
   }
 
+  async function writeQuotaManifest(contentId: string, sizeBytes: number) {
+    await fs.mkdir(path.join(contentRoot, contentId), { recursive: true });
+    await fs.writeFile(
+      path.join(contentRoot, contentId, 'manifest.json'),
+      `${JSON.stringify({
+        v: 1,
+        contentId,
+        sessionId: 'content-session',
+        artifactId: contentId,
+        workspacePath: `reports/${contentId}.txt`,
+        sha256: '0'.repeat(64),
+        sizeBytes,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      })}\n`,
+    );
+  }
+
   it('copies pinned workspace content with a path-safe content id', async () => {
     const contentStore = new SessionArtifactContentStore(contentRoot);
     const artifact = await workspaceArtifact('report.txt', 'hello');
@@ -1998,6 +2044,78 @@ describe('SessionArtifactContentStore', () => {
       missing: [],
       hashMismatches: [],
     });
+  });
+
+  it('reuses repeated pins even when the store is otherwise near quota', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('repeat-near-quota.txt', 'repeat');
+    const first = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+    await writeQuotaManifest('quota-filler', 256 * 1024 * 1024);
+
+    const second = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+
+    expect(second.contentId).toBe(first.contentId);
+  });
+
+  it('rejects files over the per-artifact content limit before copying', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const oversizedPath = path.join(workspace, 'reports', 'oversized.bin');
+    await fs.writeFile(oversizedPath, '');
+    await fs.truncate(oversizedPath, 50 * 1024 * 1024 + 1);
+    const store = new SessionArtifactStore({
+      sessionId: 'content-session',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [{ title: 'oversized.bin', workspacePath: 'reports/oversized.bin' }],
+      { strict: true },
+    );
+    const artifact = (await store.list()).artifacts[0]!;
+
+    await expect(
+      contentStore.pinWorkspaceFile('content-session', artifact, workspace),
+    ).rejects.toThrow(SessionArtifactValidationError);
+  });
+
+  it('rejects new content over total quota and cleans up temporary files', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('over-quota.txt', 'new-content');
+    await writeQuotaManifest('quota-filler', 256 * 1024 * 1024);
+
+    await expect(
+      contentStore.pinWorkspaceFile('content-session', artifact, workspace),
+    ).rejects.toThrow(SessionArtifactValidationError);
+    await expect(fs.readdir(path.join(contentRoot, '.tmp'))).resolves.toEqual(
+      [],
+    );
+  });
+
+  it('serializes quota checks across concurrent pins', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const first = await workspaceArtifact('concurrent-a.txt', 'abc');
+    const second = await workspaceArtifact('concurrent-b.txt', 'def');
+    await writeQuotaManifest('quota-filler', 256 * 1024 * 1024 - 3);
+
+    const results = await Promise.allSettled([
+      contentStore.pinWorkspaceFile('content-session', first, workspace),
+      contentStore.pinWorkspaceFile('content-session', second, workspace),
+    ]);
+
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
   });
 
   it('reports missing and hash-mismatched retained content', async () => {

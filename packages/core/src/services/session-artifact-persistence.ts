@@ -432,54 +432,20 @@ function normalizePersistedArtifact(
   }
 
   const metadata = normalizeMetadata(value['metadata']);
-  return {
-    id,
-    kind,
-    storage,
-    source,
-    status,
-    title,
-    ...(getString(value, 'description')
-      ? { description: getString(value, 'description') }
-      : {}),
-    ...(getString(value, 'workspacePath')
-      ? { workspacePath: getString(value, 'workspacePath') }
-      : {}),
-    ...(getString(value, 'managedId')
-      ? { managedId: getString(value, 'managedId') }
-      : {}),
-    ...(getString(value, 'url') ? { url: getString(value, 'url') } : {}),
-    ...(getString(value, 'mimeType')
-      ? { mimeType: getString(value, 'mimeType') }
-      : {}),
-    ...(getNonNegativeInteger(value, 'sizeBytes') !== undefined
-      ? { sizeBytes: getNonNegativeInteger(value, 'sizeBytes') }
-      : {}),
-    ...(metadata ? { metadata } : {}),
-    retention,
-    clientRetained: value['clientRetained'] === true,
-    createdAt: getString(value, 'createdAt') ?? new Date(0).toISOString(),
-    updatedAt: getString(value, 'updatedAt') ?? new Date(0).toISOString(),
-    ...(getString(value, 'persistedAt')
-      ? { persistedAt: getString(value, 'persistedAt') }
-      : {}),
-    ...(getString(value, 'expiresAt')
-      ? { expiresAt: getString(value, 'expiresAt') }
-      : {}),
-    ...(normalizeLiteral<SessionArtifactRestoreState>(value['restoreState'], [
-      'live',
-      'restored',
-      'unverified',
-      'blocked',
-    ])
-      ? {
-          restoreState: normalizeLiteral<SessionArtifactRestoreState>(
-            value['restoreState'],
-            ['live', 'restored', 'unverified', 'blocked'],
-          ),
-        }
-      : {}),
-    ...(normalizeLiteral<SessionArtifactPersistenceWarning>(
+  const description = getString(value, 'description');
+  const workspacePath = getString(value, 'workspacePath');
+  const managedId = getString(value, 'managedId');
+  const url = getString(value, 'url');
+  const mimeType = getString(value, 'mimeType');
+  const sizeBytes = getNonNegativeInteger(value, 'sizeBytes');
+  const persistedAt = getString(value, 'persistedAt');
+  const expiresAt = getString(value, 'expiresAt');
+  const restoreState = normalizeLiteral<SessionArtifactRestoreState>(
+    value['restoreState'],
+    ['live', 'restored', 'unverified', 'blocked'],
+  );
+  const persistenceWarning =
+    normalizeLiteral<SessionArtifactPersistenceWarning>(
       value['persistenceWarning'],
       [
         'persistence_unavailable',
@@ -489,28 +455,39 @@ function normalizePersistedArtifact(
         'metadata_only_restore',
         'restore_validation_failed',
       ],
-    )
-      ? {
-          persistenceWarning: value[
-            'persistenceWarning'
-          ] as SessionArtifactPersistenceWarning,
-        }
-      : {}),
-    ...(normalizeContentRef(value['contentRef'])
-      ? { contentRef: normalizeContentRef(value['contentRef']) }
-      : {}),
-    ...(getString(value, 'toolCallId')
-      ? { toolCallId: getString(value, 'toolCallId') }
-      : {}),
-    ...(getString(value, 'toolName')
-      ? { toolName: getString(value, 'toolName') }
-      : {}),
-    ...(getString(value, 'hookEventName')
-      ? { hookEventName: getString(value, 'hookEventName') }
-      : {}),
-    ...(getString(value, 'clientId')
-      ? { clientId: getString(value, 'clientId') }
-      : {}),
+    );
+  const contentRef = normalizeContentRef(value['contentRef']);
+  const toolCallId = getString(value, 'toolCallId');
+  const toolName = getString(value, 'toolName');
+  const hookEventName = getString(value, 'hookEventName');
+  const clientId = getString(value, 'clientId');
+  return {
+    id,
+    kind,
+    storage,
+    source,
+    status,
+    title,
+    ...(description ? { description } : {}),
+    ...(workspacePath ? { workspacePath } : {}),
+    ...(managedId ? { managedId } : {}),
+    ...(url ? { url } : {}),
+    ...(mimeType ? { mimeType } : {}),
+    ...(sizeBytes !== undefined ? { sizeBytes } : {}),
+    ...(metadata ? { metadata } : {}),
+    retention,
+    clientRetained: value['clientRetained'] === true,
+    createdAt: getString(value, 'createdAt') ?? new Date(0).toISOString(),
+    updatedAt: getString(value, 'updatedAt') ?? new Date(0).toISOString(),
+    ...(persistedAt ? { persistedAt } : {}),
+    ...(expiresAt ? { expiresAt } : {}),
+    ...(restoreState ? { restoreState } : {}),
+    ...(persistenceWarning ? { persistenceWarning } : {}),
+    ...(contentRef ? { contentRef } : {}),
+    ...(toolCallId ? { toolCallId } : {}),
+    ...(toolName ? { toolName } : {}),
+    ...(hookEventName ? { hookEventName } : {}),
+    ...(clientId ? { clientId } : {}),
   };
 }
 

@@ -41,6 +41,7 @@ export interface SessionArtifactGcResult {
 
 export class SessionArtifactContentStore {
   private readonly rootDir: string;
+  private writeQueue: Promise<void> = Promise.resolve();
 
   constructor(rootDir = defaultContentRoot()) {
     this.rootDir = rootDir;
@@ -54,9 +55,10 @@ export class SessionArtifactContentStore {
     if (artifact.storage !== 'workspace' || !artifact.workspacePath) {
       return undefined;
     }
+    const workspacePath = artifact.workspacePath;
     const source = await resolveWorkspaceFile(
       workspaceCwd,
-      artifact.workspacePath,
+      workspacePath,
     ).catch((error: unknown) => {
       if (error instanceof SessionArtifactValidationError) {
         throw error;
@@ -81,54 +83,76 @@ export class SessionArtifactContentStore {
         'artifactId',
       );
     }
-    const usedBytes = await this.usedBytes();
-    if (usedBytes + sourceStat.size > MAX_CONTENT_STORE_BYTES) {
-      throw new SessionArtifactValidationError(
-        'Artifact content quota exceeded',
-        'artifactId',
-      );
-    }
 
-    const tmpDir = path.join(this.rootDir, '.tmp');
-    await fs.mkdir(tmpDir, { recursive: true, mode: 0o700 });
-    const tmpPath = path.join(
-      tmpDir,
-      `${process.pid}-${Date.now()}-${artifact.id}.bin`,
-    );
-    await fs.copyFile(source, tmpPath);
-    const { sha256, sizeBytes } = await hashFile(tmpPath);
-    const contentId = `${sha256}-${stableContentSuffix(sessionId, artifact.id)}`;
-    const contentDir = path.join(this.rootDir, contentId);
-    const dataPath = path.join(contentDir, 'content');
-    await fs.mkdir(contentDir, { recursive: true, mode: 0o700 });
-    if (await exists(dataPath)) {
-      await fs.rm(tmpPath, { force: true });
-    } else {
-      await fs.rename(tmpPath, dataPath);
-    }
-    const createdAt = new Date().toISOString();
-    const manifest: ContentManifest = {
-      v: CONTENT_FORMAT_VERSION,
-      contentId,
-      sessionId,
-      artifactId: artifact.id,
-      workspacePath: artifact.workspacePath,
-      sha256,
-      sizeBytes,
-      createdAt,
-    };
-    await fs.writeFile(
-      path.join(contentDir, 'manifest.json'),
-      `${JSON.stringify(manifest)}\n`,
-      { mode: 0o600 },
-    );
-    return {
-      kind: 'managed_copy',
-      contentId,
-      sha256,
-      sizeBytes,
-      createdAt,
-    };
+    return this.enqueueWrite(async () => {
+      const tmpDir = path.join(this.rootDir, '.tmp');
+      await fs.mkdir(tmpDir, { recursive: true, mode: 0o700 });
+      let tmpPath: string | undefined = path.join(
+        tmpDir,
+        `${process.pid}-${Date.now()}-${artifact.id}.bin`,
+      );
+      try {
+        await fs.copyFile(source, tmpPath);
+        const { sha256, sizeBytes } = await hashFile(tmpPath);
+        if (sizeBytes > MAX_PINNED_FILE_BYTES) {
+          throw new SessionArtifactValidationError(
+            `Pinned artifact content exceeds ${MAX_PINNED_FILE_BYTES} bytes`,
+            'artifactId',
+          );
+        }
+
+        const contentId = `${sha256}-${stableContentSuffix(
+          sessionId,
+          artifact.id,
+        )}`;
+        const contentDir = path.join(this.rootDir, contentId);
+        const dataPath = path.join(contentDir, 'content');
+        if (await exists(dataPath)) {
+          await fs.rm(tmpPath, { force: true });
+          tmpPath = undefined;
+        } else {
+          const usedBytes = await this.usedBytes();
+          if (usedBytes + sizeBytes > MAX_CONTENT_STORE_BYTES) {
+            throw new SessionArtifactValidationError(
+              'Artifact content quota exceeded',
+              'artifactId',
+            );
+          }
+          await fs.mkdir(contentDir, { recursive: true, mode: 0o700 });
+          await fs.rename(tmpPath, dataPath);
+          tmpPath = undefined;
+        }
+
+        const createdAt = new Date().toISOString();
+        const manifest: ContentManifest = {
+          v: CONTENT_FORMAT_VERSION,
+          contentId,
+          sessionId,
+          artifactId: artifact.id,
+          workspacePath,
+          sha256,
+          sizeBytes,
+          createdAt,
+        };
+        await fs.writeFile(
+          path.join(contentDir, 'manifest.json'),
+          `${JSON.stringify(manifest)}\n`,
+          { mode: 0o600 },
+        );
+        return {
+          kind: 'managed_copy',
+          contentId,
+          sha256,
+          sizeBytes,
+          createdAt,
+        };
+      } catch (error) {
+        if (tmpPath) {
+          await fs.rm(tmpPath, { force: true }).catch(() => {});
+        }
+        throw error;
+      }
+    });
   }
 
   async fsck(
@@ -216,6 +240,15 @@ export class SessionArtifactContentStore {
       }
     }
     return total;
+  }
+
+  private enqueueWrite<T>(operation: () => Promise<T>): Promise<T> {
+    const run = this.writeQueue.catch(() => {}).then(operation);
+    this.writeQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
   }
 }
 

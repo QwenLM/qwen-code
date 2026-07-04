@@ -4235,6 +4235,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
       const result = await entry.artifacts.unpin(artifactId);
+      if (result.changes.length > 0) {
+        const refs = await entry.artifacts.contentRefs();
+        await artifactContentStore.gc(
+          sessionId,
+          new Set(refs.map((ref) => ref.contentId)),
+        );
+      }
       publishArtifactChanges(entry, result.changes, clientId);
       return result;
     },
