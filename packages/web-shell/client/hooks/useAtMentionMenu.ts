@@ -162,7 +162,7 @@ const ANSI_RE = new RegExp(`${ESC}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`, 'g');
 // Strip zero-width and BiDi controls so provider text cannot spoof paths/URIs.
 const BIDI_CONTROL_RE = /[\u200B\u200E\u200F\u061C\u2066-\u2069\u202A-\u202E]/g;
 const SAFE_DISPLAY_FALLBACK = '[invalid]';
-const AT_REFERENCE_SPECIAL_CHARS = /[ \t()[\]{};!?\\,@:]/g;
+const AT_REFERENCE_UNSAFE_CHARS = /[^\p{L}\p{N}_./-]/gu;
 
 function isBuiltinProviderId(providerId: string): boolean {
   return (
@@ -210,7 +210,7 @@ function buildMcpResourceRef(serverName: string, uri: string): string {
 }
 
 function escapeAtReferenceText(ref: string): string {
-  return ref.replace(AT_REFERENCE_SPECIAL_CHARS, '\\$&');
+  return ref.replace(AT_REFERENCE_UNSAFE_CHARS, '\\$&');
 }
 
 function unescapeAtReferenceText(ref: string): string {
@@ -309,7 +309,7 @@ async function isEnabledMcpServer(
       (server) => server.name === serverName && !server.disabled,
     );
   } catch (error) {
-    console.warn('Failed to verify @ MCP resource server status', error);
+    console.warn(`Failed to verify @ MCP server "${serverName}" status`, error);
     return false;
   }
 }

@@ -1343,7 +1343,7 @@ describe('useAtMentionMenu', () => {
       path: '.',
       entries: [
         {
-          name: 'space name(1)?.md',
+          name: 'space name(1)#plus+.md',
           kind: 'file',
           ignored: false,
         },
@@ -1359,9 +1359,10 @@ describe('useAtMentionMenu', () => {
       expect(latest!.accept(1)).toBe(true);
     });
 
+    const expectedInsert = '@space\\ name\\(1\\)\\#plus\\+.md ';
     expect(view.dispatch).toHaveBeenCalledWith({
-      changes: { from: 0, to: 1, insert: '@space\\ name\\(1\\)\\?.md ' },
-      selection: { anchor: 23 },
+      changes: { from: 0, to: 1, insert: expectedInsert },
+      selection: { anchor: expectedInsert.length },
       scrollIntoView: true,
     });
   });
@@ -1435,7 +1436,7 @@ describe('useAtMentionMenu', () => {
       path: '.',
       entries: [
         {
-          name: 'space name(1)?.md',
+          name: 'space name(1)#plus+.md',
           kind: 'file',
           ignored: false,
         },
@@ -1444,13 +1445,15 @@ describe('useAtMentionMenu', () => {
     });
     mount({ actions: { listDirectory } });
 
-    act(() => latest!.refreshForView(makeView('@space\\ name\\(1\\)\\?.md')));
+    act(() =>
+      latest!.refreshForView(makeView('@space\\ name\\(1\\)\\#plus\\+.md')),
+    );
     await runDebounce();
 
     expect(latest!.state).toMatchObject({
       level: 'items',
       selectedProviderId: 'files',
-      items: [expect.objectContaining({ label: 'space name(1)?.md' })],
+      items: [expect.objectContaining({ label: 'space name(1)#plus+.md' })],
     });
   });
 
@@ -1486,7 +1489,7 @@ describe('useAtMentionMenu', () => {
     const loadMcpResources = vi.fn().mockResolvedValue({
       resources: [
         {
-          uri: 'res://doc?version=1 path@x.',
+          uri: 'res://doc?version=1&tag=a+b path@x.',
           name: 'Doc',
         },
       ],
@@ -1517,13 +1520,15 @@ describe('useAtMentionMenu', () => {
       expect(latest!.accept()).toBe(true);
     });
 
+    const expectedInsert =
+      '@docs\\:res\\://doc\\?version\\=1\\&tag\\=a\\+b\\ path\\@x. ';
     expect(view.dispatch).toHaveBeenCalledWith({
       changes: {
         from: 0,
         to: 1,
-        insert: '@docs\\:res\\://doc\\?version=1\\ path\\@x. ',
+        insert: expectedInsert,
       },
-      selection: { anchor: 39 },
+      selection: { anchor: expectedInsert.length },
       scrollIntoView: true,
     });
   });
