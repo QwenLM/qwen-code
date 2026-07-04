@@ -480,17 +480,11 @@ export class DingtalkChannel extends ChannelBase {
     conversationId: string,
   ): Promise<void> {
     const robotCode = this.config.clientId;
-    if (!robotCode || !this.config.clientSecret || !msgId || !conversationId) {
-      if (!this.config.clientSecret) {
-        process.stderr.write(
-          `[DingTalk:${this.name}] emotion/${endpoint} skipped: clientSecret not configured\n`,
-        );
-      }
-      return;
-    }
-
     try {
-      const token = await this.getProactiveToken();
+      const token = this.config.clientSecret
+        ? await this.getProactiveToken()
+        : this.getAccessToken();
+      if (!robotCode || !token || !msgId || !conversationId) return;
       const resp = await fetch(`${EMOTION_API}/${endpoint}`, {
         method: 'POST',
         headers: {

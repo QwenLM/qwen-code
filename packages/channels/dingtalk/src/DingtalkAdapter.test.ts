@@ -524,12 +524,14 @@ describe('DingtalkChannel prompt reactions', () => {
     ).toBe('proactive-token');
   });
 
-  it('logs when emotion replies require a missing clientSecret', async () => {
+  it('uses stream auth token for emotion replies when clientSecret is absent', async () => {
     const channel = createChannel();
     (
       channel as unknown as { config: { clientSecret?: string } }
     ).config.clientSecret = undefined;
-    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response('{}', { status: 200 }));
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -541,8 +543,18 @@ describe('DingtalkChannel prompt reactions', () => {
         }
       ).attachReaction('msg-1', 'cid-123');
 
-      expect(fetchSpy).not.toHaveBeenCalled();
-      expect(stderr).toHaveBeenCalledWith(
+      const emotionCall = fetchSpy.mock.calls.find((call) =>
+        String(call[0]).startsWith(
+          'https://api.dingtalk.com/v1.0/robot/emotion/reply',
+        ),
+      );
+      expect(emotionCall).toBeDefined();
+      expect(
+        ((emotionCall![1] as RequestInit).headers as Record<string, string>)[
+          'x-acs-dingtalk-access-token'
+        ],
+      ).toBe('token');
+      expect(stderr).not.toHaveBeenCalledWith(
         '[DingTalk:test-dingtalk] emotion/reply skipped: clientSecret not configured\n',
       );
     } finally {

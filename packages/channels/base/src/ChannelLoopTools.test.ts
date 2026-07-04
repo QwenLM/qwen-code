@@ -88,6 +88,37 @@ describe('ChannelLoopMcpServer', () => {
     });
   });
 
+  it('marks handler failure text as an MCP tool error', async () => {
+    const server = new ChannelLoopMcpServer({
+      create: vi.fn().mockResolvedValue({
+        text: 'Channel loops are not configured.',
+        isError: true,
+      }),
+      list: vi.fn(),
+      cancel: vi.fn(),
+    });
+
+    const response = await server.handleMessage(
+      {
+        jsonrpc: '2.0',
+        id: 6,
+        method: 'tools/call',
+        params: {
+          name: 'channel_loop_create',
+          arguments: { cron: '* * * * *', prompt: 'drink water' },
+        },
+      },
+      { sessionId: 's-1' },
+    );
+
+    expect(response).toMatchObject({
+      result: {
+        content: [{ type: 'text', text: 'Channel loops are not configured.' }],
+        isError: true,
+      },
+    });
+  });
+
   it('returns a JSON-RPC error when sessionId is missing', async () => {
     const server = new ChannelLoopMcpServer({
       create: vi.fn(),

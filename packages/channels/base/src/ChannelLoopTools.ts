@@ -1,6 +1,7 @@
 import type {
   ChannelLoopToolCreateInput,
   ChannelLoopToolHandler,
+  ChannelLoopToolResult,
 } from './ChannelAgentBridge.js';
 
 export const CHANNEL_LOOP_MCP_SERVER_NAME = 'channel_loop';
@@ -125,25 +126,30 @@ export class ChannelLoopMcpServer {
         ? (params['arguments'] as Record<string, unknown>)
         : {};
 
-    let text: string;
+    let toolResult: string | ChannelLoopToolResult;
     switch (name) {
       case createTool.name:
-        text = await this.handler.create(
+        toolResult = await this.handler.create(
           context.sessionId,
           readCreateInput(args),
         );
         break;
       case listTool.name:
-        text = await this.handler.list(context.sessionId);
+        toolResult = await this.handler.list(context.sessionId);
         break;
       case cancelTool.name:
-        text = await this.handler.cancel(context.sessionId, readId(args));
+        toolResult = await this.handler.cancel(context.sessionId, readId(args));
         break;
       default:
         throw new Error(`Unknown channel loop tool: ${String(name)}`);
     }
 
-    return { content: [{ type: 'text', text }] };
+    const result =
+      typeof toolResult === 'string' ? { text: toolResult } : toolResult;
+    return {
+      content: [{ type: 'text', text: result.text }],
+      ...(result.isError ? { isError: true } : {}),
+    };
   }
 }
 

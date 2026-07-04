@@ -32,6 +32,7 @@ import type {
   AvailableCommand,
   ChannelAgentBridge,
   ChannelLoopToolCreateInput,
+  ChannelLoopToolResult,
   SessionDiedEvent,
   ToolCallEvent,
 } from './ChannelAgentBridge.js';
@@ -276,7 +277,9 @@ export abstract class ChannelBase {
       new SessionRouter(bridge, config.cwd, config.sessionScope);
 
     this.registerSharedCommands();
-    bridge.registerChannelLoopToolHandler?.(this.channelLoopToolHandler);
+    if (this.loopController) {
+      bridge.registerChannelLoopToolHandler?.(this.channelLoopToolHandler);
+    }
 
     // When running standalone, register bridge listeners directly.
     // In gateway mode, the ChannelManager dispatches events instead.
@@ -448,7 +451,9 @@ export abstract class ChannelBase {
     }
     this.router.setBridge(bridge);
     this.bridge = bridge;
-    bridge.registerChannelLoopToolHandler?.(this.channelLoopToolHandler);
+    if (this.loopController) {
+      bridge.registerChannelLoopToolHandler?.(this.channelLoopToolHandler);
+    }
     if (this.registerBridgeEvents) {
       this.attachBridgeEvents(bridge);
     }
@@ -1581,30 +1586,47 @@ export abstract class ChannelBase {
   private async createLoopFromTool(
     sessionId: string,
     input: ChannelLoopToolCreateInput,
-  ): Promise<string> {
-    if (!this.loopController) return 'Channel loops are not configured.';
+  ): Promise<string | ChannelLoopToolResult> {
+    if (!this.loopController) {
+      return { text: 'Channel loops are not configured.', isError: true };
+    }
     if (!this.supportsProactiveSend()) {
-      return 'This channel does not support proactive loop messages.';
+      return {
+        text: 'This channel does not support proactive loop messages.',
+        isError: true,
+      };
     }
     if (this.config.sessionScope === 'single') {
-      return 'Loops are not supported when sessionScope is single.';
+      return {
+        text: 'Loops are not supported when sessionScope is single.',
+        isError: true,
+      };
     }
     const target = this.loopToolTarget(sessionId);
-    if (typeof target === 'string') return target;
+    if (typeof target === 'string') return { text: target, isError: true };
     if (!this.supportsProactiveTarget(target)) {
-      return 'This channel does not support proactive loop messages for this chat target.';
+      return {
+        text: 'This channel does not support proactive loop messages for this chat target.',
+        isError: true,
+      };
     }
 
     const cron = input.cron.trim();
     try {
       this.loopController.validateCron(cron);
     } catch (err) {
-      return `Invalid cron expression: ${err instanceof Error ? err.message : String(err)}`;
+      return {
+        text: `Invalid cron expression: ${err instanceof Error ? err.message : String(err)}`,
+        isError: true,
+      };
     }
 
     const prompt = sanitizePromptText(input.prompt.trim());
     if (Array.from(prompt).length > MAX_LOOP_PROMPT_CHARS) {
-      return `Loop prompt is too long; keep it under ${MAX_LOOP_PROMPT_CHARS} characters.`;
+      return {
+        text: `Loop prompt is too long; keep it under ${MAX_LOOP_PROMPT_CHARS} characters.`,
+        isError: true,
+      };
     }
 
     const loopInput: ChannelLoopInput = {
@@ -1636,16 +1658,23 @@ export abstract class ChannelBase {
       }
     }
     if (!job) {
-      return 'Too many loops for this chat. Cancel an existing loop before adding another.';
+      return {
+        text: 'Too many loops for this chat. Cancel an existing loop before adding another.',
+        isError: true,
+      };
     }
 
     return `Loop ${job.id}: ${job.cron}`;
   }
 
-  private async listLoopsFromTool(sessionId: string): Promise<string> {
-    if (!this.loopController) return 'Channel loops are not configured.';
+  private async listLoopsFromTool(
+    sessionId: string,
+  ): Promise<string | ChannelLoopToolResult> {
+    if (!this.loopController) {
+      return { text: 'Channel loops are not configured.', isError: true };
+    }
     const target = this.loopToolTarget(sessionId);
-    if (typeof target === 'string') return target;
+    if (typeof target === 'string') return { text: target, isError: true };
     const jobs = await this.loopController.listForTarget(this.name, target);
     if (jobs.length === 0) return 'No loops.';
     return jobs.map((job) => this.formatLoopListLine(job)).join('\n');
@@ -1654,15 +1683,19 @@ export abstract class ChannelBase {
   private async cancelLoopFromTool(
     sessionId: string,
     id: string,
-  ): Promise<string> {
-    if (!this.loopController) return 'Channel loops are not configured.';
+  ): Promise<string | ChannelLoopToolResult> {
+    if (!this.loopController) {
+      return { text: 'Channel loops are not configured.', isError: true };
+    }
     const target = this.loopToolTarget(sessionId);
-    if (typeof target === 'string') return target;
+    if (typeof target === 'string') return { text: target, isError: true };
     const jobs = await this.loopController.listForTarget(this.name, target);
     const match = jobs.find((job) => job.id === id);
-    if (!match) return `No loop ${id}.`;
+    if (!match) return { text: `No loop ${id}.`, isError: true };
     const disabled = await this.loopController.disable(id);
-    return disabled ? `Cancelled loop ${id}.` : `Failed to cancel loop ${id}.`;
+    return disabled
+      ? `Cancelled loop ${id}.`
+      : { text: `Failed to cancel loop ${id}.`, isError: true };
   }
 
   private async handleLoopList(envelope: Envelope): Promise<boolean> {

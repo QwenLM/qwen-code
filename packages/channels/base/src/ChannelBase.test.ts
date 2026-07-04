@@ -1725,15 +1725,18 @@ describe('ChannelBase', () => {
           cron: '* * * * *',
           prompt: 'drink water',
         }),
-      ).resolves.toBe(
-        'Only authorized members can use loops in this shared session.',
-      );
-      await expect(handler!.list('s-1')).resolves.toBe(
-        'Only authorized members can use loops in this shared session.',
-      );
-      await expect(handler!.cancel('s-1', 'job-1')).resolves.toBe(
-        'Only authorized members can use loops in this shared session.',
-      );
+      ).resolves.toEqual({
+        text: 'Only authorized members can use loops in this shared session.',
+        isError: true,
+      });
+      await expect(handler!.list('s-1')).resolves.toEqual({
+        text: 'Only authorized members can use loops in this shared session.',
+        isError: true,
+      });
+      await expect(handler!.cancel('s-1', 'job-1')).resolves.toEqual({
+        text: 'Only authorized members can use loops in this shared session.',
+        isError: true,
+      });
       expect(createForTarget).not.toHaveBeenCalled();
       expect(listForTarget).not.toHaveBeenCalled();
       expect(disable).not.toHaveBeenCalled();
@@ -1813,9 +1816,10 @@ describe('ChannelBase', () => {
           cron: '* * * * *',
           prompt: 'drink water',
         }),
-      ).resolves.toBe(
-        'Only authorized members can use loops in this shared session.',
-      );
+      ).resolves.toEqual({
+        text: 'Only authorized members can use loops in this shared session.',
+        isError: true,
+      });
       expect(createForTarget).not.toHaveBeenCalled();
 
       finishPrompt?.();
@@ -2636,7 +2640,17 @@ describe('ChannelBase', () => {
     });
 
     it('registers channel loop tools again after setBridge', () => {
-      const ch = createChannel();
+      const ch = createChannel(
+        {},
+        {
+          loopController: {
+            create: vi.fn(),
+            listForTarget: vi.fn(),
+            disable: vi.fn(),
+            validateCron: vi.fn(),
+          },
+        },
+      );
       const newBridge = createBridge();
 
       ch.setBridge(newBridge);
