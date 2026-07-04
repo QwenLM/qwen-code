@@ -67,10 +67,10 @@ export class ChannelLoopMcpServer {
   async handleMessage(
     message: JsonRpcMessage,
     context: ChannelLoopMcpContext,
-  ): Promise<JsonRpcMessage> {
+  ): Promise<JsonRpcMessage | undefined> {
     const id = message['id'];
     if (id === undefined || id === null) {
-      return { jsonrpc: '2.0', id: 0, result: {} };
+      return undefined;
     }
 
     try {
@@ -171,5 +171,5 @@ function readId(args: Record<string, unknown>): string {
   if (typeof id !== 'string' || id.trim().length === 0) {
     throw new Error('id must be a non-empty string.');
   }
-  return id;
+  return id.trim();
 }

@@ -371,6 +371,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       payload as JsonRpcMessage,
       { sessionId },
     );
+    if (!response) return {};
     return { payload: response };
   }
 
@@ -381,8 +382,10 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       (candidate) => candidate.canHandle?.(sessionId) === true,
     );
     if (handler) return handler;
-    const fallback = this.channelLoopToolHandlers[0];
-    if (fallback) return fallback;
-    throw new Error('Channel loop MCP server is not registered.');
+    throw new Error(
+      this.channelLoopToolHandlers.length === 0
+        ? 'No channel loop tool handler is registered.'
+        : `No channel loop handler matched session ${sessionId}.`,
+    );
   }
 }

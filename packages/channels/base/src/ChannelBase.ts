@@ -108,6 +108,8 @@ type ActivePrompt = {
    * turn's own onPromptEnd (its finally may settle long after — or never). */
   chatId: string;
   messageId?: string;
+  senderId?: string;
+  senderName?: string;
   /**
    * Set when /clear's bounded wait times out and evicts this (wedged) turn. /clear
    * has NO replacement turn, so it runs this turn's onPromptEnd at eviction time,
@@ -1589,7 +1591,7 @@ export abstract class ChannelBase {
     if (target.channelName !== this.name) {
       return 'No channel target is bound to this session.';
     }
-    if (!this.isAuthorizedForSharedSessionTarget(target)) {
+    if (!this.isAuthorizedForSharedSessionToolCall(target, sessionId)) {
       return 'Only authorized members can use loops in this shared session.';
     }
     if (!this.supportsProactiveTarget(target)) {
@@ -1616,7 +1618,7 @@ export abstract class ChannelBase {
       prompt,
       label: truncateLoopLabel(prompt),
       recurring: input.recurring !== false,
-      createdBy: sanitizeSenderName(target.senderId || 'agent'),
+      createdBy: sanitizeSenderName(this.toolCallerName(sessionId, target)),
     };
     let job: ChannelLoop | undefined;
     if (this.loopController.createForTarget) {
@@ -1650,7 +1652,7 @@ export abstract class ChannelBase {
     if (target.channelName !== this.name) {
       return 'No channel target is bound to this session.';
     }
-    if (!this.isAuthorizedForSharedSessionTarget(target)) {
+    if (!this.isAuthorizedForSharedSessionToolCall(target, sessionId)) {
       return 'Only authorized members can use loops in this shared session.';
     }
     const jobs = await this.loopController.listForTarget(this.name, target);
@@ -1668,7 +1670,7 @@ export abstract class ChannelBase {
     if (target.channelName !== this.name) {
       return 'No channel target is bound to this session.';
     }
-    if (!this.isAuthorizedForSharedSessionTarget(target)) {
+    if (!this.isAuthorizedForSharedSessionToolCall(target, sessionId)) {
       return 'Only authorized members can use loops in this shared session.';
     }
     const jobs = await this.loopController.listForTarget(this.name, target);
@@ -1985,6 +1987,22 @@ export abstract class ChannelBase {
     if (!this.isSharedSessionTarget(target)) return true;
     const authorized = this.config.allowedUsers;
     return authorized.length === 0 || authorized.includes(target.senderId);
+  }
+
+  private isAuthorizedForSharedSessionToolCall(
+    target: SessionTarget,
+    sessionId: string,
+  ): boolean {
+    if (!this.isSharedSessionTarget(target)) return true;
+    const authorized = this.config.allowedUsers;
+    if (authorized.length === 0) return true;
+    const senderId = this.activePrompts.get(sessionId)?.senderId;
+    return senderId !== undefined && authorized.includes(senderId);
+  }
+
+  private toolCallerName(sessionId: string, target: SessionTarget): string {
+    const active = this.activePrompts.get(sessionId);
+    return active?.senderName || active?.senderId || target.senderId || 'agent';
   }
 
   private stopActiveStreaming(
@@ -2686,6 +2704,8 @@ export abstract class ChannelBase {
         resolve: doneResolve,
         chatId: envelope.chatId,
         messageId: envelope.messageId,
+        senderId: envelope.senderId,
+        senderName: envelope.senderName,
       };
       // This turn is now the single owner of the session's active-prompt slot.
       // (Steer no longer hands a still-active session to a replacement; only
