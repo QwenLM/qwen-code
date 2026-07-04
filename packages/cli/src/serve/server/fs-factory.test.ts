@@ -33,6 +33,7 @@ afterEach(async () => {
       .splice(0)
       .map((scratch) => fsp.rm(scratch, { recursive: true, force: true })),
   );
+  vi.restoreAllMocks();
 });
 
 describe('resolveBoundWorkspacesFromIdeEnv', () => {
@@ -60,10 +61,14 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
     const stale = path.join(scratch, 'stale');
     await fsp.mkdir(primary);
     await fsp.mkdir(stale);
+    const stderr = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
 
     const roots = resolveBoundWorkspacesFromIdeEnv(primary, stale);
 
     expect(roots).toEqual([realpathSync.native(primary)]);
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('ignoring stale IDE workspace paths'),
+    );
   });
 
   it('preserves path characters instead of trimming workspace segments', async () => {
@@ -112,5 +117,19 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
         emit: () => undefined,
       }),
     ).toThrow(/nested/i);
+  });
+
+  it('passes env child roots through when the primary workspace is the parent', async () => {
+    const scratch = await mkScratch();
+    const parent = path.join(scratch, 'parent');
+    const child = path.join(parent, 'child');
+    await fsp.mkdir(child, { recursive: true });
+
+    const roots = resolveBoundWorkspacesFromIdeEnv(parent, child);
+
+    expect(roots).toEqual([
+      realpathSync.native(parent),
+      realpathSync.native(child),
+    ]);
   });
 });

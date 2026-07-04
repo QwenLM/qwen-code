@@ -283,10 +283,7 @@ export function createWorkspaceFileSystemFactory(
     throw new Error('WorkspaceFileSystem requires at least one workspace root');
   }
   assertNoNestedWorkspaces(boundWorkspaces);
-  const primaryWorkspace = boundWorkspaces[0];
-  if (primaryWorkspace === undefined) {
-    throw new Error('WorkspaceFileSystem requires at least one workspace root');
-  }
+  const primaryWorkspace = boundWorkspaces[0]!;
   const workspaces = boundWorkspaces.map((workspace) => {
     const ignore =
       deps.ignore ??

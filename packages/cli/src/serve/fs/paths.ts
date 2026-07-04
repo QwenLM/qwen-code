@@ -391,11 +391,15 @@ export async function resolveWithinWorkspace(
             canonicalCandidate,
             boundCanonicals,
           );
-        } catch {
+        } catch (innerErr) {
+          const innerCode = (innerErr as NodeJS.ErrnoException)?.code;
+          if (innerCode !== 'ENOENT' && innerCode !== 'ENOTDIR') {
+            throw innerErr;
+          }
           // Leave `boundCanonical` undefined. This fallback is only
           // for non-canonical absolute inputs that still land inside
-          // a registered root; failures should keep the normal
-          // path_outside_workspace classification below.
+          // a registered root; missing-path failures should keep the
+          // normal path_outside_workspace classification below.
         }
       }
     }

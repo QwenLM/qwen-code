@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { promises as fsp, realpathSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -188,6 +188,7 @@ describe('resolveWithinWorkspace', () => {
 
   afterEach(async () => {
     await fsp.rm(scratch, { recursive: true, force: true });
+    vi.restoreAllMocks();
   });
 
   it('resolves an existing relative path to its on-disk canonical form', async () => {
@@ -286,6 +287,28 @@ describe('resolveWithinWorkspace', () => {
     expect(out).toBe(
       path.join(realpathSync.native(workspace), 'newdir', 'leaf.txt'),
     );
+  });
+
+  it('propagates realpath errors from the existing-ancestor fallback', async () => {
+    const nested = path.join(workspace, 'newdir', 'leaf.txt');
+    const missing = Object.assign(new Error('missing'), { code: 'ENOENT' });
+    const busy = Object.assign(new Error('busy'), { code: 'EBUSY' });
+    const realpath = vi
+      .spyOn(fsp, 'realpath')
+      .mockImplementation(async (target) => {
+        const targetPath = String(target);
+        if (targetPath === nested) throw missing;
+        if (targetPath === workspace) throw busy;
+        return realpathSync.native(targetPath);
+      });
+
+    try {
+      await expect(
+        resolveWithinWorkspace(nested, workspace, 'write'),
+      ).rejects.toBe(busy);
+    } finally {
+      realpath.mockRestore();
+    }
   });
 
   it('rejects ENOENT under read intent with path_not_found', async () => {

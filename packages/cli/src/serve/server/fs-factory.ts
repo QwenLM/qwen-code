@@ -101,8 +101,15 @@ export function resolveBoundWorkspacesFromIdeEnv(
   if (primary === undefined) return [];
   if (
     envCanonical.length > 0 &&
-    !envCanonical.some((workspace) => isWithinRoot(primary, workspace))
+    !envCanonical.some(
+      (workspace) =>
+        isWithinRoot(primary, workspace) || isWithinRoot(workspace, primary),
+    )
   ) {
+    writeStderrLine(
+      'qwen serve: ignoring stale IDE workspace paths that do not overlap ' +
+        'the selected workspace',
+    );
     return [primary];
   }
   return workspaces;

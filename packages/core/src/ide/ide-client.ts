@@ -149,17 +149,6 @@ export class IdeClient {
     this.trustChangeListeners.delete(listener);
   }
 
-  getWorkspaceFolders(): string[] {
-    const workspacePath =
-      this.connectionConfig?.workspacePath ??
-      process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];
-    if (!workspacePath) return [];
-    return workspacePath
-      .split(path.delimiter)
-      .filter((workspace) => workspace.length > 0)
-      .map(getRealPath);
-  }
-
   async connect(): Promise<void> {
     if (!this.currentIde) {
       this.setState(
