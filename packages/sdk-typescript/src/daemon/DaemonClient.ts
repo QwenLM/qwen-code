@@ -38,6 +38,8 @@ import type {
   DaemonSessionSummary,
   DaemonSessionSupportedCommandsStatus,
   DaemonSessionStatsStatus,
+  DaemonStatusReport,
+  DaemonStatusReportDetail,
   DaemonSessionTaskStatus,
   DaemonSessionTasksStatus,
   DaemonUpdateAgentRequest,
@@ -60,6 +62,10 @@ import type {
   DaemonWorkspaceToolsStatus,
   DaemonWriteMemoryRequest,
   DaemonWriteMemoryResult,
+  DaemonWorkspaceMemoryDreamOptions,
+  DaemonWorkspaceMemoryDreamTask,
+  DaemonWorkspaceMemoryForgetOptions,
+  DaemonWorkspaceMemoryForgetTask,
   DaemonWorkspaceMemoryRememberOptions,
   DaemonWorkspaceMemoryRememberTask,
   HeartbeatResult,
@@ -88,6 +94,9 @@ import type {
   DaemonRuntimeMcpAddResult,
   DaemonRuntimeMcpRemoveResult,
   DaemonToolToggleResult,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
+  DaemonSessionArtifactsEnvelope,
   DaemonRewindSnapshotInfo,
   DaemonRewindResult,
   ForkSessionRequest,
@@ -118,6 +127,8 @@ import type {
 } from './types.js';
 
 const WORKSPACE_MEMORY_REMEMBER_PATH = '/workspace/memory/remember';
+const WORKSPACE_MEMORY_FORGET_PATH = '/workspace/memory/forget';
+const WORKSPACE_MEMORY_DREAM_PATH = '/workspace/memory/dream';
 
 /**
  * SDK-side HTTP client for the `qwen serve` daemon. Sibling to
@@ -667,6 +678,21 @@ export class DaemonClient {
     );
   }
 
+  /**
+   * Consolidated daemon status report (`GET /daemon/status`). The default
+   * `summary` detail reads cheap in-memory counters; `full` adds per-session,
+   * ACP-connection, auth, and workspace diagnostics sections.
+   */
+  async daemonStatus(
+    detail: DaemonStatusReportDetail = 'summary',
+  ): Promise<DaemonStatusReport> {
+    const query = detail === 'summary' ? '' : `?detail=${detail}`;
+    return await this.jsonRequest<DaemonStatusReport>(
+      `/daemon/status${query}`,
+      'GET /daemon/status',
+    );
+  }
+
   async workspaceMcp(): Promise<DaemonWorkspaceMcpStatus> {
     return await this.fetchWithTimeout(
       `${this.baseUrl}/workspace/mcp`,
@@ -1065,6 +1091,57 @@ export class DaemonClient {
     return await this.jsonRequest(
       `${WORKSPACE_MEMORY_REMEMBER_PATH}/${encodeURIComponent(taskId)}`,
       `GET ${WORKSPACE_MEMORY_REMEMBER_PATH}/:taskId`,
+      { clientId: opts?.clientId },
+    );
+  }
+
+  async forgetWorkspaceMemory(
+    query: string,
+    opts: DaemonWorkspaceMemoryForgetOptions = {},
+  ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    return await this.jsonRequest<DaemonWorkspaceMemoryForgetTask>(
+      WORKSPACE_MEMORY_FORGET_PATH,
+      `POST ${WORKSPACE_MEMORY_FORGET_PATH}`,
+      {
+        method: 'POST',
+        body: { query },
+        clientId: opts.clientId,
+      },
+    );
+  }
+
+  async getWorkspaceMemoryForgetTask(
+    taskId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspaceMemoryForgetTask> {
+    return await this.jsonRequest(
+      `${WORKSPACE_MEMORY_FORGET_PATH}/${encodeURIComponent(taskId)}`,
+      `GET ${WORKSPACE_MEMORY_FORGET_PATH}/:taskId`,
+      { clientId: opts?.clientId },
+    );
+  }
+
+  async dreamWorkspaceMemory(
+    opts: DaemonWorkspaceMemoryDreamOptions = {},
+  ): Promise<DaemonWorkspaceMemoryDreamTask> {
+    return await this.jsonRequest<DaemonWorkspaceMemoryDreamTask>(
+      WORKSPACE_MEMORY_DREAM_PATH,
+      `POST ${WORKSPACE_MEMORY_DREAM_PATH}`,
+      {
+        method: 'POST',
+        body: {},
+        clientId: opts.clientId,
+      },
+    );
+  }
+
+  async getWorkspaceMemoryDreamTask(
+    taskId: string,
+    opts?: { clientId?: string },
+  ): Promise<DaemonWorkspaceMemoryDreamTask> {
+    return await this.jsonRequest(
+      `${WORKSPACE_MEMORY_DREAM_PATH}/${encodeURIComponent(taskId)}`,
+      `GET ${WORKSPACE_MEMORY_DREAM_PATH}/:taskId`,
       { clientId: opts?.clientId },
     );
   }
@@ -2956,6 +3033,50 @@ export class DaemonClient {
    */
   dispose(): void {
     this.transport.dispose();
+  }
+
+  // -- Session artifacts ---------------------------------------------------
+
+  async listSessionArtifacts(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactsEnvelope> {
+    return await this.jsonRequest<DaemonSessionArtifactsEnvelope>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts`,
+      'GET /session/:id/artifacts',
+      { clientId },
+    );
+  }
+
+  async addSessionArtifact(
+    sessionId: string,
+    artifact: DaemonSessionArtifactInput,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts`,
+      'POST /session/:id/artifacts',
+      {
+        method: 'POST',
+        body: artifact,
+        clientId,
+      },
+    );
+  }
+
+  async removeSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}`,
+      'DELETE /session/:id/artifacts/:artifactId',
+      {
+        method: 'DELETE',
+        clientId,
+      },
+    );
   }
 
   // -- Session metadata ----------------------------------------------------

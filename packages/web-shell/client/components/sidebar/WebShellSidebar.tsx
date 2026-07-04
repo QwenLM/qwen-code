@@ -33,6 +33,7 @@ interface WebShellSidebarProps {
   collapsed: boolean;
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
+  onOpenDaemonStatus: () => void;
   onNewSession: () => Promise<boolean> | boolean;
   onLoadSession: (sessionId: string) => Promise<void> | void;
   onError: (error: unknown, fallback: string) => void;
@@ -136,6 +137,14 @@ function IconSettings() {
   );
 }
 
+function IconPulse() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M3 12h4l3-8 4 16 3-8h4" />
+    </svg>
+  );
+}
+
 function IconRename() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -173,6 +182,7 @@ export function WebShellSidebar({
   collapsed,
   onCollapsedChange,
   onOpenSettings,
+  onOpenDaemonStatus,
   onNewSession,
   onLoadSession,
   onError,
@@ -214,6 +224,14 @@ export function WebShellSidebar({
   const currentSessionId = connection.sessionId;
   const projectName =
     getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
+  const qwenCodeVersion = connection.capabilities?.qwenCodeVersion || '';
+  // Numeric releases render as "v1.2.3"; a non-semver fallback such as
+  // "unknown" is shown as-is so we never produce a bogus "vunknown".
+  const versionLabel = qwenCodeVersion
+    ? /^\d/.test(qwenCodeVersion)
+      ? `v${qwenCodeVersion}`
+      : qwenCodeVersion
+    : '';
   const sidebarStyle = {
     '--web-shell-sidebar-width': `${sidebarWidth}px`,
   } as CSSProperties;
@@ -939,6 +957,20 @@ export function WebShellSidebar({
             <IconSettings />
           </span>
           {!collapsed && <span>{t('sidebar.settings')}</span>}
+        </button>
+        {!collapsed && versionLabel && (
+          <span className={styles.version} title={`Qwen Code ${versionLabel}`}>
+            {versionLabel}
+          </span>
+        )}
+        <button
+          className={styles.collapseButton}
+          type="button"
+          title={t('sidebar.daemonStatus')}
+          aria-label={t('sidebar.daemonStatus')}
+          onClick={onOpenDaemonStatus}
+        >
+          <IconPulse />
         </button>
         {!mobileOpen && (
           <button
