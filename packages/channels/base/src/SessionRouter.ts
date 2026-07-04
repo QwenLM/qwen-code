@@ -269,8 +269,8 @@ export class SessionRouter {
   private updateTarget(sessionId: string, next: SessionTarget): void {
     const current = this.toTarget.get(sessionId);
     if (!current) return;
-    if (current.isGroup === next.isGroup) return;
-    this.toTarget.set(sessionId, { ...current, isGroup: next.isGroup });
+    if (current.isGroup === true || next.isGroup !== true) return;
+    this.toTarget.set(sessionId, { ...current, isGroup: true });
     this.persist();
   }
 

@@ -96,6 +96,41 @@ describe('SessionRouter', () => {
       });
     });
 
+    it('thread scope: never downgrades group target metadata', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sessionId = await router.resolve(
+        'ch',
+        'alice',
+        'chat1',
+        'thread1',
+        undefined,
+        true,
+      );
+
+      await router.resolve('ch', 'bob', 'chat1', 'thread1');
+
+      expect(router.getTarget(sessionId)).toMatchObject({
+        senderId: 'alice',
+        chatId: 'chat1',
+        threadId: 'thread1',
+        isGroup: true,
+      });
+    });
+
+    it('thread scope: upgrades group target metadata', async () => {
+      const router = new SessionRouter(bridge, '/tmp', 'thread');
+      const sessionId = await router.resolve('ch', 'alice', 'chat1', 'thread1');
+
+      await router.resolve('ch', 'alice', 'chat1', 'thread1', undefined, true);
+
+      expect(router.getTarget(sessionId)).toMatchObject({
+        senderId: 'alice',
+        chatId: 'chat1',
+        threadId: 'thread1',
+        isGroup: true,
+      });
+    });
+
     it('thread scope: falls back to chatId when no threadId', async () => {
       const router = new SessionRouter(bridge, '/tmp', 'thread');
       const s1 = await router.resolve('ch', 'alice', 'chat1');
