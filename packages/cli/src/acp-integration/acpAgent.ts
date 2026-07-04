@@ -7115,6 +7115,26 @@ class QwenAgent implements Agent {
             filesFailed = [`file-history-rewind: ${reason}`];
           }
         }
+        let artifactSnapshot: unknown;
+        try {
+          await session.getConfig().getChatRecordingService()?.flush();
+          const cwd = session.getConfig().getProjectRoot();
+          const sessionData = await runWithAcpRuntimeOutputDir(
+            this.settings,
+            cwd,
+            async () => {
+              const sessionService = new SessionService(cwd);
+              return sessionService.loadSession(sessionId);
+            },
+          );
+          artifactSnapshot = sessionData?.artifactSnapshot;
+        } catch (err) {
+          debugLogger.warn(
+            `[ACP] Failed to rebuild artifact snapshot after rewind for session=${sessionId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
 
         return {
           success: true,
@@ -7122,6 +7142,7 @@ class QwenAgent implements Agent {
           ...rewindResult,
           filesChanged,
           filesFailed,
+          ...(artifactSnapshot ? { artifactSnapshot } : {}),
         };
       }
       case 'qwen/session/loadUpdates': {

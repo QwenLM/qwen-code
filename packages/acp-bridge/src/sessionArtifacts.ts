@@ -330,7 +330,9 @@ export class SessionArtifactStore {
             .filter((change) => change.action === 'created')
             .map((change) => change.artifactId),
         );
-        changes.push(...(await this.evictOverflow(createdIds, changes)));
+        changes.push(
+          ...(await this.evictOverflow(createdIds, changes, options.strict)),
+        );
 
         warnings.push(...(await this.persistChanges(changes, options.strict)));
       } catch (error) {
@@ -415,7 +417,6 @@ export class SessionArtifactStore {
     options?: { clientId?: string },
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
-      const before = this.cloneState();
       const existing = this.artifacts.get(artifactId);
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
@@ -442,18 +443,13 @@ export class SessionArtifactStore {
           reason: 'explicit',
         },
       ];
-      try {
-        const warnings = await this.persistChanges(changes, true);
-        return {
-          v: 1,
-          sessionId: this.sessionId,
-          changes,
-          ...(warnings.length > 0 ? { warnings } : {}),
-        };
-      } catch (error) {
-        this.restoreState(before);
-        throw error;
-      }
+      const warnings = await this.persistChanges(changes, false);
+      return {
+        v: 1,
+        sessionId: this.sessionId,
+        changes,
+        ...(warnings.length > 0 ? { warnings } : {}),
+      };
     });
   }
 
@@ -720,6 +716,11 @@ export class SessionArtifactStore {
           );
         }
       }
+      const evicted = await this.evictOverflow(new Set(), []);
+      if (evicted.length > 0) {
+        warnings.push('restored artifact list pruned to live limit');
+        warnings.push(...(await this.persistChanges(evicted, false)));
+      }
       return warnings;
     });
   }
@@ -865,8 +866,13 @@ export class SessionArtifactStore {
   }
 
   private downgradeDurableChanges(changes: SessionArtifactChange[]): string[] {
+    let downgraded = false;
+    let removalNotPersisted = false;
     for (const change of changes) {
-      if (change.action === 'removed') continue;
+      if (change.action === 'removed') {
+        removalNotPersisted = true;
+        continue;
+      }
       const stored = this.artifacts.get(change.artifactId);
       if (!stored) continue;
       stored.retention = 'ephemeral';
@@ -874,10 +880,18 @@ export class SessionArtifactStore {
       delete stored.persistedAt;
       delete stored.contentRef;
       change.artifact = toPublicArtifact(stored);
+      downgraded = true;
     }
-    return [
-      'artifact persistence unavailable; durable artifacts kept ephemeral',
-    ];
+    const warnings: string[] = [];
+    if (downgraded) {
+      warnings.push(
+        'artifact persistence unavailable; durable artifacts kept ephemeral',
+      );
+    }
+    if (removalNotPersisted) {
+      warnings.push('artifact removal not persisted; live removal kept');
+    }
+    return warnings;
   }
 
   private applyDurableMarkers(changes: readonly SessionArtifactChange[]): void {
@@ -1131,6 +1145,7 @@ export class SessionArtifactStore {
   private async evictOverflow(
     createdIds: Set<string>,
     changes: SessionArtifactChange[],
+    strict = false,
   ): Promise<SessionArtifactChange[]> {
     const removed: SessionArtifactChange[] = [];
     if (this.artifacts.size <= this.maxArtifacts) {
@@ -1171,6 +1186,16 @@ export class SessionArtifactStore {
     const overflowCreated = Array.from(this.artifacts.values())
       .filter((artifact) => createdInThisBatch.has(artifact.id))
       .sort((a, b) => b.receivedSeq - a.receivedSeq);
+    if (
+      strict &&
+      overflowCreated.length > 0 &&
+      this.artifacts.size > this.maxArtifacts
+    ) {
+      throw new SessionArtifactValidationError(
+        'artifact store is full; no eviction candidate is available',
+        'artifactId',
+      );
+    }
     for (const artifact of overflowCreated) {
       if (this.artifacts.size <= this.maxArtifacts) {
         break;
@@ -1672,7 +1697,6 @@ function toPersistedArtifact(
 }
 
 function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
-  if (change.reason === 'eviction') return false;
   if (!change.artifact) return false;
   return change.artifact.retention !== 'ephemeral';
 }

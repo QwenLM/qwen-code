@@ -11759,7 +11759,9 @@ describe('session idle reaper', () => {
 
       // No detach — simulates client crash. Reaper catches all 3.
       await vi.advanceTimersByTimeAsync(4_000);
-      expect(bridge.sessionCount).toBe(0);
+      await vi.waitFor(() => {
+        expect(bridge.sessionCount).toBe(0);
+      });
 
       await bridge.shutdown();
     } finally {

@@ -45,6 +45,7 @@ export interface SessionArtifactGcResult {
 export class SessionArtifactContentStore {
   private readonly rootDir: string;
   private writeQueue: Promise<void> = Promise.resolve();
+  private readonly leasedContentIds = new Set<string>();
 
   constructor(rootDir = defaultContentRoot()) {
     this.rootDir = rootDir;
@@ -122,6 +123,7 @@ export class SessionArtifactContentStore {
           createdAt,
         };
         await writeManifestAtomic(contentDir, manifest);
+        this.leasedContentIds.add(contentId);
         return {
           kind: 'managed_copy',
           contentId,
@@ -138,6 +140,10 @@ export class SessionArtifactContentStore {
         await sourceHandle?.close().catch(() => undefined);
       }
     });
+  }
+
+  releaseContentRef(ref: SessionArtifactContentRef): void {
+    this.leasedContentIds.delete(ref.contentId);
   }
 
   async fsck(
@@ -218,42 +224,47 @@ export class SessionArtifactContentStore {
     sessionId: string,
     referencedContentIds: ReadonlySet<string>,
   ): Promise<SessionArtifactGcResult> {
-    const removed: string[] = [];
-    const retained: string[] = [];
-    let entries: string[];
-    try {
-      entries = await fs.readdir(this.rootDir);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-        return { removed, retained };
-      }
-      throw error;
-    }
-    for (const entry of entries) {
-      if (entry === '.tmp') {
-        await cleanTmpDir(path.join(this.rootDir, entry));
-        continue;
-      }
-      const fullPath = path.join(this.rootDir, entry);
-      if (referencedContentIds.has(entry)) {
-        retained.push(entry);
-        continue;
-      }
-      let manifest: ContentManifest;
+    return this.enqueueWrite(async () => {
+      const removed: string[] = [];
+      const retained: string[] = [];
+      let entries: string[];
       try {
-        manifest = await readManifest(path.join(fullPath, 'manifest.json'));
-      } catch {
-        retained.push(entry);
-        continue;
+        entries = await fs.readdir(this.rootDir);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+          return { removed, retained };
+        }
+        throw error;
       }
-      if (manifest.sessionId !== sessionId) {
-        retained.push(entry);
-        continue;
+      for (const entry of entries) {
+        if (entry === '.tmp') {
+          await cleanTmpDir(path.join(this.rootDir, entry));
+          continue;
+        }
+        const fullPath = path.join(this.rootDir, entry);
+        if (
+          referencedContentIds.has(entry) ||
+          this.leasedContentIds.has(entry)
+        ) {
+          retained.push(entry);
+          continue;
+        }
+        let manifest: ContentManifest;
+        try {
+          manifest = await readManifest(path.join(fullPath, 'manifest.json'));
+        } catch {
+          retained.push(entry);
+          continue;
+        }
+        if (manifest.sessionId !== sessionId) {
+          retained.push(entry);
+          continue;
+        }
+        await fs.rm(fullPath, { recursive: true, force: true });
+        removed.push(entry);
       }
-      await fs.rm(fullPath, { recursive: true, force: true });
-      removed.push(entry);
-    }
-    return { removed, retained };
+      return { removed, retained };
+    });
   }
 
   private async usedBytes(): Promise<number> {

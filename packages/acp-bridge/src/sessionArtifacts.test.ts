@@ -951,6 +951,71 @@ describe('SessionArtifactStore', () => {
     ).toEqual(['Pinned', 'New']);
   });
 
+  it('rejects strict overflow when every live artifact is pinned', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's3-all-pinned',
+      workspaceCwd: workspace,
+      maxArtifacts: 1,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Pinned', url: 'https://example.com/pinned' }],
+      { strict: true },
+    );
+    await store.pin(created.changes[0]!.artifactId, {
+      contentRef: {
+        kind: 'managed_copy',
+        contentId: `${'a'.repeat(64)}-${'b'.repeat(16)}`,
+        sha256: 'a'.repeat(64),
+        sizeBytes: 12,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      },
+    });
+
+    await expect(
+      store.upsertMany([{ title: 'New', url: 'https://example.com/new' }], {
+        strict: true,
+      }),
+    ).rejects.toThrow(SessionArtifactValidationError);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [{ title: 'Pinned', retention: 'pinned' }],
+    });
+  });
+
+  it('writes eviction removals to durable persistence', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's3-durable-eviction',
+      workspaceCwd: workspace,
+      maxArtifacts: 1,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const first = await store.upsertMany(
+      [{ title: 'First', url: 'https://example.com/first' }],
+      { strict: true },
+    );
+    await store.upsertMany(
+      [{ title: 'Second', url: 'https://example.com/second' }],
+      { strict: true },
+    );
+
+    expect(events.at(-1)?.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: first.changes[0]?.artifactId,
+        reason: 'eviction',
+      }),
+    );
+  });
+
   it('drops newest artifacts created in the same batch when no older eviction candidate exists', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's3-same-batch-overflow',
@@ -2302,6 +2367,41 @@ describe('SessionArtifactStore', () => {
     await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
   });
 
+  it('removes live artifacts even when explicit tombstone persistence fails', async () => {
+    let calls = 0;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-remove-best-effort',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          calls++;
+          if (calls > 1) {
+            throw new Error('disk full');
+          }
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Sensitive', url: 'https://example.com/sensitive' }],
+      { strict: true },
+    );
+
+    const removed = await store.remove(created.changes[0]!.artifactId);
+
+    expect(removed).toMatchObject({
+      changes: [
+        {
+          action: 'removed',
+          artifactId: created.changes[0]?.artifactId,
+          reason: 'explicit',
+        },
+      ],
+      warnings: ['artifact removal not persisted; live removal kept'],
+    });
+    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
+  });
+
   it('restores rebuilt durable artifacts as metadata-only restored entries', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
     const source = new SessionArtifactStore({
@@ -2352,6 +2452,63 @@ describe('SessionArtifactStore', () => {
         }),
       ],
     });
+  });
+
+  it('prunes over-limit restored artifacts and records eviction tombstones', async () => {
+    const sourceEvents: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-prune',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          sourceEvents.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [
+        { title: 'One', url: 'https://example.com/one' },
+        { title: 'Two', url: 'https://example.com/two' },
+      ],
+      { strict: true },
+    );
+    const prunedEvents: SessionArtifactEventRecordPayload[] = [];
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-restore-prune',
+      workspaceCwd: workspace,
+      maxArtifacts: 1,
+      persistence: {
+        recordEvent: async (payload) => {
+          prunedEvents.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const snapshot: RebuiltSessionArtifactSnapshot = {
+      v: 2,
+      sessionId: 's11-restore-prune',
+      sequence: 1,
+      artifacts: sourceEvents[0]!.changes.map((change) => change.artifact!),
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    };
+
+    await expect(restored.restore(snapshot)).resolves.toContain(
+      'restored artifact list pruned to live limit',
+    );
+
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [{ title: 'Two' }],
+    });
+    expect(prunedEvents[0]?.changes).toContainEqual(
+      expect.objectContaining({
+        action: 'removed',
+        artifactId: sourceEvents[0]?.changes[0]?.artifactId,
+        reason: 'eviction',
+      }),
+    );
   });
 
   it('strips invalid retained content refs during restore', async () => {
@@ -2668,6 +2825,29 @@ describe('SessionArtifactContentStore', () => {
     await expect(fs.readdir(tmpDir)).resolves.toEqual([]);
   });
 
+  it('retains leased content during gc until the pin flow releases it', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const ref = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      await workspaceArtifact('leased.txt', 'leased'),
+      workspace,
+    ))!;
+
+    await expect(
+      contentStore.gc('content-session', new Set()),
+    ).resolves.toMatchObject({
+      removed: [],
+      retained: expect.arrayContaining([ref.contentId]),
+    });
+
+    contentStore.releaseContentRef(ref);
+    await expect(
+      contentStore.gc('content-session', new Set()),
+    ).resolves.toMatchObject({
+      removed: [ref.contentId],
+    });
+  });
+
   it('serializes quota checks across concurrent pins', async () => {
     const contentStore = new SessionArtifactContentStore(contentRoot);
     const first = await workspaceArtifact('concurrent-a.txt', 'abc');
@@ -2765,6 +2945,9 @@ describe('SessionArtifactContentStore', () => {
       await workspaceArtifact('other.txt', 'other'),
       workspace,
     ))!;
+    contentStore.releaseContentRef(kept);
+    contentStore.releaseContentRef(orphaned);
+    contentStore.releaseContentRef(otherSession);
 
     await expect(
       contentStore.gc('content-session', new Set([kept.contentId])),

@@ -792,7 +792,9 @@ export class ChatRecordingService {
       await this.writeChain;
       this.updateTitleAnchorTracking(record);
     } catch (error) {
-      this.lastRecordUuid = previousLastRecordUuid;
+      if (this.lastRecordUuid === record.uuid) {
+        this.lastRecordUuid = previousLastRecordUuid;
+      }
       debugLogger.error('Error appending record (async):', error);
       throw error;
     }

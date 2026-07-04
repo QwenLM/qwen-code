@@ -1113,6 +1113,36 @@ describe('ChatRecordingService', () => {
       }
     });
 
+    it('does not rewind the shared parent pointer when strict artifact writes race with normal appends', async () => {
+      let rejectStrict!: (error: Error) => void;
+      const strictWrite = new Promise<void>((_resolve, reject) => {
+        rejectStrict = reject;
+      });
+      vi.mocked(jsonl.writeLine)
+        .mockImplementationOnce(() => strictWrite)
+        .mockResolvedValue(undefined);
+
+      const strict = chatRecordingService.recordSessionArtifactEvent({
+        v: 2,
+        sessionId: 'test-session-id',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [],
+      });
+      chatRecordingService.recordUserMessage([{ text: 'after strict write' }]);
+      rejectStrict(new Error('disk full'));
+
+      await expect(strict).rejects.toThrow('disk full');
+      await chatRecordingService.flush();
+
+      chatRecordingService.recordUserMessage([{ text: 'next message' }]);
+      await chatRecordingService.flush();
+
+      const second = vi.mocked(jsonl.writeLine).mock.calls[1][1] as ChatRecord;
+      const third = vi.mocked(jsonl.writeLine).mock.calls[2][1] as ChatRecord;
+      expect(third.parentUuid).toBe(second.uuid);
+    });
+
     // appendRecord can throw SYNCHRONOUSLY before returning a promise
     // (e.g. ensureConversationFile fails because the conversation
     // file can't be created). Without rollback in the outer catch,
