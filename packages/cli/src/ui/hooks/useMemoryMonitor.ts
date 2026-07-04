@@ -38,7 +38,7 @@ export const useMemoryMonitor = ({
   const lastCompactRef = useRef(0);
 
   useEffect(() => {
-    // Debug logging + UI compaction interval — runs every 30 s, never cleared.
+    // Debug logging + UI compaction interval — runs every 5 min, never cleared.
     // UI compaction lives here (not in the warning interval) because the
     // warning interval self-destructs via clearInterval once RSS exceeds 7 GB,
     // which would also kill the compaction check.
