@@ -84,6 +84,7 @@ const AUTHENTICATION_TIMEOUT_MS = 30_000;
 const KICK_RECONNECT_MAX_ATTEMPTS = 3;
 const KICK_RECONNECT_BASE_DELAY_MS = 1_000;
 const KICK_RECONNECT_RESET_MS = 60_000;
+const KICK_RECONNECT_RETRY_MS = 5 * 60 * 1000;
 
 export class WeComChannel extends ChannelBase {
   private readonly wecom: WeComConfig;
@@ -92,10 +93,12 @@ export class WeComChannel extends ChannelBase {
   private readonly inFlightMessages = new Set<string>();
   private readonly attachmentDirsByMessage = new Map<string, string[]>();
   private readonly attachmentDirsBySession = new Map<string, string[]>();
+  private attachmentDirsWithoutMessage: string[] = [];
   private readonly bufferedAttachmentMessages = new Set<string>();
   private readonly coalescedAttachmentMessages = new Map<string, string[]>();
   private dedupTimer?: ReturnType<typeof setInterval>;
   private kickReconnectReset?: ReturnType<typeof setTimeout>;
+  private kickReconnectRetry?: ReturnType<typeof setTimeout>;
   private connecting?: Promise<void>;
   private connectingClient?: WeComClient;
   private authentication?: ReturnType<typeof waitForAuthentication>;
@@ -224,6 +227,10 @@ export class WeComChannel extends ChannelBase {
       clearTimeout(this.kickReconnectReset);
       this.kickReconnectReset = undefined;
     }
+    if (this.kickReconnectRetry) {
+      clearTimeout(this.kickReconnectRetry);
+      this.kickReconnectRetry = undefined;
+    }
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
       this.dedupTimer = undefined;
@@ -297,6 +304,7 @@ export class WeComChannel extends ChannelBase {
     }
 
     const messageId = getString(body, 'msgid');
+    const logMessageId = sanitizeLogText(messageId || '(no id)', 100);
     if (messageId && this.seenMessages.has(messageId)) return;
 
     const from = getRecord(body, 'from');
@@ -307,9 +315,9 @@ export class WeComChannel extends ChannelBase {
     const chatId = isGroup ? rawChatId : rawChatId || senderId;
     if (!chatId || !senderId) {
       process.stderr.write(
-        `[WeCom:${this.name}] dropping message ${
-          messageId || '(no id)'
-        }: missing ${!senderId ? 'senderId' : 'chatId'}.\n`,
+        `[WeCom:${this.name}] dropping message ${logMessageId}: missing ${
+          !senderId ? 'senderId' : 'chatId'
+        }.\n`,
       );
       return;
     }
@@ -356,7 +364,7 @@ export class WeComChannel extends ChannelBase {
       if (messageId && !processingStarted) this.seenMessages.delete(messageId);
       else if (messageId) {
         process.stderr.write(
-          `[WeCom:${this.name}] message ${messageId} failed after processing started; dedup entry retained.\n`,
+          `[WeCom:${this.name}] message ${logMessageId} failed after processing started; dedup entry retained.\n`,
         );
       }
       throw err;
@@ -369,6 +377,7 @@ export class WeComChannel extends ChannelBase {
       ) {
         this.cleanupAttachmentDirsForMessage(messageId);
       }
+      if (!messageId) this.cleanupAttachmentDirsWithoutMessage();
     }
   }
 
@@ -376,7 +385,6 @@ export class WeComChannel extends ChannelBase {
     body: Record<string, unknown>,
     attachments: Attachment[] = [],
     messageId?: string,
-    sessionId?: string,
   ): Promise<Attachment[]> {
     const refs = collectInboundMediaRefs(body);
     for (const ref of refs) {
@@ -404,7 +412,7 @@ export class WeComChannel extends ChannelBase {
       } else {
         const dir = join(tmpdir(), 'channel-files', randomUUID());
         mkdirSync(dir, { recursive: true });
-        this.rememberAttachmentDir(dir, messageId, sessionId);
+        this.rememberAttachmentDir(dir, messageId);
         const safeName = fileName || `wecom_${ref.type}`;
         const filePath = join(dir, safeName);
         writeFileSync(filePath, data);
@@ -424,7 +432,10 @@ export class WeComChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
-    if (!messageId) return;
+    if (!messageId) {
+      this.rememberUntrackedDirsForSession(sessionId);
+      return;
+    }
     this.bufferedAttachmentMessages.add(messageId);
     this.rememberMessageDirsForSession(messageId, sessionId);
   }
@@ -434,7 +445,11 @@ export class WeComChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
-    if (messageId) this.rememberMessageDirsForSession(messageId, sessionId);
+    if (messageId) {
+      this.rememberMessageDirsForSession(messageId, sessionId);
+    } else {
+      this.rememberUntrackedDirsForSession(sessionId);
+    }
   }
 
   protected override onPromptBufferDrained(
@@ -477,20 +492,13 @@ export class WeComChannel extends ChannelBase {
     this.cleanupAttachmentDirsForMessage(messageId);
   }
 
-  private rememberAttachmentDir(
-    dir: string,
-    messageId?: string,
-    sessionId?: string,
-  ): void {
+  private rememberAttachmentDir(dir: string, messageId?: string): void {
     if (messageId) {
       const messageDirs = this.attachmentDirsByMessage.get(messageId) ?? [];
       messageDirs.push(dir);
       this.attachmentDirsByMessage.set(messageId, messageDirs);
-    }
-    if (sessionId) {
-      const sessionDirs = this.attachmentDirsBySession.get(sessionId) ?? [];
-      sessionDirs.push(dir);
-      this.attachmentDirsBySession.set(sessionId, sessionDirs);
+    } else {
+      this.attachmentDirsWithoutMessage.push(dir);
     }
   }
 
@@ -524,6 +532,23 @@ export class WeComChannel extends ChannelBase {
     cleanupAttachmentDirs(dirs);
   }
 
+  private rememberUntrackedDirsForSession(sessionId: string): void {
+    if (this.attachmentDirsWithoutMessage.length === 0) return;
+    const sessionDirs = this.attachmentDirsBySession.get(sessionId) ?? [];
+    for (const dir of this.attachmentDirsWithoutMessage) {
+      if (!sessionDirs.includes(dir)) sessionDirs.push(dir);
+    }
+    this.attachmentDirsBySession.set(sessionId, sessionDirs);
+    this.attachmentDirsWithoutMessage = [];
+  }
+
+  private cleanupAttachmentDirsWithoutMessage(): void {
+    const dirs = this.attachmentDirsWithoutMessage;
+    if (dirs.length === 0) return;
+    this.attachmentDirsWithoutMessage = [];
+    cleanupAttachmentDirs(dirs);
+  }
+
   private removeAttachmentDirsFromSessions(dirs: string[]): void {
     const removed = new Set(dirs);
     for (const [sessionId, sessionDirs] of this.attachmentDirsBySession) {
@@ -554,10 +579,12 @@ export class WeComChannel extends ChannelBase {
       new Set([
         ...Array.from(this.attachmentDirsBySession.values()).flat(),
         ...Array.from(this.attachmentDirsByMessage.values()).flat(),
+        ...this.attachmentDirsWithoutMessage,
       ]),
     );
     this.attachmentDirsBySession.clear();
     this.attachmentDirsByMessage.clear();
+    this.attachmentDirsWithoutMessage = [];
     this.bufferedAttachmentMessages.clear();
     this.coalescedAttachmentMessages.clear();
     cleanupAttachmentDirs(dirs);
@@ -589,6 +616,10 @@ export class WeComChannel extends ChannelBase {
 
   private async reconnectAfterKick(reason: unknown): Promise<void> {
     if (this.reconnectingAfterKick) return;
+    if (this.kickReconnectRetry) {
+      clearTimeout(this.kickReconnectRetry);
+      this.kickReconnectRetry = undefined;
+    }
     this.reconnectingAfterKick = true;
     const previousConnecting = this.connecting;
     const disconnectGeneration = this.disconnectGeneration;
@@ -624,20 +655,38 @@ export class WeComChannel extends ChannelBase {
         }
       }
       process.stderr.write(
-        `[WeCom:${this.name}] reconnect after server kick gave up after ${KICK_RECONNECT_MAX_ATTEMPTS} attempts.\n`,
+        `[WeCom:${this.name}] reconnect after server kick gave up after ${KICK_RECONNECT_MAX_ATTEMPTS} attempts; retrying later.\n`,
       );
+      this.scheduleKickReconnectRetry(reason, disconnectGeneration);
     } finally {
       this.reconnectingAfterKick = false;
     }
   }
 
   private scheduleKickReconnectReset(): void {
+    if (this.kickReconnectRetry) {
+      clearTimeout(this.kickReconnectRetry);
+      this.kickReconnectRetry = undefined;
+    }
     if (this.kickReconnectReset) clearTimeout(this.kickReconnectReset);
     this.kickReconnectReset = setTimeout(() => {
       this.kickReconnectAttempts = 0;
       this.kickReconnectReset = undefined;
     }, KICK_RECONNECT_RESET_MS);
     this.kickReconnectReset.unref?.();
+  }
+
+  private scheduleKickReconnectRetry(
+    reason: unknown,
+    disconnectGeneration: number,
+  ): void {
+    this.kickReconnectRetry = setTimeout(() => {
+      this.kickReconnectRetry = undefined;
+      if (this.disconnectGeneration !== disconnectGeneration) return;
+      this.kickReconnectAttempts = 0;
+      void this.reconnectAfterKick(reason);
+    }, KICK_RECONNECT_RETRY_MS);
+    this.kickReconnectRetry.unref?.();
   }
 
   private cleanupSeenMessages(): void {
@@ -1234,20 +1283,24 @@ function isPublicIpAddress(address: string): boolean {
   if (ipVersion === 6) {
     const embedded = parseEmbeddedIpv4(host);
     if (embedded) return isPublicIpv4(embedded);
+    const groups = expandIpv6Groups(host);
+    if (!groups) return false;
+    const first = groups[0] ?? 0;
+    const isAllZeros = groups.every((group) => group === 0);
+    const isLoopback =
+      groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1;
     return !(
-      host === '::' ||
-      host === '::1' ||
-      host.startsWith('fc') ||
-      host.startsWith('fd') ||
-      host.startsWith('ff') ||
-      isIpv6LinkLocal(host)
+      isAllZeros ||
+      isLoopback ||
+      (first >= 0xfc00 && first <= 0xfdff) ||
+      (first >= 0xff00 && first <= 0xffff) ||
+      isIpv6LinkLocalGroup(first)
     );
   }
   return false;
 }
 
-function isIpv6LinkLocal(host: string): boolean {
-  const firstGroup = Number.parseInt(host.split(':', 1)[0] ?? '', 16);
+function isIpv6LinkLocalGroup(firstGroup: number): boolean {
   return firstGroup >= 0xfe80 && firstGroup <= 0xfeff;
 }
 
@@ -1378,6 +1431,7 @@ function isPublicIpv4(parts: number[]): boolean {
     (a === 169 && b === 254) ||
     (a === 172 && b >= 16 && b <= 31) ||
     (a === 192 && b === 0 && (c === 0 || c === 2)) ||
+    (a === 192 && b === 88 && c === 99) ||
     (a === 192 && b === 168) ||
     (a === 198 && (b === 18 || b === 19 || (b === 51 && c === 100))) ||
     (a === 203 && b === 0 && c === 113) ||

@@ -93,12 +93,17 @@ const mocks = vi.hoisted(() => {
   );
   const state = {
     autoAuthenticate: true,
+    connectErrorsRemaining: 0,
   };
 
   class MockWSClient {
     readonly options: Record<string, unknown>;
     readonly handlers = new Map<string, Array<(payload: unknown) => void>>();
     connect = vi.fn(() => {
+      if (state.connectErrorsRemaining > 0) {
+        state.connectErrorsRemaining -= 1;
+        return Promise.reject(new Error('connect failed'));
+      }
       if (state.autoAuthenticate) {
         queueMicrotask(() => this.emit('authenticated', {}));
       }
@@ -288,6 +293,7 @@ describe('WeComChannel', () => {
     mocks.instances.length = 0;
     mocks.httpCalls.length = 0;
     mocks.state.autoAuthenticate = true;
+    mocks.state.connectErrorsRemaining = 0;
     mocks.httpResponse.statusCode = 200;
     mocks.httpResponse.headers = {};
     mocks.httpResponse.body = Buffer.from('downloaded');
@@ -498,6 +504,35 @@ describe('WeComChannel', () => {
     expect(stderr).toHaveBeenCalledWith(
       '[WeCom:bot] WebSocket disconnected; reconnecting after server kick.\n',
     );
+    channel.disconnect();
+    stderr.mockRestore();
+  });
+
+  it('keeps retrying later after kick reconnect attempts are exhausted', async () => {
+    vi.useFakeTimers();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const oldClient = lastClient();
+    mocks.state.connectErrorsRemaining = 3;
+
+    oldClient.emit('event.disconnected_event', 'kicked');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(4));
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] reconnect after server kick gave up after 3 attempts; retrying later.\n',
+    );
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(5));
+    expect(lastClient().connect).toHaveBeenCalledTimes(1);
+
     channel.disconnect();
     stderr.mockRestore();
   });
@@ -1104,6 +1139,34 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('blocks non-canonical IPv6 unspecified addresses before probing them', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-unspecified-ipv6',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://[0:0:0:0:0:0:0:0]/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
     expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('unsafe media URL'),
@@ -1719,6 +1782,24 @@ describe('WeComChannel', () => {
     expect(mocks.httpsRequest).not.toHaveBeenCalled();
   });
 
+  it('rejects deprecated 6to4 relay anycast IPv4 addresses', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-6to4-relay',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://192.88.99.1/image', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+  });
+
   it('keeps downloaded file attachments for base prompt consumers', async () => {
     vi.useFakeTimers();
     const bridge = makeBridge();
@@ -1810,6 +1891,62 @@ describe('WeComChannel', () => {
     await vi.waitFor(() =>
       expect(existsSync(dirname(attachmentPath!))).toBe(false),
     );
+  });
+
+  it('removes no-message-id attachment dirs when prompt end has no message id', async () => {
+    const bridge = makeBridge();
+    (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementationOnce(
+      () => new Promise<string>(() => {}),
+    );
+    const channel = new PromptEndWeComChannel('bot', makeConfig(), bridge);
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'report.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    const prompt = (bridge.prompt as ReturnType<typeof vi.fn>).mock
+      .calls[0][1] as string;
+    const attachmentPath = prompt.match(/saved to: (.*report\.txt)/)?.[1];
+    expect(attachmentPath).toBeDefined();
+    expect(existsSync(dirname(attachmentPath!))).toBe(true);
+
+    channel.finishPrompt('alice', 'session-1');
+
+    await vi.waitFor(() =>
+      expect(existsSync(dirname(attachmentPath!))).toBe(false),
+    );
+  });
+
+  it('sanitizes message ids before writing drop logs', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.text', {
+      msgid: 'msg-1\nfake log',
+      msgtype: 'text',
+      chattype: 'single',
+      text: { content: 'hello' },
+    });
+
+    await vi.waitFor(() =>
+      expect(stderr).toHaveBeenCalledWith(
+        '[WeCom:bot] dropping message msg-1\\nfake log: missing senderId.\n',
+      ),
+    );
+    stderr.mockRestore();
   });
 
   it('removes downloaded file attachments when no prompt starts', async () => {
