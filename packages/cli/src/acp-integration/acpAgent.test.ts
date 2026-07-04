@@ -1377,6 +1377,88 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     await agentPromise;
   });
 
+  it('passes each concurrent newSession its own workspace settings instance', async () => {
+    const settingsA = makeSessionSettings();
+    const settingsB = makeSessionSettings();
+    vi.mocked(loadSettings).mockImplementation(
+      (cwd) =>
+        (cwd === '/workspace-a' ? settingsA : settingsB) as LoadedSettings,
+    );
+
+    const innerConfigA = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue('session-a'),
+    };
+    const innerConfigB = {
+      ...makeInnerConfig(),
+      getSessionId: vi.fn().mockReturnValue('session-b'),
+    };
+    // Session A stalls inside loadCliConfig (its real-world analogue: config
+    // load + MCP discovery + auth refresh) while session B starts and
+    // finishes; the gate then lets A complete.
+    let releaseSessionA!: () => void;
+    const sessionAGate = new Promise<void>((resolve) => {
+      releaseSessionA = resolve;
+    });
+    vi.mocked(loadCliConfig)
+      .mockImplementationOnce(async () => {
+        await sessionAGate;
+        return innerConfigA as unknown as Config;
+      })
+      .mockImplementationOnce(async () => innerConfigB as unknown as Config);
+    vi.mocked(Session).mockImplementation(
+      (sessionId: string) =>
+        ({
+          getId: vi.fn().mockReturnValue(sessionId),
+          sendAvailableCommandsUpdate: vi.fn().mockResolvedValue(undefined),
+          replayHistory: vi.fn().mockResolvedValue(undefined),
+          installRewriter: vi.fn(),
+          startCronScheduler: vi.fn(),
+          dispose: vi.fn(),
+        }) as unknown as InstanceType<typeof Session>,
+    );
+
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const fakeConn = {
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    } as AgentSideConnectionLike;
+    const agent = capturedAgentFactory!(fakeConn) as AgentLike;
+
+    const sessionAPromise = agent.newSession({
+      cwd: '/workspace-a',
+      mcpServers: [],
+    });
+    await vi.waitFor(() =>
+      expect(vi.mocked(loadCliConfig)).toHaveBeenCalledTimes(1),
+    );
+    await agent.newSession({ cwd: '/workspace-b', mcpServers: [] });
+    releaseSessionA();
+    await sessionAPromise;
+
+    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith('/workspace-a');
+    expect(vi.mocked(loadSettings)).toHaveBeenCalledWith('/workspace-b');
+
+    const sessionCalls = vi.mocked(Session).mock.calls;
+    expect(sessionCalls).toHaveLength(2);
+    // Session B finished first while A was still mid-creation.
+    expect(sessionCalls[0]![0]).toBe('session-b');
+    expect(sessionCalls[0]![3]).toBe(settingsB);
+    // Session A must still be constructed with workspace A's settings, not
+    // with the instance session B loaded in the meantime.
+    expect(sessionCalls[1]![0]).toBe('session-a');
+    expect(sessionCalls[1]![3]).toBe(settingsA);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('does not return discontinued qwen-oauth as the only ACP auth option', async () => {
     vi.mocked(buildAuthMethods).mockReturnValue([
       {

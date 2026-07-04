@@ -66,6 +66,11 @@ export default defineConfig(({ command }) => ({
     proxy: {
       '/health': daemonProxy,
       '/capabilities': daemonProxy,
+      // Daemon status report; scoped to the exact route the dashboard uses (a
+      // bare `/daemon` prefix would proxy unrelated `/daemon/*` paths). Without
+      // it the SPA fallback answers with index.html and the dialog fails JSON
+      // parsing in dev.
+      '/daemon/status': daemonProxy,
       '/session': daemonProxy,
       '/permission': daemonProxy,
       '/workspace': daemonProxy,

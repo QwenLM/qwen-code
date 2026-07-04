@@ -39,6 +39,7 @@ jobs:
           - os: 'macos-14'
             runner: 'macos-14'
             arch: 'arm64'
+            artifact_suffix: 'arm64+x64'
           - os: 'ubuntu-latest'
             runner: 'ubuntu-latest'
             arch: 'x64'
@@ -69,7 +70,7 @@ jobs:
       - name: 'Upload prebuild'
         uses: 'actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a' # v7.0.1
         with:
-          name: 'prebuilds-${{ matrix.os }}-${{ matrix.arch }}'
+          name: 'prebuilds-${{ matrix.os }}-${{ matrix.artifact_suffix || matrix.arch }}'
           path: 'packages/audio-capture/prebuilds/'
           if-no-files-found: 'error'
 
