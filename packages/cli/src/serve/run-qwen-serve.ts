@@ -1245,7 +1245,7 @@ function isCorsPreflightRequest(req: Request): boolean {
     Boolean(req.headers.origin) &&
     Boolean(
       req.headers['access-control-request-method'] ||
-        req.headers['access-control-request-headers'],
+      req.headers['access-control-request-headers'],
     )
   );
 }
