@@ -471,6 +471,29 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('reconnects when WeCom kicks the connection for a newer client', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const oldClient = lastClient();
+
+    oldClient.emit('event.disconnected_event', {
+      errcode: 45009,
+      errmsg: 'another client connected',
+    });
+
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(2));
+    expect(oldClient.disconnect).toHaveBeenCalled();
+    expect(lastClient().connect).toHaveBeenCalledTimes(1);
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] WebSocket disconnected; reconnecting after server kick.\n',
+    );
+    channel.disconnect();
+    stderr.mockRestore();
+  });
+
   it('removes SDK event handlers on disconnect', async () => {
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
@@ -491,6 +514,7 @@ describe('WeComChannel', () => {
     expect(client.handlers.get('message.image')).toHaveLength(0);
     expect(client.handlers.get('error')).toHaveLength(0);
     expect(client.handlers.get('disconnected')).toHaveLength(0);
+    expect(client.handlers.get('event.disconnected_event')).toHaveLength(0);
   });
 
   it('rejects sends when no SDK client is active', async () => {
@@ -808,10 +832,11 @@ describe('WeComChannel', () => {
   });
 
   it('rolls back message dedup when preflight rejects the envelope', async () => {
+    const bridge = makeBridge();
     const channel = new RejectingPreflightWeComChannel(
       'bot',
       makeConfig(),
-      makeBridge(),
+      bridge,
     );
     await channel.connect();
     const client = lastClient();
@@ -825,9 +850,12 @@ describe('WeComChannel', () => {
 
     client.emit('message.text', payload);
     await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(1));
+    expect(bridge.newSession).not.toHaveBeenCalled();
+    await new Promise((resolve) => setTimeout(resolve, 0));
 
     client.emit('message.text', payload);
     await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(2));
+    expect(bridge.newSession).not.toHaveBeenCalled();
   });
 
   it('deduplicates repeated messages while preflight is pending', async () => {
@@ -1702,6 +1730,70 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
   });
 
+  it('keeps buffered attachment files until their coalesced prompt runs', async () => {
+    const bridge = makeBridge();
+    let finishFirst: (() => void) | undefined;
+    let finishSecond: (() => void) | undefined;
+    (bridge.prompt as ReturnType<typeof vi.fn>)
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishFirst = () => resolve('');
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<string>((resolve) => {
+            finishSecond = () => resolve('');
+          }),
+      );
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ dispatchMode: 'collect' }),
+      bridge,
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgid: 'msg-active',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'active.txt',
+      },
+    });
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+
+    client.emit('message.file', {
+      msgid: 'msg-buffered',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'buffered.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(2));
+    const bufferedDir = channelFileDirs().find((dir) =>
+      existsSync(join(dir, 'buffered.txt')),
+    );
+    expect(bufferedDir).toBeDefined();
+
+    finishFirst?.();
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+    expect(existsSync(join(bufferedDir!, 'buffered.txt'))).toBe(true);
+
+    finishSecond?.();
+
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
+  });
+
   it('sends markdown text and local media through the SDK', async () => {
     const parent = join(tmpdir(), 'channel-files');
     mkdirSync(parent, { recursive: true });
@@ -1857,7 +1949,10 @@ describe('WeComChannel', () => {
       .mockResolvedValueOnce({ media_id: 'media-2' });
     client.sendMediaMessage = vi
       .fn()
-      .mockRejectedValueOnce(new Error('network failed'))
+      .mockRejectedValueOnce({
+        errcode: 45009,
+        errmsg: 'api freq out of limit',
+      })
       .mockResolvedValueOnce({ headers: { req_id: 'media-req-2' } });
 
     await channel.sendMessage(
@@ -1873,7 +1968,9 @@ describe('WeComChannel', () => {
       'media-2',
     );
     expect(stderr).toHaveBeenCalledWith(
-      expect.stringContaining('media send failed for image'),
+      expect.stringContaining(
+        'media send failed for image: errcode=45009 errmsg=api freq out of limit',
+      ),
     );
     stderr.mockRestore();
   });

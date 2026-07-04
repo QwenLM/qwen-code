@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseConfiguredChannels } from './runtime.js';
 
 vi.mock('./channel-registry.js', () => ({
@@ -10,8 +10,13 @@ vi.mock('./channel-registry.js', () => ({
 }));
 
 describe('parseConfiguredChannels', () => {
+  beforeEach(() => {
+    delete process.env['TOKEN_LITERAL_VALUE'];
+  });
+
   afterEach(() => {
     delete process.env['TEST_CHANNEL_TOKEN'];
+    delete process.env['TOKEN_LITERAL_VALUE'];
   });
 
   it('throws a clear error when a selected channel is missing config', async () => {

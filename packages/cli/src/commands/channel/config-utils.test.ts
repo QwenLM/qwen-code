@@ -19,11 +19,21 @@ vi.mock('./channel-registry.js', () => ({
         channelType: 'wecom',
         requiredConfigFields: ['botId', 'secret'],
       },
+      numeric: {
+        channelType: 'numeric',
+        requiredConfigFields: ['port'],
+      },
       bare: { channelType: 'bare' }, // no requiredConfigFields
     };
     return plugins[type];
   },
-  supportedTypes: async () => ['telegram', 'dingtalk', 'wecom', 'bare'],
+  supportedTypes: async () => [
+    'telegram',
+    'dingtalk',
+    'wecom',
+    'numeric',
+    'bare',
+  ],
 }));
 
 describe('resolveEnvVars', () => {
@@ -90,14 +100,13 @@ describe('parseChannelConfig', () => {
     delete process.env['TEST_WECOM_SECRET'];
   });
 
-  it('throws a clear error when plugin-required fields are not strings', async () => {
-    await expect(
-      parseChannelConfig('bot', {
-        type: 'wecom',
-        botId: 123,
-        secret: 'secret',
-      }),
-    ).rejects.toThrow('Channel "bot" field "botId" must be a string.');
+  it('allows non-string plugin-required fields', async () => {
+    const result = await parseChannelConfig('bot', {
+      type: 'numeric',
+      port: 443,
+    });
+
+    expect(result['port']).toBe(443);
   });
 
   it('throws a clear error when token is not a string', async () => {

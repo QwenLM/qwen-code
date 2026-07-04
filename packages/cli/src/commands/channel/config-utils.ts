@@ -139,10 +139,9 @@ export async function parseChannelConfig(
         `Channel "${name}" (${channelType}) requires "${field}".`,
       );
     }
-    if (typeof value !== 'string') {
-      throw new Error(`Channel "${name}" field "${field}" must be a string.`);
+    if (typeof value === 'string') {
+      resolvedRawConfig[field] = resolveConfigEnvVar(value, envResolution);
     }
-    resolvedRawConfig[field] = resolveConfigEnvVar(value, envResolution);
   }
 
   // Resolve env vars for known credential fields

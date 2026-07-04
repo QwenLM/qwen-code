@@ -95,7 +95,9 @@ export class WeComChannel extends ChannelBase {
     message: (payload: unknown) => void;
     error: (payload: unknown) => void;
     disconnected: (payload: unknown) => void;
+    kicked: (payload: unknown) => void;
   };
+  private reconnectingAfterKick = false;
 
   constructor(
     name: string,
@@ -131,7 +133,7 @@ export class WeComChannel extends ChannelBase {
       this.onMessage(payload).catch((err: unknown) => {
         process.stderr.write(
           `[WeCom:${this.name}] message handling failed: ${sanitizeLogText(
-            String(err),
+            formatSdkError(err),
             200,
           )}\n`,
         );
@@ -139,7 +141,7 @@ export class WeComChannel extends ChannelBase {
     };
     const errorHandler = (err: unknown) => {
       process.stderr.write(
-        `[WeCom:${this.name}] SDK error: ${sanitizeLogText(String(err), 200)}\n`,
+        `[WeCom:${this.name}] SDK error: ${sanitizeLogText(formatSdkError(err), 200)}\n`,
       );
     };
     const disconnectedHandler = (reason: unknown) => {
@@ -147,15 +149,20 @@ export class WeComChannel extends ChannelBase {
         `[WeCom:${this.name}] WebSocket ${formatDisconnectReason(reason)}; waiting for SDK reconnect.\n`,
       );
     };
+    const kickedHandler = (reason: unknown) => {
+      void this.reconnectAfterKick(reason);
+    };
     for (const event of MESSAGE_EVENTS) {
       client.on(event, messageHandler);
     }
     client.on('error', errorHandler);
     client.on('disconnected', disconnectedHandler);
+    client.on('event.disconnected_event', kickedHandler);
     this.clientHandlers = {
       message: messageHandler,
       error: errorHandler,
       disconnected: disconnectedHandler,
+      kicked: kickedHandler,
     };
 
     const authentication = waitForAuthentication(client);
@@ -235,7 +242,7 @@ export class WeComChannel extends ChannelBase {
       } catch (err) {
         process.stderr.write(
           `[WeCom:${this.name}] media send failed for ${item.type}: ${sanitizeLogText(
-            String(err),
+            formatSdkError(err),
             200,
           )}\n`,
         );
@@ -288,8 +295,11 @@ export class WeComChannel extends ChannelBase {
       isReplyToBot: false,
       referencedText: extractQuoteText(body),
     };
-    let sessionId: string;
+    let sessionId: string | undefined;
+    let attachments: Attachment[] = [];
+    let processingStarted = false;
     try {
+      if (!(await this.preflightInbound(envelope))) return;
       sessionId = await this.router.resolve(
         this.name,
         envelope.senderId,
@@ -297,15 +307,6 @@ export class WeComChannel extends ChannelBase {
         envelope.threadId,
         this.config.cwd,
       );
-    } catch (err) {
-      if (messageId) this.inFlightMessages.delete(messageId);
-      throw err;
-    }
-
-    let attachments: Attachment[] = [];
-    let processingStarted = false;
-    try {
-      if (!(await this.preflightInbound(envelope))) return;
       attachments = await this.downloadAttachments(
         body,
         attachments,
@@ -403,7 +404,12 @@ export class WeComChannel extends ChannelBase {
     sessionId: string,
     messageId?: string,
   ): void {
-    if (messageId) this.cleanupAttachmentDirsForMessage(messageId);
+    const wasBuffered =
+      messageId !== undefined && this.bufferedAttachmentMessages.has(messageId);
+    if (messageId) {
+      this.cleanupAttachmentDirsForMessage(messageId);
+      if (!wasBuffered) return;
+    }
     this.cleanupAttachmentDirsForSession(sessionId);
   }
 
@@ -425,10 +431,10 @@ export class WeComChannel extends ChannelBase {
   }
 
   private cleanupAttachmentDirsForMessage(messageId: string): void {
+    this.bufferedAttachmentMessages.delete(messageId);
     const dirs = this.attachmentDirsByMessage.get(messageId);
     if (!dirs) return;
     this.attachmentDirsByMessage.delete(messageId);
-    this.bufferedAttachmentMessages.delete(messageId);
     this.removeAttachmentDirsFromSessions(dirs);
     cleanupAttachmentDirs(dirs);
   }
@@ -482,7 +488,29 @@ export class WeComChannel extends ChannelBase {
     }
     client.off?.('error', handlers.error);
     client.off?.('disconnected', handlers.disconnected);
+    client.off?.('event.disconnected_event', handlers.kicked);
     this.clientHandlers = undefined;
+  }
+
+  private async reconnectAfterKick(reason: unknown): Promise<void> {
+    if (this.reconnectingAfterKick) return;
+    this.reconnectingAfterKick = true;
+    process.stderr.write(
+      `[WeCom:${this.name}] WebSocket ${formatDisconnectReason(reason)}; reconnecting after server kick.\n`,
+    );
+    this.disconnect();
+    try {
+      await this.connect();
+    } catch (err) {
+      process.stderr.write(
+        `[WeCom:${this.name}] reconnect after server kick failed: ${sanitizeLogText(
+          formatSdkError(err),
+          200,
+        )}\n`,
+      );
+    } finally {
+      this.reconnectingAfterKick = false;
+    }
   }
 
   private cleanupSeenMessages(): void {
@@ -547,6 +575,24 @@ function cleanupAttachmentDirs(dirs: string[]): void {
 function formatDisconnectReason(reason: unknown): string {
   const text = typeof reason === 'string' && reason ? reason : 'disconnected';
   return sanitizeLogText(text, 120);
+}
+
+function formatSdkError(err: unknown): string {
+  if (err instanceof Error) return err.message;
+  const record = asRecord(err);
+  if (record) {
+    const errcode = record['errcode'];
+    const errmsg = record['errmsg'];
+    if (typeof errcode === 'number' || typeof errmsg === 'string') {
+      return `errcode=${String(errcode)} errmsg=${String(errmsg)}`;
+    }
+    try {
+      return JSON.stringify(record);
+    } catch {
+      // Fall through to String below.
+    }
+  }
+  return String(err);
 }
 
 function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
