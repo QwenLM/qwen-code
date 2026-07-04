@@ -7485,6 +7485,32 @@ describe('Session', () => {
       }
     });
 
+    it('injects MCP server context for @mcp mentions', async () => {
+      mockConfig.getMcpServers = vi.fn().mockReturnValue({ demo: {} });
+      mockConfig.getPromptRegistry = vi.fn().mockReturnValue({
+        getPromptsByServer: (name: string) => (name === 'demo' ? ['p'] : []),
+      });
+      mockConfig.getResourceRegistry = vi.fn().mockReturnValue({
+        getResourcesByServer: (name: string) =>
+          name === 'demo' ? [{ uri: 'res://1' }] : [],
+      });
+      mockChat.sendMessageStream = vi
+        .fn()
+        .mockResolvedValue(createEmptyStream());
+
+      await session.prompt({
+        sessionId: 'test-session-id',
+        prompt: [{ type: 'text', text: 'Use @mcp:demo now' }],
+      });
+
+      const message = firstSentMessage();
+      expect(message[0]).toEqual({ text: 'Use @mcp:demo now' });
+      const sentText = textParts(message).join('\n');
+      expect(sentText).toContain('--- MCP Server: demo ---');
+      expect(sentText).toContain('- Resources: 1');
+      expect(sentText).toContain('- Prompts: 1');
+    });
+
     it('dedupes repeated extension mentions and skips unknown mentions', async () => {
       const extension = makeExtension();
       mockConfig.getActiveExtensions = vi.fn().mockReturnValue([extension]);
