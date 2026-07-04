@@ -11,6 +11,9 @@ import type {
   ProviderModelProvidersPatch,
   ProviderSettingsAdapter,
 } from './types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
+
+const debugLogger = createDebugLogger('PROVIDER_INSTALL');
 
 /**
  * Environment variable names an install plan must never set — they alter
@@ -186,8 +189,7 @@ export async function applyProviderInstallPlan(
     }
 
     if (shadowedEnvKeys.length > 0) {
-      // eslint-disable-next-line no-console -- user-facing warning about config conflict
-      console.error(
+      debugLogger.warn(
         `[auth] Warning: ${shadowedEnvKeys.join(', ')} ${shadowedEnvKeys.length === 1 ? 'is' : 'are'} also set in your shell environment or .env file. ` +
           `The shell/file value will take priority on restart. ` +
           `To ensure your new key is used, update or remove the variable from your shell profile or .env file.`,

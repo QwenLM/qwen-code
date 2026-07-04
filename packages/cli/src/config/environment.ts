@@ -371,7 +371,10 @@ export function loadEnvironment(
             continue;
           }
 
-          if (!Object.hasOwn(process.env, key)) {
+          const existingValue = process.env[key];
+          const isEffectivelyUnset =
+            !Object.hasOwn(process.env, key) || existingValue === '';
+          if (isEffectivelyUnset) {
             process.env[key] = parsedEnv[key];
             dotEnvSourcedKeys.add(key);
           }

@@ -3935,6 +3935,7 @@ describe('Settings Loading and Merging', () => {
         delete process.env['MULTI_VAR_C'];
         delete process.env['USER_ENV_VAR'];
         delete process.env['WORKSPACE_ENV_VAR'];
+        delete process.env['THREE_SOURCE_ENV_VAR'];
       });
 
       afterEach(() => {
@@ -4226,6 +4227,41 @@ describe('Settings Loading and Merging', () => {
 
         expect(process.env['EMPTY_STR_TEST_VAR']).toEqual('settings_value');
         delete process.env['EMPTY_STR_TEST_VAR'];
+      });
+
+      it('should let .env override settings.env when process.env has an empty string', () => {
+        process.env['THREE_SOURCE_ENV_VAR'] = '';
+        const geminiEnvPath = path.join(
+          RESOLVED_MOCK_WORKSPACE_DIR,
+          QWEN_DIR,
+          '.env',
+        );
+        const userSettingsContent: Settings = {
+          env: {
+            THREE_SOURCE_ENV_VAR: 'from_settings',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, geminiEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === geminiEnvPath) return 'THREE_SOURCE_ENV_VAR=from_dotenv';
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(process.env['THREE_SOURCE_ENV_VAR']).toEqual('from_dotenv');
       });
     });
 
