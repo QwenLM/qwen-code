@@ -459,6 +459,130 @@ describe('EchartsFullDataBlock', () => {
     expect(container.querySelector('pre code')).toBeNull();
   });
 
+  it.each([
+    {
+      name: 'unsupported envelope version',
+      envelope: {
+        version: 2,
+        data: { kind: 'inline', dimensions: ['day'], source: [['Mon']] },
+        option: { series: [{ type: 'bar' }] },
+      },
+      error: 'Chart envelope version must be 1.',
+    },
+    {
+      name: 'non-object envelope option',
+      envelope: {
+        version: 1,
+        data: { kind: 'inline', dimensions: ['day'], source: [['Mon']] },
+        option: 'bar chart',
+      },
+      error: 'Chart envelope option must be an object.',
+    },
+    {
+      name: 'non-object envelope data',
+      envelope: {
+        version: 1,
+        data: 42,
+        option: { series: [{ type: 'bar' }] },
+      },
+      error: 'Chart envelope data must be an object.',
+    },
+    {
+      name: 'unknown data kind',
+      envelope: {
+        version: 1,
+        data: { kind: 'remote' },
+        option: { series: [{ type: 'bar' }] },
+      },
+      error: 'Chart envelope data.kind must be "inline" or "ref".',
+    },
+    {
+      name: 'invalid ref dimensions',
+      envelope: {
+        version: 1,
+        data: {
+          kind: 'ref',
+          ref: 'artifact://chart-data/orders',
+          format: 'json',
+          dimensions: [123],
+        },
+        option: { series: [{ type: 'bar' }] },
+      },
+      error: 'Chart envelope data.dimensions must be a string array.',
+    },
+    {
+      name: 'unsafe ref dimensions',
+      envelope: {
+        version: 1,
+        data: {
+          kind: 'ref',
+          ref: 'artifact://chart-data/orders',
+          format: 'json',
+          dimensions: ['day', 'javascript:alert(1)'],
+        },
+        option: { series: [{ type: 'bar' }] },
+      },
+      error:
+        'Chart envelope data.dimensions contains an unsafe dimension name.',
+    },
+    {
+      name: 'invalid ref format',
+      envelope: {
+        version: 1,
+        data: {
+          kind: 'ref',
+          ref: 'artifact://chart-data/orders',
+          format: 'xml',
+          dimensions: ['day'],
+        },
+        option: { series: [{ type: 'bar' }] },
+      },
+      error: 'Chart envelope data.format must be "csv" or "json".',
+    },
+    {
+      name: 'malformed percent encoding in ref',
+      envelope: {
+        version: 1,
+        data: {
+          kind: 'ref',
+          ref: 'artifact://chart-data/%ZZorders',
+          format: 'json',
+          dimensions: ['day'],
+        },
+        option: { series: [{ type: 'bar' }] },
+      },
+      error: 'Chart envelope data.ref path is malformed.',
+    },
+    {
+      name: 'invalid inline dimensions',
+      envelope: {
+        version: 1,
+        data: { kind: 'inline', dimensions: 'day', source: [['Mon']] },
+        option: { series: [{ type: 'bar' }] },
+      },
+      error: 'Chart envelope data.dimensions must be a string array.',
+    },
+    {
+      name: 'invalid inline source',
+      envelope: {
+        version: 1,
+        data: { kind: 'inline', dimensions: ['day'], source: 'Mon' },
+        option: { series: [{ type: 'bar' }] },
+      },
+      error: 'Chart envelope data.source must be an array of rows.',
+    },
+  ])(
+    'rejects invalid full-data envelopes: $name',
+    async ({ envelope, error }) => {
+      const container = await renderEchartsMarkdown({
+        code: JSON.stringify(envelope),
+      });
+
+      expect(container.textContent).toContain(error);
+      expect(container.querySelector('pre code')).toBeNull();
+    },
+  );
+
   it('rejects legacy array-row dimension mismatches', async () => {
     const container = await renderEchartsMarkdown({
       code: JSON.stringify({
@@ -489,6 +613,23 @@ describe('EchartsFullDataBlock', () => {
 
     expect(container.textContent).toContain(
       'Chart data row 1 cell 2 must be a string, number, boolean, or null.',
+    );
+    expect(container.querySelector('pre code')).toBeNull();
+  });
+
+  it('rejects unsafe legacy dataset dimensions', async () => {
+    const container = await renderEchartsMarkdown({
+      code: JSON.stringify({
+        dataset: {
+          dimensions: ['day', 'constructor'],
+          source: [{ day: 'Mon', orders: 120 }],
+        },
+        series: [{ type: 'bar', encode: { x: 'day', y: 'constructor' } }],
+      }),
+    });
+
+    expect(container.textContent).toContain(
+      'Chart envelope data.dimensions contains an unsafe dimension name.',
     );
     expect(container.querySelector('pre code')).toBeNull();
   });
@@ -583,8 +724,9 @@ describe('EchartsFullDataBlock', () => {
     await flushChart();
 
     expect(container.textContent).toContain(
-      'Chart data reference could not be resolved: missing artifact',
+      'Chart data reference could not be resolved.',
     );
+    expect(container.textContent).not.toContain('missing artifact');
     expect(consoleError).toHaveBeenCalledWith(
       '[web-shell] echarts-fulldata data-ref resolution failed:',
       'artifact://chart-data/missing',
@@ -599,6 +741,7 @@ describe('EchartsFullDataBlock', () => {
     const consoleError = vi
       .spyOn(console, 'error')
       .mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, 'warn').mockImplementation(() => {});
     const setOption = vi.fn();
     const runtime: EchartsRuntime = {
       init: vi.fn(() => ({
@@ -633,7 +776,16 @@ describe('EchartsFullDataBlock', () => {
       });
 
       expect(container.textContent).toContain(
-        'Chart data reference could not be resolved: Data reference resolution timed out.',
+        'Chart data reference could not be resolved.',
+      );
+      expect(container.textContent).not.toContain(
+        'Data reference resolution timed out.',
+      );
+      expect(consoleWarn).toHaveBeenCalledWith(
+        '[web-shell] echarts-fulldata data-ref resolution timed out after %dms (ref=%s, format=%s)',
+        30_000,
+        'artifact://chart-data/slow',
+        'json',
       );
       expect(consoleError).toHaveBeenCalledWith(
         '[web-shell] echarts-fulldata data-ref resolution failed:',
@@ -1941,6 +2093,10 @@ describe('EchartsFullDataBlock', () => {
           },
         ],
       },
+      markArea: {
+        data: [[{ xAxis: 'Mon' }, { xAxis: 'Tue' }]],
+        itemStyle: { color: 'javascript:alert(1)' },
+      },
       renderItem: 'javascript:alert(1)',
       src: 'https://example.test/marker.png',
       stack: '//example.test/stack',
@@ -1977,7 +2133,15 @@ describe('EchartsFullDataBlock', () => {
       color: ['#ff0000', 'javascript:alert(1)', '#0000ff'],
       dataset: [
         {
-          dimensions: ['day', 'orders'],
+          dimensions: [
+            'day',
+            'orders',
+            'constructor',
+            'javascript:alert(1)',
+            { name: 'region', displayName: '<img src=x>' },
+            { name: '<img src=x>' },
+            2024,
+          ] as unknown as string[],
           source: [unsafeRow],
           transform: { type: 'filter' },
         },
@@ -2023,6 +2187,7 @@ describe('EchartsFullDataBlock', () => {
     const renderedOption = setOption.mock.calls[0]?.[0] as {
       color?: unknown[];
       dataset?: Array<{
+        dimensions?: unknown[];
         source?: Array<Record<string, unknown>>;
         transform?: unknown;
       }>;
@@ -2043,6 +2208,10 @@ describe('EchartsFullDataBlock', () => {
         id?: unknown;
         itemStyle?: { image?: unknown };
         label?: { formatter?: string };
+        markArea?: {
+          data?: Array<Array<{ xAxis?: string }>>;
+          itemStyle?: { color?: unknown };
+        };
         markLine?: {
           data?: Array<{
             yAxis?: number;
@@ -2069,6 +2238,15 @@ describe('EchartsFullDataBlock', () => {
     expect(renderedOption.graphic).toBeUndefined();
     expect(renderedOption.dataset).toHaveLength(2);
     expect(renderedOption.dataset?.[0]?.transform).toBeUndefined();
+    expect(renderedOption.dataset?.[0]?.dimensions).toEqual([
+      'day',
+      'orders',
+      {},
+      {},
+      { name: 'region' },
+      {},
+      '2024',
+    ]);
     expect(renderedOption.dataset?.[0]?.source?.[0]?.day).toBe('');
     expect(renderedOption.dataset?.[0]?.source).toHaveLength(1);
     expect(
@@ -2098,6 +2276,12 @@ describe('EchartsFullDataBlock', () => {
     expect(renderedOption.series?.[0]?.href).toBeUndefined();
     expect(renderedOption.series?.[0]?.id).toBeUndefined();
     expect(renderedOption.series?.[0]?.itemStyle?.image).toBeUndefined();
+    expect(renderedOption.series?.[0]?.markArea?.data?.[0]?.[0]?.xAxis).toBe(
+      'Mon',
+    );
+    expect(
+      renderedOption.series?.[0]?.markArea?.itemStyle?.color,
+    ).toBeUndefined();
     expect(renderedOption.series?.[0]?.markLine?.data?.[0]?.yAxis).toBe(150);
     expect(
       renderedOption.series?.[0]?.markLine?.data?.[0]?.label?.formatter,
@@ -2126,6 +2310,31 @@ describe('EchartsFullDataBlock', () => {
     expect(renderedOption.series?.[1]?.name).toBe('Latency <baseline>');
     expect(renderedOption.series?.[1]?.label?.formatter).toBe(
       'Results <Q4 2024>',
+    );
+  });
+
+  it('shows an error when sanitization strips every renderable chart entry', async () => {
+    const consoleError = vi
+      .spyOn(console, 'error')
+      .mockImplementation(() => {});
+
+    const container = await render(
+      <EchartsFullDataBlock
+        option={{
+          graphic: { type: 'text', style: { text: 'Unsafe-only chart' } },
+          legend: { data: ['Series'] },
+        }}
+        theme="dark"
+      />,
+    );
+    await flushChart();
+
+    expect(container.textContent).toContain(
+      'Sanitized chart has no series or dataset; option keys may have been stripped.',
+    );
+    expect(consoleError).toHaveBeenCalledWith(
+      '[web-shell] echarts-fulldata render failed:',
+      expect.any(Error),
     );
   });
 
@@ -2161,6 +2370,25 @@ describe('EchartsFullDataBlock', () => {
     await flushChart();
 
     expect(container.textContent).toContain('Recovered title');
+  });
+
+  it('uses the default title when a single title object has empty text', async () => {
+    const option: EchartsFullDataOption = {
+      title: { text: '' },
+      dataset: {
+        dimensions: ['day', 'orders'],
+        source: [{ day: 'Mon', orders: 120 }],
+      },
+      xAxis: { type: 'category' },
+      yAxis: { type: 'value' },
+      series: [{ type: 'bar', encode: { x: 'day', y: 'orders' } }],
+    };
+
+    const container = await render(
+      <EchartsFullDataBlock option={option} theme="dark" />,
+    );
+
+    expect(container.querySelector('[title="Chart Loading"]')).not.toBeNull();
   });
 
   it('shows an error when the chart runtime is unavailable', async () => {

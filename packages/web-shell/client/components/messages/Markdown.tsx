@@ -510,7 +510,8 @@ function MarkdownFencedCode({
               language,
               source,
               appTheme,
-              isStreaming ? 'streaming' : code,
+              isStreaming ? 'streaming' : 'settled',
+              code,
             ]}
           >
             {custom}

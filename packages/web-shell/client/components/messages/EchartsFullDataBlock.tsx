@@ -156,6 +156,11 @@ const DATA_REF_TIMEOUT_MS = 30_000;
 const SUPPORTED_DATA_REF_PREFIXES = ['artifact://', 'session-file://'];
 const SUPPORTED_DATA_REF_FORMATS = new Set(['csv', 'json']);
 const UNSAFE_URI_WITH_AUTHORITY_PATTERN = /^[a-z][a-z0-9+.-]*:\/\//;
+const UNSAFE_DIMENSION_NAMES = new Set([
+  '__proto__',
+  'constructor',
+  'prototype',
+]);
 const UNSAFE_OPTION_HTML_TAG_PATTERN =
   /<\/?(?:a|applet|base|button|embed|form|iframe|img|input|link|meta|object|script|style|svg)(?=[\s/>])/i;
 const WINDOWS_DRIVE_SEGMENT_PATTERN = /^[a-z]:/i;
@@ -311,6 +316,33 @@ function isUnsafeOptionString(value: string): boolean {
   return isUnsafeUriString(value) || UNSAFE_OPTION_HTML_TAG_PATTERN.test(value);
 }
 
+function isUnsafeDimensionName(value: string): boolean {
+  return UNSAFE_DIMENSION_NAMES.has(value) || isUnsafeOptionString(value);
+}
+
+function sanitizeDatasetDimension(
+  dimension: unknown,
+): DatasetDimension | undefined {
+  if (typeof dimension === 'number' && Number.isFinite(dimension)) {
+    return String(dimension);
+  }
+  if (typeof dimension === 'string') {
+    return isUnsafeDimensionName(dimension) ? {} : dimension;
+  }
+  if (isObject(dimension) && typeof dimension.name === 'string') {
+    return isUnsafeDimensionName(dimension.name)
+      ? {}
+      : { name: dimension.name };
+  }
+  return isObject(dimension) ? {} : undefined;
+}
+
+function getUnsafeDimensionError(dimensions: string[]): string | undefined {
+  return dimensions.some(isUnsafeDimensionName)
+    ? 'Chart envelope data.dimensions contains an unsafe dimension name.'
+    : undefined;
+}
+
 function sanitizeDatasetCell(value: unknown): DatasetCell {
   if (typeof value === 'string') return isUnsafeUriString(value) ? '' : value;
   if (typeof value === 'number' && Number.isFinite(value)) return value;
@@ -332,7 +364,11 @@ function sanitizeDatasetRow(row: unknown): DatasetRow | undefined {
 
 function isAllowedAnnotationData(path: string[]): boolean {
   const parentKey = path.at(-1);
-  return parentKey === 'markLine' || parentKey === 'markPoint';
+  return (
+    parentKey === 'markLine' ||
+    parentKey === 'markPoint' ||
+    parentKey === 'markArea'
+  );
 }
 
 function sanitizeOptionValue(value: unknown, path: string[] = []): unknown {
@@ -369,14 +405,9 @@ function sanitizeDatasetValue(value: unknown): unknown {
     const dataset: EchartsDataset = {};
     if (Array.isArray(entry.dimensions)) {
       dataset.dimensions = entry.dimensions
-        .map((dimension) =>
-          typeof dimension === 'number' && Number.isFinite(dimension)
-            ? String(dimension)
-            : dimension,
-        )
+        .map(sanitizeDatasetDimension)
         .filter(
-          (dimension): dimension is DatasetDimension =>
-            typeof dimension === 'string' || isObject(dimension),
+          (dimension): dimension is DatasetDimension => dimension !== undefined,
         );
     }
     if (Array.isArray(entry.source)) {
@@ -414,6 +445,10 @@ function sanitizeOptionForChart(
 function getSeriesList(series: unknown): EchartsObject[] {
   if (Array.isArray(series)) return series.filter(isObject);
   return isObject(series) ? [series] : [];
+}
+
+function hasRenderableChartData(option: EchartsFullDataOption): boolean {
+  return getSeriesList(option.series).length > 0 || !!option.dataset;
 }
 
 function getEncodedDimension(
@@ -768,7 +803,13 @@ function cloneAndSanitizeOptionForChart(
   // first to strip non-JSON values before the sanitizer walks the tree.
   const cloned = JSON.parse(JSON.stringify(option)) as EchartsFullDataOption;
   const normalized = normalizeObjectDatasetFormatters(cloned);
-  return sanitizeOptionForChart(normalized);
+  const sanitized = sanitizeOptionForChart(normalized);
+  if (!hasRenderableChartData(sanitized)) {
+    throw new Error(
+      'Sanitized chart has no series or dataset; option keys may have been stripped.',
+    );
+  }
+  return sanitized;
 }
 
 function styleOptionForChart(
@@ -797,7 +838,7 @@ function getTitle(
         isObject(entry) && typeof entry.text === 'string' && !!entry.text,
     )?.text;
   }
-  return isObject(title) && typeof title.text === 'string'
+  return isObject(title) && typeof title.text === 'string' && !!title.text
     ? title.text
     : undefined;
 }
@@ -842,7 +883,11 @@ function getCell(
   column: string,
   columnIndex: number,
 ): DatasetCell | undefined {
-  return Array.isArray(row) ? row[columnIndex] : row[column];
+  return Array.isArray(row)
+    ? row[columnIndex]
+    : Object.hasOwn(row, column)
+      ? row[column]
+      : undefined;
 }
 
 function formatCell(value: DatasetCell | undefined): string {
@@ -949,6 +994,26 @@ function validateDatasetRows(
   return validateDatasetSize(rows.length, maxColumnCount, cellCount);
 }
 
+function validateDatasetDimensions(
+  option: EchartsFullDataOption,
+): string | undefined {
+  const datasets = Array.isArray(option.dataset)
+    ? option.dataset
+    : option.dataset
+      ? [option.dataset]
+      : [];
+
+  for (const dataset of datasets) {
+    if (!Array.isArray(dataset.dimensions)) continue;
+    const error = getUnsafeDimensionError(
+      normalizeDimensions(dataset.dimensions),
+    );
+    if (error) return error;
+  }
+
+  return undefined;
+}
+
 function validateOptionShape(
   option: EchartsFullDataOption,
 ): string | undefined {
@@ -958,6 +1023,9 @@ function validateOptionShape(
 
   const datasetError = validateDatasetRows(option);
   if (datasetError) return datasetError;
+
+  const dimensionError = validateDatasetDimensions(option);
+  if (dimensionError) return dimensionError;
 
   const seriesCount = getSeriesList(option.series).length;
   if (seriesCount > MAX_SERIES_COUNT) {
@@ -985,6 +1053,8 @@ function normalizeEnvelopeDataset(value: unknown): {
       parseError: 'Chart envelope data.dimensions must be a string array.',
     };
   }
+  const dimensionError = getUnsafeDimensionError(dimensions);
+  if (dimensionError) return { parseError: dimensionError };
 
   const source = value.source;
   if (!Array.isArray(source)) {
@@ -1130,6 +1200,8 @@ function normalizeDataRefMeta(data: EchartsObject): {
       parseError: 'Chart envelope data.dimensions must be a string array.',
     };
   }
+  const dimensionError = getUnsafeDimensionError(dimensions);
+  if (dimensionError) return { parseError: dimensionError };
 
   const format = data.format;
   if (typeof format !== 'string' || !SUPPORTED_DATA_REF_FORMATS.has(format)) {
@@ -1185,6 +1257,12 @@ function resolveDataRefWithTimeout(
 ): Promise<EchartsFullDataResolvedDataset> {
   return new Promise((resolve, reject) => {
     const timeoutId = globalThis.setTimeout(() => {
+      console.warn(
+        '[web-shell] echarts-fulldata data-ref resolution timed out after %dms (ref=%s, format=%s)',
+        DATA_REF_TIMEOUT_MS,
+        ref,
+        meta.format,
+      );
       reject(new Error('Data reference resolution timed out.'));
     }, DATA_REF_TIMEOUT_MS);
 
@@ -1218,10 +1296,7 @@ function resolveEnvelopeDataRef(
         error,
       );
       return {
-        parseError:
-          error instanceof Error
-            ? `Chart data reference could not be resolved: ${error.message}`
-            : 'Chart data reference could not be resolved.',
+        parseError: 'Chart data reference could not be resolved.',
       };
     });
 }
@@ -1508,6 +1583,7 @@ export function EchartsFullDataBlock({
   const chartInstanceRef = useRef<EchartsInstance | undefined>(undefined);
   const removeResizeRef = useRef<() => void>(noop);
   const loadEchartsRef = useRef(loadEcharts);
+  const tRef = useRef(t);
   const renderRequestRef = useRef(0);
   const chartThemeRef = useRef<ChartTheme | undefined>(undefined);
   const [mode, setMode] = useState<'chart' | 'data'>('chart');
@@ -1530,6 +1606,7 @@ export function EchartsFullDataBlock({
   );
   const hasLoadEcharts = !!loadEcharts;
   loadEchartsRef.current = loadEcharts;
+  tRef.current = t;
 
   const disposeChart = useCallback(() => {
     removeResizeRef.current();
@@ -1566,7 +1643,7 @@ export function EchartsFullDataBlock({
       setChartError(
         chartOptionError instanceof Error
           ? chartOptionError.message
-          : t('echartsChart.renderFailed'),
+          : tRef.current('echartsChart.renderFailed'),
       );
       return;
     }
@@ -1578,7 +1655,7 @@ export function EchartsFullDataBlock({
     if (!hasLoadEcharts) {
       disposeChart();
       setChartReady(false);
-      setChartError(t('echartsChart.runtimeUnavailable'));
+      setChartError(tRef.current('echartsChart.runtimeUnavailable'));
       return;
     }
 
@@ -1640,7 +1717,7 @@ export function EchartsFullDataBlock({
         setChartError(
           error instanceof Error
             ? error.message
-            : t('echartsChart.renderFailed'),
+            : tRef.current('echartsChart.renderFailed'),
         );
       }
     };
@@ -1653,7 +1730,6 @@ export function EchartsFullDataBlock({
     hasLoadEcharts,
     mode,
     parseError,
-    t,
     theme,
   ]);
 

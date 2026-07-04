@@ -966,6 +966,69 @@ describe('Markdown custom code block rendering', () => {
     }
   });
 
+  it('retries custom rendered content as streaming code changes', async () => {
+    function ThrowingChart(): never {
+      throw new Error('render boom');
+    }
+
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    const renderCodeBlock = vi.fn((info: WebShellCodeBlockRenderInfo) => {
+      if (info.code === 'bad') return createElement(ThrowingChart);
+      return createElement('div', { 'data-custom-code': info.code }, info.code);
+    });
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    try {
+      await act(async () => {
+        root.render(
+          createElement(
+            WebShellCustomizationProvider,
+            { value: { markdown: { renderCodeBlock } } },
+            createElement(Markdown, {
+              content: '```echarts-fulldata\nbad\n```',
+              source: 'assistant',
+              isStreaming: true,
+            }),
+          ),
+        );
+      });
+
+      expect(container.querySelector('pre code')?.textContent).toContain('bad');
+
+      await act(async () => {
+        root.render(
+          createElement(
+            WebShellCustomizationProvider,
+            { value: { markdown: { renderCodeBlock } } },
+            createElement(Markdown, {
+              content: '```echarts-fulldata\ngood\n```',
+              source: 'assistant',
+              isStreaming: true,
+            }),
+          ),
+        );
+      });
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        '[web-shell] custom code block component render (lang=echarts-fulldata) failed:',
+        expect.any(Error),
+        expect.any(String),
+      );
+      expect(
+        container.querySelector('[data-custom-code="good"]'),
+      ).not.toBeNull();
+      expect(container.querySelector('pre code')).toBeNull();
+    } finally {
+      errorSpy.mockRestore();
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
+  });
+
   it('retries custom rendered content when source or theme changes', async () => {
     function ThrowingChart(): never {
       throw new Error('render boom');
