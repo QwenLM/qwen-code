@@ -114,6 +114,14 @@
   gap: 12px;
 }
 
+/* Fullscreen: fewer, wider chart cards so the extra viewport actually enlarges
+   the charts (paired with a taller SVG in SvgLineChart) instead of just packing
+   in more small ones. The DialogShell body carries `data-dialog-fullscreen`. */
+:global([data-dialog-fullscreen]) .grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 480px), 1fr));
+  gap: 16px;
+}
+
 .card {
   border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
   border-radius: 10px;

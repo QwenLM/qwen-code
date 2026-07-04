@@ -283,7 +283,12 @@ export function DialogShell({
               data-dialog-close
             />
           </header>
-          <div className={styles.body}>{children}</div>
+          <div
+            className={styles.body}
+            data-dialog-fullscreen={fullscreen ? '' : undefined}
+          >
+            {children}
+          </div>
         </section>
       </DialogShellIdContext.Provider>
     </div>

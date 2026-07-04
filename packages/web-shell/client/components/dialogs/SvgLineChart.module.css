@@ -19,6 +19,12 @@
   touch-action: none;
 }
 
+/* Taller plot when the dialog is fullscreen, so the enlarged cards show more
+   vertical detail. The DialogShell body carries `data-dialog-fullscreen`. */
+:global([data-dialog-fullscreen]) .svg {
+  height: 120px;
+}
+
 /* Vertical hover cursor: the time line the tooltip reads from. */
 .cursor {
   stroke: var(--muted-foreground);
