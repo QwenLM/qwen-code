@@ -1116,6 +1116,12 @@ function parseToolCallArgs(argsJson?: string | null): Record<string, unknown> {
   return args;
 }
 
+function parseModernToolCallArgs(
+  argsJson?: string | null,
+): Record<string, unknown> {
+  return safeJsonParse<Record<string, unknown>>(argsJson ?? '', {});
+}
+
 function generateToolCallId(): string {
   return `call_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 }
@@ -1124,12 +1130,13 @@ function createFunctionCallPart(
   name: string,
   argsJson?: string | null,
   id = generateToolCallId(),
+  parseArgs = parseToolCallArgs,
 ): Part {
   return {
     functionCall: {
       id,
       name,
-      args: parseToolCallArgs(argsJson),
+      args: parseArgs(argsJson),
     },
   };
 }
@@ -1188,11 +1195,12 @@ export function convertOpenAIResponseToGemini(
               toolCall.function.name,
               toolCall.function.arguments,
               toolCall.id,
+              parseModernToolCallArgs,
             ),
           );
         }
       }
-    } else if (choice.message.function_call) {
+    } else if (choice.message.function_call?.name) {
       const functionCall = choice.message.function_call;
       debugLogger.debug(
         `Using legacy function_call fallback (non-streaming): ${functionCall.name}`,

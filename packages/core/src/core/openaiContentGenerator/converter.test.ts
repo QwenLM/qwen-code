@@ -24,7 +24,7 @@ import { convertToFunctionResponse } from '../coreToolScheduler.js';
 
 function legacyFunctionCallPart(
   name = 'read_file',
-  args: Record<string, unknown> = { path: 'README.md' },
+  args: unknown = { path: 'README.md' },
 ) {
   return {
     functionCall: {
@@ -2694,7 +2694,7 @@ describe('OpenAIContentConverter', () => {
       Partial<OpenAI.Chat.ChatCompletionMessage>,
       'function_call'
     > & {
-      function_call?: { name: string; arguments?: string };
+      function_call?: { name?: string; arguments?: string };
     };
 
     it('should handle empty choices array without crashing', () => {
@@ -2777,6 +2777,46 @@ describe('OpenAIContentConverter', () => {
         ],
       },
       {
+        name: 'modern tool_calls preserve array arguments',
+        message: {
+          tool_calls: [
+            {
+              id: 'call_modern_array',
+              type: 'function' as const,
+              function: {
+                name: 'read_file',
+                arguments: '[1,2,3]',
+              },
+            },
+          ],
+          function_call: {
+            name: 'read_file',
+            arguments: '{"path":"legacy.md"}',
+          },
+        },
+        expectedParts: [legacyFunctionCallPart('read_file', [1, 2, 3])],
+      },
+      {
+        name: 'modern tool_calls preserve scalar arguments',
+        message: {
+          tool_calls: [
+            {
+              id: 'call_modern_scalar',
+              type: 'function' as const,
+              function: {
+                name: 'read_file',
+                arguments: '"literal"',
+              },
+            },
+          ],
+          function_call: {
+            name: 'read_file',
+            arguments: '{"path":"legacy.md"}',
+          },
+        },
+        expectedParts: [legacyFunctionCallPart('read_file', 'literal')],
+      },
+      {
         name: 'invalid legacy function_call arguments',
         message: {
           function_call: { name: 'read_file', arguments: 'not-json' },
@@ -2789,6 +2829,13 @@ describe('OpenAIContentConverter', () => {
           function_call: { name: 'ping' },
         },
         expectedParts: [legacyFunctionCallPart('ping', {})],
+      },
+      {
+        name: 'legacy function_call without name does not emit functionCall',
+        message: {
+          function_call: { arguments: '{"path":"README.md"}' },
+        },
+        expectedParts: [],
       },
       {
         name: 'text content plus legacy function_call',
