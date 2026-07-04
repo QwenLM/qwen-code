@@ -93,6 +93,8 @@ export class QQChannel extends ChannelBase {
   private beforeExitHook: (() => void) | null = null;
   /** Timer for reconnectWithRetry fallback (unref'd so it doesn't block exit). */
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  /** 30s READY timeout to prevent hanging on gateway without response. */
+  private readyTimeout: ReturnType<typeof setTimeout> | null = null;
   /** Guard against parallel reconnectWithRetry chains from stale close events. */
   private isReconnecting: boolean = false;
 
@@ -462,6 +464,7 @@ export class QQChannel extends ChannelBase {
     this.flushingSessions.clear();
     this.pendingStreamDelete.clear();
     this.flushedSessions.clear();
+    this.seenMessages.clear();
     this._reconnectId++;
   }
 
@@ -1093,6 +1096,11 @@ export class QQChannel extends ChannelBase {
   ): void {
     this.ws = new WebSocket(url);
     const dialed = this.ws; // capture for stale-close guard
+    this.readyTimeout = setTimeout(() => {
+      if (this.ws !== dialed) return;
+      this.ws.close(4002, 'READY timeout');
+      reject(new Error(`[QQ:${this.name}] READY timeout after 30s`));
+    }, 30_000);
 
     this.ws.on('open', () => {
       process.stderr.write(`[QQ:${this.name}] WebSocket connected\n`);
@@ -1117,6 +1125,10 @@ export class QQChannel extends ChannelBase {
       process.stderr.write(
         `[QQ:${this.name}] WebSocket closed (code=${code})\n`,
       );
+      if (this.readyTimeout) {
+        clearTimeout(this.readyTimeout);
+        this.readyTimeout = null;
+      }
       this.stopHeartbeat();
       this.ws = null;
 
@@ -1207,6 +1219,10 @@ export class QQChannel extends ChannelBase {
         if (t === 'READY') {
           this.reconnectAttempts = 0;
           this.isReconnecting = false;
+          if (this.readyTimeout) {
+            clearTimeout(this.readyTimeout);
+            this.readyTimeout = null;
+          }
           this.sessionId =
             ((msg['d'] as Record<string, unknown> | undefined)?.[
               'session_id'
@@ -1249,6 +1265,10 @@ export class QQChannel extends ChannelBase {
           // every session, aborting in-flight LLM prompts.
           this.reconnectAttempts = 0;
           this.isReconnecting = false;
+          if (this.readyTimeout) {
+            clearTimeout(this.readyTimeout);
+            this.readyTimeout = null;
+          }
           this.connectReject = null;
           this.startHeartbeat();
           onReady();
@@ -1384,6 +1404,7 @@ export class QQChannel extends ChannelBase {
       }
       this.ws.send(JSON.stringify({ op: OpCode.HEARTBEAT, d: this.seq }));
     }, this.heartbeatInterval);
+    this.heartbeatTimer.unref();
   }
 
   private stopHeartbeat(): void {
@@ -1420,6 +1441,7 @@ export class QQChannel extends ChannelBase {
     if (this.isDuplicate(event.id)) return;
     // Ignore messages with no text content (images, stickers, etc.)
     if (!event.content?.trim()) return;
+    if (!event.author) return;
     // user_openid and author.id are scoped differently — falling back to
     // author.id may produce a different identity for the same user across
     // C2C and group contexts, creating two separate sessions. QQ Bot does
