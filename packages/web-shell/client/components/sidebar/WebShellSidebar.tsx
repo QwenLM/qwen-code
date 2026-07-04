@@ -154,6 +154,16 @@ function IconRename() {
   );
 }
 
+function IconDownload() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <path d="M12 3v12" />
+      <path d="m7 10 5 5 5-5" />
+      <path d="M5 21h14" />
+    </svg>
+  );
+}
+
 function IconTrash() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
@@ -191,10 +201,11 @@ export function WebShellSidebar({
   const { t } = useI18n();
   const connection = useConnection();
   const actions = useActions();
-  const { sessions, loading, error, reload, deleteSession } = useSessions({
-    autoLoad: true,
-    pageSize: SIDEBAR_SESSION_PAGE_SIZE,
-  });
+  const { sessions, loading, error, reload, deleteSession, exportSession } =
+    useSessions({
+      autoLoad: true,
+      pageSize: SIDEBAR_SESSION_PAGE_SIZE,
+    });
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editingName, setEditingName] = useState('');
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
@@ -222,6 +233,8 @@ export function WebShellSidebar({
     null,
   );
   const currentSessionId = connection.sessionId;
+  const canExportSessions =
+    connection.capabilities?.features?.includes('session_export') ?? false;
   const projectName =
     getWorkspaceName(connection.workspaceCwd) || t('sidebar.projectFallback');
   const qwenCodeVersion = connection.capabilities?.qwenCodeVersion || '';
@@ -489,6 +502,44 @@ export function WebShellSidebar({
     [currentSessionId],
   );
 
+  const handleExportSession = useCallback(
+    (session: DaemonSessionSummary) => {
+      if (!canExportSessions || busySessionIdRef.current !== null) return;
+      const sessionId = session.sessionId;
+      busySessionIdRef.current = sessionId;
+      setBusySessionId(sessionId);
+      void (async () => {
+        try {
+          const result = await exportSession(sessionId, 'html');
+          const blob = new Blob([result.content], {
+            type: result.mimeType || 'text/html',
+          });
+          const url = URL.createObjectURL(blob);
+          try {
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = result.filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+          } finally {
+            URL.revokeObjectURL(url);
+          }
+        } catch (err) {
+          onError(err, t('sidebar.exportFailed'));
+        } finally {
+          if (busySessionIdRef.current === sessionId) {
+            busySessionIdRef.current = null;
+          }
+          setBusySessionId((current) =>
+            current === sessionId ? null : current,
+          );
+        }
+      })();
+    },
+    [canExportSessions, exportSession, onError, t],
+  );
+
   const confirmDeleteSession = useCallback(() => {
     if (!deleteCandidate) return;
     const sessionId = deleteCandidate.sessionId;
@@ -720,6 +771,17 @@ export function WebShellSidebar({
                       >
                         <IconRename />
                       </button>
+                      {canExportSessions && (
+                        <button
+                          className={styles.sessionActionButton}
+                          type="button"
+                          title={t('sidebar.export')}
+                          aria-label={t('sidebar.export')}
+                          onClick={() => handleExportSession(session)}
+                        >
+                          <IconDownload />
+                        </button>
+                      )}
                       <button
                         className={styles.sessionActionButton}
                         type="button"
@@ -753,7 +815,9 @@ export function WebShellSidebar({
     editingSessionId,
     error,
     filteredSessions,
+    canExportSessions,
     handleDeleteSession,
+    handleExportSession,
     handleLoadSession,
     handleRenameFromMenu,
     hideTooltip,

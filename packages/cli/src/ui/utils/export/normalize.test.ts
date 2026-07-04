@@ -7,6 +7,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
 import { normalizeSessionData } from './normalize.js';
+import type { ExportConfig } from './types.js';
 
 describe('normalizeSessionData', () => {
   const config = {
@@ -68,5 +69,46 @@ describe('normalizeSessionData', () => {
         },
       },
     ]);
+  });
+
+  it('accepts the minimal daemon export config shape', () => {
+    const minimalConfig: ExportConfig = {};
+    const record: ChatRecord = {
+      uuid: 'tool-1',
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: '2025-01-01T00:00:00.000Z',
+      type: 'tool_result',
+      cwd: '',
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'read_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        callId: 'call-1',
+        resultDisplay: 'read result',
+      },
+    };
+
+    const normalized = normalizeSessionData(
+      {
+        sessionId: 'session-1',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [],
+      },
+      [record],
+      minimalConfig,
+    );
+
+    expect(normalized.messages[0].toolCall?.title).toBe('read_file');
   });
 });

@@ -58,6 +58,14 @@ export function createDaemonWorkspaceActions({
       );
     },
 
+    async exportSession(sessionId, format = 'html') {
+      const client = requireClient(getClient, 'Export session failed');
+      return withActionTimeout(
+        client.exportSession(sessionId, { format }),
+        'Export session timed out',
+      );
+    },
+
     async loadMcpStatus() {
       const client = requireClient(getClient, 'Load MCP status failed');
       return withActionTimeout(

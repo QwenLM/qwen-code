@@ -44,6 +44,11 @@ export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
     },
     [workspace.actions, reload],
   );
+  const exportSession = useCallback(
+    (sessionId: string, format: 'html' | 'md' | 'json' | 'jsonl' = 'html') =>
+      workspace.actions.exportSession(sessionId, format),
+    [workspace.actions],
+  );
   return {
     ...result,
     sessions: result.data ?? [],
@@ -53,5 +58,6 @@ export function useDaemonSessions(options: DaemonSessionsOptions = {}) {
     releaseSession: sessionActions?.releaseSession,
     deleteSession,
     deleteSessions,
+    exportSession,
   };
 }

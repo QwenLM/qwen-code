@@ -51,6 +51,8 @@ import type {
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
   DaemonSessionSummary,
+  DaemonSessionExportFormat,
+  DaemonSessionExportResult,
   DaemonStatusReport,
   DaemonStatusReportDetail,
   DaemonWriteMemoryRequest,
@@ -153,6 +155,10 @@ export interface DaemonWorkspaceActions {
     notFound: string[];
     errors: Array<{ sessionId: string; error: string }>;
   }>;
+  exportSession(
+    sessionId: string,
+    format?: DaemonSessionExportFormat,
+  ): Promise<DaemonSessionExportResult>;
 
   // MCP
   loadMcpStatus(): Promise<DaemonWorkspaceMcpStatus>;

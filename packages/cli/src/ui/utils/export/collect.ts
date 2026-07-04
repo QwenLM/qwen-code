@@ -5,15 +5,17 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Config, ChatRecord } from '@qwen-code/qwen-code-core';
+import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { SessionContext } from '../../../acp-integration/session/types.js';
 import type { SessionUpdate, ToolCall } from '@agentclientprotocol/sdk';
 import { HistoryReplayer } from '../../../acp-integration/session/HistoryReplayer.js';
 import type {
+  ExportConfig,
   ExportMessage,
   ExportSessionData,
   ExportMetadata,
+  ExportToolRegistry,
 } from './types.js';
 
 /**
@@ -336,7 +338,7 @@ async function extractMetadata(
     startTime: string;
     messages: ChatRecord[];
   },
-  config: Config,
+  config: ExportConfig,
 ): Promise<ExportMetadata> {
   const { sessionId, startTime, messages } = conversation;
 
@@ -413,9 +415,18 @@ class ExportSessionContext implements SessionContext {
   private activeRecordTimestamp: string | null = null;
   private toolCallMap: Map<string, ExportMessage['toolCall']> = new Map();
 
-  constructor(sessionId: string, config: Config) {
+  constructor(sessionId: string, config: ExportConfig) {
     this.sessionId = sessionId;
-    this.config = config;
+    this.config = {
+      ...config,
+      getToolRegistry: () => {
+        const registry = config.getToolRegistry?.();
+        return {
+          getTool: (toolName: string) =>
+            registry?.getTool?.(toolName) ?? null,
+        } satisfies ExportToolRegistry;
+      },
+    } as unknown as Config;
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
@@ -666,7 +677,7 @@ export async function collectSessionData(
     startTime: string;
     messages: ChatRecord[];
   },
-  config: Config,
+  config: ExportConfig,
 ): Promise<ExportSessionData> {
   // Create export session context
   const exportContext = new ExportSessionContext(
