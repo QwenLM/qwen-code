@@ -80,17 +80,8 @@ export function resolveBoundWorkspacesFromIdeEnv(
   primaryWorkspace: string,
   ideWorkspacePath = process.env[IDE_WORKSPACE_PATH_ENV_VAR],
 ): string[] {
-  let primary: string;
-  try {
-    const canonicalPrimary = canonicalizeWorkspaces([primaryWorkspace])[0];
-    if (canonicalPrimary === undefined) return [];
-    primary = canonicalPrimary;
-  } catch (err) {
-    writeStderrLine(
-      `qwen serve: failed to canonicalize primary workspace path, using raw primary: ${err}`,
-    );
-    return [primaryWorkspace];
-  }
+  const primary = canonicalizeWorkspaces([primaryWorkspace])[0];
+  if (primary === undefined) return [];
 
   let envCanonicals: string[];
   try {

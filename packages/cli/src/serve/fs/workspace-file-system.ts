@@ -5,7 +5,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import { promises as fsp } from 'node:fs';
+import { constants as fsConstants, promises as fsp } from 'node:fs';
 import * as path from 'node:path';
 import { glob as globAsync } from 'glob';
 // `StandardFileSystemService` is constructed and `loadIgnoreRules` is
@@ -713,11 +713,19 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       let permissionErrorCount = 0;
       let transientErrorCount = 0;
       const globErrors: unknown[] = [];
-      let sawSuccessfulRoot = false;
       for (const searchRoot of searchRoots) {
         if (out.length >= max) break;
         let matches: string[];
         try {
+          await fsp.access(searchRoot.cwd, fsConstants.R_OK | fsConstants.X_OK);
+          const rootStat = await fsp.stat(searchRoot.cwd);
+          if (!rootStat.isDirectory()) {
+            const err = new Error(
+              `glob workspace root is not a directory: ${searchRoot.cwd}`,
+            ) as NodeJS.ErrnoException;
+            err.code = 'ENOTDIR';
+            throw err;
+          }
           matches = await globAsync(pattern, {
             cwd: searchRoot.cwd,
             nodir: false,
@@ -736,7 +744,6 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           });
           continue;
         }
-        sawSuccessfulRoot = true;
         for (const hit of matches) {
           if (out.length >= max) break;
           const absolute = path.resolve(hit);
@@ -792,7 +799,8 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           out.push(canonical as ResolvedPath);
         }
       }
-      if (!sawSuccessfulRoot && globErrors.length > 0) {
+      if (globErrors.length > 0) {
+        if (globErrors.length === 1) throw globErrors[0];
         throw new AggregateError(
           globErrors,
           'glob failed for all workspace roots',

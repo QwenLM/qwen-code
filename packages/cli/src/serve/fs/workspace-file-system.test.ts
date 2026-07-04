@@ -1377,6 +1377,18 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     expect(hits.sort()).toEqual([primaryPackage, secondPackage].sort());
   });
 
+  it('throws when one workspace root glob fails instead of returning partial results', async () => {
+    await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
+    await fsp.chmod(h.secondWorkspace, 0o000);
+    try {
+      await expect(h.fs.glob('*.ts')).rejects.toMatchObject({
+        kind: 'permission_denied',
+      });
+    } finally {
+      await fsp.chmod(h.secondWorkspace, 0o700);
+    }
+  });
+
   it('glob with cwd searches only that resolved root', async () => {
     await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
     await fsp.writeFile(path.join(h.secondWorkspace, 'secondary.ts'), '');

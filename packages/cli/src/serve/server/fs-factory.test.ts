@@ -7,7 +7,7 @@
 import { promises as fsp, realpathSync } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { resolveBoundWorkspacesFromIdeEnv } from './fs-factory.js';
 
 const scratches: string[] = [];
@@ -87,6 +87,33 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
         JSON.stringify(['relative']),
       ),
     ).toEqual([primary]);
+  });
+
+  it('does not re-canonicalize primary when env canonicalization fails', async () => {
+    const scratch = await mkScratch();
+    const dirs = await mkdirs(scratch, 'primary', 'blocked');
+    const primary = realpathSync.native(dirs.primary);
+    const realpathSpy = vi
+      .spyOn(realpathSync, 'native')
+      .mockImplementation((p: Parameters<typeof realpathSync.native>[0]) => {
+        if (String(p).endsWith(`${path.sep}blocked`)) {
+          const err = new Error('blocked') as NodeJS.ErrnoException;
+          err.code = 'EACCES';
+          throw err;
+        }
+        return primary;
+      });
+    try {
+      expect(
+        resolveBoundWorkspacesFromIdeEnv(
+          dirs.primary,
+          JSON.stringify([dirs.blocked]),
+        ),
+      ).toEqual([primary]);
+      expect(realpathSpy).toHaveBeenCalledTimes(2);
+    } finally {
+      realpathSpy.mockRestore();
+    }
   });
 
   it('drops env parents without losing sibling roots', async () => {
