@@ -55,6 +55,14 @@
   white-space: nowrap;
 }
 
+/* Flipped variant: near the top of the scroll container the default upward
+   tooltip would clip against DialogShell's overflow-y:auto body, so render it
+   below the cursor instead. */
+.tooltipBelow {
+  bottom: auto;
+  top: calc(100% + 4px);
+}
+
 .tooltipTime {
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;

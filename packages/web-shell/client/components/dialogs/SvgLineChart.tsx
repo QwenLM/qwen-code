@@ -42,6 +42,23 @@ function finiteOr(value: number, fallback: number): number {
   return Number.isFinite(value) ? value : fallback;
 }
 
+// Approx. tooltip height (time header + a few series rows + padding). When the
+// plot sits within this many px of its scroll container's top edge, the upward
+// tooltip would clip, so we flip it below the cursor instead.
+const TOOLTIP_CLEARANCE_PX = 84;
+
+/** Nearest scrollable ancestor — its top edge is what clips an upward tooltip
+ *  (e.g. DialogShell's `overflow-y: auto` body). Null when none is found. */
+function findScrollParent(el: Element): Element | null {
+  let node: Element | null = el.parentElement;
+  while (node) {
+    const overflowY = getComputedStyle(node).overflowY;
+    if (overflowY === 'auto' || overflowY === 'scroll') return node;
+    node = node.parentElement;
+  }
+  return null;
+}
+
 function defaultFormatTime(t: number): string {
   return new Date(t).toLocaleTimeString();
 }
@@ -64,6 +81,11 @@ export function SvgLineChart({
 }: SvgLineChartProps) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  // Flip the tooltip below the cursor near a scroll container's top edge.
+  const [tooltipBelow, setTooltipBelow] = useState(false);
+  // Nearest scroll container, resolved once on first hover (undefined = not yet
+  // looked up; null = none found).
+  const scrollParentRef = useRef<Element | null | undefined>(undefined);
 
   const { paths, maxV, maxLen, min, span } = useMemo(() => {
     const len = series.reduce((m, s) => Math.max(m, s.values.length), 0);
@@ -120,6 +142,16 @@ export function SvgLineChart({
       Math.min(maxLen - 1, Math.round(rel * (maxLen - 1))),
     );
     setHoverIdx(idx);
+    // Flip the tooltip below the cursor when the plot is too close to the top
+    // of its scroll container for the default upward tooltip to clear the clip
+    // boundary — otherwise the topmost chart's readout truncates inside
+    // DialogShell's overflow-y:auto body.
+    if (scrollParentRef.current === undefined) {
+      scrollParentRef.current = findScrollParent(svg);
+    }
+    const scroller = scrollParentRef.current;
+    const clipTop = scroller ? scroller.getBoundingClientRect().top : 0;
+    setTooltipBelow(rect.top - clipTop < TOOLTIP_CLEARANCE_PX);
   };
   const handleLeave = (): void => setHoverIdx(null);
 
@@ -207,7 +239,9 @@ export function SvgLineChart({
         </svg>
         {active != null && (
           <div
-            className={styles.tooltip}
+            className={`${styles.tooltip} ${
+              tooltipBelow ? styles.tooltipBelow : ''
+            }`}
             style={{ left: `${tooltipLeftPct}%` }}
             role="tooltip"
           >
