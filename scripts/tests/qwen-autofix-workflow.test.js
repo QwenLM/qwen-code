@@ -462,7 +462,7 @@ describe('qwen-autofix workflow', () => {
       '/autofix develop-issue --issue ${{ steps.decision.outputs.go_issue }} --workdir /tmp/autofix',
     );
     expect(triageAndAddressStep).toContain(
-      '/autofix address-review --pr ${{ matrix.target.pr }} --issue ${{ matrix.target.issue }} --workdir /tmp/autofix-review-${{ matrix.target.pr }}',
+      '/autofix address-review --pr ${{ matrix.target.pr }} --issue ${{ matrix.target.issue }} --workdir /tmp/autofix-review-${{ matrix.target.pr }} --conflict ${{ steps.prepare.outputs.conflict }} --base main',
     );
 
     for (const step of [

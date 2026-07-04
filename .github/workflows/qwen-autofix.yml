@@ -1019,7 +1019,6 @@ jobs:
         env:
           PR: '${{ env.PR }}'
           ISSUE: '${{ env.ISSUE }}'
-          CONFLICT_WITH_BASE: '${{ steps.prepare.outputs.conflict }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
           OPENAI_BASE_URL: '${{ secrets.AUTOFIX_OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}'
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
