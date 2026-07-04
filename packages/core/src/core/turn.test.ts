@@ -398,6 +398,7 @@ describe('Turn', () => {
       });
       expect(toolCalls[0]!.value.response_id).toBe('primary-response');
       expect(toolCalls[1]!.value.response_id).toBeUndefined();
+      expect(turn.pendingToolCalls).toEqual([toolCalls[1]!.value]);
     });
 
     it('should yield UserCancelled event if signal is aborted', async () => {

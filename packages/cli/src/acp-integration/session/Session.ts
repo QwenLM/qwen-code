@@ -1878,6 +1878,9 @@ export class Session implements SessionContext {
                     ) {
                       functionCalls.push(...resp.value.functionCalls);
                     }
+                    if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                      functionCalls.length = 0;
+                    }
                   }
                 } catch (error) {
                   // Restore the stripped orphan if the send threw before
@@ -2196,6 +2199,9 @@ export class Session implements SessionContext {
                 resp.value.functionCalls
               ) {
                 functionCalls.push(...resp.value.functionCalls);
+              }
+              if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                functionCalls.length = 0;
               }
             }
           } catch (error) {
@@ -3114,6 +3120,9 @@ export class Session implements SessionContext {
                   ) {
                     functionCalls.push(...resp.value.functionCalls);
                   }
+                  if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                    functionCalls.length = 0;
+                  }
                 }
 
                 if (usageMetadata) {
@@ -3422,6 +3431,9 @@ export class Session implements SessionContext {
                 resp.value.functionCalls
               ) {
                 functionCalls.push(...resp.value.functionCalls);
+              }
+              if (resp.type === StreamEventType.MODEL_FALLBACK) {
+                functionCalls.length = 0;
               }
             }
 
