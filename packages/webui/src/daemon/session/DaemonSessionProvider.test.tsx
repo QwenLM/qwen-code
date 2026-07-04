@@ -4412,6 +4412,80 @@ describe('DaemonSessionProvider', () => {
     expect(connection).not.toHaveProperty('context');
   });
 
+  it('drops preserved commands when the next session reports an empty list', async () => {
+    const firstSession = createMockSession({
+      sessionId: 'session-a',
+      supportedCommands: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'session-a',
+        availableCommands: [
+          { name: 'cmd-a', description: 'Command A', input: null },
+        ],
+        availableSkills: ['review'],
+      })),
+    });
+    const emptySession = createMockSession({
+      sessionId: 'session-b',
+      supportedCommands: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'session-b',
+        availableCommands: [],
+        availableSkills: [],
+      })),
+    });
+    // session-a loads on mount; the detached session created after the clear
+    // pops session-b next.
+    sdkMocks.sessions.push(firstSession, emptySession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection?.commands?.map((command) => command.name)).toContain(
+      'cmd-a',
+    );
+
+    await act(async () => {
+      await actions?.clearSession();
+    });
+    // The preserved list keeps autocompleting through the clear (commands is
+    // still present here)...
+    expect(connection?.commands?.map((command) => command.name)).toContain(
+      'cmd-a',
+    );
+
+    // ...but once the next session's supported-commands fetch comes back empty,
+    // that fulfilled snapshot is authoritative — the stale commands must not
+    // survive it.
+    const providerActions = requireActions(actions);
+    await act(async () => {
+      await providerActions.createSession();
+    });
+    let attach: Promise<void> | undefined;
+    act(() => {
+      attach = providerActions.attachSession();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await attach;
+
+    expect(connection).toMatchObject({ sessionId: 'session-b' });
+    expect(connection?.commands).toEqual([]);
+    expect(connection?.skills).toEqual([]);
+  });
+
   it('ignores streamed events from a session after it is cleared', async () => {
     const streamStarted = createDeferred<void>();
     const releaseOldEvent = createDeferred<void>();

@@ -52,6 +52,33 @@ describe('getConnectionAfterSessionClear', () => {
     expect(next.skills).toEqual(['old-skill']);
   });
 
+  it('handles commands and skills being undefined before clear', () => {
+    // Optional fields: clearing before the first available_commands_update
+    // (open the app, immediately start a new chat) leaves them absent. The
+    // delete calls are harmless no-ops and nothing is fabricated.
+    const next = getConnectionAfterSessionClear(
+      {
+        status: 'disconnected',
+        workspaceCwd: '/workspace',
+        sessionId: 'session-a',
+        clientId: 'client-a',
+        supportedCommands: supportedCommandsStatus('session-a'),
+        context: contextStatus('session-a'),
+      } as DaemonConnectionState,
+      'session-a',
+    );
+
+    expect(next).toMatchObject({
+      status: 'connected',
+      workspaceCwd: '/workspace',
+    });
+    expect(next).not.toHaveProperty('sessionId');
+    expect(next).not.toHaveProperty('commands');
+    expect(next).not.toHaveProperty('skills');
+    expect(next).not.toHaveProperty('supportedCommands');
+    expect(next).not.toHaveProperty('context');
+  });
+
   it('preserves a concurrently loaded session', () => {
     const next = getConnectionAfterSessionClear(
       {
