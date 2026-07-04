@@ -26,6 +26,14 @@ function makeView(doc: string): EditorView {
   } as unknown as EditorView;
 }
 
+function makeViewAt(doc: string, anchor: number): EditorView {
+  return {
+    state: EditorState.create({ doc, selection: { anchor } }),
+    dispatch: vi.fn(),
+    focus: vi.fn(),
+  } as unknown as EditorView;
+}
+
 function Harness({
   actions,
   providers,
@@ -84,6 +92,7 @@ describe('useAtMentionMenu', () => {
   it('strips ANSI and BiDi controls from extension display text', async () => {
     vi.useFakeTimers();
     mount({
+      view: makeView('@'),
       actions: {
         loadExtensionsStatus: vi.fn().mockResolvedValue({
           extensions: [
@@ -141,6 +150,7 @@ describe('useAtMentionMenu', () => {
   it('opens extension items without the inserted ref prefix as search text', async () => {
     vi.useFakeTimers();
     mount({
+      view: makeView('@'),
       actions: {
         loadExtensionsStatus: vi.fn().mockResolvedValue({
           extensions: [
@@ -176,9 +186,7 @@ describe('useAtMentionMenu', () => {
       query: '',
     });
 
-    act(() =>
-      latest!.refreshForView(makeView('@ext:revi'), { userEdited: true }),
-    );
+    act(() => latest!.refreshForView(makeView('@ext:revi')));
     await runDebounce();
 
     expect(latest!.state).toMatchObject({
@@ -198,9 +206,7 @@ describe('useAtMentionMenu', () => {
       inputMode: 'search',
     });
 
-    act(() =>
-      latest!.refreshForView(makeView('@ext:review'), { userEdited: true }),
-    );
+    act(() => latest!.refreshForView(makeView('@ext:review')));
     await runDebounce();
 
     expect(latest!.state).toMatchObject({
@@ -271,11 +277,7 @@ describe('useAtMentionMenu', () => {
       query: '',
     });
 
-    act(() =>
-      latest!.refreshForView(makeView('@docs:https://example.com/do'), {
-        userEdited: true,
-      }),
-    );
+    act(() => latest!.refreshForView(makeView('@docs:https://example.com/do')));
     await runDebounce();
 
     expect(latest!.state).toMatchObject({
@@ -331,9 +333,7 @@ describe('useAtMentionMenu', () => {
       query: '',
     });
 
-    act(() =>
-      latest!.refreshForView(makeView('@src/fo'), { userEdited: true }),
-    );
+    act(() => latest!.refreshForView(makeView('@src/fo')));
     await runDebounce();
 
     expect(latest!.state).toMatchObject({
@@ -598,7 +598,10 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(makeView('@')));
     act(() => latest!.enterCategory(2));
     await runDebounce();
-    act(() => latest!.accept());
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => latest!.accept(0));
     await runDebounce();
     act(() => {
       expect(latest!.backToCategories()).toBe('items');
@@ -656,9 +659,7 @@ describe('useAtMentionMenu', () => {
 
     act(() => latest!.refreshForView(makeView('@')));
     act(() => latest!.enterCategory(0));
-    act(() =>
-      latest!.refreshForView(makeView('@../secret'), { userEdited: true }),
-    );
+    act(() => latest!.updateSearch('../secret'));
     await runDebounce();
 
     expect(listDirectory).toHaveBeenCalledWith('.', {
@@ -678,6 +679,7 @@ describe('useAtMentionMenu', () => {
 
     expect(globWorkspace).toHaveBeenCalledWith('foo\\*bar\\?*', {
       maxResults: 50,
+      signal: expect.any(AbortSignal),
     });
   });
 
@@ -953,7 +955,7 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(view));
     act(() => latest!.enterCategory(2));
     await runDebounce();
-    act(() => latest!.accept());
+    act(() => latest!.accept(0));
     await runDebounce();
     act(() => {
       expect(latest!.accept()).toBe(true);
@@ -963,9 +965,9 @@ describe('useAtMentionMenu', () => {
       changes: {
         from: 0,
         to: 1,
-        insert: '@docs:res://doc\\?version=1\\ path@x\\. ',
+        insert: '@docs:res://doc\\?version=1\\ path@x. ',
       },
-      selection: { anchor: 37 },
+      selection: { anchor: 36 },
       scrollIntoView: true,
     });
   });
@@ -1000,6 +1002,9 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(makeView('@')));
     act(() => latest!.enterCategory(2));
     await runDebounce();
+    await act(async () => {
+      await Promise.resolve();
+    });
     act(() => latest!.accept());
     await runDebounce();
 
@@ -1029,6 +1034,9 @@ describe('useAtMentionMenu', () => {
     act(() => latest!.refreshForView(makeView('@')));
     act(() => latest!.enterCategory(2));
     await runDebounce();
+    await act(async () => {
+      await Promise.resolve();
+    });
     act(() => latest!.accept());
     await runDebounce();
     act(() => latest!.close());
@@ -1081,6 +1089,132 @@ describe('useAtMentionMenu', () => {
       itemMode: 'mcpResources',
       items: [],
       loading: false,
+    });
+  });
+
+  it('recovers from provider search failures', async () => {
+    vi.useFakeTimers();
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    mount({
+      providers: [
+        {
+          id: 'broken',
+          label: 'Broken',
+          search: vi.fn().mockRejectedValue(new Error('boom')),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      loading: false,
+      items: [],
+    });
+    expect(warn).toHaveBeenCalledWith(
+      '[@mention] provider="broken" query=<redacted> failed',
+      expect.any(Error),
+    );
+    warn.mockRestore();
+  });
+
+  it('discards stale provider responses', async () => {
+    vi.useFakeTimers();
+    let resolveFirst!: (items: []) => void;
+    const first = new Promise<[]>((resolve) => {
+      resolveFirst = resolve;
+    });
+    const search = vi
+      .fn()
+      .mockReturnValueOnce(first)
+      .mockResolvedValueOnce([{ id: 'new', label: 'newer' }]);
+    mount({
+      providers: [{ id: 'custom', label: 'Custom', search }],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => latest!.updateSearch('n'));
+    await runDebounce();
+    await act(async () => {
+      resolveFirst([]);
+      await Promise.resolve();
+    });
+
+    expect(latest!.state?.items).toEqual([
+      expect.objectContaining({ id: 'new', label: 'newer' }),
+    ]);
+  });
+
+  it('updates MCP resource search from the item search box', async () => {
+    vi.useFakeTimers();
+    const loadMcpResources = vi.fn().mockResolvedValue({
+      resources: [
+        { uri: 'res://one', name: 'One' },
+        { uri: 'res://two', name: 'Two' },
+      ],
+    });
+    mount({
+      view: makeView('@'),
+      actions: {
+        loadMcpStatus: vi.fn().mockResolvedValue({
+          servers: [
+            {
+              kind: 'mcp_server',
+              name: 'docs',
+              disabled: false,
+              resourceCount: 2,
+            },
+          ],
+        }),
+        loadMcpResources,
+      },
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(2));
+    await runDebounce();
+    await act(async () => {
+      await Promise.resolve();
+    });
+    act(() => latest!.accept(0));
+    await runDebounce();
+    act(() => latest!.updateSearch('two'));
+    await runDebounce();
+
+    expect(latest!.state).toMatchObject({
+      itemMode: 'mcpResources',
+      query: 'two',
+      items: [expect.objectContaining({ label: 'Two' })],
+    });
+  });
+
+  it('does not reuse an items-level panel after the cursor moves inside the reference', async () => {
+    vi.useFakeTimers();
+    mount({
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          search: vi.fn().mockResolvedValue([{ id: 'item', label: 'item' }]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(makeView('@')));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => latest!.refreshForView(makeViewAt('@item', 3)));
+
+    expect(latest!.state).toMatchObject({
+      level: 'items',
+      from: 0,
+      to: 3,
+      query: '',
     });
   });
 });

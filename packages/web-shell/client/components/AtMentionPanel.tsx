@@ -45,6 +45,7 @@ export function AtMentionPanel({
   const { t } = useI18n();
   const itemRefs = useRef<Array<HTMLButtonElement | null>>([]);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const [searchFocused, setSearchFocused] = useState(false);
   const [anchorRect, setAnchorRect] = useState<{
     left: number;
     bottom: number;
@@ -141,8 +142,6 @@ export function AtMentionPanel({
     };
   }, [anchorRef, panelRef]);
 
-  if (!anchorRect) return null;
-
   const rows =
     menu.level === 'categories'
       ? menu.providers.map((provider) => ({
@@ -162,6 +161,12 @@ export function AtMentionPanel({
             item.kind === 'directory' || item.kind === 'mcp-server' ? '›' : '',
         }));
 
+  useEffect(() => {
+    itemRefs.current.length = rows.length;
+  }, [rows.length]);
+
+  if (!anchorRect) return null;
+
   const selectedProvider = menu.providers.find(
     (provider) => provider.id === menu.selectedProviderId,
   );
@@ -175,7 +180,7 @@ export function AtMentionPanel({
       : t('at.menu');
   const listboxId = 'at-mention-listbox';
   const activeOptionId =
-    menu.selectedIndex >= 0 && menu.selectedIndex < rows.length
+    searchFocused && menu.selectedIndex >= 0 && menu.selectedIndex < rows.length
       ? `at-mention-option-${menu.selectedIndex}`
       : undefined;
 
@@ -227,6 +232,8 @@ export function AtMentionPanel({
               aria-label={t('common.search')}
               aria-controls={listboxId}
               aria-activedescendant={activeOptionId}
+              onFocus={() => setSearchFocused(true)}
+              onBlur={() => setSearchFocused(false)}
               onMouseDown={(event) => event.stopPropagation()}
               onClick={(event) => event.stopPropagation()}
               onChange={(event) => onSearch(event.currentTarget.value)}
@@ -277,9 +284,13 @@ export function AtMentionPanel({
           aria-label={rows.length > 0 ? listboxLabel : undefined}
         >
           {menu.loading && rows.length === 0 ? (
-            <div className={styles.atEmpty}>{t('common.loading')}</div>
+            <div className={styles.atEmpty} role="status" aria-live="polite">
+              {t('common.loading')}
+            </div>
           ) : rows.length === 0 ? (
-            <div className={styles.atEmpty}>{t('common.noResults')}</div>
+            <div className={styles.atEmpty} role="status" aria-live="polite">
+              {t('common.noResults')}
+            </div>
           ) : (
             rows.map((row, index) => (
               <button

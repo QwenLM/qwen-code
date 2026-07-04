@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import type { SetStateAction } from 'react';
 import type { RefObject } from 'react';
 import type { EditorView } from '@codemirror/view';
 import type { WebShellAtItem, WebShellAtProvider } from '../customization';
@@ -34,7 +35,7 @@ export interface AtMentionMenuState {
 
 type GlobWorkspaceFn = (
   pattern: string,
-  opts?: { maxResults?: number },
+  opts?: { maxResults?: number; signal?: AbortSignal },
 ) => Promise<{ matches: string[] }>;
 
 interface ExtensionEntry {
@@ -91,6 +92,10 @@ type LoadMcpResourcesFn = (
   }>;
 }>;
 
+interface LoadMcpResourceOptions {
+  validateServer?: boolean;
+}
+
 export interface AtMentionWorkspaceActions {
   globWorkspace?: GlobWorkspaceFn;
   loadExtensionsStatus?: LoadExtensionsStatusFn;
@@ -107,11 +112,7 @@ export interface UseAtMentionMenuOptions {
   providers?: readonly WebShellAtProvider[];
 }
 
-interface RefreshAtMentionMenuOptions {
-  userEdited?: boolean;
-}
-
-const AT_PATTERN = /@([\p{L}\p{N}_./:-]*)$/u;
+const AT_PATTERN = /@((?:[\p{L}\p{N}_./:-]|\\.)*)$/u;
 const EMPTY_PROVIDERS: readonly WebShellAtProvider[] = [];
 const SEARCH_DEBOUNCE_MS = 150;
 export const FILE_PROVIDER_ID = 'files';
@@ -119,7 +120,7 @@ const EXTENSIONS_PROVIDER_ID = 'extensions';
 export const MCP_RESOURCES_PROVIDER_ID = 'mcp-resources';
 const ESC = String.fromCharCode(27);
 const ANSI_RE = new RegExp(`${ESC}(?:[@-Z\\-_]|\\[[0-?]*[ -/]*[@-~])`, 'g');
-const BIDI_CONTROL_RE = /[\u200E\u200F\u061C\u2066-\u2069\u202A-\u202E]/g;
+const BIDI_CONTROL_RE = /[\u200B-\u200F\u061C\u2066-\u2069\u202A-\u202E]/g;
 const SAFE_DISPLAY_FALLBACK = '[invalid]';
 const AT_REFERENCE_SPECIAL_CHARS = /[ \t()[\]{};!?\\,]/g;
 
@@ -161,7 +162,7 @@ function buildMcpResourceRef(serverName: string, uri: string): string {
 }
 
 function escapeAtReferenceText(ref: string): string {
-  return ref.replace(AT_REFERENCE_SPECIAL_CHARS, '\\$&').replace(/\.$/, '\\.');
+  return ref.replace(AT_REFERENCE_SPECIAL_CHARS, '\\$&');
 }
 
 function mcpResourceInsertText(serverName: string, uri: string): string {
@@ -210,11 +211,14 @@ function splitInsertedReferenceQuery(
 async function isEnabledMcpServer(
   actions: AtMentionWorkspaceActions | undefined,
   serverName: string,
+  signal?: AbortSignal,
 ) {
+  if (signal?.aborted) return false;
   const loadMcpStatus = actions?.loadMcpStatus;
-  if (!loadMcpStatus) return true;
+  if (!loadMcpStatus) return false;
   try {
     const status = await loadMcpStatus();
+    if (signal?.aborted) return false;
     return status.servers.some(
       (server) => server.name === serverName && !server.disabled,
     );
@@ -278,7 +282,15 @@ export function sanitizeDisplayText(raw: string): string | undefined {
 }
 
 function sanitizeInsertText(raw: string): string {
-  const stripped = raw.replace(ANSI_RE, '').replace(BIDI_CONTROL_RE, '');
+  const stripped = raw
+    .replace(ANSI_RE, '')
+    .replace(BIDI_CONTROL_RE, '')
+    .split('')
+    .filter((char) => {
+      const code = char.charCodeAt(0);
+      return code > 0x1f && code !== 0x7f;
+    })
+    .join('');
   return stripped.length > 0 ? stripped : SAFE_DISPLAY_FALLBACK;
 }
 
@@ -381,7 +393,10 @@ function createFileProvider(
       }
       try {
         const pattern = query ? `${escapeGlobQuery(query)}*` : '**/*';
-        const result = await globWorkspace(pattern, { maxResults: 50 });
+        const result = await globWorkspace(pattern, {
+          maxResults: 50,
+          signal,
+        });
         if (signal.aborted) return [];
         return result.matches
           .filter((file) => file !== '.')
@@ -587,10 +602,15 @@ export function useAtMentionMenu({
   const providerViewsRef = useRef(providerViews);
   providerViewsRef.current = providerViews;
 
-  const setMenu = useCallback((next: AtMentionMenuState | null) => {
-    stateRef.current = next;
-    setState(next);
-  }, []);
+  const setMenu = useCallback(
+    (next: SetStateAction<AtMentionMenuState | null>) => {
+      const resolved =
+        typeof next === 'function' ? next(stateRef.current) : next;
+      stateRef.current = resolved;
+      setState(resolved);
+    },
+    [],
+  );
 
   const clearPendingLoad = useCallback(() => {
     abortRef.current?.abort();
@@ -676,6 +696,7 @@ export function useAtMentionMenu({
       providerId: string,
       query: string,
       baseState: Omit<AtMentionMenuState, 'items' | 'loading'>,
+      options: { loadingAlreadySet?: boolean } = {},
     ) => {
       const provider = allProvidersRef.current.find(
         (item) => item.id === providerId,
@@ -697,18 +718,23 @@ export function useAtMentionMenu({
         query,
         baseState,
       );
-      setMenu({ ...baseState, items: previousItems, loading: true });
+      if (!options.loadingAlreadySet) {
+        setMenu({ ...baseState, items: previousItems, loading: true });
+      }
       provider
         .search({ query, signal: abort.signal })
         .then((items) => {
           if (abort.signal.aborted || requestIdRef.current !== requestId) {
             return;
           }
-          setMenu({
-            ...baseState,
-            items: items.map(sanitizeAtMentionItem).slice(0, 50),
-            selectedIndex: 0,
-            loading: false,
+          setMenu((prev) => {
+            if (!prev || prev.level !== 'items') return prev;
+            return {
+              ...prev,
+              items: items.map(sanitizeAtMentionItem).slice(0, 50),
+              selectedIndex: 0,
+              loading: false,
+            };
           });
         })
         .catch((error) => {
@@ -719,11 +745,14 @@ export function useAtMentionMenu({
             `[@mention] provider="${providerId}" query=<redacted> failed`,
             error,
           );
-          setMenu({
-            ...baseState,
-            items: [],
-            selectedIndex: 0,
-            loading: false,
+          setMenu((prev) => {
+            if (!prev || prev.level !== 'items') return prev;
+            return {
+              ...prev,
+              items: [],
+              selectedIndex: 0,
+              loading: false,
+            };
           });
         });
     },
@@ -749,7 +778,7 @@ export function useAtMentionMenu({
       setMenu({ ...baseState, items: previousItems, loading: true });
       searchTimerRef.current = setTimeout(() => {
         searchTimerRef.current = null;
-        loadItems(providerId, query, baseState);
+        loadItems(providerId, query, baseState, { loadingAlreadySet: true });
       }, SEARCH_DEBOUNCE_MS);
     },
     [getPreviousProviderItems, loadItems, setMenu],
@@ -760,6 +789,7 @@ export function useAtMentionMenu({
       serverName: string,
       query: string,
       baseState: Omit<AtMentionMenuState, 'items' | 'loading'>,
+      options: LoadMcpResourceOptions = {},
     ) => {
       const actions = workspaceActionsRef.current;
       const loadMcpResources = actions?.loadMcpResources;
@@ -783,9 +813,12 @@ export function useAtMentionMenu({
           ? stateRef.current.items
           : [];
       setMenu({ ...baseState, items: previousItems, loading: true });
-      isEnabledMcpServer(actions, serverName)
+      const enabledPromise = options.validateServer
+        ? isEnabledMcpServer(actions, serverName, abort.signal)
+        : Promise.resolve(true);
+      enabledPromise
         .then((enabled) => {
-          if (!enabled) {
+          if (!enabled || abort.signal.aborted) {
             return { resources: [] };
           }
           return loadMcpResources(serverName, { signal: abort.signal });
@@ -821,11 +854,14 @@ export function useAtMentionMenu({
             })
             .sort((a, b) => a.label.localeCompare(b.label))
             .slice(0, 50);
-          setMenu({
-            ...baseState,
-            items,
-            selectedIndex: 0,
-            loading: false,
+          setMenu((prev) => {
+            if (!prev || prev.level !== 'items') return prev;
+            return {
+              ...prev,
+              items,
+              selectedIndex: 0,
+              loading: false,
+            };
           });
         })
         .catch((error) => {
@@ -833,11 +869,14 @@ export function useAtMentionMenu({
             return;
           }
           console.warn('Failed to load @ MCP resources', error);
-          setMenu({
-            ...baseState,
-            items: [],
-            selectedIndex: 0,
-            loading: false,
+          setMenu((prev) => {
+            if (!prev || prev.level !== 'items') return prev;
+            return {
+              ...prev,
+              items: [],
+              selectedIndex: 0,
+              loading: false,
+            };
           });
         });
     },
@@ -849,6 +888,7 @@ export function useAtMentionMenu({
       serverName: string,
       query: string,
       baseState: Omit<AtMentionMenuState, 'items' | 'loading'>,
+      options: LoadMcpResourceOptions = {},
     ) => {
       if (searchTimerRef.current) {
         clearTimeout(searchTimerRef.current);
@@ -865,15 +905,14 @@ export function useAtMentionMenu({
       setMenu({ ...baseState, items: previousItems, loading: true });
       searchTimerRef.current = setTimeout(() => {
         searchTimerRef.current = null;
-        loadMcpResourceItems(serverName, query, baseState);
+        loadMcpResourceItems(serverName, query, baseState, options);
       }, SEARCH_DEBOUNCE_MS);
     },
     [loadMcpResourceItems, setMenu],
   );
 
   const refreshForView = useCallback(
-    (view: EditorView | null, options: RefreshAtMentionMenuOptions = {}) => {
-      void options;
+    (view: EditorView | null) => {
       if (disabledRef.current || shellModeRef.current) {
         close();
         return;
@@ -887,12 +926,15 @@ export function useAtMentionMenu({
       const keepItemsLevel =
         current?.level === 'items' &&
         current.from === parsed.from &&
+        (current.to === parsed.to ||
+          (current.inputMode === 'search' && parsed.to >= current.to)) &&
         current.selectedProviderId !== undefined;
       if (keepItemsLevel) {
         setMenu({
           ...current,
           from: parsed.from,
           to: parsed.to,
+          query: current.query,
           providers: providerViewsRef.current,
         });
         return;
@@ -917,19 +959,24 @@ export function useAtMentionMenu({
             insertedReference.serverName
           ) {
             lastSelectedMcpServerNameRef.current = insertedReference.serverName;
-            scheduleLoadMcpResourceItems(insertedReference.serverName, '', {
-              from: parsed.from,
-              to: parsed.to,
-              query: '',
-              level: 'items',
-              selectedProviderId: MCP_RESOURCES_PROVIDER_ID,
-              selectedIndex: 0,
-              providers: providerViewsRef.current,
-              itemMode: 'mcpResources',
-              mcpServerName: insertedReference.serverName,
-              fileDirectory: undefined,
-              inputMode: 'context',
-            });
+            scheduleLoadMcpResourceItems(
+              insertedReference.serverName,
+              '',
+              {
+                from: parsed.from,
+                to: parsed.to,
+                query: '',
+                level: 'items',
+                selectedProviderId: MCP_RESOURCES_PROVIDER_ID,
+                selectedIndex: 0,
+                providers: providerViewsRef.current,
+                itemMode: 'mcpResources',
+                mcpServerName: insertedReference.serverName,
+                fileDirectory: undefined,
+                inputMode: 'context',
+              },
+              { validateServer: true },
+            );
             return;
           }
           scheduleLoadItems(insertedReference.providerId, '', {
@@ -1134,6 +1181,7 @@ export function useAtMentionMenu({
       level: 'categories',
       selectedProviderId: undefined,
       selectedIndex: 0,
+      query: '',
       items: [],
       loading: false,
       itemMode: undefined,
@@ -1191,6 +1239,7 @@ export function useAtMentionMenu({
         });
         return true;
       }
+      if (current.loading && index === undefined) return true;
       const insert =
         item.insertText ?? `@${escapeAtReferenceText(item.label)} `;
       const docLength = view.state.doc.length;

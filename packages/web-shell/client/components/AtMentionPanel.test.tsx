@@ -127,6 +127,9 @@ describe('AtMentionPanel', () => {
     const input = document.body.querySelector('input')!;
     expect(input.getAttribute('aria-label')).toBe('Search');
     expect(input.getAttribute('aria-controls')).toBe('at-mention-listbox');
+    act(() => {
+      input.focus();
+    });
     expect(input.getAttribute('aria-activedescendant')).toBe(
       'at-mention-option-0',
     );
@@ -149,6 +152,22 @@ describe('AtMentionPanel', () => {
     expect(onAccept).toHaveBeenCalledTimes(2);
     expect(onBack).toHaveBeenCalledOnce();
     expect(onSelect).toHaveBeenCalledWith(0);
+  });
+
+  it('dispatches search input changes', () => {
+    const onSearch = vi.fn();
+    mount(itemsMenu(), { onSearch });
+
+    const input = document.body.querySelector('input')!;
+    act(() => {
+      Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        'value',
+      )?.set?.call(input, 'read');
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+    });
+
+    expect(onSearch).toHaveBeenCalledWith('read');
   });
 
   it('focuses search when explicitly requested', () => {

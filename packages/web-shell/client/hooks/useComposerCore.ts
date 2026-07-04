@@ -957,7 +957,7 @@ export function useComposerCore(
     workspaceActionsRef,
     providers: atProviders,
   });
-  const closeAtMenu = atMenu.close;
+  const closeAtMenuState = atMenu.close;
   const refreshAtMenuForView = atMenu.refreshForView;
   const toggleShellMode = useCallback(() => {
     if (followupStateRef.current?.isVisible) {
@@ -1005,6 +1005,31 @@ export function useComposerCore(
     slashMenuRef.current = next;
     setSlashMenuState(next);
   }, []);
+
+  const clearAutoAtTriggerIfIntact = useCallback(() => {
+    const trigger = autoTriggerRef.current;
+    const view = viewRef.current;
+    if (!trigger || trigger.text !== '@' || !view) return;
+    const doc = view.state.doc;
+    if (
+      doc.length === trigger.from + trigger.text.length &&
+      doc.sliceString(trigger.from) === trigger.text
+    ) {
+      view.dispatch({
+        changes: {
+          from: trigger.from,
+          to: trigger.from + trigger.text.length,
+          insert: '',
+        },
+      });
+    }
+    autoTriggerRef.current = null;
+  }, []);
+
+  const closeAtMenu = useCallback(() => {
+    clearAutoAtTriggerIfIntact();
+    closeAtMenuState();
+  }, [clearAutoAtTriggerIfIntact, closeAtMenuState]);
 
   const refreshSlashMenuForView = useCallback(
     (view: EditorView | null, preferredIndex?: number) => {
@@ -1703,7 +1728,7 @@ export function useComposerCore(
         if (historyBrowseActiveRef.current) {
           closeAtMenu();
         } else {
-          refreshAtMenuForView(update.view, { userEdited });
+          refreshAtMenuForView(update.view);
         }
       }
     });
@@ -2685,7 +2710,7 @@ export function useComposerCore(
     selectSlashCompletion,
     acceptSlashCompletion,
     atMenu: atMenu.state,
-    closeAtMenu: atMenu.close,
+    closeAtMenu,
     selectAtCompletion: atMenu.select,
     acceptAtCompletion: atMenu.accept,
     enterAtCategory: atMenu.enterCategory,
