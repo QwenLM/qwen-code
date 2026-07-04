@@ -34,6 +34,24 @@ describe('EventBus', () => {
     expect(bus.lastEventId).toBe(2);
   });
 
+  it('rejects invalid maxQueuedBytes options', () => {
+    expect(
+      () => new EventBus(100, undefined, undefined, { maxQueuedBytes: 0 }),
+    ).toThrow(TypeError);
+    expect(
+      () =>
+        new EventBus(100, undefined, undefined, {
+          maxQueuedBytes: Number.POSITIVE_INFINITY,
+        }),
+    ).toThrow(TypeError);
+    expect(
+      () =>
+        new EventBus(100, undefined, undefined, {
+          maxQueuedBytes: Number.MAX_SAFE_INTEGER + 1,
+        }),
+    ).toThrow(TypeError);
+  });
+
   it('stamps published events with serverTimestamp metadata', () => {
     const bus = new EventBus();
     const before = Date.now();
@@ -245,6 +263,184 @@ describe('EventBus', () => {
     for (let i = 8; i <= 13; i++) bus.publish({ type: 'foo', data: i });
     const secondEpisode: BridgeEvent[] = [];
     for (let i = 0; i < 7; i++) secondEpisode.push((await it.next()).value);
+    expect(
+      secondEpisode.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+    abort.abort();
+  });
+
+  it('evicts a slow subscriber when live queued bytes overflow', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1000),
+      _meta: { serverTimestamp: 1 },
+    });
+    bus.publish({
+      type: 'foo',
+      data: 'y'.repeat(1000),
+      _meta: { serverTimestamp: 2 },
+    });
+
+    const collected: BridgeEvent[] = [];
+    for await (const e of iter) collected.push(e);
+
+    const live = collected.filter((e) => e.type === 'foo');
+    const evicted = collected.find((e) => e.type === 'client_evicted');
+    expect(live).toHaveLength(1);
+    expect(evicted).toBeDefined();
+    expect(evicted!.id).toBeUndefined();
+    expect(evicted!.data).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      droppedAfter: 2,
+      queueSize: 1,
+      maxQueued: 100,
+      maxQueuedBytes: 1200,
+    });
+    expect(
+      (evicted!.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThan(0);
+    expect(
+      (evicted!.data as { eventBytes?: number }).eventBytes,
+    ).toBeGreaterThan(0);
+    expect(bus.subscriberCount).toBe(0);
+    abort.abort();
+  });
+
+  it('allows one oversized live event on an empty queue before byte eviction', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 256,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1024),
+      _meta: { serverTimestamp: 1 },
+    });
+    bus.publish({
+      type: 'foo',
+      data: 'tail',
+      _meta: { serverTimestamp: 2 },
+    });
+
+    const collected: BridgeEvent[] = [];
+    for await (const e of iter) collected.push(e);
+
+    expect(collected[0]?.type).toBe('foo');
+    const warning = collected.find((e) => e.type === 'slow_client_warning');
+    expect(warning).toBeDefined();
+    expect(warning!.id).toBeUndefined();
+    expect(warning!.data).toMatchObject({
+      queueSize: 1,
+      maxQueued: 100,
+      maxQueuedBytes: 256,
+      threshold: 'bytes',
+      lastEventId: 1,
+    });
+    expect(
+      (warning!.data as { queuedBytes?: number }).queuedBytes,
+    ).toBeGreaterThan(256);
+
+    const evicted = collected.find((e) => e.type === 'client_evicted');
+    expect(evicted?.data).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      droppedAfter: 2,
+    });
+    abort.abort();
+  });
+
+  it('does not size events that are delivered directly to a waiting subscriber', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+    const next = it.next();
+    const circular: Record<string, unknown> = {};
+    circular['self'] = circular;
+
+    expect(() => bus.publish({ type: 'foo', data: circular })).not.toThrow();
+
+    const delivered = await next;
+    expect(delivered.done).toBe(false);
+    expect(delivered.value.type).toBe('foo');
+    await it.return?.();
+    abort.abort();
+  });
+
+  it('does not count replay frames toward queued bytes', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 64,
+    });
+    for (let i = 1; i <= 3; i++) {
+      bus.publish({
+        type: 'replay',
+        data: 'x'.repeat(512),
+        _meta: { serverTimestamp: i },
+      });
+    }
+
+    const abort = new AbortController();
+    const iter = bus.subscribe({
+      lastEventId: 0,
+      maxQueued: 2,
+      signal: abort.signal,
+    });
+    bus.publish({
+      type: 'live',
+      data: 'y'.repeat(512),
+      _meta: { serverTimestamp: 4 },
+    });
+
+    const events: BridgeEvent[] = [];
+    for await (const e of iter) {
+      events.push(e);
+      if (events.length === 5) break;
+    }
+
+    expect(events.find((e) => e.type === 'client_evicted')).toBeUndefined();
+    expect(events.filter((e) => e.type === 'replay')).toHaveLength(3);
+    expect(events.find((e) => e.type === 'replay_complete')).toBeDefined();
+    expect(events.at(-1)?.type).toBe('live');
+    abort.abort();
+  });
+
+  it('rearms byte-based slow_client_warning after queued bytes drain', async () => {
+    const bus = new EventBus(100, undefined, undefined, {
+      maxQueuedBytes: 1200,
+    });
+    const abort = new AbortController();
+    const iter = bus.subscribe({ maxQueued: 100, signal: abort.signal });
+    const it = iter[Symbol.asyncIterator]();
+
+    bus.publish({
+      type: 'foo',
+      data: 'x'.repeat(1000),
+      _meta: { serverTimestamp: 1 },
+    });
+    const firstEpisode: BridgeEvent[] = [];
+    firstEpisode.push((await it.next()).value);
+    firstEpisode.push((await it.next()).value);
+    expect(
+      firstEpisode.filter((e) => e.type === 'slow_client_warning'),
+    ).toHaveLength(1);
+
+    bus.publish({
+      type: 'foo',
+      data: 'y'.repeat(1000),
+      _meta: { serverTimestamp: 2 },
+    });
+    const secondEpisode: BridgeEvent[] = [];
+    secondEpisode.push((await it.next()).value);
+    secondEpisode.push((await it.next()).value);
     expect(
       secondEpisode.filter((e) => e.type === 'slow_client_warning'),
     ).toHaveLength(1);

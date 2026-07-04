@@ -924,7 +924,14 @@ describe('daemon event schema', () => {
       // No `id` on synthetic frames (matches the daemon's emit shape).
       v: 1,
       type: 'slow_client_warning',
-      data: { queueSize: 192, maxQueued: 256, lastEventId: 42 },
+      data: {
+        queueSize: 192,
+        maxQueued: 256,
+        lastEventId: 42,
+        queuedBytes: 1_800_000,
+        maxQueuedBytes: 2_097_152,
+        threshold: 'bytes',
+      },
     } satisfies DaemonEvent;
     const known = asKnownDaemonEvent(warning);
     expect(known?.type).toBe('slow_client_warning');
@@ -967,6 +974,34 @@ describe('daemon event schema', () => {
         },
       }),
     ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: {
+          queueSize: 192,
+          maxQueued: 256,
+          lastEventId: 42,
+          queuedBytes: Number.NaN,
+          maxQueuedBytes: 2_097_152,
+          threshold: 'bytes',
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      asKnownDaemonEvent({
+        v: 1,
+        type: 'slow_client_warning',
+        data: {
+          queueSize: 192,
+          maxQueued: 256,
+          lastEventId: 42,
+          queuedBytes: 1_800_000,
+          maxQueuedBytes: 2_097_152,
+          threshold: 'bogus',
+        },
+      }),
+    ).toBeUndefined();
   });
 
   it('reduces slow_client_warning into the view state without ending the stream', () => {
@@ -987,7 +1022,14 @@ describe('daemon event schema', () => {
       {
         v: 1,
         type: 'slow_client_warning',
-        data: { queueSize: 220, maxQueued: 256, lastEventId: 5 },
+        data: {
+          queueSize: 220,
+          maxQueued: 256,
+          lastEventId: 5,
+          queuedBytes: 1_900_000,
+          maxQueuedBytes: 2_097_152,
+          threshold: 'frames_and_bytes',
+        },
       },
     ]);
 
@@ -997,6 +1039,9 @@ describe('daemon event schema', () => {
       queueSize: 220,
       maxQueued: 256,
       lastEventId: 5,
+      queuedBytes: 1_900_000,
+      maxQueuedBytes: 2_097_152,
+      threshold: 'frames_and_bytes',
     });
     // Warning is non-terminal — stream is still alive, no
     // terminalEvent recorded.
@@ -1005,6 +1050,34 @@ describe('daemon event schema', () => {
     // Warnings carry no `id`, so `lastEventId` stays at the highest
     // id observed (the original session_update at id=1).
     expect(state.lastEventId).toBe(1);
+  });
+
+  it('treats byte-overflow client_evicted as terminal', () => {
+    const state = reduceDaemonSessionEvents([
+      {
+        id: 1,
+        v: 1,
+        type: 'client_evicted',
+        data: {
+          reason: 'queue_bytes_overflow',
+          droppedAfter: 8,
+          queueSize: 1,
+          maxQueued: 256,
+          queuedBytes: 1_900_000,
+          maxQueuedBytes: 2_097_152,
+          eventBytes: 300_000,
+        },
+      },
+    ]);
+
+    expect(state.alive).toBe(false);
+    expect(state.terminalEvent?.type).toBe('client_evicted');
+    expect(state.terminalEvent?.data).toMatchObject({
+      reason: 'queue_bytes_overflow',
+      queuedBytes: 1_900_000,
+      maxQueuedBytes: 2_097_152,
+      eventBytes: 300_000,
+    });
   });
 
   // PR 14b: MCP guardrail push events. Mirrors the slow_client_warning

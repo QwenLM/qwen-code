@@ -2,7 +2,7 @@
 
 ## Overview
 
-`EventBus` (`packages/acp-bridge/src/eventBus.ts`) is the per-session in-memory pub/sub that feeds the daemon's `GET /session/:id/events` SSE route. It assigns each event a monotonic id, buffers recent events in a bounded ring for `Last-Event-ID` replay, fans published events out to all subscribers, applies per-subscriber backpressure (warning at 75% queue fill, eviction at the cap), and emits two synthetic terminal frames (`client_evicted`, `slow_client_warning`) that the SDK treats as first-class events but the bus marks **without an `id`** so they do not consume a slot in the per-session sequence.
+`EventBus` (`packages/acp-bridge/src/eventBus.ts`) is the per-session in-memory pub/sub that feeds the daemon's `GET /session/:id/events` SSE route. It assigns each event a monotonic id, buffers recent events in a bounded ring for `Last-Event-ID` replay, fans published events out to all subscribers, applies per-subscriber backpressure (warning at 75% live queue fill / serialized-byte fill, eviction at the cap), and emits subscriber-local synthetic frames (`client_evicted`, `slow_client_warning`) that the SDK treats as first-class events but the bus marks **without an `id`** so they do not consume a slot in the per-session sequence.
 
 `EventBus` is currently package-private to `acp-bridge` and consumed by the bridge factory through one closed-over instance per session. A future refactor (called out at line 150–159 of `eventBus.ts`) will lift it to a top-level building block so channels, dual-output, and future WebSocket transports can subscribe through the same bus instead of running parallel streams.
 
@@ -11,8 +11,8 @@
 - Assign per-session monotonic event ids starting at 1.
 - Buffer the last `ringSize` events for replay on subscribe-with-`lastEventId`.
 - Fan published events out to ≤ `maxSubscribers` concurrent subscribers.
-- Apply per-subscriber bounded queues; drop overflowing subscribers with a synthetic `client_evicted` terminal frame.
-- Emit `slow_client_warning` once per overflow episode at 75% queue fill, with 37.5% hysteresis to prevent repeated warnings.
+- Apply per-subscriber bounded queues; drop subscribers that overflow the live frame cap or live serialized-byte cap with a synthetic `client_evicted` terminal frame.
+- Emit `slow_client_warning` once per overflow episode at 75% live frame fill or live serialized-byte fill, with 37.5% hysteresis to prevent repeated warnings.
 - Tear subscriptions down promptly on `AbortSignal.abort()`.
 - Cleanly close every subscriber on bus close (e.g. session teardown).
 - Never throw from `publish` (the contract is "publish is always safe to call").
@@ -23,9 +23,10 @@
 | -------------------------------------- | ----------- | -------------------------------------------------------------------------------------------------- |
 | `EVENT_SCHEMA_VERSION`                 | `1`         | Stamped on every `BridgeEvent.v`; bumped on breaking frame changes.                                |
 | `DEFAULT_RING_SIZE`                    | `8000`      | Per-session replay ring. Operator override via `--event-ring-size`.                                |
-| `DEFAULT_MAX_QUEUED`                   | `256`       | Per-subscriber backlog cap.                                                                        |
+| `DEFAULT_MAX_QUEUED`                   | `256`       | Per-subscriber live frame backlog cap.                                                             |
+| `DEFAULT_MAX_QUEUED_BYTES`             | `2 MiB`     | Per-subscriber live serialized-byte backlog cap.                                                   |
 | `DEFAULT_MAX_SUBSCRIBERS`              | `64`        | Per-session subscriber cap.                                                                        |
-| `WARN_THRESHOLD_RATIO`                 | `0.75`      | `slow_client_warning` trigger fraction of `maxQueued`.                                             |
+| `WARN_THRESHOLD_RATIO`                 | `0.75`      | `slow_client_warning` trigger fraction of `maxQueued` or `maxQueuedBytes`.                         |
 | `WARN_RESET_RATIO`                     | `0.375`     | Hysteresis re-arm fraction.                                                                        |
 | `MAX_EVENT_RING_SIZE` (in `bridge.ts`) | `1_000_000` | Soft upper bound on `BridgeOptions.eventRingSize` to catch out-of-memory failures caused by typos. |
 
@@ -48,20 +49,23 @@ interface BridgeEvent {
 interface SubscribeOptions {
   lastEventId?: number; // replay from after this id (Last-Event-ID resume)
   signal?: AbortSignal; // aborts the subscription promptly
-  maxQueued?: number; // per-subscriber backlog cap; default 256
+  maxQueued?: number; // per-subscriber live frame backlog cap; default 256
 }
 ```
 
 `subscribe()` returns an `AsyncIterable<BridgeEvent>`. The SSE route consumes it with `for await`. Registration is **synchronous** — by the time `subscribe()` returns, the subscriber is already attached, so a `publish()` that races with the consumer's first `next()` is still delivered.
 
+The live byte cap is a bus-level constructor option for tests / embedded callers only. It is not exposed as an HTTP query parameter, SDK option, CLI flag, or capability because clients must not be able to raise the daemon's memory budget.
+
 ### `BoundedAsyncQueue`
 
 The per-subscriber queue. Two pivotal behaviors:
 
-- **Live cap is on live items only.** Items inserted via `forcePush()` carry a `forced: true` tag per entry and never count toward `maxSize`. This lets the `Last-Event-ID` replay path force-push hundreds of historical frames into a fresh subscriber without immediately tripping the live cap and evicting the just-resumed subscriber.
-- **`liveCount` is maintained as a field**, not derived from `forcedInBuf` position. The earlier position-based heuristic broke when `slow_client_warning` started force-pushing mid-stream (warnings go to the BACK of the queue, not the front like replays). Per-entry `forced` tags are position-independent.
+- **Live caps are on live items only.** Items inserted via `forcePush()` carry a `forced: true` tag per entry and never count toward `liveCount` or `liveBytes`. This lets the `Last-Event-ID` replay path force-push hundreds of historical frames into a fresh subscriber without immediately tripping the live caps and evicting the just-resumed subscriber.
+- **`liveCount` and `liveBytes` are maintained as fields**, not derived from `forcedInBuf` position. The earlier position-based heuristic broke when `slow_client_warning` started force-pushing mid-stream (warnings go to the BACK of the queue, not the front like replays). Per-entry `forced` tags are position-independent; live entries also store their serialized byte estimate so draining the queue decrements `liveBytes`.
+- **Serialized bytes are estimated lazily.** `push()` computes `Buffer.byteLength(JSON.stringify(event), 'utf8')` only when the event will be buffered. If a subscriber is already awaiting `next()`, the event is delivered directly and no byte estimate is computed. If serialization fails, the estimate fails closed to a very large value while preserving `publish()`'s never-throws contract.
 
-`push(value)` returns `false` (instead of blocking or throwing) when the live backlog is at the cap — the bus uses that signal to evict the subscriber. `forcePush(value)` bypasses the cap. `close({drain?: boolean})` drains pending items by default; abort-path passes `drain: false` to drop them immediately.
+`push(value, getBytes)` returns an accepted / rejected result instead of blocking or throwing. Frame overflow rejects with `queue_overflow`; byte overflow rejects with `queue_bytes_overflow`. A single oversized event is allowed when the live queue is empty, but a second live event behind it evicts the subscriber. `forcePush(value)` bypasses both caps. `close({drain?: boolean})` drains pending items by default; abort-path passes `drain: false` to drop them immediately.
 
 ## Workflow
 
@@ -76,12 +80,12 @@ flowchart TD
     PR --> FAN["snapshot subscribers, for each sub:"]
     FAN --> EVCK{"sub.evicted?"}
     EVCK -->|yes| NEXT[next subscriber]
-    EVCK -->|no| PUSH["sub.queue.push(event)"]
+    EVCK -->|no| PUSH["sub.queue.push(event, lazy getBytes)"]
     PUSH --> OK{"accepted?"}
     OK -->|no| EVICT["mark evicted; force-push client_evicted; queue.close; sub.dispose"]
-    OK -->|yes| WARN{"!warned && liveSize >= warnThreshold?"}
+    OK -->|yes| WARN{"!warned && frame/byte warn threshold reached?"}
     WARN -->|yes| FW["force-push slow_client_warning; warned = true"]
-    WARN -->|no| RES{"warned && liveSize <= warnResetThreshold?"}
+    WARN -->|no| RES{"warned && frame/byte backlog below reset?"}
     RES -->|yes| RA["warned = false (hysteresis re-arm)"]
     RES -->|no| NEXT
 ```
@@ -156,10 +160,10 @@ Critical contracts (and what the #4360 review corrected):
 
 ### Eviction terminal flow
 
-When a subscriber's live backlog has been at `maxQueued` and the next `push()` returns `false`:
+When a subscriber's live backlog reaches a cap and the next `push()` rejects:
 
 1. Mark `sub.evicted = true`.
-2. Construct `client_evicted` frame **without `id`** — `{ v: 1, type: 'client_evicted', data: { reason: 'queue_overflow', droppedAfter: <last delivered id> } }`.
+2. Construct `client_evicted` frame **without `id`**. Frame overflow uses `reason: 'queue_overflow'`; byte overflow uses `reason: 'queue_bytes_overflow'`. Both include `queueSize`, `maxQueued`, `queuedBytes`, and `maxQueuedBytes`; byte overflow also includes `eventBytes`.
 3. `queue.forcePush(evictionFrame)` so the consumer iterator sees one terminal frame.
 4. `queue.close()` so iteration unwinds after the terminal frame.
 5. Call `sub.dispose()` — removes from `subs` and detaches the `AbortSignal` listener; without this cleanup, stalled consumers' closures remain live until `AbortSignal` garbage collection.
@@ -191,6 +195,7 @@ Already-aborted signals at subscribe time call `onAbort()` synchronously before 
 
 - `--event-ring-size <n>` — per-session ring depth; soft-capped at `MAX_EVENT_RING_SIZE = 1_000_000`.
 - Subscriber `?maxQueued=N` query parameter on `GET /session/:id/events`, range `[16, 2048]`. SDK clients pre-flight `caps.features.slow_client_warning` before opting in.
+- `EventBus(..., { maxQueuedBytes })` constructor option exists only for tests / embedded callers. Default is 2 MiB and invalid values throw `TypeError`. There is deliberately no `?maxQueuedBytes` query parameter.
 - `BridgeOptions.eventRingSize` (overrides daemon default for embedded usage).
 - Capability tags: `session_events`, `slow_client_warning`, `typed_event_schema`.
 
