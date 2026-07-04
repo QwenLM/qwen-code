@@ -5234,7 +5234,7 @@ describe('GeminiChat', async () => {
       expect(fallbackGenerateContentStream).not.toHaveBeenCalled();
     });
 
-    it('rolls back primary partial tool calls when all fallback entries are skipped', async () => {
+    it('preserves primary partial tool calls when fallback is skipped after output', async () => {
       vi.useFakeTimers();
       try {
         vi.mocked(mockConfig.getContentGeneratorConfig).mockReturnValue({
@@ -5243,6 +5243,10 @@ describe('GeminiChat', async () => {
           maxRetries: 0,
         });
         vi.mocked(mockConfig.getModelFallbacks).mockReturnValue(['test-model']);
+        const resolveForModel = vi.fn();
+        vi.mocked(mockConfig.getBaseLlmClient).mockReturnValue({
+          resolveForModel,
+        } as unknown as ReturnType<typeof mockConfig.getBaseLlmClient>);
 
         const capacityError = new StreamContentError(
           '{"error":{"code":"429","message":"Throttling: TPM(1/1)"}}',
@@ -5287,11 +5291,12 @@ describe('GeminiChat', async () => {
           await expect(collecting).rejects.toBe(capacityError);
         await vi.advanceTimersByTimeAsync(0);
         await resultPromise;
-        expect(
-          chat
-            .getHistory()
-            .some((entry) => entry.parts?.some((part) => part.functionCall)),
-        ).toBe(false);
+        expect(resolveForModel).not.toHaveBeenCalled();
+        const history = chat.getHistory();
+        expect(history).toHaveLength(2);
+        expect(history[0]!.role).toBe('user');
+        expect(history[1]!.role).toBe('model');
+        expect(history[1]!.parts?.some((part) => part.functionCall)).toBe(true);
       } finally {
         vi.useRealTimers();
       }

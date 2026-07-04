@@ -2748,10 +2748,18 @@ export class GeminiChat {
                   resolvedFallbackModel = resolved.model;
                 } catch (resolveError) {
                   if (isAbortError(resolveError)) throw resolveError;
+                  const resolveErrorMessage =
+                    resolveError instanceof Error
+                      ? resolveError.message
+                      : String(resolveError);
+                  fallbackFailures.push(
+                    `${fallbackModelId} (resolve-failed: ${resolveErrorMessage})`,
+                  );
+                  lastError = resolveError;
                   debugLogger.warn(
                     `[FALLBACK] Failed to resolve fallback model ` +
                       `"${fallbackModelId}": ` +
-                      `${resolveError instanceof Error ? resolveError.message : String(resolveError)}. ` +
+                      `${resolveErrorMessage}. ` +
                       `Skipping to next fallback.`,
                   );
                   continue;
@@ -2814,7 +2822,6 @@ export class GeminiChat {
                   break;
                 } catch (fallbackError) {
                   if (isAbortError(fallbackError)) throw fallbackError;
-                  self.popPendingPartialAssistantTurn();
                   if (fallbackError instanceof FallbackStreamOutputError) {
                     lastError = new Error(
                       `Primary model "${model}" failed ` +
@@ -2911,7 +2918,6 @@ export class GeminiChat {
             !isUnattendedMode() &&
             streamYieldedAnyChunk
           ) {
-            self.popPendingPartialAssistantTurn();
             debugLogger.warn(
               '[FALLBACK] Fallback chain skipped because the primary model ' +
                 'already emitted user-visible output.',
