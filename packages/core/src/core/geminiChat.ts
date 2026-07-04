@@ -178,20 +178,6 @@ function isCompressionFailureStatus(status: CompressionStatus): boolean {
   );
 }
 
-class FallbackStreamOutputError extends Error {
-  constructor(
-    readonly model: string,
-    readonly originalError: unknown,
-  ) {
-    super(
-      `Fallback model "${model}" failed after emitting output; ` +
-        'not retrying another fallback.',
-      { cause: originalError },
-    );
-    this.name = 'FallbackStreamOutputError';
-  }
-}
-
 function shouldStopAfterHardRescue(
   shouldForceFromHard: boolean,
   hardLimit: number,
@@ -2680,7 +2666,7 @@ export class GeminiChat {
           //   (QWEN_CODE_UNATTENDED_RETRY) — persistent mode retries the primary
           //   model indefinitely by design.
           // - Maximum 3 fallback transitions (capped by config normalization).
-          // - Fallback is only for capacity/availability errors (429/503/529/5xx),
+          // - Fallback is only for capacity/availability errors (429/503/529),
           //   not for auth/billing/client errors.
           const fallbackModels = self.config.getModelFallbacks();
 
@@ -2698,28 +2684,6 @@ export class GeminiChat {
               let fallbackSucceeded = false;
               let fallbackIndex = 0;
               let currentModel = model;
-              const initialFallbackClassification = currentErrorClassification;
-              const primaryError = lastError;
-              let resolvedPrimaryModel = model;
-              try {
-                resolvedPrimaryModel = (
-                  await self.config
-                    .getBaseLlmClient()
-                    .resolveForModel(model, { failClosed: true })
-                ).model;
-              } catch (resolveError) {
-                if (isAbortError(resolveError)) throw resolveError;
-                debugLogger.warn(
-                  `[FALLBACK] Failed to resolve primary model ` +
-                    `"${model}" for fallback de-duplication: ` +
-                    `${resolveError instanceof Error ? resolveError.message : String(resolveError)}.`,
-                );
-              }
-              const attemptedFallbackModels = new Set<string>([
-                model,
-                resolvedPrimaryModel,
-              ]);
-              const fallbackFailures: string[] = [];
 
               for (const fallbackModelId of fallbackModels) {
                 // Skip fallback models that match the current/primary model
@@ -2730,13 +2694,6 @@ export class GeminiChat {
                   debugLogger.warn(
                     `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
                       `same as current model.`,
-                  );
-                  continue;
-                }
-                if (attemptedFallbackModels.has(fallbackModelId)) {
-                  debugLogger.warn(
-                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
-                      `already attempted.`,
                   );
                   continue;
                 }
@@ -2760,29 +2717,16 @@ export class GeminiChat {
                     resolveError instanceof Error
                       ? resolveError.message
                       : String(resolveError);
-                  fallbackFailures.push(
-                    `${fallbackModelId} (resolve-failed: ${resolveErrorMessage})`,
-                  );
-                  attemptedFallbackModels.add(fallbackModelId);
                   lastError = resolveError;
                   debugLogger.warn(
                     `[FALLBACK] Failed to resolve fallback model ` +
                       `"${fallbackModelId}": ` +
                       `${resolveErrorMessage}. ` +
-                      `Skipping to next fallback.`,
+                      `Stopping fallback chain.`,
                   );
-                  continue;
-                }
-
-                if (attemptedFallbackModels.has(resolvedFallbackModel)) {
-                  debugLogger.warn(
-                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
-                      `resolved to already attempted model "${resolvedFallbackModel}".`,
-                  );
-                  continue;
+                  break;
                 }
                 fallbackIndex++;
-                attemptedFallbackModels.add(resolvedFallbackModel);
 
                 debugLogger.warn(
                   `[FALLBACK] Model "${currentModel}" exhausted retries ` +
@@ -2831,23 +2775,6 @@ export class GeminiChat {
                   return;
                 } catch (fallbackError) {
                   if (isAbortError(fallbackError)) throw fallbackError;
-                  if (fallbackError instanceof FallbackStreamOutputError) {
-                    lastError = new Error(
-                      `Primary model "${model}" failed ` +
-                        `(${initialFallbackClassification.reason}); ` +
-                        `fallback "${resolvedFallbackModel}" failed after ` +
-                        `emitting output, so remaining fallbacks were not ` +
-                        `attempted.`,
-                      { cause: fallbackError.originalError },
-                    );
-                    debugLogger.warn(
-                      `[FALLBACK] Not trying remaining fallbacks after ` +
-                        `"${resolvedFallbackModel}" emitted output. Retrying ` +
-                        `would duplicate user-visible chunks and can orphan ` +
-                        `NDJSON tool_use blocks.`,
-                    );
-                    break;
-                  }
 
                   // Classify the fallback error to decide whether to continue
                   // to the next fallback or give up
@@ -2862,9 +2789,6 @@ export class GeminiChat {
                   const canTryNextFallback = isFallbackEligible(
                     fallbackClassification,
                   );
-                  fallbackFailures.push(
-                    `${resolvedFallbackModel} (${fallbackClassification.reason})`,
-                  );
                   debugLogger.warn(
                     `[FALLBACK] Fallback model "${resolvedFallbackModel}" also ` +
                       `failed (reason: ${fallbackClassification.reason}, ` +
@@ -2874,17 +2798,11 @@ export class GeminiChat {
 
                   currentModel = resolvedFallbackModel;
                   currentErrorClassification = fallbackClassification;
+                  lastError = fallbackError;
 
                   // Only continue to next fallback if this error is also
                   // fallback-eligible. Auth/client errors should fail immediately.
                   if (!canTryNextFallback) {
-                    lastError = new Error(
-                      `Primary model "${model}" failed ` +
-                        `(${initialFallbackClassification.reason}); ` +
-                        `fallback "${resolvedFallbackModel}" also failed ` +
-                        `(${fallbackClassification.reason}).`,
-                      { cause: fallbackError },
-                    );
                     debugLogger.warn(
                       `[FALLBACK] Error from "${resolvedFallbackModel}" is not ` +
                         `fallback-eligible (${fallbackClassification.reason}). ` +
@@ -2892,23 +2810,11 @@ export class GeminiChat {
                     );
                     break;
                   }
-                  lastError = fallbackError;
                 }
               }
 
               if (!fallbackSucceeded) {
                 self.popPendingPartialAssistantTurn();
-                if (fallbackFailures.length > 0 && lastError) {
-                  // Preserve the original capacity error as the root cause
-                  // so debuggers can trace back to what triggered fallback.
-                  lastError = new Error(
-                    `Primary model "${model}" failed ` +
-                      `(${initialFallbackClassification.reason}); ` +
-                      `fallback chain failed after trying: ` +
-                      `${fallbackFailures.join(', ')}.`,
-                    { cause: primaryError },
-                  );
-                }
                 debugLogger.warn(
                   '[FALLBACK] Fallback chain exhausted without success. ' +
                     'Throwing last error.',
@@ -3066,29 +2972,16 @@ export class GeminiChat {
     retryAuthType?: string,
     retryErrorCodes?: readonly number[],
   ): AsyncGenerator<StreamEvent> {
-    let streamYieldedChunk = false;
-    try {
-      const stream = await this.makeApiCallAndProcessStream(
-        model,
-        requestContents,
-        params,
-        prompt_id,
-        { contentGenerator, retryAuthType, retryErrorCodes },
-      );
+    const stream = await this.makeApiCallAndProcessStream(
+      model,
+      requestContents,
+      params,
+      prompt_id,
+      { contentGenerator, retryAuthType, retryErrorCodes },
+    );
 
-      for await (const chunk of stream) {
-        streamYieldedChunk = true;
-        yield { type: StreamEventType.CHUNK, value: chunk };
-      }
-    } catch (error) {
-      if (isAbortError(error)) throw error;
-      if (streamYieldedChunk) {
-        this.popPendingPartialAssistantTurn();
-        // Once fallback output has reached callers, moving to another fallback
-        // would replay visible content and can orphan NDJSON tool_use blocks.
-        throw new FallbackStreamOutputError(model, error);
-      }
-      throw error;
+    for await (const chunk of stream) {
+      yield { type: StreamEventType.CHUNK, value: chunk };
     }
   }
 

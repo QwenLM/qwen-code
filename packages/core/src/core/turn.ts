@@ -475,7 +475,6 @@ export class Turn {
           this.pendingToolCalls.length = 0;
           this.pendingCitations.clear();
           this.finishReason = undefined;
-          this.currentResponseId = undefined;
           yield {
             type: GeminiEventType.Retry,
             retryInfo: streamEvent.retryInfo,

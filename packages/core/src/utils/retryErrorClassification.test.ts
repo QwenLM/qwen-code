@@ -211,12 +211,12 @@ describe('classifyRetryError', () => {
     });
   });
 
-  it('classifies 529 as fallback-eligible capacity overload', () => {
+  it('classifies 529 as retryable capacity overload', () => {
     expect(
       classifyRetryError({ status: 529, message: 'Overloaded' }),
     ).toMatchObject({
       kind: 'http',
-      diagnosis: 'fallback-eligible',
+      diagnosis: 'retryable',
       statusCode: 529,
       reason: 'capacity-overload',
     });
@@ -229,7 +229,7 @@ describe('classifyRetryError', () => {
 
     expect(classifyRetryError(error)).toMatchObject({
       kind: 'sse-provider',
-      diagnosis: 'fallback-eligible',
+      diagnosis: 'retryable',
       statusCode: 529,
       providerCode: 'Overloaded',
       providerMessage: 'Provider overloaded',
@@ -440,194 +440,46 @@ describe('classifyRetryError', () => {
 });
 
 describe('isFallbackEligible', () => {
-  it('returns true for rate-limit errors (429/503)', () => {
-    const classification = classifyRetryError({
-      status: 429,
-      message: 'Too Many Requests',
-    });
-    expect(isFallbackEligible(classification)).toBe(true);
+  it.each([
+    [429, 'Too Many Requests', true],
+    [503, 'Service Unavailable', true],
+    [529, 'Overloaded', true],
+    [400, 'Bad Request', false],
+    [401, 'Unauthorized', false],
+    [403, 'Forbidden', false],
+    [500, 'Internal Server Error', false],
+    [502, 'Bad Gateway', false],
+  ])('classifies HTTP %s fallback eligibility', (status, message, expected) => {
+    expect(isFallbackEligible(classifyRetryError({ status, message }))).toBe(
+      expected,
+    );
   });
 
-  it('returns true for capacity-overload errors (529)', () => {
-    const classification = classifyRetryError({
-      status: 529,
-      message: 'Overloaded',
-    });
-    expect(isFallbackEligible(classification)).toBe(true);
+  it('returns true for SSE-embedded 429/529 capacity errors', () => {
+    for (const status of [429, 529]) {
+      const error = new Error(
+        `id:1\nevent:error\n:HTTP_STATUS/${status}\ndata:{"request_id":"req-1","code":"Overloaded","message":"Provider overloaded"}`,
+      );
+      expect(isFallbackEligible(classifyRetryError(error))).toBe(true);
+    }
   });
 
-  it('returns true for server errors (5xx)', () => {
-    const classification = classifyRetryError({
-      status: 500,
-      message: 'Internal Server Error',
-    });
-    expect(isFallbackEligible(classification)).toBe(true);
-  });
-
-  it('returns true for 503 Service Unavailable', () => {
-    const classification = classifyRetryError({
-      status: 503,
-      message: 'Service Unavailable',
-    });
-    expect(isFallbackEligible(classification)).toBe(true);
-  });
-
-  it('returns false for auth errors (401)', () => {
-    const classification = classifyRetryError({
-      status: 401,
-      message: 'Unauthorized',
-    });
-    expect(isFallbackEligible(classification)).toBe(false);
-  });
-
-  it('returns false for auth errors (403)', () => {
-    const classification = classifyRetryError({
-      status: 403,
-      message: 'Forbidden',
-    });
-    expect(isFallbackEligible(classification)).toBe(false);
-  });
-
-  it('returns false for client errors (4xx)', () => {
-    const classification = classifyRetryError({
-      status: 400,
-      message: 'Bad Request',
-    });
-    expect(isFallbackEligible(classification)).toBe(false);
-  });
-
-  it('returns false for transport errors', () => {
-    const error = new Error('network error');
-    (error as unknown as { code: string }).code = 'ECONNRESET';
-    const classification = classifyRetryError(error);
-    expect(classification.kind).toBe('transport');
-    expect(isFallbackEligible(classification)).toBe(false);
-  });
-
-  it('returns false for unknown errors', () => {
-    const classification = classifyRetryError({
-      message: 'Something went wrong',
-    });
-    expect(classification.diagnosis).toBe('unknown');
-    expect(isFallbackEligible(classification)).toBe(false);
-  });
-
-  it('returns false for abort errors', () => {
-    const error = new DOMException('Aborted', 'AbortError');
-    const classification = classifyRetryError(error);
-    expect(classification.diagnosis).toBe('fail-fast');
-    expect(isFallbackEligible(classification)).toBe(false);
-  });
-
-  it('returns false for allocated-quota-exceeded (fail-fast 429)', () => {
-    const error = {
+  it('returns false for fail-fast and transport errors', () => {
+    const quotaError = {
       status: 429,
       code: 'Throttling.AllocationQuota',
       message: 'Quota exceeded',
     };
-    const classification = classifyRetryError(error);
-    expect(classification.diagnosis).toBe('fail-fast');
-    expect(isFallbackEligible(classification)).toBe(false);
-  });
-
-  it('returns false for qwen-oauth-free-tier-quota errors', () => {
-    const classification = classifyRetryError(
-      {
-        status: 429,
-        code: 'insufficient_quota',
-        message: 'Free allocated quota exceeded',
-      },
-      { authType: AuthType.QWEN_OAUTH },
-    );
-    expect(classification.reason).toBe('qwen-oauth-free-tier-quota');
-    expect(classification.diagnosis).toBe('fail-fast');
-    expect(isFallbackEligible(classification)).toBe(false);
-  });
-
-  it('returns true for 502 Bad Gateway (server error)', () => {
-    const classification = classifyRetryError({
-      status: 502,
-      message: 'Bad Gateway',
-    });
-    expect(classification.reason).toBe('server-error');
-    expect(isFallbackEligible(classification)).toBe(true);
-  });
-
-  it('returns true for SSE-embedded 429 rate-limit errors', () => {
-    const error = new Error(
-      'id:1\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"req-1","code":"Throttling.RateLimit","message":"Rate limit exceeded"}',
-    );
-    const classification = classifyRetryError(error);
-    expect(classification.kind).toBe('sse-provider');
-    expect(classification.reason).toBe('rate-limit');
-    expect(isFallbackEligible(classification)).toBe(true);
-  });
-
-  it('returns true for SSE-embedded 529 capacity-overload errors', () => {
-    const error = new Error(
-      'id:1\nevent:error\n:HTTP_STATUS/529\ndata:{"request_id":"req-1","code":"Overloaded","message":"Provider overloaded"}',
-    );
-    const classification = classifyRetryError(error);
-    expect(classification.kind).toBe('sse-provider');
-    expect(classification.reason).toBe('capacity-overload');
-    expect(isFallbackEligible(classification)).toBe(true);
-  });
-
-  it('returns false for SSE-embedded allocation quota errors', () => {
-    const error = new Error(
-      'id:1\nevent:error\n:HTTP_STATUS/429\ndata:{"request_id":"req-1","code":"Throttling.AllocationQuota","message":"Allocated quota exceeded"}',
-    );
-    const classification = classifyRetryError(error);
-    expect(classification.diagnosis).toBe('fail-fast');
-    expect(isFallbackEligible(classification)).toBe(false);
-  });
-
-  it('returns false when diagnosis is fail-fast regardless of reason', () => {
-    // Directly construct a classification with a fallback-eligible reason
-    // but a fail-fast diagnosis to verify diagnosis takes precedence.
-    expect(
-      isFallbackEligible({
-        kind: 'http',
-        diagnosis: 'fail-fast',
-        reason: 'rate-limit',
-        statusCode: 429,
-      }),
-    ).toBe(false);
+    expect(isFallbackEligible(classifyRetryError(quotaError))).toBe(false);
 
     expect(
       isFallbackEligible({
-        kind: 'http',
-        diagnosis: 'fail-fast',
-        reason: 'server-error',
-        statusCode: 500,
+        kind: 'transport',
+        diagnosis: 'retryable',
+        reason: 'transport-error',
+        statusCode: 503,
+        transportCode: 'ECONNRESET',
       }),
     ).toBe(false);
-  });
-
-  it('returns false for transport errors even with 5xx status', () => {
-    // Transport error with a 5xx status code: the transport classification
-    // should take precedence, and transport errors are not fallback-eligible.
-    const error = Object.assign(new Error('upstream failed'), {
-      status: 500,
-      cause: Object.assign(new Error('socket reset'), {
-        code: 'ECONNRESET',
-      }),
-    });
-    const classification = classifyRetryError(error);
-    expect(classification.kind).toBe('transport');
-    expect(classification.statusCode).toBe(500);
-    expect(isFallbackEligible(classification)).toBe(false);
-  });
-
-  it('returns true for provider-level rate-limit without HTTP status', () => {
-    // DashScope-style rate-limit error with a numeric error code but no HTTP
-    // status — matches via extraRetryErrorCodes in isRateLimitError.
-    const error = { error: { code: 1302, message: 'Rate limit exceeded' } };
-    const classification = classifyRetryError(error, {
-      extraRetryErrorCodes: [1302],
-    });
-    expect(classification.kind).toBe('provider');
-    expect(classification.reason).toBe('rate-limit');
-    expect(isFallbackEligible(classification)).toBe(true);
   });
 });

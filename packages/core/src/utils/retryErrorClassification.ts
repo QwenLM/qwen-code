@@ -18,11 +18,7 @@ export type RetryErrorKind =
   | 'provider-business'
   | 'unknown';
 
-export type RetryErrorDiagnosis =
-  | 'retryable'
-  | 'fail-fast'
-  | 'fallback-eligible'
-  | 'unknown';
+export type RetryErrorDiagnosis = 'retryable' | 'fail-fast' | 'unknown';
 
 export interface RetryErrorClassificationContext {
   authType?: AuthType | string;
@@ -137,12 +133,11 @@ export function classifyRetryError(
       details.transport === 'sse' ? 'sse-provider' : 'http';
 
     if (statusCode === 529) {
-      // 529 Overloaded: the provider is at capacity. Same-model retries
-      // are still attempted (isTransientCapacityError covers 529), but
-      // once those exhaust the request is eligible for model fallback.
+      // 529 stays retryable for existing consumers. Model fallback is decided
+      // separately by status code after same-model retries are exhausted.
       return {
         kind,
-        diagnosis: 'fallback-eligible',
+        diagnosis: 'retryable',
         reason: 'capacity-overload',
         ...common,
       };
@@ -296,51 +291,23 @@ function getProviderFields(error: unknown): ProviderFields {
   };
 }
 
-/**
- * Reasons that indicate capacity/availability issues eligible for model fallback.
- * These are errors where trying a different model may succeed when same-model
- * retries have been exhausted.
- */
-const FALLBACK_ELIGIBLE_REASONS = new Set([
-  'rate-limit', // 429, 503
-  'capacity-overload', // 529
-  'server-error', // 5xx
-]);
+const FALLBACK_ELIGIBLE_STATUS_CODES = new Set([429, 503, 529]);
 
 /**
  * Determines whether a classified error is eligible for model fallback.
  *
- * Returns true when the error reason indicates capacity/availability issues
- * (rate-limit, capacity-overload, server-error) where trying a different
- * model may succeed. Note: this deliberately covers errors with diagnosis
- * `'retryable'` (e.g. 429/503 rate-limit) as well as those with the literal
- * `'fallback-eligible'` diagnosis (529). The check is reason-based, not
- * diagnosis-based, because same-model retries will already have been
- * exhausted before this function is consulted.
- *
- * Returns false for:
- * - `fail-fast` diagnosis (auth, billing, quota, client errors)
- * - `unknown` diagnosis
- * - Transport errors (retried at the connection level, not model-level)
- *
- * @param classification - The result of `classifyRetryError`.
- * @returns Whether the error qualifies for model fallback after retries exhaust.
+ * The PR scope is intentionally narrow: fallback only applies to the explicit
+ * capacity statuses documented for the feature (429/503/529), after same-model
+ * retries are exhausted.
  */
 export function isFallbackEligible(
   classification: RetryErrorClassification,
 ): boolean {
-  // fail-fast and unknown errors should not trigger fallback
-  if (
-    classification.diagnosis === 'fail-fast' ||
-    classification.diagnosis === 'unknown'
-  ) {
-    return false;
-  }
-
-  // Transport errors are retried at the connection level, not model level
-  if (classification.kind === 'transport') {
-    return false;
-  }
-
-  return FALLBACK_ELIGIBLE_REASONS.has(classification.reason);
+  return (
+    classification.kind !== 'transport' &&
+    classification.statusCode !== undefined &&
+    FALLBACK_ELIGIBLE_STATUS_CODES.has(classification.statusCode) &&
+    classification.diagnosis !== 'fail-fast' &&
+    classification.diagnosis !== 'unknown'
+  );
 }
