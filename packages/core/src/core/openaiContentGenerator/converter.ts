@@ -1344,8 +1344,14 @@ export function convertOpenAIChunkToGemini(
 
     // Handle tool calls using the stream-local parser
     if (choice.delta?.tool_calls?.length) {
+      const hadLegacyFunctionCallState =
+        Boolean(requestContext.legacyFunctionCallWithoutArguments) ||
+        Boolean(requestContext.legacyFunctionCallInProgress);
       requestContext.legacyFunctionCallWithoutArguments = undefined;
       requestContext.legacyFunctionCallInProgress = undefined;
+      if (hadLegacyFunctionCallState) {
+        toolCallParser.resetIndex(0);
+      }
       if (choice.delta.function_call) {
         debugLogger.debug(
           `Ignoring legacy function_call "${choice.delta.function_call.name ?? '<pending>'}" because tool_calls is non-empty`,
@@ -1435,6 +1441,16 @@ export function convertOpenAIChunkToGemini(
       }
       requestContext.legacyFunctionCallWithoutArguments = undefined;
       requestContext.legacyFunctionCallInProgress = undefined;
+    }
+
+    if (legacyFunctionCallNameOnlyTruncated) {
+      debugLogger.debug(
+        'Suppressing zero-argument legacy function_call fallback: stream ended with finish_reason "length" before arguments arrived',
+      );
+    } else if (toolCallsTruncated && choice.finish_reason !== 'length') {
+      debugLogger.debug(
+        `Overriding finish_reason "${choice.finish_reason}" to "length": tool call arguments were truncated`,
+      );
     }
 
     // If tool call JSON was truncated, override to "length" so downstream

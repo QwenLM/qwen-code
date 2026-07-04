@@ -5511,6 +5511,68 @@ describe('Truncated tool call detection in streaming', () => {
       legacyFunctionCallPart(),
     ]);
   });
+
+  it('should reset stale legacy function_call parser state when modern tool_calls take over', () => {
+    const ctx = createStreamingRequestContext();
+
+    converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'legacy-partial-before-modern',
+        created: 102,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              function_call: {
+                name: 'read_file',
+                arguments: '{"path"',
+              },
+            },
+            finish_reason: null,
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      ctx,
+    );
+
+    const result = converter.convertOpenAIChunkToGemini(
+      {
+        object: 'chat.completion.chunk',
+        id: 'modern-after-legacy-partial',
+        created: 103,
+        model: 'test-model',
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index: 0,
+                  id: 'call_modern',
+                  type: 'function' as const,
+                  function: {
+                    name: 'read_file',
+                    arguments: '{"path":"modern.md"}',
+                  },
+                },
+              ],
+            },
+            finish_reason: 'tool_calls',
+            logprobs: null,
+          },
+        ],
+      } as unknown as OpenAI.Chat.ChatCompletionChunk,
+      ctx,
+    );
+
+    expect(result.candidates?.[0]?.finishReason).toBe(FinishReason.STOP);
+    expect(result.candidates?.[0]?.content?.parts).toEqual([
+      legacyFunctionCallPart('read_file', { path: 'modern.md' }),
+    ]);
+  });
 });
 
 describe('mapGeminiFinishReasonToOpenAI', () => {
