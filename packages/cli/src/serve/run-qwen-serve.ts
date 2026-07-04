@@ -2085,7 +2085,7 @@ export async function runQwenServe(
     daemonLog.info('daemon workspace roots initialized', {
       primary: boundWorkspaces[0],
       secondary: boundWorkspaces.slice(1),
-      ideEnvPresent: !!process.env[IDE_WORKSPACE_PATH_ENV_VAR],
+      ideEnvPresent: !!process.env['QWEN_CODE_IDE_WORKSPACE_PATH'],
     });
     const fsFactory = runtime.resolveBridgeFsFactory({
       // Secondary roots share a write-capable factory only after their own
