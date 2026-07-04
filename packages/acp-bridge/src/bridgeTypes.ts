@@ -617,7 +617,10 @@ export interface AcpSessionBridge {
     options?: SessionArtifactUnpinRequest,
   ): Promise<SessionArtifactMutationResult>;
 
-  fsckSessionArtifacts(sessionId: string): Promise<SessionArtifactFsckResult>;
+  fsckSessionArtifacts(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactFsckResult>;
 
   gcSessionArtifacts(sessionId: string): Promise<SessionArtifactGcResult>;
 

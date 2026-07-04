@@ -382,7 +382,7 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
-  it('warns when pin options are ignored for an already pinned artifact', async () => {
+  it('applies metadata pin options to an already pinned artifact', async () => {
     const previousQwenHome = process.env['QWEN_HOME'];
     const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
     const workspace = await fsp.mkdtemp(
@@ -421,9 +421,82 @@ describe('createAcpSessionBridge', () => {
           { mode: 'metadata' },
         ),
       ).resolves.toMatchObject({
-        changes: [],
-        warnings: ['artifact already pinned; pin options ignored'],
+        changes: [
+          {
+            action: 'updated',
+            artifactId,
+            artifact: {
+              retention: 'restorable',
+              persistenceWarning: 'metadata_only_restore',
+            },
+          },
+        ],
       });
+    } finally {
+      await bridge.shutdown();
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(tempHome, { recursive: true, force: true });
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('refreshes retained content on explicit content re-pin', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-workspace-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    const bridge = makeBridge({
+      boundWorkspace: workspace,
+      channelFactory: async () => makeChannel().channel,
+    });
+    try {
+      await fsp.mkdir(path.join(workspace, 'reports'), { recursive: true });
+      await fsp.writeFile(
+        path.join(workspace, 'reports', 'report.txt'),
+        'first',
+      );
+      const session = await bridge.spawnOrAttach({ workspaceCwd: workspace });
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Report',
+          workspacePath: 'reports/report.txt',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      const firstPin = await bridge.pinSessionArtifact(
+        session.sessionId,
+        artifactId,
+        { clientId: session.clientId },
+        { mode: 'content' },
+      );
+      const firstContentId =
+        firstPin.changes[0]?.artifact?.contentRef?.contentId;
+
+      await fsp.writeFile(
+        path.join(workspace, 'reports', 'report.txt'),
+        'second',
+      );
+      const secondPin = await bridge.pinSessionArtifact(
+        session.sessionId,
+        artifactId,
+        { clientId: session.clientId },
+        { mode: 'content' },
+      );
+
+      expect(
+        secondPin.changes[0]?.artifact?.contentRef?.contentId,
+      ).toBeTruthy();
+      expect(secondPin.changes[0]?.artifact?.contentRef?.contentId).not.toBe(
+        firstContentId,
+      );
     } finally {
       await bridge.shutdown();
       if (previousQwenHome === undefined) {
@@ -7317,6 +7390,11 @@ describe('createAcpSessionBridge', () => {
           },
           { clientId: 'client-not-issued' },
         ),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
+        bridge.fsckSessionArtifacts(session.sessionId, {
+          clientId: 'client-not-issued',
+        }),
       ).rejects.toBeInstanceOf(InvalidClientIdError);
       await bridge.shutdown();
     });

@@ -822,8 +822,17 @@ export function registerSessionRoutes(
   app.get('/session/:id/artifacts/fsck', async (req, res) => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
     try {
-      res.status(200).json(await bridge.fsckSessionArtifacts(sessionId));
+      res
+        .status(200)
+        .json(
+          await bridge.fsckSessionArtifacts(
+            sessionId,
+            clientId !== undefined ? { clientId } : undefined,
+          ),
+        );
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/artifacts/fsck',

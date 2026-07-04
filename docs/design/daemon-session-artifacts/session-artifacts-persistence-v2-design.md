@@ -517,7 +517,7 @@ Body：
 - `ttlDays` 只允许和 `mode: "content"` 一起使用，由 daemon 在 pin 时转换为绝对 `expiresAt = now + ttlDays`。如果提供，必须是正整数，并受默认最大值 365 天约束；超过上限返回 `INVALID_ARGUMENT`。`mode: "metadata"` 携带 `ttlDays` 返回 `INVALID_ARGUMENT`，不能静默忽略。
 - 成功按 §6.6 返回更新后的 artifact，并发布 `artifact_changed` / `updated`。
 - 失败返回明确错误，不改变 artifact retention。
-- 对已经 `pinned` 的 artifact，V2 pin API 默认是幂等 no-op：返回当前 artifact，不重新复制内容、不重新计算 hash、不延长 TTL。若未来需要刷新内容或延长 TTL，应设计显式 refresh/extend API；不能让重试请求隐式改变已保存内容或无限延长保留期。
+- 对已经 `pinned` 的 artifact，空 body / 无显式选项的重复 pin 是幂等 no-op。带显式选项的重复 pin 视为用户更新操作：`mode: "metadata"` 可降级为 `restorable`，显式 `mode: "content"` 会刷新 managed content copy/hash，`ttlDays` 会更新 `expiresAt`，`clientRetained` 会更新保留 hint。调用方不应把带选项的 pin 当作无副作用重试。
 
 ### 6.4 Unpin
 
@@ -948,7 +948,7 @@ V2 新增的失败路径必须有 structured logs，格式沿用：
 - partial writes：journal 成功但 warning、content manifest 成功但 journal 失败、journal 成功后 restore 能找到 content。
 - JSONL snapshot baseline advance：threshold 触发、post-snapshot replay 有界、snapshot payload 不再携带已被覆盖的 explicit tombstones、superseded sticky tombstone 允许显式同 id 重新出现、`stickyEphemeralIds` 保留 sticky state；JSONL 文件本身不被 artifact 子系统重写。
 - corrupt latest snapshot fallback：回退到较旧 valid snapshot 或一次顺序 artifact replay。
-- repin idempotency：已 pinned artifact 的重复 pin 不刷新内容、不延长 TTL。
+- repin idempotency：已 pinned artifact 的空重复 pin 不刷新内容、不延长 TTL；显式 `mode` / `ttlDays` / `clientRetained` 会按 §6.3 更新对应状态。
 - retention defaults：tool artifact 无显式 retention、client POST `pinned` 被拒绝。
 - capability：string list 只在行为当前可用时声明；不依赖 `enabled:false` details。
 - replay idempotency：同一 session history replay 两次不会重复 artifact。

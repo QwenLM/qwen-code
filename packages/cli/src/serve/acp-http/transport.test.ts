@@ -410,6 +410,9 @@ class FakeBridge {
       }
     | undefined;
   lastFsckSessionId: string | undefined;
+  lastFsckSessionContext:
+    | Parameters<HttpAcpBridge['fsckSessionArtifacts']>[1]
+    | undefined;
   lastGcSessionId: string | undefined;
   async getSessionArtifacts(sessionId: string) {
     this.lastArtifactListSessionId = sessionId;
@@ -468,8 +471,12 @@ class FakeBridge {
       changes: [{ action: 'updated' as const, artifactId }],
     };
   }
-  async fsckSessionArtifacts(sessionId: string) {
+  async fsckSessionArtifacts(
+    sessionId: string,
+    context?: Parameters<HttpAcpBridge['fsckSessionArtifacts']>[1],
+  ) {
     this.lastFsckSessionId = sessionId;
+    this.lastFsckSessionContext = context;
     return {
       checked: 0,
       missing: [] as string[],
@@ -6219,8 +6226,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
 
     it('_qwen/session/artifacts/fsck returns integrity status', async () => {
-      bridge.fsckSessionArtifacts = async (sessionId) => {
+      bridge.fsckSessionArtifacts = async (sessionId, context) => {
         bridge.lastFsckSessionId = sessionId;
+        bridge.lastFsckSessionContext = context;
         return { checked: 1, missing: ['missing'], hashMismatches: [] };
       };
       const connId = await initialize();
@@ -6244,6 +6252,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         result: { checked: 1, missing: ['missing'], hashMismatches: [] },
       });
       expect(bridge.lastFsckSessionId).toBe('sess-1');
+      expect(bridge.lastFsckSessionContext).toEqual({
+        clientId: 'client-1',
+        fromLoopback: true,
+      });
     });
 
     it('_qwen/session/artifacts/gc returns cleanup result', async () => {

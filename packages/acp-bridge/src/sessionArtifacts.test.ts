@@ -125,6 +125,73 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('prevents one client from pinning or unpinning another client artifact', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-client-owner-pin',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany([
+      {
+        title: 'Client link',
+        source: 'client',
+        clientId: 'client-a',
+        url: 'https://example.com/client-a-pin',
+      },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+    const contentRef = {
+      kind: 'managed_copy' as const,
+      contentId: `${'a'.repeat(64)}-${'b'.repeat(16)}`,
+      sha256: 'a'.repeat(64),
+      sizeBytes: 12,
+      createdAt: '2026-07-04T00:00:00.000Z',
+    };
+
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        store.pin(artifactId, { clientId: 'client-b', contentRef }),
+      ).resolves.toMatchObject({ changes: [] });
+      await expect(
+        store.pin(artifactId, { clientId: 'client-a', contentRef }),
+      ).resolves.toMatchObject({
+        changes: [{ action: 'updated', artifactId }],
+      });
+      await expect(
+        store.unpin(artifactId, { clientId: 'client-b' }),
+      ).resolves.toMatchObject({ changes: [] });
+
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('pin_denied');
+      expect(logged).toContain('unpin_denied');
+      expect(logged).toContain('client-a');
+      expect(logged).toContain('client-b');
+    } finally {
+      stderr.mockRestore();
+    }
+
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: artifactId,
+          retention: 'pinned',
+          clientId: 'client-a',
+        }),
+      ],
+    });
+    await expect(
+      store.unpin(artifactId, { clientId: 'client-a' }),
+    ).resolves.toMatchObject({
+      changes: [{ action: 'updated', artifactId }],
+    });
+  });
+
   it('does not write live client ids into durable artifact records', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
     const store = new SessionArtifactStore({
@@ -432,7 +499,7 @@ describe('SessionArtifactStore', () => {
     });
   });
 
-  it('does not refresh an already pinned artifact on repeated pin', async () => {
+  it('updates an already pinned artifact when pin options change', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
     const store = new SessionArtifactStore({
       sessionId: 's1-pin-idempotent',
@@ -461,27 +528,46 @@ describe('SessionArtifactStore', () => {
       expiresAt: '2026-08-01T00:00:00.000Z',
     });
 
+    const nextContentRef = {
+      ...contentRef,
+      contentId: `${'c'.repeat(64)}-${'d'.repeat(16)}`,
+      sha256: 'c'.repeat(64),
+    };
     await expect(
       store.pin(artifactId, {
-        contentRef: {
-          ...contentRef,
-          contentId: `${'c'.repeat(64)}-${'d'.repeat(16)}`,
-          sha256: 'c'.repeat(64),
-        },
+        contentRef: nextContentRef,
         expiresAt: '2026-09-01T00:00:00.000Z',
+        clientRetained: false,
       }),
-    ).resolves.toMatchObject({ changes: [] });
+    ).resolves.toMatchObject({
+      changes: [
+        {
+          action: 'updated',
+          artifactId,
+          artifact: {
+            retention: 'pinned',
+            contentRef: nextContentRef,
+            expiresAt: '2026-09-01T00:00:00.000Z',
+            clientRetained: false,
+          },
+        },
+      ],
+    });
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [
         {
           id: artifactId,
           retention: 'pinned',
-          contentRef,
-          expiresAt: '2026-08-01T00:00:00.000Z',
+          contentRef: nextContentRef,
+          expiresAt: '2026-09-01T00:00:00.000Z',
+          clientRetained: false,
         },
       ],
     });
-    expect(events).toHaveLength(2);
+    await expect(store.pin(artifactId)).resolves.toMatchObject({
+      changes: [],
+    });
+    expect(events).toHaveLength(3);
   });
 
   it('rolls back pin mutations when persistence fails', async () => {
@@ -2401,6 +2487,61 @@ describe('SessionArtifactStore', () => {
     expect(
       snapshots[0]?.artifacts.some((artifact) => artifact.id === artifactId),
     ).toBe(false);
+  });
+
+  it('drops stale sticky markers when durable eviction removes an artifact', async () => {
+    const sourceEvents: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-eviction-sticky',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          sourceEvents.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [{ title: 'Sticky', url: 'https://example.com/sticky' }],
+      { strict: true },
+    );
+    const evictedArtifact = sourceEvents[0]!.changes[0]!.artifact!;
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-eviction-sticky',
+      workspaceCwd: workspace,
+      maxArtifacts: 1,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+    await restored.restore({
+      v: 2,
+      sessionId: 's11-eviction-sticky',
+      sequence: 1,
+      artifacts: [evictedArtifact],
+      tombstonedIds: [],
+      stickyEphemeralIds: [evictedArtifact.id],
+      warnings: [],
+    });
+
+    for (let index = 0; index < 50; index++) {
+      await restored.upsertMany(
+        [
+          {
+            title: `Replacement ${index}`,
+            url: `https://example.com/replacement-${index}`,
+          },
+        ],
+        { strict: true },
+      );
+    }
+
+    expect(snapshots).toHaveLength(1);
+    expect(snapshots[0]?.stickyEphemeralIds).not.toContain(evictedArtifact.id);
   });
 
   it('downgrades non-strict durable artifacts when persistence is unavailable', async () => {

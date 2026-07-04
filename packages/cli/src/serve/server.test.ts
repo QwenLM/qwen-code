@@ -663,7 +663,10 @@ interface FakeBridge extends AcpSessionBridge {
     context?: BridgeClientRequestContext;
     options?: Parameters<AcpSessionBridge['unpinSessionArtifact']>[3];
   }>;
-  fsckSessionArtifactsCalls: string[];
+  fsckSessionArtifactsCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   gcSessionArtifactsCalls: string[];
   workspaceMcpCalls: number;
   workspaceMcpToolsCalls: string[];
@@ -815,7 +818,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
     [];
   const pinSessionArtifactCalls: FakeBridge['pinSessionArtifactCalls'] = [];
   const unpinSessionArtifactCalls: FakeBridge['unpinSessionArtifactCalls'] = [];
-  const fsckSessionArtifactsCalls: string[] = [];
+  const fsckSessionArtifactsCalls: FakeBridge['fsckSessionArtifactsCalls'] = [];
   const gcSessionArtifactsCalls: string[] = [];
   let workspaceMcpCalls = 0;
   const workspaceMcpToolsCalls: string[] = [];
@@ -1533,9 +1536,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return unpinSessionArtifactImpl(sessionId, artifactId, context, options);
     },
-    async fsckSessionArtifacts(sessionId) {
-      fsckSessionArtifactsCalls.push(sessionId);
-      return fsckSessionArtifactsImpl(sessionId);
+    async fsckSessionArtifacts(sessionId, context) {
+      fsckSessionArtifactsCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return fsckSessionArtifactsImpl(sessionId, context);
     },
     async gcSessionArtifacts(sessionId) {
       gcSessionArtifactsCalls.push(sessionId);
@@ -7544,7 +7550,9 @@ describe('createServeApp', () => {
       const app = createServeApp(tokenOpts, undefined, { bridge });
 
       const res = await auth(
-        request(app).get('/session/session-A/artifacts/fsck'),
+        request(app)
+          .get('/session/session-A/artifacts/fsck')
+          .set('X-Qwen-Client-Id', 'client-1'),
       );
 
       expect(res.status).toBe(200);
@@ -7553,7 +7561,9 @@ describe('createServeApp', () => {
         missing: ['missing-content'],
         hashMismatches: ['bad-hash'],
       });
-      expect(bridge.fsckSessionArtifactsCalls).toEqual(['session-A']);
+      expect(bridge.fsckSessionArtifactsCalls).toEqual([
+        { sessionId: 'session-A', context: { clientId: 'client-1' } },
+      ]);
     });
 
     it('POST /session/:id/artifacts/gc returns content cleanup result', async () => {

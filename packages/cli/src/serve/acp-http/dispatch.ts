@@ -2496,7 +2496,10 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/artifacts/fsck`: {
           const sessionId = String(params['sessionId'] ?? '');
           if (!this.requireOwned(conn, sessionId, id)) return;
-          const result = await this.bridge.fsckSessionArtifacts(sessionId);
+          const result = await this.bridge.fsckSessionArtifacts(
+            sessionId,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
           this.replyConn(conn, id, result as unknown);
           return;
         }

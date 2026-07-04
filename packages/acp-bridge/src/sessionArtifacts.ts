@@ -426,16 +426,13 @@ export class SessionArtifactStore {
       // Client-created artifacts with an owner require the same client id.
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
-      if (
-        existing.source === 'client' &&
-        existing.clientId !== undefined &&
-        existing.clientId !== options?.clientId
-      ) {
-        writeStderrLine(
-          `[artifacts] session=${this.sessionId} action=remove_denied artifactId=${artifactId} owner=${existing.clientId} requester=${options?.clientId ?? '<anonymous>'}`,
-        );
-        return { v: 1, sessionId: this.sessionId, changes: [] };
-      }
+      const denied = this.denyCrossClientMutation(
+        'remove',
+        artifactId,
+        existing,
+        options,
+      );
+      if (denied) return denied;
       this.artifacts.delete(artifactId);
       const changes: SessionArtifactChange[] = [
         {
@@ -457,7 +454,7 @@ export class SessionArtifactStore {
 
   async pin(
     artifactId: string,
-    options: SessionArtifactPinOptions = {},
+    options: SessionArtifactPinOptions & { clientId?: string } = {},
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
       const before = this.cloneState();
@@ -465,33 +462,51 @@ export class SessionArtifactStore {
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
-      if (existing.retention === 'pinned') {
-        const warnings =
-          Object.keys(options).length > 0
-            ? ['artifact already pinned; pin options ignored']
-            : undefined;
+      const denied = this.denyCrossClientMutation(
+        'pin',
+        artifactId,
+        existing,
+        options,
+      );
+      if (denied) return denied;
+      if (existing.retention === 'pinned' && !hasPinOptions(options)) {
         return {
           v: 1,
           sessionId: this.sessionId,
           changes: [],
-          ...(warnings ? { warnings } : {}),
         };
       }
       const targetRetention =
-        options.retention ?? (options.contentRef ? 'pinned' : 'restorable');
-      const { contentRef, expiresAt } = options;
+        options.retention ??
+        (options.contentRef
+          ? 'pinned'
+          : existing.retention === 'pinned'
+            ? 'pinned'
+            : 'restorable');
+      const contentRef =
+        targetRetention === 'pinned'
+          ? (options.contentRef ?? existing.contentRef)
+          : undefined;
       const updated: StoredArtifact = {
         ...existing,
         retention: targetRetention,
-        clientRetained: options.clientRetained ?? true,
+        clientRetained:
+          options.clientRetained ??
+          (existing.retention === 'pinned' ? existing.clientRetained : true),
         restoreState: 'live',
         updatedAt: new Date().toISOString(),
       };
       if (targetRetention === 'pinned' && contentRef) {
         updated.contentRef = contentRef;
         delete updated.persistenceWarning;
-        if (expiresAt) {
-          updated.expiresAt = expiresAt;
+        if (Object.hasOwn(options, 'expiresAt')) {
+          if (options.expiresAt) {
+            updated.expiresAt = options.expiresAt;
+          } else {
+            delete updated.expiresAt;
+          }
+        } else if (existing.expiresAt) {
+          updated.expiresAt = existing.expiresAt;
         } else {
           delete updated.expiresAt;
         }
@@ -525,7 +540,7 @@ export class SessionArtifactStore {
 
   async unpin(
     artifactId: string,
-    options: SessionArtifactUnpinOptions = {},
+    options: SessionArtifactUnpinOptions & { clientId?: string } = {},
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
       const before = this.cloneState();
@@ -533,6 +548,13 @@ export class SessionArtifactStore {
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
+      const denied = this.denyCrossClientMutation(
+        'unpin',
+        artifactId,
+        existing,
+        options,
+      );
+      if (denied) return denied;
       const targetRetention = options.retention ?? 'restorable';
       if (
         targetRetention === 'ephemeral' &&
@@ -941,6 +963,8 @@ export class SessionArtifactStore {
         if (change.reason === 'explicit') {
           this.tombstonedIds.add(change.artifactId);
           this.stickyEphemeralIds.delete(change.artifactId);
+        } else if (change.reason === 'eviction') {
+          this.stickyEphemeralIds.delete(change.artifactId);
         } else if (change.reason === 'unpin_to_ephemeral') {
           this.stickyEphemeralIds.add(change.artifactId);
         }
@@ -960,6 +984,25 @@ export class SessionArtifactStore {
       () => undefined,
     );
     return result;
+  }
+
+  private denyCrossClientMutation(
+    action: 'remove' | 'pin' | 'unpin',
+    artifactId: string,
+    existing: StoredArtifact,
+    options?: { clientId?: string },
+  ): SessionArtifactMutationResult | undefined {
+    if (
+      existing.source !== 'client' ||
+      existing.clientId === undefined ||
+      existing.clientId === options?.clientId
+    ) {
+      return undefined;
+    }
+    writeStderrLine(
+      `[artifacts] session=${this.sessionId} action=${action}_denied artifactId=${artifactId} owner=${existing.clientId} requester=${options?.clientId ?? '<anonymous>'}`,
+    );
+    return { v: 1, sessionId: this.sessionId, changes: [] };
   }
 
   private async normalizeInput(
@@ -1740,6 +1783,15 @@ function toPersistedArtifact(
 function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
   if (!change.artifact) return false;
   return change.artifact.retention !== 'ephemeral';
+}
+
+function hasPinOptions(options: SessionArtifactPinOptions): boolean {
+  return (
+    options.retention !== undefined ||
+    options.contentRef !== undefined ||
+    Object.hasOwn(options, 'expiresAt') ||
+    options.clientRetained !== undefined
+  );
 }
 
 function cloneStoredArtifact(artifact: StoredArtifact): StoredArtifact {

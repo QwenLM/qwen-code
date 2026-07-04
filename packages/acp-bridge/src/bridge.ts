@@ -4635,9 +4635,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       const clientId = resolveTrustedClientId(entry, context?.clientId);
-      const mode = artifactPinMode(options);
-      const clientRetained = artifactClientRetained(options);
-      const expiresAt = artifactExpiresAt(options, mode);
+      const requestOptions =
+        options !== undefined && Object.keys(options).length > 0
+          ? options
+          : undefined;
+      const mode = artifactPinMode(requestOptions);
+      const clientRetained = artifactClientRetained(requestOptions);
+      const expiresAt = artifactExpiresAt(requestOptions, mode);
       const artifact = await entry.artifacts.get(artifactId);
       if (!artifact) {
         return { v: 1, sessionId, changes: [] };
@@ -4647,14 +4651,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!currentArtifact) {
         return { v: 1, sessionId, changes: [] };
       }
-      if (currentArtifact.retention === 'pinned') {
+      const refreshPinnedContent =
+        currentArtifact.retention === 'pinned' &&
+        requestOptions?.mode === 'content';
+      if (currentArtifact.retention === 'pinned' && !refreshPinnedContent) {
         const result =
-          options === undefined
-            ? await entry.artifacts.pin(artifactId)
+          requestOptions === undefined
+            ? await entry.artifacts.pin(artifactId, { clientId })
             : await entry.artifacts.pin(artifactId, {
                 retention: mode === 'metadata' ? 'restorable' : 'pinned',
-                expiresAt,
-                clientRetained,
+                ...(expiresAt !== undefined ? { expiresAt } : {}),
+                ...(clientRetained !== undefined ? { clientRetained } : {}),
+                clientId,
               });
         const warnings = [...pruneWarnings, ...(result.warnings ?? [])];
         publishArtifactChanges(entry, result.changes, clientId);
@@ -4678,9 +4686,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         }
         const result = await entry.artifacts.pin(artifactId, {
           retention: mode === 'metadata' ? 'restorable' : 'pinned',
-          contentRef,
-          expiresAt,
-          clientRetained,
+          ...(contentRef ? { contentRef } : {}),
+          ...(expiresAt !== undefined ? { expiresAt } : {}),
+          ...(clientRetained !== undefined ? { clientRetained } : {}),
+          clientId,
         });
         if (contentRef) {
           artifactContentStore.releaseContentRef(contentRef);
@@ -4715,7 +4724,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return { v: 1, sessionId, changes: [] };
       }
       const pruneWarnings = await pruneExpiredArtifactPins(entry, clientId);
-      const result = await entry.artifacts.unpin(artifactId, unpinOptions);
+      const result = await entry.artifacts.unpin(artifactId, {
+        ...unpinOptions,
+        clientId,
+      });
       const warnings = [...pruneWarnings, ...(result.warnings ?? [])];
       if (result.changes.length > 0) {
         try {
@@ -4733,9 +4745,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return warnings.length > 0 ? { ...result, warnings } : result;
     },
 
-    async fsckSessionArtifacts(sessionId) {
+    async fsckSessionArtifacts(sessionId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
       return artifactContentStore.fsck(await entry.artifacts.contentRefs());
     },
 
