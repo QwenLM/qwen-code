@@ -13,16 +13,13 @@ import { successResponse, errorResponse } from '../response.ts';
 import { spawn } from 'node:child_process';
 import { join, resolve } from 'node:path';
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { randomUUID } from 'node:crypto';
 import { createScriptRuntimeEnv } from '../runtime/sandbox-env.ts';
 import {
   applyFilesystemIsolation,
   type FilesystemIsolationPlan,
 } from '../runtime/filesystem-isolation.ts';
-import {
-  applyNetworkIsolation,
-  type NetworkIsolationPlan,
-} from '../runtime/network-isolation.ts';
+import type { NetworkIsolationPlan } from '../runtime/network-isolation.ts';
 import {
   isPathWithinDirectory,
   isPathWithinDirectoryForCreation,
@@ -37,6 +34,21 @@ export interface TransformDataArgs {
 }
 
 const TRANSFORM_DATA_TIMEOUT_MS = 30_000;
+
+function formatIsolationContext(
+  filesystemIsolation: FilesystemIsolationPlan,
+  networkIsolation: NetworkIsolationPlan,
+): string {
+  const commandLine = [
+    filesystemIsolation.command,
+    ...filesystemIsolation.args,
+  ].join(' ');
+  return [
+    '',
+    `Isolation: filesystem=${filesystemIsolation.status} (${filesystemIsolation.backend}), network=${networkIsolation.status} (${networkIsolation.backend})`,
+    `Command: ${commandLine.slice(0, 1000)}`,
+  ].join('\n');
+}
 
 /**
  * Handle the transform_data tool call.
@@ -99,13 +111,13 @@ export async function handleTransformData(
 
   // Write script to temp file
   const ext = args.language === 'python3' ? '.py' : '.js';
-  const tempScript = join(
-    tmpdir(),
-    `craft-transform-${ctx.sessionId}-${Date.now()}${ext}`,
-  );
-  writeFileSync(tempScript, args.script, 'utf-8');
+  const tempScript = join(dataDir, `.craft-transform-${randomUUID()}${ext}`);
+  let networkIsolation: NetworkIsolationPlan | null = null;
+  let filesystemIsolation: FilesystemIsolationPlan | null = null;
 
   try {
+    writeFileSync(tempScript, args.script, { encoding: 'utf-8', flag: 'wx' });
+
     const runtime = resolveScriptRuntime(args.language);
     const runtimeArgs = [
       ...runtime.argsPrefix,
@@ -114,37 +126,27 @@ export async function handleTransformData(
       resolvedOutput,
     ];
 
-    let networkIsolation: NetworkIsolationPlan;
-    let filesystemIsolation: FilesystemIsolationPlan;
+    filesystemIsolation = applyFilesystemIsolation(
+      runtime.command,
+      runtimeArgs,
+      dataDir,
+      {
+        includeNetworkDeny: true,
+      },
+    );
+    networkIsolation = {
+      status: filesystemIsolation.status,
+      backend:
+        filesystemIsolation.status === 'enforced'
+          ? filesystemIsolation.backend
+          : 'none',
+      command: filesystemIsolation.command,
+      args: filesystemIsolation.args,
+    };
 
-    if (process.platform === 'darwin') {
-      filesystemIsolation = applyFilesystemIsolation(
-        runtime.command,
-        runtimeArgs,
-        sessionDir,
-        {
-          includeNetworkDeny: true,
-        },
-      );
-      networkIsolation = {
-        status: filesystemIsolation.status,
-        backend:
-          filesystemIsolation.status === 'enforced' ? 'sandbox-exec' : 'none',
-        command: filesystemIsolation.command,
-        args: filesystemIsolation.args,
-      };
-    } else {
-      networkIsolation = applyNetworkIsolation(runtime.command, runtimeArgs);
-      if (networkIsolation.status !== 'enforced') {
-        return errorResponse(
-          'transform_data requires network isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.',
-        );
-      }
-
-      filesystemIsolation = applyFilesystemIsolation(
-        networkIsolation.command,
-        networkIsolation.args,
-        sessionDir,
+    if (filesystemIsolation.status !== 'enforced') {
+      return errorResponse(
+        'transform_data requires filesystem isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.',
       );
     }
 
@@ -154,11 +156,8 @@ export async function handleTransformData(
       );
     }
 
-    if (filesystemIsolation.status !== 'enforced') {
-      return errorResponse(
-        'transform_data requires filesystem isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.',
-      );
-    }
+    const enforcedFilesystemIsolation = filesystemIsolation;
+    const enforcedNetworkIsolation = networkIsolation;
 
     // Strip sensitive env vars + redirect runtime cache/temp paths to session data dir
     const env = createScriptRuntimeEnv({
@@ -175,8 +174,8 @@ export async function handleTransformData(
       code: number | null;
     }>((resolvePromise, reject) => {
       const child = spawn(
-        filesystemIsolation.command,
-        filesystemIsolation.args,
+        enforcedFilesystemIsolation.command,
+        enforcedFilesystemIsolation.args,
         {
           cwd: dataDir,
           env,
@@ -223,7 +222,7 @@ export async function handleTransformData(
       const errorOutput =
         result.stderr || result.stdout || 'Script exited with non-zero code';
       return errorResponse(
-        `Script failed (exit code ${result.code}):\n${errorOutput.slice(0, 2000)}`,
+        `Script failed (exit code ${result.code}):\n${errorOutput.slice(0, 2000)}${formatIsolationContext(enforcedFilesystemIsolation, enforcedNetworkIsolation)}`,
       );
     }
 
@@ -238,10 +237,10 @@ export async function handleTransformData(
     const lines = [`Output written to: ${resolvedOutput}`];
     lines.push(`Runtime: ${runtime.command} (source: ${runtime.source})`);
     lines.push(
-      `Network isolation: ${networkIsolation.status} (${networkIsolation.backend})`,
+      `Network isolation: ${enforcedNetworkIsolation.status} (${enforcedNetworkIsolation.backend})`,
     );
     lines.push(
-      `Filesystem isolation: ${filesystemIsolation.status} (${filesystemIsolation.backend})`,
+      `Filesystem isolation: ${enforcedFilesystemIsolation.status} (${enforcedFilesystemIsolation.backend})`,
     );
     lines.push('');
     lines.push(
@@ -255,7 +254,11 @@ export async function handleTransformData(
     return successResponse(lines.join('\n'));
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
-    return errorResponse(`Error running script: ${msg}`);
+    const isolationContext =
+      filesystemIsolation && networkIsolation
+        ? formatIsolationContext(filesystemIsolation, networkIsolation)
+        : '';
+    return errorResponse(`Error running script: ${msg}${isolationContext}`);
   } finally {
     // Clean up temp script
     try {

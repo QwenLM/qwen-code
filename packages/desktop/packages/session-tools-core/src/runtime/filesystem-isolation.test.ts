@@ -29,6 +29,22 @@ describe('buildDarwinSandboxProfile', () => {
     expect(profile).toContain('(deny network*)');
   });
 
+  it('escapes parentheses in session paths', () => {
+    const profile = buildDarwinSandboxProfile('/tmp/craft-(session)');
+    expect(profile).toContain(
+      '(allow file-write* (subpath "/tmp/craft-\\(session\\)"))',
+    );
+  });
+
+  it('falls back to resolved path when realpathSync fails', () => {
+    const missingPath = join(tmpdir(), 'sandbox-profile-missing-session-path');
+    const resolvedPath = resolve(missingPath);
+    const profile = buildDarwinSandboxProfile(missingPath);
+    expect(profile).toContain(
+      `(allow file-write* (subpath "${resolvedPath}"))`,
+    );
+  });
+
   it('includes logical and real write roots when the session path crosses a symlink', () => {
     if (process.platform === 'win32') {
       return;

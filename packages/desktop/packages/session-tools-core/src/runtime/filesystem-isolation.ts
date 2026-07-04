@@ -38,7 +38,11 @@ function canUseSandboxExec(): boolean {
 }
 
 function escapeSandboxPath(path: string): string {
-  return path.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  return path
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)');
 }
 
 function sandboxWriteRoots(sessionDir: string): string[] {
@@ -126,12 +130,18 @@ export function applyFilesystemIsolation(
     if (existsOnPath('bwrap')) {
       // Read-only root + writable bind mount for the session subtree.
       // This limits writes to sessionRoot while preserving runtime/library access.
+      const namespaceArgs = ['--unshare-ipc'];
+      if (options?.includeNetworkDeny) {
+        namespaceArgs.push('--unshare-net');
+      }
+
       return {
         status: 'enforced',
         backend: 'bwrap',
         command: 'bwrap',
         args: [
           '--die-with-parent',
+          ...namespaceArgs,
           '--ro-bind',
           '/',
           '/',
@@ -171,6 +181,7 @@ export function applyFilesystemIsolation(
         command: 'firejail',
         args: [
           '--quiet',
+          ...(options?.includeNetworkDeny ? ['--net=none'] : []),
           `--private=${sessionRoot}`,
           `--whitelist=${sessionRoot}`,
           '--',
