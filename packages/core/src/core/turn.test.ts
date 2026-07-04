@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type {
   ServerGeminiToolCallRequestEvent,
   ServerGeminiErrorEvent,
+  ServerGeminiModelFallbackEvent,
 } from './turn.js';
 import {
   CompressionStatus,
@@ -384,6 +385,17 @@ describe('Turn', () => {
         (event): event is ServerGeminiToolCallRequestEvent =>
           event.type === GeminiEventType.ToolCallRequest,
       );
+      const fallbackEvent = events.find(
+        (event): event is ServerGeminiModelFallbackEvent =>
+          event.type === GeminiEventType.ModelFallback,
+      );
+      expect(fallbackEvent).toEqual({
+        type: GeminiEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        statusCode: undefined,
+        fallbackIndex: 1,
+      });
       expect(toolCalls[0]!.value.response_id).toBe('primary-response');
       expect(toolCalls[1]!.value.response_id).toBeUndefined();
     });

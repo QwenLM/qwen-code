@@ -2820,7 +2820,7 @@ export class GeminiChat {
                     `[FALLBACK] Successfully completed request with ` +
                       `fallback model "${resolvedFallbackModel}".`,
                   );
-                  break;
+                  return;
                 } catch (fallbackError) {
                   if (isAbortError(fallbackError)) throw fallbackError;
                   if (fallbackError instanceof FallbackStreamOutputError) {
@@ -3073,6 +3073,7 @@ export class GeminiChat {
         yield { type: StreamEventType.CHUNK, value: chunk };
       }
     } catch (error) {
+      if (isAbortError(error)) throw error;
       if (streamYieldedChunk) {
         this.popPendingPartialAssistantTurn();
         // Once fallback output has reached callers, moving to another fallback
