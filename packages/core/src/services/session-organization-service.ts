@@ -504,7 +504,12 @@ export class SessionOrganizationService {
     const deduped: SessionGroup[] = [];
     for (const group of groups) {
       const key = groupNameKey(group.name);
-      if (seen.has(key)) continue;
+      if (seen.has(key)) {
+        this.onWarning?.(
+          `Dropped duplicate session group by name: "${group.name}" (id: ${group.id})`,
+        );
+        continue;
+      }
       seen.add(key);
       deduped.push(group);
     }

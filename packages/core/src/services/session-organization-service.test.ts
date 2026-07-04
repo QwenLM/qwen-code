@@ -97,6 +97,49 @@ describe('SessionOrganizationService', () => {
     expect(third.order).toBe(11);
   });
 
+  it('warns when dropping duplicate group names from the sidecar', async () => {
+    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
+    await fs.writeFile(
+      service.getStorePath(),
+      JSON.stringify({
+        schemaVersion: 1,
+        groups: [
+          {
+            id: 'group-a',
+            name: 'Work',
+            color: 'red',
+            order: 0,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+          {
+            id: 'group-b',
+            name: 'work',
+            color: 'blue',
+            order: 1,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+        sessions: {},
+      }),
+      'utf8',
+    );
+
+    await expect(service.listGroups()).resolves.toEqual({
+      groups: [
+        expect.objectContaining({
+          id: 'group-a',
+          name: 'Work',
+        }),
+      ],
+      colorOptions: GROUP_COLOR_OPTIONS,
+    });
+    expect(warnings).toEqual([
+      'Dropped duplicate session group by name: "work" (id: group-b)',
+    ]);
+  });
+
   it('pins sessions and assigns them to a single custom group', async () => {
     const group = await service.createGroup({ name: 'Release', color: 'red' });
 
