@@ -15,6 +15,8 @@ import { FileDiscoveryService } from '../services/fileDiscoveryService.js';
 import { StandardFileSystemService } from '../services/fileSystemService.js';
 import type { Config } from '../config/config.js';
 import { createMockWorkspaceContext } from '../test-utils/mockWorkspaceContext.js';
+import { FileReadCache } from '../services/fileReadCache.js';
+import { checkPriorRead } from '../tools/priorReadEnforcement.js';
 
 /** Helper to convert PartListUnion to string for test assertions */
 function contentToString(parts: PartListUnion): string {
@@ -56,6 +58,19 @@ describe('readManyFiles', () => {
       getFileSystemService: () => new StandardFileSystemService(),
       getContentGeneratorConfig: () => ({ modalities: {} }),
       getModel: () => 'text-only-model',
+    }) as unknown as Config;
+
+  // Variant of createMockConfig wired to a live FileReadCache so the
+  // prior-read enforcement path (issue #6289) can be exercised end-to-end.
+  const createMockConfigWithCache = (
+    rootDir: string,
+    cache: FileReadCache,
+    fileReadCacheDisabled = false,
+  ): Config =>
+    ({
+      ...createMockConfig(rootDir),
+      getFileReadCache: () => cache,
+      getFileReadCacheDisabled: () => fileReadCacheDisabled,
     }) as unknown as Config;
 
   async function createTestFile(
@@ -400,6 +415,112 @@ describe('readManyFiles', () => {
       // Downstream callers (e.g. atCommandProcessor) inspect this field to
       // render the read as failed rather than successful.
       expect(result.files[0]!.error).toMatch(/exceeds the 10MB limit/i);
+    });
+  });
+
+  // Issue #6289: files attached via `@path` load their content into context
+  // but were never recorded in the session FileReadCache, so a follow-up
+  // Edit / WriteFile was rejected with EDIT_REQUIRES_PRIOR_READ until the
+  // model redundantly re-read the file with read_file.
+  describe('prior-read enforcement (issue #6289)', () => {
+    it('records an @-attached text file so a later edit passes prior-read enforcement', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('attached.ts');
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      // Precondition: the file has never been read this session, so the
+      // enforcement helper rejects an edit.
+      const before = await checkPriorRead(cache, absolutePath, 'editing');
+      expect(before.ok).toBe(false);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      // The @-mention read must now satisfy prior-read enforcement without
+      // a redundant read_file.
+      const after = await checkPriorRead(cache, absolutePath, 'editing');
+      expect(after.ok).toBe(true);
+    });
+
+    it('records the read as fresh and cacheable in the FileReadCache', async () => {
+      const { relativePath, absolutePath } = await createTestFile('notes.md');
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const stats = nodeFs.statSync(absolutePath);
+      const status = cache.check(stats);
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadAt).toBeDefined();
+        expect(status.entry.lastReadCacheable).toBe(true);
+      }
+    });
+
+    it('does not record reads when fileReadCacheDisabled is set', async () => {
+      const { relativePath, absolutePath } =
+        await createTestFile('attached.ts');
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache, true);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      expect(cache.size()).toBe(0);
+      const decision = await checkPriorRead(cache, absolutePath, 'editing');
+      expect(decision.ok).toBe(false);
+    });
+
+    it('does not record directories (edit enforcement still rejects them)', async () => {
+      await createTestFile('mydir', 'nested.txt');
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      await readManyFiles(mockConfig, { paths: ['mydir'] });
+
+      expect(cache.size()).toBe(0);
+    });
+
+    it('does not let a binary image attachment satisfy text-edit enforcement', async () => {
+      const relativePath = 'screenshot.png';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(absolutePath, Buffer.from('fake png data'));
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      // A binary payload cannot be mutated as text by Edit / WriteFile, so
+      // enforcement must still reject it rather than being cleared by the
+      // attachment.
+      const decision = await checkPriorRead(cache, absolutePath, 'editing');
+      expect(decision.ok).toBe(false);
+    });
+
+    it('records a binary file as a full but non-cacheable read', async () => {
+      // A `.bin` file with a null byte is classified as `binary`: unlike an
+      // image it returns `stats` (so it IS recorded), but it carries no
+      // `originalLineCount`, so `cacheable` must be `false`. This guards the
+      // `originalLineCount !== undefined` clause of the cacheable derivation
+      // — dropping it would wrongly let a non-text payload clear prior-read
+      // enforcement for Edit / WriteFile.
+      const relativePath = 'payload.bin';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      await fs.writeFile(
+        absolutePath,
+        Buffer.from([0x00, 0x01, 0x02, 0x00, 0xff]),
+      );
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const stats = nodeFs.statSync(absolutePath);
+      const status = cache.check(stats);
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadCacheable).toBe(false);
+      }
     });
   });
 });

@@ -830,6 +830,22 @@ export interface ProcessedFileReadResult {
   stats?: import('node:fs').Stats;
 }
 
+/**
+ * Whether a {@link ProcessedFileReadResult} may be cached for prior-read
+ * enforcement: the payload must be plain text (not an image / PDF `Part`)
+ * and carry a known line count. Shared by `read-file.ts` and
+ * `readManyFiles.ts` so both read paths derive `cacheable` identically and
+ * agree on what Edit / WriteFile may later mutate.
+ */
+export function isCacheableReadResult(
+  result: ProcessedFileReadResult,
+): boolean {
+  return (
+    typeof result.llmContent === 'string' &&
+    result.originalLineCount !== undefined
+  );
+}
+
 export interface ProcessSingleFileContentOptions {
   offset?: number;
   limit?: number;

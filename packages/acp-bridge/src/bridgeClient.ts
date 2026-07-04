@@ -14,6 +14,7 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
   SessionNotification,
+  SessionUpdate,
   WriteTextFileRequest,
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
@@ -377,6 +378,12 @@ export interface BridgeClientSessionEntry {
   approvalModeRoundtripInFlight?: boolean;
 }
 
+interface PreparedSessionUpdateFrames {
+  frames: Array<Omit<BridgeEvent, 'id' | 'v'>>;
+  artifacts: SessionArtifactInput[];
+  trustedPublisher: boolean;
+}
+
 /**
  * Bridge `Client` implementation — the daemon's response surface for things
  * the agent asks the client (file reads/writes, permission prompts).
@@ -582,9 +589,25 @@ export class BridgeClient implements Client {
     const events =
       entry?.events ?? this.resolvePendingRestoreEvents(params.sessionId);
     if (!events) return;
+    const prepared = this.prepareSessionUpdateFrames(params, entry);
+    for (const frame of prepared.frames) {
+      events.publish(frame);
+    }
+    if (entry && prepared.artifacts.length > 0) {
+      await this.upsertAndPublishArtifacts(entry, prepared.artifacts, {
+        trustedPublisher: prepared.trustedPublisher,
+      });
+    }
+  }
+
+  prepareSessionUpdateFrames(
+    params: SessionNotification,
+    entry?: BridgeClientSessionEntry,
+  ): PreparedSessionUpdateFrames {
     const originator = entry?.activePromptOriginatorClientId
       ? { originatorClientId: entry.activePromptOriginatorClientId }
       : {};
+    const frames: Array<Omit<BridgeEvent, 'id' | 'v'>> = [];
     // A2UI-over-MCP: tool_call_update results from an A2UI UI server carry
     // the A2UI command JSON flattened by core (EmbeddedResource -> text, the
     // application/a2ui+json mime is dropped, so detection keys off the
@@ -596,7 +619,7 @@ export class BridgeClient implements Client {
       // One frame per surface: tool results carrying commands for multiple
       // surfaces are split so every consumer sees a single-surface frame.
       for (const surface of a2ui.surfaces) {
-        events.publish({
+        frames.push({
           type: 'session_update',
           data: {
             sessionId: params.sessionId,
@@ -640,18 +663,46 @@ export class BridgeClient implements Client {
         )
       : [];
     const publishParams = sanitizeSessionUpdateArtifacts(params, updateMeta);
-    events.publish({
+    frames.push({
       type: 'session_update',
       data: publishParams,
       ...originator,
       ...(serverTimestamp !== undefined ? { _meta: { serverTimestamp } } : {}),
     });
-    if (entry) {
-      if (artifacts.length > 0) {
-        await this.upsertAndPublishArtifacts(entry, artifacts, {
-          trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
+    return {
+      frames,
+      artifacts,
+      trustedPublisher: isTrustedArtifactToolUpdate(params, updateMeta),
+    };
+  }
+
+  async seedSessionUpdates(
+    entry: BridgeClientSessionEntry,
+    updates: SessionUpdate[],
+  ): Promise<void> {
+    const frames: Array<Omit<BridgeEvent, 'id' | 'v'>> = [];
+    const artifactBatches: Array<{
+      artifacts: SessionArtifactInput[];
+      trustedPublisher: boolean;
+    }> = [];
+    for (const update of updates) {
+      const prepared = this.prepareSessionUpdateFrames(
+        { sessionId: entry.sessionId, update },
+        entry,
+      );
+      frames.push(...prepared.frames);
+      if (prepared.artifacts.length > 0) {
+        artifactBatches.push({
+          artifacts: prepared.artifacts,
+          trustedPublisher: prepared.trustedPublisher,
         });
       }
+    }
+    entry.events.seedReplayEvents(frames);
+    for (const batch of artifactBatches) {
+      await this.upsertAndPublishArtifacts(entry, batch.artifacts, {
+        trustedPublisher: batch.trustedPublisher,
+      });
     }
   }
 
