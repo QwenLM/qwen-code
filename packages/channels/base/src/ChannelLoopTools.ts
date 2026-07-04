@@ -104,6 +104,8 @@ export class ChannelLoopMcpServer {
         return { tools: CHANNEL_LOOP_MCP_TOOLS };
       case 'tools/call':
         return this.callTool(message['params'], context);
+      case 'ping':
+        return {};
       default:
         throw new Error(`Method not found: ${String(message['method'])}`);
     }

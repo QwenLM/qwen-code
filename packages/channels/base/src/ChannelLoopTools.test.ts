@@ -158,6 +158,21 @@ describe('ChannelLoopMcpServer', () => {
     ).resolves.toBeUndefined();
   });
 
+  it('responds to JSON-RPC ping requests', async () => {
+    const server = new ChannelLoopMcpServer({
+      create: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+    });
+
+    const response = await server.handleMessage(
+      { jsonrpc: '2.0', id: 7, method: 'ping' },
+      {},
+    );
+
+    expect(response).toStrictEqual({ jsonrpc: '2.0', id: 7, result: {} });
+  });
+
   it('trims cancel ids before dispatch', async () => {
     const cancel = vi.fn().mockResolvedValue('Cancelled loop job-1.');
     const server = new ChannelLoopMcpServer({

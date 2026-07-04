@@ -506,7 +506,7 @@ export class DingtalkChannel extends ChannelBase {
         }),
       });
       if (!resp.ok) {
-        const detail = await resp.text().catch(() => '');
+        const detail = sanitizeLogText(await resp.text().catch(() => ''), 500);
         process.stderr.write(
           `[DingTalk:${this.name}] emotion/${endpoint} failed: ${resp.status} ${detail}\n`,
         );

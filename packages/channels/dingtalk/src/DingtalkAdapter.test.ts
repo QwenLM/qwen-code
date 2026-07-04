@@ -562,6 +562,48 @@ describe('DingtalkChannel prompt reactions', () => {
       fetchSpy.mockRestore();
     }
   });
+
+  it('sanitizes failed emotion response details before logging', async () => {
+    const channel = createChannel();
+    const fetchSpy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockImplementation((input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.startsWith('https://oapi.dingtalk.com/gettoken')) {
+          return Promise.resolve(
+            new Response(
+              JSON.stringify({
+                errcode: 0,
+                access_token: 'proactive-token',
+                expires_in: 7200,
+              }),
+              { status: 200 },
+            ),
+          );
+        }
+        return Promise.resolve(
+          new Response('bad\n[DingTalk:fake] forged', { status: 500 }),
+        );
+      });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      await (
+        channel as unknown as {
+          attachReaction(msgId: string, conversationId: string): Promise<void>;
+        }
+      ).attachReaction('msg-1', 'cid-123');
+
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('bad\\n[DingTalk:fake] forged');
+      expect(logged).not.toContain('bad\n');
+    } finally {
+      stderr.mockRestore();
+      fetchSpy.mockRestore();
+    }
+  });
 });
 
 describe('DingtalkChannel.isUnroutableGroupMessage', () => {
