@@ -397,6 +397,31 @@ describe('startCommand.handler', () => {
     expect(mockChannelLoopScheduler).not.toHaveBeenCalled();
   });
 
+  it('does not expose channel loops when cron is disabled in settings', async () => {
+    const channels = { telegram: { type: 'telegram' } };
+    mockLoadSettings.mockReturnValue({
+      merged: { channels, experimental: { cron: false } },
+    });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({ name: 'telegram' })).rejects.toThrow(
+        'process.exit: 1',
+      );
+    } finally {
+      exitSpy.mockRestore();
+    }
+
+    const options = mockCreateChannel.mock.calls[0]?.[3] as
+      | ChannelBaseOptions
+      | undefined;
+    expect(options?.loopController).toBeUndefined();
+    expect(mockChannelLoopStore).not.toHaveBeenCalled();
+    expect(mockChannelLoopScheduler).not.toHaveBeenCalled();
+  });
+
   it('cleans up a single channel when pidfile creation races', async () => {
     const channels = { telegram: { type: 'telegram' } };
     const err = new Error('EEXIST') as NodeJS.ErrnoException;
