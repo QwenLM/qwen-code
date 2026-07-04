@@ -10,6 +10,7 @@ import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { SessionContext } from '../../../acp-integration/session/types.js';
 import type { SessionUpdate, ToolCall } from '@agentclientprotocol/sdk';
 import { HistoryReplayer } from '../../../acp-integration/session/HistoryReplayer.js';
+import { getExplicitToolResultCallId } from '../../../utils/chat-record-tool-call-id.js';
 import type {
   ExportConfig,
   ExportMessage,
@@ -47,23 +48,6 @@ function extractToolNameFromRecord(record: ChatRecord): string | undefined {
   for (const part of record.message.parts) {
     if ('functionResponse' in part && part.functionResponse?.name) {
       return part.functionResponse.name;
-    }
-  }
-
-  return undefined;
-}
-
-/**
- * Extracts call ID from a ChatRecord's function response.
- */
-function extractFunctionResponseId(record: ChatRecord): string | undefined {
-  if (!record.message?.parts) {
-    return undefined;
-  }
-
-  for (const part of record.message.parts) {
-    if ('functionResponse' in part && part.functionResponse?.id) {
-      return part.functionResponse.id;
     }
   }
 
@@ -144,8 +128,7 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
     if (record.type !== 'tool_result' || !record.toolCallResult) continue;
 
     const toolName = extractToolNameFromRecord(record);
-    const callId =
-      record.toolCallResult.callId ?? extractFunctionResponseId(record);
+    const callId = getExplicitToolResultCallId(record);
     const argsFromId =
       callId && argsIndex.byId.has(callId)
         ? argsIndex.byId.get(callId)

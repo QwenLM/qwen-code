@@ -8,6 +8,7 @@ import type { Part } from '@google/genai';
 import { ToolNames } from '@qwen-code/qwen-code-core';
 import type { ChatRecord, Kind } from '@qwen-code/qwen-code-core';
 import { buildTruncatedDiffPreviewText } from '../../../utils/truncatedDiffPreview.js';
+import { getToolResultCallId } from '../../../utils/chat-record-tool-call-id.js';
 import type {
   ExportConfig,
   ExportMessage,
@@ -138,7 +139,7 @@ function buildToolCallMessageFromResult(
     return null;
   }
 
-  const toolCallId = toolCallResult?.callId ?? record.uuid;
+  const toolCallId = getToolResultCallId(record);
   const functionCallArgs = extractFunctionCallArgs(record);
   const { kind, title, locations } = resolveToolMetadata(
     config,
