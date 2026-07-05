@@ -1822,6 +1822,7 @@ export abstract class ChannelBase {
   private normalizeLoopTarget(
     target: SessionTarget,
   ): SessionTarget & { isGroup: boolean } {
+    // Older persisted loop targets may not have isGroup; treat them as one-to-one chats.
     return { ...target, isGroup: target.isGroup === true };
   }
 

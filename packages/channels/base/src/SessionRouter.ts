@@ -84,13 +84,7 @@ export class SessionRouter {
     for (;;) {
       const existing = this.toSession.get(key);
       if (existing) {
-        this.updateTarget(existing, {
-          channelName,
-          senderId,
-          chatId,
-          threadId,
-          isGroup,
-        });
+        this.promoteTargetToGroup(existing, isGroup);
         return existing;
       }
 
@@ -98,13 +92,7 @@ export class SessionRouter {
       if (creating) {
         try {
           const sessionId = await creating;
-          this.updateTarget(sessionId, {
-            channelName,
-            senderId,
-            chatId,
-            threadId,
-            isGroup,
-          });
+          this.promoteTargetToGroup(sessionId, isGroup);
           return sessionId;
         } catch (err) {
           if (this.creatingSessions.get(key) === creating) {
@@ -266,10 +254,13 @@ export class SessionRouter {
     return sessionId;
   }
 
-  private updateTarget(sessionId: string, next: SessionTarget): void {
+  private promoteTargetToGroup(
+    sessionId: string,
+    isGroup: boolean | undefined,
+  ): void {
     const current = this.toTarget.get(sessionId);
     if (!current) return;
-    if (current.isGroup === true || next.isGroup !== true) return;
+    if (current.isGroup === true || isGroup !== true) return;
     this.toTarget.set(sessionId, { ...current, isGroup: true });
     this.persist();
   }
