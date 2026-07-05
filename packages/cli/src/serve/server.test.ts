@@ -65,6 +65,7 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionArtifactAuthorizationError,
   SessionArtifactValidationError,
   SessionShellClientRequiredError,
   SessionShellDisabledError,
@@ -669,7 +670,10 @@ interface FakeBridge extends AcpSessionBridge {
     sessionId: string;
     context?: BridgeClientRequestContext;
   }>;
-  gcSessionArtifactsCalls: string[];
+  gcSessionArtifactsCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   workspaceMcpCalls: number;
   workspaceMcpToolsCalls: string[];
   workspaceMcpResourcesCalls: string[];
@@ -821,7 +825,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const pinSessionArtifactCalls: FakeBridge['pinSessionArtifactCalls'] = [];
   const unpinSessionArtifactCalls: FakeBridge['unpinSessionArtifactCalls'] = [];
   const fsckSessionArtifactsCalls: FakeBridge['fsckSessionArtifactsCalls'] = [];
-  const gcSessionArtifactsCalls: string[] = [];
+  const gcSessionArtifactsCalls: FakeBridge['gcSessionArtifactsCalls'] = [];
   let workspaceMcpCalls = 0;
   const workspaceMcpToolsCalls: string[] = [];
   const workspaceMcpResourcesCalls: string[] = [];
@@ -1545,9 +1549,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       });
       return fsckSessionArtifactsImpl(sessionId, context);
     },
-    async gcSessionArtifacts(sessionId) {
-      gcSessionArtifactsCalls.push(sessionId);
-      return gcSessionArtifactsImpl(sessionId);
+    async gcSessionArtifacts(sessionId, context) {
+      gcSessionArtifactsCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return gcSessionArtifactsImpl(sessionId, context);
     },
     async getWorkspaceMcpStatus() {
       workspaceMcpCalls += 1;
@@ -7936,6 +7943,54 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('DELETE /session/:id/artifacts/:artifactId maps artifact validation errors', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app)
+          .delete('/session/session-A/artifacts/artifact-1')
+          .send({ deleteContent: 'yes' }),
+      ).set('X-Qwen-Client-Id', 'client-1');
+
+      expect(res.status).toBe(400);
+      expect(res.body).toEqual({
+        v: 1,
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: 'deleteContent must be a boolean',
+          field: 'deleteContent',
+        },
+      });
+      expect(bridge.removeSessionArtifactCalls).toEqual([]);
+    });
+
+    it('DELETE /session/:id/artifacts/:artifactId maps artifact authorization errors', async () => {
+      const bridge = fakeBridge({
+        removeSessionArtifactImpl: async () => {
+          throw new SessionArtifactAuthorizationError(
+            'session-A',
+            'artifact-1',
+            'client-a',
+            'client-b',
+          );
+        },
+      });
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).delete('/session/session-A/artifacts/artifact-1'),
+      ).set('X-Qwen-Client-Id', 'client-b');
+
+      expect(res.status).toBe(403);
+      expect(res.body).toEqual({
+        error: 'artifact artifact-1 is owned by a different client',
+        code: 'session_artifact_forbidden',
+        sessionId: 'session-A',
+        artifactId: 'artifact-1',
+      });
+    });
+
     it('POST /session/:id/artifacts/:artifactId/pin forwards mutation auth context', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
@@ -8097,7 +8152,9 @@ describe('createServeApp', () => {
       const app = createServeApp(tokenOpts, undefined, { bridge });
 
       const res = await auth(
-        request(app).post('/session/session-A/artifacts/gc'),
+        request(app)
+          .post('/session/session-A/artifacts/gc')
+          .set('X-Qwen-Client-Id', 'client-1'),
       );
 
       expect(res.status).toBe(200);
@@ -8105,7 +8162,9 @@ describe('createServeApp', () => {
         removed: ['orphaned'],
         retained: ['kept'],
       });
-      expect(bridge.gcSessionArtifactsCalls).toEqual(['session-A']);
+      expect(bridge.gcSessionArtifactsCalls).toEqual([
+        { sessionId: 'session-A', context: { clientId: 'client-1' } },
+      ]);
     });
   });
 

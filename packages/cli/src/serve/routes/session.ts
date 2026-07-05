@@ -893,9 +893,18 @@ export function registerSessionRoutes(
     mutate({ strict: true }),
     withMutableSession(
       'POST /session/:id/artifacts/gc',
-      async (_req, res, sessionId) => {
+      async (req, res, sessionId) => {
+        const clientId = parseClientIdHeader(req, res);
+        if (clientId === null) return;
         try {
-          res.status(200).json(await bridge.gcSessionArtifacts(sessionId));
+          res
+            .status(200)
+            .json(
+              await bridge.gcSessionArtifacts(
+                sessionId,
+                clientId !== undefined ? { clientId } : undefined,
+              ),
+            );
         } catch (err) {
           sendBridgeError(res, err, {
             route: 'POST /session/:id/artifacts/gc',
@@ -936,6 +945,7 @@ export function registerSessionRoutes(
           );
           res.status(200).json(result);
         } catch (err) {
+          if (sendArtifactValidationError(res, err)) return;
           sendBridgeError(res, err, {
             route: 'DELETE /session/:id/artifacts/:artifactId',
             sessionId,

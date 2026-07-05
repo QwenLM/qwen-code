@@ -169,6 +169,20 @@ export class SessionArtifactValidationError extends Error {
   }
 }
 
+export class SessionArtifactAuthorizationError extends Error {
+  readonly code = 'SESSION_ARTIFACT_FORBIDDEN';
+
+  constructor(
+    readonly sessionId: string,
+    readonly artifactId: string,
+    readonly ownerClientId: string,
+    readonly requesterClientId?: string,
+  ) {
+    super(`artifact ${artifactId} is owned by a different client`);
+    this.name = 'SessionArtifactAuthorizationError';
+  }
+}
+
 interface SessionArtifactStoreOptions {
   sessionId: string;
   workspaceCwd: string;
@@ -293,6 +307,12 @@ export class SessionArtifactStore {
       try {
         for (const normalized of coalesceByIdentity(normalizedResults)) {
           const artifact = this.applyStickyEphemeralOverride(normalized);
+          if (this.shouldSuppressTombstonedUpsert(artifact)) {
+            writeStderrLine(
+              `[artifacts] session=${this.sessionId} action=tombstone_replay_suppressed artifactId=${artifact.id}`,
+            );
+            continue;
+          }
           const existing =
             this.artifacts.get(artifact.id) ??
             this.findPublishedUpgradeTarget(artifact) ??
@@ -427,13 +447,7 @@ export class SessionArtifactStore {
       // Client-created artifacts with an owner require the same client id.
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
-      const denied = this.denyCrossClientMutation(
-        'remove',
-        artifactId,
-        existing,
-        options,
-      );
-      if (denied) return denied;
+      this.denyCrossClientMutation('remove', artifactId, existing, options);
       this.artifacts.delete(artifactId);
       const changes: SessionArtifactChange[] = [
         {
@@ -471,13 +485,7 @@ export class SessionArtifactStore {
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
-      const denied = this.denyCrossClientMutation(
-        'pin',
-        artifactId,
-        existing,
-        options,
-      );
-      if (denied) return denied;
+      this.denyCrossClientMutation('pin', artifactId, existing, options);
       if (existing.retention === 'pinned' && !hasPinOptions(options)) {
         return {
           v: 1,
@@ -555,13 +563,7 @@ export class SessionArtifactStore {
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
-      const denied = this.denyCrossClientMutation(
-        'unpin',
-        artifactId,
-        existing,
-        options,
-      );
-      if (denied) return denied;
+      this.denyCrossClientMutation('unpin', artifactId, existing, options);
       const targetRetention = options.retention ?? 'restorable';
       if (
         targetRetention === 'ephemeral' &&
@@ -706,6 +708,7 @@ export class SessionArtifactStore {
       this.stickyEphemeralIds.clear();
       this.insertSeq = 0;
       this.persistenceSeq = snapshot.sequence;
+      this.durableEventsSinceSnapshot = 0;
       for (const id of snapshot.tombstonedIds) {
         this.tombstonedIds.add(id);
       }
@@ -1025,23 +1028,23 @@ export class SessionArtifactStore {
     artifactId: string,
     existing: StoredArtifact,
     options?: { clientId?: string },
-  ): SessionArtifactMutationResult | undefined {
+  ): void {
     if (
       existing.source !== 'client' ||
       existing.clientId === undefined ||
       existing.clientId === options?.clientId
     ) {
-      return undefined;
+      return;
     }
     writeStderrLine(
       `[artifacts] session=${this.sessionId} action=${action}_denied artifactId=${artifactId} owner=${existing.clientId} requester=${options?.clientId ?? '<anonymous>'}`,
     );
-    return {
-      v: 1,
-      sessionId: this.sessionId,
-      changes: [],
-      warnings: [`artifact ${artifactId} is owned by a different client`],
-    };
+    throw new SessionArtifactAuthorizationError(
+      this.sessionId,
+      artifactId,
+      existing.clientId,
+      options?.clientId,
+    );
   }
 
   private async normalizeInput(
@@ -1160,6 +1163,15 @@ export class SessionArtifactStore {
       ),
       clientId: normalizeString(input.clientId, 'clientId', 200, false),
     };
+  }
+
+  private shouldSuppressTombstonedUpsert(
+    artifact: NormalizedArtifact,
+  ): boolean {
+    if (!this.tombstonedIds.has(artifact.id)) {
+      return false;
+    }
+    return artifact.source !== 'client' && !artifact.retentionExplicit;
   }
 
   private async refreshWorkspaceStatuses(): Promise<void> {

@@ -625,7 +625,10 @@ export interface AcpSessionBridge {
     context?: BridgeClientRequestContext,
   ): Promise<SessionArtifactFsckResult>;
 
-  gcSessionArtifacts(sessionId: string): Promise<SessionArtifactGcResult>;
+  gcSessionArtifacts(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactGcResult>;
 
   /**
    * Cast a vote on a pending `permission_request` (first-responder wins).

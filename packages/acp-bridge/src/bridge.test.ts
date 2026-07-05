@@ -62,6 +62,7 @@ import {
   SESS_A,
 } from './internal/testUtils.js';
 import { SessionArtifactContentStore } from './sessionArtifactContentStore.js';
+import { SessionArtifactAuthorizationError } from './sessionArtifacts.js';
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -168,10 +169,10 @@ describe('createAcpSessionBridge', () => {
         bridge.removeSessionArtifact(first.sessionId, artifactId, {
           clientId: second.clientId,
         }),
-      ).resolves.toMatchObject({ changes: [] });
+      ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
       await expect(
         bridge.removeSessionArtifact(first.sessionId, artifactId),
-      ).resolves.toMatchObject({ changes: [] });
+      ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
       await expect(
         bridge.getSessionArtifacts(first.sessionId),
       ).resolves.toMatchObject({

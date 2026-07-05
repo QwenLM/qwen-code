@@ -6318,6 +6318,12 @@ class QwenAgent implements Agent {
           );
         }
         const payload = params['payload'];
+        if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+          throw RequestError.invalidParams(
+            undefined,
+            'Invalid or missing artifact persist payload',
+          );
+        }
         const session = this.sessionOrThrow(sessionId);
         const recording = session.getConfig().getChatRecordingService();
         if (!recording) {

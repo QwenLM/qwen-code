@@ -1765,6 +1765,30 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     return innerConfig;
   }
 
+  it('sessionArtifactsPersist rejects a missing payload', async () => {
+    const agentPromise = runAcpAgent(
+      mockConfig,
+      makeSessionSettings(),
+      mockArgv,
+    );
+    await vi.waitFor(() => expect(capturedAgentFactory).toBeDefined());
+    const agent = capturedAgentFactory!({
+      get closed() {
+        return mockConnectionState.promise;
+      },
+    }) as AgentLike;
+
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId: 'session-A',
+        kind: 'event',
+      }),
+    ).rejects.toThrowError(/Invalid or missing artifact persist payload/);
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
   it('status ext methods expose workspace snapshots without secrets', async () => {
     vi.mocked(getMCPDiscoveryState).mockReturnValue(
       MCPDiscoveryState.COMPLETED,

@@ -4757,10 +4757,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const mode = artifactPinMode(requestOptions);
       const clientRetained = artifactClientRetained(requestOptions);
       const expiresAt = artifactExpiresAt(requestOptions, mode);
-      const artifact = await entry.artifacts.get(artifactId);
-      if (!artifact) {
-        return { v: 1, sessionId, changes: [] };
-      }
       const pruneWarnings = await pruneExpiredArtifactPins(entry, clientId);
       const currentArtifact = await entry.artifacts.get(artifactId);
       if (!currentArtifact) {
@@ -4867,9 +4863,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       return artifactContentStore.fsck(await entry.artifacts.contentRefs());
     },
 
-    async gcSessionArtifacts(sessionId) {
+    async gcSessionArtifacts(sessionId, context) {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
+      resolveTrustedClientId(entry, context?.clientId);
       const refs = await entry.artifacts.contentRefs();
       return artifactContentStore.gc(
         sessionId,

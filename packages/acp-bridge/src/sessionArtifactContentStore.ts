@@ -172,12 +172,9 @@ export class SessionArtifactContentStore {
         if (sha256 !== ref.sha256) {
           hashMismatches.push(ref.contentId);
         }
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
-          missing.push(ref.contentId);
-          continue;
-        }
-        throw error;
+      } catch {
+        missing.push(ref.contentId);
+        continue;
       }
     }
     return { checked: contentRefs.length, missing, hashMismatches };

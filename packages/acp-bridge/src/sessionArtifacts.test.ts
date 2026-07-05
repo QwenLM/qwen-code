@@ -11,6 +11,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  SessionArtifactAuthorizationError,
   SessionArtifactStore,
   SessionArtifactValidationError,
 } from './sessionArtifacts.js';
@@ -102,14 +103,10 @@ describe('SessionArtifactStore', () => {
     try {
       await expect(
         store.remove(artifactId, { clientId: 'client-b' }),
-      ).resolves.toMatchObject({
-        changes: [],
-        warnings: [`artifact ${artifactId} is owned by a different client`],
-      });
-      await expect(store.remove(artifactId)).resolves.toMatchObject({
-        changes: [],
-        warnings: [`artifact ${artifactId} is owned by a different client`],
-      });
+      ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+      await expect(store.remove(artifactId)).rejects.toBeInstanceOf(
+        SessionArtifactAuthorizationError,
+      );
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('remove_denied');
       expect(logged).toContain('client-a');
@@ -161,10 +158,7 @@ describe('SessionArtifactStore', () => {
     try {
       await expect(
         store.pin(artifactId, { clientId: 'client-b', contentRef }),
-      ).resolves.toMatchObject({
-        changes: [],
-        warnings: [`artifact ${artifactId} is owned by a different client`],
-      });
+      ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
       await expect(
         store.pin(artifactId, { clientId: 'client-a', contentRef }),
       ).resolves.toMatchObject({
@@ -172,10 +166,7 @@ describe('SessionArtifactStore', () => {
       });
       await expect(
         store.unpin(artifactId, { clientId: 'client-b' }),
-      ).resolves.toMatchObject({
-        changes: [],
-        warnings: [`artifact ${artifactId} is owned by a different client`],
-      });
+      ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
 
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('pin_denied');
@@ -2578,6 +2569,88 @@ describe('SessionArtifactStore', () => {
     ).toBe(false);
   });
 
+  it('suppresses implicit upserts for restored tombstones', async () => {
+    const sessionId = 's11-restored-tombstone';
+    const input = {
+      title: 'Old tool result',
+      url: 'https://example.com/tombstoned',
+    };
+    const seed = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+    const artifactId = (await seed.upsertMany([input])).changes[0]!.artifactId;
+    const store = new SessionArtifactStore({
+      sessionId,
+      workspaceCwd: workspace,
+    });
+
+    await store.restore({
+      v: 2,
+      sessionId,
+      sequence: 1,
+      artifacts: [],
+      tombstonedIds: [artifactId],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    const suppressed = await store.upsertMany([input]);
+    expect(suppressed.changes).toEqual([]);
+
+    const explicitClient = await store.upsertMany([
+      { ...input, source: 'client' },
+    ]);
+    expect(explicitClient.changes).toMatchObject([{ action: 'created' }]);
+  });
+
+  it('resets durable event snapshot cadence after restore', async () => {
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-snapshot-cadence',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async (payload) => {
+          snapshots.push(payload);
+        },
+      },
+    });
+
+    for (let index = 0; index < 49; index++) {
+      await store.upsertMany(
+        [
+          {
+            title: `Before restore ${index}`,
+            url: `https://example.com/before-restore-${index}`,
+          },
+        ],
+        { strict: true },
+      );
+    }
+    expect(snapshots).toHaveLength(0);
+
+    await store.restore({
+      v: 2,
+      sessionId: 's11-restore-snapshot-cadence',
+      sequence: 100,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+    await store.upsertMany(
+      [
+        {
+          title: 'After restore',
+          url: 'https://example.com/after-restore',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(snapshots).toHaveLength(0);
+  });
+
   it('snapshots unpin-to-ephemeral state after applying the live update', async () => {
     const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
     const store = new SessionArtifactStore({
@@ -3176,6 +3249,25 @@ describe('SessionArtifactContentStore', () => {
     await expect(contentStore.fsck([ref!])).resolves.toEqual({
       checked: 1,
       missing: [],
+      hashMismatches: [],
+    });
+  });
+
+  it('treats fsck read races as missing content', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('race.txt', 'race');
+    const ref = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+    const contentPath = path.join(contentRoot, ref.contentId, 'content');
+    await fs.rm(contentPath);
+    await fs.mkdir(contentPath);
+
+    await expect(contentStore.fsck([ref])).resolves.toEqual({
+      checked: 1,
+      missing: [ref.contentId],
       hashMismatches: [],
     });
   });

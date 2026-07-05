@@ -425,6 +425,9 @@ class FakeBridge {
     | Parameters<HttpAcpBridge['fsckSessionArtifacts']>[1]
     | undefined;
   lastGcSessionId: string | undefined;
+  lastGcSessionContext:
+    | Parameters<HttpAcpBridge['gcSessionArtifacts']>[1]
+    | undefined;
   async getSessionArtifacts(sessionId: string) {
     this.lastArtifactListSessionId = sessionId;
     return {
@@ -494,8 +497,12 @@ class FakeBridge {
       hashMismatches: [] as string[],
     };
   }
-  async gcSessionArtifacts(sessionId: string) {
+  async gcSessionArtifacts(
+    sessionId: string,
+    context?: Parameters<HttpAcpBridge['gcSessionArtifacts']>[1],
+  ) {
     this.lastGcSessionId = sessionId;
+    this.lastGcSessionContext = context;
     return { removed: [] as string[], retained: [] as string[] };
   }
   async getWorkspaceToolsStatus() {
@@ -6294,8 +6301,9 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     });
 
     it('_qwen/session/artifacts/gc returns cleanup result', async () => {
-      bridge.gcSessionArtifacts = async (sessionId) => {
+      bridge.gcSessionArtifacts = async (sessionId, context) => {
         bridge.lastGcSessionId = sessionId;
+        bridge.lastGcSessionContext = context;
         return { removed: ['old'], retained: ['kept'] };
       };
       const connId = await initialize();
@@ -6319,6 +6327,10 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         result: { removed: ['old'], retained: ['kept'] },
       });
       expect(bridge.lastGcSessionId).toBe('sess-1');
+      expect(bridge.lastGcSessionContext).toEqual({
+        clientId: 'client-1',
+        fromLoopback: true,
+      });
     });
 
     it('_qwen/session/artifacts/add holds the archive gate while mutating', async () => {

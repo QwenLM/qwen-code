@@ -27,6 +27,7 @@ import {
   PermissionPolicyNotImplementedError,
   PromptQueueFullError,
   RestoreInProgressError,
+  SessionArtifactAuthorizationError,
   SessionArchivedError,
   SessionArchivingError,
   SessionBusyError,
@@ -275,6 +276,15 @@ export function sendBridgeError(
       code: 'invalid_client_id',
       sessionId: err.sessionId,
       clientId: err.clientId,
+    });
+    return;
+  }
+  if (err instanceof SessionArtifactAuthorizationError) {
+    res.status(403).json({
+      error: err.message,
+      code: 'session_artifact_forbidden',
+      sessionId: err.sessionId,
+      artifactId: err.artifactId,
     });
     return;
   }

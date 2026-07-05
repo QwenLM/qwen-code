@@ -2644,7 +2644,10 @@ export class AcpDispatcher {
         case `${QWEN_METHOD_NS}session/artifacts/gc`: {
           const sessionId = String(params['sessionId'] ?? '');
           await this.withMutableOwned(conn, sessionId, id, async () => {
-            const result = await this.bridge.gcSessionArtifacts(sessionId);
+            const result = await this.bridge.gcSessionArtifacts(
+              sessionId,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
             this.replyConn(conn, id, result as unknown);
           });
           return;
