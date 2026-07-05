@@ -331,6 +331,20 @@ describe('resolveWithinWorkspace', () => {
     expect((err as { kind: string }).kind).toBe('path_not_found');
   });
 
+  it('rejects ENOENT under read intent through an absolute workspace alias', async () => {
+    const aliasWorkspace = path.join(scratch, 'alias-workspace');
+    await fsp.symlink(workspace, aliasWorkspace, 'dir');
+
+    const err = await resolveWithinWorkspace(
+      path.join(aliasWorkspace, 'does-not-exist'),
+      workspace,
+      'read',
+    ).catch((e: unknown) => e);
+
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('path_not_found');
+  });
+
   it('rejects suspicious patterns before any I/O', async () => {
     // UNC prefixes are platform-agnostic: a daemon should never
     // accept `//server/share` regardless of OS. The 8.3

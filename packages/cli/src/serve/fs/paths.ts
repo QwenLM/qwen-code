@@ -399,7 +399,7 @@ export async function resolveWithinWorkspace(
                 }
                 throw lstatErr;
               });
-            if (!finalPathIsSymlink) {
+            if (!finalPathIsSymlink && ENOENT_TOLERATING_INTENTS.has(intent)) {
               preResolvedCanonical = canonicalCandidate;
             }
           }
