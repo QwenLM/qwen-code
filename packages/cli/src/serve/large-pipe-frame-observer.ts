@@ -298,9 +298,9 @@ function mergeUpdateSummary(target: UpdateSummary, next: UpdateSummary): void {
       next.maxObservedUpdateBytes > target.maxObservedUpdateBytes)
   ) {
     target.maxObservedUpdateBytes = next.maxObservedUpdateBytes;
-    target.sessionUpdate = next.sessionUpdate;
-    target.toolName = next.toolName;
-    target.toolProvenance = next.toolProvenance;
+    target.sessionUpdate = next.sessionUpdate ?? target.sessionUpdate;
+    target.toolName = next.toolName ?? target.toolName;
+    target.toolProvenance = next.toolProvenance ?? target.toolProvenance;
   }
   if (
     next.maxContentTextBytes !== undefined &&

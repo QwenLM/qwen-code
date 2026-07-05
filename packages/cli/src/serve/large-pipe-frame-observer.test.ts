@@ -258,6 +258,44 @@ describe('large pipe frame observer', () => {
     });
   });
 
+  it('preserves existing attribution when a larger update omits it', () => {
+    const largerRawOutput = 'r'.repeat(256);
+    const context = classifyLargePipeFrame({
+      direction: 'outbound',
+      bytes: LARGE_PIPE_FRAME_THRESHOLD_BYTES,
+      message: {
+        jsonrpc: '2.0',
+        id: 4,
+        result: {
+          _meta: {
+            [LOAD_REPLAY_META_KEY]: {
+              updates: [
+                {
+                  sessionUpdate: 'tool_call_update',
+                  rawOutput: 'small',
+                  _meta: { toolName: 'shell', provenance: 'builtin' },
+                },
+                {
+                  rawOutput: largerRawOutput,
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+
+    expect(context).toMatchObject({
+      sourceClass: 'load_session_bulk_replay_response',
+      updateCount: 2,
+      sessionUpdate: 'tool_call_update',
+      toolName: 'shell',
+      toolProvenance: 'builtin',
+      maxRawOutputTextBytes: Buffer.byteLength(largerRawOutput, 'utf8'),
+      rawOutputKind: 'string',
+    });
+  });
+
   it('caps shallow update and content traversal work', () => {
     let nestedContent: unknown = { type: 'text', text: 'too-deep' };
     for (let i = 0; i < 64; i += 1) {
@@ -273,7 +311,7 @@ describe('large pipe frame observer', () => {
       bytes: LARGE_PIPE_FRAME_THRESHOLD_BYTES,
       message: {
         jsonrpc: '2.0',
-        id: 4,
+        id: 5,
         result: {
           _meta: {
             [LOAD_REPLAY_META_KEY]: {
