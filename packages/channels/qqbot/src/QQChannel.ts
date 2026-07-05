@@ -1767,13 +1767,16 @@ export class QQChannel extends ChannelBase {
   /**
    * Check if a message was already processed via a different event type
    * (e.g., GROUP_AT_MESSAGE_CREATE + GROUP_MESSAGE_CREATE for the same message).
-   * Uses composite key of chatId + authorId + content, 10-min TTL via cleanup timer.
+   * Note: QQ guarantees these events are mutually exclusive per-group
+   * (groupAllPolicy determines which event type fires), so this dedup is
+   * a safety net, not a normal code path. Keyed on event.id since the
+   * same underlying message has the same event.id across both event types.
    */
   private isCrossEventDuplicate(
     chatId: string,
     event: QQGroupMessageEvent,
   ): boolean {
-    const key = `${chatId}:${event.author?.user_openid || event.author?.member_openid || event.author?.id || ''}:${event.content || ''}`;
+    const key = `${chatId}:${event.id}`;
     const now = Date.now();
     if (this.crossEventDedup.has(key)) return true;
     this.crossEventDedup.set(key, now);
@@ -2019,9 +2022,10 @@ export class QQChannel extends ChannelBase {
       if (!matched) return;
     }
 
-    // Dedup after policy check: GROUP_AT_MESSAGE_CREATE may have already handled this message.
-    // isDuplicate/isCrossEventDuplicate add entries when returning false, so calling them before
-    // the policy check would consume dedup slots for messages that may later be filtered out.
+    // Dedup after policy check: QQ guarantees GROUP_MESSAGE_CREATE and
+    // GROUP_AT_MESSAGE_CREATE are mutually exclusive per-group based on
+    // full-message access setting, so cross-event dedup is a safety net.
+    // isDuplicate handles reconnect replay protection (same event.id).
     if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
       return;
 
