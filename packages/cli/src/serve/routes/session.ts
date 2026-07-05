@@ -52,6 +52,11 @@ import {
   type SessionArchiveCoordinator,
   unarchiveDaemonSessions,
 } from '../server/session-archive.js';
+import {
+  exportSessionTranscript,
+  parseSessionExportFormat,
+  sessionExportFormatValues,
+} from '../server/session-export.js';
 
 interface RegisterSessionRoutesDeps {
   boundWorkspace: string;
@@ -267,6 +272,7 @@ export function registerSessionRoutes(
               ? await bridge.loadSession({
                   sessionId,
                   workspaceCwd: cwd,
+                  historyReplay: 'response',
                   ...(clientId !== undefined ? { clientId } : {}),
                 })
               : await bridge.resumeSession({
@@ -423,6 +429,49 @@ export function registerSessionRoutes(
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/status',
+        sessionId,
+      });
+    }
+  });
+
+  app.get('/session/:id/export', async (req, res) => {
+    const sessionId = requireSessionId(req, res);
+    if (sessionId === null) return;
+    const rawFormat = req.query['format'];
+    const format = parseSessionExportFormat(rawFormat);
+    if (!format) {
+      res.status(400).json({
+        error: 'Invalid export format',
+        code: 'invalid_export_format',
+        format: typeof rawFormat === 'string' ? rawFormat : String(rawFormat),
+        allowedFormats: sessionExportFormatValues(),
+      });
+      return;
+    }
+    try {
+      const result = await archiveCoordinator.runSharedMany(
+        [sessionId],
+        async () => {
+          await assertSessionLoadable(boundWorkspace, sessionId);
+          return exportSessionTranscript({
+            workspaceCwd: boundWorkspace,
+            sessionId,
+            format,
+            config: { getChannel: () => 'daemon' },
+          });
+        },
+      );
+      const filename = result.filename.replace(/["\\\r\n]/g, '_');
+      res
+        .status(200)
+        .set('Cache-Control', 'no-store')
+        .set('X-Content-Type-Options', 'nosniff')
+        .set('Content-Type', result.mimeType)
+        .set('Content-Disposition', `attachment; filename="${filename}"`)
+        .send(result.content);
+    } catch (err) {
+      sendBridgeError(res, err, {
+        route: 'GET /session/:id/export',
         sessionId,
       });
     }

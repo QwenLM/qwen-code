@@ -840,8 +840,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 ? { clientId: activeSession.clientId }
                 : {}),
               workspaceCwd: activeSession.workspaceCwd,
-              commands: commands.length > 0 ? commands : current.commands,
-              skills: skills.length > 0 ? skills : current.skills,
+              // A fulfilled supported-commands fetch is authoritative even when
+              // it returns an empty list: fall back to the preserved
+              // `current.commands` only when the fetch was skipped or failed
+              // (supportedCommands === undefined). Keying on length instead
+              // would let a genuinely-empty snapshot leave a stale command list
+              // in place (see getConnectionAfterSessionClear, which now
+              // preserves commands across a clear).
+              commands:
+                supportedCommands !== undefined ? commands : current.commands,
+              skills: supportedCommands !== undefined ? skills : current.skills,
               models: sessionModels.length > 0 ? sessionModels : current.models,
               currentModel: sessionCurrentModel ?? current.currentModel,
               currentMode: currentMode ?? current.currentMode,

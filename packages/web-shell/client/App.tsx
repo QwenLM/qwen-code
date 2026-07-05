@@ -61,6 +61,7 @@ import {
 import { MemoryMessage } from './components/messages/MemoryMessage';
 import { AuthMessage } from './components/messages/AuthMessage';
 import { ToolsDialog } from './components/dialogs/ToolsDialog';
+import { DaemonStatusDialog } from './components/dialogs/DaemonStatusDialog';
 import { ExtensionsDialog } from './components/dialogs/ExtensionsDialog';
 import { SettingsMessage } from './components/messages/SettingsMessage';
 import { resolveShellOutputMaxLines } from './components/messages/ToolGroup';
@@ -73,7 +74,11 @@ import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { WebShellSidebar } from './components/sidebar/WebShellSidebar';
-import { getLocalCommands } from './constants/localCommands';
+import {
+  getLocalCommands,
+  localizeBuiltinDescriptions,
+  skillDescriptionKey,
+} from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
@@ -97,6 +102,11 @@ import { filterModelSwitchMessages } from './utils/modelSwitchMessages';
 import { decideEscapeIntent } from './utils/escapeIntent';
 import type { SkillInfo } from './completions/slashCompletion';
 import { collectSystemInfo } from './utils/systemInfo';
+import {
+  decodeVisionModelForPicker,
+  encodeVisionModelForSetting,
+  extractBareModelId,
+} from './utils/modelEncoding';
 import { appendOrDeferLocalUserMessage } from './utils/localCommandQueue';
 import { QueuedPromptDisplay } from './components/QueuedPromptDisplay';
 import { useQueuedPrompts } from './hooks/useQueuedPrompts';
@@ -164,6 +174,7 @@ import {
   type LoadingPhrasesResolver,
   type MarkdownTableMode,
   type WebShellTaskInfo,
+  type WebShellAtProvider,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
@@ -217,6 +228,14 @@ const MAX_TOASTS = 4;
 const COMPACT_MODE_SETTING_KEY = 'ui.compactMode';
 const HIDE_TIPS_SETTING_KEY = 'ui.hideTips';
 const HIDDEN_COMPOSER_MODEL_IDS = new Set(['coder-model(qwen-oauth)']);
+
+/** Maps each ModelDialogMode to its i18n title key — single source of truth. */
+const MODE_TITLE_KEY: Record<ModelDialogMode, string> = {
+  main: 'model.select',
+  fast: 'model.setFast',
+  voice: 'model.setVoice',
+  vision: 'model.setVision',
+};
 
 function isVisibleComposerModel(model: { id: string }): boolean {
   return !HIDDEN_COMPOSER_MODEL_IDS.has(model.id);
@@ -353,6 +372,8 @@ export interface WebShellProps {
   hiddenSlashCommands?: string[];
   /** Slash command category order. Defaults to custom, skill, system. */
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /** Additional @ mention categories shown alongside built-in files/extensions. */
+  atProviders?: readonly WebShellAtProvider[];
   /** Custom renderer for the tool-card header content after the status icon and tool name. */
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
@@ -744,6 +765,7 @@ export function App({
   onBugReport,
   hiddenSlashCommands,
   slashCommandCategoryOrder,
+  atProviders,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -1143,6 +1165,7 @@ export function App({
   const [showHelpDialog, setShowHelpDialog] = useState(false);
   const [showThemeDialog, setShowThemeDialog] = useState(false);
   const [showToolsDialog, setShowToolsDialog] = useState(false);
+  const [showDaemonStatusDialog, setShowDaemonStatusDialog] = useState(false);
   const [showExtensionsDialog, setShowExtensionsDialog] = useState(false);
   const [mcpDialogMessage, setMcpDialogMessage] =
     useState<SerializedMcpStatusMessage | null>(null);
@@ -1347,6 +1370,7 @@ export function App({
     showHelpDialog ||
     showThemeDialog ||
     showToolsDialog ||
+    showDaemonStatusDialog ||
     showExtensionsDialog ||
     modelDialogMode !== null ||
     showApprovalModeDialog ||
@@ -1647,6 +1671,19 @@ export function App({
   const currentVoiceModel = (() => {
     const value = workspaceSettings.find(
       (setting) => setting.key === 'voiceModel',
+    )?.values.effective;
+    return typeof value === 'string' && value.trim() ? value.trim() : undefined;
+  })();
+  const currentVisionModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'visionModel',
+    )?.values.effective;
+    if (typeof value !== 'string' || !value.trim()) return undefined;
+    return decodeVisionModelForPicker(value.trim());
+  })();
+  const currentFastModel = (() => {
+    const value = workspaceSettings.find(
+      (setting) => setting.key === 'fastModel',
     )?.values.effective;
     return typeof value === 'string' && value.trim() ? value.trim() : undefined;
   })();
@@ -3304,6 +3341,9 @@ export function App({
         blockLocalCommandDuringTurn();
         return;
       }
+      // Model IDs from the picker arrive as bare model IDs (baseModelId), not
+      // ACP format. The model picker strips the (authType) suffix before
+      // calling this handler.
       sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
         reportError(error, 'Failed to switch fast model');
       });
@@ -3313,7 +3353,10 @@ export function App({
 
   const handleVoiceModelSelect = useCallback(
     (modelId: string) => {
-      setWorkspaceSetting('workspace', 'voiceModel', modelId).catch(
+      // Model IDs from the voice picker arrive as bare model IDs (baseModelId),
+      // not ACP format. extractVoiceModels() sets id to the baseModelId.
+      const bareModelId = extractBareModelId(modelId);
+      setWorkspaceSetting('workspace', 'voiceModel', bareModelId).catch(
         (error: unknown) => reportError(error, t('model.setVoice')),
       );
     },
@@ -3322,25 +3365,41 @@ export function App({
 
   const handleVisionModelSelect = useCallback(
     (modelId: string) => {
-      setWorkspaceSetting('workspace', 'visionModel', modelId).catch(
+      // Model IDs from the picker arrive in ACP format: `modelId(authType)`.
+      // Core's resolveVisionModelSelection() expects `authType:modelId`.
+      const encoded = encodeVisionModelForSetting(modelId);
+      setWorkspaceSetting('workspace', 'visionModel', encoded).catch(
         (error: unknown) => reportError(error, t('model.setVision')),
       );
     },
     [reportError, setWorkspaceSetting, t],
   );
 
+  const modelHandlers: Record<ModelDialogMode, (id: string) => void> = {
+    main: handleModelSelect,
+    fast: handleFastModelSelect,
+    voice: handleVoiceModelSelect,
+    vision: handleVisionModelSelect,
+  };
+
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
-    return mergeCommands(connection.commands ?? [], getLocalCommands(t))
+    return localizeBuiltinDescriptions(
+      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      t,
+    )
       .filter(
         (command) => !hiddenCommands.has(normalizeHiddenCommand(command.name)),
       )
       .map((command) => {
         if (!skillNames.has(command.name)) return command;
+        const skillKey = skillDescriptionKey(command.name);
         return {
           ...command,
           displayCategory: 'skill' as const,
-          description: command.description || t('skills.run'),
+          description: skillKey
+            ? t(skillKey)
+            : command.description || t('skills.run'),
         };
       });
   }, [connection.commands, connection.skills, hiddenCommands, t]);
@@ -3463,15 +3522,7 @@ export function App({
           )}
           {modelDialogMode && (
             <DialogShell
-              title={
-                modelDialogMode === 'fast'
-                  ? t('model.setFast')
-                  : modelDialogMode === 'voice'
-                    ? t('model.setVoice')
-                    : modelDialogMode === 'vision'
-                      ? t('model.setVision')
-                      : t('model.select')
-              }
+              title={t(MODE_TITLE_KEY[modelDialogMode])}
               size="lg"
               onClose={() => setModelDialogMode(null)}
             >
@@ -3479,17 +3530,17 @@ export function App({
                 mode={modelDialogMode}
                 models={modelDialogMode === 'voice' ? voiceModels : undefined}
                 currentModelId={
-                  modelDialogMode === 'voice' ? currentVoiceModel : undefined
+                  modelDialogMode === 'voice'
+                    ? currentVoiceModel
+                    : modelDialogMode === 'vision'
+                      ? currentVisionModel
+                      : modelDialogMode === 'fast'
+                        ? currentFastModel
+                        : undefined
                 }
                 onSelect={(modelId) => {
-                  if (modelDialogMode === 'fast') {
-                    handleFastModelSelect(modelId);
-                  } else if (modelDialogMode === 'voice') {
-                    handleVoiceModelSelect(modelId);
-                  } else if (modelDialogMode === 'vision') {
-                    handleVisionModelSelect(modelId);
-                  } else {
-                    handleModelSelect(modelId);
+                  if (modelDialogMode) {
+                    modelHandlers[modelDialogMode](modelId);
                   }
                   setModelDialogMode(null);
                 }}
@@ -3518,6 +3569,16 @@ export function App({
               onClose={() => setShowToolsDialog(false)}
             >
               <ToolsDialog />
+            </DialogShell>
+          )}
+          {showDaemonStatusDialog && (
+            <DialogShell
+              title={t('daemon.title')}
+              size="xl"
+              allowFullscreen
+              onClose={() => setShowDaemonStatusDialog(false)}
+            >
+              <DaemonStatusDialog />
             </DialogShell>
           )}
           {showExtensionsDialog && (
@@ -3753,6 +3814,10 @@ export function App({
                     closeMobileDrawer();
                     setShowSettingsDialog(true);
                   }}
+                  onOpenDaemonStatus={() => {
+                    closeMobileDrawer();
+                    setShowDaemonStatusDialog(true);
+                  }}
                   onNewSession={createNewSession}
                   onLoadSession={loadSidebarSession}
                   onError={reportError}
@@ -3921,6 +3986,7 @@ export function App({
                       commands={commands}
                       skills={loadedSkills}
                       slashCommandCategoryOrder={slashCommandCategoryOrder}
+                      atProviders={atProviders}
                       queuedMessages={queuedTexts}
                       onFocusFooter={handleFocusTaskPill}
                       onPopQueuedMessages={editLastQueuedPrompt}
