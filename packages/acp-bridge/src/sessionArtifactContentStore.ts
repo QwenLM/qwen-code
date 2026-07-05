@@ -32,6 +32,12 @@ interface ContentManifest {
   createdAt: string;
 }
 
+interface ResolvedWorkspaceFile {
+  realWorkspace: string;
+  realPath: string;
+  stat: fsSync.Stats;
+}
+
 export interface SessionArtifactFsckResult {
   checked: number;
   missing: string[];
@@ -99,6 +105,12 @@ export class SessionArtifactContentStore {
         const contentDir = path.join(this.rootDir, contentId);
         const dataPath = path.join(contentDir, 'content');
         if (await exists(dataPath)) {
+          if (!(await contentFileMatches(dataPath, sha256, sizeBytes))) {
+            throw new SessionArtifactValidationError(
+              'Existing retained artifact content failed verification',
+              'artifactId',
+            );
+          }
           await fs.rm(tmpPath, { force: true });
           tmpPath = undefined;
         } else {
@@ -414,22 +426,22 @@ function stableContentSuffix(sessionId: string, artifactId: string): string {
 async function resolveWorkspaceFile(
   workspaceCwd: string,
   workspacePath: string,
-): Promise<string> {
+): Promise<ResolvedWorkspaceFile> {
   const realWorkspace = await fs.realpath(workspaceCwd);
   const candidate = path.resolve(realWorkspace, workspacePath);
   const realCandidate = await fs.realpath(candidate);
-  const relative = path.relative(realWorkspace, realCandidate);
-  if (relative.startsWith('..') || path.isAbsolute(relative)) {
-    throw new SessionArtifactValidationError(
-      'workspacePath must stay inside the workspace',
-      'workspacePath',
-    );
-  }
-  return realCandidate;
+  validateWorkspaceContained(realWorkspace, realCandidate);
+  return {
+    realWorkspace,
+    realPath: realCandidate,
+    stat: await fs.stat(realCandidate),
+  };
 }
 
-async function openRegularWorkspaceFile(filePath: string): Promise<FileHandle> {
-  const sourceStat = await fs.stat(filePath);
+async function openRegularWorkspaceFile(
+  source: ResolvedWorkspaceFile,
+): Promise<FileHandle> {
+  const sourceStat = source.stat;
   if (!sourceStat.isFile()) {
     throw new SessionArtifactValidationError(
       'Only regular workspace files can be pinned with content retention',
@@ -451,7 +463,7 @@ async function openRegularWorkspaceFile(filePath: string): Promise<FileHandle> {
   let handle: FileHandle;
   try {
     handle = await fs.open(
-      filePath,
+      source.realPath,
       fsSync.constants.O_RDONLY | noFollowFlag(),
     );
   } catch (error) {
@@ -465,13 +477,25 @@ async function openRegularWorkspaceFile(filePath: string): Promise<FileHandle> {
   }
   try {
     const handleStat = await handle.stat();
+    const realAfterOpen = await fs.realpath(source.realPath);
+    validateWorkspaceContained(source.realWorkspace, realAfterOpen);
+    if (realAfterOpen !== source.realPath) {
+      throw new SessionArtifactValidationError(
+        'workspacePath changed while pinning content',
+        'workspacePath',
+      );
+    }
+    const currentStat = await fs.stat(source.realPath);
     if (!handleStat.isFile()) {
       throw new SessionArtifactValidationError(
         'Only regular workspace files can be pinned with content retention',
         'artifactId',
       );
     }
-    if (!sameFile(sourceStat, handleStat)) {
+    if (
+      !sameFile(sourceStat, handleStat) ||
+      !sameFile(currentStat, handleStat)
+    ) {
       throw new SessionArtifactValidationError(
         'workspacePath changed while pinning content',
         'workspacePath',
@@ -493,6 +517,19 @@ async function openRegularWorkspaceFile(filePath: string): Promise<FileHandle> {
   } catch (error) {
     await handle.close().catch(() => undefined);
     throw error;
+  }
+}
+
+function validateWorkspaceContained(
+  realWorkspace: string,
+  realPath: string,
+): void {
+  const relative = path.relative(realWorkspace, realPath);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) {
+    throw new SessionArtifactValidationError(
+      'workspacePath must stay inside the workspace',
+      'workspacePath',
+    );
   }
 }
 
@@ -568,6 +605,15 @@ function hashFile(
       resolve({ sha256: hash.digest('hex'), sizeBytes });
     });
   });
+}
+
+async function contentFileMatches(
+  filePath: string,
+  sha256: string,
+  sizeBytes: number,
+): Promise<boolean> {
+  const existing = await hashFile(filePath);
+  return existing.sha256 === sha256 && existing.sizeBytes === sizeBytes;
 }
 
 async function readManifest(filePath: string): Promise<ContentManifest> {

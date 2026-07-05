@@ -260,6 +260,24 @@ export class SessionArtifactStore {
     });
   }
 
+  async getForPin(
+    artifactId: string,
+    options: { clientId?: string } = {},
+  ): Promise<DaemonSessionArtifact | undefined> {
+    return this.enqueue(async () => {
+      const artifact = this.artifacts.get(artifactId);
+      if (!artifact) return undefined;
+      this.denyCrossClientMutation('pin', artifactId, artifact, options);
+      if (
+        artifact.workspacePath &&
+        shouldRefreshWorkspaceStatus(artifact, Date.now())
+      ) {
+        await this.refreshWorkspaceStatus(artifact, { onError: 'missing' });
+      }
+      return toPublicArtifact(artifact);
+    });
+  }
+
   async contentRefs(): Promise<SessionArtifactContentRef[]> {
     return this.enqueue(async () => this.currentContentRefs());
   }
@@ -635,10 +653,14 @@ export class SessionArtifactStore {
       const changes: SessionArtifactChange[] = [];
       const expiredIds: string[] = [];
       for (const [artifactId, existing] of this.artifacts) {
+        const expiresAtMs = existing.expiresAt
+          ? Date.parse(existing.expiresAt)
+          : Number.NaN;
         if (
-          existing.retention !== 'pinned' ||
+          !existing.contentRef ||
           !existing.expiresAt ||
-          Date.parse(existing.expiresAt) > now.getTime()
+          !Number.isFinite(expiresAtMs) ||
+          expiresAtMs > now.getTime()
         ) {
           continue;
         }
@@ -674,7 +696,7 @@ export class SessionArtifactStore {
         this.restoreState(before);
         for (const artifactId of expiredIds) {
           const restored = this.artifacts.get(artifactId);
-          if (restored?.retention === 'pinned') {
+          if (restored?.contentRef) {
             this.artifacts.set(artifactId, {
               ...restored,
               persistenceWarning: 'persistence_unavailable',
@@ -691,7 +713,7 @@ export class SessionArtifactStore {
           sessionId: this.sessionId,
           changes: [],
           warnings: [
-            'expired pinned artifacts retained because persistence failed',
+            'expired artifact content retained because persistence failed',
           ],
         };
       }

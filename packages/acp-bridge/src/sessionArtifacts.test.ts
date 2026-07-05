@@ -3057,7 +3057,7 @@ describe('SessionArtifactStore', () => {
     ).resolves.toMatchObject({
       changes: [],
       warnings: [
-        'expired pinned artifacts retained because persistence failed',
+        'expired artifact content retained because persistence failed',
       ],
     });
     await expect(store.list()).resolves.toMatchObject({
@@ -3498,6 +3498,68 @@ describe('SessionArtifactStore', () => {
       ],
     });
   });
+
+  it('expires restored retained content after its ttl', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-expired-content',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await source.upsertMany(
+      [{ title: 'Pinned', url: 'https://example.com/pinned' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    await source.pin(artifactId, {
+      expiresAt: '2026-07-06T00:00:00.000Z',
+      contentRef: {
+        kind: 'managed_copy',
+        contentId: `${'e'.repeat(64)}-${'f'.repeat(16)}`,
+        sha256: 'e'.repeat(64),
+        sizeBytes: 12,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      },
+    });
+    const persisted = events[1]!.changes[0]!.artifact!;
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-restore-expired-content',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    await restored.restore(
+      {
+        v: 2,
+        sessionId: 's11-restore-expired-content',
+        sequence: 2,
+        artifacts: [persisted],
+        tombstonedIds: [],
+        stickyEphemeralIds: [],
+        warnings: [],
+      },
+      { verifyContentRef: async () => undefined },
+    );
+
+    const pruned = await restored.pruneExpiredPins(
+      new Date('2026-07-07T00:00:00.000Z'),
+    );
+
+    expect(pruned.changes[0]?.artifact).toMatchObject({
+      id: artifactId,
+      retention: 'restorable',
+      persistenceWarning: 'content_expired',
+    });
+    expect(pruned.changes[0]?.artifact).not.toHaveProperty('contentRef');
+    expect(pruned.changes[0]?.artifact).not.toHaveProperty('expiresAt');
+  });
 });
 
 describe('SessionArtifactContentStore', () => {
@@ -3625,6 +3687,24 @@ describe('SessionArtifactContentStore', () => {
       missing: [],
       hashMismatches: [],
     });
+  });
+
+  it('rejects corrupted retained content before reusing a copy', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('repeat-corrupt.txt', 'repeat');
+    const first = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+    await fs.writeFile(
+      path.join(contentRoot, first.contentId, 'content'),
+      'corrupt',
+    );
+
+    await expect(
+      contentStore.pinWorkspaceFile('content-session', artifact, workspace),
+    ).rejects.toBeInstanceOf(SessionArtifactValidationError);
   });
 
   it('reuses repeated pins even when the store is otherwise near quota', async () => {

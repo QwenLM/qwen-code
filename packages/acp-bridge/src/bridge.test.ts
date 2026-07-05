@@ -452,6 +452,54 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('checks artifact ownership before copying content on pin', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-workspace-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    const copySpy = vi.spyOn(
+      SessionArtifactContentStore.prototype,
+      'pinWorkspaceFile',
+    );
+    const bridge = makeBridge({
+      boundWorkspace: workspace,
+      channelFactory: async () => makeChannel().channel,
+    });
+    try {
+      await fsp.mkdir(path.join(workspace, 'reports'), { recursive: true });
+      await fsp.writeFile(path.join(workspace, 'reports', 'report.txt'), 'hi');
+      const session = await bridge.spawnOrAttach({ workspaceCwd: workspace });
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Report',
+          workspacePath: 'reports/report.txt',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+
+      await expect(
+        bridge.pinSessionArtifact(session.sessionId, artifactId, undefined, {
+          mode: 'content',
+        }),
+      ).rejects.toBeInstanceOf(SessionArtifactAuthorizationError);
+      expect(copySpy).not.toHaveBeenCalled();
+    } finally {
+      copySpy.mockRestore();
+      await bridge.shutdown();
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(tempHome, { recursive: true, force: true });
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('refreshes retained content on explicit content re-pin', async () => {
     const previousQwenHome = process.env['QWEN_HOME'];
     const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));

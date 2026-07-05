@@ -4769,7 +4769,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const clientRetained = artifactClientRetained(requestOptions);
       const expiresAt = artifactExpiresAt(requestOptions, mode);
       const pruneWarnings = await pruneExpiredArtifactPins(entry, clientId);
-      const currentArtifact = await entry.artifacts.get(artifactId);
+      const currentArtifact = await entry.artifacts.getForPin(artifactId, {
+        clientId,
+      });
       if (!currentArtifact) {
         return { v: 1, sessionId, changes: [] };
       }
@@ -4803,15 +4805,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return warnings.length > 0 ? { ...result, warnings } : result;
       }
       let contentRef: SessionArtifactContentRef | undefined;
+      let copiedContentRef = false;
       try {
-        contentRef =
-          mode === 'metadata'
-            ? undefined
-            : await artifactContentStore.pinWorkspaceFile(
-                sessionId,
-                currentArtifact,
-                entry.workspaceCwd,
-              );
+        if (mode === 'content') {
+          if (!refreshPinnedContent && currentArtifact.contentRef) {
+            contentRef = currentArtifact.contentRef;
+          } else {
+            contentRef = await artifactContentStore.pinWorkspaceFile(
+              sessionId,
+              currentArtifact,
+              entry.workspaceCwd,
+            );
+            copiedContentRef = contentRef !== undefined;
+          }
+        }
         if (mode === 'content' && !contentRef) {
           throw new SessionArtifactValidationError(
             'artifact content is not available for retention',
@@ -4825,7 +4832,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ...(clientRetained !== undefined ? { clientRetained } : {}),
           clientId,
         });
-        if (contentRef) {
+        if (copiedContentRef && contentRef) {
           artifactContentStore.releaseContentRef(contentRef);
           await gcArtifactContent(entry).catch(() => undefined);
         }
@@ -4841,7 +4848,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         const warnings = [...pruneWarnings, ...(result.warnings ?? [])];
         return warnings.length > 0 ? { ...result, warnings } : result;
       } catch (error) {
-        if (contentRef) {
+        if (copiedContentRef && contentRef) {
           artifactContentStore.releaseContentRef(contentRef);
           await gcArtifactContent(entry).catch(() => undefined);
         }
