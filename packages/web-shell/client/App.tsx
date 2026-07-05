@@ -4113,7 +4113,7 @@ export function App({
                         : t('daemon.title')}
                     </div>
                   </div>
-                  <div className={styles.panelBody}>
+                  <div className={styles.panelBody} key={activePanel}>
                     <div className={styles.panelBodyInner}>
                       {activePanel === 'settings' ? (
                         <SettingsMessage
