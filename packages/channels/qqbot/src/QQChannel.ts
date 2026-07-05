@@ -1759,7 +1759,7 @@ export class QQChannel extends ChannelBase {
     chatId: string,
     event: QQGroupMessageEvent,
   ): boolean {
-    const key = `${chatId}:${event.author?.user_openid || event.author?.id || ''}:${event.content || ''}`;
+    const key = `${chatId}:${event.author?.user_openid || event.author?.member_openid || event.author?.id || ''}:${event.content || ''}`;
     const now = Date.now();
     if (this.crossEventDedup.has(key)) return true;
     this.crossEventDedup.set(key, now);
@@ -1853,7 +1853,9 @@ export class QQChannel extends ChannelBase {
       isReplyToBot: false,
       ...(isSlash ? {} : { alreadyPrefixed: true as const }),
     }).catch((e) =>
-      process.stderr.write(`[QQ:${this.name}] C2C handler error: ${e}\n`),
+      process.stderr.write(
+        `[QQ:${this.name}] C2C handler error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      ),
     );
   }
 
@@ -2029,7 +2031,9 @@ export class QQChannel extends ChannelBase {
       isReplyToBot: isAtBot,
       ...(isSlash ? {} : { alreadyPrefixed: true as const }),
     }).catch((e) => {
-      process.stderr.write(`[QQ:${this.name}] handleGroupAll error: ${e}\n`);
+      process.stderr.write(
+        `[QQ:${this.name}] handleGroupAll error: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}\n`,
+      );
     });
   }
 
