@@ -53,13 +53,27 @@ function roundMs(value: number): number {
 
 function writeProfileRecord(record: SessionStartProfileRecord): void {
   const dir = path.join(Storage.getRuntimeBaseDir(), 'session-start-perf');
-  fs.mkdirSync(dir, { recursive: true });
+  fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(dir, 0o700);
+  } catch {
+    // Best-effort hardening on filesystems without POSIX chmod semantics.
+  }
   const filename = `session-start-${record.timestamp.slice(0, 10)}.jsonl`;
-  fs.appendFileSync(
-    path.join(dir, filename),
-    `${JSON.stringify(record)}\n`,
-    'utf8',
-  );
+  const filePath = path.join(dir, filename);
+  const fd = fs.openSync(filePath, 'a', 0o600);
+  try {
+    try {
+      fs.fchmodSync(fd, 0o600);
+    } catch {
+      // Best-effort hardening; profiling output must not block startup.
+    }
+    fs.appendFileSync(fd, `${JSON.stringify(record)}\n`, {
+      encoding: 'utf8',
+    });
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 const disabledProfiler: SessionStartProfiler = {

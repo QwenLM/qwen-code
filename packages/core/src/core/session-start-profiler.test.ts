@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -223,6 +223,11 @@ describe('session-start-profiler', () => {
       ok: true,
       totalMs: 1,
     });
+    expect(records[0]).not.toHaveProperty('extraHistoryLength');
+    expect(records[0]).not.toHaveProperty('historyLength');
+    expect(records[0]).not.toHaveProperty('snapshotEntryCount');
+    expect(records[0]).not.toHaveProperty('deferredReminderCount');
+    expect(records[0]).not.toHaveProperty('failedStage');
   });
 
   it('does not throw when the output writer fails', () => {
@@ -274,16 +279,15 @@ describe('session-start-profiler', () => {
         deferredReminderCount: 0,
       });
 
-      const files = await readdir(join(runtimeDir, 'session-start-perf'));
+      const perfDir = join(runtimeDir, 'session-start-perf');
+      const profilePath = join(perfDir, 'session-start-2026-07-06.jsonl');
+      const files = await readdir(perfDir);
       expect(files).toEqual(['session-start-2026-07-06.jsonl']);
-      const raw = await readFile(
-        join(
-          runtimeDir,
-          'session-start-perf',
-          'session-start-2026-07-06.jsonl',
-        ),
-        'utf8',
-      );
+      if (process.platform !== 'win32') {
+        expect((await stat(perfDir)).mode & 0o777).toBe(0o700);
+        expect((await stat(profilePath)).mode & 0o777).toBe(0o600);
+      }
+      const raw = await readFile(profilePath, 'utf8');
       const record = JSON.parse(raw.trim()) as SessionStartProfileRecord;
       const serialized = JSON.stringify(record);
 

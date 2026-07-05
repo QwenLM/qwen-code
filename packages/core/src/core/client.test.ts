@@ -1022,6 +1022,33 @@ describe('Gemini Client (client.ts)', () => {
       );
     });
 
+    it('finalizes failed startChat profiles for first-stage warm errors', async () => {
+      const toolRegistry = vi.mocked(
+        mockConfig.getToolRegistry,
+      )() as unknown as {
+        warmAll: ReturnType<typeof vi.fn>;
+      };
+      toolRegistry.warmAll.mockRejectedValueOnce(new Error('warm failed'));
+
+      await expect(client.startChat()).rejects.toThrow(
+        'Failed to initialize chat: warm failed',
+      );
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.time.mock.calls.map(([stage]) => stage)).toContain(
+        'tool_registry_warm',
+      );
+      expect(profiler.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ok: false,
+          extraHistoryLength: 0,
+          historyLength: 0,
+          snapshotEntryCount: 0,
+          deferredReminderCount: 0,
+        }),
+      );
+    });
+
     it('finalizes failed startChat profiles for sync stage errors', async () => {
       vi.spyOn(
         client as unknown as { getMainSessionSystemInstruction: () => string },
