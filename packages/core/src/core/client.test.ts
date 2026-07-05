@@ -1015,6 +1015,36 @@ describe('Gemini Client (client.ts)', () => {
         expect.objectContaining({
           ok: false,
           extraHistoryLength: 0,
+          historyLength: 0,
+          snapshotEntryCount: 0,
+          deferredReminderCount: 0,
+        }),
+      );
+    });
+
+    it('finalizes failed startChat profiles for sync stage errors', async () => {
+      vi.spyOn(
+        client as unknown as { getMainSessionSystemInstruction: () => string },
+        'getMainSessionSystemInstruction',
+      ).mockImplementationOnce(() => {
+        throw new Error('system instruction failed');
+      });
+
+      await expect(client.startChat()).rejects.toThrow(
+        'Failed to initialize chat: system instruction failed',
+      );
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.timeSync.mock.calls.map(([stage]) => stage)).toContain(
+        'system_instruction',
+      );
+      expect(profiler.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ok: false,
+          extraHistoryLength: 0,
+          historyLength: 1,
+          snapshotEntryCount: 0,
+          deferredReminderCount: 0,
         }),
       );
     });

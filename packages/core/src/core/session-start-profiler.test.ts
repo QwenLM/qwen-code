@@ -147,6 +147,38 @@ describe('session-start-profiler', () => {
     });
   });
 
+  it('preserves the first failed stage', async () => {
+    const records: SessionStartProfileRecord[] = [];
+    const profiler = createSessionStartProfiler(SessionStartSource.Startup, {
+      enabled: true,
+      now: clockFrom([100, 110, 115, 120, 130, 140]),
+      writeRecord: (record) => records.push(record),
+      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
+    });
+
+    await expect(
+      profiler.time('stage_a', async () => {
+        throw new Error('stage a failed');
+      }),
+    ).rejects.toThrow('stage a failed');
+    await expect(
+      profiler.time('stage_b', async () => {
+        throw new Error('stage b failed');
+      }),
+    ).rejects.toThrow('stage b failed');
+    profiler.finish({ ok: false });
+
+    expect(records[0]).toMatchObject({
+      ok: false,
+      totalMs: 40,
+      stages: {
+        stage_a: 5,
+        stage_b: 10,
+      },
+      failedStage: 'stage_a',
+    });
+  });
+
   it('rethrows sync stage errors and preserves the failed stage', () => {
     const records: SessionStartProfileRecord[] = [];
     const profiler = createSessionStartProfiler(SessionStartSource.Startup, {
