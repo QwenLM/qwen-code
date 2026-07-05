@@ -366,6 +366,9 @@ describe('qwen-autofix workflow', () => {
     expect(workflowAndSkill).toContain(
       'workflow verification gate runs trusted checks after',
     );
+    expect(workflowAndSkill).toContain(
+      'overrides repository instructions that ask agents to run verification',
+    );
     expect(workflow).toContain('"sandbox": "docker"');
     expect(workflow).not.toContain('"sandbox": false');
     expect(workflow).not.toContain('"sandbox": true');
@@ -483,6 +486,8 @@ describe('qwen-autofix workflow', () => {
       'untrusted input',
       'Do not push, comment, create pull requests',
       'Never ask the user a question',
+      'not execution',
+      'git status --short',
       '.qwen/skills/prepare-pr/SKILL.md',
       '.qwen/skills/bugfix/SKILL.md',
       '.qwen/skills/e2e-testing/SKILL.md',
