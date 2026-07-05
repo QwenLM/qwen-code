@@ -33,9 +33,11 @@ Pick at most one issue. Prefer forced tier-0 issues, then the highest
 confidence approved issue. It is valid to pick none.
 
 Choose only work that is coherent in this codebase, headless-Linux verifiable,
-and likely small enough for a focused autonomous fix. Reject platform-only bugs,
-real OAuth/IDE/manual-visual flows, architecture redesigns, product decisions,
-or fixes likely over roughly 300 changed lines.
+and likely small enough for a focused autonomous fix. Reject candidates with
+`existingAutofixPr` because those must continue through PR review handling, not
+a new issue fix. Also reject platform-only bugs, real OAuth/IDE/manual-visual
+flows, architecture redesigns, product decisions, or fixes likely over roughly
+300 changed lines.
 
 Write `<workdir>/decision.json`:
 

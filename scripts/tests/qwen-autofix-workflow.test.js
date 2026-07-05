@@ -221,17 +221,25 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
-  it('filters issues that already have open autofix PRs', () => {
+  it('passes existing open autofix PR context into the skill and guards decisions', () => {
+    const skill = readAutofixSkill();
+
     expect(findCandidateIssuesStep).toContain('open-autofix-prs.json');
     expect(findCandidateIssuesStep).toContain('--author "${AUTOFIX_BOT}"');
     expect(findCandidateIssuesStep).toContain(
       '($p + (.number | tostring)) as $branch',
     );
     expect(findCandidateIssuesStep).toContain(
-      'any($prs[]; (.headRefName // "") == $branch)',
+      'first($prs[] | select((.headRefName // "") == $branch)',
     );
-    expect(findCandidateIssuesStep).toContain('filtered-candidates.json');
-    expect(findCandidateIssuesStep).toContain('already have open autofix PRs');
+    expect(findCandidateIssuesStep).toContain('existingAutofixPr');
+    expect(findCandidateIssuesStep).toContain('annotated-candidates.json');
+    expect(readDecisionStep).toContain('existingAutofixPr != null');
+    expect(readDecisionStep).toContain(
+      'already has open autofix PR #${EXISTING_PR}',
+    );
+    expect(skill).toContain('existingAutofixPr');
+    expect(skill).toContain('must continue through PR review handling');
   });
 
   it('keeps release-failure autofix issues approved for scheduled fallback', () => {

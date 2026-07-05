@@ -404,26 +404,26 @@ jobs:
             echo "::warning::Open autofix PR scan failed; falling back to an empty candidate list to avoid duplicate PRs."
             jq -n -c '[]' > "${WORKDIR}/candidates.json"
           else
-            SKIPPED_WITH_PRS="$(jq --arg p "${BRANCH_PREFIX}" --slurpfile prs "${WORKDIR}/open-autofix-prs.json" '
-              ($prs[0] // []) as $prs
-              | [ .[]
-                  | ($p + (.number | tostring)) as $branch
-                  | select(any($prs[]; (.headRefName // "") == $branch)) ]
-              | length
-            ' "${WORKDIR}/candidates.json")"
             if ! jq -c --arg p "${BRANCH_PREFIX}" --slurpfile prs "${WORKDIR}/open-autofix-prs.json" '
               ($prs[0] // []) as $prs
               | map(
                   ($p + (.number | tostring)) as $branch
-                  | select((any($prs[]; (.headRefName // "") == $branch) | not))
+                  | (
+                      first($prs[] | select((.headRefName // "") == $branch) | {
+                        number,
+                        headRefName
+                      }) // null
+                    ) as $existing
+                  | . + {existingAutofixPr: $existing}
                 )
-            ' "${WORKDIR}/candidates.json" > "${WORKDIR}/filtered-candidates.json"; then
-              echo "::warning::Open autofix PR filtering failed; falling back to an empty candidate list."
+            ' "${WORKDIR}/candidates.json" > "${WORKDIR}/annotated-candidates.json"; then
+              echo "::warning::Open autofix PR annotation failed; falling back to an empty candidate list."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
             else
-              mv "${WORKDIR}/filtered-candidates.json" "${WORKDIR}/candidates.json"
-              if [[ "${SKIPPED_WITH_PRS}" -gt 0 ]]; then
-                echo "⏭️ Skipped ${SKIPPED_WITH_PRS} candidate(s) that already have open autofix PRs."
+              mv "${WORKDIR}/annotated-candidates.json" "${WORKDIR}/candidates.json"
+              CANDIDATES_WITH_PRS="$(jq '[.[] | select(.existingAutofixPr != null)] | length' "${WORKDIR}/candidates.json")"
+              if [[ "${CANDIDATES_WITH_PRS}" -gt 0 ]]; then
+                echo "ℹ️ ${CANDIDATES_WITH_PRS} candidate(s) already have open autofix PRs; the skill must skip them."
               fi
             fi
           fi
@@ -537,6 +537,21 @@ jobs:
           CANDIDATE_NUMS="$(jq -r '.[].number' "${WORKDIR}/candidates.json")"
           if [[ -n "${GO}" ]] && ! grep -qx "${GO}" <<< "${CANDIDATE_NUMS}"; then
             echo "❌ Assessment selected issue #${GO} which is not in the candidate list"
+            echo "go_issue=" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          if [[ -n "${GO}" ]] && jq -e --argjson go "${GO}" '
+            .[]
+            | select(.number == $go)
+            | .existingAutofixPr != null
+          ' "${WORKDIR}/candidates.json" > /dev/null; then
+            EXISTING_PR="$(jq -r --argjson go "${GO}" '
+              .[]
+              | select(.number == $go)
+              | .existingAutofixPr.number
+            ' "${WORKDIR}/candidates.json")"
+            echo "⏭️ Selected issue #${GO} already has open autofix PR #${EXISTING_PR}; skipping issue develop."
             echo "go_issue=" >> "${GITHUB_OUTPUT}"
             exit 0
           fi
