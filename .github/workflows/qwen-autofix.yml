@@ -11,6 +11,8 @@ name: 'Qwen Autofix'
 #   • every 4h             → review phase (sweep the bot's open PRs)
 #   • every 12h (00/12 UTC) → also the issue phase (locate + fix one new bug)
 #   • issues:labeled        → issue phase when ready label, state, and sender match
+#   • @qwen-code /autofix   → dry-run the relevant issue/PR phase
+#   • @qwen-code /autofix run → real run for the relevant issue/PR phase
 #   • workflow_dispatch     → force a phase, an issue, or a PR
 #
 # Every GitHub write (issue/PR comments, labels, branch push, PR create) goes
@@ -21,6 +23,9 @@ on:
   issues:
     types:
       - 'labeled'
+  issue_comment:
+    types:
+      - 'created'
   schedule:
     - cron: '0 0,12 * * *' # Issue + review every 12h; must match route SCHEDULE check
     - cron: '0 4,8,16,20 * * *' # Review only between issue runs
@@ -87,6 +92,9 @@ jobs:
     outputs:
       do_issue: '${{ steps.decide.outputs.do_issue }}'
       do_review: '${{ steps.decide.outputs.do_review }}'
+      dry_run: '${{ steps.decide.outputs.dry_run }}'
+      issue_number: '${{ steps.decide.outputs.issue_number }}'
+      pr_number: '${{ steps.decide.outputs.pr_number }}'
     steps:
       - name: 'Decide phases'
         id: 'decide'
@@ -94,9 +102,12 @@ jobs:
           PHASE: '${{ inputs.phase }}'
           FORCED_ISSUE: '${{ inputs.issue_number }}'
           FORCED_PR: '${{ inputs.pr_number }}'
+          DRY_RUN_INPUT: '${{ inputs.dry_run }}'
           EVENT_NAME: '${{ github.event_name }}'
           GITHUB_TOKEN: '${{ github.token }}'
           BUG_LABEL: 'type/bug'
+          COMMENT_BODY: '${{ github.event.comment.body }}'
+          COMMENT_TARGET_IS_PR: "${{ github.event.issue.pull_request && 'true' || 'false' }}"
           ISSUE_LABEL: '${{ github.event.label.name }}'
           ISSUE_LABELS_JSON: '${{ toJSON(github.event.issue.labels.*.name) }}'
           ISSUE_NUMBER: '${{ github.event.issue.number }}'
@@ -109,6 +120,9 @@ jobs:
         run: |-
           DO_ISSUE=false
           DO_REVIEW=false
+          DRY_RUN="${DRY_RUN_INPUT:-false}"
+          ROUTE_ISSUE="${FORCED_ISSUE}"
+          ROUTE_PR="${FORCED_PR}"
           case "${PHASE}" in
             issue) DO_ISSUE=true ;;
             review) DO_REVIEW=true ;;
@@ -117,7 +131,9 @@ jobs:
               # auto (the scheduled default): review every tick, issue on the
               # dedicated 00/12 UTC schedule. Use the event payload instead of
               # wall-clock time because GitHub may delay scheduled runs.
-              DO_REVIEW=true
+              if [[ "${EVENT_NAME}" == 'schedule' || "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
+                DO_REVIEW=true
+              fi
               # Must match the issue-phase cron string on the schedule trigger.
               if [[ "${EVENT_NAME}" == 'schedule' && "${SCHEDULE}" == '0 0,12 * * *' ]]; then
                 DO_ISSUE=true
@@ -154,16 +170,55 @@ jobs:
                   fi
                 fi
               fi
+              if [[ "${EVENT_NAME}" == 'issue_comment' ]]; then
+                DO_ISSUE=false
+                DO_REVIEW=false
+                DRY_RUN=true
+                if [[ "${ISSUE_STATE}" != 'open' ]]; then
+                  echo "🧭 comment ignored: issue/PR is not open (#${ISSUE_NUMBER:-n/a})"
+                elif [[ "${COMMENT_BODY}" != @qwen-code\ /autofix* ]]; then
+                  echo "🧭 comment ignored: not an autofix command"
+                else
+                  sender_permission=''
+                  sender_is_trusted=false
+                  if [[ -n "${SENDER_LOGIN}" ]]; then
+                    if ! sender_permission="$(gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission" --jq '.permission // ""' 2>&1)"; then
+                      api_error="${sender_permission}"
+                      sender_permission=''
+                      api_error="${api_error//$'\r'/ }"
+                      api_error="${api_error//$'\n'/ }"
+                      echo "::warning::Permission API call failed for ${SENDER_LOGIN}: ${api_error}"
+                    fi
+                    [[ "${sender_permission}" == 'write' || "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]] && sender_is_trusted=true
+                  fi
+                  if [[ "${sender_is_trusted}" != 'true' ]]; then
+                    echo "🧭 comment ignored: sender_permission='${sender_permission:-none}' sender_trusted=false"
+                  else
+                    [[ "${COMMENT_BODY}" == "@qwen-code /autofix run"* ]] && DRY_RUN=false
+                    if [[ "${COMMENT_TARGET_IS_PR}" == "true" ]]; then
+                      DO_REVIEW=true
+                      ROUTE_PR="${ISSUE_NUMBER}"
+                    else
+                      DO_ISSUE=true
+                      ROUTE_ISSUE="${ISSUE_NUMBER}"
+                    fi
+                    echo "🧭 comment command accepted: target_pr=${COMMENT_TARGET_IS_PR} dry_run=${DRY_RUN} issue='#${ROUTE_ISSUE:-n/a}' pr='#${ROUTE_PR:-n/a}'"
+                  fi
+                fi
+              fi
               ;;
           esac
           # Forcing a specific issue/PR implies running that phase only for
           # explicit manual dispatch. Event payload numbers still flow to the
           # phase jobs after routing, but must not bypass the label/schedule gates.
-          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${FORCED_ISSUE}" ]] && DO_ISSUE=true
-          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${FORCED_PR}" ]] && DO_REVIEW=true
+          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${ROUTE_ISSUE}" ]] && DO_ISSUE=true
+          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${ROUTE_PR}" ]] && DO_REVIEW=true
           echo "do_issue=${DO_ISSUE}" >> "${GITHUB_OUTPUT}"
           echo "do_review=${DO_REVIEW}" >> "${GITHUB_OUTPUT}"
-          echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' schedule='${SCHEDULE:-n/a}' → issue=${DO_ISSUE} review=${DO_REVIEW}"
+          echo "dry_run=${DRY_RUN}" >> "${GITHUB_OUTPUT}"
+          echo "issue_number=${ROUTE_ISSUE}" >> "${GITHUB_OUTPUT}"
+          echo "pr_number=${ROUTE_PR}" >> "${GITHUB_OUTPUT}"
+          echo "🧭 phase='${PHASE:-auto}' event='${EVENT_NAME}' issue='#${ISSUE_NUMBER:-n/a}' schedule='${SCHEDULE:-n/a}' dry_run=${DRY_RUN} → issue=${DO_ISSUE} review=${DO_REVIEW}"
 
   # ===========================================================================
   # ISSUE PHASE — locate one maintainer-ready issue, fix it, open a PR.
@@ -289,7 +344,7 @@ jobs:
         id: 'scan'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          FORCED_ISSUE: '${{ inputs.issue_number || github.event.issue.number }}'
+          FORCED_ISSUE: '${{ needs.route.outputs.issue_number || inputs.issue_number || github.event.issue.number }}'
         run: |-
           mkdir -p "${WORKDIR}"
 
@@ -307,15 +362,16 @@ jobs:
             elif [[ "$(jq -r '.state // ""' "${forced_issue_json}")" != 'OPEN' ]]; then
               echo "⏭️ Forced issue #${FORCED_ISSUE} is not open; skipping."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
-            # workflow_dispatch is a maintainer-initiated escape hatch, so it
-            # intentionally bypasses the label gates that protect event/cron
-            # paths from issue-content prompt injection.
-            elif [[ "${EVENT_NAME}" != 'workflow_dispatch' ]] && ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}" \
+            # workflow_dispatch and trusted issue_comment commands are
+            # maintainer-initiated escape hatches, so they intentionally bypass
+            # the label gates that protect event/cron paths from issue-content
+            # prompt injection.
+            elif [[ "${EVENT_NAME}" != 'workflow_dispatch' && "${EVENT_NAME}" != 'issue_comment' ]] && ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}" \
               '(.labels // []) | map(.name) as $labels | ($labels | index($ready))' \
               "${forced_issue_json}" > /dev/null; then
               echo "⏭️ Forced issue #${FORCED_ISSUE} is missing ${READY_FOR_AGENT_LABEL}; skipping."
               jq -n -c '[]' > "${WORKDIR}/candidates.json"
-            elif [[ "${EVENT_NAME}" != 'workflow_dispatch' ]] && ! jq -e --arg approved "${AUTOFIX_APPROVED_LABEL}" \
+            elif [[ "${EVENT_NAME}" != 'workflow_dispatch' && "${EVENT_NAME}" != 'issue_comment' ]] && ! jq -e --arg approved "${AUTOFIX_APPROVED_LABEL}" \
               '(.labels // []) | map(.name) as $labels | ($labels | index($approved))' \
               "${forced_issue_json}" > /dev/null; then
               echo "⏭️ Forced issue #${FORCED_ISSUE} is missing ${AUTOFIX_APPROVED_LABEL}; skipping."
@@ -433,7 +489,7 @@ jobs:
           ${{ steps.scan.outputs.has_candidates == 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          DRY_RUN: '${{ inputs.dry_run }}'
+          DRY_RUN: '${{ needs.route.outputs.dry_run }}'
           EVENT_NAME: '${{ github.event_name }}'
         run: |-
           if [[ ! -s "${WORKDIR}/decision.json" ]] || ! jq -e . "${WORKDIR}/decision.json" > /dev/null; then
@@ -456,7 +512,7 @@ jobs:
             exit 0
           fi
 
-          if [[ -n "${GO}" && "${DRY_RUN}" != "true" && "${EVENT_NAME}" != 'workflow_dispatch' ]]; then
+          if [[ -n "${GO}" && "${DRY_RUN}" != "true" && "${EVENT_NAME}" != 'workflow_dispatch' && "${EVENT_NAME}" != 'issue_comment' ]]; then
             if ! live_issue_json="$(gh issue view "${GO}" --repo "${REPO}" --json labels,state)"; then
               echo "::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error"
               echo "go_issue=" >> "${GITHUB_OUTPUT}"
@@ -504,7 +560,7 @@ jobs:
       - name: 'Claim issue'
         id: 'claim'
         if: |-
-          ${{ steps.decision.outputs.go_issue != '' && inputs.dry_run != true }}
+          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           ISSUE: '${{ steps.decision.outputs.go_issue }}'
@@ -676,7 +732,7 @@ jobs:
       - name: 'Publish PR'
         id: 'publish'
         if: |-
-          ${{ steps.decision.outputs.go_issue != '' && inputs.dry_run != true }}
+          ${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' }}
         env:
           # CI_DEV_BOT_PAT (the qwen-code-dev-bot PAT) opens the PR as
           # qwen-code-dev-bot. This is required: the default GITHUB_TOKEN is
@@ -770,7 +826,7 @@ jobs:
         id: 'scan'
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
-          FORCED_PR: '${{ inputs.pr_number }}'
+          FORCED_PR: '${{ needs.route.outputs.pr_number || inputs.pr_number }}'
         run: |-
           WORKDIR="$(mktemp -d)"
 
@@ -874,7 +930,7 @@ jobs:
   # resolution), verify, push, and report.
   # ===========================================================================
   review-address:
-    needs: 'review-scan'
+    needs: ['route', 'review-scan']
     if: |-
       ${{ needs.review-scan.outputs.has_targets == 'true' }}
     runs-on: 'ubuntu-latest'
@@ -1189,7 +1245,7 @@ jobs:
 
       - name: 'Push and report'
         if: |-
-          ${{ always() && inputs.dry_run != true && (steps.verify.outputs.outcome == 'fixed' || steps.verify.outputs.outcome == 'noop') }}
+          ${{ always() && needs.route.outputs.dry_run != 'true' && (steps.verify.outputs.outcome == 'fixed' || steps.verify.outputs.outcome == 'noop') }}
         env:
           # CI_DEV_BOT_PAT (the qwen-code-dev-bot PAT) pushes the branch and
           # posts the report as qwen-code-dev-bot, the same identity that opened
@@ -1266,11 +1322,11 @@ jobs:
 
       - name: 'Report dry-run / failure'
         if: |-
-          ${{ always() && (inputs.dry_run == true || steps.verify.outputs.outcome == 'failed') }}
+          ${{ always() && (needs.route.outputs.dry_run == 'true' || steps.verify.outputs.outcome == 'failed') }}
         env:
           OUTCOME: '${{ steps.verify.outputs.outcome }}'
           CONFLICT: '${{ steps.prepare.outputs.conflict }}'
-          DRY_RUN: '${{ inputs.dry_run }}'
+          DRY_RUN: '${{ needs.route.outputs.dry_run }}'
         run: |-
           SUFFIX=''
           [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'

@@ -18,6 +18,10 @@ const checkBotCredentialsStep =
   workflow.match(
     /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js \(hosted\)')/,
   )?.[0] ?? '';
+const routeStep =
+  workflow.match(
+    /- name: 'Decide phases'[\s\S]*?(?=\n[ ]{2}# ==========)/,
+  )?.[0] ?? '';
 const publishPrStep =
   workflow.match(
     /- name: 'Publish PR'[\s\S]*?(?=\n[ ]{6}- name: 'Withdraw claim on failure')/,
@@ -144,13 +148,13 @@ describe('qwen-autofix workflow', () => {
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
     expect(workflow).toContain(
-      '[[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e',
+      '[[ "${EVENT_NAME}" != \'workflow_dispatch\' && "${EVENT_NAME}" != \'issue_comment\' ]] && ! jq -e',
     );
     expect(workflow).toContain(
-      '"${EVENT_NAME}" == \'workflow_dispatch\' && -n "${FORCED_ISSUE}"',
+      '"${EVENT_NAME}" == \'workflow_dispatch\' && -n "${ROUTE_ISSUE}"',
     );
     expect(workflow).toContain(
-      '"${EVENT_NAME}" == \'workflow_dispatch\' && -n "${FORCED_PR}"',
+      '"${EVENT_NAME}" == \'workflow_dispatch\' && -n "${ROUTE_PR}"',
     );
     expect(workflow).toContain(
       'is missing ${READY_FOR_AGENT_LABEL}; skipping.',
@@ -169,6 +173,45 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain('github.event.sender.author_association');
   });
 
+  it('supports maintainer comment-triggered autofix dry-runs and explicit real runs', () => {
+    expect(workflow).toContain("issue_comment:\n    types:\n      - 'created'");
+    expect(routeStep).toContain(
+      "COMMENT_BODY: '${{ github.event.comment.body }}'",
+    );
+    expect(routeStep).toContain(
+      "COMMENT_TARGET_IS_PR: \"${{ github.event.issue.pull_request && 'true' || 'false' }}\"",
+    );
+    expect(routeStep).toContain(
+      '[[ "${COMMENT_BODY}" != @qwen-code\\ /autofix* ]]',
+    );
+    expect(routeStep).toContain(
+      'gh api "repos/${REPO}/collaborators/${SENDER_LOGIN}/permission"',
+    );
+    expect(routeStep).toContain(
+      '[[ "${COMMENT_BODY}" == "@qwen-code /autofix run"* ]] && DRY_RUN=false',
+    );
+    expect(routeStep).toContain('DRY_RUN=true');
+    expect(routeStep).toContain('COMMENT_TARGET_IS_PR}" == "true" ]]; then');
+    expect(routeStep).toContain('ROUTE_PR="${ISSUE_NUMBER}"');
+    expect(routeStep).toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
+    expect(routeStep).toContain('dry_run=${DRY_RUN}');
+    expect(workflow).toContain(
+      "FORCED_ISSUE: '${{ needs.route.outputs.issue_number || inputs.issue_number || github.event.issue.number }}'",
+    );
+    expect(workflow).toContain(
+      "FORCED_PR: '${{ needs.route.outputs.pr_number || inputs.pr_number }}'",
+    );
+    expect(workflow).toContain(
+      "${{ steps.decision.outputs.go_issue != '' && needs.route.outputs.dry_run != 'true' }}",
+    );
+    expect(workflow).toContain(
+      "${{ always() && needs.route.outputs.dry_run != 'true' && (steps.verify.outputs.outcome == 'fixed' || steps.verify.outputs.outcome == 'noop') }}",
+    );
+    expect(workflow).toContain(
+      "${{ always() && (needs.route.outputs.dry_run == 'true' || steps.verify.outputs.outcome == 'failed') }}",
+    );
+  });
+
   it('keeps forced issue routing bounded to open issues', () => {
     expect(workflow).toContain(
       '--json number,title,body,labels,createdAt,url,state',
@@ -180,13 +223,14 @@ describe('qwen-autofix workflow', () => {
       'elif [[ "$(jq -r \'.state // ""\' "${forced_issue_json}")" != \'OPEN\' ]]; then',
     );
     expect(workflow).toContain(
-      'workflow_dispatch is a maintainer-initiated escape hatch',
+      'workflow_dispatch and trusted issue_comment commands are',
+    );
+    expect(workflow).toContain('maintainer-initiated escape hatches');
+    expect(workflow).toContain(
+      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' && "${EVENT_NAME}" != \'issue_comment\' ]] && ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}"',
     );
     expect(workflow).toContain(
-      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}"',
-    );
-    expect(workflow).toContain(
-      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e --arg approved "${AUTOFIX_APPROVED_LABEL}"',
+      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' && "${EVENT_NAME}" != \'issue_comment\' ]] && ! jq -e --arg approved "${AUTOFIX_APPROVED_LABEL}"',
     );
     expect(workflow).toContain(
       'is missing ${AUTOFIX_APPROVED_LABEL}; skipping.',
@@ -215,10 +259,10 @@ describe('qwen-autofix workflow', () => {
     );
     expect(readDecisionStep).toContain('"${DRY_RUN}" != "true"');
     expect(readDecisionStep).toContain(
-      '::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error',
+      '[[ -n "${GO}" && "${DRY_RUN}" != "true" && "${EVENT_NAME}" != \'workflow_dispatch\' && "${EVENT_NAME}" != \'issue_comment\' ]]',
     );
     expect(readDecisionStep).toContain(
-      '($labels | index($ready)) and ($labels | index($approved))',
+      '::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error',
     );
     expect(readDecisionStep).toContain(
       'no longer has both ${READY_FOR_AGENT_LABEL} and ${AUTOFIX_APPROVED_LABEL}',
@@ -451,6 +495,10 @@ describe('qwen-autofix workflow', () => {
     expect(skill).toContain('assess-candidates');
     expect(skill).toContain('develop-issue');
     expect(skill).toContain('address-review');
+    expect(skill).toContain('operator dry-run');
+    expect(skill).toContain('@qwen-code /autofix');
+    expect(skill).toContain('@qwen-code /autofix run');
+    expect(skill).toContain('The workflow collects GitHub context');
     expect(skill.replace(/\s+/g, ' ')).toContain(
       'Use additive commits only; do not amend, rebase, reset, or otherwise rewrite Git history.',
     );

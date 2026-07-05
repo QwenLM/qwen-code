@@ -1,14 +1,14 @@
 ---
 name: autofix
-description: Use when Qwen Code GitHub Actions needs to assess approved issues for autonomous fixing, implement one selected issue, or address review feedback on an existing autofix pull request.
+description: Use when Qwen Code GitHub Actions or a maintainer-triggered Autofix run needs to assess approved issues, implement one selected issue, address review feedback, or dry-run the same flow on real GitHub context.
 ---
 
 # Qwen Autofix
 
-Use this skill only from the Qwen Autofix GitHub workflow. The workflow owns
-trigger routing, credentials, checkout, sandbox setup, verification, pushes, and
-comments. This skill owns the agent decision rules for the three model-driven
-steps.
+Use this skill from the Qwen Autofix GitHub workflow or an operator dry-run of
+that workflow. The workflow owns trigger routing, GitHub context collection,
+credentials, checkout, sandbox setup, verification, pushes, and comments. This
+skill owns the agent decision rules for the three model-driven steps.
 
 The raw invocation selects one mode:
 
@@ -17,6 +17,21 @@ The raw invocation selects one mode:
 /autofix develop-issue --issue 1234 --workdir /tmp/autofix
 /autofix address-review --pr 5678 --issue 1234 --workdir /tmp/autofix-review-5678 --conflict false --base main
 ```
+
+Maintainers can exercise the same workflow on real GitHub context with comments:
+
+```text
+@qwen-code /autofix
+@qwen-code /autofix run
+```
+
+The plain command is a dry-run: it uses the real issue or PR context, runs the
+same assessment/addressing path, uploads artifacts, and writes only the workflow
+summary. The `run` form is the real run: after verification, the workflow may
+claim/comment on issues, push the bot branch, open a PR, or comment on an
+existing PR. The workflow collects GitHub context into `candidates.json`,
+`decision.json`, and `feedback.md`; do not hand-copy review feedback as the
+normal validation path.
 
 ## Shared Rules
 
