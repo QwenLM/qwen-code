@@ -27,6 +27,7 @@ type ChatEditorTestProps = {
     commitAccepted?: () => void,
   ) => boolean | void;
   isPreparing?: boolean;
+  dialogOpen?: boolean;
 };
 
 const {
@@ -679,6 +680,24 @@ describe('App session callbacks', () => {
     });
 
     expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+  });
+
+  it('keeps the composer dormant (dialogOpen) while an approval overlay is up', async () => {
+    // Regression: after the panel auto-closes for an approval, interactionBlocked
+    // flips false. Unless dialogOpen also keys off the pending approval,
+    // useComposerCore refocuses the composer and ToolApproval — which ignores
+    // keys from editable targets — stops responding to its approval shortcuts.
+    const { rerender } = renderApp();
+    await flush();
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(false);
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(testState.latestChatEditorProps?.dialogOpen).toBe(true);
   });
 
   it('closes an open panel when resuming a session via /resume', async () => {

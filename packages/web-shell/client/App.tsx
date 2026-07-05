@@ -1017,6 +1017,13 @@ export function App({
       : null;
   const pendingApprovalRef = useRef(pendingApproval);
   pendingApprovalRef.current = canActOnPendingApproval ? pendingApproval : null;
+  // True exactly when an actionable approval overlay (ToolApproval or
+  // AskUserQuestion) is on screen. Single source of truth for the three places
+  // that must treat the composer as dormant while an approval owns the keyboard:
+  // the panel auto-close, the panel focus-restore guard, and the ChatEditor
+  // dialogOpen prop.
+  const approvalOverlayActive =
+    pendingToolApproval !== null || pendingAskUserApproval !== null;
   const floatingTodosState = useMemo(
     () => getFloatingTodos(messages),
     [messages],
@@ -1223,11 +1230,11 @@ export function App({
       // drives its own keyboard handling and ToolApproval ignores keys from
       // editable targets, so focusing the composer here would swallow its
       // shortcuts and leave the user unable to respond by keyboard.
-      if (!pendingToolApproval && !pendingAskUserApproval) {
+      if (!approvalOverlayActive) {
         editorRef.current?.focus();
       }
     }
-  }, [activePanel, pendingToolApproval, pendingAskUserApproval]);
+  }, [activePanel, approvalOverlayActive]);
   // A pending approval (a gated tool call or an AskUserQuestion) renders its
   // overlay in the chat footer, which is hidden (display:none) while a panel is
   // shown. Left alone, the turn would hang behind Settings/Status with no
@@ -1236,10 +1243,10 @@ export function App({
   // canActOnPendingApproval, so a non-owner in a shared session isn't yanked out
   // of Settings by someone else's prompt.
   useEffect(() => {
-    if ((pendingToolApproval || pendingAskUserApproval) && activePanel) {
+    if (approvalOverlayActive && activePanel) {
       setActivePanel(null);
     }
-  }, [pendingToolApproval, pendingAskUserApproval, activePanel]);
+  }, [approvalOverlayActive, activePanel]);
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
@@ -4407,7 +4414,7 @@ export function App({
                         onSelectModel={handleModelSelect}
                         onChatWidthModeChange={handleChatWidthModeChange}
                         sessionName={sessionDisplayName}
-                        dialogOpen={interactionBlocked}
+                        dialogOpen={interactionBlocked || approvalOverlayActive}
                         followupState={followupState}
                         onAcceptFollowup={onAcceptFollowup}
                         onDismissFollowup={onDismissFollowup}
