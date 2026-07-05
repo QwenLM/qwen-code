@@ -128,9 +128,8 @@ jobs:
             review) DO_REVIEW=true ;;
             both) DO_ISSUE=true; DO_REVIEW=true ;;
             *)
-              # auto (the scheduled default): review every tick, issue on the
-              # dedicated 00/12 UTC schedule. Use the event payload instead of
-              # wall-clock time because GitHub may delay scheduled runs.
+              # auto only runs review from scheduled/manual events. Comment and
+              # label events route below after their trust gates pass.
               if [[ "${EVENT_NAME}" == 'schedule' || "${EVENT_NAME}" == 'workflow_dispatch' ]]; then
                 DO_REVIEW=true
               fi
@@ -195,7 +194,11 @@ jobs:
                     echo "🧭 comment ignored: sender_permission='${sender_permission:-none}' sender_trusted=false"
                   else
                     if grep -Eq '^[[:space:]]*@qwen-code[[:space:]]+/autofix[[:space:]]+run([[:space:]]|$)' <<< "${COMMENT_BODY}"; then
-                      DRY_RUN=false
+                      if [[ "${sender_permission}" == 'maintain' || "${sender_permission}" == 'admin' ]]; then
+                        DRY_RUN=false
+                      else
+                        echo "::notice::/autofix run requires maintain or admin; sender has '${sender_permission}'. Falling back to dry-run."
+                      fi
                     fi
                     if [[ "${COMMENT_TARGET_IS_PR}" == "true" ]]; then
                       DO_REVIEW=true

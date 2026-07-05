@@ -11,6 +11,7 @@ const skillPath = resolve(
   '..',
   'SKILL.md',
 );
+const QWEN_TIMEOUT_MS = 50 * 60 * 1000;
 const specs = {
   'assess-candidates': {
     inputs: ['candidates.json'],
@@ -114,6 +115,7 @@ if (missingInputs.length > 0) {
 
 const result = spawnSync(options.qwenBin, ['--yolo', '--prompt', prompt], {
   stdio: 'inherit',
+  timeout: QWEN_TIMEOUT_MS,
 });
 if (result.error || result.signal || result.status !== 0) {
   const detail =
@@ -132,7 +134,8 @@ if (result.error || result.signal || result.status !== 0) {
 }
 
 if (existsSync(file(options.workdir, 'failure.md'))) {
-  fail(`Autofix agent wrote ${file(options.workdir, 'failure.md')}`);
+  console.error(`Autofix agent wrote ${file(options.workdir, 'failure.md')}`);
+  process.exit(0);
 }
 
 const missingOutputs = missing(options.workdir, spec.outputs);

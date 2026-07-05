@@ -203,12 +203,17 @@ describe('qwen-autofix workflow', () => {
       'ROUTE_PR="${ISSUE_NUMBER}"',
       'ROUTE_ISSUE="${ISSUE_NUMBER}"',
       'dry_run=${DRY_RUN}',
+      '/autofix run requires maintain or admin',
       "FORCED_ISSUE: '${{ needs.route.outputs.issue_number || inputs.issue_number || github.event.issue.number }}'",
       "FORCED_PR: '${{ needs.route.outputs.pr_number || inputs.pr_number }}'",
       "${{ always() && needs.route.outputs.dry_run != 'true' && (steps.verify.outputs.outcome == 'fixed' || steps.verify.outputs.outcome == 'noop') }}",
     ]) {
       expect(`${routeStep}\n${workflow}`).toContain(text);
     }
+    expect(routeStep).toContain(
+      `[[ "\${sender_permission}" == 'maintain' || "\${sender_permission}" == 'admin' ]]`,
+    );
+    expect(routeStep).toContain('comment ignored: sender_permission=');
     expect(routeStep).not.toContain(
       '[[ "${COMMENT_BODY}" != @qwen-code\\ /autofix* ]]',
     );
@@ -633,6 +638,109 @@ describe('qwen-autofix workflow', () => {
     );
   });
 
+  it('keeps autofix runner failure paths explicit', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
+    try {
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [autofixRunnerScriptPath, '--mode', 'develop-issue'],
+          { encoding: 'utf8', stdio: 'pipe' },
+        ),
+      ).toThrow(/--issue is required/);
+
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [
+            autofixRunnerScriptPath,
+            '--mode',
+            'develop-issue',
+            '--issue',
+            '1234',
+            '--workdir',
+            dir,
+            '--qwen-bin',
+            process.execPath,
+          ],
+          { encoding: 'utf8', stdio: 'pipe' },
+        ),
+      ).toThrow(/Missing input file/);
+
+      const stub = join(dir, 'qwen-stub.mjs');
+      writeFileSync(stub, '#!/usr/bin/env node\n');
+      chmodSync(stub, 0o755);
+      writeFileSync(join(dir, 'candidates.json'), '[]\n');
+      writeFileSync(join(dir, 'decision.json'), '{"go":1234}\n');
+
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [
+            autofixRunnerScriptPath,
+            '--mode',
+            'develop-issue',
+            '--issue',
+            '1234',
+            '--workdir',
+            dir,
+            '--qwen-bin',
+            stub,
+          ],
+          { encoding: 'utf8', stdio: 'pipe' },
+        ),
+      ).toThrow(/without required output/);
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'without required output',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('lets agent-written failure.md reach workflow verification', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
+    try {
+      writeFileSync(join(dir, 'feedback.md'), 'feedback\n');
+      const stub = join(dir, 'qwen-stub.mjs');
+      writeFileSync(
+        stub,
+        [
+          '#!/usr/bin/env node',
+          "import { writeFileSync } from 'node:fs';",
+          "const prompt = process.argv[process.argv.indexOf('--prompt') + 1] ?? '';",
+          'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
+          "writeFileSync(`${workdir}/failure.md`, 'cannot proceed\\n');",
+          '',
+        ].join('\n'),
+      );
+      chmodSync(stub, 0o755);
+
+      execFileSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          'address-review',
+          '--pr',
+          '5678',
+          '--issue',
+          '1234',
+          '--workdir',
+          dir,
+          '--qwen-bin',
+          stub,
+        ],
+        { encoding: 'utf8', stdio: 'pipe' },
+      );
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'cannot proceed',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('allows non-package fixes after deterministic verification', () => {
     expect(verificationGateSteps).toHaveLength(2);
     for (const step of verificationGateSteps) {
@@ -798,5 +906,12 @@ describe('qwen-autofix workflow', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+
+  it('bounds qwen subprocess runtime', () => {
+    const runner = readFileSync(autofixRunnerScriptPath, 'utf8');
+
+    expect(runner).toContain('const QWEN_TIMEOUT_MS = 50 * 60 * 1000');
+    expect(runner).toContain('timeout: QWEN_TIMEOUT_MS');
   });
 });
