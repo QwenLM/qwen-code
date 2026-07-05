@@ -4822,9 +4822,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         });
         if (contentRef) {
           artifactContentStore.releaseContentRef(contentRef);
+          await gcArtifactContent(entry).catch(() => undefined);
         }
         if (contentRef && result.changes.length === 0) {
-          await gcArtifactContent(entry).catch(() => undefined);
           if (!(await entry.artifacts.get(artifactId))) {
             throw new SessionArtifactValidationError(
               'artifact no longer exists',

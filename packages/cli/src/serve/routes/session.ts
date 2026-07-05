@@ -765,6 +765,7 @@ export function registerSessionRoutes(
       async (req, res, sessionId) => {
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        if (!requireSessionArtifactClientId(clientId, res)) return;
         try {
           const body = safeBody(req);
           const artifact: SessionArtifactInput = {
@@ -787,11 +788,9 @@ export function registerSessionRoutes(
               'clientRetained'
             ] as SessionArtifactInput['clientRetained'],
           };
-          const result = await bridge.addSessionArtifact(
-            sessionId,
-            artifact,
-            clientId !== undefined ? { clientId } : undefined,
-          );
+          const result = await bridge.addSessionArtifact(sessionId, artifact, {
+            clientId,
+          });
           res.status(200).json(result);
         } catch (err) {
           if (sendArtifactValidationError(res, err)) return;
@@ -936,6 +935,7 @@ export function registerSessionRoutes(
         const artifactId = req.params['artifactId'];
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        if (!requireSessionArtifactClientId(clientId, res)) return;
         if (!artifactId) {
           res.status(400).json({
             v: 1,
@@ -952,7 +952,7 @@ export function registerSessionRoutes(
           const result = await bridge.removeSessionArtifact(
             sessionId,
             artifactId,
-            clientId !== undefined ? { clientId } : undefined,
+            { clientId },
             nonEmptyArtifactRemoveRequest(options),
           );
           res.status(200).json(result);

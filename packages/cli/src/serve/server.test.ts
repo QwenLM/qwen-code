@@ -7853,6 +7853,19 @@ describe('createServeApp', () => {
       expect(bridge.addSessionArtifactCalls).toHaveLength(0);
     });
 
+    it('POST /session/:id/artifacts requires a client id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).post('/session/session-A/artifacts'),
+      ).send({ title: 'Lineage', url: 'https://example.com/lineage' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('client_id_required');
+      expect(bridge.addSessionArtifactCalls).toEqual([]);
+    });
+
     it('POST /session/:id/artifacts forwards body and client context', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });
@@ -7902,9 +7915,9 @@ describe('createServeApp', () => {
       });
       const app = createServeApp(tokenOpts, undefined, { bridge });
 
-      const res = await auth(
-        request(app).post('/session/session-A/artifacts'),
-      ).send({ title: 'Bad link', url: 'javascript:alert(1)' });
+      const res = await auth(request(app).post('/session/session-A/artifacts'))
+        .set('X-Qwen-Client-Id', 'client-1')
+        .send({ title: 'Bad link', url: 'javascript:alert(1)' });
 
       expect(res.status).toBe(400);
       expect(res.body).toEqual({
@@ -7928,6 +7941,19 @@ describe('createServeApp', () => {
       expect(res.status).toBe(401);
       expect(res.body.code).toBe('token_required');
       expect(bridge.removeSessionArtifactCalls).toHaveLength(0);
+    });
+
+    it('DELETE /session/:id/artifacts/:artifactId requires a client id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).delete('/session/session-A/artifacts/artifact-1'),
+      );
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('client_id_required');
+      expect(bridge.removeSessionArtifactCalls).toEqual([]);
     });
 
     it('DELETE /session/:id/artifacts/:artifactId is idempotent for missing artifacts', async () => {

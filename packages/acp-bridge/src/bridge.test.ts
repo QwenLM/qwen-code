@@ -488,6 +488,7 @@ describe('createAcpSessionBridge', () => {
       );
       const firstContentId =
         firstPin.changes[0]?.artifact?.contentRef?.contentId;
+      const gcSpy = vi.spyOn(SessionArtifactContentStore.prototype, 'gc');
 
       await fsp.writeFile(
         path.join(workspace, 'reports', 'report.txt'),
@@ -506,6 +507,7 @@ describe('createAcpSessionBridge', () => {
       expect(secondPin.changes[0]?.artifact?.contentRef?.contentId).not.toBe(
         firstContentId,
       );
+      expect(gcSpy).toHaveBeenCalledTimes(1);
     } finally {
       await bridge.shutdown();
       if (previousQwenHome === undefined) {
