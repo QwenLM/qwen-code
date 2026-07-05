@@ -16,12 +16,14 @@ import { ExtensionStorage } from './storage.js';
 import { QWEN_DIR } from '../config/storage.js';
 import {
   ExtensionManager,
+  ExtensionUpdateState,
   SettingScope,
   type ExtensionManagerOptions,
   validateName,
   getExtensionId,
   hashValue,
   type ExtensionConfig,
+  type ExtensionMutationEvent,
 } from './extensionManager.js';
 import type { MCPServerConfig, ExtensionInstallMetadata } from '../index.js';
 
@@ -690,6 +692,43 @@ describe('extension tests', () => {
   });
 
   describe('enableExtension / disableExtension', () => {
+    it('should emit mutation lifecycle events around extension changes', async () => {
+      createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+      });
+
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      manager.addMutationListener((event) => events.push(event));
+      await manager.refreshCache();
+
+      await manager.disableExtension('my-extension', SettingScope.User);
+
+      expect(events).toEqual([
+        { id: 1, phase: 'start', operation: 'disableExtension' },
+        { id: 1, phase: 'end', operation: 'disableExtension' },
+      ]);
+    });
+
+    it('should end mutation lifecycle events when extension changes fail', async () => {
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      manager.addMutationListener((event) => events.push(event));
+
+      await expect(
+        manager.disableExtension('missing-extension', SettingScope.User),
+      ).rejects.toThrow(
+        'Extension with name missing-extension does not exist.',
+      );
+
+      expect(events).toEqual([
+        { id: 1, phase: 'start', operation: 'disableExtension' },
+        { id: 1, phase: 'end', operation: 'disableExtension' },
+      ]);
+    });
+
     it('should disable an extension at the user scope', async () => {
       createExtension({
         extensionsDir: userExtensionsDir,
@@ -786,6 +825,49 @@ describe('extension tests', () => {
 
       await manager.enableExtension('ext1', SettingScope.Workspace);
       expect(manager.isEnabled('ext1', tempWorkspaceDir)).toBe(true);
+    });
+  });
+
+  describe('updateExtension', () => {
+    it('should end mutation lifecycle events when temp directory creation fails', async () => {
+      const extensionPath = createExtension({
+        extensionsDir: userExtensionsDir,
+        name: 'my-extension',
+        version: '1.0.0',
+        installMetadata: {
+          type: 'local',
+          source: tempWorkspaceDir,
+          originSource: 'QwenCode',
+        },
+      });
+      const manager = createExtensionManager();
+      const events: ExtensionMutationEvent[] = [];
+      const callback = vi.fn();
+      manager.addMutationListener((event) => events.push(event));
+      await manager.refreshCache();
+      const extension = manager
+        .getLoadedExtensions()
+        .find((entry) => entry.path === extensionPath);
+      vi.spyOn(ExtensionStorage, 'createTmpDir').mockRejectedValueOnce(
+        new Error('disk full'),
+      );
+
+      await expect(
+        manager.updateExtension(
+          extension!,
+          ExtensionUpdateState.UPDATE_AVAILABLE,
+          callback,
+        ),
+      ).rejects.toThrow('disk full');
+
+      expect(events).toEqual([
+        { id: 1, phase: 'start', operation: 'updateExtension' },
+        { id: 1, phase: 'end', operation: 'updateExtension' },
+      ]);
+      expect(callback).toHaveBeenCalledWith(
+        'my-extension',
+        ExtensionUpdateState.ERROR,
+      );
     });
   });
 
@@ -980,31 +1062,35 @@ describe('extension tests', () => {
       expect(serverConfig.env!['MISSING_VAR']).toBe('$UNDEFINED_ENV_VAR');
       expect(serverConfig.env!['MISSING_VAR_BRACES']).toBe('${ALSO_UNDEFINED}');
     });
-    describe('refreshTools and refreshMemory', () => {
+    describe('refreshTools', () => {
       it('refreshTools should return early if config is not set', async () => {
         const manager = createExtensionManager();
         // Should not throw when config is undefined
         await expect(manager.refreshTools()).resolves.not.toThrow();
       });
 
-      it('refreshTools should always call refreshMemory', async () => {
+      it('refreshTools should call all refresh methods', async () => {
         const mockRefreshCache = vi.fn();
-        const mockRestartMcpServers = vi.fn();
+        const mockReinitializeMcpServers = vi.fn();
+        const mockReloadHooks = vi.fn();
         const mockRefreshHierarchicalMemory = vi.fn();
+        const mockSettingsMcpServers = { server: { command: 'cmd' } };
 
         const mockConfig = {
           getGeminiClient: () => ({
             isInitialized: () => false,
             setTools: vi.fn(),
           }),
-          getToolRegistry: () => ({
-            restartMcpServers: mockRestartMcpServers,
-          }),
+          getSettingsMcpServers: () => mockSettingsMcpServers,
+          reinitializeMcpServers: mockReinitializeMcpServers,
           getSkillManager: () => ({
             refreshCache: mockRefreshCache,
           }),
           getSubagentManager: () => ({
             refreshCache: mockRefreshCache,
+          }),
+          getHookSystem: () => ({
+            reload: mockReloadHooks,
           }),
           refreshHierarchicalMemory: mockRefreshHierarchicalMemory,
         };
@@ -1015,47 +1101,12 @@ describe('extension tests', () => {
 
         await manager.refreshTools();
 
-        // refreshMemory should be called which includes these
-        expect(mockRestartMcpServers).toHaveBeenCalledOnce();
+        expect(mockReinitializeMcpServers).toHaveBeenCalledOnce();
+        expect(mockReinitializeMcpServers).toHaveBeenCalledWith(
+          mockSettingsMcpServers,
+        );
         expect(mockRefreshCache).toHaveBeenCalledTimes(2); // skillManager and subagentManager
-        expect(mockRefreshHierarchicalMemory).toHaveBeenCalledOnce();
-      });
-
-      it('refreshMemory should return early if config is not set', async () => {
-        const manager = createExtensionManager();
-
-        // Should not throw when config is undefined
-        await expect(manager.refreshMemory()).resolves.not.toThrow();
-      });
-
-      it('refreshMemory should call all refresh methods', async () => {
-        const mockSkillRefreshCache = vi.fn();
-        const mockSubagentRefreshCache = vi.fn();
-        const mockRestartMcpServers = vi.fn();
-        const mockRefreshHierarchicalMemory = vi.fn();
-
-        const mockConfig = {
-          getToolRegistry: () => ({
-            restartMcpServers: mockRestartMcpServers,
-          }),
-          getSkillManager: () => ({
-            refreshCache: mockSkillRefreshCache,
-          }),
-          getSubagentManager: () => ({
-            refreshCache: mockSubagentRefreshCache,
-          }),
-          refreshHierarchicalMemory: mockRefreshHierarchicalMemory,
-        };
-
-        const manager = createExtensionManager();
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (manager as any).config = mockConfig;
-
-        await manager.refreshMemory();
-
-        expect(mockRestartMcpServers).toHaveBeenCalledOnce();
-        expect(mockSkillRefreshCache).toHaveBeenCalledOnce();
-        expect(mockSubagentRefreshCache).toHaveBeenCalledOnce();
+        expect(mockReloadHooks).toHaveBeenCalledOnce();
         expect(mockRefreshHierarchicalMemory).toHaveBeenCalledOnce();
       });
     });

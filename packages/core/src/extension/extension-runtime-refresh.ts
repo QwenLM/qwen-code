@@ -11,9 +11,11 @@ const debugLogger = createDebugLogger('EXTENSION_RUNTIME_REFRESH');
 
 export type ExtensionRuntimeRefreshConfig = Pick<
   Config,
-  | 'getToolRegistry'
+  | 'getSettingsMcpServers'
+  | 'reinitializeMcpServers'
   | 'getSkillManager'
   | 'getSubagentManager'
+  | 'getHookSystem'
   | 'refreshHierarchicalMemory'
 >;
 
@@ -22,35 +24,36 @@ export async function refreshExtensionRuntime(
 ): Promise<void> {
   if (!config) return;
 
-  // Error-handling contract:
-  //   Tier 1 (fatal)   — restartMcpServers failure propagates. MCP is a
-  //                       prerequisite for tool discovery; callers must know
-  //                       if it failed so they can surface the error.
-  //   Tier 2 (swallow)  — refreshCache failures (skills, subagents) are
-  //                       logged via warn but swallowed by allSettled.
-  //   Tier 3 (swallow)  — refreshHierarchicalMemory failure is logged via
-  //                       error but swallowed by try/catch.
-  // When adding new refresh steps, decide explicitly which tier applies.
-  await config.getToolRegistry().restartMcpServers();
+  // MCP servers must settle first — skills and subagents may depend on the
+  // updated MCP tool list for their own refresh (e.g. SkillTool.refreshSkills()
+  // rebuilds the model-facing tool description and updates geminiClient's tool
+  // list). Wrap in try/catch so a failure here does not prevent the remaining
+  // refresh legs from running.
+  try {
+    await config.reinitializeMcpServers(config.getSettingsMcpServers());
+  } catch (err) {
+    debugLogger.warn(
+      'refreshExtensionRuntime: reinitializeMcpServers failed:',
+      err,
+    );
+  }
 
-  // Refresh skills + subagents in parallel. Both `refreshCache` calls now
-  // resolve only after their async change-listener chain settles — for skills,
-  // that includes `SkillTool.refreshSkills()` rebuilding the model-facing tool
-  // description and updating `geminiClient`'s tool list. Use allSettled (rather
+  // Skills, subagents, and hooks refresh in parallel. Use allSettled (rather
   // than Promise.all) so a rejection from one leg does not cascade — the other
-  // leg's result is still applied, refreshHierarchicalMemory below still runs,
-  // and callers (`enableExtension`, etc.) don't unwind because of an unrelated
-  // transient failure.
+  // legs' results are still applied, refreshHierarchicalMemory below still
+  // runs, and callers (`enableExtension`, etc.) don't unwind because of an
+  // unrelated transient failure.
   const skillManager = config.getSkillManager();
   const settled = await Promise.allSettled([
     skillManager?.refreshCache(),
     config.getSubagentManager().refreshCache(),
+    config.getHookSystem()?.reload(),
   ]);
 
   for (const result of settled) {
     if (result.status === 'rejected') {
       debugLogger.warn(
-        'refreshExtensionRuntime: a refreshCache leg failed:',
+        'refreshExtensionRuntime: a refresh leg failed:',
         result.reason,
       );
     }
@@ -61,11 +64,14 @@ export async function refreshExtensionRuntime(
   // doesn't propagate up to `enableExtension` / `installExtension` callers,
   // which have already mutated their `isActive`/`installed` flags by the time
   // this function is invoked — a failed memory refresh leaves stale memory
-  // but should not back out the surrounding extension transition.
+  // but should not back out the surrounding extension transition. At this
+  // point enable/disable and install/uninstall callers may already have
+  // updated isActive state, extension cache entries, or on-disk enablement
+  // metadata.
   try {
     await config.refreshHierarchicalMemory();
   } catch (err) {
-    debugLogger.error(
+    debugLogger.warn(
       'refreshExtensionRuntime: refreshHierarchicalMemory failed:',
       err,
     );

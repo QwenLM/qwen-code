@@ -14,6 +14,7 @@ import {
 } from '@qwen-code/qwen-code-core';
 import type { LoadedSettings } from '../config/settings.js';
 import type { InitializationResult } from '../core/initializer.js';
+import type { ExtensionRefreshState } from '../config/extension-refresh-state.js';
 import { DualOutputBridge } from '../dualOutput/DualOutputBridge.js';
 import { DualOutputContext } from '../dualOutput/DualOutputContext.js';
 import { RemoteInputWatcher } from '../remoteInput/RemoteInputWatcher.js';
@@ -49,6 +50,7 @@ export async function startInteractiveUI(
   startupWarnings: string[],
   workspaceRoot: string = process.cwd(),
   initializationResult: InitializationResult,
+  extensionRefreshState?: ExtensionRefreshState,
 ) {
   const version = await getCliVersion();
   setWindowTitle(settings, basename(workspaceRoot));
@@ -159,6 +161,7 @@ export async function startInteractiveUI(
                         startupWarnings={startupWarnings}
                         version={version}
                         initializationResult={initializationResult}
+                        extensionRefreshState={extensionRefreshState}
                       />
                     </BackgroundTaskViewProvider>
                   </AgentViewProvider>

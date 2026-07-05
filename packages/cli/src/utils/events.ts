@@ -19,6 +19,10 @@ export enum AppEvent {
    */
   McpPendingApprovalChanged = 'mcp-pending-approval-changed',
   LspStatusChanged = 'lsp-status-changed',
+  ExtensionContentChanged = 'extension-content-changed',
+  ExtensionRefreshNeeded = 'extension-refresh-needed',
+  ExtensionsReloadStarted = 'extensions-reload-started',
+  ExtensionsReloaded = 'extensions-reloaded',
 }
 
 export const appEvents = new EventEmitter();

@@ -85,6 +85,25 @@ export class HookRegistry {
     );
   }
 
+  async reloadConfiguredHooks(): Promise<void> {
+    const previousEntries = this.entries;
+    const agentEntries = this.entries.filter(
+      (entry) => entry.agentScope !== undefined,
+    );
+
+    try {
+      this.entries = [...agentEntries];
+      this.processHooksFromConfig();
+    } catch (err) {
+      this.entries = previousEntries;
+      throw err;
+    }
+
+    debugLogger.debug(
+      `Hook registry reloaded with ${this.entries.length} hook entries`,
+    );
+  }
+
   /**
    * Get all hook entries for a specific event
    */

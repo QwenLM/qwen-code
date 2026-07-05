@@ -42,6 +42,8 @@ import {
 import { SettingsWatcher } from './config/settingsWatcher.js';
 import { registerMcpHotReload } from './config/hot-reload.js';
 import { LspConfigWatcher } from './config/lsp-config-watcher.js';
+import { ExtensionFileWatcher } from './config/extension-file-watcher.js';
+import { ExtensionRefreshState } from './config/extension-refresh-state.js';
 import { initializeI18n, resolveLanguageSetting } from './i18n/index.js';
 import {
   setupStartupWorktree,
@@ -615,6 +617,27 @@ export async function main() {
 
     registerLspHotReload(config, registerCleanup);
 
+    const extensionRefreshState = new ExtensionRefreshState();
+    const extensionFileWatcher = isBareMode(argv.bare)
+      ? undefined
+      : new ExtensionFileWatcher(config, undefined, extensionRefreshState);
+    extensionFileWatcher?.startWatching();
+    if (extensionFileWatcher) {
+      const restartExtensionWatcher = () =>
+        extensionFileWatcher.restartWatching();
+      extensionRefreshState.on(
+        AppEvent.ExtensionsReloaded,
+        restartExtensionWatcher,
+      );
+      registerCleanup(() => {
+        extensionRefreshState.off(
+          AppEvent.ExtensionsReloaded,
+          restartExtensionWatcher,
+        );
+        extensionFileWatcher.stopWatching();
+      });
+    }
+
     // Phase D-1: persist the WorktreeSession sidecar so Phase C's restore
     // machinery on a subsequent `--resume` picks the worktree back up, and
     // capture any override of a previously-resumed session's worktree so
@@ -872,6 +895,7 @@ export async function main() {
         startupWarnings,
         process.cwd(),
         initializationResult!,
+        extensionRefreshState,
       );
       // Clean up corruption env vars so subsequent relaunch children
       // and subprocesses don't inherit stale state.
