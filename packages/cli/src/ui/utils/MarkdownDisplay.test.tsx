@@ -456,6 +456,19 @@ Done.`.replace(/\n/g, eol);
       expect(output).not.toContain('Alpha');
     });
 
+    it('holds back a multi-column header still being typed (no cell-by-cell flash)', () => {
+      // Incomplete header (no closing `|` yet) but already ≥2 columns: it must
+      // be held, not rendered as raw pipe text, so it does not flash in.
+      const text = `intro line
+| Alpha | Bet`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('intro line');
+      expect(output).not.toContain('Alpha');
+    });
+
     it('does not hold back non-table pipe-leading text', () => {
       // A trailing pipe-line that is not a complete table header (e.g. a shell
       // pipeline or pipe-prefixed log line) must still render, not vanish.

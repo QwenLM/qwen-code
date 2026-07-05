@@ -208,23 +208,26 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       for (let i = 0; i < start; i++) {
         if (codeFenceRegex.test(lines[i]!)) insideCodeFence = !insideCodeFence;
       }
-      // Only hold back when the first pipe-line is a plausible table header (a
-      // complete `| … |` row). Otherwise non-table pipe-leading text — an
-      // un-fenced shell pipeline (`| grep foo`), pipe-prefixed log output — would
-      // vanish from the live preview until the message commits.
-      const headerRowMatch = insideCodeFence
-        ? null
-        : lines[start]!.match(tableRowRegex);
-      if (headerRowMatch) {
-        const headerCells = splitMarkdownTableRow(headerRowMatch[1]).filter(
-          (c) => c.length > 0,
-        ).length;
+      // Only hold back a plausible forming TABLE, not arbitrary pipe text. A
+      // table header has ≥2 columns; a single-pipe line (an un-fenced shell
+      // pipeline `| grep foo`, a pipe-prefixed log line) has one cell and must
+      // render. Count cells on the first line whether or not it is closed yet,
+      // so a multi-column header held mid-type does not flash in cell by cell
+      // before its separator arrives. (A header still typing its very first
+      // cell — one cell so far — is indistinguishable from a single-pipe line,
+      // so it renders briefly until the second column appears; that is the
+      // narrowest flash we can allow without hiding real non-table text.)
+      const headerCells = insideCodeFence
+        ? 0
+        : splitMarkdownTableRow(lines[start]!).filter((c) => c.length > 0)
+            .length;
+      if (headerCells >= 2) {
         const hasMatchingSeparator = lines.slice(start + 1).some((l) => {
           if (!tableSeparatorRegex.test(l)) return false;
           const cols = splitMarkdownTableRow(l).filter(
             (c) => c.length > 0,
           ).length;
-          return headerCells > 0 && cols === headerCells;
+          return cols === headerCells;
         });
         if (!hasMatchingSeparator) {
           lines = lines.slice(0, start);
