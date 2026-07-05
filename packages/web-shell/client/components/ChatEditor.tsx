@@ -62,6 +62,7 @@ interface ChatEditorProps {
   onSubmit: (
     text: string,
     images?: import('../adapters/promptTypes').PromptImage[],
+    commitAccepted?: import('../hooks/useComposerCore').ComposerSubmitCommit,
   ) => boolean | void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;

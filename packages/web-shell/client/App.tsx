@@ -36,7 +36,10 @@ import {
   ChatEditor,
   type ComposerToolbarAction,
 } from './components/ChatEditor';
-import type { EditorHandle } from './hooks/useComposerCore';
+import type {
+  ComposerSubmitCommit,
+  EditorHandle,
+} from './hooks/useComposerCore';
 import type { PromptImage } from './adapters/promptTypes';
 import { StatusBar, type StatusBarHandle } from './components/StatusBar';
 import { StreamingStatus } from './components/StreamingStatus';
@@ -273,6 +276,7 @@ interface SendPromptOptionsWithRetry {
   images?: PromptImage[];
   retry?: boolean;
   clearComposerOnPromptStart?: boolean;
+  commitComposerAccepted?: ComposerSubmitCommit;
 }
 
 type GoalStatusTranscriptBlock = DaemonTranscriptBlock & {
@@ -1361,6 +1365,7 @@ export function App({
         optimisticUserMessage?: boolean;
         retry?: boolean;
         clearComposerOnPromptStart?: boolean;
+        commitComposerAccepted?: ComposerSubmitCommit;
       },
     ) => {
       const isUserPrompt = !text.trimStart().startsWith('/');
@@ -1418,7 +1423,9 @@ export function App({
         optimisticUserMessage: opts?.optimisticUserMessage,
         retry: opts?.retry,
       };
-      if (opts?.clearComposerOnPromptStart) {
+      if (opts?.commitComposerAccepted) {
+        opts.commitComposerAccepted();
+      } else if (opts?.clearComposerOnPromptStart) {
         editorRef.current?.clear();
       }
       const sessionIdAfterEnsure = connectionRef.current.sessionId;
@@ -1522,7 +1529,12 @@ export function App({
   });
 
   const enqueuePrompt = useCallback(
-    (text: string, images?: PromptImage[], onComplete?: () => void) => {
+    (
+      text: string,
+      images?: PromptImage[],
+      onComplete?: () => void,
+      commitComposerAccepted?: ComposerSubmitCommit,
+    ) => {
       if (onSubmitBeforeRef.current) {
         onSubmitBeforeRef
           .current({
@@ -1532,7 +1544,11 @@ export function App({
           .then(() => {
             const result = rawEnqueuePrompt(text, images, onComplete);
             if (result !== false) {
-              editorRef.current?.clear();
+              if (commitComposerAccepted) {
+                commitComposerAccepted();
+              } else {
+                editorRef.current?.clear();
+              }
             }
             const sessionId = connectionRef.current.sessionId;
             if (sessionId && text.trim()) {
@@ -2371,15 +2387,23 @@ export function App({
     (
       text: string,
       images?: PromptImage[],
-      opts?: { sendToDaemon?: boolean },
+      opts?: {
+        sendToDaemon?: boolean;
+        commitComposerAccepted?: ComposerSubmitCommit;
+      },
     ) => {
       const goalArg = text.replace(/^\/goal\b/i, '').trim();
       const lowerGoalArg = goalArg.toLowerCase();
       const sendToDaemon = opts?.sendToDaemon ?? true;
       const sendGoalPrompt = () => {
-        const clearComposerOnPromptStart = !connectionRef.current.sessionId;
+        const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
+        const clearComposerOnPromptStart =
+          !connectionRef.current.sessionId || deferComposerCommit;
         sendPrompt(text, images, {
           clearComposerOnPromptStart,
+          commitComposerAccepted: deferComposerCommit
+            ? opts?.commitComposerAccepted
+            : undefined,
         }).catch((error: unknown) => {
           reportError(error, 'Failed to send /goal command');
         });
@@ -2429,7 +2453,11 @@ export function App({
   const hideSettings = hiddenCommands.has('settings');
 
   const handleSubmit = useCallback(
-    (text: string, images?: PromptImage[]) => {
+    (
+      text: string,
+      images?: PromptImage[],
+      commitComposerAccepted?: ComposerSubmitCommit,
+    ) => {
       if (connectionRef.current.loadingTranscript) {
         pushToast('warning', t('editor.sessionLoading'));
         return false;
@@ -2449,12 +2477,15 @@ export function App({
         errorMessage: string,
         opts?: { optimisticUserMessage?: boolean; retry?: boolean },
       ) => {
+        const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
         const clearComposerOnPromptStart =
-          !connectionRef.current.sessionId ||
-          Boolean(onSubmitBeforeRef.current);
+          !connectionRef.current.sessionId || deferComposerCommit;
         sendPrompt(promptText, promptImages, {
           ...opts,
           clearComposerOnPromptStart,
+          commitComposerAccepted: deferComposerCommit
+            ? commitComposerAccepted
+            : undefined,
         }).catch((error: unknown) => reportError(error, errorMessage));
         return clearComposerOnPromptStart ? false : true;
       };
@@ -2463,7 +2494,14 @@ export function App({
         if (match) {
           const cmd = match[1];
           if (hiddenCommands.has(normalizeHiddenCommand(cmd))) {
-            if (promptBlocked) return enqueuePrompt(text, images);
+            if (promptBlocked) {
+              return enqueuePrompt(
+                text,
+                images,
+                undefined,
+                commitComposerAccepted,
+              );
+            }
             return submitPromptFromEditor(
               text,
               images,
@@ -2485,7 +2523,9 @@ export function App({
               }
               return blockLocalCommandDuringTurn();
             }
-            return handleGoalSlashCommand(text, images);
+            return handleGoalSlashCommand(text, images, {
+              commitComposerAccepted,
+            });
           }
           if (cmd === 'theme') {
             const themeArg = text.slice(match[0].length).trim().toLowerCase();
@@ -2547,10 +2587,14 @@ export function App({
               const nextLanguage = normalizeLanguage(languageArg);
               handleLanguageChange(nextLanguage);
               if (!promptBlocked) {
+                const deferComposerCommit = Boolean(onSubmitBeforeRef.current);
                 const clearComposerOnPromptStart =
-                  !connectionRef.current.sessionId;
+                  !connectionRef.current.sessionId || deferComposerCommit;
                 sendPrompt(`/language ui ${nextLanguage}`, undefined, {
                   clearComposerOnPromptStart,
+                  commitComposerAccepted: deferComposerCommit
+                    ? commitComposerAccepted
+                    : undefined,
                 })
                   .then(() => sessionActions.refreshCommands())
                   .catch((error: unknown) => {
@@ -2635,7 +2679,14 @@ export function App({
               return true;
             }
             if (modelArg.startsWith('--fast ')) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) {
+                return enqueuePrompt(
+                  text,
+                  images,
+                  undefined,
+                  commitComposerAccepted,
+                );
+              }
               return submitPromptFromEditor(
                 text,
                 images,
@@ -2803,7 +2854,14 @@ export function App({
           if (cmd === 'skills') {
             const skillArg = text.slice(match[0].length).trim();
             if (skillArg) {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) {
+                return enqueuePrompt(
+                  text,
+                  images,
+                  undefined,
+                  commitComposerAccepted,
+                );
+              }
               return submitPromptFromEditor(
                 text,
                 images,
@@ -3049,7 +3107,14 @@ export function App({
           if (cmd === 'rename') {
             const renameArg = parseRenameArgument(text.slice(match[0].length));
             if (renameArg.type === 'auto' || renameArg.type === 'delegate') {
-              if (promptBlocked) return enqueuePrompt(text, images);
+              if (promptBlocked) {
+                return enqueuePrompt(
+                  text,
+                  images,
+                  undefined,
+                  commitComposerAccepted,
+                );
+              }
               return submitPromptFromEditor(
                 text,
                 images,
@@ -3238,7 +3303,9 @@ export function App({
           }
         }
         // Forward slash commands as prompts
-        if (promptBlocked) return enqueuePrompt(text, images);
+        if (promptBlocked) {
+          return enqueuePrompt(text, images, undefined, commitComposerAccepted);
+        }
         return submitPromptFromEditor(text, images, 'Failed to send command');
       } else if (text.startsWith('!')) {
         if (promptBlocked) {
@@ -3253,7 +3320,9 @@ export function App({
         });
         return true;
       } else {
-        if (promptBlocked) return enqueuePrompt(text, images);
+        if (promptBlocked) {
+          return enqueuePrompt(text, images, undefined, commitComposerAccepted);
+        }
         return submitPromptFromEditor(text, images, 'Failed to send message');
       }
     },
@@ -3291,8 +3360,12 @@ export function App({
   );
 
   const handleEditorSubmit = useCallback(
-    (text: string, images?: PromptImage[]) => {
-      const accepted = handleSubmit(text, images);
+    (
+      text: string,
+      images?: PromptImage[],
+      commitComposerAccepted?: ComposerSubmitCommit,
+    ) => {
+      const accepted = handleSubmit(text, images, commitComposerAccepted);
       if (accepted !== false) {
         resumeChatBottomFollow('smooth');
       }
