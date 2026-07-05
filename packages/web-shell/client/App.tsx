@@ -1325,8 +1325,17 @@ export function App({
   const onSubmitBeforeRef = useRef(onSubmitBefore);
   onSubmitBeforeRef.current = onSubmitBefore;
   const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
-  const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout>>();
-  useEffect(() => () => clearTimeout(delayedReloadTimerRef.current), []);
+  const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  useEffect(
+    () => () => {
+      if (delayedReloadTimerRef.current !== null) {
+        clearTimeout(delayedReloadTimerRef.current);
+      }
+    },
+    [],
+  );
   const dispatchSessionChange = useCallback(
     (event: SessionChangeEvent) => {
       onSessionChange?.(event);
