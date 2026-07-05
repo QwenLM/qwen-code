@@ -1,5 +1,5 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
-import { AcpBridge } from './AcpBridge.js';
+import { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 
 const child = vi.hoisted(() => {
   class MockEmitter {
@@ -84,7 +84,7 @@ describe('AcpBridge', () => {
     const proc = child.instances[0]!;
 
     proc.stderr.write(
-      '[perf] acp agent event loop stall: max=917512.388607ms\n',
+      `[perf] acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS + 1000}ms\n`,
     );
 
     expect(proc.kill).toHaveBeenCalledTimes(1);
@@ -99,7 +99,9 @@ describe('AcpBridge', () => {
     await bridge.start();
     const proc = child.instances[0]!;
 
-    proc.stderr.write('[perf] acp agent event loop stall: max=2500ms\n');
+    proc.stderr.write(
+      `[perf] acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS - 1000}ms\n`,
+    );
 
     expect(proc.kill).not.toHaveBeenCalled();
   });
