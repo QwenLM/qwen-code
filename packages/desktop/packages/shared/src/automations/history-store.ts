@@ -172,7 +172,7 @@ function recoverHistoryObjectsFromLine(line: string): string[] {
 
     if (char === '{') {
       if (depth === 0 && line.slice(cursor, i).trim() !== '') {
-        return [];
+        return recovered;
       }
       if (depth === 0) start = i;
       depth++;
@@ -186,22 +186,30 @@ function recoverHistoryObjectsFromLine(line: string): string[] {
         return [];
       }
     } else if (depth === 0 && char.trim() !== '') {
-      return [];
+      return recovered;
     }
   }
 
   if (depth !== 0 || inString || line.slice(cursor).trim() !== '') {
-    return [];
+    return recovered;
   }
 
-  return recovered.length > 1 ? recovered : [];
+  return recovered;
+}
+
+function isValidHistoryObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function getHistoryObjectId(value: Record<string, unknown>): string {
+  return typeof value.id === 'string' ? value.id : '';
 }
 
 function parseHistoryLine(line: string): Array<{ raw: string; id: string }> {
   try {
     const parsed = JSON.parse(line);
-    if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-      return [{ raw: line, id: parsed.id ?? '' }];
+    if (isValidHistoryObject(parsed)) {
+      return [{ raw: line, id: getHistoryObjectId(parsed) }];
     }
     return [];
   } catch {
@@ -210,14 +218,12 @@ function parseHistoryLine(line: string): Array<{ raw: string; id: string }> {
     for (const raw of recovered) {
       try {
         const parsed = JSON.parse(raw);
-        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-          entries.push({ raw, id: parsed.id ?? '' });
-          continue;
+        if (isValidHistoryObject(parsed)) {
+          entries.push({ raw, id: getHistoryObjectId(parsed) });
         }
       } catch {
-        // Fall through to drop the whole glued line below.
+        // Skip only this recovered segment; keep any other valid objects.
       }
-      return [];
     }
     return entries;
   }

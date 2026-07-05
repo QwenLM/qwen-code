@@ -149,10 +149,11 @@ describe('history-store', () => {
       expect(entries).toHaveLength(3);
     });
 
-    it('should preserve glued object records while dropping unrecoverable lines', async () => {
+    it('should preserve nested and 3+ glued object records while rewriting the file', async () => {
       const gluedLine =
         JSON.stringify(makeEntry('a1', 2)) +
-        JSON.stringify(makeEntry('a1', 3));
+        JSON.stringify({ ...makeEntry('a1', 3), nested: { value: true } }) +
+        JSON.stringify(makeEntry('a1', 4));
       const lines = [
         JSON.stringify(makeEntry('a1', 1)),
         gluedLine,
@@ -169,7 +170,40 @@ describe('history-store', () => {
       await compactAutomationHistory(tempDir, 20, 1000);
 
       const entries = readHistory(tempDir);
-      expect(entries.map((entry) => entry.ts)).toEqual([1, 2, 3]);
+      expect(entries.map((entry) => entry.ts)).toEqual([1, 2, 3, 4]);
+      expect(entries[2]!.nested).toEqual({ value: true });
+
+      const rewritten = readFileSync(join(tempDir, AUTOMATIONS_HISTORY_FILE), 'utf-8');
+      expect(rewritten).not.toContain('}{');
+      expect(rewritten.trim().split('\n')).toHaveLength(4);
+    });
+
+    it('should preserve complete glued records before trailing garbage', async () => {
+      const first = makeEntry('a1', 1);
+      const second = makeEntry('a1', 2);
+      writeFileSync(
+        join(tempDir, AUTOMATIONS_HISTORY_FILE),
+        JSON.stringify(first) + JSON.stringify(second) + 'partial-write\n',
+      );
+
+      await compactAutomationHistory(tempDir, 20, 1000);
+
+      const entries = readHistory(tempDir);
+      expect(entries.map((entry) => entry.ts)).toEqual([1, 2]);
+    });
+
+    it('should skip invalid recovered object segments while preserving valid glued records', async () => {
+      const first = makeEntry('a1', 1);
+      const second = makeEntry('a1', 2);
+      writeFileSync(
+        join(tempDir, AUTOMATIONS_HISTORY_FILE),
+        JSON.stringify(first) + '{"id":}' + JSON.stringify(second) + '\n',
+      );
+
+      await compactAutomationHistory(tempDir, 20, 1000);
+
+      const entries = readHistory(tempDir);
+      expect(entries.map((entry) => entry.ts)).toEqual([1, 2]);
     });
 
     it('should preserve braces inside glued record strings', async () => {
