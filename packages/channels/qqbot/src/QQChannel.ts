@@ -143,7 +143,7 @@ export class QQChannel extends ChannelBase {
   > = new Map();
   /** Retry count per session for cron buffer flush. */
   private cronRetryCount: Map<string, number> = new Map();
-  private static readonly MAX_CRON_RETRIES = 3;
+  private static readonly MAX_CRON_RETRIES = 2;
 
   /** Named handler for permanent textChunk listener (cron/non-prompt). */
   private _cronTextHandler: ((sessionId: string, text: string) => void) | null =
@@ -1400,6 +1400,7 @@ export class QQChannel extends ChannelBase {
       // gone; skip the RESUME attempt and go straight to IDENTIFY.
       if (code !== 1000 && code !== 4000) {
         this.tryResume = false;
+        this.flushQQState();
         this.coldStart = true;
       }
       if (shouldReconnect && this.connectReject) {
@@ -1969,13 +1970,6 @@ export class QQChannel extends ChannelBase {
     this.chatTypeMap.set(chatId, 'group');
     if (isNewGroup) this.saveQQState();
 
-    if (this.groupActiveMsgEnabled.get(chatId) === false) {
-      process.stderr.write(
-        `[QQ:${this.name}] handleGroupAll blocked: active messages disabled for ${sanitizeLogText(chatId, 64)}\n`,
-      );
-      return;
-    }
-
     if (!event.author) {
       process.stderr.write(
         `[QQ:${this.name}] Group all-message dropped: missing author\n`,
@@ -1984,42 +1978,48 @@ export class QQChannel extends ChannelBase {
     }
     if (event.author.bot) return;
 
-    const rawPolicy = this.qqConfig.groupAllPolicy;
-    const policy =
-      rawPolicy === 'keyword' || rawPolicy === 'all' ? rawPolicy : 'log';
-
-    if (policy === 'log') {
-      const senderName =
-        event.author?.username ||
-        event.author?.id ||
-        event.author?.member_openid ||
-        'unknown';
-      process.stderr.write(
-        `[QQ:${this.name}] Group ${sanitizeLogText(chatId, 64)}: log policy — message from ${sanitizeLogText(senderName, 64)} not forwarded\n`,
-      );
-      return;
-    }
-
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
     const { isSlash, text, senderName, isAtBot } = result;
 
-    if (policy === 'keyword') {
-      if (!this._keywordTriggerCache) {
-        this._keywordTriggerCache = (this.qqConfig.keywordTriggers ?? [])
-          .filter((kw) => kw.length > 0)
-          .map((kw) => kw.toLowerCase().normalize('NFC'));
+    // @-bot messages always pass through (passive reply).
+    // Non-@-bot messages are subject to active-message and keyword policies.
+    if (!isAtBot) {
+      if (this.groupActiveMsgEnabled.get(chatId) === false) {
+        process.stderr.write(
+          `[QQ:${this.name}] handleGroupAll blocked: active messages disabled for ${sanitizeLogText(chatId, 64)}\n`,
+        );
+        return;
       }
-      if (this._keywordTriggerCache.length === 0) return;
-      const cleanText = (event.content || '')
-        .replace(/<@[^>]{1,64}>/g, '')
-        .trim()
-        .toLowerCase()
-        .normalize('NFC');
-      const matched = this._keywordTriggerCache.some((kw) =>
-        cleanText.includes(kw),
-      );
-      if (!matched) return;
+
+      const rawPolicy = this.qqConfig.groupAllPolicy;
+      const policy =
+        rawPolicy === 'keyword' || rawPolicy === 'all' ? rawPolicy : 'log';
+
+      if (policy === 'log') {
+        process.stderr.write(
+          `[QQ:${this.name}] Group ${sanitizeLogText(chatId, 64)}: log policy — message from ${sanitizeLogText(senderName, 64)} not forwarded\n`,
+        );
+        return;
+      }
+
+      if (policy === 'keyword') {
+        if (!this._keywordTriggerCache) {
+          this._keywordTriggerCache = (this.qqConfig.keywordTriggers ?? [])
+            .filter((kw) => kw.length > 0)
+            .map((kw) => kw.toLowerCase().normalize('NFC'));
+        }
+        if (this._keywordTriggerCache.length === 0) return;
+        const cleanText = (event.content || '')
+          .replace(/<@[^>]{1,64}>/g, '')
+          .trim()
+          .toLowerCase()
+          .normalize('NFC');
+        const matched = this._keywordTriggerCache.some((kw) =>
+          cleanText.includes(kw),
+        );
+        if (!matched) return;
+      }
     }
 
     // Dedup after policy check: QQ guarantees GROUP_MESSAGE_CREATE and
