@@ -669,6 +669,47 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('keeps kick reconnect alive when SDK disconnect throws', async () => {
+    vi.useFakeTimers();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const oldClient = lastClient();
+    oldClient.disconnect.mockImplementationOnce(() => {
+      throw new Error('socket already closed');
+    });
+
+    oldClient.emit('event.disconnected_event', 'kicked');
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(2));
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] client.disconnect() threw: socket already closed\n',
+    );
+
+    channel.disconnect();
+    stderr.mockRestore();
+  });
+
+  it('resets exhausted kick retry cycles before SDK-disconnect fallback reconnect', async () => {
+    vi.useFakeTimers();
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const inspectable = channel as unknown as {
+      kickReconnectRetryCycles: number;
+    };
+    inspectable.kickReconnectRetryCycles = 3;
+
+    lastClient().emit('disconnected', 'closed');
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    expect(inspectable.kickReconnectRetryCycles).toBe(0);
+
+    channel.disconnect();
+  });
+
   it('continues kick reconnect after repeated retry cycles are exhausted', async () => {
     vi.useFakeTimers();
     const stderr = vi

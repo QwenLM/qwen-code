@@ -744,7 +744,16 @@ export class WeComChannel extends ChannelBase {
     this.client = undefined;
     this.connectingClient = undefined;
     if (client) this.detachClientHandlers(client);
-    client?.disconnect();
+    try {
+      client?.disconnect();
+    } catch (e) {
+      process.stderr.write(
+        `[WeCom:${this.name}] client.disconnect() threw: ${sanitizeLogText(
+          formatSdkError(e),
+          200,
+        )}\n`,
+      );
+    }
   }
 
   private clearDisconnectReconnectFallback(): void {
@@ -768,6 +777,7 @@ export class WeComChannel extends ChannelBase {
         `[WeCom:${this.name}] SDK reconnect did not recover after WebSocket ${formattedReason}; reconnecting adapter.\n`,
       );
       this.kickReconnectAttempts = 0;
+      this.kickReconnectRetryCycles = 0;
       this.startKickReconnect(reason, 'SDK disconnect');
     }, DISCONNECT_RECONNECT_FALLBACK_MS);
     this.disconnectReconnectFallback.unref?.();

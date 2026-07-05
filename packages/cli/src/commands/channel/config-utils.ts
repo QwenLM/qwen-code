@@ -45,10 +45,10 @@ function resolveConfigEnvVar(value: string, mode: EnvResolution): string {
     const envName = value.substring(1);
     const envValue = process.env[envName];
     if (envValue === undefined) {
-      process.stderr.write(
-        `[channel] warning: environment variable ${envName} is not set, using literal value.\n`,
+      throw new Error(
+        `Environment variable ${envName} is not set (referenced as ${value}). ` +
+          'Set the variable or remove the $ prefix to use a literal value.',
       );
-      return value;
     }
     if (envValue === '') {
       throw new Error(

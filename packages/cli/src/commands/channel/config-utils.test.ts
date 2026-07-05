@@ -219,52 +219,41 @@ describe('parseChannelConfig', () => {
     delete process.env['TEST_EMPTY_SECRET'];
   });
 
-  it('leaves unavailable env vars literal in available mode', async () => {
+  it('rejects available env vars when unset', async () => {
     delete process.env['TEST_MISSING_SECRET'];
-    const stderr = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
 
-    const result = await parseChannelConfig(
-      'bot',
-      {
-        type: 'wecom',
-        botId: 'bot-id',
-        secret: '$TEST_MISSING_SECRET',
-      },
-      process.cwd(),
-      { resolveEnvVars: 'available' },
+    await expect(
+      parseChannelConfig(
+        'bot',
+        {
+          type: 'wecom',
+          botId: 'bot-id',
+          secret: '$TEST_MISSING_SECRET',
+        },
+        process.cwd(),
+        { resolveEnvVars: 'available' },
+      ),
+    ).rejects.toThrow(
+      'Environment variable TEST_MISSING_SECRET is not set (referenced as $TEST_MISSING_SECRET). Set the variable or remove the $ prefix to use a literal value.',
     );
-
-    expect(result['secret']).toBe('$TEST_MISSING_SECRET');
-    expect(stderr).toHaveBeenCalledWith(
-      '[channel] warning: environment variable TEST_MISSING_SECRET is not set, using literal value.\n',
-    );
-    stderr.mockRestore();
   });
 
-  it('warns once for unavailable required credential env vars', async () => {
+  it('rejects unavailable required credential env vars', async () => {
     delete process.env['TEST_MISSING_TOKEN'];
-    const stderr = vi
-      .spyOn(process.stderr, 'write')
-      .mockImplementation(() => true);
 
-    const result = await parseChannelConfig(
-      'bot',
-      {
-        type: 'telegram',
-        token: '$TEST_MISSING_TOKEN',
-      },
-      process.cwd(),
-      { resolveEnvVars: 'available' },
+    await expect(
+      parseChannelConfig(
+        'bot',
+        {
+          type: 'telegram',
+          token: '$TEST_MISSING_TOKEN',
+        },
+        process.cwd(),
+        { resolveEnvVars: 'available' },
+      ),
+    ).rejects.toThrow(
+      'Environment variable TEST_MISSING_TOKEN is not set (referenced as $TEST_MISSING_TOKEN). Set the variable or remove the $ prefix to use a literal value.',
     );
-
-    expect(result.token).toBe('$TEST_MISSING_TOKEN');
-    expect(stderr).toHaveBeenCalledTimes(1);
-    expect(stderr).toHaveBeenCalledWith(
-      '[channel] warning: environment variable TEST_MISSING_TOKEN is not set, using literal value.\n',
-    );
-    stderr.mockRestore();
   });
 
   it('preserves explicit config values over defaults', async () => {
