@@ -4731,10 +4731,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         warnings.push(...(await pruneExpiredArtifactPins(entry, clientId)));
         try {
           await gcArtifactContent(entry);
-        } catch {
+        } catch (error) {
           if (removeOptions.deleteContent === true || artifact.contentRef) {
             warnings.push('content_delete_preserved');
           }
+          writeStderrLine(
+            `[artifacts] session=${entry.sessionId} action=remove_gc_failed reason=${JSON.stringify(
+              error instanceof Error ? error.message : String(error),
+            )}`,
+          );
         }
       }
       publishArtifactChanges(entry, result.changes, clientId);

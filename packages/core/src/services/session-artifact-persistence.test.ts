@@ -97,6 +97,46 @@ describe('session artifact persistence records', () => {
     });
   });
 
+  it('rebuilds sticky ephemeral ids from unpin tombstones', () => {
+    const pinned = artifact('s1', 'https://example.com/sticky', {
+      retention: 'pinned',
+    });
+
+    const snapshot = rebuildSessionArtifactSnapshot([
+      event({
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 's1',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          { action: 'created', artifactId: pinned.id, artifact: pinned },
+        ],
+      }),
+      event({
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 's1',
+        sequence: 2,
+        recordedAt: '2026-07-04T00:00:01.000Z',
+        changes: [
+          {
+            action: 'removed',
+            artifactId: pinned.id,
+            artifact: pinned,
+            reason: 'unpin_to_ephemeral',
+          },
+        ],
+      }),
+    ]);
+
+    expect(snapshot).toMatchObject({
+      sequence: 2,
+      artifacts: [],
+      tombstonedIds: [],
+      stickyEphemeralIds: [pinned.id],
+      warnings: [],
+    });
+  });
+
   it('lets snapshot records replace earlier event state', () => {
     const first = artifact('s1', 'https://example.com/first');
     const second = artifact('s1', 'https://example.com/second');
