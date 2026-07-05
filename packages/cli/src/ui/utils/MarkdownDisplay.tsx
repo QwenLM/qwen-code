@@ -898,7 +898,9 @@ interface RenderTableProps {
 // Backstop only: the pending slice bounds a completed table's height assuming
 // single-line cells, but a cell that WRAPS renders taller and could still
 // overflow. While streaming, cap the table to the viewport (reserve 3 rows:
-// marginY 2 + the outer cue) so it can never trigger the scroll-to-top lock.
+// marginY 2 + one row of wrapped-cell safety headroom) so it can never trigger
+// the scroll-to-top lock. Tables under-estimate their rendered height the most
+// (a wrapped cell), so they keep one more reserved row than the other blocks.
 const TABLE_PENDING_RESERVED_ROWS = 3;
 
 const RenderTableInternal: React.FC<RenderTableProps> = ({
