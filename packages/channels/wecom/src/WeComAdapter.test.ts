@@ -1152,6 +1152,41 @@ describe('WeComChannel', () => {
     expect(file.attachments?.[0]?.filePath).toContain('report.pdf');
   });
 
+  it('allows group replies to the bot without an explicit mention', async () => {
+    const channel = new TestWeComChannel(
+      'bot',
+      makeConfig({
+        groupPolicy: 'open',
+        groups: { '*': {} },
+      }),
+      makeBridge(),
+    );
+    await channel.connect();
+
+    lastClient().emit('message.text', {
+      msgid: 'msg-reply',
+      msgtype: 'text',
+      chattype: 'group',
+      chatid: 'group-1',
+      from: { userid: 'alice' },
+      mentions: [],
+      text: { content: 'follow up' },
+      quote: {
+        msgtype: 'text',
+        from: { userid: 'bot-id' },
+        text: { content: 'bot response' },
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]).toMatchObject({
+      isGroup: true,
+      isMentioned: false,
+      isReplyToBot: true,
+      referencedText: 'bot response',
+    });
+  });
+
   it('sanitizes downloaded image filenames before adding attachments', async () => {
     mocks.httpResponse.headers = {
       'content-disposition': 'attachment; filename="../secret.png"',

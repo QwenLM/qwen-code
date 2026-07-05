@@ -363,6 +363,7 @@ export class WeComChannel extends ChannelBase {
 
     const text = extractText(body);
     const explicitMention = getExplicitMention(body, this.wecom.botId);
+    const quote = getRecord(body, 'quote');
     const envelope: Envelope = {
       channelName: this.name,
       senderId,
@@ -372,8 +373,9 @@ export class WeComChannel extends ChannelBase {
       messageId,
       isGroup,
       isMentioned: !isGroup || (explicitMention ?? false),
-      isReplyToBot: false,
-      referencedText: extractQuoteText(body),
+      isReplyToBot:
+        getString(getRecord(quote, 'from'), 'userid') === this.wecom.botId,
+      referencedText: extractQuoteText(quote),
     };
     let attachments: Attachment[] = [];
     const attachmentRouteKey = this.attachmentRouteKey(
@@ -1089,8 +1091,9 @@ function extractText(body: Record<string, unknown>): string {
   return '';
 }
 
-function extractQuoteText(body: Record<string, unknown>): string | undefined {
-  const quote = getRecord(body, 'quote');
+function extractQuoteText(
+  quote: Record<string, unknown> | undefined,
+): string | undefined {
   if (!quote) return undefined;
   return extractText(quote) || undefined;
 }
