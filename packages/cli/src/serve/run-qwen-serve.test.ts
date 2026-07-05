@@ -1242,8 +1242,11 @@ describe('runQwenServe runtime startup failures', () => {
           },
         }) as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>,
     );
-    vi.spyOn(serverModule, 'resolveBoundWorkspacesFromIdeEnv').mockReturnValue(
-      roots,
+    vi.spyOn(
+      serverModule,
+      'resolveBoundWorkspacesFromIdeEnv',
+    ).mockImplementation((_primary, _ide, includeWorkspace) =>
+      includeWorkspace === undefined ? roots : roots.filter(includeWorkspace),
     );
     vi.spyOn(serverModule, 'resolveBridgeFsFactory').mockImplementation(
       (input) => {
@@ -1278,6 +1281,78 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('keeps trusted child roots when an untrusted parent is filtered out', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-roots-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const untrustedParent = path.join(tmpDir, 'parent');
+    const trustedChild = path.join(untrustedParent, 'trusted-child');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(trustedChild, { recursive: true });
+    const roots = [primary, untrustedParent, trustedChild].map((root) =>
+      canonicalizeWorkspace(root),
+    );
+    const originalIdeWorkspacePath =
+      process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];
+    process.env['QWEN_CODE_IDE_WORKSPACE_PATH'] = JSON.stringify(roots);
+    const bridgeFsBoundWorkspaces: string[][] = [];
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(
+      trustedFoldersRuntime,
+      'getWorkspaceTrustStatus',
+    ).mockImplementation(
+      (_settings, workspace) =>
+        ({
+          effective: {
+            state: workspace === roots[1] ? 'untrusted' : 'trusted',
+          },
+        }) as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>,
+    );
+    vi.spyOn(serverModule, 'resolveBridgeFsFactory').mockImplementation(
+      (input) => {
+        bridgeFsBoundWorkspaces.push([...input.boundWorkspaces]);
+        return {} as ReturnType<typeof serverModule.resolveBridgeFsFactory>;
+      },
+    );
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue(express());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: primary,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        bootSettings: {},
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bridgeFsBoundWorkspaces[0]).toEqual([roots[0], roots[2]]);
+    } finally {
+      if (originalIdeWorkspacePath === undefined) {
+        delete process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];
+      } else {
+        process.env['QWEN_CODE_IDE_WORKSPACE_PATH'] = originalIdeWorkspacePath;
+      }
+      await handle.close();
+    }
+  });
+
   it('excludes secondary workspace roots when runtime trust settings are unavailable', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-roots-')),
@@ -1298,8 +1373,11 @@ describe('runQwenServe runtime startup failures', () => {
       throw new Error('settings unavailable');
     });
     vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus');
-    vi.spyOn(serverModule, 'resolveBoundWorkspacesFromIdeEnv').mockReturnValue(
-      roots,
+    vi.spyOn(
+      serverModule,
+      'resolveBoundWorkspacesFromIdeEnv',
+    ).mockImplementation((_primary, _ide, includeWorkspace) =>
+      includeWorkspace === undefined ? roots : roots.filter(includeWorkspace),
     );
     vi.spyOn(serverModule, 'resolveBridgeFsFactory').mockImplementation(
       (input) => {

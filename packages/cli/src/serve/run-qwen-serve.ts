@@ -2058,9 +2058,10 @@ export async function runQwenServe(
     });
     const customIgnoreFiles =
       runtimeBootSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
-    const boundWorkspaces = runtime
-      .resolveBoundWorkspacesFromIdeEnv(boundWorkspace)
-      .filter((workspace: string, index: number) => {
+    const boundWorkspaces = runtime.resolveBoundWorkspacesFromIdeEnv(
+      boundWorkspace,
+      undefined,
+      (workspace: string, index: number) => {
         if (index === 0) return true;
         if (!runtimeBootSettings) {
           daemonLog.warn(
@@ -2081,7 +2082,8 @@ export async function runQwenServe(
           );
         }
         return trustedSecondary;
-      });
+      },
+    );
     daemonLog.info('daemon workspace roots initialized', {
       primary: boundWorkspaces[0],
       secondary: boundWorkspaces.slice(1),

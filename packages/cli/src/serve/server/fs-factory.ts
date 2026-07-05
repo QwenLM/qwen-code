@@ -79,6 +79,7 @@ export function resolveBridgeFsFactory(input: {
 export function resolveBoundWorkspacesFromIdeEnv(
   primaryWorkspace: string,
   ideWorkspacePath = process.env[IDE_WORKSPACE_PATH_ENV_VAR],
+  includeWorkspace?: (workspace: string, index: number) => boolean,
 ): string[] {
   let primary = primaryWorkspace;
   let envCanonicals: string[];
@@ -108,7 +109,11 @@ export function resolveBoundWorkspacesFromIdeEnv(
     return [primary];
   }
   const workspaces = [primary, ...envCanonicals.filter((w) => w !== primary)];
-  return dropNestedWorkspacesPreservingPrimary(workspaces);
+  const filteredWorkspaces =
+    includeWorkspace === undefined
+      ? workspaces
+      : workspaces.filter(includeWorkspace);
+  return dropNestedWorkspacesPreservingPrimary(filteredWorkspaces);
 }
 
 function parseIdeWorkspacePathEnv(value: string | undefined): string[] {
