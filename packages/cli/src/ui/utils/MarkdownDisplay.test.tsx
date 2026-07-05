@@ -310,6 +310,63 @@ Some text before.
       expect(lastFrame()).toMatchSnapshot();
     });
 
+    it('holds back an unterminated trailing table row while streaming', () => {
+      const text = `| A | B |
+|---|---|
+| one | two |
+| three | fo`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      // The completed row renders inside the table…
+      expect(output).toContain('one');
+      expect(output).toContain('two');
+      // …but the still-typing frontier row is held back until its closing `|`,
+      // so it never flips between a stray text line and a table row (the source
+      // of per-token footer jitter).
+      expect(output).not.toContain('three');
+      expect(output).toContain('│');
+    });
+
+    it('renders the previously-held frontier row once it terminates', () => {
+      const text = `| A | B |
+|---|---|
+| one | two |
+| three | four |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('three');
+      expect(output).toContain('four');
+    });
+
+    it('does not hold back a partial row in committed (non-pending) output', () => {
+      const text = `| A | B |
+|---|---|
+| one | two |
+| three | fo`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={false} />,
+      );
+      // Committed transcript is final, not a streaming frontier — render as-is.
+      expect(lastFrame() ?? '').toContain('three');
+    });
+
+    it('still closes a streaming table when a non-pipe line follows', () => {
+      const text = `| A | B |
+|---|---|
+| one | two |
+Done.`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('one');
+      expect(output).toContain('Done');
+    });
+
     it('renders a single-column table', () => {
       const text = `
 | Name |

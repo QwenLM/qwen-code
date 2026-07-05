@@ -349,6 +349,23 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         cells.length = tableHeaders.length;
       }
       tableRows.push(cells);
+    } else if (
+      isPending &&
+      inTable &&
+      !tableRowMatch &&
+      index === lines.length - 1 &&
+      tableRows.length > 0 &&
+      /^\s*\|/.test(line)
+    ) {
+      // Live streaming frontier: the final line is an unterminated table row
+      // (`| a | b` with no closing `|` yet). Rendering it as a plain text line
+      // below the table — then flipping it into the table once the closing `|`
+      // arrives — makes the frame height and column widths oscillate on every
+      // token, which visibly jitters the footer/composer. Hold the partial row
+      // back instead: skip it so `inTable` stays set and the end-of-content
+      // handler renders the accumulated rows as a live table. The row appears
+      // the moment it terminates. Only when at least one row already exists, so
+      // the header + separator never blank out while the first row is typed.
     } else if (inTable && !tableRowMatch) {
       // End of table — a following line closes it, so this table is COMPLETE
       // and renders in full (the rendered-aware slice guarantees a completed
