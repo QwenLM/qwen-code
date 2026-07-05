@@ -149,6 +149,45 @@ describe('history-store', () => {
       expect(entries).toHaveLength(3);
     });
 
+    it('should preserve glued object records while dropping unrecoverable lines', async () => {
+      const gluedLine =
+        JSON.stringify(makeEntry('a1', 2)) +
+        JSON.stringify(makeEntry('a1', 3));
+      const lines = [
+        JSON.stringify(makeEntry('a1', 1)),
+        gluedLine,
+        'not-json{{{',
+        'null',
+        '42',
+        '[]',
+      ];
+      writeFileSync(
+        join(tempDir, AUTOMATIONS_HISTORY_FILE),
+        lines.join('\n') + '\n',
+      );
+
+      await compactAutomationHistory(tempDir, 20, 1000);
+
+      const entries = readHistory(tempDir);
+      expect(entries.map((entry) => entry.ts)).toEqual([1, 2, 3]);
+    });
+
+    it('should preserve braces inside glued record strings', async () => {
+      const first = { ...makeEntry('a1', 1), error: 'failed with {"x":1}' };
+      const second = { ...makeEntry('a1', 2), error: 'escaped quote: \\"' };
+      writeFileSync(
+        join(tempDir, AUTOMATIONS_HISTORY_FILE),
+        JSON.stringify(first) + JSON.stringify(second) + '\n',
+      );
+
+      await compactAutomationHistory(tempDir, 20, 1000);
+
+      const entries = readHistory(tempDir);
+      expect(entries).toHaveLength(2);
+      expect(entries[0]!.error).toBe(first.error);
+      expect(entries[1]!.error).toBe(second.error);
+    });
+
     it('should no-op when file does not exist', async () => {
       // Should not throw
       await compactAutomationHistory(tempDir, 20, 1000);
