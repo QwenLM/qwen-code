@@ -1379,6 +1379,9 @@ export async function runNonInteractive(
           if (event.type === GeminiEventType.ToolCallRequest) {
             toolCallRequests.push(event.value);
           }
+          if (event.type === GeminiEventType.ModelFallback) {
+            toolCallRequests.length = 0;
+          }
           if (
             event.type === GeminiEventType.Content &&
             plainTextPreview.length < PLAIN_TEXT_PREVIEW_LIMIT

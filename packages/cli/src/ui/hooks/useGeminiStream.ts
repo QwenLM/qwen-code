@@ -107,6 +107,7 @@ import type { LoadedSettings } from '../../config/settings.js';
 import { t } from '../../i18n/index.js';
 import { useDualOutput } from '../../dualOutput/DualOutputContext.js';
 import { recordGoalStatusItem } from '../utils/restoreGoal.js';
+import { sanitizeDisplayText } from '../../utils/extension-mention.js';
 import process from 'node:process';
 
 const debugLogger = createDebugLogger('GEMINI_STREAM');
@@ -2127,6 +2128,33 @@ export const useGeminiStream = (
                 clearRetryCountdown();
               }
               break;
+            case ServerGeminiEventType.ModelFallback: {
+              // The primary model (or a prior fallback) exhausted its retry
+              // budget on a capacity/availability error and the system is
+              // switching to the next fallback model. Discard partial content
+              // from the failed attempt and show a notification.
+              discardBufferedStreamEvents();
+              if (pendingHistoryItemRef.current) {
+                setPendingHistoryItem(null);
+              }
+              commitPendingThought(userMessageTimestamp);
+              thoughtBuffer = '';
+              setThought(null);
+              geminiMessageBuffer = '';
+              toolCallRequests.length = 0;
+              clearRetryCountdown();
+              const fromModel =
+                sanitizeDisplayText(event.fromModel) ?? '(unknown)';
+              const toModel = sanitizeDisplayText(event.toModel) ?? '(unknown)';
+              addItem(
+                {
+                  type: 'notification',
+                  text: `Model ${fromModel} unavailable, falling back to ${toModel}`,
+                },
+                userMessageTimestamp,
+              );
+              break;
+            }
             case ServerGeminiEventType.HookSystemMessage:
               flushBufferedStreamEvents();
               // Display system message from Stop hooks with "Stop says:" prefix
