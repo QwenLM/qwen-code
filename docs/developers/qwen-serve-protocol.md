@@ -359,7 +359,7 @@ mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
 runtime mount fails, it reports `daemon_runtime_failed` while non-status
 runtime routes return `503`.
 
-`runtime.activity` reports daemon-wide prompt activity. `activePrompts` counts sessions with an in-flight prompt. `pendingPrompts` counts all accepted prompts that have not settled yet, including the running prompt and FIFO-waiting prompts. `queuedPrompts` counts pending prompts that are not currently running, computed per session by subtracting the active prompt when one exists. `lastActivityAt` is the ISO 8601 timestamp of the last prompt start/end or session spawn; `null` when the daemon has never processed any activity since boot. `idleSinceMs` is computed from `lastActivityAt` at response generation time.
+`runtime.activity` reports daemon-wide prompt activity. `activePrompts` counts sessions with an in-flight prompt. `pendingPrompts` counts all accepted prompts that have not settled yet, including the running prompt and FIFO-waiting prompts. `queuedPrompts` counts FIFO-waiting prompts that have been accepted but not dispatched. `lastActivityAt` is the ISO 8601 timestamp of the last prompt start/end or session spawn; `null` when the daemon has never processed any activity since boot. `idleSinceMs` is computed from `lastActivityAt` at response generation time.
 
 `runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
 not the channel-adapter worker. Daemon-managed channels use

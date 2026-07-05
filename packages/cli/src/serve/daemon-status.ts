@@ -270,14 +270,15 @@ export async function buildDaemonStatusResponse(
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
   let pendingPrompts = 0;
-  let queuedPrompts = 0;
+  let derivedQueuedPrompts = 0;
   for (const session of bridgeSnapshot.sessions) {
     pendingPrompts += session.pendingPromptCount;
-    queuedPrompts += Math.max(
+    derivedQueuedPrompts += Math.max(
       0,
       session.pendingPromptCount - (session.hasActivePrompt ? 1 : 0),
     );
   }
+  const queuedPrompts = input.bridge.pendingPromptTotal ?? derivedQueuedPrompts;
   const channelWorker = input.getChannelWorkerSnapshot?.() ?? {
     enabled: false,
     state: 'disabled',

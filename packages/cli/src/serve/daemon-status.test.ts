@@ -509,12 +509,69 @@ describe('buildDaemonStatusResponse', () => {
       pendingPrompts: 3,
       queuedPrompts: 2,
     });
-    expect(response.issues).not.toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ code: 'pending_prompts' }),
-      ]),
-    );
     expect(response.status).toBe('ok');
+  });
+
+  it('uses bridge queued prompt total when available', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        pendingPromptTotal: 0,
+        bridgeSnapshot: {
+          ...BASE_BRIDGE_SNAPSHOT,
+          sessions: [
+            {
+              sessionId: 's1',
+              workspaceCwd: BASE_WORKSPACE,
+              createdAt: '2026-07-01T00:00:00.000Z',
+              clientCount: 1,
+              subscriberCount: 1,
+              attachCount: 1,
+              pendingPromptCount: 1,
+              pendingPermissionCount: 0,
+              hasActivePrompt: false,
+              lastEventId: 1,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(response.runtime.activity).toMatchObject({
+      pendingPrompts: 1,
+      queuedPrompts: 0,
+    });
+  });
+
+  it('does not report negative queued prompts from inconsistent snapshots', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        activePromptCount: 1,
+        bridgeSnapshot: {
+          ...BASE_BRIDGE_SNAPSHOT,
+          sessions: [
+            {
+              sessionId: 's1',
+              workspaceCwd: BASE_WORKSPACE,
+              createdAt: '2026-07-01T00:00:00.000Z',
+              clientCount: 1,
+              subscriberCount: 1,
+              attachCount: 1,
+              pendingPromptCount: 0,
+              pendingPermissionCount: 0,
+              hasActivePrompt: true,
+              lastEventId: 1,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(response.runtime.activity).toMatchObject({
+      pendingPrompts: 0,
+      queuedPrompts: 0,
+    });
   });
 
   it('reports null activity when daemon has never been active', async () => {
@@ -556,6 +613,7 @@ interface MakeOptionsInput {
     };
   };
   activePromptCount?: number;
+  pendingPromptTotal?: number;
   lastActivityAt?: number | null;
 }
 
@@ -571,6 +629,7 @@ function makeOptions(input: MakeOptionsInput = {}): BuildDaemonStatusOptions {
     getWorkspaceToolsStatus: async () =>
       input.toolsStatus ?? okStatus({ tools: [] }),
     activePromptCount: input.activePromptCount ?? 0,
+    pendingPromptTotal: input.pendingPromptTotal,
     lastActivityAt: input.lastActivityAt ?? null,
   } as unknown as AcpSessionBridge;
   const workspace = {

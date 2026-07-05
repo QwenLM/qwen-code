@@ -182,7 +182,7 @@ export interface DaemonStatusReportSession {
  * keep the two field lists in sync.** Each bucket covers a fixed window: the
  * request/token counters, the `*P50Ms`/`*P95Ms` percentiles, and
  * `promptsCompleted` aggregate what happened *during* the window, while
- * `activeSessions`/`activePrompts`/`rssBytes`/`heapUsedBytes`/
+ * `activeSessions`/`activePrompts`/`queuedPrompts`/`rssBytes`/`heapUsedBytes`/
  * `eventLoopLagP99Ms` are gauges read at seal time `t`.
  */
 export interface DaemonMetricsSeriesBucket {
@@ -193,7 +193,7 @@ export interface DaemonMetricsSeriesBucket {
   /** In-flight prompts at seal time (tasks running concurrently). */
   activePrompts: number;
   /** Prompts queued (accepted, not yet dispatched) across sessions at seal time. */
-  pendingPrompts: number;
+  queuedPrompts: number;
   /** HTTP requests completed in the window. */
   requests: number;
   /** Subset of `requests` returning 4xx/5xx. */
