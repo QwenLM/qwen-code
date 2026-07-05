@@ -1408,13 +1408,13 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     expect(hits).toHaveLength(3);
   });
 
-  it('throws when one workspace root glob fails instead of returning partial results', async () => {
+  it('returns healthy root glob results when one workspace root fails', async () => {
     await fsp.writeFile(path.join(h.workspace, 'primary.ts'), '');
     await fsp.chmod(h.secondWorkspace, 0o000);
     try {
-      await expect(h.fs.glob('*.ts')).rejects.toMatchObject({
-        kind: 'permission_denied',
-      });
+      await expect(h.fs.glob('*.ts')).resolves.toEqual([
+        path.join(h.workspace, 'primary.ts'),
+      ]);
     } finally {
       await fsp.chmod(h.secondWorkspace, 0o700);
     }

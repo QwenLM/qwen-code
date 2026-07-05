@@ -116,6 +116,28 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
     }
   });
 
+  it('falls back to the primary string when primary canonicalization fails', async () => {
+    const scratch = await mkScratch();
+    const dirs = await mkdirs(scratch, 'primary');
+    const realpathSpy = vi
+      .spyOn(realpathSync, 'native')
+      .mockImplementation((p: Parameters<typeof realpathSync.native>[0]) => {
+        if (p === dirs.primary) {
+          const err = new Error('blocked') as NodeJS.ErrnoException;
+          err.code = 'EACCES';
+          throw err;
+        }
+        return String(p);
+      });
+    try {
+      expect(resolveBoundWorkspacesFromIdeEnv(dirs.primary)).toEqual([
+        dirs.primary,
+      ]);
+    } finally {
+      realpathSpy.mockRestore();
+    }
+  });
+
   it('drops env parents without losing sibling roots', async () => {
     const scratch = await mkScratch();
     const parent = path.join(scratch, 'parent');

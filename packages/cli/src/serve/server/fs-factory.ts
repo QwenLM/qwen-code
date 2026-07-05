@@ -80,11 +80,12 @@ export function resolveBoundWorkspacesFromIdeEnv(
   primaryWorkspace: string,
   ideWorkspacePath = process.env[IDE_WORKSPACE_PATH_ENV_VAR],
 ): string[] {
-  const primary = canonicalizeWorkspaces([primaryWorkspace])[0];
-  if (primary === undefined) return [];
-
+  let primary = primaryWorkspace;
   let envCanonicals: string[];
   try {
+    const primaryCanonical = canonicalizeWorkspaces([primaryWorkspace])[0];
+    if (primaryCanonical === undefined) return [];
+    primary = primaryCanonical;
     const envWorkspaces = parseIdeWorkspacePathEnv(ideWorkspacePath);
     envCanonicals = canonicalizeWorkspaces(envWorkspaces);
   } catch (err) {

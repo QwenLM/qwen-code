@@ -713,6 +713,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       let permissionErrorCount = 0;
       let transientErrorCount = 0;
       const globErrors: unknown[] = [];
+      let successfulGlobRoots = 0;
       for (const searchRoot of searchRoots) {
         if (out.length >= max) break;
         let matches: string[];
@@ -744,6 +745,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           });
           continue;
         }
+        successfulGlobRoots += 1;
         for (const hit of matches) {
           if (out.length >= max) break;
           const absolute = path.resolve(hit);
@@ -799,7 +801,7 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
           out.push(canonical as ResolvedPath);
         }
       }
-      if (globErrors.length > 0) {
+      if (globErrors.length > 0 && successfulGlobRoots === 0) {
         if (globErrors.length === 1) throw globErrors[0];
         throw new AggregateError(
           globErrors,
