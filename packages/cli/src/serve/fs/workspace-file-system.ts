@@ -806,9 +806,16 @@ class WorkspaceFileSystemImpl implements WorkspaceFileSystem {
       }
       if (globErrors.length > 0 && successfulGlobRoots === 0) {
         if (globErrors.length === 1) throw globErrors[0];
-        throw new AggregateError(
+        const aggregate = new AggregateError(
           globErrors,
           'glob failed for all workspace roots',
+        );
+        throw new FsError(
+          errorKindForGlobFailures(globErrors),
+          aggregate.message,
+          {
+            cause: aggregate,
+          },
         );
       }
       if (escapedCount > 0) {
@@ -2101,6 +2108,16 @@ function errorKindForRealpathFailure(err: unknown): FsErrorKind {
   const code = errorCode(err);
   if (code === 'EACCES' || code === 'EPERM') return 'permission_denied';
   if (code === 'ENOENT' || code === 'ELOOP') return 'symlink_escape';
+  if (code === 'ENOTDIR') return 'parse_error';
+  return 'io_error';
+}
+
+function errorKindForGlobFailures(errors: readonly unknown[]): FsErrorKind {
+  const kinds = errors.map(errorKindForRealpathFailure);
+  const first = kinds[0];
+  if (first !== undefined && kinds.every((kind) => kind === first)) {
+    return first;
+  }
   return 'io_error';
 }
 

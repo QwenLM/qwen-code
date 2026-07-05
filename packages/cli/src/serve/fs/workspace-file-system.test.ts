@@ -1418,9 +1418,15 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
     } finally {
       await fsp.chmod(h.secondWorkspace, 0o700);
     }
+    const denied = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { errorKind: string }).errorKind === 'permission_denied',
+    );
+    expect(denied).toBeDefined();
   });
 
-  it('throws AggregateError when every workspace root glob fails', async () => {
+  it('throws permission_denied when every workspace root glob fails with EACCES', async () => {
     await fsp.chmod(h.workspace, 0o000);
     await fsp.chmod(h.secondWorkspace, 0o000);
     try {
@@ -1428,12 +1434,31 @@ describe('WorkspaceFileSystem - multi-root workspaces', () => {
       const cause = (err as Error & { cause?: unknown }).cause;
 
       expect(isFsError(err)).toBe(true);
+      expect((err as { kind: string }).kind).toBe('permission_denied');
       expect(cause).toBeInstanceOf(AggregateError);
       expect((cause as AggregateError).errors).toHaveLength(2);
     } finally {
       await fsp.chmod(h.workspace, 0o700);
       await fsp.chmod(h.secondWorkspace, 0o700);
     }
+  });
+
+  it('rejects glob cwd pointing at a regular file with parse_error', async () => {
+    const file = path.join(h.workspace, 'not-a-directory');
+    await fsp.writeFile(file, '');
+    await fsp.chmod(file, 0o700);
+    const cwd = await h.fs.resolve(file, 'glob');
+
+    const err = await h.fs.glob('*.ts', { cwd }).catch((e: unknown) => e);
+
+    expect(isFsError(err)).toBe(true);
+    expect((err as { kind: string }).kind).toBe('parse_error');
+    const denied = h.events.find(
+      (e) =>
+        e.type === FS_DENIED_EVENT_TYPE &&
+        (e.data as { errorKind: string }).errorKind === 'parse_error',
+    );
+    expect(denied).toBeDefined();
   });
 
   it('glob with cwd searches only that resolved root', async () => {

@@ -140,8 +140,10 @@ function parseIdeWorkspacePathEnv(value: string | undefined): string[] {
         );
       }
       throw new Error('IDE workspace path JSON must be a string array');
-    } catch {
-      // Fall through to the legacy delimiter parser below.
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: QWEN_CODE_IDE_WORKSPACE_PATH JSON parse failed, falling back to delimiter split: ${err}`,
+      );
     }
   }
   return value
