@@ -1526,7 +1526,10 @@ export function App({
             prompt: text,
           })
           .then(() => {
-            rawEnqueuePrompt(text, images, onComplete);
+            const result = rawEnqueuePrompt(text, images, onComplete);
+            if (result !== false) {
+              editorRef.current?.clear();
+            }
             const sessionId = connectionRef.current.sessionId;
             if (sessionId && text.trim()) {
               dispatchSessionChangeRef.current?.({
@@ -1543,7 +1546,7 @@ export function App({
               err,
             );
           });
-        return true;
+        return false;
       }
       const result = rawEnqueuePrompt(text, images, onComplete);
       const sessionId = connectionRef.current.sessionId;

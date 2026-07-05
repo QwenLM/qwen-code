@@ -34,6 +34,7 @@ const {
   testState,
   sidebarTokens,
   rawEnqueuePrompt,
+  editorClear,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -92,6 +93,7 @@ const {
     },
     sidebarTokens: [] as Array<number | undefined>,
     rawEnqueuePrompt: vi.fn(() => true),
+    editorClear: vi.fn(),
   };
 });
 
@@ -161,7 +163,7 @@ vi.mock('./components/ChatEditor', async () => {
     ) {
       testState.latestChatEditorProps = props;
       React.useImperativeHandle(ref, () => ({
-        clear: vi.fn(),
+        clear: editorClear,
         insertText: vi.fn(),
       }));
       return React.createElement(
@@ -316,6 +318,7 @@ beforeEach(() => {
   testState.latestChatEditorProps = null;
   sidebarTokens.length = 0;
   rawEnqueuePrompt.mockClear();
+  editorClear.mockClear();
   mockFollowup.clear.mockClear();
   for (const value of Object.values(mockSessionActions)) {
     if (typeof value === 'function' && 'mockClear' in value) value.mockClear();
@@ -455,6 +458,7 @@ describe('App session callbacks', () => {
     testState.prompt = 'queued';
     await clickSubmit(container);
     expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
 
     await act(async () => {
       approve?.();
@@ -472,6 +476,7 @@ describe('App session callbacks', () => {
       prompt: 'queued',
       queued: true,
     });
+    expect(editorClear).toHaveBeenCalledTimes(1);
   });
 
   it('cancels queued submissions when onSubmitBefore rejects', async () => {
@@ -487,6 +492,7 @@ describe('App session callbacks', () => {
     await flush();
 
     expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
   });
 
   it('dispatches turn_complete only for the session that was streaming', async () => {
