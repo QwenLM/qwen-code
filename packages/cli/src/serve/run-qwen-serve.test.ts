@@ -2500,6 +2500,7 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
       getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
       resume: vi.fn(),
       preheat: vi.fn().mockResolvedValue(undefined),
+      getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
     } as unknown as HttpAcpBridge;
   }
 
@@ -2566,6 +2567,60 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
     expect(mockCreateSpawnChannelFactoryOptions.at(-1)).toMatchObject({
       extraArgs: ['--experimental-lsp'],
     });
+  });
+
+  it('wires the pipe message observer without changing existing pipe stats', async () => {
+    mockCreateSpawnChannelFactoryOptions.length = 0;
+
+    const handle = await bootHandle({ serveWebShell: false });
+    try {
+      await handle.runtimeReady;
+      const pipeHooks = mockCreateSpawnChannelFactoryOptions.at(-1)?.[
+        'pipeHooks'
+      ] as
+        | {
+            onMessageSent?: (bytes: number) => void;
+            onMessageReceived?: (bytes: number) => void;
+            onMessageObserved?: (observation: {
+              direction: 'sent' | 'received';
+              bytes: number;
+              message: unknown;
+            }) => void;
+          }
+        | undefined;
+
+      expect(pipeHooks?.onMessageObserved).toEqual(expect.any(Function));
+      pipeHooks?.onMessageSent?.(123);
+      pipeHooks?.onMessageReceived?.(456);
+      pipeHooks?.onMessageObserved?.({
+        direction: 'sent',
+        bytes: 1,
+        message: {
+          jsonrpc: '2.0',
+          method: 'session/update',
+          params: { update: { sessionUpdate: 'agent_message_chunk' } },
+        },
+      });
+
+      const res = await fetch(`${handle.url}/daemon/status`);
+      const body = (await res.json()) as {
+        runtime?: {
+          perf?: {
+            pipe?: {
+              inbound?: { count?: number; totalBytes?: number };
+              outbound?: { count?: number; totalBytes?: number };
+            };
+          };
+        };
+      };
+
+      expect(body.runtime?.perf?.pipe).toMatchObject({
+        inbound: { count: 1, totalBytes: 456 },
+        outbound: { count: 1, totalBytes: 123 },
+      });
+    } finally {
+      await handle.close();
+    }
   });
 });
 

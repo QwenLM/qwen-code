@@ -83,6 +83,7 @@ import {
   type DaemonStatusResponse,
 } from './daemon-status.js';
 import { DaemonMetricsRing, computeCpuPercent } from './daemon-metrics-ring.js';
+import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
 import type {
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
@@ -2047,6 +2048,10 @@ export async function runQwenServe(
       core.recordDaemonPipeMessage(direction, bytes);
       metricsRing.recordPipe(direction, bytes);
     };
+    const observeLargePipeFrame = createLargePipeFrameObserver({
+      daemonLog,
+      emitTelemetryLog: core.emitDaemonLog,
+    });
     const daemonTelemetry = core.createDaemonBridgeTelemetry();
     daemonTelemetry.metrics = {
       sessionLifecycle(action) {
@@ -2122,6 +2127,12 @@ export async function runQwenServe(
       pipeHooks: {
         onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
         onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
+        onMessageObserved: ({ direction, bytes, message }) =>
+          observeLargePipeFrame({
+            direction: direction === 'sent' ? 'outbound' : 'inbound',
+            bytes,
+            message,
+          }),
       },
       ...(opts.experimentalLsp === true
         ? { extraArgs: ['--experimental-lsp'] }

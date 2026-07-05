@@ -6,9 +6,16 @@
 
 import type { AnyMessage, Stream } from '@agentclientprotocol/sdk';
 
+export interface NdJsonMessageObservation {
+  direction: 'sent' | 'received';
+  bytes: number;
+  message: AnyMessage;
+}
+
 export interface NdJsonStreamHooks {
   onMessageReceived?: (bytes: number) => void;
   onMessageSent?: (bytes: number) => void;
+  onMessageObserved?: (observation: NdJsonMessageObservation) => void;
 }
 
 interface TextDecoderLike {
@@ -52,6 +59,11 @@ export function ndJsonStream(
       try {
         await writer.write(frame);
         callHook(hooks?.onMessageSent, payload.byteLength);
+        callHook(hooks?.onMessageObserved, {
+          direction: 'sent',
+          bytes: payload.byteLength,
+          message,
+        });
       } finally {
         writer.releaseLock();
       }
@@ -111,7 +123,13 @@ function handleLine(
   try {
     const message = JSON.parse(trimmedLine) as AnyMessage;
     controller.enqueue(message);
-    callHook(hooks?.onMessageReceived, jsonPayloadByteLength(lineBytes));
+    const bytes = jsonPayloadByteLength(lineBytes);
+    callHook(hooks?.onMessageReceived, bytes);
+    callHook(hooks?.onMessageObserved, {
+      direction: 'received',
+      bytes,
+      message,
+    });
   } catch (err) {
     // eslint-disable-next-line no-console -- match ACP SDK parse-error behavior
     console.error('Failed to parse JSON message:', trimmedLine, err);
@@ -124,12 +142,9 @@ function jsonPayloadByteLength(lineBytes: Uint8Array): number {
     : lineBytes.byteLength;
 }
 
-function callHook(
-  hook: ((bytes: number) => void) | undefined,
-  bytes: number,
-): void {
+function callHook<T>(hook: ((value: T) => void) | undefined, value: T): void {
   try {
-    hook?.(bytes);
+    hook?.(value);
   } catch {
     /* metrics hooks must not break the transport */
   }
