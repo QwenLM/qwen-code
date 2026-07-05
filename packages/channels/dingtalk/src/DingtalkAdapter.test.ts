@@ -563,6 +563,34 @@ describe('DingtalkChannel prompt reactions', () => {
     }
   });
 
+  it('skips emotion replies before token lookup when robotCode is missing', async () => {
+    const channel = createChannel();
+    (channel as unknown as { config: { clientId?: string } }).config.clientId =
+      '';
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          errcode: 0,
+          access_token: 'proactive-token',
+          expires_in: 7200,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    try {
+      await (
+        channel as unknown as {
+          attachReaction(msgId: string, conversationId: string): Promise<void>;
+        }
+      ).attachReaction('msg-1', 'cid-123');
+
+      expect(fetchSpy).not.toHaveBeenCalled();
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
   it('sanitizes failed emotion response details before logging', async () => {
     const channel = createChannel();
     const fetchSpy = vi

@@ -232,7 +232,7 @@ function sameTarget(a: SessionTarget, b: SessionTarget): boolean {
     a.senderId === b.senderId &&
     a.chatId === b.chatId &&
     a.threadId === b.threadId &&
-    a.isGroup === b.isGroup
+    (a.isGroup === true) === (b.isGroup === true)
   );
 }
 

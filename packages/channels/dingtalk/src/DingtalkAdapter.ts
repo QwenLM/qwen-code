@@ -480,11 +480,12 @@ export class DingtalkChannel extends ChannelBase {
     conversationId: string,
   ): Promise<void> {
     const robotCode = this.config.clientId;
+    if (!robotCode || !msgId || !conversationId) return;
     try {
       const token = this.config.clientSecret
         ? await this.getProactiveToken()
         : this.getAccessToken();
-      if (!robotCode || !token || !msgId || !conversationId) return;
+      if (!token) return;
       const resp = await fetch(`${EMOTION_API}/${endpoint}`, {
         method: 'POST',
         headers: {

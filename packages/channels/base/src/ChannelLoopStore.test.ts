@@ -138,7 +138,7 @@ describe('ChannelLoopStore', () => {
     ).resolves.toHaveLength(1);
   });
 
-  it('does not match legacy targets that omit isGroup', async () => {
+  it('matches legacy one-to-one targets that omit isGroup', async () => {
     await fs.mkdir(path.join(tmpDir, 'channels'), { recursive: true });
     await fs.writeFile(
       path.join(tmpDir, 'channels', 'loops.json'),
@@ -165,7 +165,7 @@ describe('ChannelLoopStore', () => {
     ]);
     await expect(
       store.listForTarget('feishu-main', input.target),
-    ).resolves.toEqual([]);
+    ).resolves.toMatchObject([{ id: 'old-job' }]);
   });
 
   it('keeps generated ids unique when the id factory collides', async () => {
