@@ -75,6 +75,7 @@ const MAX_MEDIA_BYTES = 20 * 1024 * 1024;
 const MARKDOWN_CHUNK_BYTES = 3800;
 const AUTHENTICATION_TIMEOUT_MS = 30_000;
 const KICK_RECONNECT_MAX_ATTEMPTS = 3;
+const KICK_RECONNECT_MAX_RETRY_CYCLES = 3;
 const KICK_RECONNECT_BASE_DELAY_MS = 1_000;
 const KICK_RECONNECT_RESET_MS = 60_000;
 const KICK_RECONNECT_RETRY_MS = 5 * 60 * 1000;
@@ -107,6 +108,7 @@ export class WeComChannel extends ChannelBase {
   };
   private reconnectingAfterKick = false;
   private kickReconnectAttempts = 0;
+  private kickReconnectRetryCycles = 0;
 
   constructor(
     name: string,
@@ -226,6 +228,7 @@ export class WeComChannel extends ChannelBase {
   disconnect(): void {
     this.disconnectGeneration += 1;
     this.kickReconnectAttempts = 0;
+    this.kickReconnectRetryCycles = 0;
     if (this.kickReconnectReset) {
       clearTimeout(this.kickReconnectReset);
       this.kickReconnectReset = undefined;
@@ -737,6 +740,7 @@ export class WeComChannel extends ChannelBase {
         try {
           await this.connect();
           this.kickReconnectAttempts = 0;
+          this.kickReconnectRetryCycles = 0;
           this.scheduleKickReconnectReset();
           return;
         } catch (err) {
@@ -747,6 +751,13 @@ export class WeComChannel extends ChannelBase {
             )}\n`,
           );
         }
+      }
+      this.kickReconnectRetryCycles += 1;
+      if (this.kickReconnectRetryCycles >= KICK_RECONNECT_MAX_RETRY_CYCLES) {
+        process.stderr.write(
+          `[WeCom:${this.name}] reconnect after server kick stopped after ${this.kickReconnectRetryCycles} exhausted retry cycles; manual intervention required.\n`,
+        );
+        return;
       }
       process.stderr.write(
         `[WeCom:${this.name}] reconnect after server kick gave up after ${KICK_RECONNECT_MAX_ATTEMPTS} attempts; retrying later.\n`,
@@ -765,6 +776,7 @@ export class WeComChannel extends ChannelBase {
     if (this.kickReconnectReset) clearTimeout(this.kickReconnectReset);
     this.kickReconnectReset = setTimeout(() => {
       this.kickReconnectAttempts = 0;
+      this.kickReconnectRetryCycles = 0;
       this.kickReconnectReset = undefined;
     }, KICK_RECONNECT_RESET_MS);
     this.kickReconnectReset.unref?.();

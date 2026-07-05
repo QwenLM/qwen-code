@@ -601,6 +601,40 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('stops kick reconnect after repeated retry cycles are exhausted', async () => {
+    vi.useFakeTimers();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const oldClient = lastClient();
+    mocks.state.connectErrorsRemaining = 9;
+
+    oldClient.emit('event.disconnected_event', 'kicked');
+
+    for (let cycle = 0; cycle < 3; cycle += 1) {
+      await vi.advanceTimersByTimeAsync(1_000);
+      await vi.advanceTimersByTimeAsync(2_000);
+      await vi.advanceTimersByTimeAsync(4_000);
+      await vi.waitFor(() =>
+        expect(mocks.instances).toHaveLength(4 + cycle * 3),
+      );
+      if (cycle < 2) {
+        await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      }
+    }
+
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] reconnect after server kick stopped after 3 exhausted retry cycles; manual intervention required.\n',
+    );
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(mocks.instances).toHaveLength(10);
+
+    channel.disconnect();
+    stderr.mockRestore();
+  });
+
   it('resets the kick reconnect attempt budget after a successful reconnect', async () => {
     vi.useFakeTimers();
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
