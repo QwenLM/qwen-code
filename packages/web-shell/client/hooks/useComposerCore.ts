@@ -790,8 +790,14 @@ function createFollowupGhostExtension(suggestion: string | null) {
 
 // ---- Hook options ----
 
+export type ComposerSubmitCommit = () => void;
+
 export interface UseComposerCoreOptions {
-  onSubmit: (text: string, images?: PromptImage[]) => boolean | void;
+  onSubmit: (
+    text: string,
+    images?: PromptImage[],
+    commitAccepted?: ComposerSubmitCommit,
+  ) => boolean | void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
   disabled?: boolean;
@@ -1447,32 +1453,39 @@ export function useComposerCore(
       const prompt = buildComposerPrompt(text, tags);
       const images = pastedImagesRef.current;
       const isShellMode = shellModeRef.current;
+      let committed = false;
+      const commitAccepted = () => {
+        if (committed) return;
+        committed = true;
+        setSlashMenu(null);
+        if (followupCompletion) {
+          onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
+        }
+        onDismissFollowupRef.current?.();
+        pendingPastesRef.current.clear();
+        nextPasteIdRef.current = 1;
+        if (isShellMode) {
+          shellHistoryActionsRef.current.push(text);
+          shellHistoryActionsRef.current.reset();
+        } else {
+          historyActionsRef.current.push(text);
+          historyActionsRef.current.reset();
+        }
+        historyBrowseActiveRef.current = false;
+        setComposerTags([]);
+        setPastedImages([]);
+        view.dispatch({
+          changes: { from: 0, to: view.state.doc.length, insert: '' },
+          effects: clearInlineTagsEffect.of(),
+        });
+      };
       const accepted = onSubmitRef.current(
         isShellMode ? `!${prompt}` : prompt,
         images.length > 0 ? [...images] : undefined,
+        commitAccepted,
       );
       if (accepted === false) return true;
-      setSlashMenu(null);
-      if (followupCompletion) {
-        onAcceptFollowupRef.current?.('enter', { skipOnAccept: true });
-      }
-      onDismissFollowupRef.current?.();
-      pendingPastesRef.current.clear();
-      nextPasteIdRef.current = 1;
-      if (isShellMode) {
-        shellHistoryActionsRef.current.push(text);
-        shellHistoryActionsRef.current.reset();
-      } else {
-        historyActionsRef.current.push(text);
-        historyActionsRef.current.reset();
-      }
-      historyBrowseActiveRef.current = false;
-      setComposerTags([]);
-      setPastedImages([]);
-      view.dispatch({
-        changes: { from: 0, to: view.state.doc.length, insert: '' },
-        effects: clearInlineTagsEffect.of(),
-      });
+      commitAccepted();
       return true;
     };
     submitTextRef.current = submitText;

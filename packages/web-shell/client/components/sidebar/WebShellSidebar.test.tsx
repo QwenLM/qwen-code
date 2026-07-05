@@ -280,7 +280,7 @@ describe('WebShellSidebar — session organization', () => {
     mockWorkspaceActions.listSessionGroups.mockReturnValue(
       new Promise(() => undefined),
     );
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     expect(mockUseSessions).toHaveBeenCalledWith({
       autoLoad: true,
       pageSize: 1000,
@@ -484,7 +484,7 @@ describe('WebShellSidebar — session organization', () => {
       }),
     ];
 
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     await act(async () => {
       await Promise.resolve();
     });
@@ -535,7 +535,7 @@ describe('WebShellSidebar — session organization', () => {
       }),
     ];
 
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     await act(async () => {
       await Promise.resolve();
     });
@@ -588,7 +588,7 @@ describe('WebShellSidebar — session organization', () => {
       }),
     ];
 
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     await act(async () => {
       await Promise.resolve();
     });
@@ -630,7 +630,7 @@ describe('WebShellSidebar — session organization', () => {
     );
     mockActive.sessions = [makeSession('session-a'), makeSession('session-b')];
 
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     await act(async () => {
       await Promise.resolve();
     });
@@ -683,7 +683,7 @@ describe('WebShellSidebar — session organization', () => {
     mockActive.sessions = [makeSession('session-a')];
     const onNewSession = vi.fn();
 
-    const container = renderSidebar(false, { onNewSession });
+    const { container } = renderSidebar(false, { onNewSession });
     await act(async () => {
       await Promise.resolve();
     });
@@ -732,7 +732,7 @@ describe('WebShellSidebar — session organization', () => {
     mockActive.sessions = [makeSession('session-a')];
     const onError = vi.fn();
 
-    const container = renderSidebar(false, { onError });
+    const { container } = renderSidebar(false, { onError });
     await act(async () => {
       await Promise.resolve();
     });
