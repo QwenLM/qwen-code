@@ -522,5 +522,37 @@ describe('readManyFiles', () => {
         expect(status.entry.lastReadCacheable).toBe(false);
       }
     });
+
+    it('records a truncated @-attached file as a partial (full: false) read', async () => {
+      // This attachment exceeds both truncation caps the mock config sets —
+      // the 1000-line `getTruncateToolOutputLines()` limit and the 2500-char
+      // `getTruncateToolOutputThreshold()` — so `processSingleFileContent`
+      // marks it `isTruncated`, which `recordAttachedFileRead` maps to
+      // `full: false`. On a fresh cache a partial read leaves the sticky
+      // `lastReadWasFull` at its `false` default, so this cleanly separates
+      // correct behaviour (false) from the bug it guards against: recording a
+      // truncated attachment as `full: true` would silently clear Edit /
+      // WriteFile prior-read enforcement for a file the model only partly saw.
+      // The file is still cacheable (text with a known `originalLineCount`).
+      const relativePath = 'big.ts';
+      const absolutePath = path.join(tempRootDir, relativePath);
+      const big = Array.from(
+        { length: 1500 },
+        (_, i) => `const x${i} = ${i};`,
+      ).join('\n');
+      await fs.writeFile(absolutePath, big);
+      const cache = new FileReadCache();
+      const mockConfig = createMockConfigWithCache(tempRootDir, cache);
+
+      await readManyFiles(mockConfig, { paths: [relativePath] });
+
+      const stats = nodeFs.statSync(absolutePath);
+      const status = cache.check(stats);
+      expect(status.state).toBe('fresh');
+      if (status.state === 'fresh') {
+        expect(status.entry.lastReadWasFull).toBe(false);
+        expect(status.entry.lastReadCacheable).toBe(true);
+      }
+    });
   });
 });
