@@ -101,11 +101,11 @@ describe('<MarkdownDisplay />', () => {
         />,
       );
       const output = lastFrame() ?? '';
-      // Contiguous head + a "generating more" cue — NOT decimated (ink
-      // overflow="hidden" would drop interspersed rows) and NOT blank.
+      // Clipped to budget: head lines present, tail dropped. No "generating more"
+      // cue — incremental scrollback commit (PR #6170) streams content in
+      // real-time, so clipped content is "still streaming" not "delayed output".
       expect(output).toContain('line 1');
       expect(output).toContain('line 2');
-      expect(output).toContain('generating more');
       // The tail is dropped (budget exceeded), so a late line is absent.
       expect(output).not.toContain('line 60');
       const lineCount = output.split('\n').length;
@@ -171,18 +171,14 @@ describe('<MarkdownDisplay />', () => {
       );
       const output = lastFrame() ?? '';
       expect(output.split('\n').length).toBeLessThanOrEqual(10);
-      // The head-slice bounds code content to <= availableTerminalHeight - 2
-      // (= RenderCodeBlock's own inner budget), so the inner "generating more"
-      // never fires inside a slice — there is at most ONE cue, not two stacked.
-      expect(
-        (output.match(/generating more/g) ?? []).length,
-      ).toBeLessThanOrEqual(1);
+      // No "generating more" cue — all cues removed (PR #6170 incremental commit
+      // handles real-time streaming).
+      expect(output.match(/generating more/g) ?? []).toHaveLength(0);
     });
 
     it('does not stack a double cue for a math block near the clip boundary', () => {
-      // RenderMathBlock reserves more rows (RESERVED_LINES=3) than a code block;
-      // the head-slice budget reserves 2 rows so a retained math block never
-      // hits its own inner truncation cue on top of the outer one.
+      // No "generating more" cue — all cues removed (PR #6170 incremental commit
+      // handles real-time streaming).
       const text = [
         '$$',
         ...Array.from({ length: 40 }, (_, i) => `x_{${i}} +`),
@@ -197,9 +193,7 @@ describe('<MarkdownDisplay />', () => {
         />,
       );
       const output = lastFrame() ?? '';
-      expect(
-        (output.match(/generating more/g) ?? []).length,
-      ).toBeLessThanOrEqual(1);
+      expect(output.match(/generating more/g) ?? []).toHaveLength(0);
       expect(output.split('\n').length).toBeLessThanOrEqual(8);
     });
 
@@ -224,7 +218,7 @@ describe('<MarkdownDisplay />', () => {
 
     it('applies the minimum floor at a degenerate budget of 1', () => {
       // Math.max(MIN_PENDING_CONTENT_LINES, 1 - 2) = 1 (floored): keep one
-      // content line + the cue, never 0 or negative.
+      // content line, never 0 or negative. No "generating more" cue.
       const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
         eol,
       );
@@ -239,7 +233,7 @@ describe('<MarkdownDisplay />', () => {
       const output = lastFrame() ?? '';
       expect(output).toContain('line 1');
       expect(output).not.toContain('line 2');
-      expect(output).toContain('generating more');
+      expect(output).not.toContain('generating more');
     });
 
     it('renders unordered lists with different markers', () => {

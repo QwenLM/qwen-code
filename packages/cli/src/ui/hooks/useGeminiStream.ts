@@ -371,8 +371,8 @@ const STREAM_PENDING_ITEM_MAX_CHARS = 16_384;
 // Rows kept in reserve below the commit budget so the incremental commit fires
 // BEFORE MarkdownDisplay's safety-net clip (which reserves 2). Keeping the
 // pending item's rendered height under the safety budget stops that clip from
-// engaging and flickering "generating more" / hiding a table in step with the
-// commit cycle.
+// engaging and hiding a table (or slicing the tail) in step with the commit
+// cycle.
 const STREAM_PENDING_COMMIT_RESERVE_ROWS = 5;
 // Conservative estimate of the rows the composer/footer occupy, used to derive
 // a content-area height from terminalHeight before the live value is known.
