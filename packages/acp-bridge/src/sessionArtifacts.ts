@@ -461,7 +461,6 @@ export class SessionArtifactStore {
     options?: { clientId?: string },
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
-      const before = this.cloneState();
       const existing = this.artifacts.get(artifactId);
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
@@ -470,6 +469,7 @@ export class SessionArtifactStore {
       // Tool/hook artifacts are session-scoped outputs and may be removed by
       // any caller that already passed session mutation auth.
       this.denyCrossClientMutation('remove', artifactId, existing, options);
+      const before = this.cloneState();
       this.artifacts.delete(artifactId);
       const changes: SessionArtifactChange[] = [
         {
@@ -502,7 +502,6 @@ export class SessionArtifactStore {
     options: SessionArtifactPinOptions & { clientId?: string } = {},
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
-      const before = this.cloneState();
       const existing = this.artifacts.get(artifactId);
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
@@ -515,6 +514,7 @@ export class SessionArtifactStore {
           changes: [],
         };
       }
+      const before = this.cloneState();
       const targetRetention =
         options.retention ??
         (options.contentRef
@@ -578,23 +578,13 @@ export class SessionArtifactStore {
     options: SessionArtifactUnpinOptions & { clientId?: string } = {},
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
-      const before = this.cloneState();
       const existing = this.artifacts.get(artifactId);
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
       }
       this.denyCrossClientMutation('unpin', artifactId, existing, options);
       const targetRetention = options.retention ?? 'restorable';
-      if (
-        targetRetention === 'ephemeral' &&
-        !this.stickyEphemeralIds.has(artifactId) &&
-        this.stickyEphemeralIds.size >= this.maxArtifacts
-      ) {
-        throw new SessionArtifactValidationError(
-          'sticky ephemeral artifact limit exceeded',
-          'retention',
-        );
-      }
+      const before = this.cloneState();
       const updated: StoredArtifact = {
         ...existing,
         retention: targetRetention,
@@ -618,6 +608,8 @@ export class SessionArtifactStore {
           artifact: toPublicArtifact(updated),
         },
       ];
+      // Journal records the durable side effect while the API returns the live
+      // in-memory state that remains available as ephemeral.
       const durableChanges =
         targetRetention === 'ephemeral'
           ? [

@@ -214,6 +214,10 @@ export function rebuildSessionArtifactSnapshot(
         artifacts.delete(change.artifactId);
         if (change.reason === 'explicit') {
           tombstonedIds.add(change.artifactId);
+          stickyEphemeralIds.delete(change.artifactId);
+        }
+        if (change.reason === 'eviction') {
+          stickyEphemeralIds.delete(change.artifactId);
         }
         if (change.reason === 'unpin_to_ephemeral') {
           stickyEphemeralIds.add(change.artifactId);
