@@ -7,6 +7,7 @@
 import { describe, it, expect } from 'vitest';
 import {
   DaemonMetricsRing,
+  computeCpuPercent,
   type DaemonMetricsGauges,
 } from './daemon-metrics-ring.js';
 
@@ -188,5 +189,46 @@ describe('DaemonMetricsRing', () => {
     const snap = ring.snapshot();
     snap.push({ ...snap[0], t: 9999 });
     expect(ring.snapshot()).toHaveLength(1);
+  });
+});
+
+describe('computeCpuPercent', () => {
+  const cpu = (userUs: number, systemUs: number): NodeJS.CpuUsage => ({
+    user: userUs,
+    system: systemUs,
+  });
+
+  it('returns 0 when either sample is null (failed/absent read)', () => {
+    expect(computeCpuPercent(null, cpu(1_000_000, 0), 1000, 1)).toBe(0);
+    expect(computeCpuPercent(cpu(0, 0), null, 1000, 1)).toBe(0);
+    expect(computeCpuPercent(null, null, 1000, 1)).toBe(0);
+  });
+
+  it('returns 0 for a non-positive window', () => {
+    expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), 0, 1)).toBe(0);
+    expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), -5, 1)).toBe(0);
+  });
+
+  it('computes a normalized, clamped windowed percent', () => {
+    // 1s of CPU (1e6 µs user) over a 1000ms wall window on 1 core = 100%.
+    expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), 1000, 1)).toBe(100);
+    // Same delta across 4 cores = 25%.
+    expect(computeCpuPercent(cpu(0, 0), cpu(1_000_000, 0), 1000, 4)).toBe(25);
+    // 0.5s user + 0.5s system over 2000ms on 1 core = 50%.
+    expect(computeCpuPercent(cpu(0, 0), cpu(500_000, 500_000), 2000, 1)).toBe(
+      50,
+    );
+  });
+
+  it('clamps a huge delta to 100 (phantom-spike guard)', () => {
+    // An init baseline of {0,0} then a big first read would exceed 100 without
+    // the clamp — the exact spike the null-init guard is designed to prevent.
+    expect(computeCpuPercent(cpu(0, 0), cpu(999_000_000, 0), 1000, 1)).toBe(
+      100,
+    );
+  });
+
+  it('clamps a negative delta to 0 (non-monotonic cpuUsage)', () => {
+    expect(computeCpuPercent(cpu(1_000_000, 0), cpu(0, 0), 1000, 1)).toBe(0);
   });
 });

@@ -607,8 +607,14 @@ export class BridgeClient implements Client {
     }
     // Daemon token-burn accounting for LIVE turns only (see method doc). Batch
     // load-replay routes through seedSessionUpdates, not here, so replayed
-    // history never lands in the current metrics window.
-    this.recordLiveTokenUsage(params, entry);
+    // history never lands in the current metrics window. Wrapped so a throwing
+    // injected onTokenUsage callback can't skip the critical artifact processing
+    // below — metrics are optional, artifacts are not.
+    try {
+      this.recordLiveTokenUsage(params, entry);
+    } catch {
+      // Metrics callback failed; artifact processing must still run.
+    }
     if (entry && prepared.artifacts.length > 0) {
       await this.upsertAndPublishArtifacts(entry, prepared.artifacts, {
         trustedPublisher: prepared.trustedPublisher,

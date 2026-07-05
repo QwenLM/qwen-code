@@ -82,7 +82,7 @@ import {
   type DaemonStartupSnapshot,
   type DaemonStatusResponse,
 } from './daemon-status.js';
-import { DaemonMetricsRing } from './daemon-metrics-ring.js';
+import { DaemonMetricsRing, computeCpuPercent } from './daemon-metrics-ring.js';
 import type {
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
@@ -2323,19 +2323,16 @@ export async function runQwenServe(
       const eventLoopLagP99Ms = metricsLoopDelay.percentile(99) / 1_000_000;
       try {
         const mem = process.memoryUsage();
-        // CPU%: skip the delta AND leave the baseline untouched when
-        // cpuUsage() throws, so a transient failure can't turn the next
-        // successful read's since-start total into one giant window spike.
+        // CPU%: computeCpuPercent returns 0 (and we leave the baseline
+        // untouched) when cpuUsage() throws, so a transient failure can't turn
+        // the next successful read's since-start total into one giant spike.
         const cpu = safeCpuUsage();
-        const elapsedMs = nowMs - prevCpuAt;
-        let cpuPercent = 0;
-        if (cpu && prevCpu && elapsedMs > 0) {
-          const cpuUs = cpu.user - prevCpu.user + (cpu.system - prevCpu.system);
-          cpuPercent = Math.min(
-            100,
-            Math.max(0, ((cpuUs / (elapsedMs * 1000)) * 100) / cpuCoreCount),
-          );
-        }
+        const cpuPercent = computeCpuPercent(
+          prevCpu,
+          cpu,
+          nowMs - prevCpuAt,
+          cpuCoreCount,
+        );
         if (cpu) {
           prevCpu = cpu;
           prevCpuAt = nowMs;

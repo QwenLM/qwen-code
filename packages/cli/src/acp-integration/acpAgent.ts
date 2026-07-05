@@ -255,6 +255,7 @@ import {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isValidServerName } from '../serve/validate-server-name.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from '../serve/workspace-memory-remember-constants.js';
+import { computeCpuPercent } from '../serve/daemon-metrics-ring.js';
 import {
   collectContextData,
   formatContextUsageText,
@@ -5545,22 +5546,14 @@ class QwenAgent implements Agent {
           /* keep prev baseline on failure → this window reads 0, and the next
              successful poll still measures a correct delta window */
         }
-        const prevCpu = this.prevChildCpu;
-        const elapsedMs = now - this.prevChildCpuAt;
-        let cpuPercent = 0;
-        // Gate on prevCpu too: after an init-time cpuUsage() failure it is null,
-        // and computing a delta against a zero baseline would manufacture a
-        // phantom spike on the first successful poll.
-        if (cpu && prevCpu && elapsedMs > 0) {
-          const cpuUs = cpu.user - prevCpu.user + (cpu.system - prevCpu.system);
-          cpuPercent = Math.min(
-            100,
-            Math.max(
-              0,
-              ((cpuUs / (elapsedMs * 1000)) * 100) / this.childCpuCoreCount,
-            ),
-          );
-        }
+        // Shared delta math: returns 0 when either sample is null (init-time or
+        // read failure) or the window is non-positive, so no phantom spike.
+        const cpuPercent = computeCpuPercent(
+          this.prevChildCpu,
+          cpu,
+          now - this.prevChildCpuAt,
+          this.childCpuCoreCount,
+        );
         // Advance the baseline ONLY on a successful read (this also seeds it
         // after an init-time null). Advancing prevAt after a throw would pair a
         // full since-last-success cpuUs with a short since-last-failure

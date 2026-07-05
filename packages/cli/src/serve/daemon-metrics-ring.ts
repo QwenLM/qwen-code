@@ -269,6 +269,28 @@ export class DaemonMetricsRing {
   }
 }
 
+/**
+ * Windowed CPU utilization percent from two `process.cpuUsage()` samples over
+ * `elapsedMs`, normalized by core count and clamped to [0,100]. Returns 0 when
+ * either sample is null (a failed/absent read) or the window is non-positive —
+ * so a failed read contributes no delta, and a caller that advances its
+ * baseline only on a successful read cannot manufacture a phantom spike. Shared
+ * by the daemon self-sampler and the ACP child's `workspaceResource` handler.
+ */
+export function computeCpuPercent(
+  prev: NodeJS.CpuUsage | null,
+  cur: NodeJS.CpuUsage | null,
+  elapsedMs: number,
+  coreCount: number,
+): number {
+  if (!prev || !cur || elapsedMs <= 0) return 0;
+  const cpuUs = cur.user - prev.user + (cur.system - prev.system);
+  return Math.min(
+    100,
+    Math.max(0, ((cpuUs / (elapsedMs * 1000)) * 100) / coreCount),
+  );
+}
+
 /** Coerce a host-supplied gauge to a finite number (NaN/±Infinity → 0) so a
  *  bad reading serializes as 0 rather than JSON null and never gaps the chart. */
 function finiteGauge(value: number): number {
