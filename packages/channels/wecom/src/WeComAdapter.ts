@@ -1359,21 +1359,26 @@ async function readOutboundMedia(
 
   const allowedDirs = [
     ensureDirectoryRealpath(join(tmpdir(), 'channel-files')),
-  ].filter((dir): dir is string => Boolean(dir));
+  ];
   if (!allowedDirs.some((dir) => isInsideDir(real, dir))) {
     throw new Error('Media path outside allowed outbound directory');
   }
   return { data: await readFile(real), fileName: basename(real) };
 }
 
-function ensureDirectoryRealpath(path: string): string | undefined {
+function ensureDirectoryRealpath(path: string): string {
   try {
     mkdirSync(path, { recursive: true });
     const stat = lstatSync(path);
-    if (!stat.isDirectory() || stat.isSymbolicLink()) return undefined;
+    if (!stat.isDirectory() || stat.isSymbolicLink()) {
+      throw new Error('not a safe directory');
+    }
     return realpathSync(path);
-  } catch {
-    return undefined;
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `Cannot prepare outbound media directory ${path}: ${reason}`,
+    );
   }
 }
 

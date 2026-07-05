@@ -3544,6 +3544,37 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('reports unsafe channel file directory setup failures', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const parent = join(tmpdir(), 'channel-files');
+    writeFileSync(parent, 'not a directory');
+    const dir = mkdtempSync(join(tmpdir(), 'wecom-cwd-'));
+    const imagePath = join(dir, 'out.png');
+    writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const channel = new WeComChannel(
+      'bot',
+      makeConfig({ cwd: dir }),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    await expect(
+      channel.sendMessage('chat-1', `[IMAGE: ${imagePath}]`),
+    ).rejects.toThrow('1 media send(s) failed');
+
+    expect(client.uploadMedia).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('Cannot prepare outbound media directory'),
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('channel-files'),
+    );
+    stderr.mockRestore();
+  });
+
   it('does not allow a hardcoded /tmp channel-files fallback', async () => {
     if (tmpdir() === '/tmp') return;
 
