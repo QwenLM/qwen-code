@@ -1846,7 +1846,38 @@ describe('WeComChannel', () => {
     expect(mocks.httpsRequest).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining(
-        'unsafe media URL (resolved to private address 169.254.169.254)',
+        'unsafe media URL (metadata.example.com resolved to private address 169.254.169.254)',
+      ),
+    );
+    stderr.mockRestore();
+  });
+
+  it('includes DNS lookup errors when rejecting media hostnames', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    mocks.lookup.mockRejectedValueOnce(new Error('queryA ETIMEDOUT'));
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-dns-failure',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://metadata.example.com/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(client.downloadFile).not.toHaveBeenCalled();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'unsafe media URL (DNS lookup failed for metadata.example.com: queryA ETIMEDOUT)',
       ),
     );
     stderr.mockRestore();
@@ -2155,9 +2186,13 @@ describe('WeComChannel', () => {
 
     options.lookup?.('example.invalid', { all: true }, callback);
 
-    await vi.waitFor(() =>
-      expect(callback).toHaveBeenCalledWith(expect.any(Error), '', 0),
+    await vi.waitFor(() => expect(callback).toHaveBeenCalled());
+    expect(callback.mock.calls[0]?.[0]).toEqual(
+      new Error(
+        'unsafe resolved media address: example.invalid resolved to private address 169.254.169.254',
+      ),
     );
+    expect(callback).toHaveBeenCalledWith(expect.any(Error), '', 0);
   });
 
   it('rejects uncompressed mapped private addresses during request-time lookup validation', async () => {

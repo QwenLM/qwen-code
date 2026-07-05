@@ -1340,11 +1340,12 @@ async function isSafeInboundMediaUrl(
     return privateRecord
       ? {
           safe: false,
-          reason: `resolved to private address ${privateRecord.address}`,
+          reason: `${host} resolved to private address ${privateRecord.address}`,
         }
       : { safe: true };
-  } catch {
-    return { safe: false, reason: 'DNS lookup failed' };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { safe: false, reason: `DNS lookup failed for ${host}: ${message}` };
   }
 }
 
@@ -1464,11 +1465,15 @@ function guardedHttpsDownload(
 const safePublicLookup: LookupFunction = (hostname, options, callback) => {
   lookup(hostname, { all: true })
     .then((records) => {
-      if (
-        records.length === 0 ||
-        records.some((record) => !isPublicIpAddress(record.address))
-      ) {
-        callback(new Error('unsafe resolved media address'), '', 0);
+      const unsafeRecord = records.find(
+        (record) => !isPublicIpAddress(record.address),
+      );
+      if (records.length === 0 || unsafeRecord) {
+        const reason =
+          records.length === 0
+            ? `no DNS records for ${hostname}`
+            : `${hostname} resolved to private address ${unsafeRecord!.address}`;
+        callback(new Error(`unsafe resolved media address: ${reason}`), '', 0);
         return;
       }
       if (options.all) {
