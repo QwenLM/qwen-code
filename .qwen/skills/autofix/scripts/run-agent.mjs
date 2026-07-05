@@ -5,248 +5,163 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const scriptPath = fileURLToPath(import.meta.url);
-const defaultSkillPath = resolve(dirname(scriptPath), '..', 'SKILL.md');
-const modes = new Set(['assess-candidates', 'develop-issue', 'address-review']);
-const valueOptions = new Set([
-  'base',
-  'conflict',
-  'issue',
-  'mode',
-  'pr',
-  'qwen-bin',
-  'skill-path',
-  'workdir',
-]);
-const booleanOptions = new Set(['check-inputs', 'help', 'print-prompt']);
-
-function usage() {
-  return `Usage:
-  run-agent.mjs --mode assess-candidates --workdir <dir> [--print-prompt] [--check-inputs]
-  run-agent.mjs --mode develop-issue --issue <number> --workdir <dir> [--print-prompt] [--check-inputs]
-  run-agent.mjs --mode address-review --pr <number> --issue <number> --workdir <dir> [--conflict true|false] [--base main] [--print-prompt] [--check-inputs]
-
-Options:
-  --print-prompt   Print the expanded skill prompt and exit without running qwen.
-  --check-inputs   Validate required workdir input files before printing/running.
-  --qwen-bin CMD   qwen executable to run. Defaults to qwen.
-  --skill-path P   Skill markdown path. Defaults to ${defaultSkillPath}.
-`;
-}
+const skillPath = resolve(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  'SKILL.md',
+);
+const specs = {
+  'assess-candidates': {
+    inputs: ['candidates.json'],
+    outputs: ['decision.json'],
+    invocation: (o) =>
+      `/autofix assess-candidates --workdir ${quote(o.workdir)}`,
+  },
+  'develop-issue': {
+    inputs: ['candidates.json', 'decision.json'],
+    outputs: ['e2e-report.md', 'pr-title.txt', 'pr-body.md'],
+    required: ['issue'],
+    invocation: (o) =>
+      `/autofix develop-issue --issue ${quote(o.issue)} --workdir ${quote(
+        o.workdir,
+      )}`,
+  },
+  'address-review': {
+    inputs: ['feedback.md'],
+    outputs: ['address-summary.md', 'no-action.md', 'failure.md'],
+    required: ['pr', 'issue'],
+    anyOutput: true,
+    invocation: (o) =>
+      `/autofix address-review --pr ${quote(o.pr)} --issue ${quote(
+        o.issue,
+      )} --workdir ${quote(o.workdir)} --conflict ${o.conflict} --base ${quote(
+        o.base,
+      )}`,
+  },
+};
 
 function fail(message) {
   console.error(message);
-  console.error('');
-  console.error(usage());
   process.exit(1);
+}
+
+function quote(value) {
+  return /^[A-Za-z0-9_./:@%+=,-]+$/.test(value)
+    ? value
+    : `'${value.replaceAll("'", "'\\''")}'`;
 }
 
 function parseArgs(args) {
   const options = {
     base: 'main',
-    checkInputs: false,
     conflict: 'false',
-    printPrompt: false,
     qwenBin: 'qwen',
-    skillPath: defaultSkillPath,
+    workdir: '/tmp/autofix',
   };
 
   for (let i = 0; i < args.length; i += 1) {
     const arg = args[i];
-    if (!arg.startsWith('--')) {
-      fail(`Unexpected positional argument: ${arg}`);
+    if (arg === '--print-prompt') {
+      options.printPrompt = true;
+      continue;
     }
-
+    if (!arg.startsWith('--')) fail(`Unexpected argument: ${arg}`);
     const name = arg.slice(2);
-    if (name === 'help') {
-      options.help = true;
-      continue;
-    }
-    if (name === 'print-prompt') {
-      options.printPrompt = true;
-      continue;
-    }
-    if (name === 'check-inputs') {
-      options.checkInputs = true;
-      continue;
-    }
-    if (!valueOptions.has(name) || booleanOptions.has(name)) {
-      fail(`Unknown option: --${name}`);
-    }
     const value = args[i + 1];
-    if (!value || value.startsWith('--')) {
-      fail(`--${name} requires a value`);
-    }
+    if (!value || value.startsWith('--')) fail(`--${name} requires a value`);
     i += 1;
-
-    if (name === 'qwen-bin') {
-      options.qwenBin = value;
-    } else if (name === 'skill-path') {
-      options.skillPath = resolve(value);
-    } else if (name === 'check-inputs') {
-      options.checkInputs = true;
-    } else if (name === 'print-prompt') {
-      options.printPrompt = true;
-    } else {
-      options[name.replace(/-([a-z])/g, (_, ch) => ch.toUpperCase())] = value;
-    }
+    const key =
+      name === 'qwen-bin'
+        ? 'qwenBin'
+        : name.replace(/-([a-z])/g, (_, char) => char.toUpperCase());
+    options[key] = value;
   }
 
-  if (options.help) {
-    process.stdout.write(usage());
-    process.exit(0);
-  }
-
-  if (!options.mode) {
-    fail('--mode is required');
-  }
-  if (!modes.has(options.mode)) {
-    fail(`Unsupported --mode: ${options.mode}`);
-  }
-
-  if (options.mode === 'develop-issue' && !options.issue) {
-    fail('--issue is required for develop-issue');
-  }
-  if (options.mode === 'address-review') {
-    if (!options.pr) {
-      fail('--pr is required for address-review');
-    }
-    if (!options.issue) {
-      fail('--issue is required for address-review');
-    }
-    if (!options.workdir) {
-      fail('--workdir is required for address-review');
-    }
-  }
-  options.workdir ??= '/tmp/autofix';
+  const spec = specs[options.mode];
+  if (!spec)
+    fail('--mode must be assess-candidates, develop-issue, or address-review');
   if (!['true', 'false'].includes(options.conflict)) {
     fail('--conflict must be true or false');
   }
-
-  options.invocation = buildInvocation(options);
-  return options;
+  for (const key of spec.required ?? []) {
+    if (!options[key]) fail(`--${key} is required for ${options.mode}`);
+  }
+  return { options, spec };
 }
 
-function quoteArg(value) {
-  if (/^[A-Za-z0-9_./:@%+=,-]+$/.test(value)) {
-    return value;
-  }
-  return `'${value.replaceAll("'", "'\\''")}'`;
+function workdirPath(options, filename) {
+  return resolve(options.workdir, filename);
 }
 
-function buildInvocation(options) {
-  const workdir = quoteArg(options.workdir);
-  if (options.mode === 'assess-candidates') {
-    return `/autofix assess-candidates --workdir ${workdir}`;
-  }
-  if (options.mode === 'develop-issue') {
-    return `/autofix develop-issue --issue ${quoteArg(options.issue)} --workdir ${workdir}`;
-  }
-  return [
-    '/autofix address-review',
-    `--pr ${quoteArg(options.pr)}`,
-    `--issue ${quoteArg(options.issue)}`,
-    `--workdir ${workdir}`,
-    `--conflict ${options.conflict}`,
-    `--base ${quoteArg(options.base)}`,
-  ].join(' ');
-}
-
-function buildPrompt(skillPath, invocation, mode) {
-  const skillText = readFileSync(skillPath, 'utf8').replace(/\r\n/g, '\n');
-  const match = /^---\n[\s\S]*?\n---(?:\n|$)([\s\S]*)$/.exec(skillText);
-  if (!match) {
-    throw new Error(`${skillPath} is missing YAML frontmatter.`);
-  }
-
-  return [
-    `Base directory for this skill: ${dirname(skillPath)}`,
-    'Important: ALWAYS resolve absolute paths from this base directory when working with skills.',
-    '',
-    match[1].trim(),
-    '',
-    `Mode: ${mode}`,
-    'Invocation:',
-    invocation,
-    '',
-  ].join('\n');
-}
-
-function requiredInputFiles(options) {
-  if (options.mode === 'assess-candidates') {
-    return ['candidates.json'];
-  }
-  if (options.mode === 'develop-issue') {
-    return ['candidates.json', 'decision.json'];
-  }
-  if (options.mode === 'address-review') {
-    return ['feedback.md'];
-  }
-  return [];
-}
-
-function checkInputs(options) {
-  if (!options.workdir) {
-    fail('--workdir is required to check inputs or write failure.md');
-  }
-  const missing = requiredInputFiles(options).filter(
-    (filename) => !existsSync(resolve(options.workdir, filename)),
+function missing(options, filenames) {
+  return filenames.filter(
+    (filename) => !existsSync(workdirPath(options, filename)),
   );
-  if (missing.length > 0) {
-    fail(
-      `Missing required autofix input file(s) in ${options.workdir}: ${missing.join(
-        ', ',
-      )}`,
-    );
-  }
-}
-
-function failureMessage(status, mode, result) {
-  if (result.error) {
-    return `Qwen failed to start during ${mode}: ${result.error.message}.`;
-  }
-  if (result.signal) {
-    return `Qwen exited after signal ${result.signal} during ${mode}.`;
-  }
-  return `Qwen exited with status ${status} during ${mode}.`;
 }
 
 function writeFailure(options, message) {
-  if (!options.workdir) {
-    return;
-  }
   mkdirSync(options.workdir, { recursive: true });
   writeFileSync(
-    resolve(options.workdir, 'failure.md'),
+    workdirPath(options, 'failure.md'),
     `${message}\n\nSee the Qwen Autofix agent step logs for model/tool output.\n`,
   );
 }
 
-const options = parseArgs(process.argv.slice(2));
-if (options.checkInputs) {
-  checkInputs(options);
+function promptFor(options, spec) {
+  const skill = readFileSync(skillPath, 'utf8')
+    .replace(/\r\n/g, '\n')
+    .replace(/^---\n[\s\S]*?\n---(?:\n|$)/, '')
+    .trim();
+  return [
+    `Skill directory: ${dirname(skillPath)}`,
+    'Resolve skill-relative paths from that directory.',
+    '',
+    skill,
+    '',
+    `Mode: ${options.mode}`,
+    'Invocation:',
+    spec.invocation(options),
+    '',
+  ].join('\n');
 }
 
-let prompt;
-try {
-  prompt = buildPrompt(options.skillPath, options.invocation, options.mode);
-} catch (error) {
-  fail(error.message);
-}
+const { options, spec } = parseArgs(process.argv.slice(2));
+const prompt = promptFor(options, spec);
 
 if (options.printPrompt) {
   process.stdout.write(prompt);
   process.exit(0);
 }
 
-checkInputs(options);
+const missingInputs = missing(options, spec.inputs);
+if (missingInputs.length > 0) {
+  fail(
+    `Missing input file(s) in ${options.workdir}: ${missingInputs.join(', ')}`,
+  );
+}
+
 const result = spawnSync(options.qwenBin, ['--yolo', '--prompt', prompt], {
   stdio: 'inherit',
 });
-const status = result.status ?? 1;
-if (status !== 0 || result.error || result.signal) {
-  const message = failureMessage(status, options.mode, result);
+if (result.error || result.signal || result.status !== 0) {
+  const detail =
+    result.error?.message ?? result.signal ?? `status ${String(result.status)}`;
+  writeFailure(options, `Qwen failed during ${options.mode}: ${detail}.`);
+  process.exit(result.status ?? 1);
+}
+
+if (existsSync(workdirPath(options, 'failure.md'))) {
+  fail(`Autofix agent wrote ${workdirPath(options, 'failure.md')}`);
+}
+
+const missingOutputs = missing(options, spec.outputs);
+const ok = spec.anyOutput
+  ? missingOutputs.length < spec.outputs.length
+  : missingOutputs.length === 0;
+if (!ok) {
+  const message = `Autofix agent finished without required output file(s): ${spec.outputs.join(
+    ', ',
+  )}.`;
   writeFailure(options, message);
-  console.error(message);
-  process.exit(status);
+  fail(message);
 }
