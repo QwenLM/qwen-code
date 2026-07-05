@@ -88,6 +88,7 @@ describe('AcpBridge', () => {
     );
 
     expect(proc.kill).toHaveBeenCalledTimes(1);
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
   });
 
   it('does not kill the ACP child for a small event loop stall warning', async () => {
@@ -101,6 +102,39 @@ describe('AcpBridge', () => {
 
     proc.stderr.write(
       `[perf] acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS - 1000}ms\n`,
+    );
+
+    expect(proc.kill).not.toHaveBeenCalled();
+  });
+
+  it('ignores non-perf stderr that mentions an event loop stall', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const proc = child.instances[0]!;
+
+    proc.stderr.write(
+      `debug: acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS + 1000}ms\n`,
+    );
+
+    expect(proc.kill).not.toHaveBeenCalled();
+  });
+
+  it('does not kill the ACP child again after it is already killed', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const proc = child.instances[0]!;
+    proc.killed = true;
+
+    proc.stderr.write(
+      `[perf] acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS + 1000}ms\n`,
     );
 
     expect(proc.kill).not.toHaveBeenCalled();
