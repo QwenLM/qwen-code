@@ -238,6 +238,9 @@ describe('qwen-autofix workflow', () => {
     expect(findCandidateIssuesStep).toContain('open-autofix-prs.json');
     expect(findCandidateIssuesStep).toContain('--author "${AUTOFIX_BOT}"');
     expect(findCandidateIssuesStep).toContain(
+      'if [[ "${COUNT}" -gt 0 ]]; then',
+    );
+    expect(findCandidateIssuesStep).toContain(
       '($p + (.number | tostring)) as $branch',
     );
     expect(findCandidateIssuesStep).toContain(
@@ -245,7 +248,9 @@ describe('qwen-autofix workflow', () => {
     );
     expect(findCandidateIssuesStep).toContain('existingAutofixPr');
     expect(findCandidateIssuesStep).toContain('annotated-candidates.json');
-    expect(readDecisionStep).toContain('existingAutofixPr != null');
+    expect(readDecisionStep).toContain(
+      'first(.[] | select(.number == $go) | .existingAutofixPr.number) // empty',
+    );
     expect(readDecisionStep).toContain(
       'already has open autofix PR #${EXISTING_PR}',
     );
@@ -276,6 +281,9 @@ describe('qwen-autofix workflow', () => {
     expect(readDecisionStep).toContain('"${DRY_RUN}" != "true"');
     expect(readDecisionStep).toContain(
       '[[ -n "${GO}" && "${DRY_RUN}" != "true" && "${EVENT_NAME}" != \'workflow_dispatch\' ]]',
+    );
+    expect(readDecisionStep).toContain(
+      '($labels | index($ready)) and ($labels | index($approved))',
     );
     expect(readDecisionStep).toContain(
       '::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error',
