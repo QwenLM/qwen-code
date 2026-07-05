@@ -419,6 +419,7 @@ export class SessionArtifactStore {
     options?: { clientId?: string },
   ): Promise<SessionArtifactMutationResult> {
     return this.enqueue(async () => {
+      const before = this.cloneState();
       const existing = this.artifacts.get(artifactId);
       if (!existing) {
         return { v: 1, sessionId: this.sessionId, changes: [] };
@@ -442,13 +443,21 @@ export class SessionArtifactStore {
           reason: 'explicit',
         },
       ];
-      const warnings = await this.persistChanges(changes, false);
-      return {
-        v: 1,
-        sessionId: this.sessionId,
-        changes,
-        ...(warnings.length > 0 ? { warnings } : {}),
-      };
+      try {
+        const warnings = await this.persistChanges(
+          changes,
+          this.persistence !== undefined,
+        );
+        return {
+          v: 1,
+          sessionId: this.sessionId,
+          changes,
+          ...(warnings.length > 0 ? { warnings } : {}),
+        };
+      } catch (error) {
+        this.restoreState(before);
+        throw error;
+      }
     });
   }
 
@@ -709,11 +718,21 @@ export class SessionArtifactStore {
           if (input.retention === 'pinned') {
             input.retention = 'restorable';
           }
-          const normalized = await this.normalizeInput(
+          let normalized = await this.normalizeInput(
             input,
             ++this.receivedSeq,
             artifact.storage === 'published',
           );
+          if (
+            this.stickyEphemeralIds.has(normalized.id) &&
+            normalized.retention !== 'ephemeral'
+          ) {
+            normalized = {
+              ...normalized,
+              retention: 'ephemeral',
+              persistenceWarning: 'sticky_override_active',
+            };
+          }
           if (normalized.id !== artifact.id) {
             warnings.push(`skipped artifact with mismatched id ${artifact.id}`);
             continue;
@@ -725,7 +744,11 @@ export class SessionArtifactStore {
           let persistenceWarning:
             | SessionArtifactPersistenceWarning
             | undefined = contentRef ? undefined : 'metadata_only_restore';
-          if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
+          if (retention === 'ephemeral') {
+            contentRef = undefined;
+            expiresAt = undefined;
+            persistenceWarning = 'sticky_override_active';
+          } else if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
             contentRef = undefined;
             expiresAt = undefined;
             retention = 'restorable';
@@ -909,6 +932,9 @@ export class SessionArtifactStore {
       .map((artifact) =>
         toPersistedArtifact(toPublicArtifact(artifact), recordedAt),
       );
+    const stickyEphemeralIds = Array.from(this.stickyEphemeralIds).filter(
+      (id) => this.artifacts.has(id),
+    );
     const payload: SessionArtifactSnapshotRecordPayload = {
       v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
       sessionId: this.sessionId,
@@ -916,11 +942,15 @@ export class SessionArtifactStore {
       recordedAt,
       artifacts,
       tombstonedIds: [],
-      stickyEphemeralIds: Array.from(this.stickyEphemeralIds),
+      stickyEphemeralIds,
     };
     try {
       await this.persistence.recordSnapshot(payload);
       this.tombstonedIds.clear();
+      this.stickyEphemeralIds.clear();
+      for (const id of stickyEphemeralIds) {
+        this.stickyEphemeralIds.add(id);
+      }
     } catch (error) {
       writeStderrLine(
         `[artifacts] session=${this.sessionId} action=snapshot_failed reason=${JSON.stringify(

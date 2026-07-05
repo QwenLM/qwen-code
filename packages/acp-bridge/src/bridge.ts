@@ -6115,15 +6115,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       );
       const beforeArtifacts = (await entry.artifacts.list()).artifacts;
       const artifactRestoreWarnings = await entry.artifacts.restore(
-        artifactSnapshot ?? {
-          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-          sessionId: entry.sessionId,
-          sequence: 0,
-          artifacts: [],
-          tombstonedIds: [],
-          stickyEphemeralIds: [],
-          warnings: [],
-        },
+        artifactSnapshot,
         {
           verifyContentRef: (artifact) =>
             artifact.contentRef

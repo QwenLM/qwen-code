@@ -1676,7 +1676,7 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
-  it('clears live artifacts when rewind returns no artifact snapshot', async () => {
+  it('keeps live artifacts when rewind returns no artifact snapshot', async () => {
     const bridge = makeBridge({
       channelFactory: async () =>
         makeChannel({
@@ -1711,7 +1711,13 @@ describe('createAcpSessionBridge', () => {
 
     await expect(
       bridge.getSessionArtifacts(session.sessionId),
-    ).resolves.toMatchObject({ artifacts: [] });
+    ).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          title: 'Later artifact',
+        }),
+      ],
+    });
 
     await bridge.shutdown();
   });

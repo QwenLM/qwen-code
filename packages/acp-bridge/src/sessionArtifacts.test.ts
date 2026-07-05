@@ -2680,6 +2680,51 @@ describe('SessionArtifactStore', () => {
     expect(snapshots[0]?.stickyEphemeralIds).not.toContain(evictedArtifact.id);
   });
 
+  it('applies sticky ephemeral markers while restoring durable artifacts', async () => {
+    const sourceEvents: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-sticky',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          sourceEvents.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [{ title: 'Sticky', url: 'https://example.com/sticky-restore' }],
+      { strict: true },
+    );
+    const artifact = sourceEvents[0]!.changes[0]!.artifact!;
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-restore-sticky',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      restored.restore({
+        v: 2,
+        sessionId: 's11-restore-sticky',
+        sequence: 1,
+        artifacts: [artifact],
+        tombstonedIds: [],
+        stickyEphemeralIds: [artifact.id],
+        warnings: [],
+      }),
+    ).resolves.toEqual([]);
+
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: artifact.id,
+          retention: 'ephemeral',
+          persistenceWarning: 'sticky_override_active',
+        },
+      ],
+    });
+  });
+
   it('downgrades non-strict durable artifacts when persistence is unavailable', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's11-unavailable',
@@ -2785,10 +2830,10 @@ describe('SessionArtifactStore', () => {
     });
   });
 
-  it('removes live artifacts even when explicit tombstone persistence fails', async () => {
+  it('rolls back live removal when explicit tombstone persistence fails', async () => {
     let calls = 0;
     const store = new SessionArtifactStore({
-      sessionId: 's11-remove-best-effort',
+      sessionId: 's11-remove-rollback',
       workspaceCwd: workspace,
       persistence: {
         recordEvent: async () => {
@@ -2805,19 +2850,17 @@ describe('SessionArtifactStore', () => {
       { strict: true },
     );
 
-    const removed = await store.remove(created.changes[0]!.artifactId);
-
-    expect(removed).toMatchObject({
-      changes: [
+    await expect(store.remove(created.changes[0]!.artifactId)).rejects.toThrow(
+      'disk full',
+    );
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
         {
-          action: 'removed',
-          artifactId: created.changes[0]?.artifactId,
-          reason: 'explicit',
+          id: created.changes[0]?.artifactId,
+          title: 'Sensitive',
         },
       ],
-      warnings: ['artifact removal not persisted; live removal kept'],
     });
-    await expect(store.list()).resolves.toMatchObject({ artifacts: [] });
   });
 
   it('restores rebuilt durable artifacts as metadata-only restored entries', async () => {
