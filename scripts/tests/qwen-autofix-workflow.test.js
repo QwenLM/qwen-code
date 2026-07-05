@@ -5,7 +5,15 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
@@ -31,6 +39,10 @@ const publishPrStep =
 const pushAndReportStep =
   workflow.match(
     /- name: 'Push and report'[\s\S]*?(?=\n[ ]{6}- name: 'Report dry-run \/ failure')/,
+  )?.[0] ?? '';
+const issueAutofixReportStep =
+  workflow.match(
+    /- name: 'Report dry-run \/ failure'[\s\S]*?(?=\n[ ]{6}- name: 'Withdraw claim on failure')/,
   )?.[0] ?? '';
 const withdrawClaimStep =
   workflow.match(
@@ -506,11 +518,7 @@ describe('qwen-autofix workflow', () => {
     expect(skill).toContain('name: autofix');
     for (const requiredText of [
       'assess-candidates',
-      'design-solution',
-      'review-design',
       'develop-issue',
-      'repair-verification',
-      'cross-review',
       'address-review',
       'untrusted input',
       'Do not push, comment, create pull requests',
@@ -527,9 +535,6 @@ describe('qwen-autofix workflow', () => {
     }
     for (const filename of [
       'decision.json',
-      'design.md',
-      'design-review.md',
-      'verification-failure.md',
       'pr-title.txt',
       'pr-body.md',
       'e2e-report.md',
@@ -562,6 +567,33 @@ describe('qwen-autofix workflow', () => {
     }
   });
 
+  it('keeps the current autofix skill limited to workflow-invoked modes', () => {
+    const skill = readAutofixSkill();
+    let stderr = '';
+    try {
+      execFileSync(
+        process.execPath,
+        [autofixRunnerScriptPath, '--mode', 'bogus', '--print-prompt'],
+        { encoding: 'utf8', stdio: 'pipe' },
+      );
+    } catch (error) {
+      stderr = String(error.stderr);
+    }
+
+    for (const futureMode of [
+      'design-solution',
+      'review-design',
+      'repair-verification',
+      'cross-review',
+    ]) {
+      expect(skill).not.toContain(futureMode);
+      expect(stderr).not.toContain(futureMode);
+    }
+    expect(stderr).toContain(
+      '--mode must be one of: assess-candidates, develop-issue, address-review',
+    );
+  });
+
   it('builds local debug prompts from structured autofix runner options', () => {
     const stdout = execFileSync(
       process.execPath,
@@ -590,35 +622,6 @@ describe('qwen-autofix workflow', () => {
     expect(stdout).toContain(
       '/autofix address-review --pr 5678 --issue 1234 --workdir /tmp/autofix-review-5678 --conflict false --base main',
     );
-  });
-
-  it('builds prompts for pipeline phases: design, review-design, repair', () => {
-    const cases = [
-      { mode: 'design-solution', phase: 'Phase 2: design-solution' },
-      { mode: 'review-design', phase: 'Phase 3: review-design' },
-      { mode: 'repair-verification', phase: 'Phase 6: repair-verification' },
-    ];
-    for (const { mode, phase } of cases) {
-      const stdout = execFileSync(
-        process.execPath,
-        [
-          autofixRunnerScriptPath,
-          '--mode',
-          mode,
-          '--issue',
-          '1234',
-          '--workdir',
-          '/tmp/autofix',
-          '--print-prompt',
-        ],
-        { encoding: 'utf8' },
-      );
-      expect(stdout).toContain(`Mode: ${mode}`);
-      expect(stdout).toContain(
-        `/autofix ${mode} --issue 1234 --workdir /tmp/autofix`,
-      );
-      expect(stdout).toContain(phase);
-    }
   });
 
   it('allows non-package fixes after deterministic verification', () => {
@@ -711,5 +714,80 @@ describe('qwen-autofix workflow', () => {
       '.github/scripts/resolve-sandbox-image.test.mjs',
     );
     expect(workflow).not.toContain('.github/scripts/openai-proxy.mjs');
+  });
+
+  it('reports issue dry-runs and issue-phase failures to the step summary', () => {
+    expect(issueAutofixReportStep.length).toBeGreaterThan(0);
+    expect(issueAutofixReportStep).toContain('GITHUB_STEP_SUMMARY');
+    expect(issueAutofixReportStep).toContain(
+      "needs.route.outputs.dry_run == 'true'",
+    );
+    expect(issueAutofixReportStep).toContain('failure()');
+    for (const filename of [
+      'decision.json',
+      'pr-title.txt',
+      'pr-body.md',
+      'e2e-report.md',
+      'failure.md',
+    ]) {
+      expect(issueAutofixReportStep).toContain(filename);
+    }
+  });
+
+  it('still runs review verification reporting when the agent step fails', () => {
+    expect(verificationGateSteps).toHaveLength(2);
+    const reviewVerificationGateStep = verificationGateSteps[1];
+
+    expect(reviewVerificationGateStep).toContain(
+      'if: |-\n          ${{ always() }}',
+    );
+    expect(reviewVerificationGateStep).toContain('failure.md');
+    expect(reviewVerificationGateStep).toContain('outcome=failed');
+  });
+
+  it('preserves agent-written failure details when the qwen subprocess fails', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
+    try {
+      writeFileSync(join(dir, 'candidates.json'), '[]\n');
+      writeFileSync(join(dir, 'decision.json'), '{"go":1234}\n');
+
+      const stub = join(dir, 'qwen-stub.mjs');
+      writeFileSync(
+        stub,
+        [
+          '#!/usr/bin/env node',
+          "import { writeFileSync } from 'node:fs';",
+          "const prompt = process.argv[process.argv.indexOf('--prompt') + 1] ?? '';",
+          'const workdir = prompt.match(/--workdir (\\S+)/)?.[1];',
+          "writeFileSync(`${workdir}/failure.md`, 'agent detail\\n');",
+          'process.exit(1);',
+          '',
+        ].join('\n'),
+      );
+      chmodSync(stub, 0o755);
+
+      expect(() =>
+        execFileSync(
+          process.execPath,
+          [
+            autofixRunnerScriptPath,
+            '--mode',
+            'develop-issue',
+            '--issue',
+            '1234',
+            '--workdir',
+            dir,
+            '--qwen-bin',
+            stub,
+          ],
+          { encoding: 'utf8', stdio: 'pipe' },
+        ),
+      ).toThrow();
+      expect(readFileSync(join(dir, 'failure.md'), 'utf8')).toContain(
+        'agent detail',
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

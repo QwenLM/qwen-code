@@ -17,20 +17,6 @@ const specs = {
     outputs: ['decision.json'],
     invocation: (o) => `/autofix assess-candidates --workdir ${o.workdir}`,
   },
-  'design-solution': {
-    inputs: ['candidates.json', 'decision.json'],
-    outputs: ['design.md'],
-    required: ['issue'],
-    invocation: (o) =>
-      `/autofix design-solution --issue ${o.issue} --workdir ${o.workdir}`,
-  },
-  'review-design': {
-    inputs: ['design.md'],
-    outputs: ['design-review.md'],
-    required: ['issue'],
-    invocation: (o) =>
-      `/autofix review-design --issue ${o.issue} --workdir ${o.workdir}`,
-  },
   'develop-issue': {
     inputs: ['candidates.json', 'decision.json'],
     outputs: ['e2e-report.md', 'pr-title.txt', 'pr-body.md'],
@@ -38,16 +24,9 @@ const specs = {
     invocation: (o) =>
       `/autofix develop-issue --issue ${o.issue} --workdir ${o.workdir}`,
   },
-  'repair-verification': {
-    inputs: ['verification-failure.md'],
-    outputs: [],
-    required: ['issue'],
-    invocation: (o) =>
-      `/autofix repair-verification --issue ${o.issue} --workdir ${o.workdir}`,
-  },
   'address-review': {
     inputs: ['feedback.md'],
-    outputs: ['address-summary.md', 'no-action.md', 'failure.md'],
+    outputs: ['address-summary.md', 'no-action.md'],
     required: ['pr', 'issue'],
     anyOutput: true,
     invocation: (o) =>
@@ -112,10 +91,7 @@ const options = {
   qwenBin: values['qwen-bin'],
 };
 const spec = specs[options.mode];
-if (!spec)
-  fail(
-    `--mode must be one of: ${Object.keys(specs).join(', ')}`,
-  );
+if (!spec) fail(`--mode must be one of: ${Object.keys(specs).join(', ')}`);
 if (!['true', 'false'].includes(options.conflict)) {
   fail('--conflict must be true or false');
 }
@@ -142,10 +118,16 @@ const result = spawnSync(options.qwenBin, ['--yolo', '--prompt', prompt], {
 if (result.error || result.signal || result.status !== 0) {
   const detail =
     result.error?.message ?? result.signal ?? `status ${String(result.status)}`;
-  writeFailure(
-    options.workdir,
-    `Qwen failed during ${options.mode}: ${detail}.`,
-  );
+  if (!existsSync(file(options.workdir, 'failure.md'))) {
+    writeFailure(
+      options.workdir,
+      `Qwen failed during ${options.mode}: ${detail}.`,
+    );
+  } else {
+    console.error(
+      `Qwen failed during ${options.mode}: ${detail}; preserving agent-written failure.md.`,
+    );
+  }
   process.exit(result.status ?? 1);
 }
 

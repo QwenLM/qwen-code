@@ -818,6 +818,27 @@ jobs:
           # Per AGENTS.md, post the E2E report as a separate PR comment.
           gh pr comment "${PR_URL}" --body-file "${WORKDIR}/e2e-report.md"
 
+      - name: 'Report dry-run / failure'
+        if: |-
+          ${{ always() && (needs.route.outputs.dry_run == 'true' || failure() || cancelled()) }}
+        env:
+          ISSUE: '${{ steps.decision.outputs.go_issue }}'
+          DRY_RUN: '${{ needs.route.outputs.dry_run }}'
+        run: |-
+          SUFFIX=''
+          [[ "${DRY_RUN}" == "true" ]] && SUFFIX=' (dry-run, nothing pushed)'
+          {
+            echo "### Issue autofix${ISSUE:+ #${ISSUE}} — outcome=${{ job.status }}${SUFFIX}"
+            echo
+            for f in decision.json pr-title.txt pr-body.md e2e-report.md failure.md fix.diff; do
+              if [[ -s "${WORKDIR}/${f}" ]]; then
+                echo "**${f}:**"
+                cat "${WORKDIR}/${f}"
+                echo
+              fi
+            done
+          } >> "${GITHUB_STEP_SUMMARY}"
+
       - name: 'Withdraw claim on failure'
         if: |-
           ${{ (failure() || cancelled()) && steps.claim.outcome == 'success' }}
@@ -1208,6 +1229,8 @@ jobs:
 
       - name: 'Verification gate'
         id: 'verify'
+        if: |-
+          ${{ always() }}
         run: |-
           if [[ -f "${WORKDIR}/failure.md" && -n "$(git status --porcelain)" ]]; then
             echo "❌ Agent wrote failure.md after leaving a dirty workspace:"
