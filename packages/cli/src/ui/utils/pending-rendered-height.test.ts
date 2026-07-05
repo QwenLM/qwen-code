@@ -144,6 +144,26 @@ describe('fitPendingSlice', () => {
     expect(keptLines).toBe(3); // stops before the table row (index 3)
   });
 
+  it('charges a wide table by its wrapped row height, not a flat 2 rows/row', () => {
+    // Cells long enough to wrap make the table taller than `2*dataRows + 5`.
+    // Under-counting that lets the live frame overflow and jump to the top.
+    const longCell = 'x'.repeat(30);
+    const lines = [
+      'intro',
+      '| A | B |',
+      '| - | - |',
+      `| ${longCell} | ${longCell} |`,
+    ];
+    // Wide terminal: cells fit on one line → table is 2*1 + 5 = 7, so
+    // intro (1) + table (7) = 8 fits the budget and the table is kept whole.
+    expect(fitPendingSlice(lines, 200, 8, CLAMP).keptLines).toBe(lines.length);
+    // Narrow terminal: each cell wraps to several lines → the table is taller
+    // than 7, so it no longer fits after intro and is cut before it.
+    const narrow = fitPendingSlice(lines, 30, 8, CLAMP);
+    expect(narrow.clipped).toBe(true);
+    expect(narrow.keptLines).toBe(1); // only 'intro' survives
+  });
+
   it('caps a table cost at tableClampRows', () => {
     // A huge first-block table with a small clamp: cost = clamp, so the walk
     // keeps it and stops (kept = all lines), never exceeding the clamp.
