@@ -19,9 +19,11 @@ COMMENT_ID=$(gh api "repos/$REPO/issues/$PR_NUMBER/comments" -F body=@/tmp/stage
 | Stage 2 | Code review + test results (with screenshots) |
 | Stage 3 | Reflection + verdict                          |
 
-**Terminal gate exception:** if Stage 1a template check fails, submit exactly
-one `CHANGES_REQUESTED` review and stop. Do not also post or update a Stage 1
-issue comment, and do not continue to Stage 2, Stage 3, or approval.
+**Terminal gate exception:** if any terminal exit triggers (Stage 0 core
+module hard block, Stage 1a template failure, Stage 1b problem-does-not-exist,
+or Stage 1c direction escalation), submit exactly one `CHANGES_REQUESTED`
+review and stop. Do not also post or update a Stage 1 issue comment, and do not
+continue to Stage 2, Stage 3, or approval.
 
 **Re-runs:** if the triage runs again on the same PR, update each comment in place:
 
@@ -29,7 +31,19 @@ issue comment, and do not continue to Stage 2, Stage 3, or approval.
 gh api -X PATCH "/repos/$REPO/issues/comments/$COMMENT_ID" -F body=@/tmp/stage-N-updated.md
 ```
 
-Never create duplicates.
+Never create duplicates. For terminal-exit reviews (submitted via
+`gh pr review --request-changes`), the GitHub API does not support editing PR
+reviews. On re-run: check if a `CHANGES_REQUESTED` review from the bot already
+exists — if it does, skip re-submitting (the existing review already gates the
+PR). Only update issue comments, not PR reviews.
+
+```bash
+# Check for existing terminal-exit review before re-submitting
+EXISTING=$(gh api "repos/$REPO/pulls/$PR_NUMBER/reviews" \
+  --jq '[.[] | select(.user.login=="qwen-code-ci-bot" and .state=="CHANGES_REQUESTED")] | length')
+# Only submit if no existing terminal review
+if [ "$EXISTING" -eq 0 ]; then gh pr review ... ; fi
+```
 
 **Signature:** every comment ends with:
 
@@ -38,6 +52,28 @@ Never create duplicates.
 ```
 
 **Approval:** the `gh pr review --approve` command is a separate step that runs **after** Stage 3 comment is posted. Comment first, then approve only when genuinely confident.
+
+### Gate Philosophy
+
+Default posture: **skepticism**. Burden of proof is on the author. Distinguish **observed failures** (linked issue, reproduction, before/after) from **theoretical hardening** ("could theoretically send X" with no evidence it ever has). Volume ≠ value — an AI bot can produce 20 plausible PRs in a day. If being "too strict" feels uncomfortable, that is the gate working correctly.
+
+### Stage 0: Core Module Protection (two-tier check)
+
+Core infrastructure: files matching `packages/core/src/**`, `packages/*/src/auth/**`, `packages/*/src/providers/**`, `packages/*/src/models/**`, `packages/*/src/config/**`, `packages/*/src/tools/**`, `packages/*/src/services/**`, or cross-package changes spanning multiple `packages/*/`.
+
+**Tier 1 — Large-scope changes to core → HARD BLOCK.** Applies to non-maintainer PRs only (skip this check if the author is a known maintainer). Hard-block on _size_, not breadth: if a core-path change totals **500+ lines** (additions + deletions combined) → reject immediately. No evaluation, no Stage 1.
+
+```bash
+gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body "This change touches core infrastructure at scale. Core refactors must be maintainer-initiated — please open an issue to discuss the design first."
+```
+
+Then **stop**. This is a wall, not a guideline.
+
+**Breadth ≠ size.** A uniform, low-risk sweep — renaming a symbol, updating an import path, a lint/format autofix, the same null-guard at many call sites — can touch **10+ files** while changing only a line or two each. Don't auto-reject on file count alone: **flag it for the maintainer's awareness**, and otherwise let it proceed to Stage 1 under Tier 2's 100%-confidence bar, judged on the actual diff rather than the file count. (A deep rewrite concentrated in a few files still trips the 500-line threshold above, so depth isn't ignored.)
+
+**Tier 2 — Changes to core below the 500-line threshold → evaluate with 100% confidence.** If the PR hits core paths but stays under Tier 1 (either few files, or a breadth-sweep flagged above), you MAY proceed to Stage 1 — but only if you are **100% confident** the change is correct and safe. If there is any doubt at all — "the direction looks correct" is NOT 100% confidence — escalate to maintainer before proceeding. You must be able to name every downstream consumer affected; if you cannot, escalate.
+
+**Why two tiers:** A one-line bugfix in `packages/core/src/providers/install.ts` with a clear reproduction is different from a 75-file refactor of the provider system. The gate can handle the former; the latter requires maintainer architectural context. But for any core change, **when in doubt, escalate. Better to wrongly escalate than to wrongly approve.**
 
 ### Stage 1: Gate (Template + Direction + Solution Review)
 
@@ -59,7 +95,46 @@ PR body missing required headings from `.github/pull_request_template.md` (read 
 gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/pr-gate-template.md
 ```
 
-**1b. Product direction:**
+**1b. Problem existence check (MANDATORY):**
+
+Before "is the direction right?", ask **"does this problem actually exist?"**
+
+- **Observed bug** (linked issue, reproduction, before/after) → proceed.
+- **Theoretical hardening** ("could theoretically send X" with no evidence) → **request changes.** Ask for a reproduction:
+
+```bash
+cat > /tmp/stage-1b-reproduction.md <<'EOF'
+<!-- qwen-triage stage=1b -->
+
+This PR addresses a theoretical concern — "could theoretically send X" — but
+no reproduction demonstrates it has actually happened. Could you provide a
+before/after reproduction or link an issue where this was observed?
+
+Without a reproduction, this is a hypothesis that belongs in issues, not PRs.
+If the author cannot provide one on re-run, escalate to the maintainer and stop.
+
+<details>
+<summary>中文说明</summary>
+
+这个 PR 解决的是一个理论性的问题——"理论上可能发生 X"——但没有复现证明它
+实际发生过。能否提供一个 before/after 复现，或者关联一个观测到此现象的 issue？
+
+没有复现的 fix 只是一个假设——应该放在 issues 里，而不是 PR。
+如果作者在 re-run 时仍无法提供复现，请转交 maintainer 处理。
+
+</details>
+
+— _Qwen Code · qwen3.7-max_
+EOF
+gh pr review "$PR_NUMBER" --repo "$REPO" --request-changes --body-file /tmp/stage-1b-reproduction.md
+```
+
+If the author cannot provide a reproduction on re-run, escalate to the maintainer (use `$QWEN_MAINTAINER_HANDLE` if set) and stop — do not proceed to Stage 2.
+- **No reproduction = no fix.** A `fix:` PR without reproduction is a hypothesis — belongs in issues, not PRs.
+
+**"direction is correct" ≠ "problem exists."** If the runtime already handles the case correctly, there is no bug — only code hygiene. Code hygiene does not warrant a PR.
+
+**1c. Product direction:**
 
 Ask the hard questions before reading a single line of code:
 
@@ -78,7 +153,7 @@ curl -s https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.
 
 **Escalate to maintainer** (never auto-reject): touches auth/sandbox/model selection/telemetry/release/public contract, or direction is genuinely unclear.
 
-**1c. Solution review** (never skip — judge from the PR description and a skim of the diff structure, before reading code in detail):
+**1d. Solution review** (never skip — judge from the PR description and a skim of the diff structure, before reading code in detail):
 
 - If we cut 80% of the scope, would the remaining 20% already solve the problem?
 - Could we achieve the same goal by modifying something that already exists, instead of adding something new?
@@ -98,9 +173,11 @@ Thanks for the PR!
 
 Template looks good ✓
 
-On direction: <state your honest assessment — aligned and why, or concerns and why>. CHANGELOG <reference if found, or "no direct reference but the area is relevant">.
+Problem: <state whether the problem is an observed bug with evidence, or theoretical hardening without reproduction. If no reproduction exists, say so plainly: "No before/after reproduction is provided. What scenario triggers this issue?">
 
-On approach: <state your honest assessment — the scope feels right / feels like it could be much simpler / here's what I'd consider cutting>. <If you see a simpler path, name it: "Have you considered just X? It might cover most of the use case with a fraction of the complexity."> <If the diff carries unrelated changes or drive-by refactors, name them and suggest splitting them out.>
+Direction: <state your honest assessment — aligned and why, or concerns and why>. CHANGELOG <reference if found, or "no direct reference but the area is relevant">.
+
+Approach: <state your honest assessment — the scope feels right / feels like it could be much simpler / here's what I'd consider cutting>. <If you see a simpler path, name it: "Have you considered just X? It might cover most of the use case with a fraction of the complexity."> <If the diff carries unrelated changes or drive-by refactors, name them and suggest splitting them out.>
 
 <If passing:> Moving on to code review. 🔍
 <If concerns:> Flagging these for discussion before diving deeper.
@@ -111,6 +188,8 @@ On approach: <state your honest assessment — the scope feels right / feels lik
 感谢贡献！
 
 模板完整 ✓
+
+问题：<说明问题是已观测到的 bug（有证据）还是理论性加固（无复现）。如果没有复现，直接说明："未提供 before/after 复现。什么场景会触发这个问题？">
 
 方向：<直接说判断——对齐的原因/担心的原因>。
 
@@ -124,8 +203,12 @@ On approach: <state your honest assessment — the scope feels right / feels lik
 — _Qwen Code · qwen3.7-max_
 ```
 
-Save this comment's ID. If direction is escalated → stop here. Template
-failures already stopped in Stage 1a.
+Save this comment's ID. Terminal exits — stop here if any applies:
+
+- Core module hard block (Stage 0) → rejected, do not proceed.
+- Template failure (Stage 1a) → stopped.
+- Problem does not exist (Stage 1b) → request changes, do not proceed to Stage 2.
+- Direction escalated (Stage 1c) → stop here.
 
 ### Stage 2: Review + Test
 
@@ -231,6 +314,9 @@ Step back and look at the whole picture — the motivation, the implementation, 
 - After seeing it run, do the results match what the PR promised?
 - If I had to maintain this in six months, would I curse the author or thank them?
 - Am I approving this because it's genuinely good, or because I ran out of reasons to say no?
+- **Did I verify the problem actually exists?** Or did I accept the PR's framing ("this value could be passed") without asking "has this ever happened?" If the PR has no before/after reproduction, I should not be this far in the pipeline.
+- **Is this part of a pattern?** If the same author has multiple similar PRs open, am I evaluating each one on merit, or being worn down by volume?
+- **Am I being a pushover?** If I feel "this is probably fine but I'm not sure it's needed" — that feeling IS the signal. The gate's job is to say no to things that are not clearly needed.
 
 If your independent proposal was materially simpler — say so. Not as a blocker, but as an honest question the contributor should think about.
 

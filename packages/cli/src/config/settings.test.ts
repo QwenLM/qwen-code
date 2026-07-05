@@ -3935,6 +3935,7 @@ describe('Settings Loading and Merging', () => {
         delete process.env['MULTI_VAR_C'];
         delete process.env['USER_ENV_VAR'];
         delete process.env['WORKSPACE_ENV_VAR'];
+        delete process.env['THREE_SOURCE_ENV_VAR'];
       });
 
       afterEach(() => {
@@ -4190,6 +4191,77 @@ describe('Settings Loading and Merging', () => {
         expect(process.env['USER_ENV_VAR']).toEqual('user_value');
         // Workspace-level settings.env should NOT be loaded (filtered by mergeSettings)
         expect(process.env['WORKSPACE_ENV_VAR']).toBeUndefined();
+      });
+
+      it('should override empty-string process.env value with settings.env value', () => {
+        // Regression test for #6283: an empty-string env var (e.g. from a
+        // Docker env file or shell profile with `export KEY=`) blocks
+        // settings.env from loading because Object.hasOwn returns true.
+        // The fix treats empty-string as effectively unset so settings.env
+        // can fill the gap.
+        process.env['EMPTY_STR_TEST_VAR'] = '';
+
+        const userSettingsContent: Settings = {
+          env: {
+            EMPTY_STR_TEST_VAR: 'settings_value',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(process.env['EMPTY_STR_TEST_VAR']).toEqual('settings_value');
+        delete process.env['EMPTY_STR_TEST_VAR'];
+      });
+
+      it('should let .env override settings.env when process.env has an empty string', () => {
+        process.env['THREE_SOURCE_ENV_VAR'] = '';
+        const geminiEnvPath = path.join(
+          RESOLVED_MOCK_WORKSPACE_DIR,
+          QWEN_DIR,
+          '.env',
+        );
+        const userSettingsContent: Settings = {
+          env: {
+            THREE_SOURCE_ENV_VAR: 'from_settings',
+          },
+        };
+
+        (mockFsExistsSync as Mock).mockImplementation((p: fs.PathLike) =>
+          [USER_SETTINGS_PATH, geminiEnvPath].includes(p.toString()),
+        );
+        (fs.readFileSync as Mock).mockImplementation(
+          (p: fs.PathOrFileDescriptor) => {
+            if (p === USER_SETTINGS_PATH)
+              return JSON.stringify(userSettingsContent);
+            if (p === geminiEnvPath) return 'THREE_SOURCE_ENV_VAR=from_dotenv';
+            return '{}';
+          },
+        );
+
+        vi.mocked(isWorkspaceTrusted).mockReturnValue({
+          isTrusted: true,
+          source: 'file',
+        });
+
+        loadSettings(MOCK_WORKSPACE_DIR);
+
+        expect(process.env['THREE_SOURCE_ENV_VAR']).toEqual('from_dotenv');
       });
     });
 
@@ -4719,6 +4791,36 @@ describe('Settings Loading and Merging', () => {
       expect(process.env['OPENCODE_GO_API_KEY']).toEqual('from_project_env');
       expect(result.updatedKeys).toEqual(['OPENCODE_GO_API_KEY']);
       expect(result.removedKeys).toEqual([]);
+    });
+
+    it('keeps settings.env value during reload when .env value is empty', () => {
+      process.env['RELOAD_EMPTY_DOTENV_VAR'] = 'from_settings';
+      const projectEnvPath = path.resolve(MOCK_WORKSPACE_DIR, '.env');
+
+      vi.mocked(isWorkspaceTrusted).mockReturnValue({
+        isTrusted: true,
+        source: 'file',
+      });
+      (mockFsExistsSync as Mock).mockImplementation(
+        (p: fs.PathLike) => projectEnvPath === normalizeFsPath(p),
+      );
+      (fs.readFileSync as Mock).mockImplementation(
+        (p: fs.PathOrFileDescriptor) => {
+          const filePath = normalizeFsPath(p);
+          if (filePath === projectEnvPath) return 'RELOAD_EMPTY_DOTENV_VAR=';
+          return '{}';
+        },
+      );
+
+      const result = reloadEnvironment(
+        { env: { RELOAD_EMPTY_DOTENV_VAR: 'from_settings' } },
+        MOCK_WORKSPACE_DIR,
+      );
+
+      expect(process.env['RELOAD_EMPTY_DOTENV_VAR']).toEqual('from_settings');
+      expect(result.updatedKeys).toEqual([]);
+      expect(result.removedKeys).toEqual([]);
+      delete process.env['RELOAD_EMPTY_DOTENV_VAR'];
     });
   });
 

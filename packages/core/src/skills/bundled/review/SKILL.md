@@ -452,13 +452,17 @@ Read `.qwen/tmp/qwen-review-{target}-presubmit.json`. Schema:
 
 **Why these checks block submission:**
 
-- **Self-PR**: GitHub rejects both `APPROVE` and `REQUEST_CHANGES` on your own PR (HTTP 422); `COMMENT` is the only accepted event. The Critical/Suggestion findings still appear as inline `comments` regardless, so substantive feedback is preserved.
+- **Self-PR**: GitHub rejects both `APPROVE` and `REQUEST_CHANGES` on your own PR (HTTP 422); `COMMENT` is the only accepted event. The Critical findings still appear as inline `comments` and Suggestion findings appear in the suggestion summary regardless, so substantive feedback is preserved.
 - **CI failure / pending**: the LLM review reads code statically and cannot see runtime test failures. Approving on red CI is misleading; pending CI means the verdict is premature.
 - **Overlap with existing comments**: posting on the same `(path, line)` as an existing Qwen comment produces visual duplicates. Stale-commit and replied-to comments are skipped silently — they're false-positive overlap from line-based matching.
 
-⚠️ **Findings that can be mapped to a diff line → go in `comments` array (with `line` field). Findings that CANNOT be mapped to a specific diff line → go in `body` field.** Every entry in the `comments` array MUST have a valid `line` number. Do NOT put a comment in the `comments` array without a `line` — it creates an orphaned comment with no code reference.
+⚠️ **Severity routing — Critical findings go inline; Suggestion findings go to a single updatable issue comment (the "suggestion summary").**
 
-**Build the review JSON** with `write_file` to create `.qwen/tmp/qwen-review-{target}-review.json`. Every high-confidence Critical/Suggestion finding that can be mapped to a diff line MUST be an entry in the `comments` array:
+Rationale: Suggestion-level findings are recommended improvements, not merge blockers. If each becomes a per-line inline comment, it creates a persistent conversation thread the author must resolve one-by-one, so the PR's "Files changed" view grows noisier every /review round and the issues never converge. Routing Suggestion-level findings to ONE issue comment that is PATCHed in place across runs keeps them a single, refreshable list. Only Critical findings (real bugs / blockers) become inline comments pinned to the exact code line. The trade-off: Suggestion-level recommendations are less visually prominent than inline comments, but preserving convergence is worth it — a clean, refreshed list beats a pile of stale threads.
+
+**The `comments` array takes ONLY high-confidence Critical findings.** Every entry MUST have a valid `line` number in the diff. Do NOT put Suggestion, Nice-to-have, or low-confidence findings in `comments` — an entry without a `line` is an orphan with no code reference. A Critical finding that genuinely cannot be mapped to a diff line (a whole-PR observation) goes in the review `body`; Suggestion-level findings (mappable or not) go to the suggestion summary below.
+
+**Build the review JSON** with `write_file` to create `.qwen/tmp/qwen-review-{target}-review.json`. Every high-confidence **Critical** finding that can be mapped to a diff line MUST be an entry in the `comments` array:
 
 ````json
 {
@@ -475,22 +479,75 @@ Read `.qwen/tmp/qwen-review-{target}-presubmit.json`. Schema:
 }
 ````
 
+For Suggestion-only reviews (no Critical findings), use `event=COMMENT` with an empty `comments` array and a pointer to the suggestion summary:
+
+```json
+{
+  "commit_id": "{commit_sha}",
+  "event": "COMMENT",
+  "body": "Reviewed — no blockers. Suggestion-level recommendations are in the **Suggestion summary** comment below.",
+  "comments": []
+}
+```
+
 Rules:
 
-- `event`: `APPROVE` (no Critical), `REQUEST_CHANGES` (has Critical), or `COMMENT` (Suggestion only). Do NOT use `COMMENT` when there are Critical findings. **Apply downgrade decisions from the presubmit JSON above**: if `downgradeApprove=true`, submit `COMMENT` instead of `APPROVE`; if `downgradeRequestChanges=true`, submit `COMMENT` instead of `REQUEST_CHANGES`. The Critical/Suggestion content still appears in inline `comments` regardless, so substantive feedback is preserved.
-- `body`: **empty `""`** when there are inline comments. Only put text here if some findings cannot be mapped to diff lines (those go in body as a last resort). Never put section headers, "Review Summary", or analysis in body.
-- `comments`: **ALL** high-confidence Critical/Suggestion findings go here. Skip Nice to have and low-confidence. Each must reference a line in the diff.
-- Comment body format: `**[Severity]** description\n\n```suggestion\nfix\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_`
+- `event`: `APPROVE` (no Critical **and** no Suggestion), `REQUEST_CHANGES` (has Critical), `COMMENT` (Suggestion-only, no Critical). Do NOT use `COMMENT` when there are Critical findings. **Apply downgrade decisions from the presubmit JSON above**: if `downgradeApprove=true`, submit `COMMENT` instead of `APPROVE`; if `downgradeRequestChanges=true`, submit `COMMENT` instead of `REQUEST_CHANGES`. The Critical content still appears in inline `comments` regardless, so substantive feedback is preserved.
+- `body`: **empty `""`** when there are inline Critical comments, unless a Critical finding genuinely cannot be mapped to a diff line (whole-PR observation — put it in body as a last resort). When the review is submitted as `COMMENT` with an empty `comments` array (Suggestion-only case), put a one-line pointer: `Reviewed — no blockers. Suggestion-level recommendations are in the **Suggestion summary** comment below.` Never put section headers, "Review Summary", or analysis in body.
+- `comments`: **ONLY** high-confidence Critical findings. Skip Suggestion (routed to the suggestion summary below), Nice to have, and low-confidence. Each must reference a line in the diff.
+- Comment body format: `**[Critical]** description\n\n```suggestion\nfix\n```\n\n_— YOUR_MODEL_ID via Qwen Code /review_`
 - The model name is declared at the top of this prompt. You MUST include it in every footer. Do NOT omit the model name.
 - Use ` ```suggestion ` for one-click fixes; regular code blocks if fix spans multiple locations.
 - Only ONE comment per unique issue.
 
-Then submit:
+Then submit the review:
 
 ```bash
 gh api repos/{owner}/{repo}/pulls/{pr_number}/reviews \
   --input .qwen/tmp/qwen-review-{target}-review.json
 ```
+
+### Suggestion summary (one issue comment, updated in place)
+
+After submitting the review, publish the Suggestion-level findings as a single updatable issue comment — this is what lets Suggestion-level recommendations refresh each /review run instead of piling up as inline threads.
+
+1. Collect all high-confidence **Suggestion** findings (exclude Critical, Nice-to-have, and low-confidence). If there are **none**:
+   - Check whether a prior suggestion summary exists on the PR (look for a comment by the bot with the `SUMMARY_MARKER`). If one exists, still call `post-suggestions` with a short "all addressed" body so the stale table is replaced:
+
+     ```markdown
+     <!-- qwen-review-suggestion-summary -->
+
+     _No new Suggestion-level findings this round — all prior suggestions have been addressed or superseded._
+     ```
+
+   - If no prior summary exists and there are no suggestions, SKIP this step entirely.
+
+2. Write the summary body to `.qwen/tmp/qwen-review-{target}-suggestions.md`. It MUST contain the marker (typically as the first line) — `post-suggestions` uses it to locate and PATCH the existing comment rather than create a duplicate:
+
+   ```markdown
+   <!-- qwen-review-suggestion-summary -->
+
+   ### Suggestions — commit `{commit_sha}`
+
+   | File            | Issue                         | Suggested fix |
+   | --------------- | ----------------------------- | ------------- |
+   | `src/foo.ts:42` | description of the suggestion | concrete fix  |
+   | `src/bar.ts:88` | ...                           | ...           |
+
+   _— YOUR_MODEL_ID via Qwen Code /review_
+   ```
+
+   One table row per Suggestion — keep the `file:line` so each row stays actionable despite not being inline. With a single suggestion, use one list item instead of a table.
+
+3. Publish / update (finds the existing summary by author + marker and PATCHes it, or creates it on first run):
+
+   ```bash
+   qwen review post-suggestions {pr_number} {owner}/{repo} \
+     --body-file .qwen/tmp/qwen-review-{target}-suggestions.md \
+     --out .qwen/tmp/qwen-review-{target}-suggestions-report.json
+   ```
+
+   Read `.qwen/tmp/qwen-review-{target}-suggestions-report.json` (`{commentId, action}`) and log `Suggestion summary <created|updated> as comment <id>` to the terminal.
 
 If there are **no confirmed findings**, submit a short summary review. Use `event=APPROVE` by default; if the presubmit JSON has `downgradeApprove=true`, use `event=COMMENT` and prepend the downgrade reasons to the body. Separate the footer from the body with a blank line so it renders on its own line — `-f body` does not interpret `\n`, so use a real line break inside the quotes:
 

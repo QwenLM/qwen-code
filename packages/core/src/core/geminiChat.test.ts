@@ -1520,6 +1520,76 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('keeps historical image refs stable and reattaches only recent image bytes', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 1,
+      });
+      chat.setHistory([
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'old-shot' } }],
+        },
+        {
+          role: 'user',
+          parts: [{ inlineData: { mimeType: 'image/png', data: 'new-shot' } }],
+        },
+      ]);
+      const response = (async function* () {
+        yield {
+          candidates: [
+            {
+              content: {
+                parts: [{ text: 'response' }],
+                role: 'model',
+              },
+              finishReason: 'STOP',
+              index: 0,
+              safetyRatings: [],
+            },
+          ],
+          text: () => 'response',
+        } as unknown as GenerateContentResponse;
+      })();
+      vi.mocked(mockContentGenerator.generateContentStream).mockResolvedValue(
+        response,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'test-model',
+        { message: 'continue' },
+        'prompt-id-image-refs',
+      );
+      for await (const _ of stream) {
+        // consume stream
+      }
+
+      const request = vi.mocked(mockContentGenerator.generateContentStream).mock
+        .calls[0]?.[0];
+      const contents = request?.contents as Content[];
+      const serialized = JSON.stringify(contents);
+      expect(serialized).toMatch(
+        /\[Image #[a-f0-9]{12}: image\/png, \d+ bytes\]/,
+      );
+      expect(serialized).not.toContain('"data":"old-shot"');
+      expect(serialized?.match(/"data":"new-shot"/g)).toHaveLength(1);
+      expect(contents.at(-1)).toEqual({
+        role: 'user',
+        parts: expect.arrayContaining([
+          { text: 'continue' },
+          {
+            text: expect.stringContaining('Recent images reattached'),
+          },
+          {
+            inlineData: {
+              mimeType: 'image/png',
+              data: 'new-shot',
+              displayName: undefined,
+            },
+          },
+        ]),
+      });
+    });
+
     it('coalesces startup reminders with the first user prompt for provider requests', async () => {
       chat.setHistory([
         {
@@ -7205,7 +7275,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a long essay' },
         'prompt-recovery',
       );
@@ -7232,6 +7302,84 @@ describe('GeminiChat', async () => {
       );
     });
 
+    it('preserves current user image bytes during output recovery', async () => {
+      vi.mocked(mockConfig.getChatCompression).mockReturnValue({
+        maxRecentImagesToRetain: 0,
+      });
+      const streams = [
+        makeStream([makeChunk([{ text: 'initial' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'escalated' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: 'done' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-pro',
+        {
+          message: [
+            { text: 'describe this image' },
+            { inlineData: { mimeType: 'image/png', data: 'current-shot' } },
+          ],
+        },
+        'prompt-recovery-image',
+      );
+
+      for await (const _event of stream) {
+        // consume
+      }
+
+      const recoveryRequest = vi.mocked(
+        mockContentGenerator.generateContentStream,
+      ).mock.calls[2]?.[0];
+      const serialized = JSON.stringify(recoveryRequest?.contents);
+      expect(serialized).toContain('"data":"current-shot"');
+    });
+
+    it('should skip no-op escalation and recover directly for high-output models', async () => {
+      const streams = [
+        makeStream([makeChunk([{ text: 'Hello' }], 'MAX_TOKENS')]),
+        makeStream([makeChunk([{ text: ' ending.' }], 'STOP')]),
+      ];
+      let callIndex = 0;
+      vi.mocked(mockContentGenerator.generateContentStream).mockImplementation(
+        async () => streams[callIndex++]!,
+      );
+
+      const stream = await chat.sendMessageStream(
+        'gemini-3-pro',
+        { message: 'write a long essay' },
+        'prompt-direct-recovery',
+      );
+
+      const events: StreamEvent[] = [];
+      for await (const event of stream) {
+        events.push(event);
+      }
+
+      const retries = events.filter((e) => e.type === StreamEventType.RETRY);
+      expect(retries.length).toBe(1);
+      expect((retries[0] as { isContinuation?: boolean }).isContinuation).toBe(
+        true,
+      );
+      expect(
+        (retries[0] as { maxOutputTokensEscalated?: number })
+          .maxOutputTokensEscalated,
+      ).toBeUndefined();
+      expect(mockContentGenerator.generateContentStream).toHaveBeenCalledTimes(
+        2,
+      );
+
+      const history = chat.getHistory();
+      const lastEntry = history[history.length - 1]!;
+      const text = lastEntry.parts
+        ?.map((part) => ('text' in part ? part.text : ''))
+        .join('');
+      expect(text).toBe('Hello ending.');
+    });
+
     it('should coalesce overlapping recovery continuation text', async () => {
       const streams = [
         makeStream([makeChunk([{ text: 'discarded initial' }], 'MAX_TOKENS')]),
@@ -7251,7 +7399,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a long essay' },
         'prompt-recovery-overlap',
       );
@@ -7309,7 +7457,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a long mermaid answer' },
         'prompt-recovery-contained-replay',
       );
@@ -7357,7 +7505,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write something' },
         'prompt-recovery-prose-opener',
       );
@@ -7394,7 +7542,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write something' },
         'prompt-recovery-far-prose',
       );
@@ -7435,7 +7583,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write something with a heading' },
         'prompt-recovery-line-boundary-reject',
       );
@@ -7485,7 +7633,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'continue the derivation' },
         'prompt-recovery-single-cell-pipe-prose',
       );
@@ -7532,7 +7680,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a structured answer' },
         'prompt-recovery-newline-normalization',
       );
@@ -7568,7 +7716,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write something' },
         'prompt-recovery-full-overlap',
       );
@@ -7621,7 +7769,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write something' },
         'prompt-recovery-thought-only',
       );
@@ -7676,7 +7824,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a long essay' },
         'prompt-recovery-thinking-continuation',
       );
@@ -7724,7 +7872,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a long essay' },
         'prompt-recovery-thinking-continuation-order',
       );
@@ -7773,7 +7921,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: '帮我分析数据' },
         'prompt-recovery-cjk-floor',
       );
@@ -7813,7 +7961,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a long markdown answer' },
         'prompt-recovery-leading-whitespace',
       );
@@ -7867,7 +8015,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a very long answer' },
         'prompt-recovery-tail-truncation',
       );
@@ -7927,7 +8075,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a response that contains my delimiter' },
         'prompt-recovery-delimiter-collision',
       );
@@ -7994,7 +8142,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a response that contains my opening delimiter' },
         'prompt-recovery-delimiter-collision-open',
       );
@@ -8062,7 +8210,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'write a file' },
         'prompt-recovery-skip',
       );
@@ -8102,7 +8250,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'infinite loop test' },
         'prompt-recovery-cap',
       );
@@ -8134,7 +8282,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'recovery fails' },
         'prompt-recovery-fail',
       );
@@ -8217,7 +8365,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'recovery throws after functionCall' },
         'prompt-recovery-fc-throw',
       );
@@ -8292,7 +8440,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'mixed recovery' },
         'prompt-recovery-mixed',
       );
@@ -8334,7 +8482,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chat.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'essay' },
         'prompt-recovery-coalesce',
       );
@@ -8426,7 +8574,7 @@ describe('GeminiChat', async () => {
       );
 
       const stream = await chatWithRecording.sendMessageStream(
-        'gemini-3-pro',
+        'gemini-pro',
         { message: 'kick off' },
         'prompt-escalation-flush',
       );

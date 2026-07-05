@@ -167,6 +167,9 @@ export class ToolCallEmitter extends BaseEmitter {
         ...(BaseEmitter.toEpochMs(params.timestamp) != null && {
           timestamp: BaseEmitter.toEpochMs(params.timestamp),
         }),
+        ...(params.artifacts && params.artifacts.length > 0
+          ? { artifacts: params.artifacts }
+          : {}),
       },
     };
 

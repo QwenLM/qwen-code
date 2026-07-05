@@ -25,6 +25,7 @@ import {
   getResumeTokenCounts,
   type ConversationRecord,
 } from './sessionService.js';
+import { SessionOrganizationService } from './session-organization-service.js';
 import { CompressionStatus } from '../core/turn.js';
 import type { ChatRecord } from './chatRecordingService.js';
 import * as jsonl from '../utils/jsonl-utils.js';
@@ -909,6 +910,28 @@ describe('SessionService', () => {
       expect(unlinkSyncSpy).toHaveBeenCalled();
     });
 
+    it('should clear session organization when removing a session', async () => {
+      const warnings: string[] = [];
+      sessionService = new SessionService('/test/project/root', {
+        onWarning: (message) => warnings.push(message),
+      });
+      const removeOrganizationSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'removeSession')
+        .mockImplementation(function (this: {
+          onWarning?: (message: string) => void;
+        }) {
+          this.onWarning?.('sidecar warning');
+          return Promise.resolve();
+        });
+      vi.mocked(jsonl.readLines).mockResolvedValue([recordA1]);
+
+      const result = await sessionService.removeSession(sessionIdA);
+
+      expect(result).toBe(true);
+      expect(removeOrganizationSpy).toHaveBeenCalledWith(sessionIdA);
+      expect(warnings).toEqual(['sidecar warning']);
+    });
+
     it('should return false when session does not exist', async () => {
       vi.mocked(jsonl.readLines).mockResolvedValue([]);
 
@@ -1383,6 +1406,9 @@ describe('SessionService', () => {
 
   describe('removeSessions', () => {
     it('should remove multiple sessions and report each outcome', async () => {
+      const removeOrganizationsSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'removeSessions')
+        .mockResolvedValue();
       // recordA1 belongs to current project; recordB1 also; the third id
       // never has a backing record (notFound).
       vi.mocked(jsonl.readLines).mockImplementation(
@@ -1408,6 +1434,11 @@ describe('SessionService', () => {
       expect(result.notFound).toEqual([sessionIdC]);
       expect(result.errors).toEqual([]);
       expect(unlinkSyncSpy).toHaveBeenCalledTimes(2);
+      expect(removeOrganizationsSpy).toHaveBeenCalledTimes(1);
+      expect(removeOrganizationsSpy).toHaveBeenCalledWith([
+        sessionIdA,
+        sessionIdB,
+      ]);
     });
 
     it('should de-duplicate input ids', async () => {

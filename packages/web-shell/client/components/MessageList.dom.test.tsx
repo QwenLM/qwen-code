@@ -21,10 +21,19 @@ vi.mock('./MessageItem', async () => {
       message: Message;
       showAssistantActions?: boolean;
     }) =>
-      React.createElement('div', {
-        'data-testid': `msg-${message.id}`,
-        'data-assistant-actions': String(Boolean(showAssistantActions)),
-      }),
+      React.createElement(
+        'div',
+        {
+          'data-testid': `msg-${message.id}`,
+          'data-assistant-actions': String(Boolean(showAssistantActions)),
+        },
+        message.role === 'thinking'
+          ? React.createElement('button', {
+              'aria-expanded': 'false',
+              'data-testid': `disclosure-${message.id}`,
+            })
+          : null,
+      ),
   };
 });
 vi.mock('./messages/tools/ParallelAgentsGroup', () => ({
@@ -42,8 +51,11 @@ type MessageListHandle = import('./MessageList').MessageListHandle;
 
 // jsdom provides neither ResizeObserver (MessageList's resize guard) nor a real
 // scrollIntoView (the non-virtual scroll path) — stub both.
+const resizeObserverCallbacks: ResizeObserverCallback[] = [];
 class ResizeObserverStub {
-  constructor(private readonly callback: ResizeObserverCallback) {}
+  constructor(private readonly callback: ResizeObserverCallback) {
+    resizeObserverCallbacks.push(callback);
+  }
   observe() {
     this.callback([], this as unknown as ResizeObserver);
   }
@@ -56,12 +68,19 @@ if (!Element.prototype.scrollIntoView) {
   Element.prototype.scrollIntoView = () => {};
 }
 
+function triggerResizeObservers() {
+  for (const callback of resizeObserverCallbacks) {
+    callback([], {} as ResizeObserver);
+  }
+}
+
 const mounted: Array<{ root: Root; container: HTMLElement }> = [];
 afterEach(() => {
   for (const { root, container } of mounted.splice(0)) {
     act(() => root.unmount());
     container.remove();
   }
+  resizeObserverCallbacks.length = 0;
   vi.useRealTimers();
 });
 
@@ -107,7 +126,13 @@ const planMsg = (id: string): PlanMessage => ({
 function mount(
   messages: Message[],
   ref?: RefObject<MessageListHandle | null>,
-  opts: { isResponding?: boolean } = {},
+  opts: {
+    hideSessionTimeline?: boolean;
+    loadingTranscript?: boolean;
+    catchingUp?: boolean;
+    isResponding?: boolean;
+    onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
+  } = {},
 ): HTMLElement {
   const container = document.createElement('div');
   document.body.appendChild(container);
@@ -119,14 +144,47 @@ function mount(
           ref={ref}
           messages={messages}
           pendingApproval={null}
+          hideSessionTimeline={opts.hideSessionTimeline}
+          loadingTranscript={opts.loadingTranscript}
+          catchingUp={opts.catchingUp}
           isResponding={opts.isResponding}
           shellOutputMaxLines={50}
+          onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
         />
       </I18nProvider>,
     );
   });
   mounted.push({ root, container });
   return container;
+}
+
+function renderInto(
+  root: Root,
+  messages: Message[],
+  ref?: RefObject<MessageListHandle | null>,
+  opts: {
+    loadingTranscript?: boolean;
+    catchingUp?: boolean;
+    isResponding?: boolean;
+    onCanScrollToBottomChange?: (canScrollToBottom: boolean) => void;
+  } = {},
+) {
+  act(() => {
+    root.render(
+      <I18nProvider language="en">
+        <MessageList
+          ref={ref}
+          messages={messages}
+          pendingApproval={null}
+          loadingTranscript={opts.loadingTranscript}
+          catchingUp={opts.catchingUp}
+          isResponding={opts.isResponding}
+          shellOutputMaxLines={50}
+          onCanScrollToBottomChange={opts.onCanScrollToBottomChange}
+        />
+      </I18nProvider>,
+    );
+  });
 }
 
 const has = (c: HTMLElement, id: string) =>
@@ -143,6 +201,8 @@ const queryToggle = (c: HTMLElement, turnId: string) =>
   c.querySelector(`[data-testid="toggle-${turnId}"]`) as HTMLElement | null;
 const toggle = (c: HTMLElement, turnId: string) =>
   queryToggle(c, turnId) as HTMLElement;
+const disclosure = (c: HTMLElement, id: string) =>
+  c.querySelector(`[data-testid="disclosure-${id}"]`) as HTMLElement;
 const toggleRow = (c: HTMLElement, turnId: string) =>
   toggle(c, turnId).closest('[role="button"]') as HTMLElement;
 const click = (el: Element) =>
@@ -164,6 +224,11 @@ const mockMessageListWidth = (width: number) =>
     y: 0,
     toJSON: () => ({}),
   });
+const simpleTurns = (count: number): Message[] =>
+  Array.from({ length: count }, (_, index) => {
+    const turn = index + 1;
+    return [userMsg(`u${turn}`), asstMsg(`a${turn}`)] as Message[];
+  }).flat();
 
 describe('MessageList — turn collapse (DOM)', () => {
   it('collapses a completed turn: hides the step, keeps prompt + answer, shows the toggle', () => {
@@ -258,6 +323,10 @@ describe('MessageList — turn collapse (DOM)', () => {
       asstMsg('a1'),
       userMsg('u2'),
       asstMsg('a2'),
+      userMsg('u3'),
+      asstMsg('a3'),
+      userMsg('u4'),
+      asstMsg('a4'),
     ]);
     await nextFrame();
 
@@ -269,6 +338,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(entries.map((entry) => entry.getAttribute('data-turn-id'))).toEqual([
       'u1',
       'u2',
+      'u3',
+      'u4',
     ]);
     expect(entries[0]?.getAttribute('data-node-kinds')).toBe(
       'thought,commentary,tool,plan',
@@ -276,10 +347,8 @@ describe('MessageList — turn collapse (DOM)', () => {
     const details = Array.from(
       c.querySelectorAll('[data-testid="session-timeline-detail"]'),
     );
-    expect(details).toHaveLength(2);
-    expect(details[0]?.getAttribute('data-detail')).toContain(
-      'thinking · answer · 1 tool call · plan update',
-    );
+    expect(details).toHaveLength(4);
+    expect(details[0]?.getAttribute('data-detail')).toBe('answer');
     const buttons = Array.from(
       c.querySelectorAll<HTMLButtonElement>(
         '[data-testid="session-timeline-entry"] button',
@@ -288,7 +357,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(buttons[0]?.getAttribute('aria-label')).toBe(
       'Turn 1: q. Current turn',
     );
-    expect(buttons[0]?.getAttribute('title')).toContain('thinking');
+    expect(buttons[0]?.hasAttribute('title')).toBe(false);
     expect(entries[0]?.getAttribute('data-in-current-range')).toBe('true');
     expect(entries[1]?.getAttribute('data-in-current-range')).toBe('true');
     expect(
@@ -299,17 +368,21 @@ describe('MessageList — turn collapse (DOM)', () => {
     rectSpy.mockRestore();
   });
 
+  it('hides the session timeline until there are at least four turns', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+    const c = mount(simpleTurns(3));
+    await nextFrame();
+
+    expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
+    rectSpy.mockRestore();
+  });
+
   it('clicks a session timeline entry to jump to its turn', async () => {
     const rectSpy = mockMessageListWidth(1200);
     const scrollIntoView = vi
       .spyOn(Element.prototype, 'scrollIntoView')
       .mockImplementation(() => {});
-    const c = mount([
-      userMsg('u1'),
-      asstMsg('a1'),
-      userMsg('u2'),
-      asstMsg('a2'),
-    ]);
+    const c = mount(simpleTurns(4));
     await nextFrame();
 
     const secondEntryButton = c.querySelector<HTMLButtonElement>(
@@ -330,12 +403,19 @@ describe('MessageList — turn collapse (DOM)', () => {
   it('hides the session timeline when the message list is narrow', async () => {
     const rectSpy = mockMessageListWidth(1000);
 
-    const c = mount([
-      userMsg('u1'),
-      asstMsg('a1'),
-      userMsg('u2'),
-      asstMsg('a2'),
-    ]);
+    const c = mount(simpleTurns(4));
+    await nextFrame();
+
+    expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
+    rectSpy.mockRestore();
+  });
+
+  it('hides the session timeline when the caller disables it', async () => {
+    const rectSpy = mockMessageListWidth(1200);
+
+    const c = mount(simpleTurns(4), undefined, {
+      hideSessionTimeline: true,
+    });
     await nextFrame();
 
     expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
@@ -345,12 +425,7 @@ describe('MessageList — turn collapse (DOM)', () => {
   it('hides the session timeline when the message list has no width', async () => {
     const rectSpy = mockMessageListWidth(0);
 
-    const c = mount([
-      userMsg('u1'),
-      asstMsg('a1'),
-      userMsg('u2'),
-      asstMsg('a2'),
-    ]);
+    const c = mount(simpleTurns(4));
     await nextFrame();
 
     expect(c.querySelector('[data-testid="session-timeline"]')).toBeNull();
@@ -370,7 +445,7 @@ describe('MessageList — turn collapse (DOM)', () => {
     expect(isCollapsed(c, 'g1')).toBe(false);
   });
 
-  it('smooth-scrolls the page when a new chat prompt appears', () => {
+  it('smooth-scrolls the page when a new chat prompt appears', async () => {
     const scrollTo = vi.fn();
     Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
       configurable: true,
@@ -385,12 +460,242 @@ describe('MessageList — turn collapse (DOM)', () => {
       value: scrollTo,
     });
 
-    mount([userMsg('u1')]);
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, [userMsg('u1'), asstMsg('a1')]);
+    renderInto(root, [userMsg('u1'), asstMsg('a1'), userMsg('u2')]);
+    await nextFrame();
 
     expect(scrollTo).toHaveBeenCalledWith({
       top: 1200,
       behavior: 'smooth',
     });
+  });
+
+  it('does not smooth-scroll when initial history already contains a user prompt', () => {
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+
+    mount([userMsg('u1'), asstMsg('a1')]);
+
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('shows a transcript skeleton while loading transcript', () => {
+    const c = mount([], undefined, { loadingTranscript: true });
+
+    expect(
+      c.querySelector('[data-testid="message-list-loading-skeleton"]'),
+    ).not.toBeNull();
+    expect(c.querySelector('[role="status"]')?.textContent).toBe(
+      'Session is still loading. Try again in a moment.',
+    );
+  });
+
+  it('shows the transcript skeleton while loading transcript with existing messages', () => {
+    const c = mount([userMsg('u1')], undefined, {
+      loadingTranscript: true,
+    });
+
+    expect(
+      c.querySelector('[data-testid="message-list-loading-skeleton"]'),
+    ).not.toBeNull();
+  });
+
+  it('does not show the transcript skeleton outside transcript loading', () => {
+    const idle = mount([]);
+
+    expect(
+      idle.querySelector('[data-testid="message-list-loading-skeleton"]'),
+    ).toBeNull();
+  });
+
+  it('does not smooth-scroll when existing session history loads after an empty render', () => {
+    const scrollTo = vi.fn();
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, []);
+    renderInto(root, [userMsg('u1'), asstMsg('a1')]);
+
+    expect(scrollTop).toBe(1200);
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
+  it('smooth-scrolls the first new prompt after an empty render', async () => {
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, []);
+    renderInto(root, [userMsg('u1')]);
+    await nextFrame();
+
+    expect(scrollTo).toHaveBeenCalledWith({
+      top: 1200,
+      behavior: 'smooth',
+    });
+  });
+
+  it('does not smooth-scroll restored history that ends with a user prompt', async () => {
+    const scrollTo = vi.fn();
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, [], undefined, { loadingTranscript: true });
+    renderInto(root, [userMsg('u1')], undefined, {
+      loadingTranscript: false,
+    });
+    await nextFrame();
+
+    expect(scrollTop).toBe(1200);
+    expect(scrollTo).not.toHaveBeenCalledWith({
+      top: 1200,
+      behavior: 'smooth',
+    });
+  });
+
+  it('does not smooth-scroll when a user prompt is already followed by an assistant row', async () => {
+    const scrollTo = vi.fn();
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, [userMsg('u1'), asstMsg('a1')]);
+    renderInto(root, [
+      userMsg('u1'),
+      asstMsg('a1'),
+      userMsg('u2'),
+      asstMsg('a2'),
+    ]);
+    await nextFrame();
+
+    expect(scrollTo).not.toHaveBeenCalledWith({
+      top: 1200,
+      behavior: 'smooth',
+    });
+  });
+
+  it('snaps to bottom without smooth scrolling when catch-up completes', () => {
+    const scrollTo = vi.fn();
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value;
+      },
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    });
+    const messages = [userMsg('u1'), asstMsg('a1')];
+    const container = document.createElement('div');
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    mounted.push({ root, container });
+
+    renderInto(root, messages, undefined, { catchingUp: true });
+    expect(scrollTop).toBe(0);
+
+    renderInto(root, messages, undefined, { catchingUp: false });
+
+    expect(scrollTop).toBe(1200);
+    expect(scrollTo).not.toHaveBeenCalled();
   });
 
   it('does not treat a user_shell row as a new chat prompt', () => {
@@ -426,5 +731,256 @@ describe('MessageList — turn collapse (DOM)', () => {
 
     expect(assistantActions(c, 'mid')).toBe('false');
     expect(assistantActions(c, 'a1')).toBe('true');
+  });
+
+  it('reports when the user has scrolled away from the bottom', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      value: 600,
+      writable: true,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTo', {
+      configurable: true,
+      value: vi.fn(),
+    });
+    const onCanScrollToBottomChange = vi.fn();
+
+    const container = mount([asstMsg('a1')], undefined, {
+      onCanScrollToBottomChange,
+    });
+    await nextFrame();
+
+    const list = container.firstElementChild as HTMLElement;
+    list.scrollTop = 600;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    await nextFrame();
+
+    list.scrollTop = 500;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
+
+    list.scrollTop = 600;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('reports no scroll-to-bottom affordance when the list has no scrollbar', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    const onCanScrollToBottomChange = vi.fn();
+
+    mount([userMsg('u1')], undefined, { onCanScrollToBottomChange });
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('reports no scroll-to-bottom affordance when already at the bottom', async () => {
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      value: 600,
+      writable: true,
+    });
+    const onCanScrollToBottomChange = vi.fn();
+
+    mount([userMsg('u1')], undefined, { onCanScrollToBottomChange });
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('keeps the scroll-to-bottom affordance hidden when followed content grows', async () => {
+    let scrollHeight = 600;
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+      },
+    });
+    const onCanScrollToBottomChange = vi.fn();
+
+    mount([asstMsg('a1')], undefined, { onCanScrollToBottomChange });
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+
+    scrollHeight = 1200;
+    act(() => triggerResizeObservers());
+    await nextFrame();
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('reports scroll-to-bottom affordance when a clicked disclosure grows during streaming', async () => {
+    let scrollHeight = 600;
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+      },
+    });
+    const onCanScrollToBottomChange = vi.fn();
+    const c = mount([thinkingMsg('t1'), asstMsg('a1')], undefined, {
+      isResponding: true,
+      onCanScrollToBottomChange,
+    });
+    await nextFrame();
+
+    click(disclosure(c, 't1'));
+
+    scrollHeight = 1200;
+    act(() => triggerResizeObservers());
+    await nextFrame();
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
+  });
+
+  it('keeps the scroll-to-bottom affordance hidden when disclosure growth stays near bottom', async () => {
+    let scrollHeight = 600;
+    let scrollTop = 0;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, scrollHeight - 600));
+      },
+    });
+    const onCanScrollToBottomChange = vi.fn();
+    const c = mount([thinkingMsg('t1'), asstMsg('a1')], undefined, {
+      isResponding: true,
+      onCanScrollToBottomChange,
+    });
+    await nextFrame();
+
+    click(disclosure(c, 't1'));
+
+    scrollHeight = 620;
+    act(() => triggerResizeObservers());
+    await nextFrame();
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('clears the scroll-to-bottom affordance immediately after scrolling to bottom', async () => {
+    let scrollTop = 600;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      value: 1200,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = Math.max(0, Math.min(value, 600));
+      },
+    });
+    const onCanScrollToBottomChange = vi.fn();
+    const ref = createRef<MessageListHandle>();
+    const c = mount([asstMsg('a1')], ref, { onCanScrollToBottomChange });
+    await nextFrame();
+    await nextFrame();
+
+    const list = c.firstElementChild as HTMLElement;
+    scrollTop = 0;
+    act(() => list.dispatchEvent(new Event('scroll', { bubbles: true })));
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
+
+    act(() => ref.current?.scrollToBottom('auto'));
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('reports scroll-to-bottom affordance when expanding content creates overflow', async () => {
+    let scrollHeight = 600;
+    Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+      configurable: true,
+      value: 600,
+    });
+    Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+      configurable: true,
+      value: 0,
+      writable: true,
+    });
+    const onCanScrollToBottomChange = vi.fn();
+    const c = mount([userMsg('u1'), toolMsg('g1'), asstMsg('a1')], undefined, {
+      onCanScrollToBottomChange,
+    });
+    await nextFrame();
+
+    click(toggle(c, 'u1'));
+    scrollHeight = 1200;
+    await nextFrame();
+    await nextFrame();
+    await act(() => new Promise<void>((resolve) => setTimeout(resolve, 230)));
+    await nextFrame();
+
+    expect(onCanScrollToBottomChange).toHaveBeenLastCalledWith(true);
   });
 });

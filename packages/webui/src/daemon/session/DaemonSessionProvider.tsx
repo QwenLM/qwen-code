@@ -46,6 +46,7 @@ import {
   mapProviderStatus,
   mapSessionContextModels,
   mapSupportedCommands,
+  mapWorkspaceSkills,
   updateConnectionFromDaemonEvent,
 } from './mappers.js';
 import {
@@ -421,20 +422,41 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               !reconnectSessionId &&
               !shouldCreateFreshSession
             ) {
-              const providerResult = await Promise.allSettled([
+              // Fetch skills alongside providers so skill-backed slash
+              // commands (e.g. /review) can autocomplete before the first
+              // prompt. Both are session-less workspace queries; the
+              // session-scoped supported-commands snapshot (which also carries
+              // custom/MCP/workflow commands) still lands once the first prompt
+              // creates a session.
+              const [providerResult, skillsResult] = await Promise.allSettled([
                 client.workspaceProviders(),
+                client.workspaceSkills(),
               ]);
-              if (providerResult[0].status === 'rejected') {
+              if (providerResult.status === 'rejected') {
                 console.warn(
                   '[DaemonSessionProvider] workspaceProviders failed in deferred connect:',
-                  providerResult[0].reason,
+                  providerResult.reason,
+                );
+              }
+              if (skillsResult.status === 'rejected') {
+                console.warn(
+                  '[DaemonSessionProvider] workspaceSkills failed in deferred connect:',
+                  skillsResult.reason,
                 );
               }
               const providers =
-                providerResult[0].status === 'fulfilled'
-                  ? providerResult[0].value
+                providerResult.status === 'fulfilled'
+                  ? providerResult.value
                   : undefined;
               const providerModelStatus = mapProviderStatus(providers);
+              const {
+                commands: deferredSkillCommands,
+                skills: deferredSkills,
+              } = mapWorkspaceSkills(
+                skillsResult.status === 'fulfilled'
+                  ? skillsResult.value
+                  : undefined,
+              );
               setConnection((current) => ({
                 ...current,
                 status: 'connected',
@@ -445,6 +467,12 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
                 contextWindow: providerModelStatus.contextWindow,
                 providers,
                 capabilities: caps,
+                ...(deferredSkillCommands.length > 0
+                  ? { commands: deferredSkillCommands }
+                  : {}),
+                ...(deferredSkills.length > 0
+                  ? { skills: deferredSkills }
+                  : {}),
               }));
               return;
             }
@@ -456,6 +484,14 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             const requestClientId = clientId
               ? clientIdRef.current
               : getStableClientId(undefined, targetSessionId);
+            if (targetSessionId) {
+              setConnection((current) => ({
+                ...current,
+                sessionId: targetSessionId,
+                error: undefined,
+                loadingTranscript: true,
+              }));
+            }
             const nextSession = restoreSessionId
               ? await restoreMethod(
                   client,
@@ -588,124 +624,6 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           hasCurrentSessionActivePromptRef.current = hasSessionActivePrompt;
           setPromptStatus(hasSessionActivePrompt() ? 'streaming' : 'idle');
 
-          const canReuseSessionMetadata =
-            attachedExistingSession &&
-            connectionRef.current.commands !== undefined &&
-            connectionRef.current.skills !== undefined &&
-            connectionRef.current.supportedCommands !== undefined &&
-            connectionRef.current.context !== undefined;
-          const [providerResult, commandResult, contextResult] =
-            canReuseSessionMetadata
-              ? [undefined, undefined, undefined]
-              : await Promise.allSettled([
-                  client.workspaceProviders(),
-                  activeSession.supportedCommands(),
-                  activeSession.context(),
-                ]);
-          const providers =
-            providerResult?.status === 'fulfilled'
-              ? providerResult.value
-              : undefined;
-          const supportedCommands =
-            commandResult?.status === 'fulfilled'
-              ? commandResult.value
-              : undefined;
-          const context =
-            contextResult?.status === 'fulfilled'
-              ? contextResult.value
-              : undefined;
-          const loadWarningTexts = [
-            providerResult?.status === 'rejected'
-              ? loadWarningsRef.current?.models
-              : undefined,
-            commandResult?.status === 'rejected'
-              ? loadWarningsRef.current?.commands
-              : undefined,
-            contextResult?.status === 'rejected'
-              ? loadWarningsRef.current?.context
-              : undefined,
-          ].filter((warning): warning is string => Boolean(warning));
-          const providerModelStatus = mapProviderStatus(providers);
-          const contextModelStatus = mapSessionContextModels(context);
-          const sessionModels =
-            contextModelStatus && contextModelStatus.models.length > 0
-              ? contextModelStatus.models
-              : providerModelStatus.models;
-          const sessionCurrentModel =
-            contextModelStatus?.currentModel ??
-            providerModelStatus.currentModel;
-          const providerContextWindow =
-            sessionCurrentModel === providerModelStatus.currentModel
-              ? providerModelStatus.contextWindow
-              : providerModelStatus.models.find(
-                  (model) => model.id === sessionCurrentModel,
-                )?.contextWindow;
-          const sessionContextWindow =
-            contextModelStatus?.contextWindow ??
-            sessionModels.find((model) => model.id === sessionCurrentModel)
-              ?.contextWindow ??
-            providerContextWindow;
-          const { commands, skills } = mapSupportedCommands(supportedCommands);
-          const currentMode =
-            getCurrentMode(context) ?? providerModelStatus.currentMode;
-
-          setConnection((current) => ({
-            status: 'connected',
-            sessionId: activeSession.sessionId,
-            // Surface the bound client id so consumers can recognize their own
-            // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
-            ...(activeSession.clientId
-              ? { clientId: activeSession.clientId }
-              : {}),
-            workspaceCwd: activeSession.workspaceCwd,
-            commands: commands.length > 0 ? commands : current.commands,
-            skills: skills.length > 0 ? skills : current.skills,
-            models: sessionModels.length > 0 ? sessionModels : current.models,
-            currentModel: sessionCurrentModel ?? current.currentModel,
-            currentMode: currentMode ?? current.currentMode,
-            displayName:
-              getSessionDisplayName(activeSession.state) ??
-              (current.sessionId === activeSession.sessionId
-                ? current.displayName
-                : undefined),
-            tokenUsage:
-              // Keep token usage in sync with tokenCount: replay usage
-              // supersedes in-memory state, same-session reconnect keeps it,
-              // and a different session without replay usage starts empty.
-              replayTokenUsage !== undefined
-                ? replayTokenUsage
-                : current.sessionId === activeSession.sessionId
-                  ? current.tokenUsage
-                  : undefined,
-            tokenCount:
-              // A freshly loaded snapshot covers everything up to the SSE
-              // resume point, so its usage supersedes the in-memory count;
-              // without one (or with a usage-less replay) keep the
-              // same-session value and start anything else at 0.
-              replayTokenCount !== undefined
-                ? replayTokenCount
-                : current.sessionId === activeSession.sessionId
-                  ? (current.tokenCount ?? 0)
-                  : 0,
-            contextWindow: sessionContextWindow ?? current.contextWindow,
-            providers: providers ?? current.providers,
-            supportedCommands: supportedCommands ?? current.supportedCommands,
-            context: context ?? current.context,
-            capabilities: capabilities ?? current.capabilities,
-            catchingUp:
-              isSameSessionReconnect ||
-              activeSession.lastEventId != null ||
-              undefined,
-          }));
-          if (loadWarningTexts.length > 0) {
-            store.dispatch(
-              loadWarningTexts.map((text) => ({
-                type: 'status' as const,
-                text,
-              })),
-            );
-          }
-
           const pendingLoad = pendingSessionLoadRef.current;
           const pendingLoadToResolve =
             pendingLoad?.sessionId === activeSession.sessionId
@@ -716,20 +634,23 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           // the store before starting the SSE loop. The SSE stream begins
           // from lastEventId, so only post-snapshot events are delivered.
           //
+          // This runs before the providers/commands/context fetches below:
+          // the snapshot is already in hand, so the transcript paints one
+          // metadata round-trip earlier (visible on high-latency mobile).
+          //
           // The deferred store.reset() runs here — in the same synchronous
           // block as store.dispatch() — so the queueMicrotask notification
           // only fires once with the fully-populated state.
           const { compactedReplay, liveJournal } = activeSession.replaySnapshot;
           const replayEvents = [...compactedReplay, ...liveJournal];
-          if (
-            needsStoreReset &&
-            !(shouldInjectReplaySnapshot && replayEvents.length > 0)
-          ) {
+          const replayInjected =
+            shouldInjectReplaySnapshot && replayEvents.length > 0;
+          if (needsStoreReset && !replayInjected) {
             // Reset needed but no replay data (e.g. fresh session) — reset
             // immediately since there is no dispatch to batch with.
             store.reset();
           }
-          if (shouldInjectReplaySnapshot && replayEvents.length > 0) {
+          if (replayInjected) {
             const replayOpts = {
               ...eventOptionsRef.current,
               suppressOwnUserEcho: false,
@@ -802,6 +723,38 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             }
             setConnection((c) => ({ ...c, catchingUp: undefined }));
           }
+          setConnection((current) => ({
+            ...current,
+            status: 'connected',
+            sessionId: activeSession.sessionId,
+            ...(activeSession.clientId
+              ? { clientId: activeSession.clientId }
+              : {}),
+            workspaceCwd: activeSession.workspaceCwd,
+            displayName:
+              getSessionDisplayName(activeSession.state) ??
+              (current.sessionId === activeSession.sessionId
+                ? current.displayName
+                : undefined),
+            tokenUsage:
+              replayTokenUsage !== undefined
+                ? replayTokenUsage
+                : current.sessionId === activeSession.sessionId
+                  ? current.tokenUsage
+                  : undefined,
+            tokenCount:
+              replayTokenCount !== undefined
+                ? replayTokenCount
+                : current.sessionId === activeSession.sessionId
+                  ? (current.tokenCount ?? 0)
+                  : 0,
+            loadingTranscript: undefined,
+            catchingUp: replayInjected
+              ? current.catchingUp
+              : isSameSessionReconnect ||
+                activeSession.lastEventId != null ||
+                undefined,
+          }));
           if (pendingLoadToResolve) {
             pendingSessionLoadRef.current = undefined;
             clearTimeout(pendingLoadToResolve.timeout);
@@ -812,6 +765,120 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               skipNextCleanupDetachSessionIdRef.current = undefined;
             }
             pendingLoadToResolve.resolve();
+          }
+
+          const canReuseSessionMetadata =
+            attachedExistingSession &&
+            connectionRef.current.commands !== undefined &&
+            connectionRef.current.skills !== undefined &&
+            connectionRef.current.supportedCommands !== undefined &&
+            connectionRef.current.context !== undefined;
+          const [providerResult, commandResult, contextResult] =
+            canReuseSessionMetadata
+              ? [undefined, undefined, undefined]
+              : await Promise.allSettled([
+                  client.workspaceProviders(),
+                  activeSession.supportedCommands(),
+                  activeSession.context(),
+                ]);
+          const providers =
+            providerResult?.status === 'fulfilled'
+              ? providerResult.value
+              : undefined;
+          const supportedCommands =
+            commandResult?.status === 'fulfilled'
+              ? commandResult.value
+              : undefined;
+          const context =
+            contextResult?.status === 'fulfilled'
+              ? contextResult.value
+              : undefined;
+          const loadWarningTexts = [
+            providerResult?.status === 'rejected'
+              ? loadWarningsRef.current?.models
+              : undefined,
+            commandResult?.status === 'rejected'
+              ? loadWarningsRef.current?.commands
+              : undefined,
+            contextResult?.status === 'rejected'
+              ? loadWarningsRef.current?.context
+              : undefined,
+          ].filter((warning): warning is string => Boolean(warning));
+          const providerModelStatus = mapProviderStatus(providers);
+          const contextModelStatus = mapSessionContextModels(context);
+          const sessionModels =
+            contextModelStatus && contextModelStatus.models.length > 0
+              ? contextModelStatus.models
+              : providerModelStatus.models;
+          const sessionCurrentModel =
+            contextModelStatus?.currentModel ??
+            providerModelStatus.currentModel;
+          const providerContextWindow =
+            sessionCurrentModel === providerModelStatus.currentModel
+              ? providerModelStatus.contextWindow
+              : providerModelStatus.models.find(
+                  (model) => model.id === sessionCurrentModel,
+                )?.contextWindow;
+          const sessionContextWindow =
+            contextModelStatus?.contextWindow ??
+            sessionModels.find((model) => model.id === sessionCurrentModel)
+              ?.contextWindow ??
+            providerContextWindow;
+          const { commands, skills } = mapSupportedCommands(supportedCommands);
+          const currentMode =
+            getCurrentMode(context) ?? providerModelStatus.currentMode;
+
+          setConnection((current) => {
+            if (current.sessionId !== activeSession.sessionId) return current;
+            return {
+              ...current,
+              status: 'connected',
+              sessionId: activeSession.sessionId,
+              // Surface the bound client id so consumers can recognize their own
+              // originator-stamped frames (e.g. the web-shell's mid-turn dedupe).
+              ...(activeSession.clientId
+                ? { clientId: activeSession.clientId }
+                : {}),
+              workspaceCwd: activeSession.workspaceCwd,
+              // A fulfilled supported-commands fetch is authoritative even when
+              // it returns an empty list: fall back to the preserved
+              // `current.commands` only when the fetch was skipped or failed
+              // (supportedCommands === undefined). Keying on length instead
+              // would let a genuinely-empty snapshot leave a stale command list
+              // in place (see getConnectionAfterSessionClear, which now
+              // preserves commands across a clear).
+              commands:
+                supportedCommands !== undefined ? commands : current.commands,
+              skills: supportedCommands !== undefined ? skills : current.skills,
+              models: sessionModels.length > 0 ? sessionModels : current.models,
+              currentModel: sessionCurrentModel ?? current.currentModel,
+              currentMode: currentMode ?? current.currentMode,
+              displayName:
+                getSessionDisplayName(activeSession.state) ??
+                current.displayName,
+              contextWindow: sessionContextWindow ?? current.contextWindow,
+              providers: providers ?? current.providers,
+              supportedCommands: supportedCommands ?? current.supportedCommands,
+              context: context ?? current.context,
+              capabilities: capabilities ?? current.capabilities,
+              loadingTranscript: undefined,
+              catchingUp:
+                // Replay already injected above — keep the cleared flag rather
+                // than re-arming it (nothing before SSE would clear it again).
+                replayInjected
+                  ? current.catchingUp
+                  : isSameSessionReconnect ||
+                    activeSession.lastEventId != null ||
+                    undefined,
+            };
+          });
+          if (loadWarningTexts.length > 0) {
+            store.dispatch(
+              loadWarningTexts.map((text) => ({
+                type: 'status' as const,
+                text,
+              })),
+            );
           }
           let sawEvent = false;
           let resyncRequested = false;
@@ -1199,6 +1266,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
               status: 'disconnected',
               sessionId: undefined,
               error: message,
+              loadingTranscript: undefined,
               catchingUp: undefined,
             }));
             return;
@@ -1228,6 +1296,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             ...current,
             status: 'disconnected',
             error: message,
+            loadingTranscript: undefined,
           }));
         }
 
@@ -1236,6 +1305,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           setConnection((current) => ({
             ...current,
             status: 'disconnected',
+            loadingTranscript: undefined,
             catchingUp: undefined,
           }));
           return;
@@ -1435,7 +1505,7 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
     if (sessionId === currentSessionId) return;
 
     const request = sessionId
-      ? actions.loadSession(sessionId, { deferTranscriptReset: true })
+      ? actions.loadSession(sessionId)
       : currentSessionId
         ? actions.clearSession()
         : undefined;

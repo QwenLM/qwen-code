@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { SessionToolContext } from '../context.ts';
 import { errorResponse, successResponse } from '../response.ts';
 import type { ToolResult } from '../types.ts';
@@ -33,12 +35,31 @@ function truncateOutput(text: string): { text: string; truncated: boolean } {
   };
 }
 
+function killSandboxProcess(child: ChildProcess): void {
+  if (!child.pid) {
+    child.kill('SIGKILL');
+    return;
+  }
+
+  try {
+    if (process.platform === 'win32') {
+      child.kill('SIGKILL');
+    } else {
+      process.kill(-child.pid, 'SIGKILL');
+    }
+  } catch {
+    child.kill('SIGKILL');
+  }
+}
+
 export async function handleScriptSandbox(
   ctx: SessionToolContext,
-  args: ScriptSandboxArgs
+  args: ScriptSandboxArgs,
 ): Promise<ToolResult> {
   if (!ctx.sessionPath || !ctx.dataPath) {
-    return errorResponse('script_sandbox requires sessionPath and dataPath in context.');
+    return errorResponse(
+      'script_sandbox requires sessionPath and dataPath in context.',
+    );
   }
 
   const sessionDir = ctx.sessionPath;
@@ -49,7 +70,9 @@ export async function handleScriptSandbox(
   for (const inputFile of inputFiles) {
     const resolvedInput = resolve(sessionDir, inputFile);
     if (!isPathWithinDirectory(resolvedInput, sessionDir)) {
-      return errorResponse(`inputFile must be within the session directory. Got: ${inputFile}`);
+      return errorResponse(
+        `inputFile must be within the session directory. Got: ${inputFile}`,
+      );
     }
     if (!existsSync(resolvedInput)) {
       return errorResponse(`input file not found: ${inputFile}`);
@@ -61,32 +84,48 @@ export async function handleScriptSandbox(
     mkdirSync(dataDir, { recursive: true });
   }
 
-  const timeoutMs = Math.min(Math.max(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1), MAX_TIMEOUT_MS);
+  const timeoutMs = Math.min(
+    Math.max(args.timeoutMs ?? DEFAULT_TIMEOUT_MS, 1),
+    MAX_TIMEOUT_MS,
+  );
   const ext = args.language === 'python3' ? '.py' : '.js';
   const sandboxScriptDir = join(dataDir, '.sandbox-scripts');
   if (!existsSync(sandboxScriptDir)) {
     mkdirSync(sandboxScriptDir, { recursive: true });
   }
-  const tempScript = join(sandboxScriptDir, `craft-sandbox-${ctx.sessionId}-${Date.now()}${ext}`);
+  const tempScript = join(
+    sandboxScriptDir,
+    `craft-sandbox-${randomUUID()}${ext}`,
+  );
 
-  writeFileSync(tempScript, args.script, 'utf-8');
+  writeFileSync(tempScript, args.script, { encoding: 'utf-8', flag: 'wx' });
 
   try {
     const runtime = resolveScriptRuntime(args.language);
     const runtimeArgs = [...runtime.argsPrefix, tempScript, ...resolvedInputs];
 
     let networkIsolation = applyNetworkIsolation(runtime.command, runtimeArgs);
-    let filesystemIsolation = applyFilesystemIsolation(runtime.command, runtimeArgs, sessionDir);
+    let filesystemIsolation = applyFilesystemIsolation(
+      runtime.command,
+      runtimeArgs,
+      sessionDir,
+    );
 
     if (process.platform === 'darwin') {
       // macOS: compose network + filesystem restrictions in a SINGLE sandbox-exec profile
       // to avoid nested sandbox-exec wrapping failures.
-      filesystemIsolation = applyFilesystemIsolation(runtime.command, runtimeArgs, sessionDir, {
-        includeNetworkDeny: true,
-      });
+      filesystemIsolation = applyFilesystemIsolation(
+        runtime.command,
+        runtimeArgs,
+        sessionDir,
+        {
+          includeNetworkDeny: true,
+        },
+      );
       networkIsolation = {
         status: filesystemIsolation.status,
-        backend: filesystemIsolation.status === 'enforced' ? 'sandbox-exec' : 'none',
+        backend:
+          filesystemIsolation.status === 'enforced' ? 'sandbox-exec' : 'none',
         command: runtime.command,
         args: runtimeArgs,
       };
@@ -94,26 +133,26 @@ export async function handleScriptSandbox(
       networkIsolation = applyNetworkIsolation(runtime.command, runtimeArgs);
       if (networkIsolation.status !== 'enforced') {
         return errorResponse(
-          'script_sandbox requires network isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.'
+          'script_sandbox requires network isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.',
         );
       }
 
       filesystemIsolation = applyFilesystemIsolation(
         networkIsolation.command,
         networkIsolation.args,
-        sessionDir
+        sessionDir,
       );
     }
 
     if (networkIsolation.status !== 'enforced') {
       return errorResponse(
-        'script_sandbox requires network isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.'
+        'script_sandbox requires network isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.',
       );
     }
 
     if (filesystemIsolation.status !== 'enforced') {
       return errorResponse(
-        'script_sandbox requires filesystem isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.'
+        'script_sandbox requires filesystem isolation in all permission modes, but no supported isolation backend is available on this platform/runtime.',
       );
     }
 
@@ -123,12 +162,22 @@ export async function handleScriptSandbox(
     });
 
     const startedAt = Date.now();
-    const result = await new Promise<{ stdout: string; stderr: string; code: number | null; timedOut: boolean }>((resolvePromise, reject) => {
-      const child = spawn(filesystemIsolation.command, filesystemIsolation.args, {
-        cwd: dataDir,
-        env,
-        stdio: ['pipe', 'pipe', 'pipe'],
-      });
+    const result = await new Promise<{
+      stdout: string;
+      stderr: string;
+      code: number | null;
+      timedOut: boolean;
+    }>((resolvePromise, reject) => {
+      const child = spawn(
+        filesystemIsolation.command,
+        filesystemIsolation.args,
+        {
+          cwd: dataDir,
+          env,
+          stdio: ['pipe', 'pipe', 'pipe'],
+          detached: process.platform !== 'win32',
+        },
+      );
 
       let stdout = '';
       let stderr = '';
@@ -141,7 +190,7 @@ export async function handleScriptSandbox(
 
       const killTimer = setTimeout(() => {
         timedOut = true;
-        child.kill('SIGKILL');
+        killSandboxProcess(child);
       }, timeoutMs);
 
       child.stdout.on('data', (chunk: Buffer) => {

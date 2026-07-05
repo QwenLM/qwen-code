@@ -440,6 +440,36 @@ export function isTool(obj: unknown): obj is AnyDeclarativeTool {
   );
 }
 
+export type ToolArtifactKind =
+  | 'file'
+  | 'link'
+  | 'html'
+  | 'image'
+  | 'video'
+  | 'audio'
+  | 'pdf'
+  | 'notebook'
+  | 'other';
+
+export type ToolArtifactStorage =
+  | 'workspace'
+  | 'external_url'
+  | 'managed'
+  | 'published';
+
+export interface ToolArtifact {
+  kind?: ToolArtifactKind;
+  storage?: ToolArtifactStorage;
+  title: string;
+  description?: string;
+  workspacePath?: string;
+  managedId?: string;
+  url?: string;
+  mimeType?: string;
+  sizeBytes?: number;
+  metadata?: Record<string, string | number | boolean | null>;
+}
+
 export interface ToolResult {
   /**
    * Content meant to be included in LLM history.
@@ -461,6 +491,13 @@ export interface ToolResult {
    * Scheduler-side path activation consumes these in addition to input fields.
    */
   resultFilePaths?: string[];
+
+  /**
+   * Structured artifacts produced by this tool call. Daemon/session surfaces
+   * consume this as metadata only; the producer remains responsible for the
+   * underlying file, URL, or managed resource lifecycle.
+   */
+  artifacts?: ToolArtifact[];
 
   /**
    * If this property is present, the tool call is considered a failure.

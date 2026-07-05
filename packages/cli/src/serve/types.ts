@@ -234,10 +234,9 @@ export interface ServeOptions {
   clientMcpOverWs?: boolean;
   /**
    * Tunnel raw CDP to a real browser tab over the reverse `/acp` WS
-   * (Plan C "CDP tunnel", issue #5626). When enabled, a loopback puppeteer
-   * client (chrome-devtools-mcp) can connect to a new `/cdp` WebSocket and
-   * drive ONE real tab via the extension's `chrome.debugger`, reusing the
-   * ready-made chrome-devtools-mcp toolset. `runQwenServe` enables this for
+   * (Plan C "CDP tunnel", issue #5626). When enabled, a loopback CDP client can
+   * connect to a new `/cdp` WebSocket and drive ONE real tab via the extension's
+   * `chrome.debugger`, reusing browser automation tools. `runQwenServe` enables this for
    * Chrome extension origins or explicit env opt-in; callers may pass `false`.
    */
   cdpTunnelOverWs?: boolean;
