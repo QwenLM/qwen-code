@@ -2365,6 +2365,7 @@ export async function deliverClientMcpMessage(
   connection: AgentSideConnection | undefined,
   serverName: string,
   message: JSONRPCMessage,
+  sessionId?: string,
 ): Promise<JSONRPCMessage> {
   if (!connection) {
     throw new Error(
@@ -2373,7 +2374,11 @@ export async function deliverClientMcpMessage(
   }
   const response = await connection.extMethod(
     SERVE_CONTROL_EXT_METHODS.clientMcpMessage,
-    { server: serverName, payload: message },
+    {
+      server: serverName,
+      payload: message,
+      ...(sessionId ? { sessionId } : {}),
+    },
   );
   const payload = (response as { payload?: unknown })['payload'];
   if (payload === undefined || payload === null) {
@@ -7986,9 +7991,9 @@ class QwenAgent implements Agent {
    * servers in this session share one callback — the `serverName` argument
    * routes to the right client-hosted server in the parent.
    */
-  private buildClientMcpSender(): SendSdkMcpMessage {
+  private buildClientMcpSender(sessionId?: string): SendSdkMcpMessage {
     return (serverName: string, message: JSONRPCMessage) =>
-      deliverClientMcpMessage(this.connection, serverName, message);
+      deliverClientMcpMessage(this.connection, serverName, message, sessionId);
   }
 
   private async newSessionConfig(
@@ -8166,7 +8171,7 @@ class QwenAgent implements Agent {
       // client-hosted (extension) MCP server added at runtime reaches the
       // daemon WS. Servers that aren't client-hosted never use this callback
       // (the daemon only adds SDK-type runtime servers for client MCP).
-      sendSdkMcpMessage: this.buildClientMcpSender(),
+      sendSdkMcpMessage: this.buildClientMcpSender(wiredSessionId),
     });
     // ACP sessions served to WebUI clients are interactive: MCP tools can
     // arrive progressively, but session creation/loading must not wait for a

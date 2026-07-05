@@ -132,7 +132,7 @@ export interface PendingSliceResult {
   /**
    * Number of leading source lines whose combined RENDERED height fits within
    * `budget`. May be 0 when even the first line/table alone overflows (the
-   * caller then renders nothing plus a "more" cue rather than an oversized row).
+   * caller then renders nothing rather than an oversized row).
    */
   keptLines: number;
   /** True when some trailing source lines were dropped to fit the budget. */
