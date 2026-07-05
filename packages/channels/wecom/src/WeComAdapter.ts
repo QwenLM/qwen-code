@@ -381,6 +381,7 @@ export class WeComChannel extends ChannelBase {
       chatId,
       envelope.threadId,
     );
+    let processStarted = false;
     try {
       if (!(await this.preflightInbound(envelope))) {
         process.stderr.write(
@@ -404,9 +405,16 @@ export class WeComChannel extends ChannelBase {
           ? '(image)'
           : `(file: ${attachments[0]?.fileName ?? 'file'})`;
       }
+      processStarted = true;
       await this.processInbound(envelope);
     } catch (err) {
-      if (messageId) this.seenMessages.delete(messageId);
+      if (messageId && !processStarted) {
+        this.seenMessages.delete(messageId);
+      } else if (messageId) {
+        process.stderr.write(
+          `[WeCom:${this.name}] message ${logMessageId} failed after processing started; dedup entry retained.\n`,
+        );
+      }
       throw err;
     } finally {
       if (messageId) this.inFlightMessages.delete(messageId);

@@ -1433,7 +1433,7 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
   });
 
-  it('rolls back message dedup when processing fails', async () => {
+  it('keeps message dedup when processing fails after side effects start', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -1462,7 +1462,10 @@ describe('WeComChannel', () => {
 
     client.emit('message.text', payload);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    await vi.waitFor(() => expect(channel.processes).toHaveBeenCalledTimes(2));
+    expect(channel.processes).toHaveBeenCalledTimes(1);
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] dropping duplicate message msg-process-fails (already seen).\n',
+    );
     stderr.mockRestore();
   });
 
