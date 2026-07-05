@@ -430,6 +430,15 @@
   display: none;
 }
 
+/* Empty (new-chat) state centers the welcome header + composer vertically via
+   `.appChatEmpty .chatPane { justify-content: center }`. For that to take effect
+   the wrapper must shrink to its content instead of filling the pane — the same
+   thing `.content` already does in this state. */
+.appChatEmpty .chatViewWrap {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
 .footer {
   position: relative;
   width: min(100%, var(--chat-shell-width));
