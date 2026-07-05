@@ -70,6 +70,7 @@ const {
       forkSession: vi.fn().mockResolvedValue({ launched: false }),
       sendShellCommand: vi.fn().mockResolvedValue(undefined),
       getStats: vi.fn().mockResolvedValue({}),
+      loadSession: vi.fn().mockResolvedValue(undefined),
     },
     mockWorkspaceActions: {
       loadSkillsStatus: vi.fn().mockResolvedValue({ skills: [] }),
@@ -165,12 +166,16 @@ vi.mock('./components/ChatEditor', async () => {
       ref: React.ForwardedRef<{
         clear: () => void;
         insertText: (text: string) => void;
+        focus: () => void;
       }>,
     ) {
       testState.latestChatEditorProps = props;
       React.useImperativeHandle(ref, () => ({
         clear: editorClear,
         insertText: vi.fn(),
+        // The panel focus effect calls editorRef.current?.focus() when a panel
+        // closes with no pending approval (e.g. resuming a session).
+        focus: vi.fn(),
       }));
       return React.createElement(
         'button',
@@ -377,6 +382,7 @@ beforeEach(() => {
   mockSessionActions.forkSession.mockResolvedValue({ launched: false });
   mockSessionActions.sendShellCommand.mockResolvedValue(undefined);
   mockSessionActions.getStats.mockResolvedValue({});
+  mockSessionActions.loadSession.mockResolvedValue(undefined);
   mockWorkspaceActions.loadSkillsStatus.mockResolvedValue({ skills: [] });
   mockWorkspaceActions.loadProviders.mockResolvedValue({ current: null });
   mockWorkspaceActions.loadPreflight.mockResolvedValue(null);
@@ -673,6 +679,25 @@ describe('App session callbacks', () => {
     });
 
     expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+  });
+
+  it('closes an open panel when resuming a session via /resume', async () => {
+    // Resuming a session must surface that chat, not leave it hidden behind an
+    // open Settings/Status panel — mirrors createNewSession / loadSidebarSession.
+    const { container } = renderApp();
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+
+    testState.prompt = '/resume session-2';
+    await clickSubmit(container);
+    await flush();
+
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+    expect(mockSessionActions.loadSession).toHaveBeenCalledWith('session-2');
   });
 
   it('dispatches rename only after the current session name changes', async () => {

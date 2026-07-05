@@ -3202,6 +3202,10 @@ export function App({
             const sessionId = text.slice(match[0].length).trim();
             if (sessionId) {
               closeMobileDrawer();
+              // Resuming a session means the user wants to see that chat, so
+              // close any open Settings/Status panel (no-op when already closed),
+              // consistent with createNewSession / loadSidebarSession.
+              closePanel();
               sessionActions.loadSession(sessionId).catch((error: unknown) => {
                 reportError(error, 'Failed to load session');
               });
@@ -3390,6 +3394,7 @@ export function App({
       echoOrDeferLocalCommand,
       branchCurrentSession,
       closeMobileDrawer,
+      closePanel,
       createNewSession,
       handleBusyGoalClear,
       handleGoalSlashCommand,
@@ -3869,6 +3874,7 @@ export function App({
               <ResumeDialog
                 onSelect={(sessionId) => {
                   closeMobileDrawer();
+                  closePanel();
                   sessionActions
                     .loadSession(sessionId)
                     .catch((error: unknown) => {
