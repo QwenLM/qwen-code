@@ -385,11 +385,10 @@ Some text before.
       expect(out).toContain('two');
     });
 
-    it('keeps a streaming frontier table horizontal instead of the vertical list', () => {
-      // A tall cell trips the vertical fallback, which would render the table as
-      // a `label: value` list and then flip to a horizontal table once it
-      // completes (a visible jump). The live streaming frontier table must stay
-      // horizontal; the committed render may fall back to vertical.
+    it('renders a tall-wrapping table the same way streaming and committed (no flip)', () => {
+      // The horizontal-vs-vertical decision is identical while pending and once
+      // committed, so a table never flips format mid-stream (which reads as a
+      // jump). A tall cell trips the vertical fallback in BOTH renders.
       const tallCell = Array.from({ length: 80 }, (_, i) => `w${i}`).join(' ');
       const text = `| Col |
 |---|
@@ -414,7 +413,8 @@ Some text before.
           />,
         ).lastFrame() ?? '';
 
-      expect(stripAnsi(streaming)).toContain('┌');
+      // Both vertical (no box border) — same format, no flip between the two.
+      expect(stripAnsi(streaming)).not.toContain('┌');
       expect(stripAnsi(committed)).not.toContain('┌');
     });
 

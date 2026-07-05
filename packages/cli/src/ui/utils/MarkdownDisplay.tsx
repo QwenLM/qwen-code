@@ -643,7 +643,6 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         aligns={tableAligns}
         enableInlineMath={renderVisualBlocks}
         isPending={isPending}
-        isStreamingFrontier={true}
         availableTerminalHeight={availableTerminalHeight}
       />,
     );
@@ -958,14 +957,6 @@ interface RenderTableProps {
   aligns?: ColumnAlign[];
   enableInlineMath?: boolean;
   isPending?: boolean;
-  /**
-   * True only for the table at the live streaming frontier — the one still
-   * being written at the end of a pending message. A table closed earlier in
-   * the same (still pending) message is already COMPLETE, so it must size its
-   * columns from every row immediately (isStreaming false) instead of staying
-   * frozen to the first row until the whole message finishes.
-   */
-  isStreamingFrontier?: boolean;
   availableTerminalHeight?: number;
 }
 
@@ -976,7 +967,6 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
   aligns,
   enableInlineMath = false,
   isPending = false,
-  isStreamingFrontier = false,
   availableTerminalHeight,
 }) => {
   const maxHeight =
@@ -991,7 +981,6 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
       aligns={aligns}
       enableInlineMath={enableInlineMath}
       maxHeight={maxHeight}
-      isStreaming={isPending && isStreamingFrontier}
     />
   );
 };

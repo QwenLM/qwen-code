@@ -70,16 +70,6 @@ interface TableRendererProps {
    * overflowing the viewport and triggering the scroll-to-top lock.
    */
   maxHeight?: number;
-  /**
-   * True while the table is still streaming (a pending live preview). Column
-   * widths always track the current rows (a wider row redraws the whole table),
-   * but the format is biased to horizontal: the table only falls back to the
-   * vertical `label: value` list when the terminal is genuinely too narrow, not
-   * because an early row wraps tall. This keeps a streaming table from briefly
-   * rendering as a vertical list and then flipping to a horizontal table (a
-   * visible jump) as more rows arrive.
-   */
-  isStreaming?: boolean;
 }
 
 /** Map Ink-compatible named colors to ANSI foreground codes */
@@ -446,7 +436,6 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   aligns,
   enableInlineMath = false,
   maxHeight,
-  isStreaming = false,
 }) => {
   const colCount = headers.length;
 
@@ -592,18 +581,14 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH,
     colCount * MIN_COLUMN_WIDTH + borderOverhead + SAFETY_MARGIN,
   );
-  // While the table is still streaming, bias toward the horizontal format: only
-  // fall back to vertical when the terminal is genuinely too narrow for the
-  // columns, NOT because an early row wraps tall. Otherwise a table that will
-  // end up horizontal briefly renders as a vertical `label: value` list and
-  // then flips (a visible jump) once more rows arrive / it completes.
-  // A zero-row table is the live streaming header box: always keep it horizontal
-  // (the header is short enough to fit). The vertical fallback iterates the rows,
-  // so with no rows it would render an empty string — a blank box — on a narrow
-  // terminal where the width trigger fires.
+  // The horizontal-vs-vertical decision is the SAME while streaming and once
+  // committed, so a table never flips format mid-stream (which reads as a jump).
+  // A zero-row table is the live streaming header box: never vertical — the
+  // vertical fallback iterates the rows and with none would render an empty
+  // string (a blank box) on a narrow terminal where the width trigger fires.
   const useVerticalFormat =
-    (rowMetrics.length > 0 && contentWidth < minHorizontalTableWidth) ||
-    (!isStreaming && maxRowLines > MAX_ROW_LINES);
+    rowMetrics.length > 0 &&
+    (contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES);
 
   // ── Helper: Get alignment for a column ──
   const getAlign = (colIndex: number): ColumnAlign =>

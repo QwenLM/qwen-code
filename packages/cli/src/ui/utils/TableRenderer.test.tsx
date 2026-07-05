@@ -931,49 +931,27 @@ describe('<TableRenderer />', () => {
           .find((l) => l.includes('┌')) ?? '';
       return stringWidth(line.trim());
     };
-    const renderStreaming = (rows: string[][]) =>
+    const render = (rows: string[][]) =>
       renderWithProviders(
-        <TableRenderer
-          headers={headers}
-          rows={rows}
-          contentWidth={80}
-          isStreaming
-        />,
+        <TableRenderer headers={headers} rows={rows} contentWidth={80} />,
       ).lastFrame() ?? '';
 
-    it('widens the streaming table when a wider row is appended (redraw on wider)', () => {
+    it('widens the table when a wider row is appended (redraw on wider)', () => {
       // Widths always track the current rows: appending a wider row re-sizes
       // (redraws) the whole table rather than staying frozen to the first row.
-      expect(topBorderWidth(renderStreaming(withWiderRow))).toBeGreaterThan(
-        topBorderWidth(renderStreaming(firstRowOnly)),
+      expect(topBorderWidth(render(withWiderRow))).toBeGreaterThan(
+        topBorderWidth(render(firstRowOnly)),
       );
     });
 
-    it('stays horizontal while streaming even when a row would wrap tall', () => {
-      // A cell tall enough to trip the vertical fallback (maxRowLines) must NOT
-      // flip a streaming table into the vertical `label: value` list — that
-      // brief list-then-table flip is a visible jump. contentWidth stays well
-      // above the narrow-terminal threshold so only the tall-row trigger differs.
+    it('picks the vertical format for a tall-wrapping table (no format flip)', () => {
+      // The horizontal-vs-vertical decision must not depend on a streaming flag,
+      // so a table never flips format mid-stream. A cell tall enough to trip the
+      // vertical fallback renders vertical, identically at every point.
       const tall = [
         [Array.from({ length: 80 }, (_, i) => `w${i}`).join(' '), 'y'],
       ];
-      const streaming =
-        renderWithProviders(
-          <TableRenderer
-            headers={headers}
-            rows={tall}
-            contentWidth={60}
-            isStreaming
-          />,
-        ).lastFrame() ?? '';
-      const completed =
-        renderWithProviders(
-          <TableRenderer headers={headers} rows={tall} contentWidth={60} />,
-        ).lastFrame() ?? '';
-      // Streaming keeps the horizontal box; the completed render may fall back
-      // to the vertical list for the tall cell.
-      expect(stripAnsi(streaming)).toContain('┌');
-      expect(stripAnsi(completed)).not.toContain('┌');
+      expect(stripAnsi(render(tall))).not.toContain('┌'); // vertical list
     });
   });
 });
