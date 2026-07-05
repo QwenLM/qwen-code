@@ -1353,6 +1353,69 @@ describe('runQwenServe runtime startup failures', () => {
     }
   });
 
+  it('shares one path lock registry across bridge and REST filesystem factories', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-roots-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const roots = [primary, secondary].map((root) =>
+      canonicalizeWorkspace(root),
+    );
+    const pathLocks: unknown[] = [];
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(
+      serverModule,
+      'resolveBoundWorkspacesFromIdeEnv',
+    ).mockImplementation((_primary, _ide, includeWorkspace) =>
+      includeWorkspace === undefined ? roots : roots.filter(includeWorkspace),
+    );
+    vi.spyOn(serverModule, 'resolveBridgeFsFactory').mockImplementation(
+      (input) => {
+        pathLocks.push(input.pathLocks);
+        return {} as ReturnType<typeof serverModule.resolveBridgeFsFactory>;
+      },
+    );
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue(express());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: primary,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        bootSettings: {},
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(pathLocks).toHaveLength(2);
+      expect(pathLocks[0]).toBeDefined();
+      expect(pathLocks[0]).toBe(pathLocks[1]);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('excludes secondary workspace roots when runtime trust settings are unavailable', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-roots-')),

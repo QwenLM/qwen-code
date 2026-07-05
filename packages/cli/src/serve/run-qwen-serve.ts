@@ -34,6 +34,7 @@ import type {
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
+import { PathMutexRegistry } from './fs/workspace-file-system.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
@@ -2089,6 +2090,7 @@ export async function runQwenServe(
       secondary: boundWorkspaces.slice(1),
       ideEnvPresent: !!process.env['QWEN_CODE_IDE_WORKSPACE_PATH'],
     });
+    const sharedPathLocks = new PathMutexRegistry();
     const fsFactory = runtime.resolveBridgeFsFactory({
       // Secondary roots share a write-capable factory only after their own
       // folder trust check passes; untrusted secondary roots stay outside.
@@ -2096,6 +2098,7 @@ export async function runQwenServe(
       injected: deps.fsFactory,
       trusted: trustedWorkspace,
       emit: deps.fsAuditEmit,
+      pathLocks: sharedPathLocks,
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
     const channelFactory = runtime.createSpawnChannelFactory({
@@ -2285,6 +2288,7 @@ export async function runQwenServe(
         boundWorkspaces: [boundWorkspace],
         trusted: trustedWorkspace,
         emit: deps.fsAuditEmit,
+        pathLocks: sharedPathLocks,
         ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
       }),
       daemonLog,

@@ -268,6 +268,8 @@ export interface CreateWorkspaceFileSystemFactoryDeps {
   includeRawPaths?: boolean;
   /** Custom AI ignore files from context.fileFiltering.customIgnoreFiles. */
   customIgnoreFiles?: string[];
+  /** Optional shared write-lock registry for multiple daemon entrypoints. */
+  pathLocks?: PathMutexRegistry;
 }
 
 /**
@@ -312,7 +314,7 @@ export function createWorkspaceFileSystemFactory(
     includeRawPaths: deps.includeRawPaths,
   });
   const lowFs = new StandardFileSystemService();
-  const pathLocks = new PathMutexRegistry();
+  const pathLocks = deps.pathLocks ?? new PathMutexRegistry();
 
   return {
     assertCanWrite() {
@@ -1305,7 +1307,7 @@ export function isContentHash(value: unknown): value is ContentHash {
   return typeof value === 'string' && CONTENT_HASH_RE.test(value);
 }
 
-class PathMutexRegistry {
+export class PathMutexRegistry {
   private readonly tails = new Map<string, Promise<void>>();
 
   async runExclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
