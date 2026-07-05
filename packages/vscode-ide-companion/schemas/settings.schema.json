@@ -550,6 +550,11 @@
       "type": "string",
       "default": ""
     },
+    "modelFallbacks": {
+      "description": "Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Example: \"qwen-plus,qwen-turbo\". Set via CLI with --fallback-model.",
+      "type": "string",
+      "default": ""
+    },
     "voiceModel": {
       "description": "Model used for voice transcription. Set with /model --voice. Leave empty to keep voice dictation disabled until a voice model is selected.",
       "type": "string",

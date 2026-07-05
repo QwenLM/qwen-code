@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type {
   ServerGeminiToolCallRequestEvent,
   ServerGeminiErrorEvent,
+  ServerGeminiModelFallbackEvent,
 } from './turn.js';
 import {
   CompressionStatus,
@@ -331,6 +332,73 @@ describe('Turn', () => {
         expect.stringMatching(/^tool2-\d{13}-\w{10,}$/),
       );
       expect(turn.pendingToolCalls[1]).toEqual(event2.value);
+    });
+
+    it('clears response id state when a model fallback occurs', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            responseId: 'primary-response',
+            functionCalls: [
+              {
+                id: 'primary-call',
+                name: 'tool1',
+                args: {},
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+        yield {
+          type: StreamEventType.MODEL_FALLBACK,
+          info: {
+            fromModel: 'primary-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          },
+        };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                id: 'fallback-call',
+                name: 'tool2',
+                args: {},
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      const toolCalls = events.filter(
+        (event): event is ServerGeminiToolCallRequestEvent =>
+          event.type === GeminiEventType.ToolCallRequest,
+      );
+      const fallbackEvent = events.find(
+        (event): event is ServerGeminiModelFallbackEvent =>
+          event.type === GeminiEventType.ModelFallback,
+      );
+      expect(fallbackEvent).toEqual({
+        type: GeminiEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        statusCode: undefined,
+        fallbackIndex: 1,
+      });
+      expect(toolCalls[0]!.value.response_id).toBe('primary-response');
+      expect(toolCalls[1]!.value.response_id).toBeUndefined();
+      expect(turn.pendingToolCalls).toEqual([toolCalls[1]!.value]);
     });
 
     it('should yield UserCancelled event if signal is aborted', async () => {
