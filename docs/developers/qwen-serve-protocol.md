@@ -325,6 +325,12 @@ Response shape:
     },
     "perf": {
       "eventLoop": { "meanMs": 0, "p50Ms": 0, "p99Ms": 0, "maxMs": 0 },
+      "promptQueueWait": {
+        "count": 0,
+        "meanMs": 0,
+        "maxMs": 0,
+        "lastMs": null
+      },
       "pipe": {
         "inbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 },
         "outbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 }
@@ -332,6 +338,8 @@ Response shape:
     },
     "activity": {
       "activePrompts": 0,
+      "pendingPrompts": 0,
+      "queuedPrompts": 0,
       "lastActivityAt": null,
       "idleSinceMs": null
     }
@@ -340,8 +348,8 @@ Response shape:
 ```
 
 `runtime.perf` is optional. When present, it reports daemon-process event loop
-lag and daemon-child pipe byte counters only; ACP child event loop lag is not
-included in `/daemon/status`.
+lag, prompt FIFO queue wait samples, and daemon-child pipe byte counters only;
+ACP child event loop lag is not included in `/daemon/status`.
 
 `status` is `error` if any issue has error severity, `warning` if any issue has
 warning severity, otherwise `ok`. Issue codes are stable and include
@@ -354,7 +362,7 @@ mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
 runtime mount fails, it reports `daemon_runtime_failed` while non-status
 runtime routes return `503`.
 
-`runtime.activity` reports daemon-wide prompt activity. `activePrompts` counts sessions with an in-flight prompt. `lastActivityAt` is the ISO 8601 timestamp of the last prompt start/end or session spawn; `null` when the daemon has never processed any activity since boot. `idleSinceMs` is computed from `lastActivityAt` at response generation time.
+`runtime.activity` reports daemon-wide prompt activity. `activePrompts` counts sessions with an in-flight prompt. `pendingPrompts` counts all accepted prompts that have not settled yet, including the running prompt and FIFO-waiting prompts. `queuedPrompts` counts FIFO-waiting prompts that have been accepted but not dispatched. `lastActivityAt` is the ISO 8601 timestamp of the last prompt start/end or session spawn; `null` when the daemon has never processed any activity since boot. `idleSinceMs` is computed from `lastActivityAt` at response generation time.
 
 `runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
 not the channel-adapter worker. Daemon-managed channels use
@@ -1188,6 +1196,13 @@ Response:
 
 `attached: true` means a session for that workspace already existed and you're now sharing it.
 
+Multi-client integrations that want independent conversations should send
+`sessionScope: "thread"` on each `POST /session`. Use the default `single`
+scope only when clients intentionally share one collaborative session; shared
+sessions serialize prompts through one FIFO, visible through
+`/daemon/status` as `runtime.activity.pendingPrompts` and
+`runtime.activity.queuedPrompts`.
+
 Concurrent `POST /session` calls for the same workspace are **coalesced** to one spawn — both callers get the same `sessionId`, exactly one reports `attached: false`. If the underlying spawn fails (init timeout, malformed agent output, OOM), **all coalesced callers receive the same error** — the in-flight slot is cleared so a follow-up call can retry from scratch.
 
 > ⚠️ **`modelServiceId` rejection on a fresh session is silent on the
@@ -1487,6 +1502,11 @@ curl -X POST http://127.0.0.1:4170/session/$SID/cancel
 ```
 
 > **Multi-prompt contract:** cancel only affects the active prompt. Any prompts the same client previously POSTed and are still queued behind the active one will continue to execute. Multi-prompt queueing is a daemon-introduced behavior (not in ACP spec); the contract for queued prompts is "they keep running unless you cancel each, or kill the session via channel exit".
+
+If queued prompts are unexpected in a multi-client deployment, first confirm
+whether callers are sharing a default `sessionScope: "single"` session. For
+independent per-thread conversations, create sessions with
+`sessionScope: "thread"` so prompts serialize only within that thread.
 
 ### `DELETE /session/:id`
 
