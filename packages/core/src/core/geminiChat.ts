@@ -18,7 +18,11 @@ import type {
   GenerateContentResponseUsageMetadata,
 } from '@google/genai';
 import { createUserContent, FinishReason } from '@google/genai';
-import { retryWithBackoff, isUnattendedMode } from '../utils/retry.js';
+import {
+  retryWithBackoff,
+  isUnattendedMode,
+  type HeartbeatInfo,
+} from '../utils/retry.js';
 import { getErrorStatus, isAbortError } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
 import { parseAndFormatApiError } from '../utils/errorParsing.js';
@@ -28,11 +32,15 @@ import {
   isRateLimitError,
   type RetryInfo,
 } from '../utils/rateLimit.js';
-import { classifyRetryError } from '../utils/retryErrorClassification.js';
+import {
+  classifyRetryError,
+  isFallbackEligible,
+} from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
+import type { ContentGenerator } from './contentGenerator.js';
 import {
   DEFAULT_TOKEN_LIMIT,
-  ESCALATED_MAX_TOKENS,
+  escalatedOutputTokenLimit,
   parsePositiveIntegerEnvValue,
   tokenLimit,
 } from './tokenLimits.js';
@@ -246,6 +254,23 @@ export enum StreamEventType {
    * agent UI, subagent loop) can surface it without each call site running
    * its own compaction step. */
   COMPRESSED = 'compressed',
+  /** Emitted when the primary model (or a prior fallback) exhausted its retry
+   * budget on a capacity/availability error and the system is switching to the
+   * next fallback model. The UI should discard partial content and display a
+   * notification about the model switch. */
+  MODEL_FALLBACK = 'model_fallback',
+}
+
+/** Information about a model fallback transition. */
+export interface ModelFallbackInfo {
+  /** The model that exhausted its retry budget. */
+  fromModel: string;
+  /** The model the system is switching to. */
+  toModel: string;
+  /** HTTP status code that triggered the fallback (e.g. 429, 503, 529). */
+  statusCode?: number;
+  /** 1-based index of the fallback in the configured fallback chain. */
+  fallbackIndex: number;
 }
 
 export type StreamEvent =
@@ -260,7 +285,8 @@ export type StreamEvent =
       /** Set when the retry raised the automatic max output token limit. */
       maxOutputTokensEscalated?: number;
     }
-  | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo };
+  | { type: StreamEventType.COMPRESSED; info: ChatCompressionInfo }
+  | { type: StreamEventType.MODEL_FALLBACK; info: ModelFallbackInfo };
 
 /**
  * Options for retrying due to invalid content from the model.
@@ -1459,6 +1485,21 @@ export class GeminiChat {
     this.pendingPartialAssistantRecord = null;
   }
 
+  private popPendingPartialAssistantTurn(): void {
+    const idx = this.pendingPartialAssistantTurnIndex;
+    if (idx === null) return;
+    if (this.history.length > idx && this.history[idx]?.role === 'model') {
+      this.history.splice(idx, 1);
+    } else {
+      debugLogger.warn(
+        `[PARTIAL_POP] Splice skipped: idx=${idx}, ` +
+          `historyLength=${this.history.length}, ` +
+          `roleAtIdx=${this.history[idx]?.role ?? 'undefined'}`,
+      );
+    }
+    this.clearPendingPartialState();
+  }
+
   /**
    * Creates a new GeminiChat instance.
    *
@@ -1792,9 +1833,12 @@ export class GeminiChat {
     //
     // The subagent path sets params.config.maxOutputTokens explicitly; the
     // interactive path leaves it undefined but may still use up to
-    // max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')) across MAX_TOKENS
+    // escalatedOutputTokenLimit(model, contextWindowSize) across MAX_TOKENS
     // handling. Pre-reserving that space prevents the dead zone between the
     // adjusted auto threshold and an unadjusted hard threshold (issue #5950).
+    // The escalation limit is capped at half the context window so the
+    // reservation cannot collapse the input budget on small custom windows
+    // (issue #6144).
     const cgConfigForThresholds = this.config.getContentGeneratorConfig();
     const parsedEnvMaxTokensForThreshold = parsePositiveIntegerEnvValue(
       process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
@@ -1809,7 +1853,10 @@ export class GeminiChat {
         ? (cgConfigForThresholds?.samplingParams?.max_tokens ??
           parsedEnvMaxTokensForThreshold ??
           0)
-        : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')));
+        : escalatedOutputTokenLimit(
+            model,
+            cgConfigForThresholds?.contextWindowSize,
+          ));
     let currentUserContent: Content | undefined;
     try {
       // The send-lock above is held but the generator's `finally` (which
@@ -2055,6 +2102,7 @@ export class GeminiChat {
         let transportStreamRetryCount = 0;
         let reactiveCompressionAttempted = false;
         let suppressNextRetryEvent = false;
+        let streamYieldedAnyChunk = false;
 
         // Read per-config overrides; fall back to built-in defaults.
         const cgConfig = self.config.getContentGeneratorConfig();
@@ -2103,6 +2151,7 @@ export class GeminiChat {
             lastFinishReason = undefined;
             for await (const chunk of stream) {
               streamYieldedChunk = true;
+              streamYieldedAnyChunk = true;
               const fr = chunk.candidates?.[0]?.finishReason;
               if (fr) lastFinishReason = fr;
               yield { type: StreamEventType.CHUNK, value: chunk };
@@ -2112,54 +2161,6 @@ export class GeminiChat {
             break;
           } catch (error) {
             lastError = error;
-
-            // If `processStreamResponse` persisted a partial assistant turn
-            // (mid-stream error after a `functionCall` was already
-            // yielded), every retry-and-continue path below must drop
-            // that turn first; otherwise the retry's response lands as
-            // a second consecutive model turn with an orphan tool_use
-            // (the wedge — see the canonical note above
-            // `ORPHAN_TOOL_USE_REPAIR_REASON`). Paths that `break`
-            // (unretryable) keep the partial.
-            const popPartialIfPushed = () => {
-              const idx = self.pendingPartialAssistantTurnIndex;
-              if (idx === null) return;
-              if (
-                self.history.length > idx &&
-                self.history[idx]?.role === 'model'
-              ) {
-                self.history.splice(idx, 1);
-              } else {
-                // Marker was set but the entry it pointed at is gone or
-                // is no longer a `model` turn. Today this can't happen:
-                // every history-mutation path (clearHistory, addHistory,
-                // setHistory, truncateHistory, stripThoughtsFromHistory,
-                // stripOrphanedUserEntriesFromHistory) calls
-                // clearPendingPartialState() in lockstep, so the marker
-                // is null whenever the index basis is invalidated.
-                // Logging the mismatch makes the invariant observable —
-                // without this, a future caller that mutates history
-                // without resetting the marker would silently leave a
-                // stale partial in `this.history` (popPartialIfPushed
-                // skipping the splice) AND the field-level invariant
-                // that "marker non-null ⇒ a real partial sits at idx"
-                // would be quietly violated. With the warn, anyone
-                // investigating a stale-partial wedge sees a log line
-                // pointing straight at the offending caller.
-                debugLogger.warn(
-                  `[PARTIAL_POP] Splice skipped: idx=${idx}, ` +
-                    `historyLength=${self.history.length}, ` +
-                    `roleAtIdx=${self.history[idx]?.role ?? 'undefined'}`,
-                );
-              }
-              // Drop both markers in lockstep — the deferred chat-
-              // recording record must be discarded alongside the
-              // in-memory splice so the JSONL transcript also drops the
-              // failed attempt. See the field-level comment on
-              // `pendingPartialAssistantRecord` for the failure mode
-              // this prevents.
-              self.clearPendingPartialState();
-            };
 
             // Handle rate-limit / throttling errors returned as stream content.
             // These arrive as StreamContentError with finish_reason="error_finish"
@@ -2188,7 +2189,7 @@ export class GeminiChat {
                 // Discard any partial assistant turn from the failed attempt
                 // before scheduling the retry, so a stale partial does not leak
                 // into history or the JSONL transcript.
-                popPartialIfPushed();
+                self.popPendingPartialAssistantTurn();
                 rateLimitRetryCount++;
                 const delayMs = getRateLimitRetryDelayMs(rateLimitRetryCount, {
                   ...RATE_LIMIT_RETRY_OPTIONS,
@@ -2248,7 +2249,7 @@ export class GeminiChat {
               transportStreamRetryCount <
                 TRANSPORT_STREAM_RETRY_CONFIG.maxRetries
             ) {
-              popPartialIfPushed();
+              self.popPendingPartialAssistantTurn();
               transportStreamRetryCount++;
               const delayMs =
                 TRANSPORT_STREAM_RETRY_CONFIG.initialDelayMs *
@@ -2318,7 +2319,7 @@ export class GeminiChat {
                     // cleared the marker. Kept for uniformity with the
                     // other retry branches in case a future in-place
                     // tryCompress stops resetting it.
-                    popPartialIfPushed();
+                    self.popPendingPartialAssistantTurn();
                     requestContents =
                       self.getRequestHistory(currentUserContent);
                     debugLogger.info(
@@ -2390,7 +2391,7 @@ export class GeminiChat {
               isTransientStreamError &&
               invalidStreamRetryCount < INVALID_STREAM_RETRY_CONFIG.maxRetries
             ) {
-              popPartialIfPushed();
+              self.popPendingPartialAssistantTurn();
               invalidStreamRetryCount++;
               const delayMs =
                 INVALID_STREAM_RETRY_CONFIG.initialDelayMs *
@@ -2433,7 +2434,7 @@ export class GeminiChat {
             const isContentError = error instanceof InvalidStreamError;
             if (isContentError) {
               if (attempt < INVALID_CONTENT_RETRY_OPTIONS.maxAttempts - 1) {
-                popPartialIfPushed();
+                self.popPendingPartialAssistantTurn();
                 logContentRetry(
                   self.config,
                   new ContentRetryEvent(
@@ -2456,19 +2457,22 @@ export class GeminiChat {
 
         // Max output tokens handling: if the retry loop succeeded but hit
         // MAX_TOKENS, retry once at an escalated output limit only when that
-        // would raise the effective initial limit. When the initial limit is
-        // already at or above the escalation floor (for example 64K+ output
-        // models), skip the no-op escalation call but still run continuation
-        // recovery on the partial response.
+        // would raise the effective initial limit. The escalation limit is
+        // capped at half the context window so the retry itself cannot
+        // overflow small custom windows (issue #6144). Must match
+        // effectiveReservedOutput above, which pre-reserves this space.
+        // When the initial limit is already at or above the escalation floor
+        // (for example 64K+ output models), skip the no-op escalation call
+        // but still run continuation recovery on the partial response.
         // Placed outside the retry loop so that any errors from the
         // escalated/recovery streams propagate directly (not caught by retry
         // logic).
         const requestedMaxOutputTokens = params.config?.maxOutputTokens;
         const effectiveInitialMaxOutputTokens =
           requestedMaxOutputTokens ?? tokenLimit(model, 'output');
-        const escalatedLimit = Math.max(
-          ESCALATED_MAX_TOKENS,
-          tokenLimit(model, 'output'),
+        const escalatedLimit = escalatedOutputTokenLimit(
+          model,
+          cgConfigForThresholds?.contextWindowSize,
         );
         const shouldEscalateMaxOutputTokens =
           effectiveInitialMaxOutputTokens < escalatedLimit;
@@ -2674,7 +2678,222 @@ export class GeminiChat {
               ),
             );
           }
-          throw lastError;
+
+          // === Model fallback chain ===
+          // When the primary model's retries exhaust on a capacity/availability
+          // error, try configured fallback models in sequence. Each fallback
+          // model gets its own fresh retry budget.
+          //
+          // Constraints:
+          // - Do NOT trigger fallback when persistent mode is active
+          //   (QWEN_CODE_UNATTENDED_RETRY) — persistent mode retries the primary
+          //   model indefinitely by design.
+          // - Maximum 3 fallback transitions (capped by config normalization).
+          // - Fallback is only for capacity/availability errors (429/503/529),
+          //   not for auth/billing/client errors.
+          const fallbackModels = self.config.getModelFallbacks();
+
+          if (
+            fallbackModels.length > 0 &&
+            !isUnattendedMode() &&
+            !streamYieldedAnyChunk
+          ) {
+            let currentErrorClassification = classifyRetryError(lastError, {
+              authType: cgConfig?.authType,
+              extraRetryErrorCodes,
+            });
+
+            if (isFallbackEligible(currentErrorClassification)) {
+              let fallbackSucceeded = false;
+              let fallbackIndex = 0;
+              let currentModel = model;
+              let currentResolvedModel = cgConfig?.model ?? model;
+              let fallbackStreamYieldedAnyChunk = false;
+
+              for (const fallbackModelId of fallbackModels) {
+                // Skip fallback models that match the current/primary model
+                if (
+                  fallbackModelId === model ||
+                  fallbackModelId === currentModel
+                ) {
+                  debugLogger.warn(
+                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
+                      `same as current model.`,
+                  );
+                  continue;
+                }
+
+                // Resolve the fallback model's content generator
+                let fallbackGenerator: ContentGenerator;
+                let fallbackRetryAuthType: string | undefined;
+                let fallbackRetryErrorCodes: readonly number[] | undefined;
+                let resolvedFallbackModel: string;
+                try {
+                  const resolved = await self.config
+                    .getBaseLlmClient()
+                    .resolveForModel(fallbackModelId, { failClosed: true });
+                  fallbackGenerator = resolved.contentGenerator;
+                  fallbackRetryAuthType = resolved.retryAuthType;
+                  fallbackRetryErrorCodes = resolved.retryErrorCodes;
+                  resolvedFallbackModel = resolved.model;
+                } catch (resolveError) {
+                  if (isAbortError(resolveError)) throw resolveError;
+                  const resolveErrorMessage =
+                    resolveError instanceof Error
+                      ? resolveError.message
+                      : String(resolveError);
+                  debugLogger.warn(
+                    `[FALLBACK] Failed to resolve fallback model ` +
+                      `"${fallbackModelId}": ` +
+                      `${resolveErrorMessage}. ` +
+                      `Trying next fallback.`,
+                  );
+                  continue;
+                }
+
+                if (resolvedFallbackModel === currentResolvedModel) {
+                  debugLogger.warn(
+                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
+                      `resolved model "${resolvedFallbackModel}" matches ` +
+                      `the current model.`,
+                  );
+                  continue;
+                }
+                fallbackIndex++;
+
+                debugLogger.warn(
+                  `[FALLBACK] Model "${currentModel}" exhausted retries ` +
+                    `(reason: ${currentErrorClassification.reason}, ` +
+                    `status: ${currentErrorClassification.statusCode ?? 'unknown'}). ` +
+                    `Switching to fallback model "${fallbackModelId}" ` +
+                    `(${fallbackIndex}/${fallbackModels.length}).`,
+                );
+
+                // Emit fallback event so the UI can notify the user
+                yield {
+                  type: StreamEventType.MODEL_FALLBACK,
+                  info: {
+                    fromModel: currentModel,
+                    toModel: resolvedFallbackModel,
+                    statusCode: currentErrorClassification.statusCode,
+                    fallbackIndex,
+                  },
+                };
+
+                // Remove the partial assistant turn from history before the
+                // fallback model starts producing its own response.
+                self.popPendingPartialAssistantTurn();
+
+                // Run the fallback model through the existing API-call wiring.
+                let currentFallbackYieldedAnyChunk = false;
+                try {
+                  for await (const event of self.makeFallbackStream(
+                    resolvedFallbackModel,
+                    requestContents,
+                    params,
+                    prompt_id,
+                    fallbackGenerator,
+                    fallbackRetryAuthType,
+                    fallbackRetryErrorCodes,
+                  )) {
+                    currentFallbackYieldedAnyChunk = true;
+                    fallbackStreamYieldedAnyChunk = true;
+                    yield event;
+                  }
+
+                  // Fallback succeeded
+                  lastError = null;
+                  fallbackSucceeded = true;
+                  debugLogger.info(
+                    `[FALLBACK] Successfully completed request with ` +
+                      `fallback model "${resolvedFallbackModel}".`,
+                  );
+                  return;
+                } catch (fallbackError) {
+                  if (isAbortError(fallbackError)) throw fallbackError;
+                  lastError = fallbackError;
+
+                  if (currentFallbackYieldedAnyChunk) {
+                    self.popPendingPartialAssistantTurn();
+                    debugLogger.warn(
+                      `[FALLBACK] Fallback model "${resolvedFallbackModel}" ` +
+                        `failed after emitting output. Popped the partial ` +
+                        `assistant turn and stopped the fallback chain to ` +
+                        `avoid duplicating user-visible output.`,
+                    );
+                    break;
+                  }
+
+                  // Classify the fallback error to decide whether to continue
+                  // to the next fallback or give up
+                  const fallbackClassification = classifyRetryError(
+                    fallbackError,
+                    {
+                      authType: fallbackRetryAuthType,
+                      extraRetryErrorCodes: fallbackRetryErrorCodes,
+                    },
+                  );
+
+                  const canTryNextFallback = isFallbackEligible(
+                    fallbackClassification,
+                  );
+                  debugLogger.warn(
+                    `[FALLBACK] Fallback model "${resolvedFallbackModel}" also ` +
+                      `failed (reason: ${fallbackClassification.reason}, ` +
+                      `status: ${fallbackClassification.statusCode ?? 'unknown'}). ` +
+                      `${canTryNextFallback ? 'Checking remaining fallbacks.' : 'Stopping fallback chain.'}`,
+                  );
+
+                  currentModel = resolvedFallbackModel;
+                  currentResolvedModel = resolvedFallbackModel;
+                  currentErrorClassification = fallbackClassification;
+
+                  // Only continue to next fallback if this error is also
+                  // fallback-eligible. Auth/client errors should fail immediately.
+                  if (!canTryNextFallback) {
+                    debugLogger.warn(
+                      `[FALLBACK] Error from "${resolvedFallbackModel}" is not ` +
+                        `fallback-eligible (${fallbackClassification.reason}). ` +
+                        `Stopping fallback chain.`,
+                    );
+                    break;
+                  }
+                }
+              }
+
+              if (!fallbackSucceeded) {
+                if (!fallbackStreamYieldedAnyChunk) {
+                  self.popPendingPartialAssistantTurn();
+                }
+                debugLogger.warn(
+                  '[FALLBACK] Fallback chain exhausted without success. ' +
+                    'Throwing last error.',
+                );
+              }
+            } else {
+              debugLogger.warn(
+                '[FALLBACK] Fallback chain skipped: primary error is not ' +
+                  'fallback-eligible ' +
+                  `(reason: ${currentErrorClassification.reason}, ` +
+                  `diagnosis: ${currentErrorClassification.diagnosis}, ` +
+                  `status: ${currentErrorClassification.statusCode ?? 'unknown'}, ` +
+                  `error: ${lastError instanceof Error ? lastError.message : String(lastError)}).`,
+              );
+            }
+          } else if (
+            fallbackModels.length > 0 &&
+            !isUnattendedMode() &&
+            streamYieldedAnyChunk
+          ) {
+            debugLogger.warn(
+              '[FALLBACK] Fallback chain skipped because the primary model ' +
+                'already emitted user-visible output.',
+            );
+          }
+
+          if (lastError) {
+            throw lastError;
+          }
         }
       } finally {
         sleepInhibitorHandle.release();
@@ -2705,14 +2924,30 @@ export class GeminiChat {
     })();
   }
 
+  /**
+   * Makes an API call with retry logic and returns the processed stream.
+   *
+   * When called without `overrides`, uses the session's primary content
+   * generator and provider config (the common path for the main model).
+   * Pass `overrides` to run against a different content generator — used
+   * by the fallback chain to call alternative models without duplicating
+   * the retry wiring.
+   */
   private async makeApiCallAndProcessStream(
     model: string,
     requestContents: Content[],
     params: SendMessageParameters,
     prompt_id: string,
+    overrides?: {
+      contentGenerator: ContentGenerator;
+      retryAuthType?: string;
+      retryErrorCodes?: readonly number[];
+    },
   ): Promise<AsyncGenerator<GenerateContentResponse>> {
+    const generator =
+      overrides?.contentGenerator ?? this.config.getContentGenerator();
     const apiCall = () =>
-      this.config.getContentGenerator().generateContentStream(
+      generator.generateContentStream(
         {
           model,
           contents: requestContents,
@@ -2721,7 +2956,12 @@ export class GeminiChat {
         prompt_id,
       );
     const cgConfig = this.config.getContentGeneratorConfig();
-    const extraRetryErrorCodes = cgConfig?.retryErrorCodes;
+    const authType = overrides?.retryAuthType ?? cgConfig?.authType;
+    const extraRetryErrorCodes =
+      overrides?.retryErrorCodes ?? cgConfig?.retryErrorCodes;
+    // Fallback models never enter persistent retry mode — persistent mode
+    // is the caller's explicit opt-in for the primary model only.
+    const persistentMode = overrides ? false : isUnattendedMode();
     const streamResponse = await retryWithBackoff(apiCall, {
       shouldRetryOnError: (error: unknown) => {
         if (error instanceof Error) {
@@ -2741,15 +2981,19 @@ export class GeminiChat {
 
         return false;
       },
-      authType: cgConfig?.authType,
+      authType,
       extraRetryErrorCodes,
-      persistentMode: isUnattendedMode(),
+      persistentMode,
       signal: params.config?.abortSignal,
-      heartbeatFn: (info) => {
-        process.stderr.write(
-          `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
-        );
-      },
+      ...(persistentMode
+        ? {
+            heartbeatFn: (info: HeartbeatInfo) => {
+              process.stderr.write(
+                `[qwen-code] Waiting for API capacity... attempt ${info.attempt}, retry in ${Math.ceil(info.remainingMs / 1000)}s\n`,
+              );
+            },
+          }
+        : {}),
       onRetry: (info) => {
         logApiRetry(
           this.config,
@@ -2767,6 +3011,28 @@ export class GeminiChat {
     });
 
     return this.processStreamResponse(model, streamResponse);
+  }
+
+  private async *makeFallbackStream(
+    model: string,
+    requestContents: Content[],
+    params: SendMessageParameters,
+    prompt_id: string,
+    contentGenerator: ContentGenerator,
+    retryAuthType?: string,
+    retryErrorCodes?: readonly number[],
+  ): AsyncGenerator<StreamEvent> {
+    const stream = await this.makeApiCallAndProcessStream(
+      model,
+      requestContents,
+      params,
+      prompt_id,
+      { contentGenerator, retryAuthType, retryErrorCodes },
+    );
+
+    for await (const chunk of stream) {
+      yield { type: StreamEventType.CHUNK, value: chunk };
+    }
   }
 
   /**
