@@ -1182,7 +1182,7 @@ describe('gemini.tsx main function kitty protocol', () => {
       expect.any(Object),
       {
         connectIde: false,
-        initializeTelemetry: true,
+        initializeTelemetry: false,
       },
     );
     expect(mockStartEarlyStartupPrefetches).toHaveBeenCalledWith(
@@ -1646,13 +1646,16 @@ describe('startInteractiveUI', () => {
       mockStartupWarnings,
       mockWorkspaceRoot,
       mockInitializationResult,
-      { postRenderConnectIde: false },
+      {
+        postRenderConnectIde: false,
+        postRenderInitializeTelemetry: false,
+      },
     );
 
     expect(mockStartPostRenderPrefetches).toHaveBeenCalledWith(
       mockConfig,
       mockSettings,
-      { connectIde: false, initializeTelemetry: true },
+      { connectIde: false, initializeTelemetry: false },
     );
   });
 

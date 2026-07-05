@@ -1485,7 +1485,7 @@ describe('loadCliConfig telemetry', () => {
     expect(config.getTelemetryEnabled()).toBe(true);
   });
 
-  it('should defer telemetry for prompt-interactive startup', async () => {
+  it('should initialize telemetry before prompt-interactive startup', async () => {
     process.argv = [
       'node',
       'script.js',
@@ -1500,7 +1500,7 @@ describe('loadCliConfig telemetry', () => {
     expect(mockConfigConstructorParams).toHaveBeenCalledWith(
       expect.objectContaining({
         question: 'hello from prompt-interactive',
-        deferTelemetryInitialization: true,
+        deferTelemetryInitialization: false,
       }),
     );
   });

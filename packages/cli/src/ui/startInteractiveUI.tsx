@@ -44,6 +44,7 @@ const debugLogger = createDebugLogger('STARTUP');
 
 export interface StartInteractiveUIOptions {
   postRenderConnectIde?: boolean;
+  postRenderInitializeTelemetry?: boolean;
 }
 
 export async function startInteractiveUI(
@@ -201,7 +202,7 @@ export async function startInteractiveUI(
   profileCheckpoint('first_paint');
   startPostRenderPrefetches(config, settings, {
     connectIde: options.postRenderConnectIde ?? true,
-    initializeTelemetry: true,
+    initializeTelemetry: options.postRenderInitializeTelemetry ?? true,
   });
 
   registerCleanup(async () => {
