@@ -97,6 +97,41 @@ describe('ChannelLoopMcpServer', () => {
     },
   );
 
+  it.each(['true', 1])(
+    'treats serialized true recurring value %s as recurring',
+    async (recurring) => {
+      const create = vi.fn().mockResolvedValue('Loop job-1: * * * * *');
+      const server = new ChannelLoopMcpServer({
+        create,
+        list: vi.fn(),
+        cancel: vi.fn(),
+      });
+
+      await server.handleMessage(
+        {
+          jsonrpc: '2.0',
+          id: 2,
+          method: 'tools/call',
+          params: {
+            name: 'channel_loop_create',
+            arguments: {
+              cron: '* * * * *',
+              prompt: 'drink water',
+              recurring,
+            },
+          },
+        },
+        { sessionId: 's-1' },
+      );
+
+      expect(create).toHaveBeenCalledWith('s-1', {
+        cron: '* * * * *',
+        prompt: 'drink water',
+        recurring: true,
+      });
+    },
+  );
+
   it('routes list calls with the current channel session id', async () => {
     const list = vi.fn().mockResolvedValue('No loops.');
     const server = new ChannelLoopMcpServer({

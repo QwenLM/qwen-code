@@ -27,6 +27,7 @@ import {
   WORKSPACE_MCP_RUNTIME_ADD_METHOD,
   type JsonRpcMessage,
 } from './ChannelLoopTools.js';
+import { sanitizeLogText } from './sanitize.js';
 export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
 
 const MID_TURN_QUEUE_DRAIN_METHOD = 'craft/drainMidTurnQueue';
@@ -454,5 +455,7 @@ function isSkippedMcpRegistration(result: unknown): boolean {
 function formatSkippedRegistrationReason(result: unknown): string {
   if (typeof result !== 'object' || result === null) return '.';
   const reason = (result as { reason?: unknown }).reason;
-  return typeof reason === 'string' && reason.length > 0 ? `: ${reason}` : '.';
+  return typeof reason === 'string' && reason.length > 0
+    ? `: ${sanitizeLogText(reason, 256)}`
+    : '.';
 }

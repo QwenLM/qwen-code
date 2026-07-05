@@ -177,6 +177,7 @@ function readCreateInput(
 function readRecurring(value: unknown): boolean | undefined {
   if (typeof value === 'boolean') return value;
   if (value === 'false' || value === 0) return false;
+  if (value === 'true' || value === 1) return true;
   return undefined;
 }
 

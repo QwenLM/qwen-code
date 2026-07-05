@@ -163,6 +163,35 @@ describe('AcpBridge', () => {
     expect(bridge.channelLoopMcpRegistered).toBe(true);
   });
 
+  it('sanitizes skipped channel loop MCP registration reasons', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const extMethod = vi.fn().mockResolvedValue({
+      skipped: true,
+      reason: 'budget\n\u001b[31mforged',
+    });
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.connection = { extMethod };
+    bridge.channelLoopMcpServer = {};
+
+    let output = '';
+    try {
+      await bridge.registerChannelLoopMcpServer();
+      output = stderr.mock.calls.join('');
+    } finally {
+      stderr.mockRestore();
+    }
+
+    expect(output).toContain('budget\\n');
+    expect(output).toContain('forged');
+    expect(output).not.toContain('budget\n');
+    expect(output).not.toContain('\u001b');
+  });
+
   it('returns a synthetic payload ack for MCP notifications', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
