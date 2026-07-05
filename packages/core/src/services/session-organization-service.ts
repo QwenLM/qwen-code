@@ -86,6 +86,7 @@ export class SessionOrganizationError extends Error {
 const STORE_FILE = 'session-organization.v1.json';
 const SCHEMA_VERSION = 1;
 const MAX_GROUP_NAME_LENGTH = 64;
+const MAX_GROUPS = 200;
 const FALLBACK_GROUP_COLOR: SessionGroupColor = 'blue';
 const locks = new Map<string, Promise<unknown>>();
 const warningKeysByStorePath = new Map<string, Set<string>>();
@@ -253,6 +254,12 @@ export class SessionOrganizationService {
     return this.withStoreLock(async () => {
       const store = await this.readStore();
       this.assertGroupNameAvailable(store.groups, name);
+      if (store.groups.length >= MAX_GROUPS) {
+        throw new SessionOrganizationError(
+          `Maximum number of groups (${MAX_GROUPS}) reached`,
+          'group_limit_reached',
+        );
+      }
       const now = new Date().toISOString();
       const group: SessionGroup = {
         id: randomUUID(),
@@ -374,6 +381,25 @@ export class SessionOrganizationService {
       }
       delete store.sessions[sessionId];
       await this.writeStore(store);
+    });
+  }
+
+  async removeSessions(sessionIds: string[]): Promise<void> {
+    const uniqueSessionIds = [...new Set(sessionIds)];
+    if (uniqueSessionIds.length === 0) return;
+
+    await this.withStoreLock(async () => {
+      const store = await this.readStore();
+      let changed = false;
+      for (const sessionId of uniqueSessionIds) {
+        if (Object.prototype.hasOwnProperty.call(store.sessions, sessionId)) {
+          delete store.sessions[sessionId];
+          changed = true;
+        }
+      }
+      if (changed) {
+        await this.writeStore(store);
+      }
     });
   }
 
@@ -506,7 +532,9 @@ export class SessionOrganizationService {
     return [...groups].sort((a, b) => {
       const byOrder = a.order - b.order;
       if (byOrder !== 0) return byOrder;
-      return a.name.localeCompare(b.name) || a.id.localeCompare(b.id);
+      if (a.name !== b.name) return a.name < b.name ? -1 : 1;
+      if (a.id !== b.id) return a.id < b.id ? -1 : 1;
+      return 0;
     });
   }
 

@@ -1406,6 +1406,9 @@ describe('SessionService', () => {
 
   describe('removeSessions', () => {
     it('should remove multiple sessions and report each outcome', async () => {
+      const removeOrganizationsSpy = vi
+        .spyOn(SessionOrganizationService.prototype, 'removeSessions')
+        .mockResolvedValue();
       // recordA1 belongs to current project; recordB1 also; the third id
       // never has a backing record (notFound).
       vi.mocked(jsonl.readLines).mockImplementation(
@@ -1431,6 +1434,11 @@ describe('SessionService', () => {
       expect(result.notFound).toEqual([sessionIdC]);
       expect(result.errors).toEqual([]);
       expect(unlinkSyncSpy).toHaveBeenCalledTimes(2);
+      expect(removeOrganizationsSpy).toHaveBeenCalledTimes(1);
+      expect(removeOrganizationsSpy).toHaveBeenCalledWith([
+        sessionIdA,
+        sessionIdB,
+      ]);
     });
 
     it('should de-duplicate input ids', async () => {

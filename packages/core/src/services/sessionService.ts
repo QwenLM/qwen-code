@@ -422,6 +422,23 @@ export class SessionService {
     }
   }
 
+  private async removeSessionOrganizations(
+    sessionIds: string[],
+  ): Promise<void> {
+    if (sessionIds.length === 0) return;
+    try {
+      await new SessionOrganizationService(this.projectRoot, (message) => {
+        this.warn(message);
+      }).removeSessions(sessionIds);
+    } catch (error) {
+      this.warn(
+        `removeSessions: failed to clear session organization for ${sessionIds.join(
+          ', ',
+        )}: ${error}`,
+      );
+    }
+  }
+
   private moveOptionalFile(sourcePath: string, targetPath: string): boolean {
     if (!fs.existsSync(sourcePath)) {
       return false;
@@ -1044,6 +1061,14 @@ export class SessionService {
    * @returns true if removed, false if not found
    */
   async removeSession(sessionId: string): Promise<boolean> {
+    const removed = await this.removeSessionFiles(sessionId);
+    if (removed) {
+      await this.removeSessionOrganization(sessionId);
+    }
+    return removed;
+  }
+
+  private async removeSessionFiles(sessionId: string): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
@@ -1058,7 +1083,6 @@ export class SessionService {
           this.removeFileIfExists(archivedPath);
         }
         this.removeWorktreeSidecars(sessionId);
-        await this.removeSessionOrganization(sessionId);
         return true;
       }
       const archivedPath = this.getSessionFilePath(sessionId, 'archived');
@@ -1071,7 +1095,6 @@ export class SessionService {
       }
       this.removeFileIfExists(archivedPath);
       this.removeWorktreeSidecars(sessionId);
-      await this.removeSessionOrganization(sessionId);
       return true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
@@ -1235,7 +1258,7 @@ export class SessionService {
 
     const uniqueSessionIds = [...new Set(sessionIds)];
     const results = await Promise.allSettled(
-      uniqueSessionIds.map((sessionId) => this.removeSession(sessionId)),
+      uniqueSessionIds.map((sessionId) => this.removeSessionFiles(sessionId)),
     );
 
     for (let i = 0; i < results.length; i++) {
@@ -1253,6 +1276,8 @@ export class SessionService {
         errors.push({ sessionId, error: result.reason as Error });
       }
     }
+
+    await this.removeSessionOrganizations(removed);
 
     return { removed, notFound, errors };
   }

@@ -146,6 +146,30 @@ describe('SessionOrganizationService', () => {
     expect(second.order).toBe(Number.MAX_SAFE_INTEGER);
   });
 
+  it('rejects creating more than 200 groups', async () => {
+    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
+    await fs.writeFile(
+      service.getStorePath(),
+      JSON.stringify({
+        schemaVersion: 1,
+        groups: Array.from({ length: 200 }, (_, index) => ({
+          id: `group-${index}`,
+          name: `Group ${index}`,
+          color: 'blue',
+          order: index,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        })),
+        sessions: {},
+      }),
+      'utf8',
+    );
+
+    await expect(
+      service.createGroup({ name: 'Overflow', color: 'red' }),
+    ).rejects.toMatchObject({ code: 'group_limit_reached' });
+  });
+
   it('keeps groups with unsupported stored colors by falling back and warning once', async () => {
     await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
     await fs.writeFile(
@@ -459,5 +483,26 @@ describe('SessionOrganizationService', () => {
 
     const snapshot = await service.readSnapshot();
     expect(snapshot.sessions.has(sessionIdA)).toBe(false);
+  });
+
+  it('removes multiple session organization entries in one call', async () => {
+    const group = await service.createGroup({
+      name: 'Cleanup',
+      color: 'purple',
+    });
+    await service.updateSessionOrganization(sessionIdA, {
+      isPinned: true,
+      groupId: group.id,
+    });
+    await service.updateSessionOrganization(sessionIdB, {
+      isPinned: true,
+      groupId: group.id,
+    });
+
+    await service.removeSessions([sessionIdA, sessionIdB, sessionIdA]);
+
+    const snapshot = await service.readSnapshot();
+    expect(snapshot.sessions.has(sessionIdA)).toBe(false);
+    expect(snapshot.sessions.has(sessionIdB)).toBe(false);
   });
 });
