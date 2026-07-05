@@ -250,6 +250,31 @@ export class QQChannel extends ChannelBase {
             entry.timer = null;
           }
           entry.buffer += text;
+          if (entry.buffer.length >= QQChannel.MAX_BUFFER_LENGTH) {
+            if (entry.timer) clearTimeout(entry.timer);
+            entry.timer = null;
+            const toFlushNow = entry.buffer;
+            entry.buffer = '';
+            if (toFlushNow) {
+              const target = this.router.getTarget(sessionId);
+              if (target) {
+                this.sendMessage(target.chatId, toFlushNow)
+                  .then(() => {
+                    this.cronRetryCount.delete(sessionId);
+                    if (!entry!.buffer) this.cronBuffer.delete(sessionId);
+                  })
+                  .catch((err) => {
+                    process.stderr.write(
+                      `[QQ:${this.name}] Cron flush (size cap) send error: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
+                    );
+                  });
+                return;
+              }
+            }
+            this.cronRetryCount.delete(sessionId);
+            this.cronBuffer.delete(sessionId);
+            return;
+          }
           entry.timer = setTimeout(() => {
             const toFlush = entry!.buffer;
             entry!.buffer = '';
@@ -289,7 +314,8 @@ export class QQChannel extends ChannelBase {
                       this.sendMessage(retryTarget.chatId, retryEntry.buffer)
                         .then(() => {
                           this.cronRetryCount.delete(sessionId);
-                          this.cronBuffer.delete(sessionId);
+                          if (!retryEntry.buffer)
+                            this.cronBuffer.delete(sessionId);
                         })
                         .catch((retryErr) => {
                           process.stderr.write(
@@ -297,7 +323,8 @@ export class QQChannel extends ChannelBase {
 `,
                           );
                           this.cronRetryCount.delete(sessionId);
-                          this.cronBuffer.delete(sessionId);
+                          if (!retryEntry.buffer)
+                            this.cronBuffer.delete(sessionId);
                         });
                     }, 2000).unref();
                   });
@@ -439,8 +466,9 @@ export class QQChannel extends ChannelBase {
     // violations. Only applies to active sends (no msgId — passive replies
     // to @-bot messages must still be delivered).
     if (!msgId && this.groupActiveMsgEnabled.get(chatId) === false) {
+      const cronCtx = this._inCronFlow ? ' (cron flow discarded)' : '';
       process.stderr.write(
-        `[QQ:${this.name}] sendMessage blocked: active messages disabled for ${sanitizeLogText(chatId, 64)}\n`,
+        `[QQ:${this.name}] sendMessage blocked: active messages disabled for ${sanitizeLogText(chatId, 64)}${cronCtx}\n`,
       );
       return;
     }
@@ -1006,7 +1034,6 @@ export class QQChannel extends ChannelBase {
   }
 
   /** Flush pending state writes immediately (called on disconnect). */
-  /** Flush pending state writes immediately (called on disconnect). */
   private flushQQState(): void {
     if (this.saveTimer) {
       clearTimeout(this.saveTimer);
@@ -1068,7 +1095,19 @@ export class QQChannel extends ChannelBase {
                   k,
                   typeof v === 'string' && v.length <= 128
                     ? { msgId: v, timestamp: Date.now() }
-                    : (v as { msgId: string; timestamp: number }),
+                    : v !== null &&
+                        typeof v === 'object' &&
+                        typeof (v as Record<string, unknown>)['msgId'] ===
+                          'string' &&
+                        ((v as Record<string, unknown>)['msgId'] as string)
+                          .length <= 128 &&
+                        typeof (v as Record<string, unknown>)['timestamp'] ===
+                          'number' &&
+                        Number.isFinite(
+                          (v as Record<string, unknown>)['timestamp'] as number,
+                        )
+                      ? (v as { msgId: string; timestamp: number })
+                      : { msgId: '', timestamp: 0 },
                 ])
             : [],
         );
@@ -1941,14 +1980,18 @@ export class QQChannel extends ChannelBase {
     // Also check cross-event dedup: GROUP_MESSAGE_CREATE may also fire for the same message.
     if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
       return;
+    const senderId =
+      event.author.user_openid || event.author.id || event.author.member_openid;
+    if (!senderId) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group message dropped: no senderId for author\n`,
+      );
+      return;
+    }
     this.setReplyMsgId(chatId, event.id);
     this.handleInbound({
       channelName: this.name,
-      senderId:
-        event.author.user_openid ||
-        event.author.id ||
-        event.author.member_openid ||
-        'unknown',
+      senderId,
       senderName,
       chatId,
       text: correctedTextFinal,
@@ -2009,7 +2052,12 @@ export class QQChannel extends ChannelBase {
             .filter((kw) => kw.length > 0)
             .map((kw) => kw.toLowerCase().normalize('NFC'));
         }
-        if (this._keywordTriggerCache.length === 0) return;
+        if (this._keywordTriggerCache.length === 0) {
+          process.stderr.write(
+            `[QQ:${this.name}] Group ${sanitizeLogText(chatId, 64)}: keyword policy — no keywords configured, message from ${sanitizeLogText(senderName, 64)} not forwarded\n`,
+          );
+          return;
+        }
         const cleanText = (event.content || '')
           .replace(/<@[^>]{1,64}>/g, '')
           .trim()
@@ -2018,7 +2066,12 @@ export class QQChannel extends ChannelBase {
         const matched = this._keywordTriggerCache.some((kw) =>
           cleanText.includes(kw),
         );
-        if (!matched) return;
+        if (!matched) {
+          process.stderr.write(
+            `[QQ:${this.name}] Group ${sanitizeLogText(chatId, 64)}: keyword policy — no match for message from ${sanitizeLogText(senderName, 64)}\n`,
+          );
+          return;
+        }
       }
     }
 
@@ -2029,19 +2082,22 @@ export class QQChannel extends ChannelBase {
     if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
       return;
 
+    const senderId =
+      event.author.user_openid || event.author.id || event.author.member_openid;
+    if (!senderId) {
+      process.stderr.write(
+        `[QQ:${this.name}] Group all-message dropped: no senderId for author\n`,
+      );
+      return;
+    }
     if (isAtBot) {
       this.setReplyMsgId(chatId, event.id);
     }
-
     this.handleInbound({
       channelName: this.name,
       chatId,
       text,
-      senderId:
-        event.author.user_openid ||
-        event.author.id ||
-        event.author.member_openid ||
-        'unknown',
+      senderId,
       senderName,
       messageId: event.id,
       isGroup: true,
