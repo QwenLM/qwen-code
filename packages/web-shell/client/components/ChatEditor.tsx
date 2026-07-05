@@ -21,6 +21,7 @@ import {
   useWebShellCustomization,
   type WebShellComposerInput,
   type WebShellComposerTag,
+  type WebShellAtProvider,
 } from '../customization';
 import {
   useComposerCore,
@@ -30,6 +31,7 @@ import {
   getComposerTagLabel,
   getComposerTagValue,
 } from '../hooks/useComposerCore';
+import { AtMentionPanel } from './AtMentionPanel';
 import { cssUrlVar } from '../utils/cssUrlVar';
 import { getComposerTagIconUrl } from './composerTagIcons';
 import { ModeIcon } from './ModeIcon';
@@ -94,6 +96,7 @@ interface ChatEditorProps {
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
+  atProviders?: readonly WebShellAtProvider[];
 }
 
 const CHAT_EDITOR_THEME = {
@@ -913,6 +916,7 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
+      atProviders,
     } = props;
 
     const core = useComposerCore({
@@ -935,6 +939,7 @@ export const ChatEditor = memo(
       sessionName,
       composerInput,
       composerInputVersion,
+      atProviders,
       editorTheme: CHAT_EDITOR_THEME,
     });
 
@@ -953,11 +958,16 @@ export const ChatEditor = memo(
     const [showQuickActions, setShowQuickActions] = useState(isTouchLikeDevice);
     const containerRef = useRef<HTMLDivElement>(null);
     const slashPanelRef = useRef<HTMLDivElement>(null);
+    const atPanelRef = useRef<HTMLDivElement>(null);
     const modeBtnRef = useRef<HTMLButtonElement>(null);
     const modelBtnRef = useRef<HTMLButtonElement>(null);
     const [widthToggleFits, setWidthToggleFits] = useState(false);
     const slashMenu = core.slashMenu;
     const closeSlashMenu = core.closeSlashMenu;
+    const atMenu = core.atMenu;
+    const closeAtMenu = core.closeAtMenu;
+    const hasSlashMenu = Boolean(slashMenu);
+    const hasAtMenu = Boolean(atMenu);
     const editorViewRef = core.viewRef;
 
     useEffect(() => {
@@ -974,7 +984,7 @@ export const ChatEditor = memo(
     }, [showQuickActions]);
 
     useEffect(() => {
-      if (!slashMenu) return;
+      if (!hasSlashMenu && !hasAtMenu) return;
       const onPointerOutside = (event: Event) => {
         const target = event.target;
         const container = containerRef.current;
@@ -982,9 +992,11 @@ export const ChatEditor = memo(
           target instanceof Node &&
           container &&
           !container.contains(target) &&
-          !slashPanelRef.current?.contains(target)
+          !slashPanelRef.current?.contains(target) &&
+          !atPanelRef.current?.contains(target)
         ) {
           closeSlashMenu();
+          closeAtMenu();
         }
       };
       window.addEventListener('mousedown', onPointerOutside);
@@ -993,7 +1005,7 @@ export const ChatEditor = memo(
         window.removeEventListener('mousedown', onPointerOutside);
         window.removeEventListener('touchstart', onPointerOutside);
       };
-    }, [slashMenu, closeSlashMenu]);
+    }, [hasAtMenu, hasSlashMenu, closeAtMenu, closeSlashMenu]);
 
     useEffect(() => {
       const glowRoot = containerRef.current;
@@ -1211,6 +1223,7 @@ export const ChatEditor = memo(
         setModeDropdownOpen(false);
         setModelDropdownOpen(false);
         core.closeSlashMenu();
+        core.closeAtMenu();
         if (action.action.type === 'insert') {
           core.insertText(action.action.text, { mode: 'replace' });
           return;
@@ -1416,6 +1429,23 @@ export const ChatEditor = memo(
                 onAccept={core.acceptSlashCompletion}
               />
             )}
+            {core.atMenu && (
+              <AtMentionPanel
+                menu={core.atMenu}
+                anchorRef={containerRef}
+                panelRef={atPanelRef}
+                onSelect={core.selectAtCompletion}
+                onAccept={core.acceptAtCompletion}
+                onBack={() => {
+                  const result = core.backAtCategories();
+                  if (result === 'categories') {
+                    window.setTimeout(() => core.focus(), 0);
+                  }
+                  return Boolean(result);
+                }}
+                onSearch={core.updateAtSearch}
+              />
+            )}
             <div className={styles.editorArea}>
               {core.shellMode && (
                 <span className={styles.shellPrefix} aria-hidden="true">
@@ -1454,6 +1484,7 @@ export const ChatEditor = memo(
                         onClick={(e) => {
                           e.stopPropagation();
                           core.closeSlashMenu();
+                          core.closeAtMenu();
                           setQuickActionsOpen(false);
                           setModeDropdownOpen((v) => !v);
                           setModelDropdownOpen(false);
@@ -1488,6 +1519,7 @@ export const ChatEditor = memo(
                         onClick={(e) => {
                           e.stopPropagation();
                           core.closeSlashMenu();
+                          core.closeAtMenu();
                           setQuickActionsOpen(false);
                           setModelDropdownOpen((v) => !v);
                           setModeDropdownOpen(false);
@@ -1524,6 +1556,7 @@ export const ChatEditor = memo(
                     onClick={(e) => {
                       e.stopPropagation();
                       core.closeSlashMenu();
+                      core.closeAtMenu();
                       setModeDropdownOpen(false);
                       setModelDropdownOpen(false);
                       setQuickActionsOpen((value) => !value);

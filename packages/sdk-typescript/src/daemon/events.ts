@@ -326,6 +326,11 @@ export interface DaemonMidTurnMessageInjectedData {
 export interface DaemonClientEvictedData {
   reason: string;
   droppedAfter?: number;
+  queueSize?: number;
+  maxQueued?: number;
+  queuedBytes?: number;
+  maxQueuedBytes?: number;
+  eventBytes?: number;
   [key: string]: unknown;
 }
 
@@ -340,6 +345,12 @@ export interface DaemonSlowClientWarningData {
    * `Last-Event-ID` or detach + drain.
    */
   lastEventId: number;
+  /** Approximate serialized bytes queued for this subscriber's live backlog. */
+  queuedBytes?: number;
+  /** Per-subscriber serialized-byte backlog cap. */
+  maxQueuedBytes?: number;
+  /** Which backlog threshold caused the warning. */
+  threshold?: 'frames' | 'bytes' | 'frames_and_bytes';
   [key: string]: unknown;
 }
 
@@ -2539,7 +2550,12 @@ function isClientEvictedData(value: unknown): value is DaemonClientEvictedData {
   return (
     isRecord(value) &&
     isNonEmptyString(value['reason']) &&
-    isOptionalNumber(value['droppedAfter'])
+    isOptionalNumber(value['droppedAfter']) &&
+    isOptionalNumber(value['queueSize']) &&
+    isOptionalNumber(value['maxQueued']) &&
+    isOptionalNumber(value['queuedBytes']) &&
+    isOptionalNumber(value['maxQueuedBytes']) &&
+    isOptionalNumber(value['eventBytes'])
   );
 }
 
@@ -2561,11 +2577,18 @@ function isSlowClientWarningData(
   // (`isOptionalNumber` → `isFiniteNumber`): `typeof NaN === 'number'`
   // and `typeof Infinity === 'number'` both pass a bare `typeof`
   // check but would be schema garbage for a queue-size measurement.
+  if (!isRecord(value)) return false;
+  const threshold = value['threshold'];
   return (
-    isRecord(value) &&
     isFiniteNumber(value['queueSize']) &&
     isFiniteNumber(value['maxQueued']) &&
-    isFiniteNumber(value['lastEventId'])
+    isFiniteNumber(value['lastEventId']) &&
+    isOptionalNumber(value['queuedBytes']) &&
+    isOptionalNumber(value['maxQueuedBytes']) &&
+    (threshold === undefined ||
+      threshold === 'frames' ||
+      threshold === 'bytes' ||
+      threshold === 'frames_and_bytes')
   );
 }
 

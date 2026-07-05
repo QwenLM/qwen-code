@@ -117,6 +117,25 @@ export interface WebShellComposerInput {
   submit?: boolean;
 }
 
+export interface WebShellAtItem {
+  id: string;
+  label: string;
+  description?: string;
+  detail?: string;
+  insertText?: string;
+}
+
+export interface WebShellAtProvider {
+  id: string;
+  label: string;
+  description?: string;
+  order?: number;
+  search(params: {
+    query: string;
+    signal: AbortSignal;
+  }): Promise<readonly WebShellAtItem[]>;
+}
+
 export interface WebShellComposerApi {
   insertText(text: string, options?: WebShellComposerTextOptions): void;
   setText(text: string): void;

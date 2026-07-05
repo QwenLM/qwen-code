@@ -114,6 +114,61 @@ describe('RemoteInputWatcher', () => {
     expect(submitted).toEqual(['after-bad-line']);
   });
 
+  it('does not consume a trailing partial submit command before newline', async () => {
+    watcher = new RemoteInputWatcher(inputFile);
+    const submitted: string[] = [];
+    watcher.setSubmitFn((text) => {
+      submitted.push(text);
+    });
+
+    fs.appendFileSync(inputFile, '{"type":"submit","text":"spl');
+    await watcher.checkForNewInput();
+    expect(submitted).toEqual([]);
+
+    fs.appendFileSync(inputFile, 'it"}\n');
+    await watcher.checkForNewInput();
+
+    expect(submitted).toEqual(['split']);
+  });
+
+  it('consumes complete records but defers a trailing partial in the same poll', async () => {
+    watcher = new RemoteInputWatcher(inputFile);
+    const submitted: string[] = [];
+    watcher.setSubmitFn((text) => {
+      submitted.push(text);
+    });
+
+    fs.appendFileSync(
+      inputFile,
+      '{"type":"submit","text":"first"}\n{"type":"submit","text":"sec',
+    );
+    await watcher.checkForNewInput();
+    expect(submitted).toEqual(['first']);
+
+    fs.appendFileSync(inputFile, 'ond"}\n');
+    await watcher.checkForNewInput();
+
+    expect(submitted).toEqual(['first', 'second']);
+  });
+
+  it('does not consume a trailing partial confirmation before newline', async () => {
+    watcher = new RemoteInputWatcher(inputFile);
+    const handler = vi.fn();
+    watcher.setConfirmationHandler(handler);
+
+    fs.appendFileSync(
+      inputFile,
+      '{"type":"confirmation_response","request_id":"req-7"',
+    );
+    await watcher.checkForNewInput();
+    expect(handler).not.toHaveBeenCalled();
+
+    fs.appendFileSync(inputFile, ',"allowed":true}\n');
+    await watcher.checkForNewInput();
+
+    expect(handler).toHaveBeenCalledWith('req-7', true);
+  });
+
   it('reads commands written after the input file is truncated', async () => {
     watcher = new RemoteInputWatcher(inputFile);
     const submitted: string[] = [];
