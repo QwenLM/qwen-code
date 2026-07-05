@@ -171,6 +171,7 @@ import {
   type MarkdownTableMode,
   type WebShellTaskInfo,
   type WebShellAtProvider,
+  type WebShellComposerTagIconMap,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
@@ -370,6 +371,8 @@ export interface WebShellProps {
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
   /** Additional @ mention categories shown alongside built-in files/extensions. */
   atProviders?: readonly WebShellAtProvider[];
+  /** Icon URLs for custom composer tag kinds used by @ mention chips. */
+  composerTagIcons?: WebShellComposerTagIconMap;
   /** Custom renderer for the tool-card header content after the status icon and tool name. */
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
@@ -762,6 +765,7 @@ export function App({
   hiddenSlashCommands,
   slashCommandCategoryOrder,
   atProviders,
+  composerTagIcons,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -3976,6 +3980,7 @@ export function App({
                       skills={loadedSkills}
                       slashCommandCategoryOrder={slashCommandCategoryOrder}
                       atProviders={atProviders}
+                      composerTagIcons={composerTagIcons}
                       queuedMessages={queuedTexts}
                       onFocusFooter={handleFocusTaskPill}
                       onPopQueuedMessages={editLastQueuedPrompt}
