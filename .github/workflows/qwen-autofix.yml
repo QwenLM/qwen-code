@@ -470,8 +470,7 @@ jobs:
                 "sandbox": "docker"
               }
             }
-          PROMPT: |-
-            /autofix assess-candidates --workdir /tmp/autofix
+          AUTOFIX_INVOCATION: '/autofix assess-candidates --workdir /tmp/autofix'
         run: |-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
@@ -481,6 +480,7 @@ jobs:
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           rm -f "${WORKDIR}/decision.json"
+          PROMPT="$(node .github/scripts/build-autofix-prompt.mjs "${AUTOFIX_INVOCATION}")"
           qwen --yolo --prompt "${PROMPT}"
 
       - name: 'Read decision'
@@ -626,8 +626,7 @@ jobs:
                 "sandbox": "docker"
               }
             }
-          PROMPT: |-
-            /autofix develop-issue --issue ${{ steps.decision.outputs.go_issue }} --workdir /tmp/autofix
+          AUTOFIX_INVOCATION: '/autofix develop-issue --issue ${{ steps.decision.outputs.go_issue }} --workdir /tmp/autofix'
         run: |-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
@@ -636,6 +635,7 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          PROMPT="$(node .github/scripts/build-autofix-prompt.mjs "${AUTOFIX_INVOCATION}")"
           qwen --yolo --prompt "${PROMPT}"
 
       - name: 'Verification gate'
@@ -1143,8 +1143,7 @@ jobs:
                 "sandbox": "docker"
               }
             }
-          PROMPT: |-
-            /autofix address-review --pr ${{ matrix.target.pr }} --issue ${{ matrix.target.issue }} --workdir /tmp/autofix-review-${{ matrix.target.pr }} --conflict ${{ steps.prepare.outputs.conflict }} --base main
+          AUTOFIX_INVOCATION: '/autofix address-review --pr ${{ matrix.target.pr }} --issue ${{ matrix.target.issue }} --workdir /tmp/autofix-review-${{ matrix.target.pr }} --conflict ${{ steps.prepare.outputs.conflict }} --base main'
         run: |-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
@@ -1153,6 +1152,7 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
+          PROMPT="$(node .github/scripts/build-autofix-prompt.mjs "${AUTOFIX_INVOCATION}")"
           qwen --yolo --prompt "${PROMPT}"
 
       - name: 'Verification gate'

@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
 const workflow = readFileSync('.github/workflows/qwen-autofix.yml', 'utf8');
@@ -14,6 +14,11 @@ const sandboxImageResolverScript = readFileSync(
   '.github/scripts/resolve-sandbox-image.mjs',
   'utf8',
 );
+const autofixPromptBuilderScriptPath =
+  '.github/scripts/build-autofix-prompt.mjs';
+const autofixPromptBuilderScript = existsSync(autofixPromptBuilderScriptPath)
+  ? readFileSync(autofixPromptBuilderScriptPath, 'utf8')
+  : '';
 const checkBotCredentialsStep =
   workflow.match(
     /- name: 'Check bot credentials'[\s\S]*?(?=\n[ ]{6}- name: 'Set up Node.js \(hosted\)')/,
@@ -482,6 +487,11 @@ describe('qwen-autofix workflow', () => {
     for (const step of qwenSteps) {
       expect(step.length).toBeGreaterThan(0);
       expect(step).toContain('qwen --yolo --prompt "${PROMPT}"');
+      expect(step).toContain('AUTOFIX_INVOCATION:');
+      expect(step).toContain(
+        'node .github/scripts/build-autofix-prompt.mjs "${AUTOFIX_INVOCATION}"',
+      );
+      expect(step).not.toMatch(/PROMPT: \|-\n\s+\/autofix /);
       expect(step).not.toContain('for attempt in 1 2; do');
       expect(step).not.toContain('Qwen Code failed on attempt');
     }
@@ -542,6 +552,13 @@ describe('qwen-autofix workflow', () => {
     expect(triageAndAddressStep).toContain(
       '/autofix address-review --pr ${{ matrix.target.pr }} --issue ${{ matrix.target.issue }} --workdir /tmp/autofix-review-${{ matrix.target.pr }} --conflict ${{ steps.prepare.outputs.conflict }} --base main',
     );
+    expect(autofixPromptBuilderScript).toContain(
+      'Base directory for this skill:',
+    );
+    expect(autofixPromptBuilderScript).toContain(
+      '.qwen/skills/autofix/SKILL.md',
+    );
+    expect(autofixPromptBuilderScript).toContain('process.argv.slice(2).join');
 
     for (const step of [
       assessCandidatesStep,
