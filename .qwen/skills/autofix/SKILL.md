@@ -63,10 +63,12 @@ Implement the selected issue in the checked-out repository:
 2. Establish baseline behavior by focused code inspection, not execution.
 3. Make the minimal root-cause change and add/update focused Vitest coverage
    without running it.
-4. Re-read the full diff as a skeptical reviewer.
-5. Ensure `git status --short` shows only intended files, then create one
+4. For TypeScript changes, read the relevant type definitions and preserve
+   strict nullability; do not assume optional fields are present.
+5. Re-read the full diff as a skeptical reviewer.
+6. Ensure `git status --short` shows only intended files, then create one
    Conventional Commit, e.g. `fix(core): summary (#<issue>)`.
-6. Write all required outputs:
+7. Write all required outputs:
    - `<workdir>/e2e-report.md`
    - `<workdir>/pr-title.txt`
    - `<workdir>/pr-body.md` using `.qwen/skills/prepare-pr/SKILL.md`

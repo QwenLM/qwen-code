@@ -512,6 +512,8 @@ describe('qwen-autofix workflow', () => {
       'Do not push, comment, create pull requests',
       'Never ask the user a question',
       'not execution',
+      'strict nullability',
+      'optional fields',
       'git status --short',
       '.qwen/skills/prepare-pr/SKILL.md',
       '.qwen/skills/bugfix/SKILL.md',
