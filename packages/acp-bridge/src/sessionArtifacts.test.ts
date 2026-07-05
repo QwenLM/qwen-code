@@ -3920,6 +3920,33 @@ describe('SessionArtifactContentStore', () => {
     }
   });
 
+  it('throws after scanning when content removal fails during gc', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const ref = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      await workspaceArtifact('remove-failure.txt', 'data'),
+      workspace,
+    ))!;
+    contentStore.releaseContentRef(ref);
+    const originalRm = fs.rm.bind(fs);
+    vi.spyOn(fs, 'rm').mockImplementation((async (target, options) => {
+      if (String(target).includes(ref.contentId)) {
+        throw new Error('busy');
+      }
+      return originalRm(target, options);
+    }) as typeof fs.rm);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    await expect(contentStore.gc('content-session', new Set())).rejects.toThrow(
+      'artifact content GC failed to remove 1 entry',
+    );
+    const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+    expect(logged).toContain('content_gc_remove_failed');
+    expect(logged).toContain(ref.contentId);
+  });
+
   it('retains leased content during gc until the pin flow releases it', async () => {
     const contentStore = new SessionArtifactContentStore(contentRoot);
     const ref = (await contentStore.pinWorkspaceFile(

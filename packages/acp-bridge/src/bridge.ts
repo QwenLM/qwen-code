@@ -3264,9 +3264,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           )}`,
         );
       }
-      if (artifactRestoreWarnings.length > 0) {
-        await gcArtifactContent(entry).catch(() => undefined);
-      }
       if (replayUpdates.length > 0) {
         await ci.client.seedSessionUpdates(entry, replayUpdates);
         ci.client.drainEarlyEvents(entry.sessionId, entry);
@@ -4786,19 +4783,32 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!currentArtifact) {
         return { v: 1, sessionId, changes: [] };
       }
+      const pruneWarnings = await pruneExpiredArtifactPins(entry, clientId);
+      const prunedArtifact = await entry.artifacts.getForPin(artifactId, {
+        clientId,
+      });
+      if (!prunedArtifact) {
+        const result: SessionArtifactMutationResult = {
+          v: 1,
+          sessionId,
+          changes: [],
+        };
+        return pruneWarnings.length > 0
+          ? { ...result, warnings: pruneWarnings }
+          : result;
+      }
       const refreshPinnedContent =
-        currentArtifact.retention === 'pinned' &&
+        prunedArtifact.retention === 'pinned' &&
         requestOptions?.mode === 'content';
       const reusableContentRef =
         mode === 'content' && !refreshPinnedContent
-          ? currentArtifact.contentRef
+          ? prunedArtifact.contentRef
           : undefined;
       const releaseReusableContentRef = reusableContentRef
         ? artifactContentStore.leaseContentRefs([reusableContentRef])
         : undefined;
       try {
-        const pruneWarnings = await pruneExpiredArtifactPins(entry, clientId);
-        if (currentArtifact.retention === 'pinned' && !refreshPinnedContent) {
+        if (prunedArtifact.retention === 'pinned' && !refreshPinnedContent) {
           const result =
             requestOptions === undefined
               ? await entry.artifacts.pin(artifactId, { clientId })
@@ -4836,7 +4846,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
             } else {
               contentRef = await artifactContentStore.pinWorkspaceFile(
                 sessionId,
-                currentArtifact,
+                prunedArtifact,
                 entry.workspaceCwd,
               );
               copiedContentRef = contentRef !== undefined;

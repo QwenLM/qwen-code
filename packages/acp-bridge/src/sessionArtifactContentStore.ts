@@ -274,6 +274,7 @@ export class SessionArtifactContentStore {
     return this.enqueueWrite(async () => {
       const removed: string[] = [];
       const retained: string[] = [];
+      const failedRemovals: string[] = [];
       let entries: string[];
       try {
         entries = await fs.readdir(this.rootDir);
@@ -321,6 +322,7 @@ export class SessionArtifactContentStore {
             )}`,
           );
           retained.push(entry);
+          failedRemovals.push(entry);
           continue;
         }
         if (this.cachedTotalBytes !== undefined) {
@@ -330,6 +332,13 @@ export class SessionArtifactContentStore {
           );
         }
         removed.push(entry);
+      }
+      if (failedRemovals.length > 0) {
+        throw new Error(
+          `artifact content GC failed to remove ${failedRemovals.length} entr${
+            failedRemovals.length === 1 ? 'y' : 'ies'
+          }`,
+        );
       }
       return { removed, retained };
     });

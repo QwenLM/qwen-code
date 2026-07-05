@@ -388,6 +388,76 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('re-reads an artifact after pruning before re-pinning expired content', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-workspace-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-07-04T00:00:00.000Z'));
+    const copySpy = vi.spyOn(
+      SessionArtifactContentStore.prototype,
+      'pinWorkspaceFile',
+    );
+    const bridge = makeBridge({
+      boundWorkspace: workspace,
+      channelFactory: async () => makeChannel().channel,
+    });
+    try {
+      await fsp.mkdir(path.join(workspace, 'reports'), { recursive: true });
+      await fsp.writeFile(path.join(workspace, 'reports', 'report.txt'), 'hi');
+      const session = await bridge.spawnOrAttach({ workspaceCwd: workspace });
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Report',
+          workspacePath: 'reports/report.txt',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      await bridge.pinSessionArtifact(
+        session.sessionId,
+        artifactId,
+        { clientId: session.clientId },
+        { mode: 'content', ttlDays: 1 },
+      );
+      copySpy.mockClear();
+
+      vi.setSystemTime(new Date('2026-07-06T00:00:00.000Z'));
+      await expect(
+        bridge.pinSessionArtifact(session.sessionId, artifactId, {
+          clientId: session.clientId,
+        }),
+      ).resolves.toMatchObject({
+        changes: [
+          {
+            action: 'updated',
+            artifactId,
+            artifact: {
+              retention: 'pinned',
+              contentRef: expect.any(Object),
+            },
+          },
+        ],
+      });
+      expect(copySpy).toHaveBeenCalledTimes(1);
+    } finally {
+      copySpy.mockRestore();
+      vi.useRealTimers();
+      await bridge.shutdown();
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(tempHome, { recursive: true, force: true });
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('applies metadata pin options to an already pinned artifact', async () => {
     const previousQwenHome = process.env['QWEN_HOME'];
     const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
@@ -1857,6 +1927,53 @@ describe('createAcpSessionBridge', () => {
     });
 
     await bridge.shutdown();
+  });
+
+  it('does not run broad content GC for restore metadata warnings', async () => {
+    const sessionId = 'persisted-artifact-warning';
+    const artifactUrl = 'https://example.com/restored-warning';
+    const gcSpy = vi.spyOn(SessionArtifactContentStore.prototype, 'gc');
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          loadSessionImpl: () =>
+            ({
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId,
+                sequence: 1,
+                artifacts: [
+                  {
+                    id: 'mismatched-artifact-id',
+                    kind: 'link',
+                    storage: 'external_url',
+                    source: 'client',
+                    status: 'available',
+                    title: 'Restored link',
+                    url: artifactUrl,
+                    retention: 'restorable',
+                    clientRetained: true,
+                    createdAt: '2026-07-04T00:00:00.000Z',
+                    updatedAt: '2026-07-04T00:00:00.000Z',
+                  },
+                ],
+                warnings: [],
+              },
+            }) as LoadSessionResponse,
+        }).channel,
+    });
+
+    try {
+      await bridge.loadSession({
+        sessionId,
+        workspaceCwd: WS_A,
+      });
+
+      expect(gcSpy).not.toHaveBeenCalled();
+    } finally {
+      gcSpy.mockRestore();
+      await bridge.shutdown();
+    }
   });
 
   it('keeps live artifacts when rewind returns no artifact snapshot', async () => {
