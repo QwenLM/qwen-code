@@ -1474,6 +1474,7 @@ function mergeBatchArtifact(
     clientRetained: existing.clientRetained || next.clientRetained,
     trustedPublisher: existing.trustedPublisher || next.trustedPublisher,
     retentionExplicit: existing.retentionExplicit || next.retentionExplicit,
+    retention: strongestRetention(existing.retention, next.retention),
     lastStatAt: next.lastStatAt ?? existing.lastStatAt,
   };
 }
