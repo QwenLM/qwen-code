@@ -342,6 +342,30 @@ Some text before.
       expect(output).toContain('four');
     });
 
+    it('holds back a partial first row, then pops the table in once it terminates', () => {
+      // Header + separator present but the first data row is still being typed.
+      // The partial row is held back and the table is not drawn yet, so there is
+      // no header+separator with a stray partial line flashing beneath it.
+      const partial = `| A | B |
+|---|---|
+| one | tw`.replace(/\n/g, eol);
+      const { lastFrame: partialFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={partial} isPending={true} />,
+      );
+      expect(partialFrame() ?? '').not.toContain('one');
+
+      // Once the row terminates, the table appears complete.
+      const complete = `| A | B |
+|---|---|
+| one | two |`.replace(/\n/g, eol);
+      const { lastFrame: completeFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={complete} isPending={true} />,
+      );
+      const out = completeFrame() ?? '';
+      expect(out).toContain('one');
+      expect(out).toContain('two');
+    });
+
     it('does not hold back a partial row in committed (non-pending) output', () => {
       const text = `| A | B |
 |---|---|

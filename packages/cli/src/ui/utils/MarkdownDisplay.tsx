@@ -25,6 +25,14 @@ import {
 // coupled to MaxSizedBox's floor).
 const MIN_PENDING_CONTENT_LINES = 1;
 
+// Rows reserved from the viewport when clamping a streaming table's height:
+// marginY 2 + one row of wrapped-cell safety headroom. Tables under-estimate
+// their rendered height the most (a wrapped cell), so they keep one more
+// reserved row than the other blocks. Shared by the render-side clamp
+// (RenderTable's `maxHeight`) and the slice-side estimate (`tableClampRows`)
+// so the two never diverge and let a table overflow the render cap.
+const TABLE_PENDING_RESERVED_ROWS = 3;
+
 interface MarkdownDisplayProps {
   text: string;
   isPending: boolean;
@@ -170,7 +178,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   if (pendingRenderedBudget !== undefined) {
     const tableClampRows =
       availableTerminalHeight !== undefined
-        ? Math.max(2, availableTerminalHeight - 3)
+        ? Math.max(2, availableTerminalHeight - TABLE_PENDING_RESERVED_ROWS)
         : Number.MAX_SAFE_INTEGER;
     const { keptLines } = fitPendingSlice(
       allLines,
@@ -354,18 +362,19 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       inTable &&
       !tableRowMatch &&
       index === lines.length - 1 &&
-      tableRows.length > 0 &&
+      tableHeaders.length > 0 &&
       /^\s*\|/.test(line)
     ) {
-      // Live streaming frontier: the final line is an unterminated table row
-      // (`| a | b` with no closing `|` yet). Rendering it as a plain text line
-      // below the table — then flipping it into the table once the closing `|`
-      // arrives — makes the frame height and column widths oscillate on every
-      // token, which visibly jitters the footer/composer. Hold the partial row
-      // back instead: skip it so `inTable` stays set and the end-of-content
-      // handler renders the accumulated rows as a live table. The row appears
-      // the moment it terminates. Only when at least one row already exists, so
-      // the header + separator never blank out while the first row is typed.
+      // Live streaming frontier: the final line is an unterminated table row or
+      // separator (`| a | b` with no closing `|` yet). Rendering it as a plain
+      // text line and then flipping it into the table once the closing `|`
+      // arrives makes the frame height and column widths oscillate on every
+      // token, which visibly jitters the footer/composer. Hold it back instead:
+      // skip it so `inTable` stays set and the end-of-content handler renders
+      // only the COMPLETE rows as a live table. A partial row never flips in;
+      // the table appears once its first row terminates and grows one complete
+      // row at a time. Until then the table is simply not drawn (no header +
+      // separator with a stray partial line beneath it).
     } else if (inTable && !tableRowMatch) {
       // End of table — a following line closes it, so this table is COMPLETE
       // and renders in full (the rendered-aware slice guarantees a completed
@@ -894,14 +903,6 @@ interface RenderTableProps {
   isPending?: boolean;
   availableTerminalHeight?: number;
 }
-
-// Backstop only: the pending slice bounds a completed table's height assuming
-// single-line cells, but a cell that WRAPS renders taller and could still
-// overflow. While streaming, cap the table to the viewport (reserve 3 rows:
-// marginY 2 + one row of wrapped-cell safety headroom) so it can never trigger
-// the scroll-to-top lock. Tables under-estimate their rendered height the most
-// (a wrapped cell), so they keep one more reserved row than the other blocks.
-const TABLE_PENDING_RESERVED_ROWS = 3;
 
 const RenderTableInternal: React.FC<RenderTableProps> = ({
   headers,
