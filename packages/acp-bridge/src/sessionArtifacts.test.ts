@@ -412,7 +412,7 @@ describe('SessionArtifactStore', () => {
     );
   });
 
-  it('bounds sticky ephemeral overrides by the artifact limit', async () => {
+  it('allows sticky ephemeral overrides within the artifact limit', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-sticky-cap',
       workspaceCwd: workspace,
@@ -437,17 +437,13 @@ describe('SessionArtifactStore', () => {
     );
     const secondId = second.changes[0]!.artifactId;
 
-    await expect(
-      store.unpin(secondId, { retention: 'ephemeral' }),
-    ).rejects.toMatchObject({
-      field: 'retention',
-      message: 'sticky ephemeral artifact limit exceeded',
-    });
+    await store.unpin(secondId, { retention: 'ephemeral' });
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [
         expect.objectContaining({
           id: secondId,
-          retention: 'restorable',
+          retention: 'ephemeral',
+          persistenceWarning: 'sticky_override_active',
         }),
       ],
     });
