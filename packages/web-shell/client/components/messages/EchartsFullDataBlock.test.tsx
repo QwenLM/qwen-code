@@ -211,7 +211,8 @@ describe('EchartsFullDataBlock', () => {
       notMerge: true,
     });
     const renderedOption = setOption.mock.calls[0]?.[0] as
-      EchartsFullDataOption | undefined;
+      | EchartsFullDataOption
+      | undefined;
     expect(renderedOption).toEqual(
       expect.not.objectContaining({ title: expect.anything() }),
     );

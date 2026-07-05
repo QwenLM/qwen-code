@@ -8,6 +8,7 @@ import express from 'express';
 import type { Application } from 'express';
 import type { DaemonLogger } from './daemon-logger.js';
 import type {
+  DaemonMetricsBucket,
   DaemonPerfSnapshot,
   DaemonStartupSnapshot,
 } from './daemon-status.js';
@@ -215,6 +216,13 @@ export interface ServeAppDeps {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
+  /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
+  getMetricsSeries?: () => DaemonMetricsBucket[];
+  /**
+   * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
+   * the metrics ring can bucket request rate and latency for the charts.
+   */
+  recordDaemonRequest?: (durationMs: number, statusCode: number) => void;
   workspace?: DaemonWorkspaceService;
   statusProvider?: DaemonStatusProvider;
   persistDisabledTools?: (
@@ -539,7 +547,7 @@ export function createServeApp(
     requireAuth: opts.requireAuth === true,
   });
 
-  app.use(daemonTelemetryMiddleware(boundWorkspace));
+  app.use(daemonTelemetryMiddleware(boundWorkspace, deps.recordDaemonRequest));
 
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
@@ -569,6 +577,7 @@ export function createServeApp(
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
     getPerfSnapshot: deps.getPerfSnapshot,
+    getMetricsSeries: deps.getMetricsSeries,
   });
 
   registerCapabilitiesRoutes(app, {
