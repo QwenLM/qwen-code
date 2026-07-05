@@ -59,8 +59,8 @@ feature that an autonomous agent can confidently implement and verify:
 2. Reject work that cannot be reproduced in headless Linux CI, including
    Windows/macOS-only bugs, real OAuth flows, IDE extension behavior, or human
    visual judgment.
-3. Reject likely fixes requiring more than a small scoped change, architectural
-   redesign, or product decisions.
+3. Reject likely fixes requiring more than roughly 300 lines of change,
+   architectural redesign, or product decisions.
 4. If a report mixes symptoms, judge the reporter's primary complaint. If only
    a side symptom is fixable, skip this issue and mention the side symptom so a
    human can split it out. Do not mark that skip permanent solely for the side
@@ -93,6 +93,9 @@ Inputs:
   Default: `/tmp/autofix`.
 
 Implement the selected issue end to end in the checked-out repository:
+
+Read `<workdir>/candidates.json` for the full issue text and
+`<workdir>/decision.json` for the assessment that selected it.
 
 Follow the project conventions in `AGENTS.md`, the reproduce-first workflow in
 `.qwen/skills/bugfix/SKILL.md`, and the E2E guide in
@@ -144,11 +147,10 @@ Classify every feedback point:
 - Critical or merge-blocking: correctness bug, broken build/test, security
   problem, or a `CHANGES_REQUESTED` item that names a real defect. Verify it
   against current code before changing anything, then fix it minimally.
-- Suggestion, nit, or optional hardening: use engineering judgment. Implement
-  only suggestions that are reasonable, valuable, and within the PR scope. Skip
+- Suggestion, nit, or optional hardening: use engineering judgment. Prefer NOT
+  to deviate from this PR's original direction and scope. Implement only
+  suggestions that are reasonable, valuable, and within the PR scope. Skip
   low-value or over-engineered suggestions and explain why.
-- Re-read the full diff as a skeptical reviewer before writing the final
-  summary.
 
 If `--conflict true`, merge `origin/<base>`, resolve every conflict by
 understanding both sides, and include conflict notes in the summary. If false,
@@ -156,8 +158,9 @@ do not merge unnecessarily.
 
 Finish with exactly one outcome:
 
-- Made a change: commit one Conventional Commit such as
-  `fix(core): address review feedback (#<issue>)`, then write
+- Made a change: before committing, re-read the full diff as a skeptical
+  reviewer and fix issues you would flag. Commit one Conventional Commit such
+  as `fix(core): address review feedback (#<issue>)`, then write
   `<workdir>/address-summary.md` with each feedback point, its class, your
   decision, what changed, suggested verification, and conflict notes if any.
 - Nothing worth doing: do not commit. Write `<workdir>/no-action.md` explaining
