@@ -505,8 +505,6 @@ export class SessionArtifactStore {
           } else {
             delete updated.expiresAt;
           }
-        } else if (existing.expiresAt) {
-          updated.expiresAt = existing.expiresAt;
         } else {
           delete updated.expiresAt;
         }
@@ -574,6 +572,7 @@ export class SessionArtifactStore {
           targetRetention === 'ephemeral'
             ? 'sticky_override_active'
             : 'metadata_only_restore',
+        clientRetained: false,
         updatedAt: new Date().toISOString(),
       };
       delete updated.contentRef;
@@ -721,7 +720,7 @@ export class SessionArtifactStore {
           }
           let contentRef = artifact.contentRef;
           let expiresAt = artifact.expiresAt;
-          let retention = artifact.retention;
+          let retention = normalized.retention;
           let status = normalized.status;
           let persistenceWarning:
             | SessionArtifactPersistenceWarning
@@ -776,6 +775,7 @@ export class SessionArtifactStore {
 
   private cloneState(): {
     artifacts: Map<string, StoredArtifact>;
+    receivedSeq: number;
     insertSeq: number;
     persistenceSeq: number;
     durableEventsSinceSnapshot: number;
@@ -789,6 +789,7 @@ export class SessionArtifactStore {
           cloneStoredArtifact(artifact),
         ]),
       ),
+      receivedSeq: this.receivedSeq,
       insertSeq: this.insertSeq,
       persistenceSeq: this.persistenceSeq,
       durableEventsSinceSnapshot: this.durableEventsSinceSnapshot,
@@ -799,6 +800,7 @@ export class SessionArtifactStore {
 
   private restoreState(state: {
     artifacts: Map<string, StoredArtifact>;
+    receivedSeq: number;
     insertSeq: number;
     persistenceSeq: number;
     durableEventsSinceSnapshot: number;
@@ -809,6 +811,7 @@ export class SessionArtifactStore {
     for (const [id, artifact] of state.artifacts) {
       this.artifacts.set(id, cloneStoredArtifact(artifact));
     }
+    this.receivedSeq = state.receivedSeq;
     this.insertSeq = state.insertSeq;
     this.persistenceSeq = state.persistenceSeq;
     this.durableEventsSinceSnapshot = state.durableEventsSinceSnapshot;

@@ -309,6 +309,7 @@ describe('SessionArtifactStore', () => {
     expect(unpinned.changes[0]?.artifact).toMatchObject({
       retention: 'restorable',
       persistenceWarning: 'metadata_only_restore',
+      clientRetained: false,
     });
     expect(unpinned.changes[0]?.artifact).not.toHaveProperty('contentRef');
     expect(events.map((event) => event.sequence)).toEqual([1, 2, 3]);
@@ -580,6 +581,46 @@ describe('SessionArtifactStore', () => {
     expect(events).toHaveLength(3);
   });
 
+  it('clears stale pin expiration when repinning without a ttl', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-pin-clear-expiration',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [{ title: 'Report', url: 'https://example.com/report' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    const contentRef = {
+      kind: 'managed_copy' as const,
+      contentId: `${'a'.repeat(64)}-${'b'.repeat(16)}`,
+      sha256: 'a'.repeat(64),
+      sizeBytes: 12,
+      createdAt: '2026-07-04T00:00:00.000Z',
+    };
+    await store.pin(artifactId, {
+      contentRef,
+      expiresAt: '2026-08-01T00:00:00.000Z',
+    });
+
+    const repinned = await store.pin(artifactId, {
+      contentRef: {
+        ...contentRef,
+        contentId: `${'c'.repeat(64)}-${'d'.repeat(16)}`,
+        sha256: 'c'.repeat(64),
+      },
+    });
+
+    expect(repinned.changes[0]?.artifact).toMatchObject({
+      retention: 'pinned',
+    });
+    expect(repinned.changes[0]?.artifact).not.toHaveProperty('expiresAt');
+  });
+
   it('rolls back pin mutations when persistence fails', async () => {
     let fail = false;
     const store = new SessionArtifactStore({
@@ -618,6 +659,43 @@ describe('SessionArtifactStore', () => {
         },
       ],
     });
+  });
+
+  it('rolls back received sequence when strict upsert persistence fails', async () => {
+    let fail = false;
+    const store = new SessionArtifactStore({
+      sessionId: 's1-upsert-sequence-rollback',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {
+          if (fail) throw new Error('persist failed');
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const sequenceState = store as unknown as { receivedSeq: number };
+
+    await store.upsertMany(
+      [{ title: 'First', url: 'https://example.com/first' }],
+      { strict: true },
+    );
+    expect(sequenceState.receivedSeq).toBe(1);
+
+    fail = true;
+    await expect(
+      store.upsertMany(
+        [{ title: 'Second', url: 'https://example.com/second' }],
+        { strict: true },
+      ),
+    ).rejects.toThrow('persist failed');
+    expect(sequenceState.receivedSeq).toBe(1);
+
+    fail = false;
+    await store.upsertMany(
+      [{ title: 'Third', url: 'https://example.com/third' }],
+      { strict: true },
+    );
+    expect(sequenceState.receivedSeq).toBe(2);
   });
 
   it('serializes concurrent store operations', async () => {
@@ -2912,6 +2990,65 @@ describe('SessionArtifactStore', () => {
     expect((await restored.list()).artifacts[0]).not.toHaveProperty(
       'contentRef',
     );
+  });
+
+  it('downgrades restored pinned records to restorable even when content is valid', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-valid-pinned',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await source.upsertMany(
+      [{ title: 'Pinned', url: 'https://example.com/pinned' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    await source.pin(artifactId, {
+      contentRef: {
+        kind: 'managed_copy',
+        contentId: `${'e'.repeat(64)}-${'f'.repeat(16)}`,
+        sha256: 'e'.repeat(64),
+        sizeBytes: 12,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      },
+    });
+    const persisted = events[1]!.changes[0]!.artifact!;
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-restore-valid-pinned',
+      workspaceCwd: workspace,
+    });
+
+    await expect(
+      restored.restore(
+        {
+          v: 2,
+          sessionId: 's11-restore-valid-pinned',
+          sequence: 2,
+          artifacts: [persisted],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+          warnings: [],
+        },
+        { verifyContentRef: async () => undefined },
+      ),
+    ).resolves.toEqual([]);
+
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: artifactId,
+          retention: 'restorable',
+          restoreState: 'restored',
+          contentRef: persisted.contentRef,
+        }),
+      ],
+    });
   });
 });
 
