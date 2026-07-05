@@ -326,7 +326,11 @@ async function listOrganizedWorkspaceSessionsForResponse(
     if (group === 'pinned') return session.isPinned === true;
     if (group === 'ungrouped')
       return session.groupId == null && session.color == null;
-    return session.groupId === group;
+    // Color takes precedence over a named group in the sidebar's bucketing, so
+    // a session carrying a color tag is never shown under its group. Keep the
+    // named-group filter consistent for REST/ACP consumers (the store allows
+    // both fields even though the UI keeps them mutually exclusive).
+    return session.color == null && session.groupId === group;
   });
   const activityTimeById = new Map(
     filtered.map((session) => [
