@@ -157,9 +157,10 @@ Classify every feedback point:
   why.
 
 If `--conflict true`, merge `origin/<base>`, resolve every conflict by
-understanding both sides, never blindly taking one side, and include conflict
-notes plus focused post-merge verification checks in the summary. If false, do
-not merge unnecessarily.
+understanding both sides, never blindly taking one side, ensure the merged
+result builds and tests pass, and include conflict notes plus focused
+post-merge verification checks in the summary. If false, do not merge
+unnecessarily.
 
 Finish with exactly one outcome:
 

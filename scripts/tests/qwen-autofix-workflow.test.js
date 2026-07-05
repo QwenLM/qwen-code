@@ -465,6 +465,9 @@ describe('qwen-autofix workflow', () => {
     expect(compactSkill).toContain('are not grounds for a permanent skip');
     expect(compactSkill).toContain('never blindly taking one side');
     expect(compactSkill).toContain(
+      'ensure the merged result builds and tests pass',
+    );
+    expect(compactSkill).toContain(
       'before committing, re-read the full diff as a skeptical reviewer',
     );
     expect(compactSkill).toContain(
