@@ -47,25 +47,25 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 ### Options
 
-| Option                   | Required | Description                                                                                                                                                            |
-| ------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`                   | Yes      | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `feishu`, or a custom type from an extension (see [Plugins](./plugins))                                          |
-| `token`                  | Telegram | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat or DingTalk                                                            |
-| `clientId`               | DingTalk | DingTalk AppKey. Supports `$ENV_VAR` syntax                                                                                                                            |
-| `clientSecret`           | DingTalk | DingTalk AppSecret. Supports `$ENV_VAR` syntax                                                                                                                         |
-| `model`                  | No       | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                               |
-| `senderPolicy`           | No       | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                   |
-| `allowedUsers`           | No       | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                   |
-| `sessionScope`           | No       | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                       |
-| `cwd`                    | No       | Working directory for the agent. Defaults to the current directory                                                                                                     |
-| `instructions`           | No       | Custom instructions prepended to the first message of each session                                                                                                     |
-| `groupPolicy`            | No       | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                       |
-| `groupHistoryLimit`      | No       | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many authorized, unmentioned group messages for the next bot mention/reply. |
-| `groups`                 | No       | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                     |
-| `dispatchMode`           | No       | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                         |
-| `blockStreaming`         | No       | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                        |
-| `blockStreamingChunk`    | No       | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                    |
-| `blockStreamingCoalesce` | No       | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                              |
+| Option                   | Required         | Description                                                                                                                                                            |
+| ------------------------ | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`                   | Yes              | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `feishu`, or a custom type from an extension (see [Plugins](./plugins))                                          |
+| `token`                  | Telegram         | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat or DingTalk                                                            |
+| `clientId`               | DingTalk, Feishu | DingTalk AppKey or Feishu App ID. Supports `$ENV_VAR` syntax                                                                                                           |
+| `clientSecret`           | DingTalk, Feishu | DingTalk AppSecret or Feishu App Secret. Supports `$ENV_VAR` syntax                                                                                                    |
+| `model`                  | No               | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                               |
+| `senderPolicy`           | No               | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                   |
+| `allowedUsers`           | No               | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                   |
+| `sessionScope`           | No               | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                       |
+| `cwd`                    | No               | Working directory for the agent. Defaults to the current directory                                                                                                     |
+| `instructions`           | No               | Custom instructions prepended to the first message of each session                                                                                                     |
+| `groupPolicy`            | No               | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                       |
+| `groupHistoryLimit`      | No               | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many authorized, unmentioned group messages for the next bot mention/reply. |
+| `groups`                 | No               | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                     |
+| `dispatchMode`           | No               | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                         |
+| `blockStreaming`         | No               | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                        |
+| `blockStreamingChunk`    | No               | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                    |
+| `blockStreamingCoalesce` | No               | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                              |
 
 ### Sender Policy
 
