@@ -8,6 +8,7 @@ import {
   SessionService,
   SessionOrganizationError,
   type SessionArchiveState,
+  type SessionGroupColor,
 } from '@qwen-code/qwen-code-core';
 import type {
   AcpSessionBridge,
@@ -211,6 +212,7 @@ function applyOrganization(
   organization:
     | {
         groupId: string | null;
+        color?: SessionGroupColor | null;
         isPinned: boolean;
         pinnedAt?: string;
       }
@@ -219,6 +221,7 @@ function applyOrganization(
   return {
     ...session,
     groupId: organization?.groupId ?? null,
+    color: organization?.color ?? null,
     isPinned: organization?.isPinned === true,
     ...(organization?.pinnedAt !== undefined
       ? { pinnedAt: organization.pinnedAt }

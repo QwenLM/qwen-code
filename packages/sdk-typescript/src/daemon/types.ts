@@ -486,6 +486,8 @@ export interface DaemonSessionSummary {
   isPinned?: boolean;
   pinnedAt?: string;
   groupId?: string | null;
+  /** Quick color grouping tag; mutually exclusive with `groupId` in the UI. */
+  color?: DaemonSessionGroupColor | null;
 }
 
 export type DaemonSessionExportFormat = 'html' | 'md' | 'json' | 'jsonl';
@@ -535,6 +537,7 @@ export interface DaemonSessionGroupUpdate {
 export interface DaemonSessionOrganizationUpdate {
   isPinned?: boolean;
   groupId?: string | null;
+  color?: DaemonSessionGroupColor | null;
 }
 
 export interface DaemonSessionOrganizationResult {
@@ -542,6 +545,7 @@ export interface DaemonSessionOrganizationResult {
   groupId: string | null;
   isPinned: boolean;
   pinnedAt?: string;
+  color?: DaemonSessionGroupColor | null;
   updatedAt: string;
 }
 
