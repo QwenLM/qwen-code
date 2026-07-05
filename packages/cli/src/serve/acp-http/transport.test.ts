@@ -6423,6 +6423,47 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('session/list group=ungrouped excludes color-tagged sessions', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440012';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        // Tag the session with a color and no named group.
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 82,
+          method: '_qwen/session/update_organization',
+          params: { sessionId, color: 'red' },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessionId, color: 'red', groupId: null },
+        });
+
+        // A color tag is its own sidebar bucket, so the session is not
+        // "ungrouped" even though it belongs to no named group. The server
+        // filter must agree with that taxonomy for REST/ACP consumers.
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 83,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'ungrouped',
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { sessions: [] },
+        });
+        reader.close();
+      });
+    });
+
     it('session/list rejects group filter without organized view', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);

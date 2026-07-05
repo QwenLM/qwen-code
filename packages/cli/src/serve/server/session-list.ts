@@ -324,7 +324,8 @@ async function listOrganizedWorkspaceSessionsForResponse(
   const filtered = [...bySessionId.values()].filter((session) => {
     if (group === 'all') return true;
     if (group === 'pinned') return session.isPinned === true;
-    if (group === 'ungrouped') return session.groupId == null;
+    if (group === 'ungrouped')
+      return session.groupId == null && session.color == null;
     return session.groupId === group;
   });
   const activityTimeById = new Map(
