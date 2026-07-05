@@ -72,6 +72,7 @@ interface WebShellSidebarProps {
   onLoadSession: (sessionId: string) => Promise<void> | void;
   onError: (error: unknown, fallback: string) => void;
   mobileOpen?: boolean;
+  sessionListReloadToken?: number;
 }
 
 function cx(...classes: Array<string | false | undefined>): string {
@@ -407,6 +408,7 @@ export function WebShellSidebar({
   onLoadSession,
   onError,
   mobileOpen,
+  sessionListReloadToken,
 }: WebShellSidebarProps) {
   const { t } = useI18n();
   const connection = useConnection();
@@ -674,6 +676,22 @@ export function WebShellSidebar({
     }, pollInterval);
     return () => window.clearInterval(intervalId);
   }, [error, hasRunningSession, projectExpanded, reload]);
+
+  const prevReloadTokenRef = useRef(sessionListReloadToken);
+  useEffect(() => {
+    if (
+      sessionListReloadToken !== undefined &&
+      sessionListReloadToken !== prevReloadTokenRef.current &&
+      !document.hidden &&
+      !pollInFlightRef.current
+    ) {
+      prevReloadTokenRef.current = sessionListReloadToken;
+      pollInFlightRef.current = true;
+      void reload().finally(() => {
+        pollInFlightRef.current = false;
+      });
+    }
+  }, [sessionListReloadToken, reload]);
 
   useEffect(() => {
     const runningBySessionId = new Map(
