@@ -85,9 +85,6 @@ export type {
   BridgeDaemonStatusSnapshot,
   AcpSessionBridge,
   HttpAcpBridge,
-  SessionArtifactPinRequest,
-  SessionArtifactRemoveRequest,
-  SessionArtifactUnpinRequest,
 } from '@qwen-code/acp-bridge/bridgeTypes';
 
 export {

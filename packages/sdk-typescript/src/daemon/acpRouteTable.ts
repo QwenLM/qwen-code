@@ -280,50 +280,6 @@ export const ROUTE_TABLE: readonly RouteEntry[] = [
       }),
     },
   },
-  // POST /session/:id/artifacts/:artifactId/pin → _qwen/session/artifacts/pin
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/artifacts\/([^/]+)\/pin$/,
-    mapping: {
-      method: '_qwen/session/artifacts/pin',
-      extractParams: (segs, body) => ({
-        ...(isRecord(body) ? body : {}),
-        sessionId: segs[0],
-        artifactId: segs[1],
-      }),
-    },
-  },
-  // DELETE /session/:id/artifacts/:artifactId/pin → _qwen/session/artifacts/unpin
-  {
-    httpMethod: 'DELETE',
-    pattern: /^\/session\/([^/]+)\/artifacts\/([^/]+)\/pin$/,
-    mapping: {
-      method: '_qwen/session/artifacts/unpin',
-      extractParams: (segs, body) => ({
-        ...(isRecord(body) ? body : {}),
-        sessionId: segs[0],
-        artifactId: segs[1],
-      }),
-    },
-  },
-  // GET /session/:id/artifacts/fsck → _qwen/session/artifacts/fsck
-  {
-    httpMethod: 'GET',
-    pattern: /^\/session\/([^/]+)\/artifacts\/fsck$/,
-    mapping: {
-      method: '_qwen/session/artifacts/fsck',
-      extractParams: (segs) => ({ sessionId: segs[0] }),
-    },
-  },
-  // POST /session/:id/artifacts/gc → _qwen/session/artifacts/gc
-  {
-    httpMethod: 'POST',
-    pattern: /^\/session\/([^/]+)\/artifacts\/gc$/,
-    mapping: {
-      method: '_qwen/session/artifacts/gc',
-      extractParams: (segs) => ({ sessionId: segs[0] }),
-    },
-  },
   // DELETE /session/:id/artifacts/:artifactId → _qwen/session/artifacts/remove
   {
     httpMethod: 'DELETE',

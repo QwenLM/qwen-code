@@ -358,64 +358,11 @@ describe('acpRouteTable – matchRoute', () => {
     expect(result).not.toBeNull();
     expect(result!.mapping.method).toBe('_qwen/session/artifacts/remove');
     expect(
-      result!.mapping.extractParams(
-        result!.segments,
-        { deleteContent: false },
-        'DELETE',
-      ),
+      result!.mapping.extractParams(result!.segments, undefined, 'DELETE'),
     ).toEqual({
       sessionId: 's8',
       artifactId: 'art 1',
-      deleteContent: false,
     });
-  });
-
-  it('POST /session/:id/artifacts/:artifactId/pin maps to _qwen/session/artifacts/pin', () => {
-    const result = matchRoute('/session/s8/artifacts/art%201/pin', 'POST');
-    expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('_qwen/session/artifacts/pin');
-    expect(
-      result!.mapping.extractParams(
-        result!.segments,
-        { mode: 'metadata' },
-        'POST',
-      ),
-    ).toEqual({ sessionId: 's8', artifactId: 'art 1', mode: 'metadata' });
-  });
-
-  it('DELETE /session/:id/artifacts/:artifactId/pin maps to _qwen/session/artifacts/unpin', () => {
-    const result = matchRoute('/session/s8/artifacts/art%201/pin', 'DELETE');
-    expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('_qwen/session/artifacts/unpin');
-    expect(
-      result!.mapping.extractParams(
-        result!.segments,
-        { retention: 'ephemeral' },
-        'DELETE',
-      ),
-    ).toEqual({
-      sessionId: 's8',
-      artifactId: 'art 1',
-      retention: 'ephemeral',
-    });
-  });
-
-  it('GET /session/:id/artifacts/fsck maps to _qwen/session/artifacts/fsck', () => {
-    const result = matchRoute('/session/s8/artifacts/fsck', 'GET');
-    expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('_qwen/session/artifacts/fsck');
-    expect(
-      result!.mapping.extractParams(result!.segments, undefined, 'GET'),
-    ).toEqual({ sessionId: 's8' });
-  });
-
-  it('POST /session/:id/artifacts/gc maps to _qwen/session/artifacts/gc', () => {
-    const result = matchRoute('/session/s8/artifacts/gc', 'POST');
-    expect(result).not.toBeNull();
-    expect(result!.mapping.method).toBe('_qwen/session/artifacts/gc');
-    expect(
-      result!.mapping.extractParams(result!.segments, undefined, 'POST'),
-    ).toEqual({ sessionId: 's8' });
   });
 
   it('POST /session/:id/recap maps to _qwen/session/recap', () => {

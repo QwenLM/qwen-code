@@ -28,10 +28,6 @@ import type {
   SessionArtifactsEnvelope,
 } from './sessionArtifacts.js';
 import type {
-  SessionArtifactFsckResult,
-  SessionArtifactGcResult,
-} from './sessionArtifactContentStore.js';
-import type {
   ServeSessionContextStatus,
   ServeSessionHooksStatus,
   ServeSessionLspStatus,
@@ -63,20 +59,6 @@ export interface RewindResponse {
   targetTurnIndex: number;
   filesChanged: string[];
   filesFailed: string[];
-}
-
-export interface SessionArtifactPinRequest {
-  mode?: 'metadata' | 'content';
-  ttlDays?: number;
-  clientRetained?: boolean;
-}
-
-export interface SessionArtifactRemoveRequest {
-  deleteContent?: boolean;
-}
-
-export interface SessionArtifactUnpinRequest {
-  retention?: 'ephemeral' | 'restorable';
 }
 
 export interface BridgeSpawnRequest {
@@ -606,32 +588,7 @@ export interface AcpSessionBridge {
     sessionId: string,
     artifactId: string,
     context?: BridgeClientRequestContext,
-    options?: SessionArtifactRemoveRequest,
   ): Promise<SessionArtifactMutationResult>;
-
-  pinSessionArtifact(
-    sessionId: string,
-    artifactId: string,
-    context?: BridgeClientRequestContext,
-    options?: SessionArtifactPinRequest,
-  ): Promise<SessionArtifactMutationResult>;
-
-  unpinSessionArtifact(
-    sessionId: string,
-    artifactId: string,
-    context?: BridgeClientRequestContext,
-    options?: SessionArtifactUnpinRequest,
-  ): Promise<SessionArtifactMutationResult>;
-
-  fsckSessionArtifacts(
-    sessionId: string,
-    context?: BridgeClientRequestContext,
-  ): Promise<SessionArtifactFsckResult>;
-
-  gcSessionArtifacts(
-    sessionId: string,
-    context?: BridgeClientRequestContext,
-  ): Promise<SessionArtifactGcResult>;
 
   /**
    * Cast a vote on a pending `permission_request` (first-responder wins).

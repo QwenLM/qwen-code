@@ -79,7 +79,6 @@ export function createServeFeatures(
         persistSettingAvailable,
         sessionShellCommandEnabled,
         sessionArtifactsPersistenceAvailable: true,
-        sessionArtifactsContentRetentionAvailable: true,
         rateLimit: opts.rateLimit === true,
         reloadAvailable,
         clientMcpOverWsEnabled: opts.clientMcpOverWs === true,

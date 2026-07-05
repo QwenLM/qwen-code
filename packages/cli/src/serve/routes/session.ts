@@ -27,9 +27,6 @@ import {
   SessionShellClientRequiredError,
   SessionShellDisabledError,
   type AcpSessionBridge,
-  type SessionArtifactPinRequest,
-  type SessionArtifactRemoveRequest,
-  type SessionArtifactUnpinRequest,
 } from '../acp-session-bridge.js';
 import type { DaemonLogger } from '../daemon-logger.js';
 import type { SendBridgeError } from '../server/error-response.js';
@@ -76,8 +73,6 @@ interface RegisterSessionRoutesDeps {
   languageCodes: string[];
 }
 
-const SESSION_ARTIFACT_MAX_TTL_DAYS = 365;
-
 function requireSessionArtifactClientId(
   clientId: string | undefined,
   res: Response,
@@ -104,108 +99,6 @@ function sendArtifactValidationError(res: Response, err: unknown): boolean {
     },
   });
   return true;
-}
-
-function parseArtifactPinRequest(req: Request): SessionArtifactPinRequest {
-  const body = safeBody(req);
-  const mode = body['mode'];
-  const ttlDays = body['ttlDays'];
-  const clientRetained = body['clientRetained'];
-  const options: SessionArtifactPinRequest = {};
-  if (mode !== undefined) {
-    if (mode !== 'metadata' && mode !== 'content') {
-      throw new SessionArtifactValidationError(
-        'mode must be "metadata" or "content"',
-        'mode',
-      );
-    }
-    options.mode = mode;
-  }
-  if (ttlDays !== undefined) {
-    if (mode === 'metadata') {
-      throw new SessionArtifactValidationError(
-        'ttlDays is only valid with content pinning',
-        'ttlDays',
-      );
-    }
-    if (
-      typeof ttlDays !== 'number' ||
-      !Number.isSafeInteger(ttlDays) ||
-      ttlDays <= 0
-    ) {
-      throw new SessionArtifactValidationError(
-        'ttlDays must be a positive safe integer',
-        'ttlDays',
-      );
-    }
-    if (ttlDays > SESSION_ARTIFACT_MAX_TTL_DAYS) {
-      throw new SessionArtifactValidationError(
-        `ttlDays must be at most ${SESSION_ARTIFACT_MAX_TTL_DAYS}`,
-        'ttlDays',
-      );
-    }
-    options.ttlDays = ttlDays;
-  }
-  if (clientRetained !== undefined) {
-    if (typeof clientRetained !== 'boolean') {
-      throw new SessionArtifactValidationError(
-        'clientRetained must be a boolean',
-        'clientRetained',
-      );
-    }
-    options.clientRetained = clientRetained;
-  }
-  return options;
-}
-
-function parseArtifactRemoveRequest(
-  req: Request,
-): SessionArtifactRemoveRequest {
-  const body = safeBody(req);
-  const deleteContent = body['deleteContent'];
-  if (deleteContent === undefined) {
-    return {};
-  }
-  if (typeof deleteContent !== 'boolean') {
-    throw new SessionArtifactValidationError(
-      'deleteContent must be a boolean',
-      'deleteContent',
-    );
-  }
-  return { deleteContent };
-}
-
-function parseArtifactUnpinRequest(req: Request): SessionArtifactUnpinRequest {
-  const body = safeBody(req);
-  const retention = body['retention'];
-  if (retention === undefined) {
-    return {};
-  }
-  if (retention !== 'ephemeral' && retention !== 'restorable') {
-    throw new SessionArtifactValidationError(
-      'retention must be "ephemeral" or "restorable"',
-      'retention',
-    );
-  }
-  return { retention };
-}
-
-function nonEmptyArtifactPinRequest(
-  options: SessionArtifactPinRequest,
-): SessionArtifactPinRequest | undefined {
-  return Object.keys(options).length === 0 ? undefined : options;
-}
-
-function nonEmptyArtifactRemoveRequest(
-  options: SessionArtifactRemoveRequest,
-): SessionArtifactRemoveRequest | undefined {
-  return Object.keys(options).length === 0 ? undefined : options;
-}
-
-function nonEmptyArtifactUnpinRequest(
-  options: SessionArtifactUnpinRequest,
-): SessionArtifactUnpinRequest | undefined {
-  return Object.keys(options).length === 0 ? undefined : options;
 }
 
 function sendSessionOrganizationError(res: Response, err: unknown): boolean {
@@ -803,129 +696,6 @@ export function registerSessionRoutes(
     ),
   );
 
-  app.post(
-    '/session/:id/artifacts/:artifactId/pin',
-    mutate({ strict: true }),
-    withMutableSession(
-      'POST /session/:id/artifacts/:artifactId/pin',
-      async (req, res, sessionId) => {
-        const artifactId = req.params['artifactId'];
-        const clientId = parseClientIdHeader(req, res);
-        if (clientId === null) return;
-        if (!requireSessionArtifactClientId(clientId, res)) return;
-        if (!artifactId) {
-          res.status(400).json({
-            v: 1,
-            error: {
-              code: 'VALIDATION_FAILED',
-              message: '`artifactId` route parameter is required',
-              field: 'artifactId',
-            },
-          });
-          return;
-        }
-        try {
-          const options = parseArtifactPinRequest(req);
-          const result = await bridge.pinSessionArtifact(
-            sessionId,
-            artifactId,
-            { clientId },
-            nonEmptyArtifactPinRequest(options),
-          );
-          res.status(200).json(result);
-        } catch (err) {
-          if (sendArtifactValidationError(res, err)) return;
-          sendBridgeError(res, err, {
-            route: 'POST /session/:id/artifacts/:artifactId/pin',
-            sessionId,
-          });
-        }
-      },
-    ),
-  );
-
-  app.delete(
-    '/session/:id/artifacts/:artifactId/pin',
-    mutate({ strict: true }),
-    withMutableSession(
-      'DELETE /session/:id/artifacts/:artifactId/pin',
-      async (req, res, sessionId) => {
-        const artifactId = req.params['artifactId'];
-        const clientId = parseClientIdHeader(req, res);
-        if (clientId === null) return;
-        if (!requireSessionArtifactClientId(clientId, res)) return;
-        if (!artifactId) {
-          res.status(400).json({
-            v: 1,
-            error: {
-              code: 'VALIDATION_FAILED',
-              message: '`artifactId` route parameter is required',
-              field: 'artifactId',
-            },
-          });
-          return;
-        }
-        try {
-          const options = parseArtifactUnpinRequest(req);
-          const result = await bridge.unpinSessionArtifact(
-            sessionId,
-            artifactId,
-            { clientId },
-            nonEmptyArtifactUnpinRequest(options),
-          );
-          res.status(200).json(result);
-        } catch (err) {
-          if (sendArtifactValidationError(res, err)) return;
-          sendBridgeError(res, err, {
-            route: 'DELETE /session/:id/artifacts/:artifactId/pin',
-            sessionId,
-          });
-        }
-      },
-    ),
-  );
-
-  app.get('/session/:id/artifacts/fsck', async (req, res) => {
-    const sessionId = requireSessionId(req, res);
-    if (sessionId === null) return;
-    const clientId = parseClientIdHeader(req, res);
-    if (clientId === null) return;
-    if (!requireSessionArtifactClientId(clientId, res)) return;
-    try {
-      res
-        .status(200)
-        .json(await bridge.fsckSessionArtifacts(sessionId, { clientId }));
-    } catch (err) {
-      sendBridgeError(res, err, {
-        route: 'GET /session/:id/artifacts/fsck',
-        sessionId,
-      });
-    }
-  });
-
-  app.post(
-    '/session/:id/artifacts/gc',
-    mutate({ strict: true }),
-    withMutableSession(
-      'POST /session/:id/artifacts/gc',
-      async (req, res, sessionId) => {
-        const clientId = parseClientIdHeader(req, res);
-        if (clientId === null) return;
-        if (!requireSessionArtifactClientId(clientId, res)) return;
-        try {
-          res
-            .status(200)
-            .json(await bridge.gcSessionArtifacts(sessionId, { clientId }));
-        } catch (err) {
-          sendBridgeError(res, err, {
-            route: 'POST /session/:id/artifacts/gc',
-            sessionId,
-          });
-        }
-      },
-    ),
-  );
-
   app.delete(
     '/session/:id/artifacts/:artifactId',
     mutate({ strict: true }),
@@ -948,12 +718,10 @@ export function registerSessionRoutes(
           return;
         }
         try {
-          const options = parseArtifactRemoveRequest(req);
           const result = await bridge.removeSessionArtifact(
             sessionId,
             artifactId,
             { clientId },
-            nonEmptyArtifactRemoveRequest(options),
           );
           res.status(200).json(result);
         } catch (err) {

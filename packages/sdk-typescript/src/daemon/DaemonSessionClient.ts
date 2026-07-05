@@ -31,12 +31,7 @@ import type {
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
   DaemonSessionArtifactInput,
-  DaemonSessionArtifactFsckResult,
-  DaemonSessionArtifactGcResult,
   DaemonSessionArtifactMutationResult,
-  DaemonSessionArtifactPinOptions,
-  DaemonSessionArtifactRemoveOptions,
-  DaemonSessionArtifactUnpinOptions,
   DaemonSessionArtifactsEnvelope,
   DaemonSessionState,
   DaemonSession,
@@ -434,49 +429,12 @@ export class DaemonSessionClient {
 
   async removeArtifact(
     artifactId: string,
-    options?: DaemonSessionArtifactRemoveOptions,
   ): Promise<DaemonSessionArtifactMutationResult> {
     return await this.client.removeSessionArtifact(
       this.sessionId,
       artifactId,
       this.clientId,
-      options,
     );
-  }
-
-  async pinArtifact(
-    artifactId: string,
-    options?: DaemonSessionArtifactPinOptions,
-  ): Promise<DaemonSessionArtifactMutationResult> {
-    return await this.client.pinSessionArtifact(
-      this.sessionId,
-      artifactId,
-      this.clientId,
-      options,
-    );
-  }
-
-  async unpinArtifact(
-    artifactId: string,
-    options?: DaemonSessionArtifactUnpinOptions,
-  ): Promise<DaemonSessionArtifactMutationResult> {
-    return await this.client.unpinSessionArtifact(
-      this.sessionId,
-      artifactId,
-      this.clientId,
-      options,
-    );
-  }
-
-  async fsckArtifacts(): Promise<DaemonSessionArtifactFsckResult> {
-    return await this.client.fsckSessionArtifacts(
-      this.sessionId,
-      this.clientId,
-    );
-  }
-
-  async gcArtifacts(): Promise<DaemonSessionArtifactGcResult> {
-    return await this.client.gcSessionArtifacts(this.sessionId, this.clientId);
   }
 
   async setModel(modelId: string): Promise<SetModelResult> {
