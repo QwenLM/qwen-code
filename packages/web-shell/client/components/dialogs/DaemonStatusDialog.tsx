@@ -1,12 +1,21 @@
-import { useCallback, useEffect, useRef, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type KeyboardEvent,
+  type ReactNode,
+} from 'react';
 import {
   useStatusReport,
+  type DaemonMetricsSeriesBucket,
   type DaemonStatusReport,
   type DaemonStatusReportLevel,
   type DaemonStatusReportSection,
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { ErrorBoundary } from '../ErrorBoundary';
+import { SvgLineChart, type ChartSeries } from './SvgLineChart';
 import styles from './DaemonStatusDialog.module.css';
 
 // The cheap in-memory summary is polled continuously; the expensive detail
@@ -16,6 +25,18 @@ import styles from './DaemonStatusDialog.module.css';
 // that path. Both surface as one dashboard: the summary/full split is a daemon
 // cost boundary, not something the operator should have to think about.
 const REFRESH_INTERVAL_MS = 5000;
+
+// The dashboard splits into tabs once it carries live charts: monitoring
+// (charts you watch), configuration (static cards you glance at), and
+// diagnostics (sessions/workspace you open when something is wrong) are
+// different intents — and 6 cards + 7 charts + diagnostics overflow one 70vh
+// scroll. Status badge / refresh / issues stay global above the tabs.
+type DaemonTab = 'overview' | 'metrics' | 'diagnostics';
+const DAEMON_TABS: ReadonlyArray<{ id: DaemonTab; labelKey: string }> = [
+  { id: 'overview', labelKey: 'daemon.tab.overview' },
+  { id: 'metrics', labelKey: 'daemon.tab.metrics' },
+  { id: 'diagnostics', labelKey: 'daemon.tab.diagnostics' },
+];
 
 function formatUptime(ms: number): string {
   const totalSeconds = Math.max(0, Math.floor(ms / 1000));
@@ -37,8 +58,28 @@ function formatDurationMs(ms: number): string {
 }
 
 function formatBytes(bytes: number): string {
-  const mb = bytes / (1024 * 1024);
+  // Adaptive unit: sub-MB windows (idle-pipe keep-alive traffic) would read a
+  // misleading "0.0 MB", so drop to KB/B and show a nonzero value. RSS/heap are
+  // always ≥ 1 MB, so those charts stay in MB/GB unchanged.
+  const kb = bytes / 1024;
+  if (kb < 1) return `${Math.round(bytes)} B`;
+  const mb = kb / 1024;
+  if (mb < 1) return `${kb.toFixed(kb < 10 ? 1 : 0)} KB`;
   return mb >= 1024 ? `${(mb / 1024).toFixed(2)} GB` : `${mb.toFixed(1)} MB`;
+}
+
+// Compact counts for chart peaks/current values: thousands collapse to "12.3k"
+// so token burn and request counts stay legible in the narrow legend.
+function formatCount(value: number): string {
+  const n = Math.round(value);
+  if (n >= 10_000) {
+    return `${(n / 1000).toFixed(n % 1000 === 0 ? 0 : 1)}k`;
+  }
+  return n.toLocaleString();
+}
+
+function formatPercent(value: number): string {
+  return `${value.toFixed(value >= 100 || value === 0 ? 0 : 1)}%`;
 }
 
 function channelWorkerState(
@@ -258,8 +299,220 @@ function FullDetail({ report }: { report: DaemonStatusReport }) {
   );
 }
 
+// Bottleneck-analysis dashboard: the daemon samples load, throughput, latency,
+// resource pressure, and token burn into one time-bucketed series, so these
+// charts share an x-axis. Lining up "N tasks running at once" (concurrency)
+// against event-loop lag, queue wait, memory, and API latency shows *where* a
+// busy daemon is actually stalling.
+function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
+  const { t } = useI18n();
+  if (series.length === 0) {
+    return (
+      <Card title={t('daemon.charts.title')}>
+        <div className={styles.empty}>{t('daemon.charts.empty')}</div>
+      </Card>
+    );
+  }
+  const col = (pick: (b: DaemonMetricsSeriesBucket) => number): number[] =>
+    series.map(pick);
+  // Bucket timestamps drive the hover tooltip's time header.
+  const times = series.map((b) => b.t);
+  const chart = (
+    titleKey: string,
+    format: (v: number) => string,
+    lines: ChartSeries[],
+  ): ReactNode => (
+    <Card title={t(titleKey)}>
+      <SvgLineChart
+        series={lines}
+        timestamps={times}
+        format={format}
+        ariaLabel={t(titleKey)}
+        peakLabel={t('daemon.charts.peak')}
+      />
+    </Card>
+  );
+  return (
+    <div className={styles.grid}>
+      {chart('daemon.charts.concurrency', formatCount, [
+        {
+          label: t('daemon.charts.activePrompts'),
+          values: col((b) => b.activePrompts),
+          color: 'var(--primary)',
+        },
+        {
+          label: t('daemon.charts.queuedPrompts'),
+          values: col((b) => b.queuedPrompts),
+          color: 'var(--warning-color)',
+        },
+        {
+          label: t('daemon.charts.activeSessions'),
+          values: col((b) => b.activeSessions),
+          color: 'var(--muted-foreground)',
+        },
+      ])}
+      {chart('daemon.charts.requests', formatCount, [
+        {
+          label: t('daemon.charts.reqTotal'),
+          values: col((b) => b.requests),
+          color: 'var(--success-color)',
+        },
+        {
+          label: t('daemon.charts.reqErrors'),
+          values: col((b) => b.errors),
+          color: 'var(--error-color)',
+        },
+        {
+          label: t('daemon.charts.reqRejected'),
+          values: col((b) => b.rateLimitRejected),
+          color: 'var(--warning-color)',
+        },
+      ])}
+      {chart('daemon.charts.apiLatency', formatDurationMs, [
+        {
+          label: 'p50',
+          values: col((b) => b.latencyP50Ms),
+          color: 'var(--agent-blue-400)',
+        },
+        {
+          label: 'p95',
+          values: col((b) => b.latencyP95Ms),
+          color: 'var(--warning-color)',
+        },
+      ])}
+      {chart('daemon.charts.llmLatency', formatDurationMs, [
+        {
+          label: 'p50',
+          values: col((b) => b.llmApiP50Ms),
+          color: 'var(--agent-blue-400)',
+        },
+        {
+          label: 'p95',
+          values: col((b) => b.llmApiP95Ms),
+          color: 'var(--primary)',
+        },
+      ])}
+      {chart('daemon.charts.promptLatency', formatDurationMs, [
+        {
+          label: t('daemon.charts.queueWait'),
+          values: col((b) => b.promptQueueWaitP95Ms),
+          color: 'var(--warning-color)',
+        },
+        {
+          label: t('daemon.charts.promptDuration'),
+          values: col((b) => b.promptDurationP95Ms),
+          color: 'var(--primary)',
+        },
+      ])}
+      {chart('daemon.charts.eventLoop', formatDurationMs, [
+        {
+          label: t('daemon.charts.eventLoopLag'),
+          values: col((b) => b.eventLoopLagP99Ms),
+          color: 'var(--error-color)',
+        },
+      ])}
+      {chart('daemon.charts.cpu', formatPercent, [
+        {
+          label: t('daemon.charts.cpuDaemon'),
+          values: col((b) => b.cpuPercent),
+          color: 'var(--muted-foreground)',
+        },
+        {
+          label: t('daemon.charts.cpuChild'),
+          values: col((b) => b.childCpuPercent),
+          color: 'var(--primary)',
+        },
+      ])}
+      {chart('daemon.charts.memory', formatBytes, [
+        {
+          label: t('daemon.charts.rssDaemon'),
+          values: col((b) => b.rssBytes),
+          color: 'var(--muted-foreground)',
+        },
+        {
+          label: t('daemon.charts.heap'),
+          values: col((b) => b.heapUsedBytes),
+          color: 'var(--agent-blue-400)',
+        },
+        {
+          label: t('daemon.charts.rssChild'),
+          values: col((b) => b.childRssBytes),
+          color: 'var(--primary)',
+        },
+      ])}
+      {chart('daemon.charts.pipe', formatBytes, [
+        {
+          label: t('daemon.charts.pipeIn'),
+          values: col((b) => b.pipeInBytes),
+          color: 'var(--agent-blue-400)',
+        },
+        {
+          label: t('daemon.charts.pipeOut'),
+          values: col((b) => b.pipeOutBytes),
+          color: 'var(--success-color)',
+        },
+      ])}
+      {chart('daemon.charts.connections', formatCount, [
+        {
+          label: 'SSE',
+          values: col((b) => b.sseConnections),
+          color: 'var(--primary)',
+        },
+        {
+          label: 'WS',
+          values: col((b) => b.wsConnections),
+          color: 'var(--agent-blue-400)',
+        },
+        {
+          label: 'ACP',
+          values: col((b) => b.acpConnections),
+          color: 'var(--muted-foreground)',
+        },
+      ])}
+      {chart('daemon.charts.tokens', formatCount, [
+        {
+          label: t('daemon.charts.tokensIn'),
+          values: col((b) => b.tokensIn),
+          color: 'var(--agent-blue-400)',
+        },
+        {
+          label: t('daemon.charts.tokensOut'),
+          values: col((b) => b.tokensOut),
+          color: 'var(--success-color)',
+        },
+      ])}
+    </div>
+  );
+}
+
 function DaemonStatusDialogInner() {
   const { t } = useI18n();
+  const [activeTab, setActiveTab] = useState<DaemonTab>('overview');
+  // WAI-ARIA tabs keyboard support: roving tabindex (only the active tab is in
+  // the tab order) + Arrow/Home/End moving focus and selection across the
+  // tablist, so keyboard-only users can switch tabs without tabbing through all
+  // the panel content in between.
+  const tabRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const handleTabKeyDown = (
+    e: KeyboardEvent<HTMLButtonElement>,
+    index: number,
+  ): void => {
+    let next: number;
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
+      next = (index + 1) % DAEMON_TABS.length;
+    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
+      next = (index - 1 + DAEMON_TABS.length) % DAEMON_TABS.length;
+    } else if (e.key === 'Home') {
+      next = 0;
+    } else if (e.key === 'End') {
+      next = DAEMON_TABS.length - 1;
+    } else {
+      return;
+    }
+    e.preventDefault();
+    setActiveTab(DAEMON_TABS[next].id);
+    tabRefs.current[next]?.focus();
+  };
   // Two independent fetches: the summary drives the always-live top cards and
   // rides the auto-refresh interval; the full report backs the detail sections
   // and is only pulled on open (autoLoad) and on manual refresh.
@@ -386,261 +639,326 @@ function DaemonStatusDialogInner() {
         </Card>
       )}
 
-      <div className={styles.grid}>
-        <Card title={t('daemon.overview.title')}>
-          {daemon.qwenCodeVersion && (
+      <div
+        className={styles.tabs}
+        role="tablist"
+        aria-label={t('daemon.title')}
+      >
+        {DAEMON_TABS.map((tab, index) => (
+          <button
+            key={tab.id}
+            ref={(el) => {
+              tabRefs.current[index] = el;
+            }}
+            type="button"
+            role="tab"
+            id={`daemon-tab-${tab.id}`}
+            aria-selected={tab.id === activeTab}
+            aria-controls={`daemon-tabpanel-${tab.id}`}
+            tabIndex={tab.id === activeTab ? 0 : -1}
+            className={`${styles.tab} ${
+              tab.id === activeTab ? styles.tabActive : ''
+            }`}
+            onClick={() => setActiveTab(tab.id)}
+            onKeyDown={(e) => handleTabKeyDown(e, index)}
+          >
+            {t(tab.labelKey)}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'overview' && (
+        <div
+          role="tabpanel"
+          id="daemon-tabpanel-overview"
+          aria-labelledby="daemon-tab-overview"
+          tabIndex={0}
+          className={styles.grid}
+        >
+          <Card title={t('daemon.overview.title')}>
+            {daemon.qwenCodeVersion && (
+              <Row
+                label={t('daemon.overview.version')}
+                value={daemon.qwenCodeVersion}
+              />
+            )}
+            <Row label={t('daemon.overview.pid')} value={daemon.pid} />
+            <Row label={t('daemon.overview.mode')} value={daemon.mode} />
             <Row
-              label={t('daemon.overview.version')}
-              value={daemon.qwenCodeVersion}
+              label={t('daemon.overview.uptime')}
+              value={formatUptime(daemon.uptimeMs)}
             />
-          )}
-          <Row label={t('daemon.overview.pid')} value={daemon.pid} />
-          <Row label={t('daemon.overview.mode')} value={daemon.mode} />
-          <Row
-            label={t('daemon.overview.uptime')}
-            value={formatUptime(daemon.uptimeMs)}
-          />
-          {/* The workspace path is long; give it its own full-width row and
+            {/* The workspace path is long; give it its own full-width row and
               keep it to a single line — front-truncated so the meaningful tail
               (…/parent/workspace) stays visible, full path on hover. */}
-          <div className={styles.pathRow}>
-            <span className={styles.rowLabel}>
-              {t('daemon.overview.workspace')}
-            </span>
-            <span
-              className={styles.pathValue}
-              title={daemon.workspaceCwd}
-              // Front-truncate (ellipsis at the start) via CSS `direction:rtl`
-              // so the meaningful tail stays visible; `bdi` keeps the path's
-              // own characters in logical order despite the rtl context.
-            >
-              <bdi>{daemon.workspaceCwd}</bdi>
-            </span>
-          </div>
-        </Card>
+            <div className={styles.pathRow}>
+              <span className={styles.rowLabel}>
+                {t('daemon.overview.workspace')}
+              </span>
+              <span
+                className={styles.pathValue}
+                title={daemon.workspaceCwd}
+                // Front-truncate (ellipsis at the start) via CSS `direction:rtl`
+                // so the meaningful tail stays visible; `bdi` keeps the path's
+                // own characters in logical order despite the rtl context.
+              >
+                <bdi>{daemon.workspaceCwd}</bdi>
+              </span>
+            </div>
+          </Card>
 
-        <Card title={t('daemon.runtime.title')}>
-          {/* The counters below read as plausible zeros while the daemon
+          <Card title={t('daemon.runtime.title')}>
+            {/* The counters below read as plausible zeros while the daemon
               runtime is still coming up or has failed; call that out so they
               are not mistaken for a healthy idle daemon. */}
-          {runtime.error ? (
-            <div className={styles.workspaceError}>
-              {t('daemon.runtime.startFailed')}: {runtime.error}
-            </div>
-          ) : runtime.loading ? (
-            <div className={styles.empty}>{t('daemon.runtime.startingUp')}</div>
-          ) : null}
-          <Row
-            label={t('daemon.runtime.activeSessions')}
-            value={runtime.sessions.active}
-          />
-          {/* Activity counters (daemons predating this omit the sub-object). */}
-          {runtime.activity && (
-            <>
-              <Row
-                label={t('daemon.runtime.activePrompts')}
-                value={runtime.activity.activePrompts}
-              />
-              <Row
-                label={t('daemon.runtime.idle')}
-                value={
-                  runtime.activity.idleSinceMs === null
-                    ? t('daemon.runtime.noActivity')
-                    : formatDurationMs(runtime.activity.idleSinceMs)
-                }
-              />
-            </>
-          )}
-          <Row
-            label={t('daemon.runtime.pendingPermissions')}
-            value={runtime.permissions.pending}
-          />
-          <Row
-            label={t('daemon.runtime.permissionPolicy')}
-            value={runtime.permissions.policy}
-          />
-          <Row
-            label={t('daemon.runtime.channel')}
-            value={
-              runtime.channel.live
-                ? t('daemon.runtime.channelLive')
-                : t('daemon.runtime.channelDown')
-            }
-          />
-          {/* Surface why a channel worker is unhealthy instead of leaving the
-              operator with a bare "down" — these fields are already fetched. */}
-          {runtime.channelWorker.enabled && (
-            <>
-              <Row
-                label={t('daemon.runtime.channelWorker')}
-                value={channelWorkerState(runtime.channelWorker)}
-              />
-              {runtime.channelWorker.error && (
-                <div className={styles.workspaceError}>
-                  {runtime.channelWorker.error}
-                </div>
-              )}
-              {(runtime.channelWorker.restartCount ?? 0) > 0 && (
+            {runtime.error ? (
+              <div className={styles.workspaceError}>
+                {t('daemon.runtime.startFailed')}: {runtime.error}
+              </div>
+            ) : runtime.loading ? (
+              <div className={styles.empty}>
+                {t('daemon.runtime.startingUp')}
+              </div>
+            ) : null}
+            <Row
+              label={t('daemon.runtime.activeSessions')}
+              value={runtime.sessions.active}
+            />
+            {/* Activity counters (daemons predating this omit the sub-object). */}
+            {runtime.activity && (
+              <>
                 <Row
-                  label={t('daemon.runtime.channelWorkerRestarts')}
-                  value={runtime.channelWorker.restartCount}
+                  label={t('daemon.runtime.activePrompts')}
+                  value={runtime.activity.activePrompts}
                 />
-              )}
-            </>
-          )}
-          <Row
-            label={t('daemon.runtime.memory')}
-            value={`${formatBytes(runtime.process.rss)} / ${formatBytes(
-              runtime.process.heapUsed,
-            )}`}
-          />
-        </Card>
+                <Row
+                  label={t('daemon.runtime.idle')}
+                  value={
+                    runtime.activity.idleSinceMs === null
+                      ? t('daemon.runtime.noActivity')
+                      : formatDurationMs(runtime.activity.idleSinceMs)
+                  }
+                />
+              </>
+            )}
+            <Row
+              label={t('daemon.runtime.pendingPermissions')}
+              value={runtime.permissions.pending}
+            />
+            <Row
+              label={t('daemon.runtime.permissionPolicy')}
+              value={runtime.permissions.policy}
+            />
+            <Row
+              label={t('daemon.runtime.channel')}
+              value={
+                runtime.channel.live
+                  ? t('daemon.runtime.channelLive')
+                  : t('daemon.runtime.channelDown')
+              }
+            />
+            {/* Surface why a channel worker is unhealthy instead of leaving the
+              operator with a bare "down" — these fields are already fetched. */}
+            {runtime.channelWorker.enabled && (
+              <>
+                <Row
+                  label={t('daemon.runtime.channelWorker')}
+                  value={channelWorkerState(runtime.channelWorker)}
+                />
+                {runtime.channelWorker.error && (
+                  <div className={styles.workspaceError}>
+                    {runtime.channelWorker.error}
+                  </div>
+                )}
+                {(runtime.channelWorker.restartCount ?? 0) > 0 && (
+                  <Row
+                    label={t('daemon.runtime.channelWorkerRestarts')}
+                    value={runtime.channelWorker.restartCount}
+                  />
+                )}
+              </>
+            )}
+            <Row
+              label={t('daemon.runtime.memory')}
+              value={`${formatBytes(runtime.process.rss)} / ${formatBytes(
+                runtime.process.heapUsed,
+              )}`}
+            />
+          </Card>
 
-        <Card title={t('daemon.transport.title')}>
-          <Row
-            label={t('daemon.transport.restSse')}
-            value={runtime.transport.restSseActive}
-          />
-          {acp.enabled ? (
-            <>
-              <Row
-                label={t('daemon.transport.acpConnections')}
-                value={acp.connections}
-              />
-              <Row
-                label={t('daemon.transport.acpStreams')}
-                value={`${acp.sessionStreams} / ${acp.sseStreams} / ${acp.wsStreams}`}
-              />
-              <Row
-                label={t('daemon.transport.pendingRequests')}
-                value={acp.pendingClientRequests}
-              />
-            </>
-          ) : (
-            <div className={styles.empty}>
-              {t('daemon.transport.acpDisabled')}
-            </div>
-          )}
-          <Row
-            label={t('daemon.transport.rateLimitRejected')}
-            value={
-              runtime.rateLimit.enabled ? rateRejected : t('common.disabled')
-            }
-          />
-        </Card>
+          <Card title={t('daemon.transport.title')}>
+            <Row
+              label={t('daemon.transport.restSse')}
+              value={runtime.transport.restSseActive}
+            />
+            {acp.enabled ? (
+              <>
+                <Row
+                  label={t('daemon.transport.acpConnections')}
+                  value={acp.connections}
+                />
+                <Row
+                  label={t('daemon.transport.acpStreams')}
+                  value={`${acp.sessionStreams} / ${acp.sseStreams} / ${acp.wsStreams}`}
+                />
+                <Row
+                  label={t('daemon.transport.pendingRequests')}
+                  value={acp.pendingClientRequests}
+                />
+              </>
+            ) : (
+              <div className={styles.empty}>
+                {t('daemon.transport.acpDisabled')}
+              </div>
+            )}
+            <Row
+              label={t('daemon.transport.rateLimitRejected')}
+              value={
+                runtime.rateLimit.enabled ? rateRejected : t('common.disabled')
+              }
+            />
+          </Card>
 
-        <Card title={t('daemon.security.title')}>
-          <Row
-            label={t('daemon.security.token')}
-            value={
-              security.tokenConfigured
-                ? t('daemon.security.configured')
-                : t('daemon.security.notConfigured')
-            }
-          />
-          <Row
-            label={t('daemon.security.requireAuth')}
-            value={
-              security.requireAuth ? t('common.enabled') : t('common.disabled')
-            }
-          />
-          <Row
-            label={t('daemon.security.loopback')}
-            value={
-              security.loopbackBind ? t('common.enabled') : t('common.disabled')
-            }
-          />
-          <Row
-            label={t('daemon.security.allowOrigin')}
-            value={security.allowOriginMode}
-          />
-          <Row
-            label={t('daemon.security.shell')}
-            value={
-              security.sessionShellCommandEnabled
-                ? t('common.enabled')
-                : t('common.disabled')
-            }
-          />
-        </Card>
+          <Card title={t('daemon.security.title')}>
+            <Row
+              label={t('daemon.security.token')}
+              value={
+                security.tokenConfigured
+                  ? t('daemon.security.configured')
+                  : t('daemon.security.notConfigured')
+              }
+            />
+            <Row
+              label={t('daemon.security.requireAuth')}
+              value={
+                security.requireAuth
+                  ? t('common.enabled')
+                  : t('common.disabled')
+              }
+            />
+            <Row
+              label={t('daemon.security.loopback')}
+              value={
+                security.loopbackBind
+                  ? t('common.enabled')
+                  : t('common.disabled')
+              }
+            />
+            <Row
+              label={t('daemon.security.allowOrigin')}
+              value={security.allowOriginMode}
+            />
+            <Row
+              label={t('daemon.security.shell')}
+              value={
+                security.sessionShellCommandEnabled
+                  ? t('common.enabled')
+                  : t('common.disabled')
+              }
+            />
+          </Card>
 
-        <Card title={t('daemon.limits.title')}>
-          <Row
-            label={t('daemon.limits.maxSessions')}
-            value={limitValue(limits.maxSessions)}
-          />
-          <Row
-            label={t('daemon.limits.maxPendingPrompts')}
-            value={limitValue(limits.maxPendingPromptsPerSession)}
-          />
-          <Row
-            label={t('daemon.limits.maxConnections')}
-            value={limitValue(limits.listenerMaxConnections)}
-          />
-          <Row
-            label={t('daemon.limits.eventRing')}
-            value={limits.eventRingSize}
-          />
-          <Row
-            label={t('daemon.limits.promptDeadline')}
-            value={
-              limits.promptDeadlineMs === null
-                ? t('daemon.limits.unlimited')
-                : formatDurationMs(limits.promptDeadlineMs)
-            }
-          />
-          <Row
-            label={t('daemon.limits.sessionIdle')}
-            value={formatDurationMs(limits.sessionIdleTimeoutMs)}
-          />
-        </Card>
+          <Card title={t('daemon.limits.title')}>
+            <Row
+              label={t('daemon.limits.maxSessions')}
+              value={limitValue(limits.maxSessions)}
+            />
+            <Row
+              label={t('daemon.limits.maxPendingPrompts')}
+              value={limitValue(limits.maxPendingPromptsPerSession)}
+            />
+            <Row
+              label={t('daemon.limits.maxConnections')}
+              value={limitValue(limits.listenerMaxConnections)}
+            />
+            <Row
+              label={t('daemon.limits.eventRing')}
+              value={limits.eventRingSize}
+            />
+            <Row
+              label={t('daemon.limits.promptDeadline')}
+              value={
+                limits.promptDeadlineMs === null
+                  ? t('daemon.limits.unlimited')
+                  : formatDurationMs(limits.promptDeadlineMs)
+              }
+            />
+            <Row
+              label={t('daemon.limits.sessionIdle')}
+              value={formatDurationMs(limits.sessionIdleTimeoutMs)}
+            />
+          </Card>
 
-        <Card
-          title={
-            capabilities.features.length
-              ? t('daemon.capabilities.titleCount', {
-                  count: capabilities.features.length,
-                })
-              : t('daemon.capabilities.title')
-          }
+          <Card
+            title={
+              capabilities.features.length
+                ? t('daemon.capabilities.titleCount', {
+                    count: capabilities.features.length,
+                  })
+                : t('daemon.capabilities.title')
+            }
+          >
+            {capabilities.features.length === 0 ? (
+              <span className={styles.empty}>{t('daemon.none')}</span>
+            ) : (
+              <div className={styles.featureChips}>
+                {[...capabilities.features].sort().map((feature) => (
+                  <span key={feature} className={styles.featureChip}>
+                    {feature}
+                  </span>
+                ))}
+              </div>
+            )}
+          </Card>
+        </div>
+      )}
+
+      {/* Time-series charts for bottleneck analysis. Driven by the
+          continuously-refreshed summary report so the curves advance on every
+          poll; the daemon retains the history, so it survives dialog close. */}
+      {activeTab === 'metrics' && (
+        <div
+          role="tabpanel"
+          id="daemon-tabpanel-metrics"
+          aria-labelledby="daemon-tab-metrics"
+          tabIndex={0}
         >
-          {capabilities.features.length === 0 ? (
-            <span className={styles.empty}>{t('daemon.none')}</span>
-          ) : (
-            <div className={styles.featureChips}>
-              {[...capabilities.features].sort().map((feature) => (
-                <span key={feature} className={styles.featureChip}>
-                  {feature}
-                </span>
-              ))}
-            </div>
-          )}
-        </Card>
-      </div>
+          <MetricsCharts series={report.runtime.metrics?.series ?? []} />
+        </div>
+      )}
 
       {/* Contain a crash in the detail sections (e.g. a partial detail=full
           payload) to this region so the healthy summary cards above stay live,
           rather than letting the outer boundary replace the whole dialog. */}
-      <ErrorBoundary
-        label="daemon-status-detail"
-        fallback={
-          <div className={styles.empty}>{t('daemon.details.failed')}</div>
-        }
-      >
-        {fullReport?.full ? (
-          <FullDetail report={fullReport} />
-        ) : full.loading ? (
-          <div className={styles.empty}>{t('daemon.details.loading')}</div>
-        ) : full.error ? (
-          <div className={styles.empty}>
-            {t('daemon.details.failed')}: {full.error.message}
-          </div>
-        ) : (
-          // Fetch resolved but the daemon omitted the `full` section — don't
-          // hang on the loading placeholder forever.
-          <div className={styles.empty}>{t('daemon.details.failed')}</div>
-        )}
-      </ErrorBoundary>
+      {activeTab === 'diagnostics' && (
+        <div
+          role="tabpanel"
+          id="daemon-tabpanel-diagnostics"
+          aria-labelledby="daemon-tab-diagnostics"
+          tabIndex={0}
+        >
+          <ErrorBoundary
+            label="daemon-status-detail"
+            fallback={
+              <div className={styles.empty}>{t('daemon.details.failed')}</div>
+            }
+          >
+            {fullReport?.full ? (
+              <FullDetail report={fullReport} />
+            ) : full.loading ? (
+              <div className={styles.empty}>{t('daemon.details.loading')}</div>
+            ) : full.error ? (
+              <div className={styles.empty}>
+                {t('daemon.details.failed')}: {full.error.message}
+              </div>
+            ) : (
+              // Fetch resolved but the daemon omitted the `full` section — don't
+              // hang on the loading placeholder forever.
+              <div className={styles.empty}>{t('daemon.details.failed')}</div>
+            )}
+          </ErrorBoundary>
+        </div>
+      )}
     </div>
   );
 }

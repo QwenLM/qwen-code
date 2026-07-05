@@ -293,6 +293,8 @@ export type {
   DaemonStatusReportSection,
   /** Per-session diagnostics row in a `detail=full` report. */
   DaemonStatusReportSession,
+  /** One time-bucketed sample in the Daemon Status metrics series (charts). */
+  DaemonMetricsSeriesBucket,
   /** Full agent detail including system prompt, tools, and run config. */
   DaemonWorkspaceAgentDetail,
   /** Agent list entry: name, description, level, model, builtin flag. */

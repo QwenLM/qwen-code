@@ -74,7 +74,11 @@ import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { WebShellSidebar } from './components/sidebar/WebShellSidebar';
-import { getLocalCommands } from './constants/localCommands';
+import {
+  getLocalCommands,
+  localizeBuiltinDescriptions,
+  skillDescriptionKey,
+} from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
@@ -329,6 +333,11 @@ export interface WebShellSidebarOptions {
   defaultCollapsed?: boolean;
 }
 
+export type SessionChangeEvent =
+  | { type: 'rename'; sessionId: string; newName: string }
+  | { type: 'submit'; sessionId: string; prompt: string; queued: boolean }
+  | { type: 'turn_complete'; sessionId: string; error?: Error };
+
 export interface WebShellProps {
   /** Called whenever the attached daemon session id changes. */
   onSessionIdChange?: (sessionId: string | undefined) => void;
@@ -410,6 +419,18 @@ export interface WebShellProps {
   composerInput?: WebShellComposerInput;
   /** Replay key for composerInput. */
   composerInputVersion?: number;
+  /** Called when a session-level event occurs (rename, submit, turn complete). */
+  onSessionChange?: (event: SessionChangeEvent) => void;
+  /**
+   * Called before a prompt is submitted. Return a Promise — the prompt is held
+   * until the Promise resolves. If the Promise rejects, the prompt is cancelled.
+   * `sessionId` is `undefined` when the session has not yet been created (deferred).
+   * Also called for queued prompts (submitted while a turn is streaming).
+   */
+  onSubmitBefore?: (params: {
+    sessionId: string | undefined;
+    prompt: string;
+  }) => Promise<void>;
 }
 
 type SessionActionsWithCreate = {
@@ -784,6 +805,8 @@ export function App({
   onComposerReady,
   composerInput,
   composerInputVersion,
+  onSessionChange,
+  onSubmitBefore,
 }: WebShellProps = {}) {
   const [chatWidthMode, setChatWidthMode] =
     useState<ChatWidthMode>(readChatWidthMode);
@@ -1303,6 +1326,33 @@ export function App({
     }
     return createSessionPromiseRef.current;
   }, [sessionActions]);
+  const onSubmitBeforeRef = useRef(onSubmitBefore);
+  onSubmitBeforeRef.current = onSubmitBefore;
+  const [sessionListReloadToken, setSessionListReloadToken] = useState(0);
+  const delayedReloadTimerRef = useRef<ReturnType<typeof setTimeout> | null>(
+    null,
+  );
+  useEffect(
+    () => () => {
+      if (delayedReloadTimerRef.current !== null) {
+        clearTimeout(delayedReloadTimerRef.current);
+      }
+    },
+    [],
+  );
+  const dispatchSessionChange = useCallback(
+    (event: SessionChangeEvent) => {
+      onSessionChange?.(event);
+      setSessionListReloadToken((n) => n + 1);
+    },
+    [onSessionChange],
+  );
+  // Ref-stable handle so that useCallback hooks (sendPrompt, enqueuePrompt,
+  // turn_complete effect) don't need dispatchSessionChange in their dep arrays.
+  // Without this, an unstable onSessionChange prop would cause those callbacks
+  // to be recreated on every render, cascading into downstream effect chains.
+  const dispatchSessionChangeRef = useRef(dispatchSessionChange);
+  dispatchSessionChangeRef.current = dispatchSessionChange;
   const sendPrompt = useCallback(
     async (
       text: string,
@@ -1313,8 +1363,11 @@ export function App({
         clearComposerOnPromptStart?: boolean;
       },
     ) => {
-      clearFollowup();
       const isUserPrompt = !text.trimStart().startsWith('/');
+      const previousLastSubmittedPrompt = lastSubmittedPromptRef.current;
+      const previousLastSubmittedImages = lastSubmittedImagesRef.current;
+      const previousRetriedTurnErrorId = retriedTurnErrorIdRef.current;
+      const previousShowRetryHint = showRetryHintRef.current;
       if (!opts?.retry && isUserPrompt) {
         lastSubmittedPromptRef.current = text;
         lastSubmittedImagesRef.current = images;
@@ -1322,9 +1375,37 @@ export function App({
       }
       setShowRetryHint(false);
       const shouldShowPreparing = !connectionRef.current.sessionId;
-      if (shouldShowPreparing) {
+      if (onSubmitBeforeRef.current) {
+        setIsPreparingPrompt(true);
+        try {
+          await onSubmitBeforeRef.current({
+            sessionId: connectionRef.current.sessionId,
+            prompt: text,
+          });
+        } catch (err) {
+          console.warn(
+            '[web-shell] onSubmitBefore rejected, prompt cancelled',
+            err,
+          );
+          setIsPreparingPrompt(false);
+          // Restore retry-critical refs so Ctrl+Y doesn't resend the
+          // cancelled prompt.
+          lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
+          lastSubmittedImagesRef.current = previousLastSubmittedImages;
+          retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
+          setShowRetryHint(previousShowRetryHint);
+          return;
+        }
+        // Only reset if session already exists; otherwise keep true and let
+        // ensureSessionForPrompt's finally block handle it.
+        if (!shouldShowPreparing) {
+          setIsPreparingPrompt(false);
+        }
+      }
+      if (!onSubmitBeforeRef.current && shouldShowPreparing) {
         setIsPreparingPrompt(true);
       }
+      clearFollowup();
       try {
         await ensureSessionForPrompt();
       } finally {
@@ -1339,6 +1420,24 @@ export function App({
       };
       if (opts?.clearComposerOnPromptStart) {
         editorRef.current?.clear();
+      }
+      const sessionIdAfterEnsure = connectionRef.current.sessionId;
+      if (sessionIdAfterEnsure && text.trim()) {
+        dispatchSessionChangeRef.current?.({
+          type: 'submit',
+          sessionId: sessionIdAfterEnsure,
+          prompt: text,
+          queued: false,
+        });
+        // Schedule an additional delayed reload to account for daemon-side
+        // session registration lag — the immediate reload above may return
+        // a list that doesn't yet include the newly created session.
+        if (delayedReloadTimerRef.current !== null) {
+          clearTimeout(delayedReloadTimerRef.current);
+        }
+        delayedReloadTimerRef.current = setTimeout(() => {
+          setSessionListReloadToken((n) => n + 1);
+        }, 2000);
       }
       const result = await (
         sessionActions.sendPrompt as (
@@ -1403,7 +1502,7 @@ export function App({
   const {
     queuedPrompts,
     queuedTexts,
-    enqueuePrompt,
+    enqueuePrompt: rawEnqueuePrompt,
     removeQueuedPrompt,
     insertQueuedPrompt,
     editQueuedPrompt,
@@ -1421,6 +1520,52 @@ export function App({
     notifySuccess,
     t,
   });
+
+  const enqueuePrompt = useCallback(
+    (text: string, images?: PromptImage[], onComplete?: () => void) => {
+      if (onSubmitBeforeRef.current) {
+        onSubmitBeforeRef
+          .current({
+            sessionId: connectionRef.current.sessionId,
+            prompt: text,
+          })
+          .then(() => {
+            const result = rawEnqueuePrompt(text, images, onComplete);
+            if (result !== false) {
+              editorRef.current?.clear();
+            }
+            const sessionId = connectionRef.current.sessionId;
+            if (sessionId && text.trim()) {
+              dispatchSessionChangeRef.current?.({
+                type: 'submit',
+                sessionId,
+                prompt: text,
+                queued: true,
+              });
+            }
+          })
+          .catch((err: unknown) => {
+            console.warn(
+              '[web-shell] onSubmitBefore rejected queued prompt, cancelled',
+              err,
+            );
+          });
+        return false;
+      }
+      const result = rawEnqueuePrompt(text, images, onComplete);
+      const sessionId = connectionRef.current.sessionId;
+      if (sessionId && text.trim()) {
+        dispatchSessionChangeRef.current?.({
+          type: 'submit',
+          sessionId,
+          prompt: text,
+          queued: true,
+        });
+      }
+      return result;
+    },
+    [rawEnqueuePrompt],
+  );
 
   useEffect(() => {
     logSessionNoticesHook(notices);
@@ -1730,7 +1875,7 @@ export function App({
         blockLocalCommandDuringTurn();
         return;
       }
-      sendPrompt(command)
+      sendPrompt(command, undefined)
         .then(refreshSettings)
         .catch((error: unknown) => {
           handleLanguageChange(previousLanguage);
@@ -1846,6 +1991,35 @@ export function App({
     onStreamingStateChange?.(streamingState);
   }, [streamingState, onStreamingStateChange]);
 
+  // Reads retryableTurnErrorIdRef which is set by the blocks effect above.
+  // Declaration order matters: this effect must run after the blocks effect
+  // so that within the same render, the ref is already updated before we read it.
+  const prevStreamingForTurnCompleteRef = useRef(streamingState);
+  const streamingSessionIdRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const prev = prevStreamingForTurnCompleteRef.current;
+    prevStreamingForTurnCompleteRef.current = streamingState;
+    if (streamingState !== 'idle') {
+      streamingSessionIdRef.current = connectionRef.current.sessionId;
+    }
+    if (prev !== 'idle' && streamingState === 'idle') {
+      const sessionId = connectionRef.current.sessionId;
+      // Only fire if the session that was streaming is still the active one.
+      // Session switches reset streamingState to idle, which must not produce
+      // a spurious turn_complete for the new session.
+      if (!sessionId || sessionId !== streamingSessionIdRef.current) return;
+      const turnError =
+        retryableTurnErrorIdRef.current != null
+          ? new Error(`Turn error (block ${retryableTurnErrorIdRef.current})`)
+          : undefined;
+      dispatchSessionChangeRef.current?.({
+        type: 'turn_complete',
+        sessionId,
+        error: turnError,
+      });
+    }
+  }, [streamingState]);
+
   useEffect(() => {
     onConnectionChange?.(connection.status);
   }, [connection.status, onConnectionChange]);
@@ -1877,6 +2051,26 @@ export function App({
     lastNotifiedSessionIdRef.current = connection.sessionId;
     onSessionIdChange?.(connection.sessionId);
   }, [connection.sessionId, onSessionIdChange]);
+
+  const lastRenameSessionRef = useRef<string | undefined>(undefined);
+  const lastRenameNameRef = useRef<string | undefined>(undefined);
+  useEffect(() => {
+    const sessionId = connection.sessionId;
+    const displayName = connection.displayName;
+    if (!sessionId || !displayName) return;
+    if (sessionId !== lastRenameSessionRef.current) {
+      lastRenameSessionRef.current = sessionId;
+      lastRenameNameRef.current = displayName;
+      return;
+    }
+    if (displayName === lastRenameNameRef.current) return;
+    lastRenameNameRef.current = displayName;
+    dispatchSessionChangeRef.current?.({
+      type: 'rename',
+      sessionId,
+      newName: displayName,
+    });
+  }, [connection.sessionId, connection.displayName]);
 
   useEffect(() => {
     const nextGoal = getLatestActiveGoalFromBlocks(blocks);
@@ -2255,7 +2449,9 @@ export function App({
         errorMessage: string,
         opts?: { optimisticUserMessage?: boolean; retry?: boolean },
       ) => {
-        const clearComposerOnPromptStart = !connectionRef.current.sessionId;
+        const clearComposerOnPromptStart =
+          !connectionRef.current.sessionId ||
+          Boolean(onSubmitBeforeRef.current);
         sendPrompt(promptText, promptImages, {
           ...opts,
           clearComposerOnPromptStart,
@@ -3380,16 +3576,22 @@ export function App({
 
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
-    return mergeCommands(connection.commands ?? [], getLocalCommands(t))
+    return localizeBuiltinDescriptions(
+      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      t,
+    )
       .filter(
         (command) => !hiddenCommands.has(normalizeHiddenCommand(command.name)),
       )
       .map((command) => {
         if (!skillNames.has(command.name)) return command;
+        const skillKey = skillDescriptionKey(command.name);
         return {
           ...command,
           displayCategory: 'skill' as const,
-          description: command.description || t('skills.run'),
+          description: skillKey
+            ? t(skillKey)
+            : command.description || t('skills.run'),
         };
       });
   }, [connection.commands, connection.skills, hiddenCommands, t]);
@@ -3565,6 +3767,7 @@ export function App({
             <DialogShell
               title={t('daemon.title')}
               size="xl"
+              allowFullscreen
               onClose={() => setShowDaemonStatusDialog(false)}
             >
               <DaemonStatusDialog />
@@ -3811,6 +4014,7 @@ export function App({
                   onLoadSession={loadSidebarSession}
                   onError={reportError}
                   mobileOpen={mobileDrawerOpen}
+                  sessionListReloadToken={sessionListReloadToken}
                 />
               </div>
             )}

@@ -343,6 +343,16 @@ describe('ToolRegistry', () => {
   });
 
   describe('deferred tool filtering', () => {
+    it('sorts visible function declarations by canonical name', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'zeta' }));
+      toolRegistry.registerTool(new MockTool({ name: 'alpha' }));
+      toolRegistry.registerTool(new MockTool({ name: 'middle' }));
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+
+      expect(names).toEqual(['alpha', 'middle', 'zeta']);
+    });
+
     it('excludes shouldDefer tools from getFunctionDeclarations by default', () => {
       toolRegistry.registerTool(new MockTool({ name: 'visible' }));
       toolRegistry.registerTool(
@@ -354,29 +364,42 @@ describe('ToolRegistry', () => {
     });
 
     it('includes deferred tools when includeDeferred is true', () => {
-      toolRegistry.registerTool(new MockTool({ name: 'visible' }));
+      toolRegistry.registerTool(new MockTool({ name: 'visible-z' }));
       toolRegistry.registerTool(
-        new MockTool({ name: 'hidden', shouldDefer: true }),
+        new MockTool({ name: 'hidden-a', shouldDefer: true }),
       );
+      toolRegistry.registerTool(new MockTool({ name: 'visible-a' }));
 
       const names = toolRegistry
         .getFunctionDeclarations({ includeDeferred: true })
         .map((d) => d.name);
-      expect(names).toEqual(expect.arrayContaining(['visible', 'hidden']));
-      expect(names).toHaveLength(2);
+      expect(names).toEqual(['hidden-a', 'visible-a', 'visible-z']);
+    });
+
+    it('filters deferred tools before sorting visible declarations', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'visible-z' }));
+      toolRegistry.registerTool(
+        new MockTool({ name: 'hidden-a', shouldDefer: true }),
+      );
+      toolRegistry.registerTool(new MockTool({ name: 'visible-a' }));
+
+      const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
+
+      expect(names).toEqual(['visible-a', 'visible-z']);
     });
 
     it('always keeps alwaysLoad tools visible even when shouldDefer is true', () => {
       toolRegistry.registerTool(
         new MockTool({
-          name: 'always-visible',
+          name: 'z',
           shouldDefer: true,
           alwaysLoad: true,
         }),
       );
+      toolRegistry.registerTool(new MockTool({ name: 'a' }));
 
       const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
-      expect(names).toEqual(['always-visible']);
+      expect(names).toEqual(['a', 'z']);
     });
 
     // Regression for #5210: the real exit_plan_mode is deferred-category but
@@ -394,19 +417,79 @@ describe('ToolRegistry', () => {
     });
 
     it('includes revealed deferred tools in getFunctionDeclarations', () => {
+      toolRegistry.registerTool(new MockTool({ name: 'visible-m' }));
       toolRegistry.registerTool(
-        new MockTool({ name: 'hidden', shouldDefer: true }),
+        new MockTool({ name: 'hidden-a', shouldDefer: true }),
       );
       toolRegistry.registerTool(
         new MockTool({ name: 'other-hidden', shouldDefer: true }),
       );
+      toolRegistry.registerTool(new MockTool({ name: 'visible-z' }));
 
-      toolRegistry.revealDeferredTool('hidden');
+      toolRegistry.revealDeferredTool('hidden-a');
 
       const names = toolRegistry.getFunctionDeclarations().map((d) => d.name);
-      expect(names).toEqual(['hidden']);
-      expect(toolRegistry.isDeferredToolRevealed('hidden')).toBe(true);
+      expect(names).toEqual(['hidden-a', 'visible-m', 'visible-z']);
+      expect(toolRegistry.isDeferredToolRevealed('hidden-a')).toBe(true);
       expect(toolRegistry.isDeferredToolRevealed('other-hidden')).toBe(false);
+    });
+
+    it('sorts MCP declarations deterministically regardless of registration order', () => {
+      const mcpCallable = {} as CallableTool;
+      const registryA = new ToolRegistry(config);
+      const registryB = new ToolRegistry(config);
+
+      registryA.registerTool(
+        new DiscoveredMCPTool(
+          mcpCallable,
+          'github',
+          'search_issues',
+          'Search GitHub issues',
+          {},
+        ),
+      );
+      registryA.registerTool(
+        new DiscoveredMCPTool(
+          mcpCallable,
+          'filesystem',
+          'read_tree',
+          'Read filesystem tree',
+          {},
+        ),
+      );
+
+      registryB.registerTool(
+        new DiscoveredMCPTool(
+          mcpCallable,
+          'filesystem',
+          'read_tree',
+          'Read filesystem tree',
+          {},
+        ),
+      );
+      registryB.registerTool(
+        new DiscoveredMCPTool(
+          mcpCallable,
+          'github',
+          'search_issues',
+          'Search GitHub issues',
+          {},
+        ),
+      );
+
+      registryA.revealDeferredTool('mcp__github__search_issues');
+      registryA.revealDeferredTool('mcp__filesystem__read_tree');
+      registryB.revealDeferredTool('mcp__github__search_issues');
+      registryB.revealDeferredTool('mcp__filesystem__read_tree');
+
+      const namesA = registryA.getFunctionDeclarations().map((d) => d.name);
+      const namesB = registryB.getFunctionDeclarations().map((d) => d.name);
+
+      expect(namesA).toEqual([
+        'mcp__filesystem__read_tree',
+        'mcp__github__search_issues',
+      ]);
+      expect(namesB).toEqual(namesA);
     });
 
     it('getDeferredToolSummary lists deferred tools sorted by name', () => {
