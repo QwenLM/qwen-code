@@ -99,6 +99,20 @@ describe('SessionOrganizationService', () => {
     });
 
     await expect(
+      service.createGroup({ name: '\u200b', color: 'blue' }),
+    ).rejects.toMatchObject({
+      code: 'invalid_group_name',
+      field: 'name',
+    });
+
+    await expect(
+      service.createGroup({ name: 'Bad\u202eName', color: 'blue' }),
+    ).rejects.toMatchObject({
+      code: 'invalid_group_name',
+      field: 'name',
+    });
+
+    await expect(
       service.createGroup({ name: 'Feature', color: 'pink' as never }),
     ).rejects.toMatchObject({
       code: 'invalid_group_color',

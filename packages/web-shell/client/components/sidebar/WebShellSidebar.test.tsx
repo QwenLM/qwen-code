@@ -284,9 +284,7 @@ describe('WebShellSidebar — session organization', () => {
       view: 'organized',
       group: 'all',
     });
-    expect(
-      container.querySelector('[aria-label="Session group"]'),
-    ).not.toBeNull();
+    expect(container.querySelector('[aria-label="Session group"]')).toBeNull();
   });
 
   it('creates session groups from an in-app dialog form', async () => {
@@ -302,15 +300,29 @@ describe('WebShellSidebar — session organization', () => {
       createdAt: '2026-07-04T00:00:00.000Z',
       updatedAt: '2026-07-04T00:00:00.000Z',
     });
+    mockActive.sessions = [
+      makeSession('550e8400-e29b-41d4-a716-446655440000', {
+        displayName: 'Review plan',
+        createdAt: '2026-07-04T00:00:00.000Z',
+        updatedAt: '2026-07-04T00:00:00.000Z',
+      }),
+    ];
     const promptSpy = vi.spyOn(window, 'prompt');
 
     renderSidebar(false);
     await act(async () => {
       await Promise.resolve();
     });
-    const createButton = document.body.querySelector<HTMLButtonElement>(
-      '[aria-label="Create group"]',
+    const organizeButton = document.body.querySelector<HTMLButtonElement>(
+      '[aria-label="Move to group"]',
     );
+    expect(organizeButton).not.toBeNull();
+    act(() => {
+      organizeButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    const createButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.includes('Create group'));
     expect(createButton).not.toBeNull();
     act(() => {
       createButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
@@ -412,6 +424,19 @@ describe('WebShellSidebar — session organization', () => {
       '[role="menuitemradio"][aria-checked="true"]',
     );
     expect(selectedOption?.textContent).toContain('Ungrouped');
+    await act(async () => {
+      await new Promise((resolve) => window.requestAnimationFrame(resolve));
+    });
+    expect(document.activeElement).toBe(selectedOption);
+    act(() => {
+      menu!.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'ArrowDown',
+          bubbles: true,
+        }),
+      );
+    });
+    expect(document.activeElement?.textContent).toContain('Backend');
     const groupOption = Array.from(
       menu!.querySelectorAll<HTMLButtonElement>('button'),
     ).find((button) => button.textContent?.includes('Backend'));
@@ -424,6 +449,60 @@ describe('WebShellSidebar — session organization', () => {
       '550e8400-e29b-41d4-a716-446655440000',
       { groupId: 'group-1' },
     );
+  });
+
+  it('renders organized sessions as collapsible group sections', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'group-1',
+          name: 'Backend',
+          color: 'green',
+          order: 0,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    mockActive.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        groupId: 'group-1',
+      }),
+      makeSession('session-b', {
+        displayName: 'Release notes',
+        groupId: null,
+      }),
+    ];
+
+    const container = renderSidebar(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+
+    const backendHeader = Array.from(
+      container.querySelectorAll<HTMLButtonElement>('button'),
+    ).find(
+      (button) =>
+        button.textContent?.includes('Backend') &&
+        button.textContent.includes('1'),
+    );
+    expect(backendHeader).not.toBeNull();
+    expect(container.textContent).toContain('Recent');
+    expect(container.textContent).toContain('API review');
+    expect(container.textContent).toContain('Release notes');
+
+    act(() => {
+      backendHeader!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+
+    expect(container.textContent).not.toContain('API review');
+    expect(container.textContent).toContain('Release notes');
   });
 
   it('toggles pin state from the session action button', async () => {
@@ -527,7 +606,7 @@ describe('WebShellSidebar — session organization', () => {
     });
   });
 
-  it('disables new session while a session organization update is busy', async () => {
+  it('keeps new session available while a session organization update is busy', async () => {
     mockConnection.capabilities = {
       qwenCodeVersion: '1.2.3',
       features: ['session_organization'],
@@ -555,11 +634,11 @@ describe('WebShellSidebar — session organization', () => {
       '[aria-label="New chat"]',
     );
     expect(newSessionButton).not.toBeNull();
-    expect(newSessionButton!.disabled).toBe(true);
+    expect(newSessionButton!.disabled).toBe(false);
     act(() => {
       newSessionButton!.click();
     });
-    expect(onNewSession).not.toHaveBeenCalled();
+    expect(onNewSession).toHaveBeenCalledTimes(1);
 
     await act(async () => {
       resolveUpdate?.({
@@ -572,6 +651,41 @@ describe('WebShellSidebar — session organization', () => {
       await Promise.resolve();
     });
     expect(newSessionButton!.disabled).toBe(false);
+  });
+
+  it('does not report organization failure when post-mutation reload fails', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.updateSessionOrganization.mockResolvedValueOnce({
+      sessionId: 'session-a',
+      groupId: null,
+      isPinned: true,
+      pinnedAt: '2026-07-04T00:00:00.000Z',
+      updatedAt: '2026-07-04T00:00:00.000Z',
+    });
+    mockActive.reload.mockRejectedValueOnce(new Error('reload failed'));
+    mockActive.sessions = [makeSession('session-a')];
+    const onError = vi.fn();
+
+    const container = renderSidebar(false, { onError });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    const pinButton =
+      container.querySelector<HTMLButtonElement>('[aria-label="Pin"]');
+    await act(async () => {
+      pinButton!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      await Promise.resolve();
+    });
+
+    expect(mockWorkspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      'session-a',
+      { isPinned: true },
+    );
+    expect(mockActive.reload).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
   });
 });
 

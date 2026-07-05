@@ -33,6 +33,8 @@
 .collapseButton,
 .projectRow,
 .sessionRow,
+.sessionGroupHeader,
+.sessionGroupActionButton,
 .retry,
 .iconButton,
 .projectIconButton,
@@ -77,6 +79,10 @@
 .projectRow:hover,
 .sessionRow:hover,
 .sessionRow:focus-visible,
+.sessionGroupHeader:hover,
+.sessionGroupHeader:focus-visible,
+.sessionGroupActionButton:hover,
+.sessionGroupActionButton:focus-visible,
 .collapseButton:hover,
 .collapseButton:focus-visible,
 .iconButton:hover,
@@ -91,6 +97,8 @@
 .footerButton:focus-visible,
 .projectRow:focus-visible,
 .sessionRow:focus-visible,
+.sessionGroupHeader:focus-visible,
+.sessionGroupActionButton:focus-visible,
 .collapseButton:focus-visible,
 .iconButton:focus-visible,
 .projectIconButton:focus-visible,
@@ -200,9 +208,116 @@
   min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 4px;
   overflow: auto;
   padding-bottom: 48px;
+}
+
+.sessionGroupSection {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sessionGroupHeaderRow {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.sessionGroupHeader {
+  min-width: 0;
+  height: 32px;
+  flex: 1 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px 0 20px;
+  border-radius: 8px;
+  color: var(--muted-foreground);
+  font-size: 13px;
+  font-weight: 600;
+  line-height: 20px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.sessionGroupDot {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 8px;
+  border-radius: 999px;
+}
+
+.sessionGroupTitle {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sessionGroupCount {
+  flex: 0 0 auto;
+  color: color-mix(in srgb, var(--muted-foreground) 86%, transparent);
+}
+
+.sessionGroupChevron {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.sessionGroupChevron svg,
+.sessionGroupActionButton svg,
+.sessionPinnedIndicator svg {
+  width: 13px;
+  height: 13px;
+  display: block;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.sessionGroupHeaderActions {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+
+.sessionGroupHeaderRow:hover .sessionGroupHeaderActions,
+.sessionGroupHeaderRow:focus-within .sessionGroupHeaderActions {
+  opacity: 1;
+}
+
+.sessionGroupActionButton {
+  width: 24px;
+  height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 7px;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.sessionGroupActionButton:disabled {
+  cursor: not-allowed;
+  opacity: 0.38;
+}
+
+.sessionGroupList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .sessionRow {
@@ -215,6 +330,18 @@
   margin-left: 26px;
   border-radius: 8px;
   cursor: pointer;
+}
+
+.groupedSessionRow {
+  min-height: 42px;
+  margin-left: 12px;
+  padding: 8px;
+  color: var(--muted-foreground);
+}
+
+.groupedSessionRow:not(.currentSession):hover,
+.groupedSessionRow:not(.currentSession):focus-visible {
+  color: var(--sidebar-accent-foreground);
 }
 
 .currentSession {
@@ -343,6 +470,15 @@
   width: 12px;
   height: 12px;
   display: inline-flex;
+  color: var(--muted-foreground);
+}
+
+.sessionPinnedIndicator {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   color: var(--muted-foreground);
 }
 
@@ -509,21 +645,6 @@
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--sidebar-ring) 18%, transparent);
 }
 
-.groupToolbar {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 4px;
-  margin: -2px 8px 2px;
-}
-
-.groupSelect {
-  min-width: 96px;
-  height: 30px;
-  flex: 1 1 112px;
-}
-
-.groupSelect,
 .dialogSelect {
   border: 1px solid var(--sidebar-border);
   border-radius: 6px;
@@ -534,17 +655,6 @@
   line-height: 18px;
 }
 
-.groupSelect {
-  padding: 0 6px;
-}
-
-.groupIconButton {
-  width: 30px;
-  height: 30px;
-  flex: 0 0 30px;
-}
-
-.groupSelect:focus-visible,
 .dialogInput:focus-visible,
 .dialogSelect:focus-visible {
   border-color: var(--sidebar-ring);

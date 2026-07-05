@@ -92,7 +92,15 @@ const warningKeysByStorePath = new Map<string, Set<string>>();
 function hasControlCharacter(value: string): boolean {
   return [...value].some((char) => {
     const codePoint = char.codePointAt(0);
-    return codePoint !== undefined && (codePoint < 32 || codePoint === 127);
+    return (
+      codePoint !== undefined &&
+      ((codePoint >= 0x00 && codePoint <= 0x1f) ||
+        (codePoint >= 0x7f && codePoint <= 0x9f) ||
+        (codePoint >= 0x200b && codePoint <= 0x200f) ||
+        (codePoint >= 0x202a && codePoint <= 0x202e) ||
+        (codePoint >= 0x2066 && codePoint <= 0x2069) ||
+        codePoint === 0xfeff)
+    );
   });
 }
 
