@@ -114,6 +114,9 @@ export const SERVE_STATUS_EXT_METHODS = {
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
   workspaceExtensions: 'qwen/status/workspace/extensions',
+  // Process-wide rss/cpu of this ACP child, self-reported to the daemon for
+  // the Daemon Status resource charts (workspace-scoped; no sessionId).
+  workspaceResource: 'qwen/status/workspace/resource',
 } as const;
 
 /**
@@ -141,6 +144,8 @@ export const SERVE_CONTROL_EXT_METHODS = {
   workspaceMemoryRememberAvailability:
     'qwen/control/workspace/memory/remember/availability',
   workspaceMemoryRemember: 'qwen/control/workspace/memory/remember',
+  workspaceMemoryForget: 'qwen/control/workspace/memory/forget',
+  workspaceMemoryDream: 'qwen/control/workspace/memory/dream',
   // Runtime MCP server mutation ext-methods
   sessionTaskCancel: 'qwen/control/session/task/cancel',
   sessionGoalClear: 'qwen/control/session/goal/clear',
@@ -418,6 +423,7 @@ export interface ServeWorkspaceProviderCurrent {
   modelId?: string;
   baseUrl?: string;
   fastModelId?: string;
+  visionModelId?: string;
 }
 
 export interface ServeWorkspaceProviderModel {
@@ -451,6 +457,7 @@ export interface ServeWorkspaceProvidersStatus {
   initialized: boolean;
   acpChannelLive?: boolean;
   current?: ServeWorkspaceProviderCurrent;
+  approvalMode?: string;
   providers: ServeWorkspaceProviderStatus[];
   errors?: ServeStatusCell[];
 }
@@ -577,6 +584,20 @@ export interface ServeSessionAgentTaskStatus {
   stats?: { totalTokens: number; toolUses: number; durationMs: number };
   recentActivities?: Array<{ name: string; description: string; at: number }>;
   prompt?: string;
+  /**
+   * `id` of the agent task that spawned this one; absent for agents
+   * launched by the top-level session. Mirrors `AgentTask.parentAgentId`
+   * (a `null` there serializes as absent here). Lets clients render the
+   * roster as a tree.
+   */
+  parentAgentId?: string;
+  /**
+   * Display name (`subagentType`) of the spawning agent, captured at
+   * registration time so it survives the parent's eviction. Display-only.
+   */
+  parentName?: string;
+  /** Launch depth (0-based; 0 = spawned by the top-level session). */
+  depth?: number;
 }
 
 export interface ServeSessionShellTaskStatus {

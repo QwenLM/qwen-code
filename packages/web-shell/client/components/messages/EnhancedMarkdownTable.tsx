@@ -31,7 +31,7 @@ type TextFilterOperator =
   | 'endsWith';
 type NumberFilterOperator = 'gt' | 'gte' | 'lt' | 'lte' | 'between';
 
-interface CellData {
+export interface EnhancedTableCell {
   key: string;
   content: ReactNode;
   text: string;
@@ -39,14 +39,14 @@ interface CellData {
   textAlign?: CSSProperties['textAlign'];
 }
 
-interface RowData {
+export interface EnhancedTableRow {
   key: string;
-  cells: CellData[];
+  cells: EnhancedTableCell[];
 }
 
-interface ParsedTable {
-  headers: CellData[];
-  rows: RowData[];
+export interface EnhancedTableData {
+  headers: EnhancedTableCell[];
+  rows: EnhancedTableRow[];
   columnCount: number;
 }
 
@@ -103,8 +103,8 @@ const NUMBER_FILTER_LABEL_KEYS: Record<NumberFilterOperator, string> = {
   between: 'markdownTable.filter.number.between',
 };
 
-const MAX_ENHANCED_TABLE_ROWS = 500;
-const MAX_ENHANCED_TABLE_COLUMNS = 50;
+export const MAX_ENHANCED_TABLE_ROWS = 500;
+export const MAX_ENHANCED_TABLE_COLUMNS = 50;
 const FOCUSABLE_FILTER_MENU_SELECTOR =
   'a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
@@ -155,7 +155,7 @@ function getTextContent(node: ReactNode): string {
   return '';
 }
 
-function emptyCell(rowKey: string, columnIndex: number): CellData {
+function emptyCell(rowKey: string, columnIndex: number): EnhancedTableCell {
   return {
     key: `${rowKey}-empty-${columnIndex}`,
     content: '',
@@ -164,7 +164,7 @@ function emptyCell(rowKey: string, columnIndex: number): CellData {
   };
 }
 
-function parseRow(rowNode: TableElement, rowKey: string): RowData {
+function parseRow(rowNode: TableElement, rowKey: string): EnhancedTableRow {
   const cellNodes = Children.toArray(rowNode.props.children).filter(
     (child) => isTagElement(child, 'td') || isTagElement(child, 'th'),
   );
@@ -180,13 +180,19 @@ function parseRow(rowNode: TableElement, rowKey: string): RowData {
   };
 }
 
-function parseRows(sectionNode: TableElement, prefix: string): RowData[] {
+function parseRows(
+  sectionNode: TableElement,
+  prefix: string,
+): EnhancedTableRow[] {
   return Children.toArray(sectionNode.props.children)
     .filter((child) => isTagElement(child, 'tr'))
     .map((rowNode, rowIndex) => parseRow(rowNode, `${prefix}-${rowIndex}`));
 }
 
-function normalizeRow(row: RowData, columnCount: number): RowData {
+function normalizeRow(
+  row: EnhancedTableRow,
+  columnCount: number,
+): EnhancedTableRow {
   return {
     ...row,
     cells: Array.from(
@@ -200,11 +206,11 @@ function normalizeRow(row: RowData, columnCount: number): RowData {
 function parseTable(
   children: ReactNode,
   defaultColumnLabel: (columnIndex: number) => string,
-): ParsedTable {
+): EnhancedTableData {
   const topLevel = Children.toArray(children);
-  const headerRows: RowData[] = [];
-  const bodyRows: RowData[] = [];
-  const directRows: RowData[] = [];
+  const headerRows: EnhancedTableRow[] = [];
+  const bodyRows: EnhancedTableRow[] = [];
+  const directRows: EnhancedTableRow[] = [];
 
   topLevel.forEach((child, index) => {
     if (isTagElement(child, 'thead')) {
@@ -291,7 +297,7 @@ function sanitizeForClipboard(value: string): string {
 
 function getSelectionText(
   range: SelectionRange | null,
-  rows: RowData[],
+  rows: EnhancedTableRow[],
   visibleColumnIndexes: number[],
 ): string {
   if (!range) return '';
@@ -317,8 +323,8 @@ function getSelectionText(
 }
 
 function getVisibleTableText(
-  headers: CellData[],
-  rows: RowData[],
+  headers: EnhancedTableCell[],
+  rows: EnhancedTableRow[],
   visibleColumnIndexes: number[],
 ): string {
   if (visibleColumnIndexes.length === 0) return '';
@@ -422,10 +428,10 @@ function matchesColumnFilter(value: string, filter: ColumnFilter): boolean {
 }
 
 function applyFilters(
-  rows: RowData[],
+  rows: EnhancedTableRow[],
   filters: Record<number, ColumnFilter>,
   excludeColumnIndex?: number,
-): RowData[] {
+): EnhancedTableRow[] {
   const activeFilters = Object.entries(filters)
     .map(([key, value]) => [Number(key), value] as const)
     .filter(
@@ -441,7 +447,10 @@ function applyFilters(
   );
 }
 
-function sortRows(rows: RowData[], sort: SortState | null): RowData[] {
+function sortRows(
+  rows: EnhancedTableRow[],
+  sort: SortState | null,
+): EnhancedTableRow[] {
   if (!sort) return rows;
   return rows
     .map((row, index) => ({ row, index }))
@@ -457,7 +466,7 @@ function sortRows(rows: RowData[], sort: SortState | null): RowData[] {
 }
 
 function getColumnOptions(
-  rows: RowData[],
+  rows: EnhancedTableRow[],
   columnIndex: number,
   blankLabel: string,
 ): FilterOption[] {
@@ -476,7 +485,10 @@ function getColumnOptions(
     .sort((a, b) => compareCellText(a.value, b.value));
 }
 
-function isMostlyNumericColumn(rows: RowData[], columnIndex: number): boolean {
+function isMostlyNumericColumn(
+  rows: EnhancedTableRow[],
+  columnIndex: number,
+): boolean {
   let filledCount = 0;
   let numericCount = 0;
   rows.forEach((row) => {
@@ -1038,14 +1050,14 @@ export function EnhancedMarkdownTable({
     return <>{fallback ?? <table>{children}</table>}</>;
   }
 
-  return <InteractiveMarkdownTable table={table} toolbarExtra={toolbarExtra} />;
+  return <EnhancedTable table={table} toolbarExtra={toolbarExtra} />;
 }
 
-function InteractiveMarkdownTable({
+export function EnhancedTable({
   table,
   toolbarExtra,
 }: {
-  table: ParsedTable;
+  table: EnhancedTableData;
   toolbarExtra?: ReactNode;
 }) {
   const { t } = useI18n();

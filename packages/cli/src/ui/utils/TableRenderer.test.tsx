@@ -809,4 +809,59 @@ describe('<TableRenderer />', () => {
       }
     }
   });
+
+  describe('maxHeight clamp (streaming preview)', () => {
+    const renderWithMaxHeight = (
+      headers: string[],
+      rows: string[][],
+      maxHeight: number | undefined,
+      contentWidth = 80,
+    ) => {
+      const { lastFrame } = renderWithProviders(
+        <TableRenderer
+          headers={headers}
+          rows={rows}
+          contentWidth={contentWidth}
+          maxHeight={maxHeight}
+        />,
+      );
+      return lastFrame() ?? '';
+    };
+
+    const manyRows = Array.from({ length: 40 }, (_, i) => [`r${i}`, `v${i}`]);
+
+    it('renders unchanged when the table fits within maxHeight', () => {
+      const output = renderWithMaxHeight(
+        ['A', 'B'],
+        [
+          ['1', 'one'],
+          ['2', 'two'],
+        ],
+        50,
+      );
+      expect(stripAnsi(output)).not.toContain('more rows streaming');
+      expect(output).toContain('one');
+      expect(output).toContain('two');
+    });
+
+    it('clips a tall table to maxHeight and appends the streaming cue', () => {
+      const output = renderWithMaxHeight(['A', 'B'], manyRows, 10);
+      expect(getVisibleLines(output).length).toBeLessThanOrEqual(10);
+      expect(stripAnsi(output)).toContain('more rows streaming');
+    });
+
+    it('is a passthrough when maxHeight is undefined (full table)', () => {
+      const output = renderWithMaxHeight(['A', 'B'], manyRows, undefined);
+      expect(stripAnsi(output)).not.toContain('more rows streaming');
+      expect(stripAnsi(output)).toContain('r39');
+    });
+
+    it('also clamps the vertical fallback format', () => {
+      // A narrow contentWidth forces the vertical (key/value) layout; it must
+      // still be clipped to maxHeight with the cue.
+      const output = renderWithMaxHeight(['A', 'B'], manyRows, 8, 20);
+      expect(getVisibleLines(output).length).toBeLessThanOrEqual(8);
+      expect(stripAnsi(output)).toContain('more rows streaming');
+    });
+  });
 });

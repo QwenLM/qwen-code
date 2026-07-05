@@ -18,7 +18,11 @@ import { type Config, ApprovalMode } from '../../config/config.js';
 import { SubagentManager } from '../../subagents/subagent-manager.js';
 import type { SubagentConfig } from '../../subagents/types.js';
 import { BUBBLE_APPROVAL_MODE } from '../../subagents/types.js';
-import { FORK_AGENT, FORK_DEFAULT_MAX_TURNS } from './fork-subagent.js';
+import {
+  FORK_AGENT,
+  FORK_DEFAULT_MAX_TURNS,
+  runInForkContext,
+} from './fork-subagent.js';
 import { AgentTerminateMode } from '../../agents/runtime/agent-types.js';
 import {
   AgentHeadless,
@@ -35,6 +39,7 @@ import { partToString } from '../../utils/partUtils.js';
 import type { HookSystem } from '../../hooks/hookSystem.js';
 import { PermissionMode } from '../../hooks/types.js';
 import { runWithAgentContext } from '../../agents/runtime/agent-context.js';
+import { runWithTeammateIdentity } from '../../agents/team/identity.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -181,6 +186,7 @@ describe('AgentTool', () => {
       getSandbox: vi.fn().mockReturnValue(undefined),
       getScreenReader: vi.fn().mockReturnValue(false),
       getMaxSessionTurns: vi.fn().mockReturnValue(-1),
+      getMaxSubagentDepth: vi.fn().mockReturnValue(5),
       getMaxToolCalls: vi.fn().mockReturnValue(-1),
       isTrustedFolder: vi.fn().mockReturnValue(true),
       isInteractive: vi.fn().mockReturnValue(false),
@@ -405,6 +411,37 @@ describe('AgentTool', () => {
       expect(parameters.properties.name?.description).toContain('active team');
     });
 
+    it('exposes plan_mode_required only when teams are enabled', async () => {
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(true);
+
+      const teamAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const schema = teamAgentTool.schema;
+      const parameters = schema.parametersJsonSchema as {
+        properties: {
+          plan_mode_required?: {
+            description?: string;
+          };
+        };
+      };
+      expect(parameters.properties.plan_mode_required?.description).toContain(
+        'named teammate',
+      );
+
+      vi.mocked(config.isAgentTeamEnabled).mockReturnValue(false);
+      const ordinaryAgentTool = new AgentTool(config);
+      await vi.runAllTimersAsync();
+
+      const ordinarySchema = ordinaryAgentTool.schema;
+      const ordinaryParameters = ordinarySchema.parametersJsonSchema as {
+        properties: {
+          plan_mode_required?: unknown;
+        };
+      };
+      expect(ordinaryParameters.properties.plan_mode_required).toBeUndefined();
+    });
+
     it('should generate schema without enum when no subagents available', async () => {
       vi.mocked(mockSubagentManager.listSubagents).mockResolvedValue([]);
 
@@ -521,6 +558,41 @@ describe('AgentTool', () => {
         }),
       ).toMatch(/fork/i);
     });
+
+    it('rejects plan_mode_required without a named teammate', () => {
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          plan_mode_required: true,
+        }),
+      ).toMatch(/named teammate/i);
+    });
+
+    it('rejects plan_mode_required when no team is active', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue(null);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'planner',
+          plan_mode_required: true,
+        }),
+      ).toMatch(/active team/i);
+    });
+
+    it('accepts plan_mode_required for a named teammate in an active team', () => {
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate: vi.fn(),
+      } as never);
+
+      expect(
+        agentTool.validateToolParams({
+          ...validParams,
+          name: 'planner',
+          plan_mode_required: true,
+        }),
+      ).toBeNull();
+    });
   });
 
   // Round-7 regression guard: agent isolation must refuse when the
@@ -620,6 +692,249 @@ describe('AgentTool', () => {
       expect(result.llmContent).not.toContain('no active team');
       expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
         'file-search',
+      );
+    });
+
+    it('passes plan_mode_required through to TeamManager for named teammates', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Plan implementation',
+        prompt: 'Investigate and propose a plan',
+        subagent_type: 'file-search',
+        name: 'planner',
+        plan_mode_required: true,
+      });
+
+      await invocation.execute(new AbortController().signal);
+
+      expect(spawnTeammate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'planner',
+          planModeRequired: true,
+        }),
+      );
+    });
+
+    it('rejects plan_mode_required direct execution from a subagent context', async () => {
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+
+      const invocation = agentTool.build({
+        description: 'Plan implementation',
+        prompt: 'Investigate and propose a plan',
+        name: 'planner',
+        plan_mode_required: true,
+      });
+
+      const result = await runWithAgentContext('child-agent', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('from the team leader');
+      expect(spawnTeammate).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('nesting depth guard', () => {
+    it('rejects a spawn that would exceed maxSubagentDepth', async () => {
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(1);
+      const invocation = agentTool.build({
+        description: 'Spawn deeper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      // One agent frame → invoker is a level-1 sub-agent; its child would be
+      // level 2, which exceeds max=1 → rejected before any subagent load.
+      const result = await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('nesting depth limit reached');
+      // The user-facing display mirrors a failed task execution, not a bare
+      // string, so the UI renders it like any other failed sub-agent run.
+      expect(result.returnDisplay).toMatchObject({
+        type: 'task_execution',
+        status: 'failed',
+        subagentName: 'file-search',
+        terminateReason: 'Nesting depth limit reached (max 1)',
+      });
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      // A blocked spawn must take the scheduler's failure path: `error` keeps
+      // tool-usage stats from counting it as a spawned sub-agent (and fires
+      // failure-path hooks), and the display row reports it as failed. The
+      // scheduler sends only `error.message` to the model (llmContent is
+      // discarded on the failure path), so the message must carry the full
+      // actionable guidance, not just the terse reason label.
+      expect(result.error?.message).toContain('nesting depth limit reached');
+      expect(result.error?.message).toContain('Complete this task directly');
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
+    });
+
+    it('allows a spawn from the top-level session at maxSubagentDepth=1', async () => {
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(1);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      const invocation = agentTool.build({
+        description: 'Spawn helper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      // No agent frame → invoker level 0 → child level 1 ≤ 1 → allowed; the
+      // guard lets execution proceed to subagent resolution.
+      await invocation.execute(new AbortController().signal);
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
+    });
+
+    it('does not route a nested sub-agent to a teammate even with a name + active team', async () => {
+      // Regression: nested sub-agents now carry the AgentTool. A sub-agent
+      // passing `name` must NOT reach executeTeammate (which would bypass the
+      // depth guard and the v1 "teammates do not nest" rule). With max depth 1
+      // and one agent frame, the spawn falls through team routing to the depth
+      // guard and is rejected — proving executeTeammate was not taken.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(1);
+      vi.mocked(config.getTeamManager).mockReturnValue({} as never);
+      const invocation = agentTool.build({
+        description: 'Spawn teammate from within a sub-agent',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        name: 'helper',
+      });
+      const result = await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain('nesting depth limit reached');
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+    });
+
+    it('blocks a teammate from spawning any sub-agent', async () => {
+      // Teammates do not nest in v1. The schema layer strips `agent` from
+      // teammate tool lists; this pins the symmetric runtime backstop for a
+      // hallucinated call that slips past schema-hiding. Depth would permit
+      // the spawn here (max 5), so a pass proves the teammate guard fired.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      const invocation = agentTool.build({
+        description: 'Spawn from a teammate',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      const result = await runWithTeammateIdentity(
+        {
+          agentId: 'scribe@demo',
+          agentName: 'scribe',
+          teamName: 'demo',
+          isTeamLead: false,
+        },
+        () =>
+          runWithAgentContext('teammate-1', () =>
+            invocation.execute(new AbortController().signal),
+          ),
+      );
+
+      expect(result.llmContent).toContain('Teammates cannot spawn sub-agents');
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+    });
+
+    it('blocks a fork child from spawning any sub-agent', async () => {
+      // Forks must never spawn sub-agents. The runtime guard blocks ALL agent
+      // calls from within a fork (not just fork-in-fork), catching the
+      // wildcard/fallback tool path that could otherwise re-add `agent`.
+      const invocation = agentTool.build({
+        description: 'Spawn from within a fork',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      const result = await runInForkContext(() =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(result.llmContent).toContain(
+        'Cannot spawn sub-agents from within a fork',
+      );
+      expect(mockSubagentManager.loadSubagent).not.toHaveBeenCalled();
+      // Same failure-path contract as the depth guard above: the model-facing
+      // message keeps the actionable instruction.
+      expect(result.error?.message).toContain(
+        'Cannot spawn sub-agents from within a fork',
+      );
+      expect(result.error?.message).toContain('execute tasks directly');
+      const display = result.returnDisplay as AgentResultDisplay;
+      expect(display.status).toBe('failed');
+    });
+
+    it('allows nesting while depth remains under the cap', async () => {
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      const invocation = agentTool.build({
+        description: 'Spawn deeper',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+      });
+      // Two frames → invoker is level 2; child would be level 3 ≤ 5 → allowed.
+      await runWithAgentContext('sub-1', () =>
+        runWithAgentContext('sub-2', () =>
+          invocation.execute(new AbortController().signal),
+        ),
+      );
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
+    });
+
+    it('ignores a teammate name from a nested sub-agent and spawns a regular sub-agent', async () => {
+      // With a team active and depth permitting the spawn, a nested
+      // sub-agent's `name` must not reach executeTeammate (teammates do not
+      // nest in v1) — the spawn proceeds as a regular one-shot agent of the
+      // requested type. Pins the silent-success path at the default cap.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      const spawnTeammate = vi.fn().mockResolvedValue(undefined);
+      vi.mocked(config.getTeamManager).mockReturnValue({
+        spawnTeammate,
+      } as never);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      const invocation = agentTool.build({
+        description: 'Spawn with a name from a nested sub-agent',
+        prompt: 'Do work',
+        subagent_type: 'file-search',
+        name: 'helper',
+      });
+      await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(spawnTeammate).not.toHaveBeenCalled();
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'file-search',
+      );
+    });
+
+    it('falls back to a regular general-purpose sub-agent when a nested sub-agent requests a fork', async () => {
+      // Fork is a top-level-only capability in v1. A nested sub-agent
+      // requesting `subagent_type: "fork"` must get the awaitable
+      // general-purpose sub-agent, not an error and not a nested fork.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(null);
+      const invocation = agentTool.build({
+        description: 'Fork from a nested sub-agent',
+        prompt: 'Do work',
+        subagent_type: 'fork',
+      });
+      await runWithAgentContext('sub-1', () =>
+        invocation.execute(new AbortController().signal),
+      );
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
       );
     });
   });
@@ -1488,6 +1803,39 @@ describe('AgentTool', () => {
       expect(AgentHeadless.create).not.toHaveBeenCalled();
     });
 
+    it('falls back to general-purpose when a nested sub-agent requests a fork', async () => {
+      // v1: fork is a top-level-only capability. A sub-agent — which may
+      // carry the AgentTool via nesting — that requests a fork downgrades to
+      // the awaitable general-purpose subagent instead of opening a nested
+      // fork, even in interactive mode where fork is otherwise enabled.
+      const mockLoadedSubagent: SubagentConfig = {
+        name: 'general-purpose',
+        description: 'General-purpose agent',
+        systemPrompt: 'You are a general-purpose agent.',
+        level: 'builtin',
+        filePath: '<builtin:general-purpose>',
+      };
+      vi.mocked(mockSubagentManager.loadSubagent).mockResolvedValue(
+        mockLoadedSubagent,
+      );
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation({
+        description: 'fork task',
+        prompt: 'do the thing',
+        subagent_type: 'fork',
+      });
+      // One agent frame → the invoker is a level-1 sub-agent, not the
+      // top-level session, so the fork request must take the fallback path.
+      await runWithAgentContext('parent-sub', () => invocation.execute());
+
+      expect(mockSubagentManager.loadSubagent).toHaveBeenCalledWith(
+        'general-purpose',
+      );
+      expect(AgentHeadless.create).not.toHaveBeenCalled();
+    });
+
     it('should call AgentHeadless.create directly and execute without options', async () => {
       const params: AgentParams = {
         description: 'fork task',
@@ -1788,7 +2136,7 @@ describe('AgentTool', () => {
       );
     });
 
-    it('should not inject hook_context when additionalContext is undefined', async () => {
+    it('should inject hook_context as empty string when additionalContext is undefined', async () => {
       const mockStartOutput = {
         getAdditionalContext: vi.fn().mockReturnValue(undefined),
       };
@@ -1807,9 +2155,12 @@ describe('AgentTool', () => {
       ).createInvocation(params);
       await invocation.execute();
 
+      // hook_context is always set (to empty string) so ${hook_context} in
+      // systemPrompt does not throw even when hook returns no additional context.
+      expect(mockContextState.set).toHaveBeenCalledWith('hook_context', '');
       expect(mockContextState.set).not.toHaveBeenCalledWith(
         'hook_context',
-        expect.anything(),
+        expect.stringMatching(/.+/),
       );
     });
 
@@ -1836,7 +2187,7 @@ describe('AgentTool', () => {
       expect(display.status).toBe('completed');
     });
 
-    it('should skip hooks when hookSystem is not available', async () => {
+    it('should set hook_context to empty string even when hookSystem is not available', async () => {
       (config as unknown as Record<string, unknown>)['getHookSystem'] = vi
         .fn()
         .mockReturnValue(undefined);
@@ -1853,6 +2204,8 @@ describe('AgentTool', () => {
       const result = await invocation.execute();
 
       expect(mockHookSystem.fireSubagentStartEvent).not.toHaveBeenCalled();
+      // hook_context is always set so ${hook_context} in systemPrompt does not throw.
+      expect(mockContextState.set).toHaveBeenCalledWith('hook_context', '');
       const llmText = partToString(result.llmContent);
       expect(llmText).toBe('Task completed successfully');
     });
@@ -2842,6 +3195,35 @@ describe('AgentTool', () => {
       expect(mockRegistry.register).toHaveBeenCalled();
     });
 
+    it('downgrades a background request from a nested sub-agent to an awaited foreground run', async () => {
+      // Background delegation is top-level-only in v1: a nested launcher
+      // cannot honor the background completion contract (send_message /
+      // task_stop are excluded from its toolset, and completion
+      // notifications go to the top-level session). The run must complete
+      // inline instead of orphaning the child's results.
+      vi.mocked(config.getMaxSubagentDepth).mockReturnValue(5);
+      const params: AgentParams = {
+        description: 'Start monitor from a nested sub-agent',
+        prompt: 'Watch for changes',
+        subagent_type: 'monitor',
+        run_in_background: true,
+      };
+
+      const invocation = (
+        agentTool as AgentToolWithProtectedMethods
+      ).createInvocation(params);
+      const result = await runWithAgentContext('sub-1', () =>
+        invocation.execute(),
+      );
+
+      const llmText = partToString(result.llmContent);
+      expect(llmText).not.toContain('Background agent launched');
+      expect(llmText).toContain('Monitor done');
+      expect(mockRegistry.register).toHaveBeenCalledWith(
+        expect.objectContaining({ isBackgrounded: false }),
+      );
+    });
+
     it('returns registry registration errors to the model without launching the background body', async () => {
       const errorMessage =
         'Cannot start background agent: maximum concurrent background agents ' +
@@ -3184,6 +3566,7 @@ describe('AgentTool', () => {
             model: 'parent-model',
             maxSessionTurns: -1,
             maxToolCalls: -1,
+            maxSubagentDepth: 5,
           }),
         }),
       );

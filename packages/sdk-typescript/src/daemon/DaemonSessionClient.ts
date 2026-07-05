@@ -30,6 +30,9 @@ import type {
   DaemonSessionLspStatus,
   DaemonSessionRecapResult,
   DaemonShellCommandResult,
+  DaemonSessionArtifactInput,
+  DaemonSessionArtifactMutationResult,
+  DaemonSessionArtifactsEnvelope,
   DaemonSessionState,
   DaemonSession,
   DaemonSessionStatsStatus,
@@ -407,6 +410,33 @@ export class DaemonSessionClient {
     return await this.client.heartbeat(this.sessionId, this.clientId);
   }
 
+  async artifacts(): Promise<DaemonSessionArtifactsEnvelope> {
+    return await this.client.listSessionArtifacts(
+      this.sessionId,
+      this.clientId,
+    );
+  }
+
+  async addArtifact(
+    artifact: DaemonSessionArtifactInput,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.client.addSessionArtifact(
+      this.sessionId,
+      artifact,
+      this.clientId,
+    );
+  }
+
+  async removeArtifact(
+    artifactId: string,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.client.removeSessionArtifact(
+      this.sessionId,
+      artifactId,
+      this.clientId,
+    );
+  }
+
   async setModel(modelId: string): Promise<SetModelResult> {
     return await this.client.setSessionModel(
       this.sessionId,
@@ -602,6 +632,10 @@ export class DaemonSessionClient {
 
   async close(): Promise<void> {
     return await this.client.closeSession(this.sessionId, this.clientId);
+  }
+
+  async detach(): Promise<void> {
+    return await this.client.detachSession(this.sessionId, this.clientId);
   }
 
   async updateMetadata(metadata: {

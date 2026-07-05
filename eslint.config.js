@@ -34,6 +34,7 @@ export default tseslint.config(
       '.qwen/**',
       'packages/desktop/**',
       'packages/cua-driver/**', // vendored trycua/cua driver (Rust + scripts); not qwen-code TS
+      'packages/mobile-mcp/**', // vendored mobile-next/mobile-mcp; has own eslint config
     ],
   },
   eslint.configs.recommended,
@@ -256,6 +257,14 @@ export default tseslint.config(
     rules: {
       '@typescript-eslint/no-require-imports': 'off',
       'no-undef': 'off',
+    },
+  },
+  {
+    files: ['.github/scripts/**/*.{js,mjs,cjs}'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
     },
   },
   // ==================== no-console allowlist ====================

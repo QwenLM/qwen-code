@@ -2,6 +2,7 @@ export { getGlobalQwenDir, resolvePath } from './paths.js';
 export { AcpBridge } from './AcpBridge.js';
 export type {
   AvailableCommand,
+  BridgeSessionInfo,
   ChannelAgentBridge,
   SessionDiedEvent,
   ToolCallEvent,
@@ -50,17 +51,27 @@ export {
   sanitizePromptText,
   sanitizeLogText,
 } from './sanitize.js';
+export { isTerminalTaskLifecycleType } from './types.js';
 export type {
   Attachment,
   BlockStreamingChunkConfig,
   BlockStreamingCoalesceConfig,
   ChannelConfig,
+  ChannelIdentityConfig,
+  ChannelMemoryScopeConfig,
+  ChannelMemoryScopeMode,
   ChannelPlugin,
+  ChannelRuntimeIdentity,
+  ChannelRuntimeMemoryScope,
+  ChannelTaskCancellationReason,
+  ChannelTaskLifecycleBase,
+  ChannelTaskLifecycleEvent,
   ChannelType,
   DispatchMode,
   Envelope,
   GroupConfig,
   GroupPolicy,
+  SanitizedToolCallEvent,
   SenderPolicy,
   SessionScope,
   SessionTarget,

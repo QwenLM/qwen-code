@@ -33,8 +33,68 @@ export function createDaemonWorkspaceActions({
       const cwd = getWorkspaceCwd();
       if (!cwd) return [];
       return withActionTimeout(
-        client.listWorkspaceSessions(cwd, options),
+        client
+          .listWorkspaceSessionsPage(cwd, options)
+          .then((page) => page.sessions),
         'List sessions timed out',
+      );
+    },
+
+    async listSessionsPage(options) {
+      const client = requireClient(getClient, 'List sessions failed');
+      const cwd = getWorkspaceCwd();
+      if (!cwd) return { sessions: [] };
+      return withActionTimeout(
+        client.listWorkspaceSessionsPage(cwd, options),
+        'List sessions timed out',
+      );
+    },
+
+    async listSessionGroups() {
+      const client = requireClient(getClient, 'List session groups failed');
+      const cwd = getWorkspaceCwd();
+      if (!cwd) return { groups: [], colorOptions: [] };
+      return withActionTimeout(
+        client.listSessionGroups(cwd),
+        'List session groups timed out',
+      );
+    },
+
+    async createSessionGroup(input) {
+      const client = requireClient(getClient, 'Create session group failed');
+      const cwd = requireWorkspaceCwd(getWorkspaceCwd);
+      return withActionTimeout(
+        client.createSessionGroup(cwd, input),
+        'Create session group timed out',
+      );
+    },
+
+    async updateSessionGroup(groupId, update) {
+      const client = requireClient(getClient, 'Update session group failed');
+      const cwd = requireWorkspaceCwd(getWorkspaceCwd);
+      return withActionTimeout(
+        client.updateSessionGroup(cwd, groupId, update),
+        'Update session group timed out',
+      );
+    },
+
+    async deleteSessionGroup(groupId) {
+      const client = requireClient(getClient, 'Delete session group failed');
+      const cwd = requireWorkspaceCwd(getWorkspaceCwd);
+      return withActionTimeout(
+        client.deleteSessionGroup(cwd, groupId),
+        'Delete session group timed out',
+      );
+    },
+
+    async updateSessionOrganization(sessionId, update) {
+      const client = requireClient(
+        getClient,
+        'Update session organization failed',
+      );
+      return withActionTimeout(
+        client.updateSessionOrganization(sessionId, update),
+        'Update session organization timed out',
       );
     },
 
@@ -56,6 +116,38 @@ export function createDaemonWorkspaceActions({
         client.deleteSessionsData(sessionIds),
         'Delete sessions timed out',
       );
+    },
+
+    async exportSession(sessionId, format = 'html') {
+      const client = requireClient(getClient, 'Export session failed');
+      return withActionTimeout(
+        client.exportSession(sessionId, { format }),
+        'Export session timed out',
+      );
+    },
+
+    async archiveSession(sessionId: string) {
+      const client = requireClient(getClient, 'Archive session failed');
+      const result = await withActionTimeout(
+        client.archiveSessionsData([sessionId]),
+        'Archive session timed out',
+      );
+      if (result.errors.length > 0) {
+        throw new Error(result.errors[0].error);
+      }
+      return result.archived.length > 0 || result.alreadyArchived.length > 0;
+    },
+
+    async unarchiveSession(sessionId: string) {
+      const client = requireClient(getClient, 'Unarchive session failed');
+      const result = await withActionTimeout(
+        client.unarchiveSessionsData([sessionId]),
+        'Unarchive session timed out',
+      );
+      if (result.errors.length > 0) {
+        throw new Error(result.errors[0].error);
+      }
+      return result.unarchived.length > 0 || result.alreadyActive.length > 0;
     },
 
     async loadMcpStatus() {
@@ -138,6 +230,14 @@ export function createDaemonWorkspaceActions({
         client.manageMcpServer(serverName, action),
         'Manage MCP server timed out',
         timeoutMs,
+      );
+    },
+
+    async loadDaemonStatus(detail) {
+      const client = requireClient(getClient, 'Load daemon status failed');
+      return withActionTimeout(
+        client.daemonStatus(detail),
+        'Load daemon status timed out',
       );
     },
 
@@ -511,6 +611,16 @@ function requireClient(
     throw new Error(`${action}: DaemonClient is not connected`);
   }
   return client;
+}
+
+function requireWorkspaceCwd(
+  getWorkspaceCwd: () => string | undefined,
+): string {
+  const cwd = getWorkspaceCwd();
+  if (!cwd) {
+    throw new Error('Daemon workspace is not connected');
+  }
+  return cwd;
 }
 
 function createDaemonHeaders(token: string | undefined): HeadersInit {

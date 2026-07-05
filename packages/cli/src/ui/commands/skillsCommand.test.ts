@@ -6,15 +6,15 @@
 
 import { vi, describe, it, expect } from 'vitest';
 import { skillsCommand } from './skillsCommand.js';
-import { type CommandContext } from './types.js';
+import type { SlashCommandActionReturn, CommandContext } from './types.js';
 import { createMockCommandContext } from '../../test-utils/mockCommandContext.js';
-import { MessageType } from '../types.js';
 
 interface FakeSkill {
   name: string;
   description?: string;
   priority?: number;
   userInvocable?: boolean;
+  level?: string;
 }
 
 function makeContext(opts: {
@@ -108,64 +108,115 @@ describe('skillsCommand bare entry', () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
       skills: [
-        { name: 'high', priority: 100 },
-        { name: 'low', priority: -5 },
-        { name: 'mid', priority: 10 },
+        {
+          name: 'high',
+          priority: 100,
+          description: 'High priority',
+          level: 'project',
+        },
+        {
+          name: 'low',
+          priority: -5,
+          description: 'Low priority',
+          level: 'bundled',
+        },
+        {
+          name: 'mid',
+          priority: 10,
+          description: 'Mid priority',
+          level: 'user',
+        },
       ],
       executionMode: 'acp',
     });
 
-    await skillsCommand.action(context, '');
+    const result = await skillsCommand.action(context, '');
 
-    expect(context.ui.addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.SKILLS_LIST,
-        skills: [{ name: 'high' }, { name: 'mid' }, { name: 'low' }],
-      },
-      expect.any(Number),
-    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringContaining('high'),
+    });
+    const content = (
+      result as Extract<SlashCommandActionReturn, { type: 'message' }>
+    ).content;
+    expect(content).toContain('High priority');
+    expect(content).toContain('(Project)');
+    expect(content).toContain('Mid priority');
+    expect(content).toContain('(User)');
+    expect(content).toContain('Low priority');
+    expect(content).toContain('(Bundled)');
+    const highIdx = content.indexOf('high');
+    const midIdx = content.indexOf('mid');
+    const lowIdx = content.indexOf('low');
+    expect(highIdx).toBeLessThan(midIdx);
+    expect(midIdx).toBeLessThan(lowIdx);
+  });
+
+  it('handles skills without description or level gracefully', async () => {
+    if (!skillsCommand.action) throw new Error('action missing');
+    const context = makeContext({
+      skills: [{ name: 'bare' }],
+      executionMode: 'acp',
+    });
+
+    const result = await skillsCommand.action(context, '');
+
+    const content = (
+      result as Extract<SlashCommandActionReturn, { type: 'message' }>
+    ).content;
+    expect(content).toContain('bare');
+    expect(content).not.toMatch(/\(\s*\)/);
+    expect(content).not.toMatch(/\s{4,}$/m);
   });
 
   it('omits non-user-invocable skills from the non-interactive listing', async () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
       skills: [
-        { name: 'alpha' },
-        { name: 'model-only', userInvocable: false },
-        { name: 'gamma' },
+        { name: 'alpha', description: 'Alpha skill', level: 'bundled' },
+        {
+          name: 'model-only',
+          userInvocable: false,
+          description: 'Model only',
+          level: 'bundled',
+        },
+        { name: 'gamma', description: 'Gamma skill', level: 'bundled' },
       ],
       executionMode: 'non_interactive',
     });
 
-    await skillsCommand.action(context, '');
+    const result = await skillsCommand.action(context, '');
 
-    expect(context.ui.addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.SKILLS_LIST,
-        skills: [{ name: 'alpha' }, { name: 'gamma' }],
-      },
-      expect.any(Number),
-    );
+    const content = (
+      result as Extract<SlashCommandActionReturn, { type: 'message' }>
+    ).content;
+    expect(content).toContain('alpha');
+    expect(content).toContain('gamma');
+    expect(content).not.toContain('model-only');
   });
 
   it('omits disabled skills from the non-interactive listing', async () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
-      skills: [{ name: 'alpha' }, { name: 'beta' }, { name: 'gamma' }],
+      skills: [
+        { name: 'alpha', description: 'Alpha', level: 'bundled' },
+        { name: 'beta', description: 'Beta', level: 'bundled' },
+        { name: 'gamma', description: 'Gamma', level: 'bundled' },
+      ],
       workspaceDisabled: ['beta'],
       mergedDisabled: ['beta'],
       executionMode: 'non_interactive',
     });
 
-    await skillsCommand.action(context, '');
+    const result = await skillsCommand.action(context, '');
 
-    expect(context.ui.addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.SKILLS_LIST,
-        skills: [{ name: 'alpha' }, { name: 'gamma' }],
-      },
-      expect.any(Number),
-    );
+    const content = (
+      result as Extract<SlashCommandActionReturn, { type: 'message' }>
+    ).content;
+    expect(content).toContain('alpha');
+    expect(content).toContain('gamma');
+    expect(content).not.toContain('beta');
   });
 
   it('shows no available skills when all loaded skills are not user invocable', async () => {
@@ -175,37 +226,36 @@ describe('skillsCommand bare entry', () => {
       executionMode: 'acp',
     });
 
-    await skillsCommand.action(context, '');
+    const result = await skillsCommand.action(context, '');
 
-    expect(context.ui.addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.INFO,
-        text: 'All skills are marked as non-user-invocable.',
-      },
-      expect.any(Number),
-    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: 'All skills are marked as non-user-invocable.',
+    });
   });
 
   it('shows a clarifying message when all skills are disabled in non-interactive mode', async () => {
     if (!skillsCommand.action) throw new Error('action missing');
     const context = makeContext({
-      skills: [{ name: 'a' }, { name: 'b' }],
+      skills: [
+        { name: 'a', description: 'Skill A', level: 'bundled' },
+        { name: 'b', description: 'Skill B', level: 'bundled' },
+      ],
       workspaceDisabled: ['a', 'b'],
       mergedDisabled: ['a', 'b'],
       executionMode: 'acp',
     });
 
-    await skillsCommand.action(context, '');
+    const result = await skillsCommand.action(context, '');
 
-    expect(context.ui.addItem).toHaveBeenCalledWith(
-      {
-        type: MessageType.INFO,
-        text: expect.stringMatching(
-          /disabled.*settings\.json|skills\.disabled/i,
-        ),
-      },
-      expect.any(Number),
-    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content: expect.stringMatching(
+        /disabled.*settings\.json|skills\.disabled/i,
+      ),
+    });
   });
 });
 

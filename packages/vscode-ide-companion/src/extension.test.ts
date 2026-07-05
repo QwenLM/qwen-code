@@ -82,6 +82,11 @@ describe('activate', () => {
     vi.mocked(vscode.window.showInformationMessage).mockResolvedValue(
       undefined,
     );
+    (
+      vscode.workspace as unknown as {
+        workspaceFolders: vscode.WorkspaceFolder[];
+      }
+    ).workspaceFolders = [];
     context = {
       subscriptions: [],
       environmentVariableCollection: {
@@ -117,6 +122,51 @@ describe('activate', () => {
     await activate(context);
     expect(showInformationMessageMock).toHaveBeenCalledWith(
       'Qwen Code Companion extension successfully installed.',
+    );
+  });
+
+  it('launches Qwen Code with the full multi-root workspace env', async () => {
+    vi.mocked(context.globalState.get).mockReturnValue(true);
+    const first = {
+      name: 'first',
+      index: 0,
+      uri: { fsPath: '/workspace/first' },
+    } as vscode.WorkspaceFolder;
+    const second = {
+      name: 'second',
+      index: 1,
+      uri: { fsPath: '/workspace/second' },
+    } as vscode.WorkspaceFolder;
+    (
+      vscode.workspace as unknown as {
+        workspaceFolders: vscode.WorkspaceFolder[];
+      }
+    ).workspaceFolders = [first, second];
+    vi.mocked(vscode.window.showWorkspaceFolderPick).mockResolvedValue(second);
+    vi.mocked(vscode.Uri.joinPath).mockReturnValue({
+      fsPath: '/extension/dist/qwen-cli/cli.js',
+    } as vscode.Uri);
+
+    await activate(context);
+
+    const command = vi
+      .mocked(vscode.commands.registerCommand)
+      .mock.calls.find(([id]) => id === 'qwen-code.runQwenCode')?.[1] as
+      | (() => Promise<void>)
+      | undefined;
+    expect(command).toBeDefined();
+    await command!();
+
+    expect(vscode.window.createTerminal).toHaveBeenCalledWith(
+      expect.objectContaining({
+        cwd: '/workspace/second',
+        env: {
+          QWEN_CODE_IDE_WORKSPACE_PATH: JSON.stringify([
+            '/workspace/first',
+            '/workspace/second',
+          ]),
+        },
+      }),
     );
   });
 

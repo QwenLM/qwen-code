@@ -8,6 +8,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as fs from 'node:fs';
 import { createServer } from 'node:http';
+import * as https from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import express from 'express';
@@ -32,6 +33,8 @@ import type {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import * as qwenCore from '@qwen-code/qwen-code-core';
 import * as serverModule from './server.js';
+import * as settingsRuntime from '../config/settings.js';
+import * as trustedFoldersRuntime from '../config/trustedFolders.js';
 import type {
   ChannelWorkerSnapshot,
   CreateChannelWorkerSupervisorOptions,
@@ -456,6 +459,408 @@ describe('runQwenServe permissionResponseTimeoutMs validation', () => {
   });
 });
 
+// Long-lived self-signed cert (CN=localhost, SAN IP:127.0.0.1) used only
+// to exercise the HTTPS listener path. Not a real secret.
+const TEST_TLS_CERT = `-----BEGIN CERTIFICATE-----
+MIIDJzCCAg+gAwIBAgIUfuVC8Ulq3HIg+1tf36JrjAa6dr4wDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MCAXDTI2MDYzMDAyMjIxOVoYDzIxMjYw
+NjA2MDIyMjE5WjAUMRIwEAYDVQQDDAlsb2NhbGhvc3QwggEiMA0GCSqGSIb3DQEB
+AQUAA4IBDwAwggEKAoIBAQCnEk5caJsr2ShJwi4bkAMr1/IzzueiUFbnnqs3XpaB
+ANxpIZxi8WN1gf8MoAOioZteH51Q2nz8Zb2MVHoDMH3zx4V36VcXUaeR+/wZbFRN
+94NlzYCXPnzPH+Mw/vle1PTM/boPON8F4ATGJZkzmGT8+M5CqDCW4isHlpGvbn0T
+SdmqnmzihNBdaREVVkGJYa7JSFcgRth52+wTAOIM8e8HC1VTMw1OhXDAus6ro7z+
+u5XKGpG+JfsCpimNPYzNOPSkIr/QmxuaMq7kmYwT9J1Gyw9cQQj8vcipyLq6q3Hz
+iMhxUXbWp7moi4e6CzxLKyPrWwhuh+3SXqIYshAYRsKNAgMBAAGjbzBtMB0GA1Ud
+DgQWBBSM8bvfq77vXg5fsuhYGXsLuKjqxzAfBgNVHSMEGDAWgBSM8bvfq77vXg5f
+suhYGXsLuKjqxzAPBgNVHRMBAf8EBTADAQH/MBoGA1UdEQQTMBGHBH8AAAGCCWxv
+Y2FsaG9zdDANBgkqhkiG9w0BAQsFAAOCAQEAGUBgaBYEO119e28j61PTijfhw7mV
+Q8AxlUjlv+HHx+IAPR+E8w7jiS97oxvFSIkmbV+FAQOWwTE+oNvrL5qSFlG7cI60
+wj+Jxwxr+/SShV5Jm7JlynAGxOvOZ1mfxzyGrlm5cg4hoRvcoWAtB/qtiIyFIz/s
+fDAdZiFXRoTaZnpyPWA6iydf3mc0ZOastHib+mlFb+aedKz9by/f2Z1CY6RfckEj
+20c9Mar85RYkVtVTIWNSwItASmQVBaoXsXK33y4C0P1NmPoYBzyPSXsOlmIZXui5
+WYj2mrPe2DL5gCeNUxMhmzgv0bgoYiksHmdyNjRmO5AQlcdjX/7CHg0zEQ==
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_KEY = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQCnEk5caJsr2ShJ
+wi4bkAMr1/IzzueiUFbnnqs3XpaBANxpIZxi8WN1gf8MoAOioZteH51Q2nz8Zb2M
+VHoDMH3zx4V36VcXUaeR+/wZbFRN94NlzYCXPnzPH+Mw/vle1PTM/boPON8F4ATG
+JZkzmGT8+M5CqDCW4isHlpGvbn0TSdmqnmzihNBdaREVVkGJYa7JSFcgRth52+wT
+AOIM8e8HC1VTMw1OhXDAus6ro7z+u5XKGpG+JfsCpimNPYzNOPSkIr/QmxuaMq7k
+mYwT9J1Gyw9cQQj8vcipyLq6q3HziMhxUXbWp7moi4e6CzxLKyPrWwhuh+3SXqIY
+shAYRsKNAgMBAAECggEAQW/tG0qphEog+orAznDgnRqOtfYTScLX1w6RlzVIE60H
+p3HPs/1B7HOHNyWxZtCPbxVI47NAAwfCbyVjSL6EhqgeQbI2N173GDmvKzH/7y3D
+3GraM+L4tZOSw80KVTdpzqSObInk6IMuu4FceRX2cBLvjrIbne1l1yoFU8Yd3SCM
+t8J46vMys7Rh4yR0iOl1hFeLYj8KolTdp6uNYTxaHMt363G7/TcJYRqjrLkpBpXJ
+dJiP58a3WulvVKVHBjZYVmHLlkvla7LQ9tPRsk0gUQfzNpLzl6oBacrNrRv1F7Oe
+keYqt+Kpy9HhZIHt57ahwKmjhjrfIUpyQadF/me0rQKBgQDVbLV6VngGjMSCPQOQ
+VZcAMFZ+y1fgaHeVZwuFeRlCEHBDDmw5eWdUdUQNIRckpqf0IlU39aP/cLgjNZ0W
+nmxfUwhdgEMam2aHZ/8eqrOl0HTa+F5PWz8NPLKsQ970vPb1XCsoEtDVXEsMqK+s
+4h+zjRzy6lLy2cWvYZrDr/KwywKBgQDIZmitKO0MIJOWeqwI3MQvbBXCz9aEIG+3
+0ISQreD/7Z/IEcwrMpDD+z1sOj9OUO2GFflECdhtqo416cv3uo8LLABxuzsYOgug
+ZPgW9oPKVRLfqc43/n0JMtIvS+Na/7C/nCNwcZZZU91V+VG4+1rexINQybnCRbQw
+cBZLcX8nBwKBgQDMdZhl2vChVbnsCwee/l/qjmROk/9bvLjTKCSheaH46Eaj9u03
+IlcbUjwfV9QUCJReDYYWVf0GebXuBS64vIyVxbX93SJsGvPeRILjniT8dPd9zvKK
+k5+TztJctaiiTWVJKUMu4NevjvtW5UNnHDnCiS1yiYltnbMEkTzyu1yEgQKBgAYk
+pYbRX1rk0MFnJ0jqQ5VUkeIz7taEDAiterLYsbIGvcQrT3/vf+KSHBLqQjCLaIyY
+tdhxGNJbzRo3/YmtjV8BTU4vOCOI+/xBvB0wF2AndXmnweuTgI+8oBbVE7YhanCl
+P6zdvocke/97shailemISqI6XNhovJpThUtwwj4XAoGATwSvzX0VLRpoWwDl30oi
+hxyfpb0iCzGik49j/oL+ZB5C8F8AdBpza8eTXJAeAVP7L5nvWffMgvcXs5sGMF7e
+ARaOwZHpfsTw4Aq74yAWUKXumVGFXQpZMRj/QWgQEItTYF7rJVARIssv5miDbHvW
+1Qm2tDpPnmCd1BedIYWCnHA=
+-----END PRIVATE KEY-----
+`;
+
+// A self-signed localhost cert/key whose validity window is entirely in the
+// past (notAfter = 2020-01-02). Not a real secret — and doubly worthless
+// since it's already expired. Used to exercise the boot-time expiry guard.
+const TEST_TLS_CERT_EXPIRED = `-----BEGIN CERTIFICATE-----
+MIIDCTCCAfGgAwIBAgIUW7rZvmhryKZI3pojRCfl3liQSEMwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJbG9jYWxob3N0MB4XDTIwMDEwMTAwMDAwMFoXDTIwMDEw
+MjAwMDAwMFowFDESMBAGA1UEAwwJbG9jYWxob3N0MIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEAzK9z67IJ0e5QGpnGoqCCY4jr401AKE0EuCx1TVkyGFck
+2ESCkBPvV+ikMxvLuCOTdrKhgavlIVsnnrPgyND49WaVX6XrftoEU5hApDrWYtIV
+TfHYSC1wWdS5yNL+tdqLnfiC8b1FolEdgChF5cBpv9jQ6jwjUwXDojVhoPv5Rf/+
+7zWyCg4hoj4N5veluDp1uUJ3xYjT5bqgu54sSR8lDJ8quq48nei60iOy40QQ1z3N
++sDgoAwkkLDOt74iGnZpUOuKt4w0/v96epC12os40FrcYbbe880/trG0aWT4tvnr
+t0WFMtLReBSgV/QPkXTZ4HXUVs+7QrqcDWElET2QXQIDAQABo1MwUTAdBgNVHQ4E
+FgQUOy4xvXmhCSs0Msfb6mT3WuCjrwQwHwYDVR0jBBgwFoAUOy4xvXmhCSs0Msfb
+6mT3WuCjrwQwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAZA0J
+BSNEIrsyS/5MyiEmgZlhpPwdqxOfBGFTsHqD0jha30RSEl85iW4XIuwFH1nKoOKQ
+Mw3Ns0FaXVJxsrLS7f+4QjzCtTNQ4jEHsnmkm+bLSXK9qA3XLYG7mogdiRE5qz91
+9lwZCTBoWnfiG3phz7/Y/F4jM86JxJG4Fm/IQNhgxSGrNhyrRRfXR3rPOIA8pSpz
+yN2OMgOQdMXhgE3IM8v7O/76OAYWhybO3zzNtL9d+mRW42B+Q5TCBIKwZXAALlLf
+arfULiZOWgeWfNpoEvfbVqn6VXKNny0F8KDoTwoHzpTm0cb+RzfGiSRm0avJr20t
+OmPpuyd1dcPjPSJEAQ==
+-----END CERTIFICATE-----
+`;
+
+const TEST_TLS_KEY_EXPIRED = `-----BEGIN PRIVATE KEY-----
+MIIEvQIBADANBgkqhkiG9w0BAQEFAASCBKcwggSjAgEAAoIBAQDMr3PrsgnR7lAa
+mcaioIJjiOvjTUAoTQS4LHVNWTIYVyTYRIKQE+9X6KQzG8u4I5N2sqGBq+UhWyee
+s+DI0Pj1ZpVfpet+2gRTmECkOtZi0hVN8dhILXBZ1LnI0v612oud+ILxvUWiUR2A
+KEXlwGm/2NDqPCNTBcOiNWGg+/lF//7vNbIKDiGiPg3m96W4OnW5QnfFiNPluqC7
+nixJHyUMnyq6rjyd6LrSI7LjRBDXPc36wOCgDCSQsM63viIadmlQ64q3jDT+/3p6
+kLXaizjQWtxhtt7zzT+2sbRpZPi2+eu3RYUy0tF4FKBX9A+RdNngddRWz7tCupwN
+YSURPZBdAgMBAAECggEAAUw1eG+TB10y7dA+xaYt3XKvSCwjtX2zg3VosvpXSnc2
++RYKG968fDqx288Xzg2PsEd2patQ0xLQX/209aD5ixjA5q/XG+FG+L603jWvSUYa
+s3lOjTqYhUFHgkHwMnf1vaUnM2AnUl2gScE3nDrJkNlPjcSe1rZpJJyhB1PBo1N2
+w602QMMMsIOHrPeJ/THm6ENUD6xGvGsuDcYZWDP9Fa/Dj1oMW+B8FRV/lF91JHgh
+cP+QLk/E4SZGDIOQQ86v1jst6MGzI+iQVYTxfyDgyuCop9DAc1X9hZpG3qOyp6NS
+DwBK14fc2r0S9ImL9I/wOBL319s60sC6h8BdOoSWowKBgQDoDP51obLx4kX3YbFD
+1huH64Y072LolopXfaNj+Albk1PaNe1oBp1V80wFIT57l0WpibYWOQM6zDWVjZ/5
+83utLHOdPe1PzVt4W1Yrk0CcWBiPybGlVVsBrogkF0lCSDGW8rqzD/Cms6AuLB5k
+3ypNZKrk976fXjLSvefA9w2QvwKBgQDhz3BFW4oKvksl7PWyc5fvPgh1+V4K622b
+hfjcdnamPynkUT13S0ymwOkjNYW6QzCSpgas59X3EHp8JR6Z6CoWdI4Fixz01qLv
+R2n41Cc7lKF4WsXoi2IAq489z8GTuQpxhwWGxRs6uWiexY6CResvIgf7fnG63Rrd
+p6Ul8kCJ4wKBgQCTdkZyHEqqGd/agBN1B2fBbTOBCisxoRDS3n1pduMDddFQlvqC
+I8nyJ8VEcUbSpWPYhDHZV2us/r6ChliGL2uFtfzWjNb04oxhJLHSySXC9NzO6x5f
+8aj+nZnYTY/5dgVFZoSsa9HDLdz52oGKGqM4QWO0U5eokOT9NT9ESfst4wKBgG5K
+raGSxmfc7kOF67PPteQKvoMw23gl6ZFO7HByBB3LOCDmdUkxJC1GiBjEaZ7CdpUK
+NrR5QA6+o7TDRKETvordPwkCG5CSzV5l2SLKLKdzPzLT01pzydhd80bTlM8cUDeH
+JXHgEB6stKboA2Up1WdeDdwOtGn62MZuvcE9A7zVAoGAdediZvzAK+yVIPwaNqpy
+eeYB4svm8NxzReLF/SCx+j++LvdQlrZMaCfX5M+zPCjXP7WiMWKlCKFm3kCq0NxV
+dfOrXxrzy0bEsqEN1JpFwcVI4sUXm/JQSxO6mI5osX1e9qGF3p12aK6fWrPwaj1T
+0qHz65jIzFez4M7YrnWF6Ak=
+-----END PRIVATE KEY-----
+`;
+
+describe('runQwenServe TLS (--tls-cert / --tls-key)', () => {
+  let tmpDir: string;
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    if (tmpDir) {
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  const minimalBridge = () =>
+    ({
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+    }) as unknown as HttpAcpBridge;
+
+  it.each([
+    ['only --tls-cert', { tlsCert: '/tmp/c.pem' }],
+    ['only --tls-key', { tlsKey: '/tmp/k.pem' }],
+  ])('rejects %s without its pair', async (_label, tlsOpts) => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tls-')),
+    );
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            ...tlsOpts,
+          },
+          { bridge: minimalBridge() },
+        ),
+      ).rejects.toThrow(/--tls-cert and --tls-key must be provided together/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('rejects an unreadable cert file', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tls-')),
+    );
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            tlsCert: path.join(tmpDir, 'does-not-exist.pem'),
+            tlsKey: path.join(tmpDir, 'also-missing.pem'),
+          },
+          { bridge: minimalBridge() },
+        ),
+      ).rejects.toThrow(/Failed to read --tls-cert/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('rejects an unreadable key file', async () => {
+    // A readable cert with an unreadable key must hit the key-read catch,
+    // not the cert-read one — otherwise the --tls-key error message is
+    // never exercised and could regress unnoticed.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tls-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            tlsCert: certPath,
+            tlsKey: path.join(tmpDir, 'no-key.pem'),
+          },
+          { bridge: minimalBridge() },
+        ),
+      ).rejects.toThrow(/Failed to read --tls-key/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('rejects an expired certificate at boot', async () => {
+    // A cert past its notAfter must fail loud at boot rather than start a
+    // listener that rejects every client handshake while /health stays green.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tls-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT_EXPIRED);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY_EXPIRED);
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            tlsCert: certPath,
+            tlsKey: keyPath,
+          },
+          { bridge: minimalBridge() },
+        ),
+      ).rejects.toThrow(/expired on/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('rejects an unparseable certificate at boot', async () => {
+    // A readable file whose contents aren't a valid PEM cert must hit the
+    // X509Certificate parse catch and surface the framed message rather than
+    // a raw OpenSSL string.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tls-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, 'not a real certificate');
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            tlsCert: certPath,
+            tlsKey: keyPath,
+          },
+          { bridge: minimalBridge() },
+        ),
+      ).rejects.toThrow(/is not a valid certificate/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('rejects a cert/key mismatch at boot', async () => {
+    // TEST_TLS_CERT and TEST_TLS_KEY_EXPIRED come from different keypairs, so
+    // https.createServer's createSecureContext throws a raw OpenSSL
+    // key-values-mismatch string. Assert it's wrapped into the actionable
+    // "could not be loaded (do they match?)" framing.
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tls-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY_EXPIRED);
+    const origEnv = process.env['QWEN_RUNTIME_DIR'];
+    process.env['QWEN_RUNTIME_DIR'] = tmpDir;
+    try {
+      await expect(
+        runQwenServe(
+          {
+            port: 0,
+            hostname: '127.0.0.1',
+            mode: 'http-bridge',
+            workspace: tmpDir,
+            maxSessions: 1,
+            tlsCert: certPath,
+            tlsKey: keyPath,
+          },
+          { bridge: minimalBridge() },
+        ),
+      ).rejects.toThrow(/could not be loaded/);
+    } finally {
+      delete process.env['QWEN_RUNTIME_DIR'];
+      if (origEnv !== undefined) {
+        process.env['QWEN_RUNTIME_DIR'] = origEnv;
+      }
+    }
+  });
+
+  it('serves over https when both cert and key are valid', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-tls-')),
+    );
+    const certPath = path.join(tmpDir, 'cert.pem');
+    const keyPath = path.join(tmpDir, 'key.pem');
+    fs.writeFileSync(certPath, TEST_TLS_CERT);
+    fs.writeFileSync(keyPath, TEST_TLS_KEY);
+
+    let resolveTelemetry:
+      | ((settings: qwenCore.ResolvedTelemetrySettings) => void)
+      | undefined;
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockReturnValue(
+      new Promise<qwenCore.ResolvedTelemetrySettings>((resolve) => {
+        resolveTelemetry = resolve;
+      }),
+    );
+    const bridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+      getSession: vi.fn(),
+      getAllSessions: vi.fn().mockReturnValue([]),
+      publishWorkspaceEvent: vi.fn(),
+      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+      resume: vi.fn(),
+      preheat: vi.fn().mockResolvedValue(undefined),
+      getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+      isChannelLive: vi.fn().mockReturnValue(true),
+    } as unknown as HttpAcpBridge;
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+        tlsCert: certPath,
+        tlsKey: keyPath,
+      },
+      { resolveOnListen: true, runtimeStartupTimeoutMs: 0 },
+    );
+
+    try {
+      expect(handle.url).toMatch(/^https:\/\//);
+      expect(handle.server instanceof https.Server).toBe(true);
+
+      // A successful response over the self-signed listener proves the
+      // TLS handshake completed (not just that the URL string says https).
+      const statusCode = await new Promise<number>((resolve, reject) => {
+        const req = https.get(
+          `${handle.url}/health`,
+          { rejectUnauthorized: false },
+          (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          },
+        );
+        req.on('error', reject);
+      });
+      expect(typeof statusCode).toBe('number');
+    } finally {
+      resolveTelemetry?.({
+        enabled: false,
+        sensitiveSpanAttributeMaxLength: 1024 * 1024,
+      });
+      await handle.close();
+    }
+  });
+});
+
 describe('runQwenServe pre-listen bridge option validation', () => {
   let tmpDir: string;
 
@@ -801,6 +1206,274 @@ describe('runQwenServe runtime startup failures', () => {
       } else {
         process.env['QWEN_SERVE_CDP_TUNNEL_OVER_WS'] = originalCdpTunnelOverWs;
       }
+      await handle.close();
+    }
+  });
+
+  it('filters secondary workspace roots before constructing the bridge filesystem', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-roots-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const trustedSecondary = path.join(tmpDir, 'trusted-secondary');
+    const untrustedSecondary = path.join(tmpDir, 'untrusted-secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(trustedSecondary);
+    fs.mkdirSync(untrustedSecondary);
+    const roots = [primary, trustedSecondary, untrustedSecondary].map((root) =>
+      canonicalizeWorkspace(root),
+    );
+    const bridgeFsBoundWorkspaces: string[][] = [];
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(
+      trustedFoldersRuntime,
+      'getWorkspaceTrustStatus',
+    ).mockImplementation(
+      (_settings, workspace) =>
+        ({
+          effective: {
+            state: workspace === untrustedSecondary ? 'untrusted' : 'trusted',
+          },
+        }) as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>,
+    );
+    vi.spyOn(
+      serverModule,
+      'resolveBoundWorkspacesFromIdeEnv',
+    ).mockImplementation((_primary, _ide, includeWorkspace) =>
+      includeWorkspace === undefined ? roots : roots.filter(includeWorkspace),
+    );
+    vi.spyOn(serverModule, 'resolveBridgeFsFactory').mockImplementation(
+      (input) => {
+        bridgeFsBoundWorkspaces.push([...input.boundWorkspaces]);
+        return {} as ReturnType<typeof serverModule.resolveBridgeFsFactory>;
+      },
+    );
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue(express());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: primary,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        bootSettings: {},
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bridgeFsBoundWorkspaces[0]).toEqual([roots[0], roots[1]]);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('keeps trusted child roots when an untrusted parent is filtered out', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-roots-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const untrustedParent = path.join(tmpDir, 'parent');
+    const trustedChild = path.join(untrustedParent, 'trusted-child');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(trustedChild, { recursive: true });
+    const roots = [primary, untrustedParent, trustedChild].map((root) =>
+      canonicalizeWorkspace(root),
+    );
+    const originalIdeWorkspacePath =
+      process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];
+    process.env['QWEN_CODE_IDE_WORKSPACE_PATH'] = JSON.stringify(roots);
+    const bridgeFsBoundWorkspaces: string[][] = [];
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(
+      trustedFoldersRuntime,
+      'getWorkspaceTrustStatus',
+    ).mockImplementation(
+      (_settings, workspace) =>
+        ({
+          effective: {
+            state: workspace === roots[1] ? 'untrusted' : 'trusted',
+          },
+        }) as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>,
+    );
+    vi.spyOn(serverModule, 'resolveBridgeFsFactory').mockImplementation(
+      (input) => {
+        bridgeFsBoundWorkspaces.push([...input.boundWorkspaces]);
+        return {} as ReturnType<typeof serverModule.resolveBridgeFsFactory>;
+      },
+    );
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue(express());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: primary,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        bootSettings: {},
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bridgeFsBoundWorkspaces[0]).toEqual([roots[0], roots[2]]);
+    } finally {
+      if (originalIdeWorkspacePath === undefined) {
+        delete process.env['QWEN_CODE_IDE_WORKSPACE_PATH'];
+      } else {
+        process.env['QWEN_CODE_IDE_WORKSPACE_PATH'] = originalIdeWorkspacePath;
+      }
+      await handle.close();
+    }
+  });
+
+  it('shares one path lock registry across bridge and REST filesystem factories', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-roots-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const roots = [primary, secondary].map((root) =>
+      canonicalizeWorkspace(root),
+    );
+    const pathLocks: unknown[] = [];
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockReturnValue({
+      merged: {},
+    } as ReturnType<typeof settingsRuntime.loadSettings>);
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus').mockReturnValue({
+      effective: { state: 'trusted' },
+    } as ReturnType<typeof trustedFoldersRuntime.getWorkspaceTrustStatus>);
+    vi.spyOn(
+      serverModule,
+      'resolveBoundWorkspacesFromIdeEnv',
+    ).mockImplementation((_primary, _ide, includeWorkspace) =>
+      includeWorkspace === undefined ? roots : roots.filter(includeWorkspace),
+    );
+    vi.spyOn(serverModule, 'resolveBridgeFsFactory').mockImplementation(
+      (input) => {
+        pathLocks.push(input.pathLocks);
+        return {} as ReturnType<typeof serverModule.resolveBridgeFsFactory>;
+      },
+    );
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue(express());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: primary,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        bootSettings: {},
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(pathLocks).toHaveLength(2);
+      expect(pathLocks[0]).toBeDefined();
+      expect(pathLocks[0]).toBe(pathLocks[1]);
+    } finally {
+      await handle.close();
+    }
+  });
+
+  it('excludes secondary workspace roots when runtime trust settings are unavailable', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-roots-')),
+    );
+    const primary = path.join(tmpDir, 'primary');
+    const secondary = path.join(tmpDir, 'secondary');
+    fs.mkdirSync(primary);
+    fs.mkdirSync(secondary);
+    const roots = [primary, secondary].map((root) =>
+      canonicalizeWorkspace(root),
+    );
+    const bridgeFsBoundWorkspaces: string[][] = [];
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    vi.spyOn(settingsRuntime, 'loadSettings').mockImplementation(() => {
+      throw new Error('settings unavailable');
+    });
+    vi.spyOn(trustedFoldersRuntime, 'getWorkspaceTrustStatus');
+    vi.spyOn(
+      serverModule,
+      'resolveBoundWorkspacesFromIdeEnv',
+    ).mockImplementation((_primary, _ide, includeWorkspace) =>
+      includeWorkspace === undefined ? roots : roots.filter(includeWorkspace),
+    );
+    vi.spyOn(serverModule, 'resolveBridgeFsFactory').mockImplementation(
+      (input) => {
+        bridgeFsBoundWorkspaces.push([...input.boundWorkspaces]);
+        return {} as ReturnType<typeof serverModule.resolveBridgeFsFactory>;
+      },
+    );
+    vi.spyOn(serverModule, 'createServeApp').mockReturnValue(express());
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: primary,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      {
+        bridge: makeRuntimeBridge(),
+        bootSettings: {},
+        daemonLogBaseDir: path.join(tmpDir, 'debug'),
+        resolveOnListen: true,
+      },
+    );
+
+    try {
+      await handle.runtimeReady;
+      expect(bridgeFsBoundWorkspaces[0]).toEqual([roots[0]]);
+      expect(
+        trustedFoldersRuntime.getWorkspaceTrustStatus,
+      ).not.toHaveBeenCalled();
+    } finally {
       await handle.close();
     }
   });
@@ -1697,6 +2370,87 @@ describe('runQwenServe runtime startup failures', () => {
     expect(bridge.shutdown).toHaveBeenCalledTimes(1);
   });
 
+  it('accumulates prompt queue wait stats in daemon status perf data', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-queue-wait-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const telemetry: ReturnType<typeof qwenCore.createDaemonBridgeTelemetry> = {
+      captureContext() {
+        return undefined;
+      },
+      runWithContext(_captured, fn) {
+        return fn();
+      },
+      withSpan(_operation, _attributes, fn) {
+        return fn();
+      },
+      event: vi.fn(),
+      injectPromptContext(request) {
+        return request;
+      },
+    };
+    vi.spyOn(qwenCore, 'createDaemonBridgeTelemetry').mockReturnValue(
+      telemetry,
+    );
+    const recordPromptQueueWait = vi.spyOn(
+      qwenCore,
+      'recordDaemonPromptQueueWait',
+    );
+    const bridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await handle.runtimeReady;
+      telemetry.metrics?.promptQueueWait(10);
+      telemetry.metrics?.promptQueueWait(30);
+      telemetry.metrics?.promptQueueWait(5);
+
+      const res = await fetch(`${handle.url}/daemon/status`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        runtime?: {
+          perf?: {
+            promptQueueWait?: {
+              count: number;
+              meanMs: number;
+              maxMs: number;
+              lastMs: number | null;
+            };
+          };
+        };
+      };
+      expect(body.runtime?.perf?.promptQueueWait).toEqual({
+        count: 3,
+        meanMs: 15,
+        maxMs: 30,
+        lastMs: 5,
+      });
+      expect(recordPromptQueueWait).toHaveBeenNthCalledWith(1, 10);
+      expect(recordPromptQueueWait).toHaveBeenNthCalledWith(2, 30);
+      expect(recordPromptQueueWait).toHaveBeenNthCalledWith(3, 5);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('fails runtimeReady and health when runtime startup times out', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-timeout-')),
@@ -2026,6 +2780,53 @@ describe('runQwenServe runtime startup failures', () => {
     await handle.close();
 
     expect(bridge.shutdown).toHaveBeenCalledTimes(1);
+    expect(dispose).toHaveBeenCalledTimes(1);
+  });
+
+  it('disposes the daemon event loop monitor when closed after listening', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-monitor-close-')),
+    );
+    const bridge = {
+      spawnOrAttach: vi.fn(),
+      shutdown: vi.fn().mockResolvedValue(undefined),
+      killAllSync: vi.fn(),
+      getSession: vi.fn(),
+      getAllSessions: vi.fn().mockReturnValue([]),
+      publishWorkspaceEvent: vi.fn(),
+      getEventRing: vi.fn().mockReturnValue({ getAll: () => [] }),
+      resume: vi.fn(),
+      preheat: vi.fn().mockResolvedValue(undefined),
+      getDaemonStatusSnapshot: vi.fn().mockReturnValue(BASE_BRIDGE_SNAPSHOT),
+    } as unknown as HttpAcpBridge;
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+    const dispose = vi.fn();
+    vi.spyOn(qwenCore, 'startEventLoopLagMonitor').mockReturnValueOnce({
+      snapshot: () => ({
+        meanMs: 0,
+        p50Ms: 0,
+        p99Ms: 0,
+        maxMs: 0,
+      }),
+      dispose,
+    });
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+
+    await handle.close();
+
     expect(dispose).toHaveBeenCalledTimes(1);
   });
 });

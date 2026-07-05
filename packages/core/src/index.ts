@@ -58,6 +58,7 @@ export * from './output/types.js';
 
 export * from './core/client.js';
 export * from './core/contentGenerator.js';
+export * from './core/reasoning-effort.js';
 export * from './core/coreToolScheduler.js';
 export * from './core/permissionFlow.js';
 export * from './core/permission-helpers.js';
@@ -121,6 +122,7 @@ export {
 } from './tools/skill-utils.js';
 export { atomicWriteFile } from './utils/atomicFileWrite.js';
 export { nextFireTime, parseCron } from './utils/cronParser.js';
+export * from './services/session-organization-service.js';
 
 // Backward-compatible type re-exports for tool classes removed from eager loading.
 // These preserve TypeScript type compatibility for downstream consumers.
@@ -172,6 +174,10 @@ export type {
   ArtifactToolParams,
 } from './tools/artifact/artifact-tool.js';
 export type {
+  RecordArtifactTool,
+  RecordArtifactParams,
+} from './tools/record-artifact.js';
+export type {
   ArtifactPublisher,
   PublishArtifactInput,
   PublishedArtifact,
@@ -180,6 +186,10 @@ export type { CronCreateTool, CronCreateParams } from './tools/cron-create.js';
 export type { CronListTool, CronListParams } from './tools/cron-list.js';
 export type { CronDeleteTool, CronDeleteParams } from './tools/cron-delete.js';
 export type { ToolSearchTool, ToolSearchParams } from './tools/tool-search.js';
+export type {
+  TeamPlanApprovalTool,
+  TeamPlanApprovalParams,
+} from './tools/team-plan-approval.js';
 
 // ============================================================================
 // Providers
@@ -204,8 +214,10 @@ export * from './services/fileReadCache.js';
 export * from './services/fileSystemService.js';
 export { decodeBufferWithEncodingInfo } from './utils/fileUtils.js';
 export * from './services/gitWorktreeService.js';
+export { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from './services/loopDetectionService.js';
 export * from './services/visionBridge/vision-bridge-service.js';
 export * from './services/visionBridge/image-part-utils.js';
+export * from './services/visionBridge/image-capability.js';
 export * from './services/sessionRecap.js';
 export * from './services/sessionService.js';
 export * from './services/sessionTitle.js';
@@ -278,6 +290,7 @@ export * from './memory/store.js';
 export * from './memory/const.js';
 export * from './memory/channel-memory.js';
 export * from './memory/remember.js';
+export * from './memory/dream.js';
 // Issue : write helper for hierarchical context files,
 // re-exported so the `qwen serve` daemon can mutate workspace memory
 // via `POST /workspace/memory` without depending on internal paths.
@@ -303,6 +316,7 @@ export * from './ide/types.js';
 // ============================================================================
 
 export * from './lsp/constants.js';
+export * from './lsp/configHash.js';
 export * from './lsp/LspConfigLoader.js';
 export * from './lsp/LspConnectionFactory.js';
 export * from './lsp/LspResponseNormalizer.js';
@@ -536,11 +550,13 @@ export {
   firePreToolUseHook,
   firePostToolUseHook,
   firePostToolUseFailureHook,
+  firePostToolBatchHook,
   type NotificationHookResult,
   type PermissionRequestHookResult,
   type PreToolUseHookResult,
   type PostToolUseHookResult,
   type PostToolUseFailureHookResult,
+  type PostToolBatchHookResult,
   generateToolUseId,
 } from './core/toolHookTriggers.js';
 

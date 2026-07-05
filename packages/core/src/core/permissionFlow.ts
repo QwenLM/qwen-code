@@ -25,11 +25,14 @@ import {
   buildPermissionCheckContext,
   evaluatePermissionRules,
 } from './permission-helpers.js';
+import type { PermissionDecision } from '../permissions/types.js';
 import type { ToolCallConfirmationDetails } from '../tools/tools.js';
 
-export type PermissionFlowPermission = 'allow' | 'deny' | 'ask' | 'default';
+export type PermissionFlowPermission = PermissionDecision;
 
 export interface PermissionFlowResult {
+  /** The tool's intrinsic L3 permission before PermissionManager rules. */
+  defaultPermission: PermissionFlowPermission;
   /** The final permission after L3→L4 (allow | deny | ask | default) */
   finalPermission: PermissionFlowPermission;
   /** Whether PM forced 'ask' (hides "Always Allow" buttons) */
@@ -60,7 +63,7 @@ export async function evaluatePermissionFlow(
   toolParams: Record<string, unknown>,
 ): Promise<PermissionFlowResult> {
   // ── L3: Tool's default permission ───────────────────────────────────
-  const defaultPermission: string = await invocation.getDefaultPermission();
+  const defaultPermission = await invocation.getDefaultPermission();
 
   // ── L4: PermissionManager override ──────────────────────────────────
   const pm = config.getPermissionManager?.();
@@ -77,6 +80,7 @@ export async function evaluatePermissionFlow(
 
   // Build result
   const result: PermissionFlowResult = {
+    defaultPermission,
     finalPermission: finalPermission as PermissionFlowPermission,
     pmForcedAsk,
     pmCtx,

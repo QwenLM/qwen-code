@@ -7,7 +7,11 @@
 import express from 'express';
 import type { Application } from 'express';
 import type { DaemonLogger } from './daemon-logger.js';
-import type { DaemonStartupSnapshot } from './daemon-status.js';
+import type {
+  DaemonMetricsBucket,
+  DaemonPerfSnapshot,
+  DaemonStartupSnapshot,
+} from './daemon-status.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import {
   allowOriginCors,
@@ -25,6 +29,7 @@ import type { DaemonStatusProvider } from '@qwen-code/acp-bridge';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
 import { createDaemonStatusProvider } from './daemon-status-provider.js';
 import { createWorkspaceProvidersStatusProvider } from './workspace-providers-status.js';
+import { createWorkspaceSkillsStatusProvider } from './workspace-skills-status.js';
 import { mountAcpHttp, type AcpHttpHandle } from './acp-http/index.js';
 import { createVoiceWsConnectionHandler } from './voice/voice-ws.js';
 import {
@@ -113,6 +118,7 @@ import { registerWorkspaceToolsRoutes } from './routes/workspace-tools.js';
 
 export {
   createDefaultFsAuditEmit,
+  resolveBoundWorkspacesFromIdeEnv,
   resolveBridgeFsFactory,
 } from './server/fs-factory.js';
 export {
@@ -209,6 +215,14 @@ export interface ServeAppDeps {
   daemonLog?: DaemonLogger;
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
+  getPerfSnapshot?: () => DaemonPerfSnapshot;
+  /** Rolling metrics series for the Daemon Status charts (oldest→newest). */
+  getMetricsSeries?: () => DaemonMetricsBucket[];
+  /**
+   * Sink fed one (durationMs, statusCode) per matched daemon HTTP request, so
+   * the metrics ring can bucket request rate and latency for the charts.
+   */
+  recordDaemonRequest?: (durationMs: number, statusCode: number) => void;
   workspace?: DaemonWorkspaceService;
   statusProvider?: DaemonStatusProvider;
   persistDisabledTools?: (
@@ -308,7 +322,7 @@ export function createServeApp(
     );
   }
   const fsFactory = resolveBridgeFsFactory({
-    boundWorkspace,
+    boundWorkspaces: [boundWorkspace],
     injected: deps.fsFactory,
     trusted: false,
   });
@@ -411,6 +425,7 @@ export function createServeApp(
       statusProvider,
       workspaceProvidersStatusProvider:
         createWorkspaceProvidersStatusProvider(),
+      workspaceSkillsStatusProvider: createWorkspaceSkillsStatusProvider(),
       isChannelLive: () => bridge.isChannelLive(),
       persistDisabledTools:
         deps.persistDisabledTools ??
@@ -532,7 +547,7 @@ export function createServeApp(
     requireAuth: opts.requireAuth === true,
   });
 
-  app.use(daemonTelemetryMiddleware(boundWorkspace));
+  app.use(daemonTelemetryMiddleware(boundWorkspace, deps.recordDaemonRequest));
 
   const buildWorkspaceCtx = createBuildWorkspaceCtx(boundWorkspace);
 
@@ -561,6 +576,8 @@ export function createServeApp(
     deviceFlowRegistry,
     sessionShellCommandEnabled,
     getChannelWorkerSnapshot: deps.getChannelWorkerSnapshot,
+    getPerfSnapshot: deps.getPerfSnapshot,
+    getMetricsSeries: deps.getMetricsSeries,
   });
 
   registerCapabilitiesRoutes(app, {

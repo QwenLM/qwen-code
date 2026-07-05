@@ -6,8 +6,6 @@
 
 import { createHash, timingSafeEqual } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
-import { createRequire } from 'node:module';
-import * as path from 'node:path';
 import type { Duplex } from 'node:stream';
 import type { Application, Request, Response } from 'express';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -65,9 +63,10 @@ const CDP_PATH = '/cdp';
  */
 const CDP_BRIDGE_CLIENT_NAME = 'qwen-cdp-bridge';
 const CHROME_DEVTOOLS_MCP_SERVER_NAME = 'chrome-devtools';
+/** Stdio MCP adapter command used by the optional CDP browser automation bridge. */
+const CDP_MCP_COMMAND_ENV = 'QWEN_CDP_MCP_COMMAND';
 const RUNTIME_MCP_RETRY_DELAY_MS = 250;
 const RUNTIME_MCP_RETRY_ATTEMPTS = 20;
-const requireFromHere = createRequire(import.meta.url);
 
 function formatCdpEndpointHost(hostname: string | undefined): string {
   const host = hostname?.trim() || '127.0.0.1';
@@ -90,11 +89,9 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-export function buildChromeDevToolsMcpRuntimeConfigFromPackage(
+function buildChromeDevToolsMcpRuntimeConfig(
   localPort: number | undefined,
-  pkgJsonPath: string,
-  pkgBin: string | Record<string, string> | undefined,
-  hostname?: string,
+  hostname: string | undefined,
 ): Record<string, unknown> | undefined {
   if (
     localPort === undefined ||
@@ -103,52 +100,22 @@ export function buildChromeDevToolsMcpRuntimeConfigFromPackage(
   ) {
     return undefined;
   }
-  const binRel =
-    typeof pkgBin === 'string' ? pkgBin : Object.values(pkgBin ?? {})[0];
-  if (!binRel) return undefined;
-  const pkgDir = path.dirname(pkgJsonPath);
-  const binPath = path.resolve(pkgDir, binRel);
-  const binRelToPkg = path.relative(pkgDir, binPath);
-  if (binRelToPkg.startsWith('..') || path.isAbsolute(binRelToPkg)) {
+  const command = process.env[CDP_MCP_COMMAND_ENV]?.trim();
+  if (!command) {
+    writeStderrLine(
+      `qwen serve: set ${CDP_MCP_COMMAND_ENV} to enable browser automation MCP (chrome-devtools-mcp is no longer bundled)`,
+    );
     return undefined;
   }
   return {
-    command: process.execPath,
+    command,
     args: [
-      binPath,
       '--wsEndpoint',
       `ws://${formatCdpEndpointHost(hostname)}:${localPort}/cdp`,
     ],
     alwaysLoadTools: true,
     [RUNTIME_MCP_IF_ABSENT_CONFIG_FLAG]: true,
   };
-}
-
-function buildChromeDevToolsMcpRuntimeConfig(
-  localPort: number | undefined,
-  hostname: string | undefined,
-): Record<string, unknown> | undefined {
-  try {
-    const pkgJsonPath = requireFromHere.resolve(
-      'chrome-devtools-mcp/package.json',
-    );
-    const pkg = requireFromHere('chrome-devtools-mcp/package.json') as {
-      bin?: string | Record<string, string>;
-    };
-    return buildChromeDevToolsMcpRuntimeConfigFromPackage(
-      localPort,
-      pkgJsonPath,
-      pkg.bin,
-      hostname,
-    );
-  } catch (err) {
-    writeStderrLine(
-      `qwen serve: chrome-devtools-mcp package not resolvable: ${
-        err instanceof Error ? err.message : String(err)
-      }`,
-    );
-    return undefined;
-  }
 }
 
 /**
@@ -221,11 +188,13 @@ const WS_READ_METHODS = new Set([
   '_qwen/session/context_usage',
   '_qwen/session/tasks',
   '_qwen/session/lsp',
+  '_qwen/session/artifacts',
   '_qwen/workspace/mcp',
   '_qwen/workspace/skills',
   '_qwen/workspace/providers',
   '_qwen/workspace/env',
   '_qwen/workspace/preflight',
+  '_qwen/workspace/session_groups/list',
   '_qwen/workspace/trust',
   '_qwen/workspace/permissions',
   '_qwen/workspace/voice',
@@ -236,6 +205,8 @@ const WS_READ_METHODS = new Set([
   '_qwen/workspace/agents/get',
   '_qwen/workspace/memory',
   '_qwen/workspace/memory/remember/get',
+  '_qwen/workspace/memory/forget/get',
+  '_qwen/workspace/memory/dream/get',
   '_qwen/workspace/auth/status',
   '_qwen/workspace/auth/device_flow/get',
   '_qwen/file/read',
@@ -248,11 +219,25 @@ const WS_READ_METHODS = new Set([
 function isSameLoopbackOrigin(origin: string, localPort?: number): boolean {
   if (!localPort) return false;
   const parsed = new URL(origin);
+  // Both schemes: under `--tls-cert/--tls-key` the loopback ACP client
+  // speaks https, so its Origin header carries `https://`.
   const allowed = new Set([
     `http://localhost:${localPort}`,
     `http://127.0.0.1:${localPort}`,
     `http://[::1]:${localPort}`,
+    `https://localhost:${localPort}`,
+    `https://127.0.0.1:${localPort}`,
+    `https://[::1]:${localPort}`,
   ]);
+  // RFC 7230 §5.4: browsers omit the port in the Origin header when it
+  // matches the scheme default (http→80, https→443). Accept the port-less
+  // forms so the check doesn't fail on default ports.
+  if (localPort === 80 || localPort === 443) {
+    for (const host of ['localhost', '127.0.0.1', '[::1]']) {
+      allowed.add(`http://${host}`);
+      allowed.add(`https://${host}`);
+    }
+  }
   return allowed.has(parsed.origin.toLowerCase());
 }
 
@@ -966,6 +951,17 @@ export function mountAcpHttp(
           `[::1]:${localPort}`,
           `host.docker.internal:${localPort}`,
         ]);
+        // RFC 7230 §5.4: browsers omit the port suffix when it matches the
+        // scheme default (http→80, https→443). On TLS/port 443 the browser
+        // sends `Host: localhost`, which won't match `localhost:443` and
+        // every WS upgrade is rejected. Mirror the REST host allowlist
+        // (auth.ts) and accept the port-less forms on default ports.
+        if (localPort === 80 || localPort === 443) {
+          allowed.add('localhost');
+          allowed.add('127.0.0.1');
+          allowed.add('[::1]');
+          allowed.add('host.docker.internal');
+        }
         if (!allowed.has(host)) {
           logReject(`host-not-allowed ${host || '(missing)'}`);
           socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');

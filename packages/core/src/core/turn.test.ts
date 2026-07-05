@@ -8,6 +8,7 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type {
   ServerGeminiToolCallRequestEvent,
   ServerGeminiErrorEvent,
+  ServerGeminiModelFallbackEvent,
 } from './turn.js';
 import {
   CompressionStatus,
@@ -25,6 +26,7 @@ import { reportError } from '../utils/errorReporting.js';
 import type { GeminiChat } from './geminiChat.js';
 import { StreamEventType } from './geminiChat.js';
 import { normalizeModelToolCallIds } from './toolCallIdUtils.js';
+import { createOpenAIReasoningThoughtPart } from '../utils/thoughtUtils.js';
 
 const mockSendMessageStream = vi.fn();
 const mockGetHistory = vi.fn();
@@ -220,6 +222,80 @@ describe('Turn', () => {
       ]);
     });
 
+    it('should keep OpenAI reasoning markdown as a streaming thought description', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    createOpenAIReasoningThoughtPart(
+                      '**Analyzing the request**',
+                    ),
+                  ],
+                },
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Thought,
+          value: { subject: '', description: '**Analyzing the request**' },
+        },
+      ]);
+    });
+
+    it('should keep parsing unmarked structured thought subjects', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ thought: true, text: '**Only Subject**' }],
+                },
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Thought,
+          value: { subject: 'Only Subject', description: '' },
+        },
+      ]);
+    });
+
     it('should emit thought descriptions per incoming chunk', async () => {
       const mockResponseStream = (async function* () {
         yield {
@@ -333,6 +409,73 @@ describe('Turn', () => {
       expect(turn.pendingToolCalls[1]).toEqual(event2.value);
     });
 
+    it('clears response id state when a model fallback occurs', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            responseId: 'primary-response',
+            functionCalls: [
+              {
+                id: 'primary-call',
+                name: 'tool1',
+                args: {},
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+        yield {
+          type: StreamEventType.MODEL_FALLBACK,
+          info: {
+            fromModel: 'primary-model',
+            toModel: 'fallback-model',
+            fallbackIndex: 1,
+          },
+        };
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            functionCalls: [
+              {
+                id: 'fallback-call',
+                name: 'tool2',
+                args: {},
+              },
+            ],
+          } as unknown as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      const toolCalls = events.filter(
+        (event): event is ServerGeminiToolCallRequestEvent =>
+          event.type === GeminiEventType.ToolCallRequest,
+      );
+      const fallbackEvent = events.find(
+        (event): event is ServerGeminiModelFallbackEvent =>
+          event.type === GeminiEventType.ModelFallback,
+      );
+      expect(fallbackEvent).toEqual({
+        type: GeminiEventType.ModelFallback,
+        fromModel: 'primary-model',
+        toModel: 'fallback-model',
+        statusCode: undefined,
+        fallbackIndex: 1,
+      });
+      expect(toolCalls[0]!.value.response_id).toBe('primary-response');
+      expect(toolCalls[1]!.value.response_id).toBeUndefined();
+      expect(turn.pendingToolCalls).toEqual([toolCalls[1]!.value]);
+    });
+
     it('should yield UserCancelled event if signal is aborted', async () => {
       const abortController = new AbortController();
       const mockResponseStream = (async function* () {
@@ -422,6 +565,7 @@ describe('Turn', () => {
           },
         },
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
     });
 
@@ -461,6 +605,7 @@ describe('Turn', () => {
           },
         },
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
     });
 
@@ -540,6 +685,7 @@ describe('Turn', () => {
           },
         },
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
     });
 
@@ -579,6 +725,7 @@ describe('Turn', () => {
           },
         },
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
     });
 
@@ -620,6 +767,7 @@ describe('Turn', () => {
           },
         },
         'Turn.run-sendMessageStream',
+        { contextAlreadySummarized: true },
       );
     });
 

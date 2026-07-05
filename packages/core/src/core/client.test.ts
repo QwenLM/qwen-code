@@ -67,7 +67,9 @@ import { setSimulate429 } from '../utils/testUtils.js';
 import { ideContextStore } from '../ide/ideContext.js';
 import { uiTelemetryService } from '../telemetry/uiTelemetry.js';
 import {
-  buildAddedMcpToolsReminder,
+  buildChangedAgentsReminder,
+  buildChangedMcpToolsReminder,
+  buildChangedSkillsReminder,
   getInitialChatHistory,
 } from '../utils/environmentContext.js';
 import { collectAvailableSkillEntries } from '../tools/skill-utils.js';
@@ -198,10 +200,32 @@ vi.mock('../utils/environmentContext', async (importOriginal) => {
       ],
       [],
     ]),
-    buildAddedMcpToolsReminder: vi.fn((tools: Array<{ name: string }>) =>
-      tools.length === 0
-        ? null
-        : `<system-reminder>\nadded: ${tools.map((tool) => tool.name).join(', ')}\n</system-reminder>`,
+    buildChangedMcpToolsReminder: vi.fn(
+      (
+        tools: Array<{ name: string }>,
+        removedToolNames: string[],
+      ): string | null =>
+        tools.length === 0 && removedToolNames.length === 0
+          ? null
+          : `<system-reminder>\nchanged mcp: added=${tools.map((tool) => tool.name).join(', ')} removed=${removedToolNames.join(', ')}\n</system-reminder>`,
+    ),
+    buildChangedSkillsReminder: vi.fn(
+      (
+        entries: Array<{ name: string }>,
+        removedNames: string[],
+      ): string | null =>
+        entries.length === 0 && removedNames.length === 0
+          ? null
+          : `<system-reminder>\nchanged skills: added=${entries.map((entry) => entry.name).join(', ')} removed=${removedNames.join(', ')}\n</system-reminder>`,
+    ),
+    buildChangedAgentsReminder: vi.fn(
+      (
+        addedAgents: Array<{ name: string }>,
+        removedAgentNames: string[],
+      ): string | null =>
+        addedAgents.length === 0 && removedAgentNames.length === 0
+          ? null
+          : `<system-reminder>\nchanged agents: added=${addedAgents.map((agent) => agent.name).join(', ')} removed=${removedAgentNames.join(', ')}\n</system-reminder>`,
     ),
     getStartupContextLength: vi.fn((history) => {
       const first = history?.[0];
@@ -513,6 +537,9 @@ describe('Gemini Client (client.ts)', () => {
       getContentGenerator: vi.fn().mockReturnValue(mockContentGenerator),
       getBaseLlmClient: vi.fn(),
       getSkipLoopDetection: vi.fn().mockReturnValue(false),
+      // Mimics the resolved Config getter: always a number (Infinity keeps
+      // the cap out of the way of unrelated streaming tests).
+      getMaxToolCallsPerTurn: vi.fn().mockReturnValue(Number.POSITIVE_INFINITY),
       getChatRecordingService: vi.fn().mockReturnValue(undefined),
       getFileHistoryService: vi.fn().mockReturnValue(mockFileHistoryService),
       getResumedSessionData: vi.fn().mockReturnValue(undefined),
@@ -533,6 +560,9 @@ describe('Gemini Client (client.ts)', () => {
       hasHooksForEvent: vi.fn().mockReturnValue(false),
       getHookSystem: vi.fn().mockReturnValue(undefined),
       getSkillManager: vi.fn().mockReturnValue(undefined),
+      getSubagentManager: vi.fn().mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([]),
+      }),
       consumeInlineAnnouncedSkillKeys: vi
         .fn()
         .mockReturnValue(new Set<string>()),
@@ -1353,26 +1383,53 @@ describe('Gemini Client (client.ts)', () => {
 
       expect(setSystemInstructionSpy).not.toHaveBeenCalled();
       expect(vi.mocked(getCoreSystemPrompt)).not.toHaveBeenCalled();
-      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
 
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([
-        {
-          name: 'mcp__addition-server__add',
-          description: 'Add two numbers',
-          serverName: 'addition-server',
-        },
-      ]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [
+          {
+            name: 'mcp__addition-server__add',
+            description: 'Add two numbers',
+            serverName: 'addition-server',
+          },
+        ],
+        [],
+      );
       expect(addHistorySpy).toHaveBeenCalledWith({
         role: 'user',
         parts: [
           {
-            text: '<system-reminder>\nadded: mcp__addition-server__add\n</system-reminder>',
+            text: '<system-reminder>\nchanged mcp: added=mcp__addition-server__add removed=\n</system-reminder>',
           },
         ],
       });
+    });
+
+    it('does not announce MCP removal before an added tool was drained', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      const tool = {
+        name: 'mcp__flaky__do',
+        description: 'd',
+        serverName: 'flaky',
+      };
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      reg.getDeferredToolSummary.mockReturnValue([tool]);
+      await client.setTools();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+      await client.setTools();
+
+      await runTurn();
+
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
     });
 
     it('omits already-revealed deferred tools from added reminders', async () => {
@@ -1397,9 +1454,10 @@ describe('Gemini Client (client.ts)', () => {
 
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([
-        { name: 'mcp__server__beta', description: 'b', serverName: 'server' },
-      ]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [{ name: 'mcp__server__beta', description: 'b', serverName: 'server' }],
+        [],
+      );
       expect(addHistorySpy).toHaveBeenCalledTimes(1);
     });
 
@@ -1419,12 +1477,12 @@ describe('Gemini Client (client.ts)', () => {
       reg.getDeferredToolSummary.mockReturnValue([tool]);
       await client.setTools();
       await runTurn();
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([tool]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith([tool], []);
 
       // Server disconnects: removeMcpToolsByServer() drops it from the
       // deferred set. queueAddedMcpToolsReminder must prune the stale
       // announced name here.
-      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
       reg.getDeferredToolSummary.mockReturnValue([]);
       await client.setTools();
       await runTurn();
@@ -1432,11 +1490,68 @@ describe('Gemini Client (client.ts)', () => {
       // Server reconnects with the same tool. Without the prune the name
       // would still be in announcedDeferredToolNames and be skipped, so
       // the user would never get a "new tools available" reminder.
-      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
       reg.getDeferredToolSummary.mockReturnValue([tool]);
       await client.setTools();
       await runTurn();
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([tool]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith([tool], []);
+    });
+
+    it('announces removed MCP deferred tools after disconnect', async () => {
+      const reg = getRegistryMock();
+      reg.getTool.mockImplementation((n: string) =>
+        n === 'tool_search' ? ({} as never) : null,
+      );
+      const tool = {
+        name: 'mcp__gone__do',
+        description: 'd',
+        serverName: 'gone',
+      };
+      vi.spyOn(client.getChat(), 'setTools').mockImplementation(() => {});
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      reg.getDeferredToolSummary.mockReturnValue([tool]);
+      await client.setTools();
+      await runTurn();
+
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
+      addHistorySpy.mockClear();
+      reg.getDeferredToolSummary.mockReturnValue([]);
+
+      await client.setTools();
+      await runTurn();
+
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [],
+        ['mcp__gone__do'],
+      );
+      expect(addHistorySpy).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nchanged mcp: added= removed=mcp__gone__do\n</system-reminder>',
+          },
+        ],
+      });
+    });
+
+    it('keeps queued MCP changes when the reminder builder returns null', () => {
+      const priv = client as unknown as {
+        pendingAddedMcpTools: Map<
+          string,
+          { name: string; description: string; serverName: string }
+        >;
+        pendingRemovedMcpToolNames: Set<string>;
+        drainPendingAddedMcpToolsReminder(): void;
+      };
+      priv.pendingRemovedMcpToolNames = new Set(['mcp__gone__do']);
+      vi.mocked(buildChangedMcpToolsReminder).mockReturnValueOnce(null);
+
+      priv.drainPendingAddedMcpToolsReminder();
+
+      expect(priv.pendingRemovedMcpToolNames).toEqual(
+        new Set(['mcp__gone__do']),
+      );
     });
 
     it('eagerly reveals every deferred tool when ToolSearch is unavailable', async () => {
@@ -1489,12 +1604,12 @@ describe('Gemini Client (client.ts)', () => {
       await client.setTools();
       await runTurn();
       addHistorySpy.mockClear();
-      vi.mocked(buildAddedMcpToolsReminder).mockClear();
+      vi.mocked(buildChangedMcpToolsReminder).mockClear();
 
       await client.setTools();
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
     });
 
@@ -1517,26 +1632,53 @@ describe('Gemini Client (client.ts)', () => {
       await client.setTools();
       await runTurn(SendMessageType.ToolResult);
 
-      expect(buildAddedMcpToolsReminder).not.toHaveBeenCalled();
+      expect(buildChangedMcpToolsReminder).not.toHaveBeenCalled();
       expect(addHistorySpy).not.toHaveBeenCalled();
 
       await runTurn();
 
-      expect(buildAddedMcpToolsReminder).toHaveBeenCalledWith([
-        {
-          name: 'mcp__addition-server__add',
-          description: 'Add two numbers',
-          serverName: 'addition-server',
-        },
-      ]);
+      expect(buildChangedMcpToolsReminder).toHaveBeenCalledWith(
+        [
+          {
+            name: 'mcp__addition-server__add',
+            description: 'Add two numbers',
+            serverName: 'addition-server',
+          },
+        ],
+        [],
+      );
       expect(addHistorySpy).toHaveBeenCalledWith({
         role: 'user',
         parts: [
           {
-            text: '<system-reminder>\nadded: mcp__addition-server__add\n</system-reminder>',
+            text: '<system-reminder>\nchanged mcp: added=mcp__addition-server__add removed=\n</system-reminder>',
           },
         ],
       });
+    });
+
+    it('keeps draining later capability reminders when MCP drain fails', async () => {
+      const priv = client as unknown as {
+        drainPendingAddedMcpToolsReminder(): void;
+        drainSkillAndCommandReminders(): Promise<void>;
+        drainAgentReminders(): Promise<void>;
+      };
+      vi.spyOn(priv, 'drainPendingAddedMcpToolsReminder').mockImplementation(
+        () => {
+          throw new Error('mcp drain failed');
+        },
+      );
+      const skillDrainSpy = vi
+        .spyOn(priv, 'drainSkillAndCommandReminders')
+        .mockResolvedValue();
+      const agentDrainSpy = vi
+        .spyOn(priv, 'drainAgentReminders')
+        .mockResolvedValue();
+
+      await runTurn();
+
+      expect(skillDrainSpy).toHaveBeenCalled();
+      expect(agentDrainSpy).toHaveBeenCalled();
     });
 
     it('preserves SessionStart additionalContext because setTools does not rewrite the system instruction', async () => {
@@ -7230,6 +7372,76 @@ Other open files:
         });
       });
 
+      it('gives a blocking Stop hook continuation a fresh per-turn tool-call budget', async () => {
+        // First Stop check blocks (like a /goal "not met" verdict); the
+        // second allows the loop to end.
+        const mockMessageBus = {
+          request: vi
+            .fn()
+            .mockResolvedValueOnce({
+              output: { decision: 'block', reason: 'Keep working' },
+              stopHookCount: 1,
+            })
+            .mockResolvedValue({ output: undefined }),
+          response: vi.fn(),
+        };
+        vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+        vi.mocked(mockConfig.getMessageBus).mockReturnValue(
+          mockMessageBus as unknown as ReturnType<Config['getMessageBus']>,
+        );
+        vi.mocked(mockConfig.hasHooksForEvent).mockImplementation(
+          (event: string) => event === 'Stop',
+        );
+        // Cap of 4: each turn's 3 tool calls fit, but 6 accumulated across
+        // the continuation boundary would not.
+        vi.mocked(mockConfig.getMaxToolCallsPerTurn).mockReturnValue(4);
+
+        client['chat'] = {
+          addHistory: vi.fn(),
+          getHistory: vi
+            .fn()
+            .mockReturnValue([
+              { role: 'model', parts: [{ text: 'not done' }] },
+            ]),
+        } as unknown as GeminiChat;
+        let turnIndex = 0;
+        mockTurnRunFn.mockImplementation(() => {
+          const turnNo = turnIndex++;
+          return (async function* () {
+            for (let i = 0; i < 3; i++) {
+              yield {
+                type: GeminiEventType.ToolCallRequest,
+                value: {
+                  callId: `call-${turnNo}-${i}`,
+                  name: 'test_tool',
+                  args: { turnNo, i },
+                  isClientInitiated: false,
+                  prompt_id: 'prompt-stop-hook-budget',
+                },
+              };
+            }
+            yield { type: GeminiEventType.Content, value: 'not done' };
+          })();
+        });
+
+        const events = await fromAsync(
+          client.sendMessageStream(
+            [{ text: 'Hi' }],
+            new AbortController().signal,
+            'prompt-stop-hook-budget',
+          ),
+        );
+
+        // The hook continuation turn actually ran...
+        expect(mockTurnRunFn).toHaveBeenCalledTimes(2);
+        // ...and 3+3 tool calls under a cap of 4 never tripped the cap: the
+        // continuation started a fresh budget instead of inheriting the
+        // first turn's accumulated count.
+        expect(events).not.toContainEqual(
+          expect.objectContaining({ type: GeminiEventType.LoopDetected }),
+        );
+      });
+
       it('emits one active_goal null when the blocking cap aborts an active goal', async () => {
         setActiveGoal('test-session-id', {
           condition: 'finish the refactor',
@@ -8172,8 +8384,16 @@ Other open files:
       setHistory: vi.fn(),
     };
 
-    /* eslint-disable @typescript-eslint/no-explicit-any */
-    const priv = () => client as any;
+    const priv = () =>
+      client as unknown as {
+        chat: typeof mockChat;
+        announcedSkillReminderKeys: Set<string>;
+        skillRemindersInitialized: boolean;
+        drainSkillAndCommandReminders(): Promise<void>;
+        seedSkillReminderDedupFromSnapshot(
+          entries: AvailableSkillEntry[],
+        ): void;
+      };
 
     async function drain() {
       await priv().drainSkillAndCommandReminders();
@@ -8188,7 +8408,7 @@ Other open files:
       );
       const toolReg = mockConfig.getToolRegistry();
       vi.mocked(toolReg!.getTool).mockImplementation((name: string) =>
-        name === ToolNames.SKILL ? ({} as any) : undefined,
+        name === ToolNames.SKILL ? ({} as never) : undefined,
       );
       priv().chat = mockChat;
       priv().announcedSkillReminderKeys = new Set();
@@ -8300,6 +8520,30 @@ Other open files:
       expect(mockChat.addHistory).toHaveBeenCalled();
       const addedContent = mockChat.addHistory.mock.calls[0][0];
       expect(addedContent.parts[0].text).toContain('skill-a');
+    });
+
+    it('removed skill emits a reminder', async () => {
+      priv().seedSkillReminderDedupFromSnapshot(makeEntries(['skill-a']));
+      vi.mocked(buildChangedSkillsReminder).mockClear();
+
+      vi.mocked(collectAvailableSkillEntries).mockResolvedValue({
+        availableSkills: [],
+        pendingConditionalSkillNames: new Set(),
+        modelInvocableCommands: [],
+        entries: [],
+      });
+
+      await drain();
+
+      expect(buildChangedSkillsReminder).toHaveBeenCalledWith([], ['skill-a']);
+      expect(mockChat.addHistory).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nchanged skills: added= removed=skill-a\n</system-reminder>',
+          },
+        ],
+      });
     });
 
     it('path-activated skill is announced by drain (no suppression based on shared activation set)', async () => {
@@ -8525,7 +8769,6 @@ Other open files:
       expect(addedContent.parts[0].text).toContain('skill-new');
       expect(addedContent.parts[0].text).not.toContain('desc-skill-inline');
     });
-    /* eslint-enable @typescript-eslint/no-explicit-any */
   });
 
   describe('#5147 shutdown gate', () => {
@@ -8601,6 +8844,198 @@ Other open files:
       expect(() => client.requestShutdown()).not.toThrow();
       // Should not throw on third call
       expect(() => client.requestShutdown()).not.toThrow();
+    });
+  });
+
+  describe('drainAgentReminders', () => {
+    const priv = () =>
+      client as unknown as {
+        announcedAgentReminderNames: Set<string>;
+        agentRemindersInitialized: boolean;
+        drainAgentReminders(): Promise<void>;
+      };
+
+    beforeEach(() => {
+      const toolReg = mockConfig.getToolRegistry();
+      vi.mocked(toolReg!.getTool).mockImplementation((name: string) =>
+        name === ToolNames.AGENT ? ({} as never) : undefined,
+      );
+      priv().announcedAgentReminderNames = new Set(['old-agent']);
+      priv().agentRemindersInitialized = true;
+      vi.mocked(buildChangedAgentsReminder).mockClear();
+    });
+
+    it('returns early when the Agent tool is not registered', async () => {
+      const toolReg = mockConfig.getToolRegistry();
+      vi.mocked(toolReg!.getTool).mockReturnValue(undefined);
+      const listSubagents = vi.fn().mockResolvedValue([]);
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents,
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(listSubagents).not.toHaveBeenCalled();
+      expect(buildChangedAgentsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('seeds current agents on first drain without emitting a reminder', async () => {
+      priv().announcedAgentReminderNames = new Set();
+      priv().agentRemindersInitialized = false;
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'seed-agent',
+            description: 'Seed agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(priv().agentRemindersInitialized).toBe(true);
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['seed-agent']),
+      );
+      expect(buildChangedAgentsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('returns early when listing agents fails', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi
+          .fn()
+          .mockRejectedValue(new Error('agent list failed')),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['old-agent']),
+      );
+      expect(buildChangedAgentsReminder).not.toHaveBeenCalled();
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('emits no reminder when agents are unchanged', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'old-agent',
+            description: 'Old agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(buildChangedAgentsReminder).toHaveBeenCalledWith([], []);
+      expect(addHistorySpy).not.toHaveBeenCalled();
+    });
+
+    it('announces added-only agents', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'old-agent',
+            description: 'Old agent',
+          },
+          {
+            name: 'new-agent',
+            description: 'New agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(buildChangedAgentsReminder).toHaveBeenCalledWith(
+        [{ name: 'new-agent', description: 'New agent' }],
+        [],
+      );
+      expect(addHistorySpy).toHaveBeenCalled();
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['old-agent', 'new-agent']),
+      );
+    });
+
+    it('announces removed-only agents', async () => {
+      priv().announcedAgentReminderNames = new Set(['old-agent', 'stay-agent']);
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'stay-agent',
+            description: 'Stay agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(buildChangedAgentsReminder).toHaveBeenCalledWith(
+        [],
+        ['old-agent'],
+      );
+      expect(addHistorySpy).toHaveBeenCalled();
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['stay-agent']),
+      );
+    });
+
+    it('announces added and removed agents', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'new-agent',
+            description: 'New agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      vi.mocked(buildChangedAgentsReminder).mockClear();
+      const addHistorySpy = vi.spyOn(client.getChat(), 'addHistory');
+
+      await priv().drainAgentReminders();
+
+      expect(buildChangedAgentsReminder).toHaveBeenCalledWith(
+        [{ name: 'new-agent', description: 'New agent' }],
+        ['old-agent'],
+      );
+      expect(addHistorySpy).toHaveBeenCalledWith({
+        role: 'user',
+        parts: [
+          {
+            text: '<system-reminder>\nchanged agents: added=new-agent removed=old-agent\n</system-reminder>',
+          },
+        ],
+      });
+    });
+
+    it('keeps agent reminder state unchanged if history append fails', async () => {
+      vi.mocked(mockConfig.getSubagentManager).mockReturnValue({
+        listSubagents: vi.fn().mockResolvedValue([
+          {
+            name: 'new-agent',
+            description: 'New agent',
+          },
+        ]),
+      } as unknown as ReturnType<Config['getSubagentManager']>);
+      vi.spyOn(client.getChat(), 'addHistory').mockImplementation(() => {
+        throw new Error('history failed');
+      });
+
+      await expect(priv().drainAgentReminders()).rejects.toThrow(
+        'history failed',
+      );
+      expect(priv().announcedAgentReminderNames).toEqual(
+        new Set(['old-agent']),
+      );
     });
   });
 });

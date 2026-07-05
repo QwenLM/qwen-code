@@ -363,13 +363,12 @@ afterEach(() => {
 
 describe('CLI entry import boundary', () => {
   it('does not statically import the full gemini entry before the serve fast path can run', () => {
-    const indexSource = readFileSync('index.ts', 'utf8');
+    const cliSource = readFileSync('src/cli.ts', 'utf8');
 
-    expect(indexSource).not.toContain("import './src/gemini.js'");
-    expect(indexSource).not.toContain("import { main } from './src/gemini.js'");
-    expect(indexSource).not.toContain("process.argv[2] === 'serve'");
-    expect(indexSource).toContain('import { isServeFastPathArgv }');
-    expect(indexSource).toContain("await import('./src/serve/fast-path.js')");
+    expect(cliSource).not.toContain("import './gemini.js'");
+    expect(cliSource).not.toContain("import { main } from './gemini.js'");
+    expect(cliSource).not.toContain("process.argv[2] === 'serve'");
+    expect(cliSource).toContain("await import('./serve/fast-path.js')");
   });
 
   it('does not import the full settings loader on the serve fast path', () => {
@@ -515,6 +514,24 @@ describe('serve fast path argument parsing', () => {
     });
   });
 
+  it('parses --tls-cert and --tls-key on the fast path', () => {
+    const parsed = parseServeFastPathArgs([
+      'serve',
+      '--tls-cert',
+      '/tmp/cert.pem',
+      '--tls-key',
+      '/tmp/key.pem',
+    ]);
+
+    expect(parsed).toMatchObject({
+      kind: 'serve',
+      options: {
+        tlsCert: '/tmp/cert.pem',
+        tlsKey: '/tmp/key.pem',
+      },
+    });
+  });
+
   it('parses bundled entrypoint argv before serve', () => {
     const parsed = parseServeFastPathArgs([
       '/repo/dist/cli.js',
@@ -584,6 +601,8 @@ describe('serve fast path argument parsing', () => {
       ['workspace', ['--workspace', process.cwd()]],
       ['require-auth', ['--require-auth']],
       ['enable-session-shell', ['--enable-session-shell']],
+      ['tls-cert', ['--tls-cert', '/tmp/cert.pem']],
+      ['tls-key', ['--tls-key', '/tmp/key.pem']],
       ['web', ['--no-web']],
       ['open', ['--open']],
       ['http-bridge', ['--no-http-bridge']],
