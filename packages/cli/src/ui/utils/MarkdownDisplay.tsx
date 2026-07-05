@@ -208,10 +208,17 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
       for (let i = 0; i < start; i++) {
         if (codeFenceRegex.test(lines[i]!)) insideCodeFence = !insideCodeFence;
       }
-      if (!insideCodeFence) {
-        const headerCells = splitMarkdownTableRow(
-          lines[start]!.match(tableRowRegex)?.[1] ?? '',
-        ).filter((c) => c.length > 0).length;
+      // Only hold back when the first pipe-line is a plausible table header (a
+      // complete `| … |` row). Otherwise non-table pipe-leading text — an
+      // un-fenced shell pipeline (`| grep foo`), pipe-prefixed log output — would
+      // vanish from the live preview until the message commits.
+      const headerRowMatch = insideCodeFence
+        ? null
+        : lines[start]!.match(tableRowRegex);
+      if (headerRowMatch) {
+        const headerCells = splitMarkdownTableRow(headerRowMatch[1]).filter(
+          (c) => c.length > 0,
+        ).length;
         const hasMatchingSeparator = lines.slice(start + 1).some((l) => {
           if (!tableSeparatorRegex.test(l)) return false;
           const cols = splitMarkdownTableRow(l).filter(

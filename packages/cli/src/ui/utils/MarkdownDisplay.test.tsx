@@ -456,6 +456,17 @@ Done.`.replace(/\n/g, eol);
       expect(output).not.toContain('Alpha');
     });
 
+    it('does not hold back non-table pipe-leading text', () => {
+      // A trailing pipe-line that is not a complete table header (e.g. a shell
+      // pipeline or pipe-prefixed log line) must still render, not vanish.
+      const text = `run:
+| grep foo`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      expect(lastFrame() ?? '').toContain('grep foo');
+    });
+
     it('keeps holding the header while its separator is still being typed', () => {
       // A partial separator whose column count does not yet match the header is
       // not enough to recognize the table, so the header stays held.

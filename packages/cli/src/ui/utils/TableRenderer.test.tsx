@@ -901,6 +901,23 @@ describe('<TableRenderer />', () => {
       expect(clean).toContain('┌');
     });
 
+    it('keeps the zero-row box visible when it exceeds a very narrow terminal', () => {
+      // The maxLineWidth safety check is a second path to the vertical format;
+      // for a zero-row box that would render an empty string (blank). The header
+      // box must stay visible rather than vanish.
+      const output =
+        renderWithProviders(
+          <TableRenderer
+            headers={['C1', 'C2', 'C3', 'C4', 'C5', 'C6']}
+            rows={[]}
+            contentWidth={25}
+          />,
+        ).lastFrame() ?? '';
+      const clean = stripAnsi(output);
+      expect(clean).toContain('┌');
+      expect(clean).toContain('C1');
+    });
+
     const headers = ['A', 'B'];
     const firstRowOnly = [['x', 'y']];
     const withWiderRow = [

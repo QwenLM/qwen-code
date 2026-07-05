@@ -764,8 +764,12 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   const maxLineWidth = Math.max(
     ...tableLines.map((line) => getCachedStringWidth(stripAnsi(line))),
   );
-  if (maxLineWidth > contentWidth - SAFETY_MARGIN) {
-    // Fallback to vertical format to prevent terminal resize flicker
+  if (rowMetrics.length > 0 && maxLineWidth > contentWidth - SAFETY_MARGIN) {
+    // Fallback to vertical format to prevent terminal resize flicker. Skipped
+    // for a zero-row streaming header box: the vertical format iterates the
+    // rows and would render an empty string (a blank box). Better to keep the
+    // horizontal header — even if it slightly overflows a very narrow terminal
+    // — than to make the box the PR draws immediately vanish.
     return (
       <Box marginY={1}>
         <Text>{clampToMaxHeight(renderVerticalFormat())}</Text>
