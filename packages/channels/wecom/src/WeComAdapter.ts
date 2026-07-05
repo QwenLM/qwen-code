@@ -445,11 +445,22 @@ export class WeComChannel extends ChannelBase {
         });
       } else {
         const dir = join(tmpdir(), 'channel-files', randomUUID());
-        mkdirSync(dir, { recursive: true, mode: 0o700 });
-        this.rememberAttachmentDir(dir, messageId, routeKey);
         const safeName = fileName || `wecom_${ref.type}`;
         const filePath = join(dir, safeName);
-        await writeFile(filePath, data, { mode: 0o600 });
+        try {
+          mkdirSync(dir, { recursive: true, mode: 0o700 });
+          await writeFile(filePath, data, { mode: 0o600 });
+          this.rememberAttachmentDir(dir, messageId, routeKey);
+        } catch (err) {
+          cleanupAttachmentDirs([dir]);
+          process.stderr.write(
+            `[WeCom:${this.name}] skipping ${ref.type} attachment: ${sanitizeLogText(
+              err instanceof Error ? err.message : String(err),
+              160,
+            )}.\n`,
+          );
+          continue;
+        }
         attachments.push({
           type: ref.type === 'voice' ? 'audio' : ref.type,
           filePath,

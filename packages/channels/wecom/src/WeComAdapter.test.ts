@@ -2206,6 +2206,37 @@ describe('WeComChannel', () => {
     );
   });
 
+  it('skips inbound file attachments when temp file writing fails', async () => {
+    mocks.writeFile.mockRejectedValueOnce(new Error('ENAMETOOLONG'));
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    try {
+      client.emit('message.file', {
+        msgid: 'msg-write-fails',
+        msgtype: 'file',
+        chattype: 'single',
+        from: { userid: 'alice' },
+        file: {
+          url: 'https://example.invalid/file',
+          filename: 'report.txt',
+        },
+      });
+
+      await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+      expect(channel.envelopes[0]?.attachments).toBeUndefined();
+      expect(stderr).toHaveBeenCalledWith(
+        expect.stringContaining('skipping file attachment: ENAMETOOLONG'),
+      );
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('rejects media URLs that resolve to IPv6 link-local addresses', async () => {
     mocks.lookup.mockResolvedValue([{ address: 'fe90::1', family: 6 }]);
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
