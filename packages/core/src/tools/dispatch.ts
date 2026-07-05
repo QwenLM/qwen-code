@@ -24,8 +24,14 @@
 
 import type { ToolInvocation, ToolResult } from './tools.js';
 import { BaseDeclarativeTool, BaseToolInvocation, Kind } from './tools.js';
+import { ToolErrorType } from './tool-error.js';
 import type { Config } from '../config/config.js';
-import type { AnyDeclarativeTool } from './tools.js';
+import { ApprovalMode } from '../config/config.js';
+import type { AnyDeclarativeTool, AnyToolInvocation } from './tools.js';
+import {
+  evaluatePermissionFlow,
+  isPlanModeBlocked,
+} from '../core/permissionFlow.js';
 
 export interface DispatchParams {
   /** Name of the target tool to invoke (e.g. "read_file", "mcp__server__some_tool"). */
@@ -104,10 +110,78 @@ class DispatchInvocation extends BaseToolInvocation<
       };
     }
 
+    // Build the target invocation.
+    let targetInvocation: AnyToolInvocation;
+    try {
+      targetInvocation = tool.build(this.params.args);
+    } catch (err) {
+      return {
+        llmContent: `Error: invalid args for tool "${toolName}": ${err instanceof Error ? err.message : String(err)}`,
+        returnDisplay: `Invalid args: ${toolName}`,
+        error: {
+          message: `Invalid args for "${toolName}": ${err instanceof Error ? err.message : String(err)}`,
+          type: ToolErrorType.INVALID_TOOL_PARAMS,
+        },
+      };
+    }
+
+    // --- Permission check: resolve against the REAL tool, not dispatch ---
+    const flowResult = await evaluatePermissionFlow(
+      this.config,
+      targetInvocation,
+      toolName,
+      this.params.args,
+    );
+
+    if (flowResult.finalPermission === 'deny') {
+      return {
+        llmContent: flowResult.denyMessage ?? `Tool "${toolName}" is denied.`,
+        returnDisplay: `Permission denied: ${toolName}`,
+        error: {
+          message: flowResult.denyMessage ?? `Tool "${toolName}" is denied.`,
+          type: ToolErrorType.EXECUTION_DENIED,
+        },
+      };
+    }
+
+    // --- Plan-mode check: use the REAL tool's confirmation details ---
+    const approvalMode = this.config.getApprovalMode();
+    if (approvalMode === ApprovalMode.PLAN) {
+      const confirmationDetails =
+        await targetInvocation.getConfirmationDetails(signal);
+      if (isPlanModeBlocked(true, false, false, confirmationDetails, false)) {
+        return {
+          llmContent: `Tool "${toolName}" is blocked in plan mode.`,
+          returnDisplay: `Plan mode blocked: ${toolName}`,
+          error: {
+            message: `Tool "${toolName}" is blocked in plan mode.`,
+            type: ToolErrorType.EXECUTION_DENIED,
+          },
+        };
+      }
+    }
+
+    // --- Ask handling ---
+    if (flowResult.finalPermission === 'ask') {
+      if (approvalMode === ApprovalMode.YOLO) {
+        // YOLO: auto-approve tools that would normally ask.
+      } else if (!this.config.isInteractive()) {
+        return {
+          llmContent: `Qwen Code requires permission to use "${toolName}", but that permission was declined (non-interactive mode cannot prompt for confirmation).`,
+          returnDisplay: `Non-interactive deny: ${toolName}`,
+          error: {
+            message: `Non-interactive deny: ${toolName}`,
+            type: ToolErrorType.EXECUTION_DENIED,
+          },
+        };
+      }
+      // Interactive mode: dispatch was already confirmed by the user,
+      // proceed to the inner tool without re-prompting.
+    }
+
     // Execute the target tool with forwarded args.
     try {
-      const invocation = tool.build(this.params.args);
-      return await invocation.execute(signal);
+      return await targetInvocation.execute(signal);
     } catch (err) {
       process.stderr.write(
         `[dispatch] tool "${toolName}" execution failed: ${err instanceof Error ? err.message : String(err)}\n`,
@@ -117,6 +191,7 @@ class DispatchInvocation extends BaseToolInvocation<
         returnDisplay: `Execution failed: ${toolName}`,
         error: {
           message: `Tool "${toolName}" execution failed: ${err instanceof Error ? err.message : String(err)}`,
+          type: ToolErrorType.EXECUTION_FAILED,
         },
       };
     }

@@ -11,6 +11,7 @@ import { ToolRegistry } from './tool-registry.js';
 import { MockTool } from '../test-utils/mock-tool.js';
 import { DispatchTool } from './dispatch.js';
 import type { ToolResult } from './tools.js';
+import { Kind } from './tools.js';
 
 const baseConfigParams: ConfigParameters = {
   cwd: '/tmp',
@@ -162,5 +163,74 @@ describe('DispatchTool', () => {
       .execute(new AbortController().signal);
 
     expect(capturedArgs).toEqual(inputArgs);
+  });
+
+  it('denies dispatch when target tool has default deny permission', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: 'denied_tool',
+        getDefaultPermission: () => Promise.resolve('deny'),
+      }),
+    );
+    const dispatchTool = new DispatchTool(config);
+    const result = await dispatchTool
+      .build({ tool: 'denied_tool', args: {} })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.error?.type).toBe('execution_denied');
+    expect(result.llmContent).toContain('is denied');
+  });
+
+  it('blocks Kind.Edit tool in plan mode', async () => {
+    const planConfig = new Config({
+      ...baseConfigParams,
+      approvalMode: ApprovalMode.PLAN,
+    });
+    const planRegistry = new ToolRegistry(planConfig);
+    vi.spyOn(planConfig, 'getToolRegistry').mockReturnValue(planRegistry);
+
+    planRegistry.registerTool(
+      new MockTool({
+        name: 'editor',
+        kind: Kind.Edit,
+        getDefaultPermission: () => Promise.resolve('allow'),
+        getConfirmationDetails: () =>
+          Promise.resolve({
+            type: 'edit',
+            title: 'Edit',
+            prompt: 'edit file',
+            onConfirm: async () => {},
+          }),
+      }),
+    );
+    const dispatchTool = new DispatchTool(planConfig);
+    const result = await dispatchTool
+      .build({ tool: 'editor', args: {} })
+      .execute(new AbortController().signal);
+
+    expect(result.error).toBeDefined();
+    expect(result.error?.type).toBe('execution_denied');
+    expect(result.returnDisplay).toContain('Plan mode blocked');
+  });
+
+  it('returns invalid-params error when target tool build throws', async () => {
+    registry.registerTool(
+      new MockTool({
+        name: 'strict_tool',
+        params: {
+          type: 'object',
+          properties: { required_param: { type: 'string' } },
+          required: ['required_param'],
+        },
+      }),
+    );
+    const dispatchTool = new DispatchTool(config);
+    const result = await dispatchTool
+      .build({ tool: 'strict_tool', args: {} })
+      .execute(new AbortController().signal);
+
+    expect(result.error?.type).toBe('invalid_tool_params');
+    expect(result.llmContent).toContain('invalid args');
   });
 });
