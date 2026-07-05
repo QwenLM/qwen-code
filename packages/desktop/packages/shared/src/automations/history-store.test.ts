@@ -192,6 +192,20 @@ describe('history-store', () => {
       expect(entries.map((entry) => entry.ts)).toEqual([1, 2]);
     });
 
+    it('should recover valid objects before a stray closing brace', async () => {
+      const first = makeEntry('a1', 1);
+      const second = makeEntry('a1', 2);
+      writeFileSync(
+        join(tempDir, AUTOMATIONS_HISTORY_FILE),
+        JSON.stringify(first) + '}garbage\n' + JSON.stringify(second) + '\n',
+      );
+
+      await compactAutomationHistory(tempDir, 20, 1000);
+
+      const entries = readHistory(tempDir);
+      expect(entries.map((entry) => entry.ts)).toEqual([1, 2]);
+    });
+
     it('should rewrite glued records when recovered count matches physical line count', async () => {
       const first = makeEntry('a1', 1);
       const second = makeEntry('a1', 2);
@@ -204,6 +218,30 @@ describe('history-store', () => {
 
       const rewritten = readFileSync(join(tempDir, AUTOMATIONS_HISTORY_FILE), 'utf-8');
       expect(rewritten).not.toContain('}{');
+      expect(rewritten.trim().split('\n')).toHaveLength(2);
+
+      const entries = readHistory(tempDir);
+      expect(entries.map((entry) => entry.ts)).toEqual([1, 2]);
+    });
+
+    it('should rewrite non-object JSON history lines out of the file', async () => {
+      writeFileSync(
+        join(tempDir, AUTOMATIONS_HISTORY_FILE),
+        [
+          JSON.stringify(makeEntry('a1', 1)),
+          'null',
+          '42',
+          '[]',
+          JSON.stringify(makeEntry('a1', 2)),
+        ].join('\n') + '\n',
+      );
+
+      await compactAutomationHistory(tempDir, 20, 1000);
+
+      const rewritten = readFileSync(join(tempDir, AUTOMATIONS_HISTORY_FILE), 'utf-8');
+      expect(rewritten).not.toContain('null');
+      expect(rewritten).not.toContain('42');
+      expect(rewritten).not.toContain('[]');
       expect(rewritten.trim().split('\n')).toHaveLength(2);
 
       const entries = readHistory(tempDir);

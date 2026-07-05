@@ -183,7 +183,7 @@ function recoverHistoryObjectsFromLine(line: string): string[] {
         cursor = i + 1;
         start = -1;
       } else if (depth < 0) {
-        return [];
+        return recovered;
       }
     } else if (depth === 0 && char.trim() !== '') {
       return recovered;
