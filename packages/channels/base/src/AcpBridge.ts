@@ -26,6 +26,9 @@ export interface AcpBridgeOptions {
   model?: string;
 }
 
+export const ACP_EVENT_LOOP_STALL_RESTART_MS = 5 * 60 * 1000;
+const ACP_EVENT_LOOP_STALL_RE = /acp agent event loop stall: max=([0-9.]+)ms/;
+
 /**
  * Read a command's aliases off a raw wire `available_commands_update` entry. ACP
  * carries them in `_meta` (its only extension point); a top-level `altNames` is
@@ -90,6 +93,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       const msg = data.toString().trim();
       if (msg) {
         process.stderr.write(`[AcpBridge] ${msg}\n`);
+        this.maybeRestartOnEventLoopStall(msg);
       }
     });
 
@@ -272,5 +276,25 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       throw new Error('Not connected to ACP agent');
     }
     return this.connection;
+  }
+
+  private maybeRestartOnEventLoopStall(stderr: string): void {
+    const match = ACP_EVENT_LOOP_STALL_RE.exec(stderr);
+    if (!match) return;
+
+    const maxMs = Number(match[1]);
+    if (!Number.isFinite(maxMs) || maxMs < ACP_EVENT_LOOP_STALL_RESTART_MS) {
+      return;
+    }
+
+    const child = this.child;
+    if (!child || child.killed || child.exitCode !== null) {
+      return;
+    }
+
+    process.stderr.write(
+      `[AcpBridge] ACP agent event loop stalled for ${Math.round(maxMs)}ms; restarting child process\n`,
+    );
+    child.kill();
   }
 }
