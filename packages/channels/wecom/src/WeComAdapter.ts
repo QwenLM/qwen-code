@@ -1538,11 +1538,7 @@ function parseEmbeddedIpv4(host: string): number[] | undefined {
   if (groups[0] === 0x2001 && groups[1] === 0) {
     return hexGroupsToIpv4(groups[6]! ^ 0xffff, groups[7]! ^ 0xffff);
   }
-  if (
-    groups[0] === 0x0064 &&
-    groups[1] === 0xff9b &&
-    groups.slice(2, 6).every((group) => group === 0)
-  ) {
+  if (groups[0] === 0x0064 && groups[1] === 0xff9b) {
     return hexGroupsToIpv4(groups[6], groups[7]);
   }
   return undefined;

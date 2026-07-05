@@ -2156,6 +2156,34 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('decodes NAT64 /48 media URLs before checking embedded IPv4 safety', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-nat64-48',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://[64:ff9b:1::127.0.0.1]/latest/meta-data/',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpsRequest).not.toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('unsafe media URL'),
+    );
+    stderr.mockRestore();
+  });
+
   it('allows public IPv4 addresses adjacent to documentation ranges', async () => {
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
     await channel.connect();
