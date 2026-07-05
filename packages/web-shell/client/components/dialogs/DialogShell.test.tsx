@@ -50,6 +50,33 @@ function AutofocusChild() {
 }
 
 describe('DialogShell', () => {
+  it('hides the fullscreen toggle by default', () => {
+    mount(
+      <DialogShell title="T" onClose={() => {}}>
+        <div>content</div>
+      </DialogShell>,
+    );
+    // DialogShell portals into document.body, so query there, not the root.
+    expect(document.querySelector('button[aria-pressed]')).toBeNull();
+  });
+
+  it('shows a fullscreen toggle when allowFullscreen and toggles its state', () => {
+    mount(
+      <DialogShell title="T" allowFullscreen onClose={() => {}}>
+        <div>content</div>
+      </DialogShell>,
+    );
+    const toggle = document.querySelector(
+      'button[aria-pressed]',
+    ) as HTMLElement | null;
+    expect(toggle).toBeTruthy();
+    expect(toggle!.getAttribute('aria-pressed')).toBe('false');
+    act(() => {
+      toggle!.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    expect(toggle!.getAttribute('aria-pressed')).toBe('true');
+  });
+
   it('closes on Escape', () => {
     const onClose = vi.fn();
     mount(

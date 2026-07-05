@@ -36,7 +36,6 @@ import {
   type ConfigSources,
   type ConfigLayer,
 } from '../utils/configResolver.js';
-import { parsePositiveIntegerEnv } from '../utils/env.js';
 import {
   AUTH_ENV_MAPPINGS,
   DEFAULT_MODELS,
@@ -123,14 +122,17 @@ function applyTimeoutEnvOverride(
   const raw = env['QWEN_CODE_API_TIMEOUT_MS'];
   if (raw === undefined) return;
 
-  const parsed = parsePositiveIntegerEnv(raw, 0);
-  if (parsed > 0) {
-    generationConfig.timeout = parsed;
-    sources['timeout'] = {
-      kind: 'env',
-      envKey: 'QWEN_CODE_API_TIMEOUT_MS',
-    };
-  }
+  const trimmed = raw.trim();
+  // Accept a non-negative integer; `0` disables the request timeout downstream
+  // (see resolveRequestTimeout). Malformed values are ignored (keep default).
+  if (!/^\d+$/.test(trimmed)) return;
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed)) return;
+  generationConfig.timeout = parsed;
+  sources['timeout'] = {
+    kind: 'env',
+    envKey: 'QWEN_CODE_API_TIMEOUT_MS',
+  };
 }
 
 /**

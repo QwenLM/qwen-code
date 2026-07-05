@@ -135,6 +135,13 @@ export interface SessionBinding {
    * are unaffected — they're already produced in replay order.
    */
   replayPending?: boolean;
+  /**
+   * Set after ACP `session/load` when the bridge used response-mode history
+   * replay. The first session stream attach rereads the bridge replay snapshot
+   * and emits it; the binding keeps only this lightweight marker, not the
+   * potentially large replay arrays.
+   */
+  initialReplayPending?: boolean;
 }
 
 /** An agent→client request awaiting the client's JSON-RPC response. */
@@ -288,6 +295,19 @@ export class AcpConnection {
       this.sessions.set(sessionId, binding);
     }
     return binding;
+  }
+
+  markInitialReplayPending(sessionId: string): void {
+    this.getOrCreateSession(sessionId).initialReplayPending = true;
+  }
+
+  hasInitialReplayPending(sessionId: string): boolean {
+    return this.sessions.get(sessionId)?.initialReplayPending === true;
+  }
+
+  markInitialReplayComplete(sessionId: string): void {
+    const binding = this.sessions.get(sessionId);
+    if (binding) binding.initialReplayPending = false;
   }
 
   getDiagnostic(): AcpConnectionDiagnostic {
@@ -532,16 +552,16 @@ export class AcpConnection {
     // there's no ring replay, so the buffer is the only delivery path — flush
     // everything now, in order.
     //
-    // RESUME (`resumeFromEventId !== undefined`): the ring replay the event pump
-    // starts at that cursor already redelivers every BUS event (`id !==
-    // undefined`) after the cursor — including frames lost in-flight to the dead
-    // socket — so we do NOT flush id-bearing frames here (flushing would
-    // double-deliver, and advancing a cursor past them to dedupe would silently
-    // drop an in-flight-lost frame whose id sits below the buffer's ids).
+    // REPLAYING ATTACH (Last-Event-ID resume or response-mode load's initial
+    // replay): the event pump redelivers sequenced BUS events (`id !==
+    // undefined`) from the replay source, so we do NOT flush id-bearing frames
+    // here (flushing would double-deliver, and advancing a cursor past them to
+    // dedupe would silently drop an in-flight-lost frame whose id sits below
+    // the buffer's ids).
     //
     // Id-LESS frames are JSON-RPC replies (`replySession`), NOT ring events, so
-    // the ring won't redeliver them. But flushing them HERE — before replay —
-    // would deliver e.g. a `session/prompt` result BEFORE the ring replays the
+    // the replay won't redeliver them. But flushing them HERE — before replay —
+    // would deliver e.g. a `session/prompt` result BEFORE the pump replays the
     // content chunks that preceded it, so the client would see "prompt complete"
     // ahead of the body (the exact truncated-body failure §1.8 fixes). So on
     // resume we DEFER id-less frames: leave them in the buffer for the pump to
@@ -556,7 +576,9 @@ export class AcpConnection {
     // the flush), which would otherwise leave the flag stuck true and buffer
     // every later `sendSessionReply` — including `session/prompt` results —
     // behind a replay boundary this live-only subscription will never emit.
-    binding.replayPending = resumeFromEventId !== undefined;
+    const replayingOnAttach =
+      resumeFromEventId !== undefined || binding.initialReplayPending === true;
+    binding.replayPending = replayingOnAttach;
     if (binding.replayPending) {
       // Breadcrumb: while armed, `sendSessionReply` defers every out-of-band
       // reply (e.g. `session/prompt` results) until the pump delivers
@@ -565,7 +587,7 @@ export class AcpConnection {
       // trace. Logging the arm gives operators a starting point when responses
       // look stuck behind the replay window.
       writeStderrLine(
-        `qwen serve: /acp replay deferral armed (${logSafe(sessionId)}, from id ${resumeFromEventId})`,
+        `qwen serve: /acp replay deferral armed (${logSafe(sessionId)}, from id ${resumeFromEventId ?? 'initial'})`,
       );
     }
     // Drain the gap buffer into a separate array first: on the resume path the
@@ -574,7 +596,7 @@ export class AcpConnection {
     // step; the explicit local makes the copy-semantics invariant visible.
     const gap = binding.buffer.splice(0);
     for (const entry of gap) {
-      if (resumeFromEventId === undefined) {
+      if (!replayingOnAttach) {
         void stream.send(entry.frame, entry.id); // fresh connect: flush all now
       } else if (entry.id !== undefined) {
         // Resume: ring replay owns bus events, so drop the buffered copy to

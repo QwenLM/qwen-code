@@ -63,6 +63,13 @@ interface TableRendererProps {
   /** Per-column alignment parsed from markdown separator line */
   aligns?: ColumnAlign[];
   enableInlineMath?: boolean;
+  /**
+   * Maximum rendered text lines the table may occupy. When set (streaming
+   * preview) and the fully rendered table exceeds it, output is clipped to
+   * `maxHeight - 1` lines plus a cue. Backstop against a wrapped-cell table
+   * overflowing the viewport and triggering the scroll-to-top lock.
+   */
+  maxHeight?: number;
 }
 
 /** Map Ink-compatible named colors to ANSI foreground codes */
@@ -428,6 +435,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   contentWidth,
   aligns,
   enableInlineMath = false,
+  maxHeight,
 }) => {
   const colCount = headers.length;
 
@@ -435,6 +443,18 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   if (colCount === 0) {
     return <Box />;
   }
+
+  // Clip the fully-rendered table to `maxHeight` text lines (streaming preview
+  // backstop). Operates on the final joined string so it is exact for wrapped
+  // rows and the vertical fallback alike.
+  const clampToMaxHeight = (text: string): string => {
+    if (maxHeight === undefined) return text;
+    const all = text.split('\n');
+    if (all.length <= maxHeight) return text;
+    const kept = all.slice(0, Math.max(1, maxHeight - 1));
+    kept.push(applyColor('… more rows streaming …', theme.text.secondary));
+    return kept.join('\n');
+  };
 
   // ── Precompute per-cell metrics to avoid repeated renderMarkdownToAnsi calls ──
   const computeMetrics = (text: string) => {
@@ -690,7 +710,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   if (useVerticalFormat) {
     return (
       <Box marginY={1}>
-        <Text>{renderVerticalFormat()}</Text>
+        <Text>{clampToMaxHeight(renderVerticalFormat())}</Text>
       </Box>
     );
   }
@@ -722,7 +742,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     // Fallback to vertical format to prevent terminal resize flicker
     return (
       <Box marginY={1}>
-        <Text>{renderVerticalFormat()}</Text>
+        <Text>{clampToMaxHeight(renderVerticalFormat())}</Text>
       </Box>
     );
   }
@@ -730,7 +750,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   // Render as a single Text block to prevent Ink wrapping mid-row
   return (
     <Box flexDirection="column" marginY={1}>
-      <Text>{tableLines.join('\n')}</Text>
+      <Text>{clampToMaxHeight(tableLines.join('\n'))}</Text>
     </Box>
   );
 };

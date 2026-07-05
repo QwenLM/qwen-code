@@ -16,10 +16,10 @@ import {
   replaceImagesWithText,
   splitImageParts,
 } from './image-part-utils.js';
+import { VISION_BRIDGE_MAX_IMAGES } from './vision-bridge-constants.js';
 
 const debugLogger = createDebugLogger('VISION_BRIDGE');
 const BRIDGE_MAX_OUTPUT_TOKENS = 2048;
-const VISION_BRIDGE_MAX_IMAGES = 4;
 const VISION_BRIDGE_TIMEOUT_MS = 30_000;
 // Cap intent so @-file contents in nonImageParts aren't dumped to the bridge model.
 const BRIDGE_INTENT_MAX_CHARS = 2000;
