@@ -231,8 +231,7 @@ function sameTarget(a: SessionTarget, b: SessionTarget): boolean {
     a.channelName === b.channelName &&
     a.senderId === b.senderId &&
     a.chatId === b.chatId &&
-    a.threadId === b.threadId &&
-    a.isGroup === b.isGroup
+    a.threadId === b.threadId
   );
 }
 
