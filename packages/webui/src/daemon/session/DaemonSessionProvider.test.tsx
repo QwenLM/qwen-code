@@ -4486,6 +4486,73 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.skills).toEqual([]);
   });
 
+  it('keeps preserved commands when the next supported-commands fetch fails', async () => {
+    const firstSession = createMockSession({
+      sessionId: 'session-a',
+      supportedCommands: vi.fn(async () => ({
+        v: 1 as const,
+        sessionId: 'session-a',
+        availableCommands: [
+          { name: 'cmd-a', description: 'Command A', input: null },
+        ],
+        availableSkills: ['review'],
+      })),
+    });
+    const failingSession = createMockSession({
+      sessionId: 'session-b',
+      supportedCommands: vi.fn(async () => {
+        throw new Error('supported-commands unavailable');
+      }),
+    });
+    sdkMocks.sessions.push(firstSession, failingSession);
+    let actions: DaemonSessionActions | undefined;
+    let connection: DaemonConnectionState | undefined;
+
+    function Harness() {
+      actions = useDaemonActions();
+      connection = useDaemonConnection();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      sessionId: 'session-a',
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    expect(connection?.commands?.map((command) => command.name)).toContain(
+      'cmd-a',
+    );
+
+    await act(async () => {
+      await actions?.clearSession();
+    });
+
+    // A skipped or failed fetch is not authoritative — unlike a fulfilled empty
+    // snapshot it must not clobber the preserved list. supportedCommands()
+    // rejecting here leaves supportedCommands === undefined, so the commands
+    // survive rather than being wiped.
+    const providerActions = requireActions(actions);
+    await act(async () => {
+      await providerActions.createSession();
+    });
+    let attach: Promise<void> | undefined;
+    act(() => {
+      attach = providerActions.attachSession();
+    });
+    await act(async () => {
+      await flushPromises();
+    });
+    await attach;
+
+    expect(connection).toMatchObject({ sessionId: 'session-b' });
+    expect(connection?.commands?.map((command) => command.name)).toContain(
+      'cmd-a',
+    );
+    expect(connection?.skills).toContain('review');
+  });
+
   it('ignores streamed events from a session after it is cleared', async () => {
     const streamStarted = createDeferred<void>();
     const releaseOldEvent = createDeferred<void>();
