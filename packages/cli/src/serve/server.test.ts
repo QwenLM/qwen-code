@@ -642,7 +642,10 @@ interface FakeBridge extends AcpSessionBridge {
   }>;
   listCalls: string[];
   summaryCalls: string[];
-  sessionArtifactsCalls: string[];
+  sessionArtifactsCalls: Array<{
+    sessionId: string;
+    context?: BridgeClientRequestContext;
+  }>;
   addSessionArtifactCalls: Array<{
     sessionId: string;
     artifact: Parameters<AcpSessionBridge['addSessionArtifact']>[1];
@@ -818,7 +821,7 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
   const sessionPermissionVotes: FakeBridge['sessionPermissionVotes'] = [];
   const listCalls: string[] = [];
   const summaryCalls: string[] = [];
-  const sessionArtifactsCalls: string[] = [];
+  const sessionArtifactsCalls: FakeBridge['sessionArtifactsCalls'] = [];
   const addSessionArtifactCalls: FakeBridge['addSessionArtifactCalls'] = [];
   const removeSessionArtifactCalls: FakeBridge['removeSessionArtifactCalls'] =
     [];
@@ -1503,9 +1506,12 @@ function fakeBridge(opts: FakeBridgeOpts = {}): FakeBridge {
       summaryCalls.push(sessionId);
       return summaryImpl(sessionId);
     },
-    async getSessionArtifacts(sessionId) {
-      sessionArtifactsCalls.push(sessionId);
-      return getSessionArtifactsImpl(sessionId);
+    async getSessionArtifacts(sessionId, context) {
+      sessionArtifactsCalls.push({
+        sessionId,
+        ...(context ? { context } : {}),
+      });
+      return getSessionArtifactsImpl(sessionId, context);
     },
     async addSessionArtifact(sessionId, artifact, context) {
       addSessionArtifactCalls.push({
@@ -7761,7 +7767,9 @@ describe('createServeApp', () => {
       });
       const app = createServeApp(tokenOpts, undefined, { bridge });
 
-      const res = await auth(request(app).get('/session/session-A/artifacts'));
+      const res = await auth(
+        request(app).get('/session/session-A/artifacts'),
+      ).set('X-Qwen-Client-Id', 'client-1');
 
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({
@@ -7769,7 +7777,20 @@ describe('createServeApp', () => {
         sessionId: 'session-A',
         artifacts: [{ id: 'artifact-1', title: 'Lineage' }],
       });
-      expect(bridge.sessionArtifactsCalls).toEqual(['session-A']);
+      expect(bridge.sessionArtifactsCalls).toEqual([
+        { sessionId: 'session-A', context: { clientId: 'client-1' } },
+      ]);
+    });
+
+    it('GET /session/:id/artifacts requires a client id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(request(app).get('/session/session-A/artifacts'));
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('client_id_required');
+      expect(bridge.sessionArtifactsCalls).toEqual([]);
     });
 
     it('GET /session/:id/artifacts returns 404 for an unknown session', async () => {
@@ -7780,11 +7801,16 @@ describe('createServeApp', () => {
       });
       const app = createServeApp(tokenOpts, undefined, { bridge });
 
-      const res = await auth(request(app).get('/session/ghost/artifacts'));
+      const res = await auth(request(app).get('/session/ghost/artifacts')).set(
+        'X-Qwen-Client-Id',
+        'client-1',
+      );
 
       expect(res.status).toBe(404);
       expect(res.body.sessionId).toBe('ghost');
-      expect(bridge.sessionArtifactsCalls).toEqual(['ghost']);
+      expect(bridge.sessionArtifactsCalls).toEqual([
+        { sessionId: 'ghost', context: { clientId: 'client-1' } },
+      ]);
     });
 
     it('POST /session/:id/artifacts requires strict mutation auth', async () => {

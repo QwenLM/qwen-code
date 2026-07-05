@@ -729,8 +729,20 @@ export function registerSessionRoutes(
   app.get('/session/:id/artifacts', async (req, res) => {
     const sessionId = requireSessionId(req, res);
     if (sessionId === null) return;
+    const clientId = parseClientIdHeader(req, res);
+    if (clientId === null) return;
+    if (clientId === undefined) {
+      res.status(403).json({
+        error: 'Session artifact listing requires a session-bound client id',
+        code: 'client_id_required',
+        errorKind: 'client_id_required',
+      });
+      return;
+    }
     try {
-      res.status(200).json(await bridge.getSessionArtifacts(sessionId));
+      res
+        .status(200)
+        .json(await bridge.getSessionArtifacts(sessionId, { clientId }));
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/artifacts',

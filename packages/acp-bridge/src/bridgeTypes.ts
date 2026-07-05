@@ -582,7 +582,10 @@ export interface AcpSessionBridge {
    * List the structured artifacts registered for a live session. Throws
    * `SessionNotFoundError` when the id is unknown.
    */
-  getSessionArtifacts(sessionId: string): Promise<SessionArtifactsEnvelope>;
+  getSessionArtifacts(
+    sessionId: string,
+    context?: BridgeClientRequestContext,
+  ): Promise<SessionArtifactsEnvelope>;
 
   /**
    * Register a client-supplied artifact for the session. Client artifacts use

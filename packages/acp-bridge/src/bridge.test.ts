@@ -166,6 +166,11 @@ describe('createAcpSessionBridge', () => {
       const artifactId = created.changes[0]!.artifactId;
 
       await expect(
+        bridge.getSessionArtifacts(first.sessionId, {
+          clientId: 'forged-client',
+        }),
+      ).rejects.toBeInstanceOf(InvalidClientIdError);
+      await expect(
         bridge.removeSessionArtifact(first.sessionId, artifactId, {
           clientId: second.clientId,
         }),
