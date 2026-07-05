@@ -237,6 +237,11 @@ describe('EventBus', () => {
       maxQueued: 8,
       threshold: 'frames',
     });
+    expect(process.stderr.write).toHaveBeenCalledWith(
+      expect.stringContaining(
+        'qwen serve: EventBus slow_client_warning {"queueSize":6,"maxQueued":8',
+      ),
+    );
     abort.abort();
   });
 

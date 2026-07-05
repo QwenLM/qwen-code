@@ -87,7 +87,7 @@ flowchart TD
     RES -->|yes| RA["warned = false (hysteresis re-arm)"]
     RES -->|no| WARN{"!warned && frame/byte warn threshold reached?"}
     RA --> WARN
-    WARN -->|yes| FW["force-push slow_client_warning; warned = true"]
+    WARN -->|yes| FW["log slow_client_warning; force-push frame; warned = true"]
     WARN -->|no| NEXT
     FW --> NEXT
 ```

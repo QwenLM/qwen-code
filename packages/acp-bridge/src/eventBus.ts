@@ -165,6 +165,16 @@ function logSubscriberEvicted(data: Record<string, unknown>): void {
 
 type QueueWarningThreshold = 'frames' | 'bytes' | 'frames_and_bytes';
 
+function logSlowClientWarning(data: Record<string, unknown>): void {
+  try {
+    process.stderr.write(
+      `qwen serve: EventBus slow_client_warning ${JSON.stringify(data)}\n`,
+    );
+  } catch {
+    // Best-effort diagnostic; logging must not break publish()'s never-throws contract.
+  }
+}
+
 interface InternalSub {
   queue: BoundedAsyncQueue<BridgeEvent>;
   evicted: boolean;
@@ -416,20 +426,22 @@ export class EventBus {
             : byteThresholdReached
               ? 'bytes'
               : 'frames';
+        const warningData = {
+          queueSize: liveSize,
+          maxQueued: sub.maxQueued,
+          // `event.id` is always defined here — the just-published
+          // `event` is constructed at the top of `publish()` with
+          // `id: this.nextId++`. No `??` fallback needed.
+          lastEventId: event.id as number,
+          queuedBytes: liveBytes,
+          maxQueuedBytes: sub.maxQueuedBytes,
+          threshold,
+        };
+        logSlowClientWarning(warningData);
         const warningFrame: BridgeEvent = {
           v: EVENT_SCHEMA_VERSION,
           type: 'slow_client_warning',
-          data: {
-            queueSize: liveSize,
-            maxQueued: sub.maxQueued,
-            // `event.id` is always defined here — the just-published
-            // `event` is constructed at the top of `publish()` with
-            // `id: this.nextId++`. No `??` fallback needed.
-            lastEventId: event.id as number,
-            queuedBytes: liveBytes,
-            maxQueuedBytes: sub.maxQueuedBytes,
-            threshold,
-          },
+          data: warningData,
         };
         sub.queue.forcePush(warningFrame);
       }
