@@ -166,12 +166,18 @@ function readCreateInput(
   if (typeof prompt !== 'string' || prompt.trim().length === 0) {
     throw new Error('prompt must be a non-empty string.');
   }
-  const recurring = args['recurring'];
+  const recurring = readRecurring(args['recurring']);
   return {
     cron: cron.trim(),
     prompt: prompt.trim(),
-    ...(typeof recurring === 'boolean' ? { recurring } : {}),
+    ...(recurring !== undefined ? { recurring } : {}),
   };
+}
+
+function readRecurring(value: unknown): boolean | undefined {
+  if (typeof value === 'boolean') return value;
+  if (value === 'false' || value === 0) return false;
+  return undefined;
 }
 
 function readId(args: Record<string, unknown>): string {

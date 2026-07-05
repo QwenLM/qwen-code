@@ -1,11 +1,58 @@
 import { describe, it, expect } from 'vitest';
 import {
+  convertTables,
   splitChunks,
   extractTitle,
   normalizeDingTalkMarkdown,
 } from './markdown.js';
 
 describe('DingTalk markdown utilities', () => {
+  describe('convertTables', () => {
+    it('converts markdown tables to readable text', () => {
+      const input = ['| A | B |', '| --- | --- |', '| 1 | 2 |'].join('\n');
+
+      expect(convertTables(input)).toBe('A | B  \n1 | 2');
+    });
+
+    it('passes through non-table pipe text', () => {
+      expect(convertTables('Use foo | bar in text')).toBe(
+        'Use foo | bar in text',
+      );
+    });
+
+    it('preserves text around converted tables', () => {
+      const input = [
+        'before',
+        '| A | B |',
+        '| --- | --- |',
+        '| 1 | 2 |',
+        'after',
+      ].join('\n');
+
+      expect(convertTables(input)).toBe('before\nA | B  \n1 | 2\nafter');
+    });
+
+    it('supports alignment colons in table separators', () => {
+      const input = ['| Left | Right |', '| :--- | ---: |', '| 1 | 2 |'].join(
+        '\n',
+      );
+
+      expect(convertTables(input)).toBe('Left | Right  \n1 | 2');
+    });
+
+    it('does not convert tables inside code fences', () => {
+      const input = [
+        '```',
+        '| A | B |',
+        '| --- | --- |',
+        '| 1 | 2 |',
+        '```',
+      ].join('\n');
+
+      expect(convertTables(input)).toBe(input);
+    });
+  });
+
   describe('splitChunks', () => {
     it('returns single chunk for short text', () => {
       expect(splitChunks('short text')).toEqual(['short text']);
