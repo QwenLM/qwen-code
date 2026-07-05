@@ -864,4 +864,99 @@ describe('<TableRenderer />', () => {
       expect(stripAnsi(output)).toContain('more rows streaming');
     });
   });
+
+  describe('streaming table rendering (isStreaming)', () => {
+    it('renders a header-only box (no divider) when there are no data rows', () => {
+      // The live empty box shown while the first row streams: header + borders
+      // only. The header/body divider must be skipped so it does not stack on
+      // the bottom border and read as an empty second row.
+      const output =
+        renderWithProviders(
+          <TableRenderer
+            headers={['Alpha', 'Beta']}
+            rows={[]}
+            contentWidth={80}
+          />,
+        ).lastFrame() ?? '';
+      const clean = stripAnsi(output);
+      expect(clean).toContain('Alpha');
+      expect(clean).toContain('┌');
+      expect(clean).toContain('└');
+      expect(clean).not.toContain('├');
+    });
+
+    it('keeps the zero-row header box horizontal on a narrow terminal', () => {
+      // The width trigger would otherwise force the vertical format, which with
+      // no rows renders an empty string — a blank box instead of the header.
+      const output =
+        renderWithProviders(
+          <TableRenderer
+            headers={['Alpha', 'Beta']}
+            rows={[]}
+            contentWidth={20}
+          />,
+        ).lastFrame() ?? '';
+      const clean = stripAnsi(output);
+      expect(clean).toContain('Alpha');
+      expect(clean).toContain('┌');
+    });
+
+    const headers = ['A', 'B'];
+    const firstRowOnly = [['x', 'y']];
+    const withWiderRow = [
+      ['x', 'y'],
+      ['x', 'a considerably wider streaming cell'],
+    ];
+    const topBorderWidth = (frame: string) => {
+      const line =
+        stripAnsi(frame)
+          .split('\n')
+          .find((l) => l.includes('┌')) ?? '';
+      return stringWidth(line.trim());
+    };
+    const renderStreaming = (rows: string[][]) =>
+      renderWithProviders(
+        <TableRenderer
+          headers={headers}
+          rows={rows}
+          contentWidth={80}
+          isStreaming
+        />,
+      ).lastFrame() ?? '';
+
+    it('widens the streaming table when a wider row is appended (redraw on wider)', () => {
+      // Widths always track the current rows: appending a wider row re-sizes
+      // (redraws) the whole table rather than staying frozen to the first row.
+      expect(topBorderWidth(renderStreaming(withWiderRow))).toBeGreaterThan(
+        topBorderWidth(renderStreaming(firstRowOnly)),
+      );
+    });
+
+    it('stays horizontal while streaming even when a row would wrap tall', () => {
+      // A cell tall enough to trip the vertical fallback (maxRowLines) must NOT
+      // flip a streaming table into the vertical `label: value` list — that
+      // brief list-then-table flip is a visible jump. contentWidth stays well
+      // above the narrow-terminal threshold so only the tall-row trigger differs.
+      const tall = [
+        [Array.from({ length: 80 }, (_, i) => `w${i}`).join(' '), 'y'],
+      ];
+      const streaming =
+        renderWithProviders(
+          <TableRenderer
+            headers={headers}
+            rows={tall}
+            contentWidth={60}
+            isStreaming
+          />,
+        ).lastFrame() ?? '';
+      const completed =
+        renderWithProviders(
+          <TableRenderer headers={headers} rows={tall} contentWidth={60} />,
+        ).lastFrame() ?? '';
+      // Streaming keeps the horizontal box; the completed render may fall back
+      // to the vertical list for the tall cell.
+      expect(stripAnsi(streaming)).toContain('┌');
+      expect(stripAnsi(completed)).not.toContain('┌');
+    });
+  });
 });

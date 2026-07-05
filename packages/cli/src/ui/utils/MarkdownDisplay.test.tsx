@@ -5,6 +5,7 @@
  */
 
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import stripAnsi from 'strip-ansi';
 import { MarkdownDisplay } from './MarkdownDisplay.js';
 import { LoadedSettings } from '../../config/settings.js';
 import { renderWithProviders } from '../../test-utils/render.js';
@@ -329,6 +330,24 @@ Some text before.
       expect(output).toContain('│');
     });
 
+    it('holds back a frontier row that is closed but missing columns', () => {
+      // `| four | five |` on a 3-column table is an intermediate state of
+      // `| four | five | six |` still being typed: it matches the row regex but
+      // has too few cells, so it must not render (and fill in cell by cell)
+      // until every column has arrived.
+      const text = `| A | B | C |
+|---|---|---|
+| one | two | three |
+| four | five |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('one');
+      expect(output).toContain('three');
+      expect(output).not.toContain('four');
+    });
+
     it('renders the previously-held frontier row once it terminates', () => {
       const text = `| A | B |
 |---|---|
@@ -366,6 +385,39 @@ Some text before.
       expect(out).toContain('two');
     });
 
+    it('keeps a streaming frontier table horizontal instead of the vertical list', () => {
+      // A tall cell trips the vertical fallback, which would render the table as
+      // a `label: value` list and then flip to a horizontal table once it
+      // completes (a visible jump). The live streaming frontier table must stay
+      // horizontal; the committed render may fall back to vertical.
+      const tallCell = Array.from({ length: 80 }, (_, i) => `w${i}`).join(' ');
+      const text = `| Col |
+|---|
+| ${tallCell} |`.replace(/\n/g, eol);
+
+      const streaming =
+        renderWithProviders(
+          <MarkdownDisplay
+            {...baseProps}
+            text={text}
+            isPending={true}
+            contentWidth={60}
+          />,
+        ).lastFrame() ?? '';
+      const committed =
+        renderWithProviders(
+          <MarkdownDisplay
+            {...baseProps}
+            text={text}
+            isPending={false}
+            contentWidth={60}
+          />,
+        ).lastFrame() ?? '';
+
+      expect(stripAnsi(streaming)).toContain('┌');
+      expect(stripAnsi(committed)).not.toContain('┌');
+    });
+
     it('does not hold back a partial row in committed (non-pending) output', () => {
       const text = `| A | B |
 |---|---|
@@ -389,6 +441,72 @@ Done.`.replace(/\n/g, eol);
       const output = lastFrame() ?? '';
       expect(output).toContain('one');
       expect(output).toContain('Done');
+    });
+
+    it('holds back a forming table header until its separator arrives', () => {
+      // Header present but no separator yet — must not flash as raw `| a | b |`
+      // text (streaming in char by char) before the table box appears.
+      const text = `intro line
+| Alpha | Beta |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('intro line');
+      expect(output).not.toContain('Alpha');
+    });
+
+    it('keeps holding the header while its separator is still being typed', () => {
+      // A partial separator whose column count does not yet match the header is
+      // not enough to recognize the table, so the header stays held.
+      const text = `intro line
+| Alpha | Beta |
+|--`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      expect((lastFrame() ?? '').includes('Alpha')).toBe(false);
+    });
+
+    it('renders the table once the separator matches the header columns', () => {
+      const text = `| Alpha | Beta |
+|---|---|
+| 1 | 2 |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Alpha');
+      expect(output).toContain('│'); // drawn as a table box, not raw text
+    });
+
+    it('draws the empty table box once recognized, before the first row completes', () => {
+      // Header + separator recognized but the first row is still being typed:
+      // show the header box immediately (empty body) rather than a long blank
+      // while the first row streams (a stall in that window looked like a hang).
+      const text = `| Alpha | Beta |
+|---|---|
+| 1`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('Alpha'); // header box drawn with zero rows
+      expect(output).toContain('│');
+    });
+
+    it('does not hold back pipe lines inside a pending code block', () => {
+      // A `|`-leading line that is fenced code-block content must still render.
+      const text = '```\n| Alpha | Beta |'.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay
+          {...baseProps}
+          text={text}
+          isPending={true}
+          availableTerminalHeight={20}
+        />,
+      );
+      expect(stripAnsi(lastFrame() ?? '')).toContain('Alpha');
     });
 
     it('renders a single-column table', () => {

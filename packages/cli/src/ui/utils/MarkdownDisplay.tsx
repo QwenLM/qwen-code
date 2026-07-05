@@ -191,6 +191,41 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     }
   }
 
+  // Hold back a still-forming table at the streaming frontier. A table is only
+  // recognized once its separator line (matching the header's column count) has
+  // arrived; until then the header — and any partial separator — would render as
+  // raw `| a | b |` text and stream in character by character before snapping
+  // into a table box. So while pending, trim a trailing run of pipe-lines that
+  // does not yet contain a matching separator: nothing renders for it until it
+  // can render as a table. (A run that IS a recognizable table is kept — the
+  // per-row hold-back below then handles its unterminated frontier row.)
+  if (isPending && renderVisualBlocks && lines.length > 0) {
+    let start = lines.length;
+    while (start > 0 && /^\s*\|/.test(lines[start - 1]!)) start--;
+    if (start < lines.length) {
+      // Don't touch pipe-lines that are actually fenced code-block content.
+      let insideCodeFence = false;
+      for (let i = 0; i < start; i++) {
+        if (codeFenceRegex.test(lines[i]!)) insideCodeFence = !insideCodeFence;
+      }
+      if (!insideCodeFence) {
+        const headerCells = splitMarkdownTableRow(
+          lines[start]!.match(tableRowRegex)?.[1] ?? '',
+        ).filter((c) => c.length > 0).length;
+        const hasMatchingSeparator = lines.slice(start + 1).some((l) => {
+          if (!tableSeparatorRegex.test(l)) return false;
+          const cols = splitMarkdownTableRow(l).filter(
+            (c) => c.length > 0,
+          ).length;
+          return headerCells > 0 && cols === headerCells;
+        });
+        if (!hasMatchingSeparator) {
+          lines = lines.slice(0, start);
+        }
+      }
+    }
+  }
+
   /** Parse column alignments from a markdown table separator like `|:---|:---:|---:|` */
   const parseTableAligns = (line: string): ColumnAlign[] =>
     splitMarkdownTableRow(line)
@@ -346,6 +381,26 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
     } else if (inTable && tableSeparatorMatch) {
       // Parse alignment from separator line
       tableAligns = parseTableAligns(line);
+    } else if (
+      isPending &&
+      inTable &&
+      index === lines.length - 1 &&
+      tableHeaders.length > 0 &&
+      /^\s*\|/.test(line) &&
+      (!tableRowMatch ||
+        splitMarkdownTableRow(tableRowMatch[1]).length < tableHeaders.length)
+    ) {
+      // Live streaming frontier: the final line is a row still being typed —
+      // either mid-cell (`| a | b` with no closing `|` yet) or closed but with
+      // fewer cells than the header (`| a |` while `| a | b | c |` is coming, an
+      // intermediate that itself matches the row regex). Both would otherwise
+      // render as a padded row that fills in cell by cell and flips as the
+      // closing `|`/columns arrive, jittering the frame. Hold the row back until
+      // it has all its columns: skip it so `inTable` stays set and the
+      // end-of-content handler renders only the COMPLETE rows as a live table.
+      // The whole row (border + all cells) then appears in one step. Guarded on
+      // `tableHeaders.length > 0` so the header + separator never blank out with
+      // a stray partial line beneath them while the first row is typed.
     } else if (inTable && tableRowMatch) {
       // Add table row
       const cells = splitMarkdownTableRow(tableRowMatch[1]);
@@ -357,24 +412,6 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         cells.length = tableHeaders.length;
       }
       tableRows.push(cells);
-    } else if (
-      isPending &&
-      inTable &&
-      !tableRowMatch &&
-      index === lines.length - 1 &&
-      tableHeaders.length > 0 &&
-      /^\s*\|/.test(line)
-    ) {
-      // Live streaming frontier: the final line is an unterminated table row or
-      // separator (`| a | b` with no closing `|` yet). Rendering it as a plain
-      // text line and then flipping it into the table once the closing `|`
-      // arrives makes the frame height and column widths oscillate on every
-      // token, which visibly jitters the footer/composer. Hold it back instead:
-      // skip it so `inTable` stays set and the end-of-content handler renders
-      // only the COMPLETE rows as a live table. A partial row never flips in;
-      // the table appears once its first row terminates and grows one complete
-      // row at a time. Until then the table is simply not drawn (no header +
-      // separator with a stray partial line beneath it).
     } else if (inTable && !tableRowMatch) {
       // End of table — a following line closes it, so this table is COMPLETE
       // and renders in full (the rendered-aware slice guarantees a completed
@@ -577,7 +614,16 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
   // slice above keeps preceding content within budget, so it can never overflow
   // and lock the terminal. Renders in full once the message commits to <Static>
   // (isPending=false → no clamp).
-  if (inTable && tableHeaders.length > 0 && tableRows.length > 0) {
+  //
+  // No `tableRows.length > 0` guard: once the header + separator are recognized
+  // draw the empty table box right away (its data rows fill in as they complete
+  // via the per-row hold-back). Otherwise the whole table area stays blank from
+  // the moment it is recognized until the first row terminates — if generation
+  // stalls in that window it looks like a hang (no box, no cue). The header does
+  // NOT flash char by char: the pre-loop trim holds it until the separator lands,
+  // so the box appears atomically. Committed (isPending=false) tables always have
+  // rows, so this only affects the live frontier.
+  if (inTable && tableHeaders.length > 0) {
     addContentBlock(
       <RenderTable
         key={`table-${contentBlocks.length}`}
@@ -587,6 +633,7 @@ const MarkdownDisplayInternal: React.FC<MarkdownDisplayProps> = ({
         aligns={tableAligns}
         enableInlineMath={renderVisualBlocks}
         isPending={isPending}
+        isStreamingFrontier={true}
         availableTerminalHeight={availableTerminalHeight}
       />,
     );
@@ -901,6 +948,14 @@ interface RenderTableProps {
   aligns?: ColumnAlign[];
   enableInlineMath?: boolean;
   isPending?: boolean;
+  /**
+   * True only for the table at the live streaming frontier — the one still
+   * being written at the end of a pending message. A table closed earlier in
+   * the same (still pending) message is already COMPLETE, so it must size its
+   * columns from every row immediately (isStreaming false) instead of staying
+   * frozen to the first row until the whole message finishes.
+   */
+  isStreamingFrontier?: boolean;
   availableTerminalHeight?: number;
 }
 
@@ -911,6 +966,7 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
   aligns,
   enableInlineMath = false,
   isPending = false,
+  isStreamingFrontier = false,
   availableTerminalHeight,
 }) => {
   const maxHeight =
@@ -925,6 +981,7 @@ const RenderTableInternal: React.FC<RenderTableProps> = ({
       aligns={aligns}
       enableInlineMath={enableInlineMath}
       maxHeight={maxHeight}
+      isStreaming={isPending && isStreamingFrontier}
     />
   );
 };

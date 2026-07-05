@@ -70,6 +70,16 @@ interface TableRendererProps {
    * overflowing the viewport and triggering the scroll-to-top lock.
    */
   maxHeight?: number;
+  /**
+   * True while the table is still streaming (a pending live preview). Column
+   * widths always track the current rows (a wider row redraws the whole table),
+   * but the format is biased to horizontal: the table only falls back to the
+   * vertical `label: value` list when the terminal is genuinely too narrow, not
+   * because an early row wraps tall. This keeps a streaming table from briefly
+   * rendering as a vertical list and then flipping to a horizontal table (a
+   * visible jump) as more rows arrive.
+   */
+  isStreaming?: boolean;
 }
 
 /** Map Ink-compatible named colors to ANSI foreground codes */
@@ -436,6 +446,7 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   aligns,
   enableInlineMath = false,
   maxHeight,
+  isStreaming = false,
 }) => {
   const colCount = headers.length;
 
@@ -581,8 +592,18 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
     ABSOLUTE_MIN_HORIZONTAL_TABLE_WIDTH,
     colCount * MIN_COLUMN_WIDTH + borderOverhead + SAFETY_MARGIN,
   );
+  // While the table is still streaming, bias toward the horizontal format: only
+  // fall back to vertical when the terminal is genuinely too narrow for the
+  // columns, NOT because an early row wraps tall. Otherwise a table that will
+  // end up horizontal briefly renders as a vertical `label: value` list and
+  // then flips (a visible jump) once more rows arrive / it completes.
+  // A zero-row table is the live streaming header box: always keep it horizontal
+  // (the header is short enough to fit). The vertical fallback iterates the rows,
+  // so with no rows it would render an empty string — a blank box — on a narrow
+  // terminal where the width trigger fires.
   const useVerticalFormat =
-    contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES;
+    (rowMetrics.length > 0 && contentWidth < minHorizontalTableWidth) ||
+    (!isStreaming && maxRowLines > MAX_ROW_LINES);
 
   // ── Helper: Get alignment for a column ──
   const getAlign = (colIndex: number): ColumnAlign =>
@@ -720,18 +741,23 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   const tableLines: string[] = [];
   tableLines.push(renderBorderLine('top'));
   tableLines.push(...renderRowLines(headerRendered, true));
-  tableLines.push(renderBorderLine('middle'));
-  rowMetrics.forEach((row, rowIndex) => {
-    tableLines.push(
-      ...renderRowLines(
-        row.map((m) => m.rendered),
-        false,
-      ),
-    );
-    if (rowIndex < rows.length - 1) {
-      tableLines.push(renderBorderLine('middle'));
-    }
-  });
+  // With no data rows yet (a live table whose first row is still streaming),
+  // skip the header/body divider so the box reads as a clean header — otherwise
+  // the divider stacked directly on the bottom border looks like an empty row.
+  if (rowMetrics.length > 0) {
+    tableLines.push(renderBorderLine('middle'));
+    rowMetrics.forEach((row, rowIndex) => {
+      tableLines.push(
+        ...renderRowLines(
+          row.map((m) => m.rendered),
+          false,
+        ),
+      );
+      if (rowIndex < rows.length - 1) {
+        tableLines.push(renderBorderLine('middle'));
+      }
+    });
+  }
   tableLines.push(renderBorderLine('bottom'));
 
   // ── Safety check: verify no line exceeds content width ──
