@@ -218,6 +218,73 @@ describe('large pipe frame observer', () => {
     });
   });
 
+  it('caps object rawOutput byte approximation without full stringification', () => {
+    const rawOutput = {
+      payload: 'x'.repeat(LARGE_PIPE_FRAME_THRESHOLD_BYTES * 2),
+      toJSON: () => {
+        throw new Error('rawOutput should not be stringified');
+      },
+    };
+
+    const context = classifyLargePipeFrame({
+      direction: 'outbound',
+      bytes: LARGE_PIPE_FRAME_THRESHOLD_BYTES,
+      message: {
+        jsonrpc: '2.0',
+        id: 3,
+        result: {
+          updates: [
+            {
+              sessionUpdate: 'tool_call_update',
+              rawOutput,
+            },
+          ],
+          startTime: '2026-07-05T00:00:00.000Z',
+        },
+      },
+    });
+
+    expect(context).toMatchObject({
+      sourceClass: 'load_updates_response',
+      maxRawOutputApproxBytes: LARGE_PIPE_FRAME_THRESHOLD_BYTES,
+      maxRawOutputApproxBytesCapped: true,
+      rawOutputKind: 'object',
+    });
+  });
+
+  it('handles cyclic object rawOutput without throwing from attribution', () => {
+    const rawOutput: Record<string, unknown> = {};
+    rawOutput['self'] = rawOutput;
+    let context: ReturnType<typeof classifyLargePipeFrame> = undefined;
+
+    expect(
+      () =>
+        (context = classifyLargePipeFrame({
+          direction: 'outbound',
+          bytes: LARGE_PIPE_FRAME_THRESHOLD_BYTES,
+          message: {
+            jsonrpc: '2.0',
+            id: 4,
+            result: {
+              updates: [
+                {
+                  sessionUpdate: 'tool_call_update',
+                  rawOutput,
+                },
+              ],
+              startTime: '2026-07-05T00:00:00.000Z',
+            },
+          },
+        })),
+    ).not.toThrow();
+
+    expect(context).toMatchObject({
+      sourceClass: 'load_updates_response',
+      maxRawOutputApproxBytesCapped: true,
+      rawOutputKind: 'object',
+    });
+  });
+
   it('uses byte-dominant update attribution for mixed bulk updates', () => {
     const rawOutput = 'r'.repeat(256);
     const context = classifyLargePipeFrame({

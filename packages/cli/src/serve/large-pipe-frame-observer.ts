@@ -25,6 +25,8 @@ type LogValue = string | number | boolean;
 
 const MAX_ATTR_STRING_LENGTH = 128;
 const MAX_CONTENT_DEPTH = 32;
+const MAX_JSON_APPROX_DEPTH = 32;
+const MAX_RAW_OUTPUT_APPROX_BYTES = LARGE_PIPE_FRAME_THRESHOLD_BYTES;
 const MAX_SUMMARIZED_UPDATES = 500;
 
 export type LargePipeFrameContext = Record<string, LogValue>;
@@ -52,6 +54,7 @@ interface UpdateSummary {
   maxObservedUpdateBytes?: number;
   maxContentTextBytes?: number;
   maxRawOutputApproxBytes?: number;
+  maxRawOutputApproxBytesCapped?: boolean;
   maxRawOutputObservedBytes?: number;
   maxRawOutputTextBytes?: number;
   mixedSessionUpdate?: boolean;
@@ -66,6 +69,18 @@ interface SourceClassification {
   replay?: Record<string, unknown>;
   result?: Record<string, unknown>;
   update?: Record<string, unknown>;
+}
+
+interface JsonByteLengthApproximation {
+  bytes: number;
+  capped: boolean;
+}
+
+interface JsonByteLengthState {
+  budget: number;
+  bytes: number;
+  capped: boolean;
+  seen: WeakSet<object>;
 }
 
 export function createLargePipeFrameObserver(
@@ -266,13 +281,16 @@ function summarizeUpdate(
         rawOutputTextBytes,
       );
     } else {
-      const rawOutputApproxBytes = jsonByteLength(rawOutput);
-      if (rawOutputApproxBytes !== undefined) {
-        summary.maxRawOutputApproxBytes = rawOutputApproxBytes;
-        summary.maxRawOutputObservedBytes = rawOutputApproxBytes;
+      const rawOutputApprox = approximateJsonByteLength(rawOutput);
+      if (rawOutputApprox !== undefined) {
+        summary.maxRawOutputApproxBytes = rawOutputApprox.bytes;
+        if (rawOutputApprox.capped) {
+          summary.maxRawOutputApproxBytesCapped = true;
+        }
+        summary.maxRawOutputObservedBytes = rawOutputApprox.bytes;
         summary.maxObservedUpdateBytes = Math.max(
           summary.maxObservedUpdateBytes,
-          rawOutputApproxBytes,
+          rawOutputApprox.bytes,
         );
       }
     }
@@ -323,6 +341,9 @@ function mergeUpdateSummary(target: UpdateSummary, next: UpdateSummary): void {
   ) {
     target.maxRawOutputApproxBytes = next.maxRawOutputApproxBytes;
   }
+  if (next.maxRawOutputApproxBytesCapped) {
+    target.maxRawOutputApproxBytesCapped = true;
+  }
   if (
     next.maxRawOutputObservedBytes !== undefined &&
     (target.maxRawOutputObservedBytes === undefined ||
@@ -348,6 +369,9 @@ function addUpdateSummary(
     'maxRawOutputApproxBytes',
     summary.maxRawOutputApproxBytes,
   );
+  if (summary.maxRawOutputApproxBytesCapped) {
+    context['maxRawOutputApproxBytesCapped'] = true;
+  }
   addString(context, 'rawOutputKind', summary.rawOutputKind);
 }
 
@@ -371,15 +395,146 @@ function contentTextBytes(value: unknown, depth = 0): number {
   return total;
 }
 
-function jsonByteLength(value: unknown): number | undefined {
-  try {
-    const json = JSON.stringify(value);
-    return typeof json === 'string'
-      ? Buffer.byteLength(json, 'utf8')
-      : undefined;
-  } catch {
-    return undefined;
+function approximateJsonByteLength(
+  value: unknown,
+): JsonByteLengthApproximation | undefined {
+  const state: JsonByteLengthState = {
+    budget: MAX_RAW_OUTPUT_APPROX_BYTES,
+    bytes: 0,
+    capped: false,
+    seen: new WeakSet<object>(),
+  };
+  if (!addJsonValueBytes(value, state, 0)) return undefined;
+  return { bytes: state.bytes, capped: state.capped };
+}
+
+function addJsonValueBytes(
+  value: unknown,
+  state: JsonByteLengthState,
+  depth: number,
+): boolean {
+  if (state.capped) return true;
+  switch (typeof value) {
+    case 'string':
+      addJsonStringBytes(value, state);
+      return true;
+    case 'number':
+      addJsonBytes(state, Number.isFinite(value) ? String(value).length : 4);
+      return true;
+    case 'boolean':
+      addJsonBytes(state, value ? 4 : 5);
+      return true;
+    case 'object':
+      if (value === null) {
+        addJsonBytes(state, 4);
+        return true;
+      }
+      if (depth >= MAX_JSON_APPROX_DEPTH) {
+        capJsonBytes(state);
+        return true;
+      }
+      if (Array.isArray(value)) {
+        addJsonArrayBytes(value, state, depth);
+      } else {
+        addJsonObjectBytes(value, state, depth);
+      }
+      return true;
+    default:
+      return false;
   }
+}
+
+function addJsonArrayBytes(
+  value: unknown[],
+  state: JsonByteLengthState,
+  depth: number,
+): void {
+  if (state.seen.has(value)) {
+    capJsonBytes(state);
+    return;
+  }
+  state.seen.add(value);
+  addJsonBytes(state, 1);
+  for (let i = 0; i < value.length && !state.capped; i += 1) {
+    if (i > 0) addJsonBytes(state, 1);
+    if (!addJsonValueBytes(value[i], state, depth + 1)) {
+      addJsonBytes(state, 4);
+    }
+  }
+  addJsonBytes(state, 1);
+  state.seen.delete(value);
+}
+
+function addJsonObjectBytes(
+  value: object,
+  state: JsonByteLengthState,
+  depth: number,
+): void {
+  if (state.seen.has(value)) {
+    capJsonBytes(state);
+    return;
+  }
+  state.seen.add(value);
+  addJsonBytes(state, 1);
+
+  const record = value as Record<string, unknown>;
+  let propertyCount = 0;
+  for (const key in record) {
+    if (state.capped) break;
+    if (!Object.hasOwn(record, key)) continue;
+    const item = record[key];
+    if (isOmittedJsonObjectValue(item)) continue;
+    if (propertyCount > 0) addJsonBytes(state, 1);
+    addJsonStringBytes(key, state);
+    addJsonBytes(state, 1);
+    if (!addJsonValueBytes(item, state, depth + 1)) {
+      addJsonBytes(state, 4);
+    }
+    propertyCount += 1;
+  }
+
+  addJsonBytes(state, 1);
+  state.seen.delete(value);
+}
+
+function addJsonStringBytes(value: string, state: JsonByteLengthState): void {
+  addJsonBytes(state, 1);
+  if (state.capped) return;
+
+  const remainingForContent = Math.max(0, state.budget - state.bytes - 1);
+  const sampleLength = Math.min(value.length, remainingForContent);
+  const sample =
+    sampleLength < value.length ? value.slice(0, sampleLength) : value;
+  addJsonBytes(state, Buffer.byteLength(sample, 'utf8'));
+  if (sampleLength < value.length) {
+    capJsonBytes(state);
+    return;
+  }
+
+  addJsonBytes(state, 1);
+}
+
+function addJsonBytes(state: JsonByteLengthState, bytes: number): void {
+  if (state.capped || bytes <= 0) return;
+  const nextBytes = state.bytes + bytes;
+  if (nextBytes >= state.budget) {
+    capJsonBytes(state);
+    return;
+  }
+  state.bytes = nextBytes;
+}
+
+function capJsonBytes(state: JsonByteLengthState): void {
+  state.bytes = state.budget;
+  state.capped = true;
+}
+
+function isOmittedJsonObjectValue(value: unknown): boolean {
+  return (
+    typeof value === 'undefined' ||
+    typeof value === 'function' ||
+    typeof value === 'symbol'
+  );
 }
 
 function rawOutputKind(value: unknown): string {
