@@ -18,6 +18,9 @@ model-driven decisions.
 - You have no GitHub credentials. Do not push, comment, create pull requests,
   edit labels, or use GitHub credentials. The workflow handles all network
   writes.
+- Operate only in the workflow's current checkout. Do not create git worktrees,
+  clone the repository, or move the fix to another directory; workflow
+  verification expects the branch to be usable from this checkout.
 - Use additive commits only; do not amend, rebase, reset, or rewrite history.
 - Keep changes minimal and scoped. No drive-by refactors.
 - Do not run project code, tests, builds, package scripts, or the CLI yourself;
@@ -64,7 +67,8 @@ Implement the selected issue in the checked-out repository:
 
 1. Read `<workdir>/candidates.json` for the full issue text and
    `<workdir>/decision.json` for the assessment that selected it.
-2. Create branch `autofix/issue-<issue>` from current HEAD.
+2. In the current checkout, create branch `autofix/issue-<issue>` from current
+   HEAD. Do not create a separate worktree.
 3. Establish baseline behavior by focused code inspection, not execution.
 4. Make the minimal root-cause change and add/update focused Vitest coverage
    without running it.

@@ -529,6 +529,8 @@ describe('qwen-autofix workflow', () => {
       'address-review',
       'untrusted input',
       'Do not push, comment, create pull requests',
+      'Operate only in the workflow',
+      'Do not create git worktrees',
       'Never ask the user a question',
       'not execution',
       'strict nullability',
