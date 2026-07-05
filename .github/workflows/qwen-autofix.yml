@@ -399,6 +399,35 @@ jobs:
             fi
           fi
 
+          if ! gh pr list --repo "${REPO}" --state open --author "${AUTOFIX_BOT}" \
+            --limit 100 --json number,headRefName > "${WORKDIR}/open-autofix-prs.json"; then
+            echo "::warning::Open autofix PR scan failed; falling back to an empty candidate list to avoid duplicate PRs."
+            jq -n -c '[]' > "${WORKDIR}/candidates.json"
+          else
+            SKIPPED_WITH_PRS="$(jq --arg p "${BRANCH_PREFIX}" --slurpfile prs "${WORKDIR}/open-autofix-prs.json" '
+              ($prs[0] // []) as $prs
+              | [ .[]
+                  | ($p + (.number | tostring)) as $branch
+                  | select(any($prs[]; (.headRefName // "") == $branch)) ]
+              | length
+            ' "${WORKDIR}/candidates.json")"
+            if ! jq -c --arg p "${BRANCH_PREFIX}" --slurpfile prs "${WORKDIR}/open-autofix-prs.json" '
+              ($prs[0] // []) as $prs
+              | map(
+                  ($p + (.number | tostring)) as $branch
+                  | select((any($prs[]; (.headRefName // "") == $branch) | not))
+                )
+            ' "${WORKDIR}/candidates.json" > "${WORKDIR}/filtered-candidates.json"; then
+              echo "::warning::Open autofix PR filtering failed; falling back to an empty candidate list."
+              jq -n -c '[]' > "${WORKDIR}/candidates.json"
+            else
+              mv "${WORKDIR}/filtered-candidates.json" "${WORKDIR}/candidates.json"
+              if [[ "${SKIPPED_WITH_PRS}" -gt 0 ]]; then
+                echo "⏭️ Skipped ${SKIPPED_WITH_PRS} candidate(s) that already have open autofix PRs."
+              fi
+            fi
+          fi
+
           COUNT="$(jq length "${WORKDIR}/candidates.json")"
           echo "📋 ${COUNT} candidate(s) found"
           if [[ "${COUNT}" -gt 0 ]]; then

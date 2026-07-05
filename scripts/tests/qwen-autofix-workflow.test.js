@@ -44,6 +44,10 @@ const assessCandidatesStep =
   workflow.match(
     /- name: 'Assess candidates'[\s\S]*?(?=\n[ ]{6}- name: 'Read decision')/,
   )?.[0] ?? '';
+const findCandidateIssuesStep =
+  workflow.match(
+    /- name: 'Find candidate issues'[\s\S]*?(?=\n[ ]{6}- name: 'Resolve sandbox image')/,
+  )?.[0] ?? '';
 const readDecisionStep =
   workflow.match(
     /- name: 'Read decision'[\s\S]*?(?=\n[ ]{6}- name: 'Claim issue')/,
@@ -215,6 +219,19 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain(
       'is missing ${AUTOFIX_APPROVED_LABEL}; skipping.',
     );
+  });
+
+  it('filters issues that already have open autofix PRs', () => {
+    expect(findCandidateIssuesStep).toContain('open-autofix-prs.json');
+    expect(findCandidateIssuesStep).toContain('--author "${AUTOFIX_BOT}"');
+    expect(findCandidateIssuesStep).toContain(
+      '($p + (.number | tostring)) as $branch',
+    );
+    expect(findCandidateIssuesStep).toContain(
+      'any($prs[]; (.headRefName // "") == $branch)',
+    );
+    expect(findCandidateIssuesStep).toContain('filtered-candidates.json');
+    expect(findCandidateIssuesStep).toContain('already have open autofix PRs');
   });
 
   it('keeps release-failure autofix issues approved for scheduled fallback', () => {
