@@ -160,4 +160,84 @@ describe('scheduled-tasks routes', () => {
     expect(over.status).toBe(409);
     expect(over.body.code).toBe('max_tasks_reached');
   });
+
+  it('updates cron / prompt / recurring via PATCH', async () => {
+    const created = await create({
+      cron: '0 9 * * *',
+      prompt: 'orig',
+      recurring: true,
+    });
+    const id = created.body.id as string;
+
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ cron: '30 12 * * 1-5', prompt: 'updated', recurring: false });
+    expect(patch.status).toBe(200);
+    expect(patch.body).toMatchObject({
+      cron: '30 12 * * 1-5',
+      prompt: 'updated',
+      recurring: false,
+    });
+
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0]).toMatchObject({
+      cron: '30 12 * * 1-5',
+      prompt: 'updated',
+      recurring: false,
+    });
+  });
+
+  it('rejects an invalid cron via PATCH', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'x' });
+    const id = created.body.id as string;
+    const patch = await request(h.app)
+      .patch(`/scheduled-tasks/${id}`)
+      .send({ cron: 'nope' });
+    expect(patch.status).toBe(400);
+    expect(patch.body.code).toBe('invalid_cron');
+    // The bad PATCH must not have mutated the stored cron.
+    const list = await request(h.app).get('/scheduled-tasks');
+    expect(list.body.tasks[0].cron).toBe('0 9 * * *');
+  });
+
+  it('rejects a PATCH with no updatable fields', async () => {
+    const created = await create({ cron: '0 9 * * *', prompt: 'x' });
+    const id = created.body.id as string;
+    const patch = await request(h.app).patch(`/scheduled-tasks/${id}`).send({});
+    expect(patch.status).toBe(400);
+    expect(patch.body.code).toBe('empty_patch');
+  });
+
+  it('enforces POST field limits and boolean types', async () => {
+    const longPrompt = await create({
+      cron: '0 9 * * *',
+      prompt: 'x'.repeat(100_001),
+    });
+    expect(longPrompt.status).toBe(400);
+    expect(longPrompt.body.code).toBe('invalid_prompt');
+
+    const longName = await create({
+      cron: '0 9 * * *',
+      prompt: 'x',
+      name: 'n'.repeat(201),
+    });
+    expect(longName.status).toBe(400);
+    expect(longName.body.code).toBe('invalid_name');
+
+    const badRecurring = await create({
+      cron: '0 9 * * *',
+      prompt: 'x',
+      recurring: 'yes',
+    });
+    expect(badRecurring.status).toBe(400);
+    expect(badRecurring.body.code).toBe('invalid_recurring');
+
+    const badEnabled = await create({
+      cron: '0 9 * * *',
+      prompt: 'x',
+      enabled: 1,
+    });
+    expect(badEnabled.status).toBe(400);
+    expect(badEnabled.body.code).toBe('invalid_enabled');
+  });
 });

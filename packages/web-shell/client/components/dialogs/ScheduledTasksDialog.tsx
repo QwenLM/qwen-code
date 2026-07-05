@@ -11,6 +11,13 @@ import {
 } from '@qwen-code/webui/daemon-react-sdk';
 import { useI18n } from '../../i18n';
 import { DialogShell } from './DialogShell';
+import {
+  buildCron,
+  describeCron,
+  describeLastRun,
+  type BuilderState,
+  type Frequency,
+} from './scheduledTasksSchedule';
 import styles from './ScheduledTasksDialog.module.css';
 
 interface ScheduledTasksDialogProps {
@@ -23,14 +30,6 @@ interface ScheduledTasksDialogProps {
   onError: (error: unknown, fallback: string) => void;
 }
 
-type Frequency =
-  | 'daily'
-  | 'weekdays'
-  | 'weekly'
-  | 'hourly'
-  | 'minutes'
-  | 'custom';
-
 const FREQUENCIES: Frequency[] = [
   'daily',
   'weekdays',
@@ -40,14 +39,6 @@ const FREQUENCIES: Frequency[] = [
   'custom',
 ];
 
-interface BuilderState {
-  frequency: Frequency;
-  time: string; // "HH:MM"
-  weekday: number; // 0..6, Sun..Sat
-  minuteInterval: number;
-  customCron: string;
-}
-
 const DEFAULT_BUILDER: BuilderState = {
   frequency: 'daily',
   time: '09:00',
@@ -55,142 +46,6 @@ const DEFAULT_BUILDER: BuilderState = {
   minuteInterval: 30,
   customCron: '0 9 * * *',
 };
-
-function parseHhmm(time: string): { hh: number; mm: number } | null {
-  const m = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
-  if (!m) return null;
-  const hh = Number(m[1]);
-  const mm = Number(m[2]);
-  if (hh < 0 || hh > 23 || mm < 0 || mm > 59) return null;
-  return { hh, mm };
-}
-
-/** Build a 5-field cron from the builder inputs. Returns null when the inputs
- * for the chosen frequency are invalid (the caller surfaces a form error). */
-function buildCron(state: BuilderState): string | null {
-  if (state.frequency === 'custom') {
-    const cron = state.customCron.trim();
-    return cron.length > 0 ? cron : null;
-  }
-  if (state.frequency === 'minutes') {
-    const n = Math.floor(state.minuteInterval);
-    if (!Number.isFinite(n) || n < 1 || n > 59) return null;
-    return `*/${n} * * * *`;
-  }
-  const t = parseHhmm(state.time);
-  if (!t) return null;
-  switch (state.frequency) {
-    case 'daily':
-      return `${t.mm} ${t.hh} * * *`;
-    case 'weekdays':
-      return `${t.mm} ${t.hh} * * 1-5`;
-    case 'weekly':
-      return `${t.mm} ${t.hh} * * ${state.weekday}`;
-    case 'hourly':
-      return `${t.mm} * * * *`;
-    default:
-      return null;
-  }
-}
-
-/** Human-readable schedule label, localized. Covers the shapes the builder
- * emits (the common cases in the reference design); anything else — including
- * ranges/lists a power user hand-writes — falls back to the raw expression so
- * the label is never wrong, only sometimes terse. */
-function describeCron(
-  cron: string,
-  t: (key: string, vars?: Record<string, string | number>) => string,
-): string {
-  const parts = cron.trim().split(/\s+/);
-  if (parts.length !== 5) return cron;
-  const [min, hour, dom, mon, dow] = parts;
-  const isNum = (s: string) => /^\d+$/.test(s);
-  const pad = (n: string) => n.padStart(2, '0');
-
-  // */N * * * *
-  if (
-    /^\*\/\d+$/.test(min!) &&
-    hour === '*' &&
-    dom === '*' &&
-    mon === '*' &&
-    dow === '*'
-  ) {
-    return t('scheduledTasks.human.everyMinutes', { n: min!.slice(2) });
-  }
-  // M * * * *  → hourly at minute M
-  if (
-    isNum(min!) &&
-    hour === '*' &&
-    dom === '*' &&
-    mon === '*' &&
-    dow === '*'
-  ) {
-    return t('scheduledTasks.human.hourly', { min: pad(min!) });
-  }
-  // M H * * *  → daily
-  if (
-    isNum(min!) &&
-    isNum(hour!) &&
-    dom === '*' &&
-    mon === '*' &&
-    dow === '*'
-  ) {
-    return t('scheduledTasks.human.daily', {
-      time: `${pad(hour!)}:${pad(min!)}`,
-    });
-  }
-  // M H * * 1-5 → weekdays
-  if (
-    isNum(min!) &&
-    isNum(hour!) &&
-    dom === '*' &&
-    mon === '*' &&
-    dow === '1-5'
-  ) {
-    return t('scheduledTasks.human.weekdays', {
-      time: `${pad(hour!)}:${pad(min!)}`,
-    });
-  }
-  // M H * * D → weekly on a single weekday
-  if (
-    isNum(min!) &&
-    isNum(hour!) &&
-    dom === '*' &&
-    mon === '*' &&
-    isNum(dow!) &&
-    Number(dow) >= 0 &&
-    Number(dow) <= 6
-  ) {
-    const names = t('scheduledTasks.weekdayNames').split(',');
-    const name = names[Number(dow)] ?? dow!;
-    return t('scheduledTasks.human.weekly', {
-      day: name,
-      time: `${pad(hour!)}:${pad(min!)}`,
-    });
-  }
-  return cron;
-}
-
-function describeLastRun(
-  task: DaemonScheduledTask,
-  t: (key: string, vars?: Record<string, string | number>) => string,
-): string {
-  // A fresh task is stamped with `lastFiredAt = floor(createdAt)` so the
-  // scheduler can't fire it during its creation minute — that stamp is NOT a
-  // real run. Only a genuine fire advances lastFiredAt past the creation
-  // minute, so anything at or before it reads as "never run".
-  const createdMinute = task.createdAt - (task.createdAt % 60_000);
-  if (task.lastFiredAt === null || task.lastFiredAt <= createdMinute) {
-    return t('scheduledTasks.never');
-  }
-  let when: string;
-  try {
-    when = new Date(task.lastFiredAt).toLocaleString();
-  } catch {
-    return t('scheduledTasks.never');
-  }
-  return t('scheduledTasks.lastFired', { when });
-}
 
 export function ScheduledTasksDialog({
   onRunPrompt,

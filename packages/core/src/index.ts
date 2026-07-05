@@ -210,11 +210,8 @@ export * from './services/cronScheduler.js';
 export type { DurableCronTask } from './services/cronTasksFile.js';
 export {
   readCronTasks,
-  addCronTask,
   updateCronTasks,
   removeCronTasks,
-  getCronFilePath,
-  CRON_TASKS_DISPLAY_PATH,
 } from './services/cronTasksFile.js';
 export * from './services/fileDiscoveryService.js';
 export * from './services/fileHistoryService.js';

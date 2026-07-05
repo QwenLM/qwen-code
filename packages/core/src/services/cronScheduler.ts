@@ -630,6 +630,19 @@ export class CronScheduler {
       // either as an empty schedule would wipe every loaded durable job
       // and clear pendingRemoval guards whose removals are still in
       // flight; keep the current view and let a later reload retry.
+      //
+      // Breadcrumb: keeping the prior view means an edit that hasn't loaded
+      // yet — a just-disabled or just-deleted durable task — keeps firing
+      // until a later reload succeeds. Rare (needs a read failure exactly
+      // between the write and this reload), but otherwise silent.
+      if (this.jobs.size > 0) {
+        // eslint-disable-next-line no-console -- operator-facing breadcrumb for a silent scheduler/disk divergence
+        console.warn(
+          'CronScheduler: durable tasks reload failed; keeping the previous ' +
+            'schedule (a just-disabled or -deleted task may keep firing until ' +
+            'the next successful reload).',
+        );
+      }
       return;
     }
     if (generation !== this.durableGeneration) {
