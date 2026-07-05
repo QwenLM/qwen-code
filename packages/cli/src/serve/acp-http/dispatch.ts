@@ -50,7 +50,10 @@ import {
   SessionShellDisabledError,
   WorkspaceMismatchError,
 } from '@qwen-code/acp-bridge/bridgeErrors';
-import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
+import {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';
 import { canonicalizeWorkspace } from '@qwen-code/acp-bridge/workspacePaths';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from '../fs/paths.js';
@@ -577,6 +580,17 @@ function toRpcError(err: unknown): {
       code: RPC.INVALID_PARAMS,
       message: errMsg(err),
       data: { errorKind: 'client_id_required' },
+    };
+  }
+  if (err instanceof SessionArtifactAuthorizationError) {
+    return {
+      code: RPC.INVALID_REQUEST,
+      message: err.message,
+      data: {
+        errorKind: 'artifact_forbidden',
+        sessionId: err.sessionId,
+        artifactId: err.artifactId,
+      },
     };
   }
   if (err instanceof SessionArtifactValidationError) {

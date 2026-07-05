@@ -20,7 +20,10 @@ import type {
   BridgeEvent,
   SessionReplaySnapshot,
 } from '@qwen-code/acp-bridge/eventBus';
-import { SessionArtifactValidationError } from '@qwen-code/acp-bridge/sessionArtifacts';
+import {
+  SessionArtifactAuthorizationError,
+  SessionArtifactValidationError,
+} from '@qwen-code/acp-bridge/sessionArtifacts';
 import {
   CancelSentinelCollisionError,
   InvalidClientIdError,
@@ -6191,6 +6194,46 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         },
       });
       expect(bridge.lastRemovedArtifact).toBeUndefined();
+    });
+
+    it('_qwen/session/artifacts/remove maps artifact authorization errors', async () => {
+      bridge.removeSessionArtifact = async () => {
+        throw new SessionArtifactAuthorizationError(
+          'sess-1',
+          'artifact-1',
+          'client-owner',
+          'client-other',
+        );
+      };
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/session/artifacts/remove',
+        params: { sessionId: 'sess-1', artifactId: 'artifact-1' },
+      });
+
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32600,
+          message: 'artifact artifact-1 is owned by a different client',
+          data: {
+            errorKind: 'artifact_forbidden',
+            sessionId: 'sess-1',
+            artifactId: 'artifact-1',
+          },
+        },
+      });
     });
 
     it('_qwen/session/artifacts/pin forwards artifact id', async () => {
