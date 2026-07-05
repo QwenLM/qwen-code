@@ -341,8 +341,8 @@ function MetricsCharts({ series }: { series: DaemonMetricsSeriesBucket[] }) {
           color: 'var(--primary)',
         },
         {
-          label: t('daemon.charts.pendingPrompts'),
-          values: col((b) => b.pendingPrompts),
+          label: t('daemon.charts.queuedPrompts'),
+          values: col((b) => b.queuedPrompts),
           color: 'var(--warning-color)',
         },
         {

@@ -139,6 +139,7 @@ function parseApprovalModeValue(value: string): ApprovalMode {
 export interface CliArgs {
   query: string | undefined;
   model: string | undefined;
+  fallbackModel: string[] | undefined;
   sandbox: boolean | string | undefined;
   sandboxImage: string | undefined;
   debug: boolean | undefined;
@@ -652,6 +653,16 @@ export async function parseArguments(): Promise<CliArgs> {
           alias: 'm',
           type: 'string',
           description: `Model`,
+        })
+        .option('fallback-model', {
+          type: 'array',
+          string: true,
+          description:
+            'Fallback model(s) for capacity errors (429/503/529), repeatable or comma-separated (max 3)',
+          coerce: (models: string[]) =>
+            models
+              .flatMap((m) => m.split(',').map((s) => s.trim()))
+              .filter(Boolean),
         })
         .option('prompt', {
           alias: 'p',
@@ -1181,6 +1192,34 @@ export async function loadHierarchicalGeminiMemory(
     contextRuleExcludes,
     options,
   );
+}
+
+/**
+ * Merge CLI `--fallback-model` values with the `modelFallbacks` setting.
+ * CLI values take precedence when provided; otherwise the setting value
+ * (a comma-separated string) is split and used.
+ *
+ * @param cliValues  - Repeated/comma-split values from `--fallback-model`.
+ * @param settingValue - Comma-separated string from the `modelFallbacks` setting.
+ * @returns An array of model IDs (may be empty). Core-level normalization
+ *          (dedup, cap at 3) is handled by `normalizeModelFallbacks` in Config.
+ */
+function resolveModelFallbacks(
+  cliValues: string[] | undefined,
+  settingValue: string | undefined,
+): string[] | undefined {
+  // CLI flag takes precedence when provided
+  if (cliValues && cliValues.length > 0) {
+    return cliValues;
+  }
+  // Fall back to settings (comma-separated string)
+  if (settingValue && settingValue.trim().length > 0) {
+    return settingValue
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+  return undefined;
 }
 
 /**
@@ -2148,6 +2187,10 @@ export async function loadCliConfig(
         : (settings.memory?.autoSkillConfirm ?? true),
     fastModel: settings.fastModel || undefined,
     visionModel: settings.visionModel || undefined,
+    modelFallbacks: resolveModelFallbacks(
+      argv.fallbackModel,
+      settings.modelFallbacks,
+    ),
     // Use separated hooks if provided, otherwise fall back to merged hooks
     userHooks:
       bareMode || safeMode

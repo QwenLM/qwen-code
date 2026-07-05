@@ -21,6 +21,7 @@ import {
   useWebShellCustomization,
   type WebShellComposerInput,
   type WebShellComposerTag,
+  type WebShellComposerTagIconMap,
   type WebShellAtProvider,
 } from '../customization';
 import {
@@ -62,6 +63,7 @@ interface ChatEditorProps {
   onSubmit: (
     text: string,
     images?: import('../adapters/promptTypes').PromptImage[],
+    commitAccepted?: import('../hooks/useComposerCore').ComposerSubmitCommit,
   ) => boolean | void;
   onCycleMode?: () => void;
   onToggleShortcuts?: () => void;
@@ -97,6 +99,7 @@ interface ChatEditorProps {
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
   atProviders?: readonly WebShellAtProvider[];
+  composerTagIcons?: WebShellComposerTagIconMap;
 }
 
 const CHAT_EDITOR_THEME = {
@@ -917,6 +920,7 @@ export const ChatEditor = memo(
       composerInput,
       composerInputVersion,
       atProviders,
+      composerTagIcons,
     } = props;
 
     const core = useComposerCore({
@@ -940,6 +944,7 @@ export const ChatEditor = memo(
       composerInput,
       composerInputVersion,
       atProviders,
+      composerTagIcons,
       editorTheme: CHAT_EDITOR_THEME,
     });
 
@@ -1267,7 +1272,7 @@ export const ChatEditor = memo(
       const rawTagLabel = getComposerTagLabel(tag);
       const tagValue = getComposerTagValue(tag);
       const tagLabel = tag.kind ? '' : rawTagLabel;
-      const iconUrl = getComposerTagIconUrl(tag.kind);
+      const iconUrl = getComposerTagIconUrl(tag.kind, composerTagIcons);
       if (!tagLabel && !tagValue) {
         return <span className={styles.tagLabel}>{tag.id}</span>;
       }

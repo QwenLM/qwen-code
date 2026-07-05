@@ -35,6 +35,7 @@ import type {
   TelemetrySettings,
 } from '@qwen-code/qwen-code-core';
 import { createBridgeFileSystemAdapter } from './bridge-file-system-adapter.js';
+import { PathMutexRegistry } from './fs/path-mutex-registry.js';
 import { isLoopbackBind } from './loopback-binds.js';
 import { RUNTIME_STARTUP_CANCELLED_MESSAGE } from './runtime-startup-errors.js';
 import { resolveWebShellDir } from './web-shell-resolver.js';
@@ -726,6 +727,8 @@ async function loadServeRuntimeModules() {
   return {
     createServeApp: serverModule.createServeApp,
     getActiveSseCount: serverModule.getActiveSseCount,
+    resolveBoundWorkspacesFromIdeEnv:
+      serverModule.resolveBoundWorkspacesFromIdeEnv,
     resolveBridgeFsFactory: serverModule.resolveBridgeFsFactory,
     createAcpSessionBridge: bridgeModule.createAcpSessionBridge,
     createSpawnChannelFactory: spawnChannelModule.createSpawnChannelFactory,
@@ -1161,6 +1164,8 @@ function createBootstrapServeApp(input: {
         },
         activity: {
           activePrompts: 0,
+          pendingPrompts: 0,
+          queuedPrompts: 0,
           lastActivityAt: null,
           idleSinceMs: null,
         },
@@ -2036,6 +2041,12 @@ export async function runQwenServe(
       inbound: { count: 0, totalBytes: 0, maxBytes: 0 },
       outbound: { count: 0, totalBytes: 0, maxBytes: 0 },
     };
+    const promptQueueWaitStats = {
+      count: 0,
+      totalMs: 0,
+      maxMs: 0,
+      lastMs: null as number | null,
+    };
     const recordPipeMessage = (
       direction: keyof DaemonPerfSnapshot['pipe'],
       bytes: number,
@@ -2046,6 +2057,16 @@ export async function runQwenServe(
       stats.maxBytes = Math.max(stats.maxBytes, bytes);
       core.recordDaemonPipeMessage(direction, bytes);
       metricsRing.recordPipe(direction, bytes);
+    };
+    const recordPromptQueueWait = (durationMs: number): void => {
+      promptQueueWaitStats.count += 1;
+      promptQueueWaitStats.totalMs += durationMs;
+      promptQueueWaitStats.maxMs = Math.max(
+        promptQueueWaitStats.maxMs,
+        durationMs,
+      );
+      promptQueueWaitStats.lastMs = durationMs;
+      core.recordDaemonPromptQueueWait(durationMs);
     };
     const daemonTelemetry = core.createDaemonBridgeTelemetry();
     daemonTelemetry.metrics = {
@@ -2081,7 +2102,7 @@ export async function runQwenServe(
         );
       },
       promptQueueWait(durationMs) {
-        core.recordDaemonPromptQueueWait(durationMs);
+        recordPromptQueueWait(durationMs);
         metricsRing.recordPromptQueueWait(durationMs);
       },
       promptDuration(durationMs) {
@@ -2110,11 +2131,46 @@ export async function runQwenServe(
     });
     const customIgnoreFiles =
       runtimeBootSettings?.merged.context?.fileFiltering?.customIgnoreFiles;
-    const fsFactory = runtime.resolveBridgeFsFactory({
+    const boundWorkspaces = runtime.resolveBoundWorkspacesFromIdeEnv(
       boundWorkspace,
+      undefined,
+      (workspace: string, index: number) => {
+        if (index === 0) return true;
+        if (!runtimeBootSettings) {
+          daemonLog.warn(
+            'excluding secondary workspace root because trust settings are unavailable',
+            { workspace },
+          );
+          return false;
+        }
+        const trustedSecondary =
+          settingsRuntime.trustedFolders.getWorkspaceTrustStatus(
+            runtimeBootSettings.merged,
+            workspace,
+          ).effective.state === 'trusted';
+        if (!trustedSecondary) {
+          daemonLog.warn(
+            'excluding untrusted secondary workspace root from file-system access',
+            { workspace },
+          );
+        }
+        return trustedSecondary;
+      },
+    );
+    daemonLog.info('daemon workspace roots initialized', {
+      primary: boundWorkspaces[0],
+      secondary: boundWorkspaces.slice(1),
+      ideEnvPresent: !!process.env['QWEN_CODE_IDE_WORKSPACE_PATH'],
+    });
+    const sharedPathLocks = new PathMutexRegistry();
+    const fsFactory = runtime.resolveBridgeFsFactory({
+      // Secondary roots share a write-capable factory only after their own
+      // folder trust check passes; untrusted secondary roots stay outside.
+      boundWorkspaces,
       injected: deps.fsFactory,
       trusted: trustedWorkspace,
       emit: deps.fsAuditEmit,
+      pathLocks: sharedPathLocks,
       ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
     });
     const channelFactory = runtime.createSpawnChannelFactory({
@@ -2371,7 +2427,7 @@ export async function runQwenServe(
           heapUsedBytes: mem.heapUsed,
           activeSessions: bridge.sessionCount,
           activePrompts: bridge.activePromptCount,
-          pendingPrompts: bridge.pendingPromptTotal ?? 0,
+          queuedPrompts: bridge.pendingPromptTotal ?? 0,
           eventLoopLagP99Ms,
           sseConnections: runtime.getActiveSseCount(),
           wsConnections: acp?.wsStreams ?? 0,
@@ -2397,7 +2453,7 @@ export async function runQwenServe(
             heapUsedBytes: 0,
             activeSessions: 0,
             activePrompts: 0,
-            pendingPrompts: 0,
+            queuedPrompts: 0,
             eventLoopLagP99Ms,
             sseConnections: 0,
             wsConnections: 0,
@@ -2432,11 +2488,28 @@ export async function runQwenServe(
       boundWorkspace,
       qwenCodeVersion: resolvedCliVersion,
       startup,
-      fsFactory,
+      fsFactory: runtime.resolveBridgeFsFactory({
+        // REST routes still return primary-relative paths, so keep their
+        // filesystem boundary primary-only until responses carry root IDs.
+        boundWorkspaces: [boundWorkspace],
+        trusted: trustedWorkspace,
+        emit: deps.fsAuditEmit,
+        pathLocks: sharedPathLocks,
+        ...(customIgnoreFiles !== undefined ? { customIgnoreFiles } : {}),
+      }),
       daemonLog,
       getChannelWorkerSnapshot,
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
+        promptQueueWait: {
+          count: promptQueueWaitStats.count,
+          meanMs:
+            promptQueueWaitStats.count === 0
+              ? 0
+              : promptQueueWaitStats.totalMs / promptQueueWaitStats.count,
+          maxMs: promptQueueWaitStats.maxMs,
+          lastMs: promptQueueWaitStats.lastMs,
+        },
         pipe: {
           inbound: { ...pipeStats.inbound },
           outbound: { ...pipeStats.outbound },
