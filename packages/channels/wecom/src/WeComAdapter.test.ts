@@ -103,6 +103,9 @@ const mocks = vi.hoisted(() => {
     autoAuthenticate: true,
     connectErrorsRemaining: 0,
     connectNeverSettles: false,
+    connectResolvers: [] as Array<() => void>,
+    connectWaitsForRelease: false,
+    kickAfterConnectsRemaining: 0,
     mediaResponseNeverEnds: false,
   };
 
@@ -117,8 +120,22 @@ const mocks = vi.hoisted(() => {
       if (state.connectNeverSettles) {
         return new Promise(() => {});
       }
+      if (state.connectWaitsForRelease) {
+        if (state.autoAuthenticate) {
+          queueMicrotask(() => this.emit('authenticated', {}));
+        }
+        return new Promise<MockWSClient>((resolve) => {
+          state.connectResolvers.push(() => resolve(this));
+        });
+      }
       if (state.autoAuthenticate) {
         queueMicrotask(() => this.emit('authenticated', {}));
+      }
+      if (state.kickAfterConnectsRemaining > 0) {
+        state.kickAfterConnectsRemaining -= 1;
+        queueMicrotask(() =>
+          this.emit('event.disconnected_event', 'kicked again'),
+        );
       }
       return this;
     });
@@ -332,6 +349,9 @@ describe('WeComChannel', () => {
     mocks.state.autoAuthenticate = true;
     mocks.state.connectErrorsRemaining = 0;
     mocks.state.connectNeverSettles = false;
+    mocks.state.connectResolvers.length = 0;
+    mocks.state.connectWaitsForRelease = false;
+    mocks.state.kickAfterConnectsRemaining = 0;
     mocks.state.mediaResponseNeverEnds = false;
     mocks.httpResponse.statusCode = 200;
     mocks.httpResponse.headers = {};
@@ -698,6 +718,54 @@ describe('WeComChannel', () => {
 
     await vi.advanceTimersByTimeAsync(1_000);
     expect(mocks.instances).toHaveLength(1);
+  });
+
+  it('does not schedule reconnect reset after disconnect races with connect success', async () => {
+    vi.useFakeTimers();
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    mocks.state.connectWaitsForRelease = true;
+
+    lastClient().emit('event.disconnected_event', 'kicked');
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(mocks.instances).toHaveLength(2);
+
+    channel.disconnect();
+    mocks.state.connectResolvers.splice(0).forEach((resolve) => resolve());
+    await vi.runAllTicks();
+
+    expect(
+      (
+        channel as unknown as {
+          kickReconnectReset?: ReturnType<typeof setTimeout>;
+        }
+      ).kickReconnectReset,
+    ).toBeUndefined();
+  });
+
+  it('retries when a new client is kicked during reconnect', async () => {
+    vi.useFakeTimers();
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    mocks.state.kickAfterConnectsRemaining = 1;
+
+    lastClient().emit('event.disconnected_event', 'kicked');
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(2));
+    await vi.waitFor(() =>
+      expect(
+        (
+          channel as unknown as {
+            reconnectingAfterKick: boolean;
+          }
+        ).reconnectingAfterKick,
+      ).toBe(false),
+    );
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(3));
+
+    channel.disconnect();
   });
 
   it('does not clear adapter state when reconnecting after a kick', async () => {
@@ -1278,7 +1346,7 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('rolls back message dedup when preflight rejects the envelope', async () => {
+  it('deduplicates messages rejected by preflight', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -1309,16 +1377,11 @@ describe('WeComChannel', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     client.emit('message.text', payload);
-    await vi.waitFor(() => expect(channel.preflights).toHaveBeenCalledTimes(2));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(channel.preflights).toHaveBeenCalledTimes(1);
     expect(bridge.newSession).not.toHaveBeenCalled();
-    await vi.waitFor(() =>
-      expect(
-        stderr.mock.calls.filter(
-          ([message]) =>
-            message ===
-            '[WeCom:bot] dropping message msg-preflight-rejected: preflight rejected.\n',
-        ),
-      ).toHaveLength(2),
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] dropping duplicate message msg-preflight-rejected (already seen).\n',
     );
     stderr.mockRestore();
   });

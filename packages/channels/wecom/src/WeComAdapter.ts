@@ -107,6 +107,7 @@ export class WeComChannel extends ChannelBase {
     kicked: (payload: unknown) => void;
   };
   private reconnectingAfterKick = false;
+  private pendingKickReconnect = false;
   private kickReconnectAttempts = 0;
   private kickReconnectRetryCycles = 0;
 
@@ -386,6 +387,7 @@ export class WeComChannel extends ChannelBase {
         process.stderr.write(
           `[WeCom:${this.name}] dropping message ${logMessageId}: preflight rejected.\n`,
         );
+        if (messageId) this.seenMessages.set(messageId, Date.now());
         return;
       }
       attachments = await this.downloadAttachments(
@@ -724,7 +726,10 @@ export class WeComChannel extends ChannelBase {
   }
 
   private async reconnectAfterKick(reason: unknown): Promise<void> {
-    if (this.reconnectingAfterKick) return;
+    if (this.reconnectingAfterKick) {
+      this.pendingKickReconnect = true;
+      return;
+    }
     if (this.kickReconnectRetry) {
       clearTimeout(this.kickReconnectRetry);
       this.kickReconnectRetry = undefined;
@@ -752,9 +757,13 @@ export class WeComChannel extends ChannelBase {
         if (this.disconnectGeneration !== disconnectGeneration) return;
         try {
           await this.connect();
+          if (this.disconnectGeneration !== disconnectGeneration) return;
           this.kickReconnectAttempts = 0;
           this.kickReconnectRetryCycles = 0;
           this.scheduleKickReconnectReset();
+          process.stderr.write(
+            `[WeCom:${this.name}] reconnected after server kick.\n`,
+          );
           return;
         } catch (err) {
           process.stderr.write(
@@ -778,6 +787,13 @@ export class WeComChannel extends ChannelBase {
       this.scheduleKickReconnectRetry(reason, disconnectGeneration);
     } finally {
       this.reconnectingAfterKick = false;
+      const shouldRetryPendingKick =
+        this.pendingKickReconnect &&
+        this.disconnectGeneration === disconnectGeneration;
+      this.pendingKickReconnect = false;
+      if (shouldRetryPendingKick) {
+        this.startKickReconnect(reason);
+      }
     }
   }
 
