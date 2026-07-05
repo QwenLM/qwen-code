@@ -262,11 +262,11 @@ Files work with any model — no multimodal support required.
 
 ### Platform differences
 
-| Feature  | Telegram                                     | WeChat                           | DingTalk                                      | Feishu                                          |
-| -------- | -------------------------------------------- | -------------------------------- | --------------------------------------------- | ----------------------------------------------- |
-| Images   | Direct download via Bot API                  | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (authenticated GET) |
-| Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (50MB limit)        |
-| Captions | Photo/file captions included as message text | Not applicable                   | Rich text: mixed text + images in one message | Rich text (`post`): mixed text + images         |
+| Feature  | Telegram                                     | WeChat                           | DingTalk                                      | Feishu                                                      |
+| -------- | -------------------------------------------- | -------------------------------- | --------------------------------------------- | ----------------------------------------------------------- |
+| Images   | Direct download via Bot API                  | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (authenticated GET)             |
+| Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (50MB limit)                    |
+| Captions | Photo/file captions included as message text | Not applicable                   | Rich text: mixed text + images in one message | Rich text (`post`): text extracted; embedded images ignored |
 
 > QQ Bot does not process incoming media — image and sticker messages are ignored, so it has no media-handling row above.
 
