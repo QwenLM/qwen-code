@@ -110,18 +110,22 @@ export function getShellAbortReasonKind(
 const CHCP = `${process.env['SystemRoot'] || 'C:\\Windows'}\\System32\\chcp.com`;
 
 function applyUtf8Prefix(command: string, shell: ShellType): string {
-  if (os.platform() === 'win32') {
-    if (shell === 'powershell') {
+  if (os.platform() !== 'win32') return command;
+  switch (shell) {
+    case 'powershell':
       return (
         '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;' + command
       );
-    }
-    if (shell === 'cmd') {
+    case 'cmd':
       // Resolved at module-load time (defense-in-depth, matches WINDOWS_TASKKILL pattern, see #5873)
       return `${CHCP} 65001 >nul 2>nul & ${command}`;
+    case 'bash':
+      return command;
+    default: {
+      const _exhaustive: never = shell;
+      return _exhaustive;
     }
   }
-  return command;
 }
 
 /**
