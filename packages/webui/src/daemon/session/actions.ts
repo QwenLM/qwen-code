@@ -81,10 +81,19 @@ export function getConnectionAfterSessionClear(
     delete next.displayName;
     delete next.tokenUsage;
     delete next.tokenCount;
-    delete next.commands;
-    delete next.skills;
+    // Drop the session-scoped raw snapshots (both carry the cleared
+    // sessionId), which also makes the effect's canReuseSessionMetadata
+    // check refetch fresh data for the next session.
     delete next.supportedCommands;
     delete next.context;
+    // Keep `commands`/`skills`: they are workspace-scoped (skills, custom,
+    // MCP-prompt and workflow slash commands all live at the workspace/config
+    // level, not the session), so they stay valid after the session is
+    // cleared. Clearing starts a fresh deferred session that is not created
+    // until the first prompt (#6066); preserving these keeps skill-backed
+    // slash commands like /review autocompleting in that window — the same
+    // guarantee #6153 added for the initial deferred connect. The next
+    // session's available_commands_update refreshes them once it lands.
   }
   return {
     ...next,

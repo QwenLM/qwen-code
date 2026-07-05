@@ -16,10 +16,16 @@ import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { DaemonMetricsBucket } from './daemon-metrics-ring.js';
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
 } from './workspace-service/index.js';
+
+// Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
+// import the bucket shape from the status module alongside the rest of the
+// response contract, matching how DaemonPerfSnapshot is sourced.
+export type { DaemonMetricsBucket };
 
 const DEFAULT_LISTENER_MAX_CONNECTIONS = 256;
 const SECTION_TIMEOUT_MS = 1_000;
@@ -95,6 +101,7 @@ export interface BuildDaemonStatusOptions {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
+  getMetricsSeries?: () => DaemonMetricsBucket[];
 }
 
 interface DaemonStatusSection<T> {
@@ -170,6 +177,13 @@ interface DaemonStatusRuntime {
     rejectedSinceStart: Record<RateLimitTier, number>;
   };
   perf?: DaemonPerfSnapshot;
+  /**
+   * Rolling per-interval activity series backing the Daemon Status charts
+   * (requests, latency, tokens, memory over time). Optional/additive to v=1:
+   * absent when the daemon predates it or the sampler has not sealed a bucket
+   * yet. Ordered oldest→newest.
+   */
+  metrics?: { series: DaemonMetricsBucket[] };
   activity: {
     activePrompts: number;
     pendingPrompts: number;
@@ -359,6 +373,9 @@ export async function buildDaemonStatusResponse(
         rejectedSinceStart: rateLimitHits,
       },
       ...(input.getPerfSnapshot ? { perf: input.getPerfSnapshot() } : {}),
+      ...(input.getMetricsSeries
+        ? { metrics: { series: input.getMetricsSeries() } }
+        : {}),
       activity: {
         activePrompts: input.bridge.activePromptCount ?? 0,
         pendingPrompts,

@@ -37,7 +37,7 @@ import {
   buildRuntimeFetchOptions,
   redactProxyError,
 } from '../../utils/runtimeFetchOptions.js';
-import { DEFAULT_TIMEOUT } from '../openaiContentGenerator/constants.js';
+import { resolveRequestTimeout } from '../openaiContentGenerator/constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
@@ -315,7 +315,7 @@ export class AnthropicContentGenerator implements ContentGenerator {
         ? { authToken: contentGeneratorConfig.apiKey, apiKey: null }
         : { apiKey: contentGeneratorConfig.apiKey, authToken: null }),
       baseURL,
-      timeout: contentGeneratorConfig.timeout || DEFAULT_TIMEOUT,
+      timeout: resolveRequestTimeout(contentGeneratorConfig.timeout),
       maxRetries: contentGeneratorConfig.maxRetries,
       defaultHeaders,
       ...runtimeOptions,
