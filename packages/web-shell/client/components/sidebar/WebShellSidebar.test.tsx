@@ -372,6 +372,12 @@ describe('WebShellSidebar — session organization', () => {
       name: 'Backend',
       color: 'green',
     });
+    // Creating a group for a session assigns it and clears any color tag —
+    // color and named group are mutually exclusive in the UI.
+    expect(mockWorkspaceActions.updateSessionOrganization).toHaveBeenCalledWith(
+      '550e8400-e29b-41d4-a716-446655440000',
+      { groupId: 'group-1', color: null },
+    );
     promptSpy.mockRestore();
   });
 

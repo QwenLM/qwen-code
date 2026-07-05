@@ -1048,7 +1048,9 @@ export function WebShellSidebar({
             try {
               await workspaceActions.updateSessionOrganization(
                 groupEditor.targetSession.sessionId,
-                { groupId: group.id },
+                // Assigning a named group clears any color tag (single choice
+                // in the UI), matching assignSessionGroup.
+                { groupId: group.id, color: null },
               );
               void reload().catch(() => undefined);
             } catch (err) {
