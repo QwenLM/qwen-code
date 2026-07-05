@@ -31,8 +31,7 @@ import {
 import type { GeminiChat } from './geminiChat.js';
 import type { RetryInfo } from '../utils/rateLimit.js';
 import {
-  getThoughtText,
-  parseThought,
+  getThoughtSummary,
   type ThoughtSummary,
 } from '../utils/thoughtUtils.js';
 import type { LoopType } from '../telemetry/types.js';
@@ -524,11 +523,11 @@ export class Turn {
           this.currentResponseId = resp.responseId;
         }
 
-        const thoughtText = getThoughtText(resp);
-        if (thoughtText) {
+        const thoughtSummary = getThoughtSummary(resp);
+        if (thoughtSummary) {
           yield {
             type: GeminiEventType.Thought,
-            value: parseThought(thoughtText),
+            value: thoughtSummary,
           };
         }
 

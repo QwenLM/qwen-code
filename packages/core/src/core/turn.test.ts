@@ -26,6 +26,7 @@ import { reportError } from '../utils/errorReporting.js';
 import type { GeminiChat } from './geminiChat.js';
 import { StreamEventType } from './geminiChat.js';
 import { normalizeModelToolCallIds } from './toolCallIdUtils.js';
+import { createOpenAIReasoningThoughtPart } from '../utils/thoughtUtils.js';
 
 const mockSendMessageStream = vi.fn();
 const mockGetHistory = vi.fn();
@@ -218,6 +219,80 @@ describe('Turn', () => {
           value: { subject: '', description: 'reasoning...' },
         },
         { type: GeminiEventType.Content, value: 'final answer' },
+      ]);
+    });
+
+    it('should keep OpenAI reasoning markdown as a streaming thought description', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    createOpenAIReasoningThoughtPart(
+                      '**Analyzing the request**',
+                    ),
+                  ],
+                },
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Thought,
+          value: { subject: '', description: '**Analyzing the request**' },
+        },
+      ]);
+    });
+
+    it('should keep parsing unmarked structured thought subjects', async () => {
+      const mockResponseStream = (async function* () {
+        yield {
+          type: StreamEventType.CHUNK,
+          value: {
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [{ thought: true, text: '**Only Subject**' }],
+                },
+              },
+            ],
+          } as GenerateContentResponse,
+        };
+      })();
+      mockSendMessageStream.mockResolvedValue(mockResponseStream);
+
+      const events = [];
+      for await (const event of turn.run(
+        'test-model',
+        [{ text: 'Hi' }],
+        new AbortController().signal,
+      )) {
+        events.push(event);
+      }
+
+      expect(events).toEqual([
+        {
+          type: GeminiEventType.Thought,
+          value: { subject: 'Only Subject', description: '' },
+        },
       ]);
     });
 
