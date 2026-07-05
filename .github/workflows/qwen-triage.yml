@@ -842,8 +842,8 @@ jobs:
           PREPARE_FAILURE_PHASE: '${{ needs.tmux-testing.outputs.failure_phase }}'
           TMUX_RESULT: '${{ needs.tmux-testing.result }}'
           RUN_URL: '${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}'
+        # shellcheck disable=SC2016
         run: |-
-          # shellcheck disable=SC2016
           set -euo pipefail
           if [ -z "${PR_NUMBER:-}" ]; then
             echo "::warning::No PR number resolved; cannot post a tmux result comment."
@@ -921,7 +921,6 @@ jobs:
             {
               printf '%s\n\n' '<!-- qwen-triage:tmux -->'
               printf '**tmux real-user testing: fail** - [workflow run](%s)\n\n' "$RUN_URL"
-              # shellcheck disable=SC2016
               printf 'The PR app could not be launched because `%s` failed before the tmux session started. This is treated as a PR failure verdict rather than an infrastructure failure.\n\n' "$PREPARE_COMMAND"
               if [ -n "${PREPARE_LOG_NOTE:-}" ]; then
                 printf '%s\n\n' "$PREPARE_LOG_NOTE"

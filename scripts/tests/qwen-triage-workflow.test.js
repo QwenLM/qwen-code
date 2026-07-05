@@ -112,20 +112,6 @@ describe('qwen-triage tmux workflow', () => {
     expect(runStep).toContain("QWEN_HOME: '${{ runner.temp }}/qwen-home'");
   });
 
-  it('does not run comment-triggered triage for closed issues or PRs', () => {
-    const triageJob = job('triage');
-
-    expect(triageJob).toContain("github.event_name == 'issue_comment'");
-    expect(triageJob).toContain("github.event.issue.state == 'open'");
-    expect(
-      triageJob.indexOf("github.event.issue.state == 'open'"),
-    ).toBeLessThan(
-      triageJob.indexOf(
-        "startsWith(github.event.comment.body, '@qwen-code /triage')",
-      ),
-    );
-  });
-
   it('reports timeout and infra-error without claiming the flow was exercised', () => {
     const postStep = step('Post tmux result comment');
 

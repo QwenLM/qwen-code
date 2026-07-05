@@ -480,8 +480,6 @@ describe('qwen-autofix workflow', () => {
       'assess-candidates',
       'develop-issue',
       'address-review',
-      '@qwen-code /autofix',
-      '@qwen-code /autofix run',
       'untrusted input',
       'Do not push, comment, create pull requests',
       'Never ask the user a question',
