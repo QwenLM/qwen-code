@@ -190,10 +190,6 @@ function recoverHistoryObjectsFromLine(line: string): string[] {
     }
   }
 
-  if (depth !== 0 || inString || line.slice(cursor).trim() !== '') {
-    return recovered;
-  }
-
   return recovered;
 }
 

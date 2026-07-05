@@ -188,6 +188,10 @@ describe('history-store', () => {
 
       await compactAutomationHistory(tempDir, 20, 1000);
 
+      const rewritten = readFileSync(join(tempDir, AUTOMATIONS_HISTORY_FILE), 'utf-8');
+      expect(rewritten).not.toContain('}garbage');
+      expect(rewritten.trim().split('\n')).toHaveLength(2);
+
       const entries = readHistory(tempDir);
       expect(entries.map((entry) => entry.ts)).toEqual([1, 2]);
     });
