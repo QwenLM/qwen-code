@@ -172,6 +172,8 @@ interface DaemonStatusRuntime {
   perf?: DaemonPerfSnapshot;
   activity: {
     activePrompts: number;
+    pendingPrompts: number;
+    queuedPrompts: number;
     lastActivityAt: string | null;
     idleSinceMs: number | null;
   };
@@ -190,6 +192,12 @@ export interface DaemonPerfSnapshot {
     p50Ms: number;
     p99Ms: number;
     maxMs: number;
+  };
+  promptQueueWait: {
+    count: number;
+    meanMs: number;
+    maxMs: number;
+    lastMs: number | null;
   };
   pipe: {
     inbound: DaemonPipeStatsSnapshot;
@@ -247,6 +255,15 @@ export async function buildDaemonStatusResponse(
   const lastActivity = input.bridge.lastActivityAt ?? null;
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
+  let pendingPrompts = 0;
+  let queuedPrompts = 0;
+  for (const session of bridgeSnapshot.sessions) {
+    pendingPrompts += session.pendingPromptCount;
+    queuedPrompts += Math.max(
+      0,
+      session.pendingPromptCount - (session.hasActivePrompt ? 1 : 0),
+    );
+  }
   const channelWorker = input.getChannelWorkerSnapshot?.() ?? {
     enabled: false,
     state: 'disabled',
@@ -344,6 +361,8 @@ export async function buildDaemonStatusResponse(
       ...(input.getPerfSnapshot ? { perf: input.getPerfSnapshot() } : {}),
       activity: {
         activePrompts: input.bridge.activePromptCount ?? 0,
+        pendingPrompts,
+        queuedPrompts,
         lastActivityAt:
           lastActivity !== null ? new Date(lastActivity).toISOString() : null,
         idleSinceMs: lastActivity !== null ? Date.now() - lastActivity : null,

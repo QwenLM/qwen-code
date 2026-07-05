@@ -408,6 +408,7 @@ describe('buildDaemonStatusResponse', () => {
       makeOptions({
         perfSnapshot: {
           eventLoop: { meanMs: 1, p50Ms: 2, p99Ms: 3, maxMs: 4 },
+          promptQueueWait: { count: 2, meanMs: 15, maxMs: 25, lastMs: 5 },
           pipe: {
             inbound: { count: 5, totalBytes: 600, maxBytes: 300 },
             outbound: { count: 7, totalBytes: 800, maxBytes: 400 },
@@ -418,6 +419,7 @@ describe('buildDaemonStatusResponse', () => {
 
     expect(response.runtime.perf).toEqual({
       eventLoop: { meanMs: 1, p50Ms: 2, p99Ms: 3, maxMs: 4 },
+      promptQueueWait: { count: 2, meanMs: 15, maxMs: 25, lastMs: 5 },
       pipe: {
         inbound: { count: 5, totalBytes: 600, maxBytes: 300 },
         outbound: { count: 7, totalBytes: 800, maxBytes: 400 },
@@ -442,9 +444,62 @@ describe('buildDaemonStatusResponse', () => {
     );
     expect(response.runtime.activity).toEqual({
       activePrompts: 3,
+      pendingPrompts: 0,
+      queuedPrompts: 0,
       lastActivityAt: '2024-07-03T07:00:00.000Z',
       idleSinceMs: 5000,
     });
+  });
+
+  it('summarizes pending and queued prompts across sessions without warning', async () => {
+    const response = await buildDaemonStatusResponse(
+      'summary',
+      makeOptions({
+        activePromptCount: 1,
+        bridgeSnapshot: {
+          ...BASE_BRIDGE_SNAPSHOT,
+          sessionCount: 2,
+          sessions: [
+            {
+              sessionId: 's1',
+              workspaceCwd: BASE_WORKSPACE,
+              createdAt: '2026-07-01T00:00:00.000Z',
+              clientCount: 2,
+              subscriberCount: 2,
+              attachCount: 2,
+              pendingPromptCount: 3,
+              pendingPermissionCount: 0,
+              hasActivePrompt: true,
+              lastEventId: 10,
+            },
+            {
+              sessionId: 's2',
+              workspaceCwd: BASE_WORKSPACE,
+              createdAt: '2026-07-01T00:01:00.000Z',
+              clientCount: 1,
+              subscriberCount: 1,
+              attachCount: 1,
+              pendingPromptCount: 0,
+              pendingPermissionCount: 0,
+              hasActivePrompt: false,
+              lastEventId: 0,
+            },
+          ],
+        },
+      }),
+    );
+
+    expect(response.runtime.activity).toMatchObject({
+      activePrompts: 1,
+      pendingPrompts: 3,
+      queuedPrompts: 2,
+    });
+    expect(response.issues).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ code: 'pending_prompts' }),
+      ]),
+    );
+    expect(response.status).toBe('ok');
   });
 
   it('reports null activity when daemon has never been active', async () => {
@@ -454,6 +509,8 @@ describe('buildDaemonStatusResponse', () => {
     );
     expect(response.runtime.activity).toEqual({
       activePrompts: 0,
+      pendingPrompts: 0,
+      queuedPrompts: 0,
       lastActivityAt: null,
       idleSinceMs: null,
     });
@@ -472,6 +529,12 @@ interface MakeOptionsInput {
   channelWorkerSnapshot?: ChannelWorkerSnapshot;
   perfSnapshot?: {
     eventLoop: { meanMs: number; p50Ms: number; p99Ms: number; maxMs: number };
+    promptQueueWait: {
+      count: number;
+      meanMs: number;
+      maxMs: number;
+      lastMs: number | null;
+    };
     pipe: {
       inbound: { count: number; totalBytes: number; maxBytes: number };
       outbound: { count: number; totalBytes: number; maxBytes: number };

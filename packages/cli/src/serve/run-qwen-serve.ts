@@ -1142,6 +1142,8 @@ function createBootstrapServeApp(input: {
         },
         activity: {
           activePrompts: 0,
+          pendingPrompts: 0,
+          queuedPrompts: 0,
           lastActivityAt: null,
           idleSinceMs: null,
         },
@@ -2000,6 +2002,12 @@ export async function runQwenServe(
       inbound: { count: 0, totalBytes: 0, maxBytes: 0 },
       outbound: { count: 0, totalBytes: 0, maxBytes: 0 },
     };
+    const promptQueueWaitStats = {
+      count: 0,
+      totalMs: 0,
+      maxMs: 0,
+      lastMs: null as number | null,
+    };
     const recordPipeMessage = (
       direction: keyof DaemonPerfSnapshot['pipe'],
       bytes: number,
@@ -2009,6 +2017,16 @@ export async function runQwenServe(
       stats.totalBytes += bytes;
       stats.maxBytes = Math.max(stats.maxBytes, bytes);
       core.recordDaemonPipeMessage(direction, bytes);
+    };
+    const recordPromptQueueWait = (durationMs: number): void => {
+      promptQueueWaitStats.count += 1;
+      promptQueueWaitStats.totalMs += durationMs;
+      promptQueueWaitStats.maxMs = Math.max(
+        promptQueueWaitStats.maxMs,
+        durationMs,
+      );
+      promptQueueWaitStats.lastMs = durationMs;
+      core.recordDaemonPromptQueueWait(durationMs);
     };
     const daemonTelemetry = core.createDaemonBridgeTelemetry();
     daemonTelemetry.metrics = {
@@ -2043,7 +2061,7 @@ export async function runQwenServe(
           },
         );
       },
-      promptQueueWait: core.recordDaemonPromptQueueWait,
+      promptQueueWait: recordPromptQueueWait,
       promptDuration: core.recordDaemonPromptDuration,
       cancelled: core.recordDaemonCancel,
     };
@@ -2249,6 +2267,15 @@ export async function runQwenServe(
       getChannelWorkerSnapshot,
       getPerfSnapshot: () => ({
         eventLoop: currentDaemonEventLoopMonitor.snapshot(),
+        promptQueueWait: {
+          count: promptQueueWaitStats.count,
+          meanMs:
+            promptQueueWaitStats.count === 0
+              ? 0
+              : promptQueueWaitStats.totalMs / promptQueueWaitStats.count,
+          maxMs: promptQueueWaitStats.maxMs,
+          lastMs: promptQueueWaitStats.lastMs,
+        },
         pipe: {
           inbound: { ...pipeStats.inbound },
           outbound: { ...pipeStats.outbound },

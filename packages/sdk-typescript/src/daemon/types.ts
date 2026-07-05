@@ -271,6 +271,25 @@ export interface DaemonStatusReport {
       enabled: boolean;
       rejectedSinceStart: Record<string, number>;
     };
+    /** Optional daemon-process performance counters. */
+    perf?: {
+      eventLoop: {
+        meanMs: number;
+        p50Ms: number;
+        p99Ms: number;
+        maxMs: number;
+      };
+      promptQueueWait?: {
+        count: number;
+        meanMs: number;
+        maxMs: number;
+        lastMs: number | null;
+      };
+      pipe: {
+        inbound: { count: number; totalBytes: number; maxBytes: number };
+        outbound: { count: number; totalBytes: number; maxBytes: number };
+      };
+    };
     /**
      * Prompt/session activity counters. Optional because this is additive to
      * v=1; daemons predating it omit the sub-object. `lastActivityAt`/
@@ -278,6 +297,8 @@ export interface DaemonStatusReport {
      */
     activity?: {
       activePrompts: number;
+      pendingPrompts?: number;
+      queuedPrompts?: number;
       lastActivityAt: string | null;
       idleSinceMs: number | null;
     };
