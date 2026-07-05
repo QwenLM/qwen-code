@@ -89,7 +89,17 @@ export type ToolHeaderExtraRenderer = (
 export type WelcomeHeaderRenderer = (props: WelcomeHeaderProps) => ReactNode;
 export type WelcomeFooterRenderer = (props: WelcomeHeaderProps) => ReactNode;
 
-export type WebShellComposerTagKind = 'extension' | 'mcp' | 'file' | 'skill';
+export type WebShellBuiltinComposerTagKind =
+  | 'extension'
+  | 'mcp'
+  | 'file'
+  | 'skill';
+
+export type WebShellComposerTagKind =
+  | WebShellBuiltinComposerTagKind
+  | (string & {});
+
+export type WebShellComposerTagIconMap = Readonly<Record<string, string>>;
 
 export interface WebShellComposerTag {
   id: string;
@@ -123,6 +133,7 @@ export interface WebShellAtItem {
   description?: string;
   detail?: string;
   insertText?: string;
+  composerTag?: WebShellComposerTag;
 }
 
 export interface WebShellAtProvider {

@@ -21,7 +21,11 @@ type MockConnection = {
 };
 
 type ChatEditorTestProps = {
-  onSubmit: (text: string) => boolean | void;
+  onSubmit: (
+    text: string,
+    images?: undefined,
+    commitAccepted?: () => void,
+  ) => boolean | void;
   isPreparing?: boolean;
 };
 
@@ -35,6 +39,7 @@ const {
   sidebarTokens,
   rawEnqueuePrompt,
   editorClear,
+  editorCommit,
 } = vi.hoisted(() => {
   const connection: MockConnection = {
     status: 'connected',
@@ -94,6 +99,7 @@ const {
     sidebarTokens: [] as Array<number | undefined>,
     rawEnqueuePrompt: vi.fn(() => true),
     editorClear: vi.fn(),
+    editorCommit: vi.fn(),
   };
 });
 
@@ -171,7 +177,8 @@ vi.mock('./components/ChatEditor', async () => {
         {
           'data-testid': 'submit',
           'data-preparing': props.isPreparing ? 'true' : 'false',
-          onClick: () => props.onSubmit(testState.prompt),
+          onClick: () =>
+            props.onSubmit(testState.prompt, undefined, editorCommit),
           type: 'button',
         },
         'submit',
@@ -319,6 +326,7 @@ beforeEach(() => {
   sidebarTokens.length = 0;
   rawEnqueuePrompt.mockClear();
   editorClear.mockClear();
+  editorCommit.mockClear();
   mockFollowup.clear.mockClear();
   for (const value of Object.values(mockSessionActions)) {
     if (typeof value === 'function' && 'mockClear' in value) value.mockClear();
@@ -376,7 +384,8 @@ describe('App session callbacks', () => {
       'hello',
       expect.objectContaining({ retry: undefined }),
     );
-    expect(editorClear).toHaveBeenCalledTimes(1);
+    expect(editorCommit).toHaveBeenCalledTimes(1);
+    expect(editorClear).not.toHaveBeenCalled();
     expect(onSessionChange).toHaveBeenCalledWith({
       type: 'submit',
       sessionId: 'session-1',
@@ -417,6 +426,7 @@ describe('App session callbacks', () => {
 
     mockSessionActions.sendPrompt.mockClear();
     editorClear.mockClear();
+    editorCommit.mockClear();
     testState.prompt = 'blocked';
     await clickSubmit(container);
     await flush();
@@ -424,6 +434,7 @@ describe('App session callbacks', () => {
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(mockFollowup.clear).toHaveBeenCalledTimes(1);
     expect(editorClear).toHaveBeenCalledTimes(0);
+    expect(editorCommit).toHaveBeenCalledTimes(0);
     expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
     expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
 
@@ -462,6 +473,7 @@ describe('App session callbacks', () => {
     await clickSubmit(container);
     expect(rawEnqueuePrompt).not.toHaveBeenCalled();
     expect(editorClear).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
 
     await act(async () => {
       approve?.();
@@ -479,7 +491,8 @@ describe('App session callbacks', () => {
       prompt: 'queued',
       queued: true,
     });
-    expect(editorClear).toHaveBeenCalledTimes(1);
+    expect(editorCommit).toHaveBeenCalledTimes(1);
+    expect(editorClear).not.toHaveBeenCalled();
   });
 
   it('cancels queued submissions when onSubmitBefore rejects', async () => {
@@ -495,6 +508,25 @@ describe('App session callbacks', () => {
     await flush();
 
     expect(rawEnqueuePrompt).not.toHaveBeenCalled();
+    expect(editorClear).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
+  });
+
+  it('keeps daemon-bound slash command drafts when onSubmitBefore rejects', async () => {
+    const onSubmitBefore = vi.fn().mockRejectedValue(new Error('blocked'));
+    const { container } = renderApp({ onSubmitBefore });
+    await flush();
+
+    testState.prompt = '/goal ship it';
+    await clickSubmit(container);
+    await flush();
+
+    expect(onSubmitBefore).toHaveBeenCalledWith({
+      sessionId: 'session-1',
+      prompt: '/goal ship it',
+    });
+    expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
+    expect(editorCommit).not.toHaveBeenCalled();
     expect(editorClear).not.toHaveBeenCalled();
   });
 
