@@ -30,7 +30,10 @@ import { checkForUpdates } from './utils/updateCheck.js';
 import { disableKittyProtocol } from './utils/kittyProtocolDetector.js';
 import { installTerminalRedrawOptimizer } from './utils/terminalRedrawOptimizer.js';
 import { installSynchronizedOutput } from './utils/synchronizedOutput.js';
-import { shouldUseVirtualViewport } from './utils/terminal-buffer.js';
+import {
+  isInteractiveTerminal,
+  shouldUseVirtualViewport,
+} from './utils/terminal-buffer.js';
 import { handleAutoUpdate } from '../utils/handleAutoUpdate.js';
 import { registerCleanup } from '../utils/cleanup.js';
 import { stopAndGetCapturedInput } from '../utils/earlyInputCapture.js';
@@ -175,6 +178,7 @@ export async function startInteractiveUI(
   const useVP = shouldUseVirtualViewport(
     settings.merged.ui?.useTerminalBuffer,
     config.getScreenReader(),
+    isInteractiveTerminal(),
   );
   const instance = render(
     process.env['DEBUG'] ? (

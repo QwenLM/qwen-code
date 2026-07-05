@@ -116,7 +116,10 @@ import { useAuthCommand } from './auth/useAuth.js';
 import { useEditorSettings } from './hooks/useEditorSettings.js';
 import { usePreferredEditor } from './hooks/usePreferredEditor.js';
 import { useSettingsCommand } from './hooks/useSettingsCommand.js';
-import { shouldUseVirtualViewport } from './utils/terminal-buffer.js';
+import {
+  isInteractiveTerminal,
+  shouldUseVirtualViewport,
+} from './utils/terminal-buffer.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
@@ -970,6 +973,7 @@ export const AppContainer = (props: AppContainerProps) => {
     shouldUseVirtualViewport(
       settings.merged.ui?.useTerminalBuffer,
       config.getScreenReader(),
+      isInteractiveTerminal(),
     ),
   );
   const refreshStatic = useCallback(() => {

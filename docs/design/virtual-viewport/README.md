@@ -141,19 +141,35 @@ ui: {
 }
 ```
 
-`MainContent.tsx` reads the setting and switches paths:
+`AppContainer.tsx` freezes the startup decision so it stays in sync with
+Ink's `alternateScreen` lifetime:
 
 ```tsx
-const useTerminalBuffer = uiState.settings?.ui?.useTerminalBuffer ?? true;
+const [useTerminalBuffer] = useState(() =>
+  shouldUseVirtualViewport(
+    settings.merged.ui?.useTerminalBuffer,
+    config.getScreenReader(),
+    isInteractiveTerminal(),
+  ),
+);
+```
 
-if (useTerminalBuffer) {
+`MainContent.tsx` then reads the frozen UI state and switches paths:
+
+```tsx
+const useVirtualScroll = uiState.useTerminalBuffer;
+
+if (useVirtualScroll) {
   return <ScrollableList .../>; // virtualized
 }
 
 return <Static .../>; // existing path, untouched
 ```
 
-The legacy `<Static>` path stays available for users who explicitly opt out.
+The legacy `<Static>` path stays available for users who explicitly opt out,
+for screen-reader mode, and for non-interactive output such as piped stdout or
+CI. Because the decision controls Ink's alternate screen, changes to
+`ui.useTerminalBuffer` require a restart.
 
 ## 6. Key adaptations from gemini-cli source
 

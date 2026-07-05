@@ -207,9 +207,15 @@ describe('AppContainer State Management', () => {
   const mockedUseLoadingIndicator = useLoadingIndicator as Mock;
   const mockedUseTerminalSize = useTerminalSize as Mock;
   const mockedUseKeypress = useKeypress as Mock;
+  let originalStdoutIsTTY: boolean | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    originalStdoutIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
 
     // Initialize mock stdout for terminal title tests
     mockStdout = { write: vi.fn() };
@@ -412,6 +418,14 @@ describe('AppContainer State Management', () => {
   });
 
   afterEach(() => {
+    if (originalStdoutIsTTY === undefined) {
+      delete (process.stdout as { isTTY?: unknown }).isTTY;
+    } else {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: originalStdoutIsTTY,
+        configurable: true,
+      });
+    }
     cleanup();
   });
 

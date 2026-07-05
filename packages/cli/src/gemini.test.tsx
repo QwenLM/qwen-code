@@ -1263,13 +1263,27 @@ describe('startInteractiveUI', () => {
   }));
 
   let initialExitListeners: NodeJS.ExitListener[] = [];
+  let originalStdoutIsTTY: boolean | undefined;
 
   beforeEach(() => {
     vi.clearAllMocks();
+    originalStdoutIsTTY = process.stdout.isTTY;
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: true,
+      configurable: true,
+    });
     initialExitListeners = process.listeners('exit') as NodeJS.ExitListener[];
   });
 
   afterEach(() => {
+    if (originalStdoutIsTTY === undefined) {
+      delete (process.stdout as { isTTY?: unknown }).isTTY;
+    } else {
+      Object.defineProperty(process.stdout, 'isTTY', {
+        value: originalStdoutIsTTY,
+        configurable: true,
+      });
+    }
     const currentExitListeners = process.listeners(
       'exit',
     ) as NodeJS.ExitListener[];
@@ -1338,6 +1352,33 @@ describe('startInteractiveUI', () => {
     await startInteractiveUI(
       mockConfig,
       legacySettings,
+      mockStartupWarnings,
+      mockWorkspaceRoot,
+      mockInitializationResult,
+    );
+
+    const [, options] = renderSpy.mock.calls[0];
+    expect(options).toMatchObject({ alternateScreen: false });
+  });
+
+  it('should not use alternate screen when stdout is not interactive', async () => {
+    Object.defineProperty(process.stdout, 'isTTY', {
+      value: false,
+      configurable: true,
+    });
+    const { render } = await import('ink');
+    const renderSpy = vi.mocked(render);
+
+    const mockInitializationResult = {
+      authError: null,
+      themeError: null,
+      shouldOpenAuthDialog: false,
+      geminiMdFileCount: 0,
+    };
+
+    await startInteractiveUI(
+      mockConfig,
+      mockSettings,
       mockStartupWarnings,
       mockWorkspaceRoot,
       mockInitializationResult,
