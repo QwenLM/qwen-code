@@ -17,12 +17,33 @@ const specs = {
     outputs: ['decision.json'],
     invocation: (o) => `/autofix assess-candidates --workdir ${o.workdir}`,
   },
+  'design-solution': {
+    inputs: ['candidates.json', 'decision.json'],
+    outputs: ['design.md'],
+    required: ['issue'],
+    invocation: (o) =>
+      `/autofix design-solution --issue ${o.issue} --workdir ${o.workdir}`,
+  },
+  'review-design': {
+    inputs: ['design.md'],
+    outputs: ['design-review.md'],
+    required: ['issue'],
+    invocation: (o) =>
+      `/autofix review-design --issue ${o.issue} --workdir ${o.workdir}`,
+  },
   'develop-issue': {
     inputs: ['candidates.json', 'decision.json'],
     outputs: ['e2e-report.md', 'pr-title.txt', 'pr-body.md'],
     required: ['issue'],
     invocation: (o) =>
       `/autofix develop-issue --issue ${o.issue} --workdir ${o.workdir}`,
+  },
+  'repair-verification': {
+    inputs: ['verification-failure.md'],
+    outputs: [],
+    required: ['issue'],
+    invocation: (o) =>
+      `/autofix repair-verification --issue ${o.issue} --workdir ${o.workdir}`,
   },
   'address-review': {
     inputs: ['feedback.md'],
@@ -92,7 +113,9 @@ const options = {
 };
 const spec = specs[options.mode];
 if (!spec)
-  fail('--mode must be assess-candidates, develop-issue, or address-review');
+  fail(
+    `--mode must be one of: ${Object.keys(specs).join(', ')}`,
+  );
 if (!['true', 'false'].includes(options.conflict)) {
   fail('--conflict must be true or false');
 }

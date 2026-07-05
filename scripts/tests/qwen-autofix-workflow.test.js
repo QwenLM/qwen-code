@@ -506,7 +506,11 @@ describe('qwen-autofix workflow', () => {
     expect(skill).toContain('name: autofix');
     for (const requiredText of [
       'assess-candidates',
+      'design-solution',
+      'review-design',
       'develop-issue',
+      'repair-verification',
+      'cross-review',
       'address-review',
       'untrusted input',
       'Do not push, comment, create pull requests',
@@ -523,6 +527,9 @@ describe('qwen-autofix workflow', () => {
     }
     for (const filename of [
       'decision.json',
+      'design.md',
+      'design-review.md',
+      'verification-failure.md',
       'pr-title.txt',
       'pr-body.md',
       'e2e-report.md',
@@ -583,6 +590,35 @@ describe('qwen-autofix workflow', () => {
     expect(stdout).toContain(
       '/autofix address-review --pr 5678 --issue 1234 --workdir /tmp/autofix-review-5678 --conflict false --base main',
     );
+  });
+
+  it('builds prompts for pipeline phases: design, review-design, repair', () => {
+    const cases = [
+      { mode: 'design-solution', phase: 'Phase 2: design-solution' },
+      { mode: 'review-design', phase: 'Phase 3: review-design' },
+      { mode: 'repair-verification', phase: 'Phase 6: repair-verification' },
+    ];
+    for (const { mode, phase } of cases) {
+      const stdout = execFileSync(
+        process.execPath,
+        [
+          autofixRunnerScriptPath,
+          '--mode',
+          mode,
+          '--issue',
+          '1234',
+          '--workdir',
+          '/tmp/autofix',
+          '--print-prompt',
+        ],
+        { encoding: 'utf8' },
+      );
+      expect(stdout).toContain(`Mode: ${mode}`);
+      expect(stdout).toContain(
+        `/autofix ${mode} --issue 1234 --workdir /tmp/autofix`,
+      );
+      expect(stdout).toContain(phase);
+    }
   });
 
   it('allows non-package fixes after deterministic verification', () => {
