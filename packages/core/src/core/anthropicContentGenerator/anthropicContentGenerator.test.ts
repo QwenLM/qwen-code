@@ -12,6 +12,10 @@ import type {
 } from '@google/genai';
 import { FinishReason, GenerateContentResponse } from '@google/genai';
 import type { ContentGeneratorConfig } from '../contentGenerator.js';
+import {
+  DEFAULT_TIMEOUT,
+  DISABLED_REQUEST_TIMEOUT_MS,
+} from '../openaiContentGenerator/constants.js';
 
 // Mock the request tokenizer module BEFORE importing the class that uses it.
 const mockTokenizer = {
@@ -195,6 +199,45 @@ describe('AnthropicContentGenerator', () => {
     expect(headers['x-app']).toBeUndefined();
     expect(anthropicState.constructorOptions?.['apiKey']).toBe('test-key');
     expect(anthropicState.constructorOptions?.['authToken']).toBeNull();
+  });
+
+  it('disables the request timeout when configured to 0', async () => {
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-opus-4-7',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.anthropic.com',
+        timeout: 0,
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    expect(anthropicState.constructorOptions?.['timeout']).toBe(
+      DISABLED_REQUEST_TIMEOUT_MS,
+    );
+  });
+
+  it('falls back to the default request timeout when unset', async () => {
+    const { AnthropicContentGenerator } = await importGenerator();
+    void new AnthropicContentGenerator(
+      {
+        model: 'claude-opus-4-7',
+        apiKey: 'test-key',
+        baseUrl: 'https://api.anthropic.com',
+        maxRetries: 2,
+        samplingParams: {},
+        schemaCompliance: 'auto',
+      },
+      mockConfig,
+    );
+
+    expect(anthropicState.constructorOptions?.['timeout']).toBe(
+      DEFAULT_TIMEOUT,
+    );
   });
 
   it('treats *.anthropic.com subdomains as Anthropic-native', async () => {

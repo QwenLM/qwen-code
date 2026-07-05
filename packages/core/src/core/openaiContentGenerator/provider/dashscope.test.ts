@@ -18,7 +18,11 @@ import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
 import { AuthType } from '../../contentGenerator.js';
 import type { ChatCompletionToolWithCache } from './types.js';
-import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
+import {
+  DEFAULT_TIMEOUT,
+  DEFAULT_MAX_RETRIES,
+  DISABLED_REQUEST_TIMEOUT_MS,
+} from '../constants.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
@@ -48,19 +52,18 @@ vi.mock('../../../utils/runtimeFetchOptions.js', () => ({
   buildRuntimeFetchOptions: vi.fn(),
 }));
 
-// Mock DASHSCOPE_PROXY_BASE_URL so tests can control its value
-vi.mock('../constants.js', () => ({
-  DEFAULT_TIMEOUT: 120000,
-  DEFAULT_MAX_RETRIES: 3,
-  DEFAULT_OPENAI_BASE_URL: 'https://api.openai.com/v1',
-  DEFAULT_DASHSCOPE_BASE_URL:
-    'https://dashscope.aliyuncs.com/compatible-mode/v1',
-  DEFAULT_DEEPSEEK_BASE_URL: 'https://api.deepseek.com/v1',
-  DEFAULT_OPEN_ROUTER_BASE_URL: 'https://openrouter.ai/api/v1',
-  get DASHSCOPE_PROXY_BASE_URL() {
-    return process.env['DASHSCOPE_PROXY_BASE_URL'];
-  },
-}));
+// Mock DASHSCOPE_PROXY_BASE_URL so tests can control its value, while
+// delegating every other constant (timeouts, sentinel, resolveRequestTimeout)
+// to the real module so the mock cannot drift from the implementation.
+vi.mock('../constants.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../constants.js')>();
+  return {
+    ...actual,
+    get DASHSCOPE_PROXY_BASE_URL() {
+      return process.env['DASHSCOPE_PROXY_BASE_URL'];
+    },
+  };
+});
 
 describe('DashScopeOpenAICompatibleProvider', () => {
   let provider: DashScopeOpenAICompatibleProvider;
@@ -503,6 +506,18 @@ describe('DashScopeOpenAICompatibleProvider', () => {
           timeout: DEFAULT_TIMEOUT,
           maxRetries: DEFAULT_MAX_RETRIES,
           defaultHeaders: expect.any(Object),
+        }),
+      );
+    });
+
+    it('should disable the timeout when configured to 0', () => {
+      mockContentGeneratorConfig.timeout = 0;
+
+      provider.buildClient();
+
+      expect(OpenAI).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeout: DISABLED_REQUEST_TIMEOUT_MS,
         }),
       );
     });

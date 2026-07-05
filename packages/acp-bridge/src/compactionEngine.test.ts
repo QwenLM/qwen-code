@@ -652,6 +652,52 @@ describe('TurnBoundaryCompactionEngine', () => {
 });
 
 describe('EventBus + CompactionEngine integration', () => {
+  it('seedReplayEvents advances replay state without populating the ring', async () => {
+    const engine = new TurnBoundaryCompactionEngine();
+    const bus = new EventBus(100, undefined, engine);
+
+    bus.seedReplayEvents([
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'user_message_chunk',
+            content: { type: 'text', text: 'loaded' },
+          },
+        },
+        _meta: { serverTimestamp: 1_700_000_000_000 },
+      },
+      {
+        type: 'session_update',
+        data: {
+          update: {
+            sessionUpdate: 'agent_message_chunk',
+            content: { type: 'text', text: 'history' },
+          },
+        },
+      },
+    ]);
+
+    const snapshot = bus.snapshotReplay()!;
+    expect(snapshot.lastEventId).toBe(2);
+    expect(snapshot.liveJournal).toHaveLength(2);
+    expect(snapshot.liveJournal[0]!._meta?.['serverTimestamp']).toBe(
+      1_700_000_000_000,
+    );
+
+    const iterator = bus.subscribe({ lastEventId: 0 })[Symbol.asyncIterator]();
+    const first = await iterator.next();
+    expect(first.value).toMatchObject({
+      type: 'state_resync_required',
+      data: {
+        reason: 'seeded_replay_not_in_ring',
+        lastDeliveredId: 0,
+        earliestAvailableId: 3,
+      },
+    });
+    await iterator.return?.();
+  });
+
   it('snapshotReplay returns compacted state after publish + turn_complete', () => {
     const engine = new TurnBoundaryCompactionEngine();
     const bus = new EventBus(100, undefined, engine);

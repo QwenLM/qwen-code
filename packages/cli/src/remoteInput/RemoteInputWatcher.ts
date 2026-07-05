@@ -158,10 +158,19 @@ export class RemoteInputWatcher {
 
     if (currentSize <= this.bytesRead) return Promise.resolve();
 
-    const nextConsumedPrefixHash = this.hashFilePrefix(currentSize);
+    const consumeUntil = this.findLastCompleteRecordEnd(
+      this.bytesRead,
+      currentSize,
+    );
+    if (consumeUntil === null) {
+      return Promise.resolve();
+    }
+
+    const nextConsumedPrefixHash = this.hashFilePrefix(consumeUntil);
     this.reading = true;
     const stream = createReadStream(this.filePath, {
       start: this.bytesRead,
+      end: consumeUntil - 1,
       encoding: 'utf-8',
     });
     const rl = createInterface({ input: stream, crlfDelay: Infinity });
@@ -207,7 +216,7 @@ export class RemoteInputWatcher {
 
     return new Promise<void>((resolve) => {
       rl.on('close', () => {
-        this.bytesRead = currentSize;
+        this.bytesRead = consumeUntil;
         if (nextConsumedPrefixHash !== null) {
           this.consumedPrefixHash = nextConsumedPrefixHash;
         }
@@ -216,6 +225,41 @@ export class RemoteInputWatcher {
         resolve();
       });
     });
+  }
+
+  private findLastCompleteRecordEnd(start: number, end: number): number | null {
+    if (end <= start) return null;
+
+    let fd: number | null = null;
+    try {
+      fd = openSync(this.filePath, 'r');
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, end - start));
+      let remaining = end - start;
+      let position = start;
+      let lastLineBreak = -1;
+
+      while (remaining > 0) {
+        const bytesToRead = Math.min(buffer.length, remaining);
+        const bytesRead = readSync(fd, buffer, 0, bytesToRead, position);
+        if (bytesRead <= 0) break;
+        for (let i = 0; i < bytesRead; i++) {
+          if (buffer[i] === 0x0a) {
+            lastLineBreak = position + i;
+          }
+        }
+        remaining -= bytesRead;
+        position += bytesRead;
+      }
+
+      return lastLineBreak >= start ? lastLineBreak + 1 : null;
+    } catch (err) {
+      debugLogger.warn('RemoteInput: failed to scan complete records:', err);
+      return null;
+    } finally {
+      if (fd !== null) {
+        closeSync(fd);
+      }
+    }
   }
 
   private hasConsumedPrefixChanged(): boolean {
