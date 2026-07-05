@@ -36,6 +36,7 @@ import {
   buildSkillLlmContent,
   applySkillAllowedTools,
   collectAvailableSkillEntries,
+  clearCollectedSkillEntriesCache,
 } from './skill-utils.js';
 
 /**
@@ -170,6 +171,10 @@ export class SkillTool extends BaseDeclarativeTool<SkillParams, ToolResult> {
    */
   async refreshSkills(): Promise<void> {
     try {
+      // Invalidate the memoization cache so this refresh picks up any
+      // skill-set mutations (file edits, conditional activations, config
+      // toggles) that occurred since the last collection.
+      clearCollectedSkillEntriesCache(this.skillManager);
       const collected = await collectAvailableSkillEntries(
         this.skillManager,
         this.config,

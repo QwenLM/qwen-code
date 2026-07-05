@@ -20,6 +20,7 @@ import express, {
 } from 'express';
 import { writeStderrLine, writeStdoutLine } from '../utils/stdioHelpers.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
+import type { NdJsonMessageObservation } from '@qwen-code/acp-bridge/ndJsonStream';
 import { getDeviceFlowRegistry } from './auth/device-flow.js';
 import {
   loadServeFastPathSettings,
@@ -84,6 +85,7 @@ import {
   type DaemonStatusResponse,
 } from './daemon-status.js';
 import { DaemonMetricsRing, computeCpuPercent } from './daemon-metrics-ring.js';
+import { createLargePipeFrameObserver } from './large-pipe-frame-observer.js';
 import type {
   ChannelWorkerSupervisor,
   CreateChannelWorkerSupervisorOptions,
@@ -105,6 +107,22 @@ const QWEN_SERVE_PROMPT_DEADLINE_MS_ENV = 'QWEN_SERVE_PROMPT_DEADLINE_MS';
 const QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS_ENV =
   'QWEN_SERVE_WRITER_IDLE_TIMEOUT_MS';
 const SHUTDOWN_FORCE_CLOSE_MS = 5_000;
+
+function daemonPipeDirection(
+  direction: NdJsonMessageObservation['direction'],
+): 'inbound' | 'outbound' {
+  switch (direction) {
+    case 'sent':
+      return 'outbound';
+    case 'received':
+      return 'inbound';
+    default: {
+      const exhaustive: never = direction;
+      return exhaustive;
+    }
+  }
+}
+
 // Daemon Status metrics ring: seal one bucket every SAMPLE_MS and retain
 // CAPACITY of them (5s × 180 ≈ 15 min of history), matching the dashboard's
 // own 5s poll so each poll surfaces roughly one fresh bucket.
@@ -2059,6 +2077,10 @@ export async function runQwenServe(
       core.recordDaemonPipeMessage(direction, bytes);
       metricsRing.recordPipe(direction, bytes);
     };
+    const observeLargePipeFrame = createLargePipeFrameObserver({
+      daemonLog,
+      emitTelemetryLog: core.emitDaemonLog,
+    });
     const recordPromptQueueWait = (durationMs: number): void => {
       promptQueueWaitStats.count += 1;
       promptQueueWaitStats.totalMs += durationMs;
@@ -2179,6 +2201,12 @@ export async function runQwenServe(
       pipeHooks: {
         onMessageSent: (bytes) => recordPipeMessage('outbound', bytes),
         onMessageReceived: (bytes) => recordPipeMessage('inbound', bytes),
+        onMessageObserved: ({ direction, bytes, message }) =>
+          observeLargePipeFrame({
+            direction: daemonPipeDirection(direction),
+            bytes,
+            message,
+          }),
       },
       ...(opts.experimentalLsp === true
         ? { extraArgs: ['--experimental-lsp'] }
