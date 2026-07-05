@@ -13,16 +13,15 @@
 .svg {
   display: block;
   width: 100%;
-  height: 52px;
+  /* The metrics tab now renders in a full-height panel (not the old 70vh
+     dialog), so give each plot real vertical detail instead of the old 52px
+     sliver — the taller curve is where most of the "use the height" win comes
+     from. (The former fullscreen-only 120px override is gone: the panel layout
+     can't carry `data-dialog-fullscreen`, and 140px is the baseline now.) */
+  height: 140px;
   overflow: visible;
   cursor: crosshair;
   touch-action: none;
-}
-
-/* Taller plot when the dialog is fullscreen, so the enlarged cards show more
-   vertical detail. The DialogShell body carries `data-dialog-fullscreen`. */
-:global([data-dialog-fullscreen]) .svg {
-  height: 120px;
 }
 
 /* Vertical hover cursor: the time line the tooltip reads from. */
