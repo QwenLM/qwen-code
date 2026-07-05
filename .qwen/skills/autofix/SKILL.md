@@ -10,7 +10,21 @@ that workflow. The workflow owns trigger routing, GitHub context collection,
 credentials, checkout, sandbox setup, verification, pushes, and comments. This
 skill owns the agent decision rules for the three model-driven steps.
 
-The raw invocation selects one mode:
+The bundled runner is the shared entrypoint for workflow and local debugging:
+
+```bash
+node .qwen/skills/autofix/scripts/run-agent.mjs --mode assess-candidates --workdir /tmp/autofix --print-prompt
+node .qwen/skills/autofix/scripts/run-agent.mjs --mode develop-issue --issue 1234 --workdir /tmp/autofix --check-inputs --print-prompt
+node .qwen/skills/autofix/scripts/run-agent.mjs --mode address-review --pr 5678 --issue 1234 --workdir /tmp/autofix-review-5678 --conflict false --base main --print-prompt
+```
+
+`--print-prompt` expands this skill into the exact headless prompt and exits
+without model calls or GitHub writes. Remove `--print-prompt` to run `qwen
+--yolo --prompt` with the same prompt; the runner writes `<workdir>/failure.md`
+when qwen exits non-zero. `--check-inputs` verifies the expected workdir files
+before printing or running.
+
+The runner builds a raw invocation that selects one mode:
 
 ```text
 /autofix assess-candidates --workdir /tmp/autofix

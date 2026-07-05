@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { describe, expect, it } from 'vitest';
 
@@ -14,10 +15,9 @@ const sandboxImageResolverScript = readFileSync(
   '.github/scripts/resolve-sandbox-image.mjs',
   'utf8',
 );
-const autofixPromptBuilderScriptPath =
-  '.github/scripts/build-autofix-prompt.mjs';
-const autofixPromptBuilderScript = existsSync(autofixPromptBuilderScriptPath)
-  ? readFileSync(autofixPromptBuilderScriptPath, 'utf8')
+const autofixRunnerScriptPath = '.qwen/skills/autofix/scripts/run-agent.mjs';
+const autofixRunnerScript = existsSync(autofixRunnerScriptPath)
+  ? readFileSync(autofixRunnerScriptPath, 'utf8')
   : '';
 const checkBotCredentialsStep =
   workflow.match(
@@ -486,13 +486,10 @@ describe('qwen-autofix workflow', () => {
     ];
     for (const step of qwenSteps) {
       expect(step.length).toBeGreaterThan(0);
-      expect(step).toContain('qwen --yolo --prompt "${PROMPT}"');
-      expect(step).toContain('AUTOFIX_INVOCATION:');
-      expect(step).toContain(
-        'node .github/scripts/build-autofix-prompt.mjs "${AUTOFIX_INVOCATION}"',
-      );
-      expect(step).toContain('qwen_status=$?');
-      expect(step).toContain('"${WORKDIR}/failure.md"');
+      expect(step).toContain('node .qwen/skills/autofix/scripts/run-agent.mjs');
+      expect(step).not.toContain('qwen --yolo --prompt "${PROMPT}"');
+      expect(step).not.toContain('AUTOFIX_INVOCATION:');
+      expect(step).not.toContain('qwen_status=$?');
       expect(step).not.toMatch(/PROMPT: \|-\n\s+\/autofix /);
       expect(step).not.toContain('for attempt in 1 2; do');
       expect(step).not.toContain('Qwen Code failed on attempt');
@@ -545,22 +542,28 @@ describe('qwen-autofix workflow', () => {
       expect(skill).toContain(filename);
     }
 
-    expect(assessCandidatesStep).toContain(
+    expect(assessCandidatesStep).toContain('--mode assess-candidates');
+    expect(developFixStep).toContain('--mode develop-issue');
+    expect(developFixStep).toContain('--issue "${ISSUE}"');
+    expect(triageAndAddressStep).toContain('--mode address-review');
+    expect(triageAndAddressStep).toContain('--pr "${PR}"');
+    expect(triageAndAddressStep).toContain('--issue "${ISSUE}"');
+    expect(triageAndAddressStep).toContain('--conflict "${CONFLICT}"');
+    expect(triageAndAddressStep).toContain('--base "${BASE}"');
+    expect(skill).toContain(
       '/autofix assess-candidates --workdir /tmp/autofix',
     );
-    expect(developFixStep).toContain(
-      '/autofix develop-issue --issue ${{ steps.decision.outputs.go_issue }} --workdir /tmp/autofix',
+    expect(skill).toContain(
+      '/autofix develop-issue --issue 1234 --workdir /tmp/autofix',
     );
-    expect(triageAndAddressStep).toContain(
-      '/autofix address-review --pr ${{ matrix.target.pr }} --issue ${{ matrix.target.issue }} --workdir /tmp/autofix-review-${{ matrix.target.pr }} --conflict ${{ steps.prepare.outputs.conflict }} --base main',
+    expect(skill).toContain(
+      '/autofix address-review --pr 5678 --issue 1234 --workdir /tmp/autofix-review-5678 --conflict false --base main',
     );
-    expect(autofixPromptBuilderScript).toContain(
-      'Base directory for this skill:',
-    );
-    expect(autofixPromptBuilderScript).toContain(
-      '.qwen/skills/autofix/SKILL.md',
-    );
-    expect(autofixPromptBuilderScript).toContain('process.argv.slice(2).join');
+    expect(autofixRunnerScript).toContain('Base directory for this skill:');
+    expect(autofixRunnerScript).toContain('SKILL.md');
+    expect(autofixRunnerScript).toContain('--print-prompt');
+    expect(autofixRunnerScript).toContain('--check-inputs');
+    expect(workflow).not.toContain('.github/scripts/build-autofix-prompt.mjs');
 
     for (const step of [
       assessCandidatesStep,
@@ -571,6 +574,54 @@ describe('qwen-autofix workflow', () => {
       expect(step).not.toContain('## Workflow');
       expect(step).not.toContain('## Task');
     }
+  });
+
+  it('builds local debug prompts from structured autofix runner options', () => {
+    const stdout = execFileSync(
+      process.execPath,
+      [
+        autofixRunnerScriptPath,
+        '--mode',
+        'address-review',
+        '--pr',
+        '5678',
+        '--issue',
+        '1234',
+        '--workdir',
+        '/tmp/autofix-review-5678',
+        '--conflict',
+        'false',
+        '--base',
+        'main',
+        '--print-prompt',
+      ],
+      { encoding: 'utf8' },
+    );
+
+    expect(stdout).toContain('Base directory for this skill:');
+    expect(stdout).toContain('Mode: address-review');
+    expect(stdout).toContain('Invocation:');
+    expect(stdout).toContain(
+      '/autofix address-review --pr 5678 --issue 1234 --workdir /tmp/autofix-review-5678 --conflict false --base main',
+    );
+  });
+
+  it('fails local debug invocation before running qwen when required args are missing', () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        autofixRunnerScriptPath,
+        '--mode',
+        'develop-issue',
+        '--workdir',
+        '/tmp/autofix',
+        '--print-prompt',
+      ],
+      { encoding: 'utf8' },
+    );
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('--issue is required for develop-issue');
   });
 
   it('allows non-package fixes after deterministic verification', () => {

@@ -470,7 +470,6 @@ jobs:
                 "sandbox": "docker"
               }
             }
-          AUTOFIX_INVOCATION: '/autofix assess-candidates --workdir /tmp/autofix'
         run: |-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
@@ -480,19 +479,9 @@ jobs:
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           rm -f "${WORKDIR}/decision.json"
-          PROMPT="$(node .github/scripts/build-autofix-prompt.mjs "${AUTOFIX_INVOCATION}")"
-          set +e
-          qwen --yolo --prompt "${PROMPT}"
-          qwen_status=$?
-          set -e
-          if [[ "${qwen_status}" -ne 0 ]]; then
-            {
-              echo "Qwen exited with status ${qwen_status} during assess-candidates."
-              echo
-              echo 'See the Assess candidates step logs for model/tool output.'
-            } > "${WORKDIR}/failure.md"
-            exit "${qwen_status}"
-          fi
+          node .qwen/skills/autofix/scripts/run-agent.mjs \
+            --mode assess-candidates \
+            --workdir "${WORKDIR}"
 
       - name: 'Read decision'
         id: 'decision'
@@ -637,7 +626,6 @@ jobs:
                 "sandbox": "docker"
               }
             }
-          AUTOFIX_INVOCATION: '/autofix develop-issue --issue ${{ steps.decision.outputs.go_issue }} --workdir /tmp/autofix'
         run: |-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
@@ -646,19 +634,10 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
-          PROMPT="$(node .github/scripts/build-autofix-prompt.mjs "${AUTOFIX_INVOCATION}")"
-          set +e
-          qwen --yolo --prompt "${PROMPT}"
-          qwen_status=$?
-          set -e
-          if [[ "${qwen_status}" -ne 0 ]]; then
-            {
-              echo "Qwen exited with status ${qwen_status} during develop-issue."
-              echo
-              echo 'See the Develop fix step logs for model/tool output.'
-            } > "${WORKDIR}/failure.md"
-            exit "${qwen_status}"
-          fi
+          node .qwen/skills/autofix/scripts/run-agent.mjs \
+            --mode develop-issue \
+            --issue "${ISSUE}" \
+            --workdir "${WORKDIR}"
 
       - name: 'Verification gate'
         id: 'verify'
@@ -1140,6 +1119,8 @@ jobs:
           OPENAI_MODEL: '${{ vars.QWEN_PR_REVIEW_MODEL }}'
           NO_PROXY: '127.0.0.1,localhost,::1'
           QWEN_HOME: '${{ runner.temp }}/qwen-autofix-review-home'
+          CONFLICT: '${{ steps.prepare.outputs.conflict }}'
+          BASE: 'main'
           SETTINGS_JSON: |-
             {
               "maxSessionTurns": 400,
@@ -1165,7 +1146,6 @@ jobs:
                 "sandbox": "docker"
               }
             }
-          AUTOFIX_INVOCATION: '/autofix address-review --pr ${{ matrix.target.pr }} --issue ${{ matrix.target.issue }} --workdir /tmp/autofix-review-${{ matrix.target.pr }} --conflict ${{ steps.prepare.outputs.conflict }} --base main'
         run: |-
           rm -rf "${QWEN_HOME}"
           mkdir -p .qwen "${QWEN_HOME}"
@@ -1174,19 +1154,13 @@ jobs:
             exit 1
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
-          PROMPT="$(node .github/scripts/build-autofix-prompt.mjs "${AUTOFIX_INVOCATION}")"
-          set +e
-          qwen --yolo --prompt "${PROMPT}"
-          qwen_status=$?
-          set -e
-          if [[ "${qwen_status}" -ne 0 ]]; then
-            {
-              echo "Qwen exited with status ${qwen_status} during address-review."
-              echo
-              echo 'See the Triage and address step logs for model/tool output.'
-            } > "${WORKDIR}/failure.md"
-            exit "${qwen_status}"
-          fi
+          node .qwen/skills/autofix/scripts/run-agent.mjs \
+            --mode address-review \
+            --pr "${PR}" \
+            --issue "${ISSUE}" \
+            --workdir "${WORKDIR}" \
+            --conflict "${CONFLICT}" \
+            --base "${BASE}"
 
       - name: 'Verification gate'
         id: 'verify'
