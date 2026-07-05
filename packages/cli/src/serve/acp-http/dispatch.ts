@@ -11,6 +11,8 @@ import {
   BTW_MAX_INPUT_LENGTH,
   createDebugLogger,
   SessionService,
+  SessionOrganizationError,
+  type SessionGroupColor,
   BuiltinAgentRegistry,
   SubagentError,
   WorkspaceMemoryFileTooLargeError,
@@ -18,6 +20,7 @@ import {
   writeWorkspaceContextFile,
   type SessionArchiveState,
   type SubagentLevel,
+  IMAGE_CAPABILITY,
 } from '@qwen-code/qwen-code-core';
 // Import the permission error classes from the same module REST's
 // `sendPermissionVoteError` uses, so `instanceof` matches the class the bridge
@@ -86,6 +89,7 @@ import {
   InvalidCursorError,
   listWorkspaceSessionsForResponse,
 } from '../server.js';
+import { createSessionOrganizationService } from '../session-organization-helpers.js';
 import {
   archiveDaemonSessions,
   assertSessionLoadable,
@@ -148,6 +152,11 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/context`,
   `${QWEN_METHOD_NS}session/supported_commands`,
   `${QWEN_METHOD_NS}session/update_metadata`,
+  `${QWEN_METHOD_NS}session/update_organization`,
+  `${QWEN_METHOD_NS}workspace/session_groups/list`,
+  `${QWEN_METHOD_NS}workspace/session_groups/create`,
+  `${QWEN_METHOD_NS}workspace/session_groups/update`,
+  `${QWEN_METHOD_NS}workspace/session_groups/delete`,
   `${QWEN_METHOD_NS}workspace/mcp`,
   `${QWEN_METHOD_NS}workspace/skills`,
   `${QWEN_METHOD_NS}workspace/providers`,
@@ -433,6 +442,17 @@ function toRpcError(err: unknown): {
   if (err instanceof AcpParamError || err instanceof InvalidCursorError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
+  if (err instanceof SessionOrganizationError) {
+    const isServerSide = err.code === 'session_organization_store_unreadable';
+    return {
+      code: isServerSide ? RPC.INTERNAL_ERROR : RPC.INVALID_PARAMS,
+      message: err.message,
+      data: {
+        errorKind: err.code,
+        ...(err.field ? { field: err.field } : {}),
+      },
+    };
+  }
   if (err instanceof SubagentError) {
     return { code: RPC.INVALID_PARAMS, message: err.message };
   }
@@ -640,6 +660,23 @@ export class AcpDispatcher {
     };
   }
 
+  private parseBoundWorkspaceParam(params: Record<string, unknown>): string {
+    const rawWorkspace =
+      typeof params['workspaceCwd'] === 'string'
+        ? params['workspaceCwd']
+        : undefined;
+    if (rawWorkspace === undefined) {
+      return this.boundWorkspace;
+    }
+    const requestedWorkspace = canonicalizeWorkspace(
+      parseOptionalWorkspaceCwd({ cwd: rawWorkspace }, this.boundWorkspace),
+    );
+    if (requestedWorkspace !== this.boundWorkspace) {
+      throw new WorkspaceMismatchError(this.boundWorkspace, requestedWorkspace);
+    }
+    return requestedWorkspace;
+  }
+
   private parseSessionIds(params: Record<string, unknown>): string[] {
     const sessionIds = params['sessionIds'];
     if (
@@ -843,6 +880,7 @@ export class AcpDispatcher {
               this.sessionShellCommandEnabled,
             ),
           },
+          imageCapability: IMAGE_CAPABILITY,
         },
       },
     };
@@ -1076,6 +1114,7 @@ export class AcpDispatcher {
                     sessionId,
                     workspaceCwd: cwd,
                     clientId: conn.clientId,
+                    historyReplay: 'response',
                   })
                 : await this.bridge.resumeSession({
                     sessionId,
@@ -1121,13 +1160,43 @@ export class AcpDispatcher {
             return;
           }
           conn.getOrCreateSession(sessionId).clientId = restored.clientId;
+          if (method === 'session/load') {
+            conn.markInitialReplayPending(sessionId);
+          }
           conn.ownSession(sessionId);
           // ACP standard: load/resume response includes configOptions + models + modes
           const loadConfigOptions = await this.configOptionsFor(sessionId);
           const loadModels = this.extractModelState(loadConfigOptions);
           const loadModes = this.extractModeState(loadConfigOptions);
+          const loadState = restored.state ?? {};
+          const loadMeta = isObject(loadState._meta)
+            ? loadState._meta
+            : undefined;
+          const loadQwenMeta = isObject(loadMeta?.[QWEN_META_KEY])
+            ? loadMeta[QWEN_META_KEY]
+            : undefined;
+          const replayStatus =
+            method === 'session/load' && restored.partial === true
+              ? {
+                  partial: true as const,
+                  ...(typeof restored.replayError === 'string'
+                    ? { replayError: restored.replayError }
+                    : {}),
+                }
+              : undefined;
           this.replyConn(conn, id, {
-            ...(restored.state ?? {}),
+            ...loadState,
+            ...(replayStatus
+              ? {
+                  _meta: {
+                    ...(loadMeta ?? {}),
+                    [QWEN_META_KEY]: {
+                      ...(loadQwenMeta ?? {}),
+                      sessionLoadReplay: replayStatus,
+                    },
+                  },
+                }
+              : {}),
             ...(loadConfigOptions ? { configOptions: loadConfigOptions } : {}),
             ...(loadModels ? { models: loadModels } : {}),
             ...(loadModes ? { modes: loadModes } : {}),
@@ -1136,29 +1205,25 @@ export class AcpDispatcher {
         }
 
         case 'session/list': {
-          const rawWorkspace =
-            typeof params['workspaceCwd'] === 'string'
-              ? params['workspaceCwd']
-              : undefined;
-          let workspaceCwd =
-            rawWorkspace === undefined
-              ? this.boundWorkspace
-              : parseOptionalWorkspaceCwd(
-                  { cwd: rawWorkspace },
-                  this.boundWorkspace,
-                );
-          if (rawWorkspace !== undefined) {
-            const requestedWorkspace = canonicalizeWorkspace(workspaceCwd);
-            if (requestedWorkspace !== this.boundWorkspace) {
-              throw new WorkspaceMismatchError(
-                this.boundWorkspace,
-                requestedWorkspace,
-              );
-            }
-            workspaceCwd = requestedWorkspace;
-          }
+          const workspaceCwd = this.parseBoundWorkspaceParam(params);
           const cursor =
             typeof params['cursor'] === 'string' ? params['cursor'] : undefined;
+          const rawView =
+            typeof params['view'] === 'string' ? params['view'] : undefined;
+          let view: 'organized' | undefined;
+          if (rawView !== undefined) {
+            if (rawView !== 'organized') {
+              throw new AcpParamError('`view` must be "organized"');
+            }
+            view = rawView;
+          }
+          const group =
+            typeof params['group'] === 'string' ? params['group'] : undefined;
+          if (group !== undefined && view !== 'organized') {
+            throw new AcpParamError(
+              '`group` requires `view` to be "organized"',
+            );
+          }
           const meta = isObject(params['_meta']) ? params['_meta'] : undefined;
           const metaSize =
             typeof meta?.['size'] === 'number'
@@ -1185,7 +1250,7 @@ export class AcpDispatcher {
           const result = await listWorkspaceSessionsForResponse(
             this.bridge,
             workspaceCwd,
-            { cursor, size: metaSize, archiveState },
+            { cursor, size: metaSize, archiveState, view, group },
           );
           this.replyConn(conn, id, {
             sessions: result.sessions.map((s) => ({
@@ -1199,10 +1264,15 @@ export class AcpDispatcher {
               clientCount: s.clientCount,
               hasActivePrompt: s.hasActivePrompt,
               isArchived: s.isArchived === true,
+              ...(s.isPinned !== undefined ? { isPinned: s.isPinned } : {}),
+              ...(s.pinnedAt !== undefined ? { pinnedAt: s.pinnedAt } : {}),
+              ...(s.groupId !== undefined ? { groupId: s.groupId } : {}),
             })),
             ...(result.nextCursor != null
               ? { nextCursor: result.nextCursor }
               : {}),
+            ...(result.liveMergeFailed ? { liveMergeFailed: true } : {}),
+            ...(result.truncated ? { truncated: true } : {}),
           });
           return;
         }
@@ -1842,6 +1912,106 @@ export class AcpDispatcher {
             );
             this.replyConn(conn, id, result as unknown);
           });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/update_organization`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!sessionId) {
+            throw new AcpParamError('`sessionId` is required');
+          }
+          // Organization is workspace-scoped UI state. It can target persisted or
+          // archived sessions without a live ACP owner, matching the REST route.
+          if ('isPinned' in params && typeof params['isPinned'] !== 'boolean') {
+            throw new AcpParamError('`isPinned` must be a boolean');
+          }
+          if (
+            'groupId' in params &&
+            params['groupId'] !== null &&
+            typeof params['groupId'] !== 'string'
+          ) {
+            throw new AcpParamError('`groupId` must be a string or null');
+          }
+          await this.archiveCoordinator.runSharedMany([sessionId], async () => {
+            const sessionService = new SessionService(this.boundWorkspace);
+            let exists =
+              await sessionService.sessionExistsInAnyState(sessionId);
+            if (!exists) {
+              try {
+                const liveSummary = this.bridge.getSessionSummary(sessionId);
+                exists = liveSummary.workspaceCwd === this.boundWorkspace;
+              } catch {
+                exists = false;
+              }
+            }
+            if (!exists) {
+              throw new AcpParamError(`Session not found: ${sessionId}`);
+            }
+            const organization = await createSessionOrganizationService(
+              this.boundWorkspace,
+            ).updateSessionOrganization(sessionId, {
+              ...(typeof params['isPinned'] === 'boolean'
+                ? { isPinned: params['isPinned'] }
+                : {}),
+              ...('groupId' in params
+                ? { groupId: params['groupId'] as string | null }
+                : {}),
+            });
+            this.replyConn(conn, id, { sessionId, ...organization });
+          });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/session_groups/list`: {
+          const workspaceCwd = this.parseBoundWorkspaceParam(params);
+          const groups =
+            await createSessionOrganizationService(workspaceCwd).listGroups();
+          this.replyConn(conn, id, groups);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/session_groups/create`: {
+          const workspaceCwd = this.parseBoundWorkspaceParam(params);
+          const group = await createSessionOrganizationService(
+            workspaceCwd,
+          ).createGroup({
+            name: params['name'] as string,
+            color: params['color'] as SessionGroupColor,
+          });
+          this.replyConn(conn, id, { group });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/session_groups/update`: {
+          const workspaceCwd = this.parseBoundWorkspaceParam(params);
+          const groupId = String(params['groupId'] ?? '');
+          if (!groupId) {
+            throw new AcpParamError('`groupId` is required');
+          }
+          const group = await createSessionOrganizationService(
+            workspaceCwd,
+          ).updateGroup(groupId, {
+            ...('name' in params ? { name: params['name'] as string } : {}),
+            ...('color' in params
+              ? { color: params['color'] as SessionGroupColor }
+              : {}),
+            ...('order' in params ? { order: params['order'] as number } : {}),
+          });
+          this.replyConn(conn, id, { group });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}workspace/session_groups/delete`: {
+          const workspaceCwd = this.parseBoundWorkspaceParam(params);
+          const groupId = String(params['groupId'] ?? '');
+          if (!groupId) {
+            throw new AcpParamError('`groupId` is required');
+          }
+          const deleted =
+            await createSessionOrganizationService(workspaceCwd).deleteGroup(
+              groupId,
+            );
+          this.replyConn(conn, id, { deleted });
           return;
         }
 
@@ -3700,14 +3870,6 @@ export class AcpDispatcher {
     lastEventId?: number,
   ): Promise<void> {
     try {
-      // `lastEventId` (from the `Last-Event-ID` reconnect header) drives the
-      // EventBus ring replay: events with `id > lastEventId` still buffered
-      // are replayed before live events flow, recovering content frames lost
-      // in a mid-turn proxy gap (§1.8). `undefined` ⇒ live-only, as before.
-      const iterable = this.bridge.subscribeEvents(sessionId, {
-        signal,
-        ...(lastEventId !== undefined ? { lastEventId } : {}),
-      });
       // On resume, `attachSessionStream` defers id-less buffered replies (e.g. a
       // `session/prompt` result produced during the detach gap) so they land
       // AFTER the content chunks that preceded them. Each deferred reply carries
@@ -3735,6 +3897,54 @@ export class AcpDispatcher {
       // deferred replies (anchor guarantee void) instead of stranding them
       // behind an unreachable watermark — the cascading-freeze fix.
       let sawEviction = false;
+      let subscribeFromEventId = lastEventId;
+      if (conn.hasInitialReplayPending(sessionId)) {
+        const snapshot = this.bridge.getSessionReplaySnapshot(sessionId);
+        if (snapshot) {
+          const snapshotEvents = [
+            ...snapshot.compactedTurns,
+            ...snapshot.liveJournal,
+          ];
+          for (const event of snapshotEvents) {
+            if (signal.aborted) return;
+            if (typeof event.id === 'number' && event.id <= lastDeliveredId) {
+              continue;
+            }
+            conn.touch();
+            this.translateEvent(conn, sessionId, event);
+            if (typeof event.id === 'number') {
+              lastDeliveredId = event.id;
+              conn.releaseDeferredSessionReplies(sessionId, event.id);
+            }
+          }
+          if (signal.aborted) return;
+          lastDeliveredId = Math.max(lastDeliveredId, snapshot.lastEventId);
+          subscribeFromEventId = Math.max(
+            subscribeFromEventId ?? 0,
+            snapshot.lastEventId,
+          );
+        } else {
+          writeStderrLine(
+            `qwen serve: /acp initial replay skipped (no snapshot) session=${logSafe(sessionId)}`,
+          );
+          conn.markInitialReplayComplete(sessionId);
+          conn.endReplayDeferral(sessionId, lastDeliveredId, false);
+        }
+      }
+
+      // `lastEventId` (from the `Last-Event-ID` reconnect header) drives the
+      // EventBus ring replay: events with `id > lastEventId` still buffered
+      // are replayed before live events flow, recovering content frames lost
+      // in a mid-turn proxy gap (§1.8). `undefined` ⇒ live-only, as before.
+      // For initial response-mode load replay, snapshot frames are emitted
+      // above and EventBus subscribes from the snapshot high-water mark, so
+      // events published between snapshot read and subscribe are still replayed.
+      const iterable = this.bridge.subscribeEvents(sessionId, {
+        signal,
+        ...(subscribeFromEventId !== undefined
+          ? { lastEventId: subscribeFromEventId }
+          : {}),
+      });
       for await (const event of iterable) {
         if (signal.aborted) break;
         // Count event delivery as connection activity so a long, quiet prompt
@@ -3748,6 +3958,7 @@ export class AcpDispatcher {
         }
         if (event.type === 'replay_complete') {
           conn.endReplayDeferral(sessionId, lastDeliveredId, sawEviction);
+          conn.markInitialReplayComplete(sessionId);
           // Operator breadcrumb for "did resume recover the gap?": one line per
           // resumed stream stating the cursor it resumed from, how far delivery
           // reached, the bus-reported replayed count, and whether the ring had

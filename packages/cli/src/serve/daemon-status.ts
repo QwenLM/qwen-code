@@ -16,10 +16,16 @@ import { isLoopbackBind } from './loopback-binds.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
 import type { ServeOptions } from './types.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
+import type { DaemonMetricsBucket } from './daemon-metrics-ring.js';
 import type {
   DaemonWorkspaceService,
   WorkspaceRequestContext,
 } from './workspace-service/index.js';
+
+// Re-export so downstream consumers (server.ts, routes, the SDK type mirror)
+// import the bucket shape from the status module alongside the rest of the
+// response contract, matching how DaemonPerfSnapshot is sourced.
+export type { DaemonMetricsBucket };
 
 const DEFAULT_LISTENER_MAX_CONNECTIONS = 256;
 const SECTION_TIMEOUT_MS = 1_000;
@@ -95,6 +101,7 @@ export interface BuildDaemonStatusOptions {
   startup?: DaemonStartupSnapshot;
   getChannelWorkerSnapshot?: () => ChannelWorkerSnapshot;
   getPerfSnapshot?: () => DaemonPerfSnapshot;
+  getMetricsSeries?: () => DaemonMetricsBucket[];
 }
 
 interface DaemonStatusSection<T> {
@@ -170,6 +177,20 @@ interface DaemonStatusRuntime {
     rejectedSinceStart: Record<RateLimitTier, number>;
   };
   perf?: DaemonPerfSnapshot;
+  /**
+   * Rolling per-interval activity series backing the Daemon Status charts
+   * (requests, latency, tokens, memory over time). Optional/additive to v=1:
+   * absent when the daemon predates it or the sampler has not sealed a bucket
+   * yet. Ordered oldest→newest.
+   */
+  metrics?: { series: DaemonMetricsBucket[] };
+  activity: {
+    activePrompts: number;
+    pendingPrompts: number;
+    queuedPrompts: number;
+    lastActivityAt: string | null;
+    idleSinceMs: number | null;
+  };
   process: NodeJS.MemoryUsage;
 }
 
@@ -185,6 +206,12 @@ export interface DaemonPerfSnapshot {
     p50Ms: number;
     p99Ms: number;
     maxMs: number;
+  };
+  promptQueueWait: {
+    count: number;
+    meanMs: number;
+    maxMs: number;
+    lastMs: number | null;
   };
   pipe: {
     inbound: DaemonPipeStatsSnapshot;
@@ -239,8 +266,19 @@ export async function buildDaemonStatusResponse(
   input: BuildDaemonStatusOptions,
 ): Promise<DaemonStatusResponse> {
   const bridgeSnapshot = input.bridge.getDaemonStatusSnapshot();
+  const lastActivity = input.bridge.lastActivityAt ?? null;
   const acpSnapshot = input.acpHandle?.registry.getSnapshot();
   const rateLimitHits = input.rateLimiter?.getHitCounts() ?? zeroRateHits();
+  let pendingPrompts = 0;
+  let derivedQueuedPrompts = 0;
+  for (const session of bridgeSnapshot.sessions) {
+    pendingPrompts += session.pendingPromptCount;
+    derivedQueuedPrompts += Math.max(
+      0,
+      session.pendingPromptCount - (session.hasActivePrompt ? 1 : 0),
+    );
+  }
+  const queuedPrompts = input.bridge.pendingPromptTotal ?? derivedQueuedPrompts;
   const channelWorker = input.getChannelWorkerSnapshot?.() ?? {
     enabled: false,
     state: 'disabled',
@@ -336,6 +374,17 @@ export async function buildDaemonStatusResponse(
         rejectedSinceStart: rateLimitHits,
       },
       ...(input.getPerfSnapshot ? { perf: input.getPerfSnapshot() } : {}),
+      ...(input.getMetricsSeries
+        ? { metrics: { series: input.getMetricsSeries() } }
+        : {}),
+      activity: {
+        activePrompts: input.bridge.activePromptCount ?? 0,
+        pendingPrompts,
+        queuedPrompts,
+        lastActivityAt:
+          lastActivity !== null ? new Date(lastActivity).toISOString() : null,
+        idleSinceMs: lastActivity !== null ? Date.now() - lastActivity : null,
+      },
       process: process.memoryUsage(),
     },
     ...(full ? { full } : {}),
@@ -669,7 +718,33 @@ function summarizeStatusData(data: unknown): SectionSummary {
     }
   }
 
+  summarizeMcpServers(data, summary);
+
   return summary;
+}
+
+function summarizeMcpServers(
+  data: StatusRecord,
+  summary: SectionSummary,
+): void {
+  const servers = data['servers'];
+  if (!Array.isArray(servers)) return;
+  let connected = 0;
+  let errored = 0;
+  let disabled = 0;
+  for (const server of servers) {
+    if (!isRecord(server)) continue;
+    if (server['disabled'] === true) {
+      disabled++;
+    } else if (server['status'] === 'error') {
+      errored++;
+    } else if (server['mcpStatus'] === 'connected') {
+      connected++;
+    }
+  }
+  summary['serversConnected'] = connected;
+  summary['serversErrored'] = errored;
+  summary['serversDisabled'] = disabled;
 }
 
 function collectStatuses(data: unknown): string[] {

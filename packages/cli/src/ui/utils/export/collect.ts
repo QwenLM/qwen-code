@@ -5,15 +5,18 @@
  */
 
 import { randomUUID } from 'node:crypto';
-import type { Config, ChatRecord } from '@qwen-code/qwen-code-core';
+import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
 import type { GenerateContentResponseUsageMetadata } from '@google/genai';
 import type { SessionContext } from '../../../acp-integration/session/types.js';
 import type { SessionUpdate, ToolCall } from '@agentclientprotocol/sdk';
 import { HistoryReplayer } from '../../../acp-integration/session/HistoryReplayer.js';
+import { getExplicitToolResultCallId } from '../../../utils/chat-record-tool-call-id.js';
 import type {
+  ExportConfig,
   ExportMessage,
   ExportSessionData,
   ExportMetadata,
+  ExportToolRegistry,
 } from './types.js';
 
 /**
@@ -45,23 +48,6 @@ function extractToolNameFromRecord(record: ChatRecord): string | undefined {
   for (const part of record.message.parts) {
     if ('functionResponse' in part && part.functionResponse?.name) {
       return part.functionResponse.name;
-    }
-  }
-
-  return undefined;
-}
-
-/**
- * Extracts call ID from a ChatRecord's function response.
- */
-function extractFunctionResponseId(record: ChatRecord): string | undefined {
-  if (!record.message?.parts) {
-    return undefined;
-  }
-
-  for (const part of record.message.parts) {
-    if ('functionResponse' in part && part.functionResponse?.id) {
-      return part.functionResponse.id;
     }
   }
 
@@ -142,8 +128,7 @@ function calculateFileStats(records: ChatRecord[]): FileOperationStats {
     if (record.type !== 'tool_result' || !record.toolCallResult) continue;
 
     const toolName = extractToolNameFromRecord(record);
-    const callId =
-      record.toolCallResult.callId ?? extractFunctionResponseId(record);
+    const callId = getExplicitToolResultCallId(record);
     const argsFromId =
       callId && argsIndex.byId.has(callId)
         ? argsIndex.byId.get(callId)
@@ -327,6 +312,32 @@ function calculateTokenStats(records: ChatRecord[]): {
   };
 }
 
+function createExportSessionConfig(config: ExportConfig): Config {
+  const supportedConfig = {
+    ...config,
+    getToolRegistry: () => {
+      const registry = config.getToolRegistry?.();
+      return {
+        getTool: (toolName: string) => registry?.getTool?.(toolName) ?? null,
+      } satisfies ExportToolRegistry;
+    },
+  };
+
+  return new Proxy(supportedConfig, {
+    get(target, prop, receiver) {
+      if (prop in target) {
+        return Reflect.get(target, prop, receiver);
+      }
+      if (typeof prop === 'symbol') {
+        return undefined;
+      }
+      throw new Error(
+        `Export session replay config does not implement ${prop}`,
+      );
+    },
+  }) as unknown as Config;
+}
+
 /**
  * Extract session metadata from ChatRecords.
  */
@@ -336,7 +347,7 @@ async function extractMetadata(
     startTime: string;
     messages: ChatRecord[];
   },
-  config: Config,
+  config: ExportConfig,
 ): Promise<ExportMetadata> {
   const { sessionId, startTime, messages } = conversation;
 
@@ -413,9 +424,9 @@ class ExportSessionContext implements SessionContext {
   private activeRecordTimestamp: string | null = null;
   private toolCallMap: Map<string, ExportMessage['toolCall']> = new Map();
 
-  constructor(sessionId: string, config: Config) {
+  constructor(sessionId: string, config: ExportConfig) {
     this.sessionId = sessionId;
-    this.config = config;
+    this.config = createExportSessionConfig(config);
   }
 
   async sendUpdate(update: SessionUpdate): Promise<void> {
@@ -666,7 +677,7 @@ export async function collectSessionData(
     startTime: string;
     messages: ChatRecord[];
   },
-  config: Config,
+  config: ExportConfig,
 ): Promise<ExportSessionData> {
   // Create export session context
   const exportContext = new ExportSessionContext(

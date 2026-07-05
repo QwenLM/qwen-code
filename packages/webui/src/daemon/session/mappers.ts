@@ -242,9 +242,14 @@ export function updateConnectionFromDaemonEvent(
     }
     if (getString(update, 'sessionUpdate') === 'available_commands_update') {
       const { commands, skills } = mapAvailableCommandsUpdate(update);
+      // An available_commands_update is the daemon's authoritative snapshot of
+      // the current slash commands, so assign it directly (matching `skills`)
+      // rather than keeping the previous list when it is empty — otherwise a
+      // command list that shrank to empty would leave stale entries
+      // autocompleting.
       setConnection((current) => ({
         ...current,
-        commands: commands.length > 0 ? commands : current.commands,
+        commands,
         skills,
       }));
     }

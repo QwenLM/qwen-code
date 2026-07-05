@@ -1,7 +1,74 @@
-import { describe, expect, it, vi } from 'vitest';
-import { AcpBridge } from './AcpBridge.js';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { ACP_EVENT_LOOP_STALL_RESTART_MS, AcpBridge } from './AcpBridge.js';
 import { CHANNEL_LOOP_MCP_SERVER_NAME } from './ChannelLoopTools.js';
 import type { ChannelLoopToolHandler } from './ChannelAgentBridge.js';
+
+const child = vi.hoisted(() => {
+  class MockEmitter {
+    private listeners = new Map<string, Array<(...args: unknown[]) => void>>();
+
+    on(eventName: string, listener: (...args: unknown[]) => void): this {
+      const listeners = this.listeners.get(eventName) ?? [];
+      listeners.push(listener);
+      this.listeners.set(eventName, listeners);
+      return this;
+    }
+
+    emit(eventName: string, ...args: unknown[]): boolean {
+      const listeners = this.listeners.get(eventName) ?? [];
+      for (const listener of listeners) {
+        listener(...args);
+      }
+      return listeners.length > 0;
+    }
+  }
+
+  class MockStderr extends MockEmitter {
+    write(data: string): void {
+      this.emit('data', Buffer.from(data));
+    }
+  }
+
+  class MockChild extends MockEmitter {
+    stdout = {};
+    stdin = {};
+    stderr = new MockStderr();
+    killed = false;
+    exitCode: number | null = null;
+    kill = vi.fn(() => {
+      this.killed = true;
+      this.exitCode = null;
+      return true;
+    });
+  }
+
+  return {
+    instances: [] as MockChild[],
+    MockChild,
+    spawn: vi.fn(() => {
+      const instance = new MockChild();
+      child.instances.push(instance);
+      return instance;
+    }),
+  };
+});
+
+vi.mock('node:child_process', () => ({
+  spawn: child.spawn,
+}));
+
+vi.mock('node:stream', () => ({
+  Readable: { toWeb: vi.fn(() => ({})) },
+  Writable: { toWeb: vi.fn(() => ({})) },
+}));
+
+vi.mock('@agentclientprotocol/sdk', () => ({
+  PROTOCOL_VERSION: 1,
+  ndJsonStream: vi.fn(() => ({})),
+  ClientSideConnection: vi.fn().mockImplementation(() => ({
+    initialize: vi.fn().mockResolvedValue(undefined),
+  })),
+}));
 
 type TestableAcpBridge = AcpBridge & {
   child: { killed: boolean; exitCode: number | null };
@@ -22,6 +89,11 @@ type TestableAcpBridge = AcpBridge & {
 };
 
 describe('AcpBridge', () => {
+  beforeEach(() => {
+    child.instances.length = 0;
+    child.spawn.mockClear();
+  });
+
   it('registers the channel loop MCP server once across concurrent calls', async () => {
     const pending: Array<() => void> = [];
     const extMethod = vi.fn(
@@ -119,5 +191,97 @@ describe('AcpBridge', () => {
     expect(() => bridge.resolveChannelLoopToolHandler('s-2')).toThrow(
       'No channel loop handler matched session s-2.',
     );
+  });
+
+  it('kills the ACP child when it reports a large event loop stall', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+    const disconnected = vi.fn();
+    bridge.on('disconnected', disconnected);
+
+    await bridge.start();
+    const proc = child.instances[0]!;
+    proc.kill.mockImplementation(() => {
+      proc.killed = true;
+      proc.emit('exit', null, 'SIGKILL');
+      return true;
+    });
+
+    proc.stderr.write(
+      `[perf] acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS + 1000}ms\n`,
+    );
+
+    expect(proc.kill).toHaveBeenCalledTimes(1);
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(bridge.isConnected).toBe(false);
+    expect(disconnected).toHaveBeenCalledWith(null, 'SIGKILL');
+  });
+
+  it('kills the ACP child when a stall line is coalesced with prior stderr', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const proc = child.instances[0]!;
+
+    proc.stderr.write(
+      `debug line\n[perf] acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS + 1000}ms\n`,
+    );
+
+    expect(proc.kill).toHaveBeenCalledTimes(1);
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('does not kill the ACP child for a small event loop stall warning', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const proc = child.instances[0]!;
+
+    proc.stderr.write(
+      `[perf] acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS - 1000}ms\n`,
+    );
+
+    expect(proc.kill).not.toHaveBeenCalled();
+  });
+
+  it('ignores non-perf stderr that mentions an event loop stall', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const proc = child.instances[0]!;
+
+    proc.stderr.write(
+      `debug: acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS + 1000}ms\n`,
+    );
+
+    expect(proc.kill).not.toHaveBeenCalled();
+  });
+
+  it('does not kill the ACP child again after it is already killed', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
+
+    await bridge.start();
+    const proc = child.instances[0]!;
+    proc.killed = true;
+
+    proc.stderr.write(
+      `[perf] acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS + 1000}ms\n`,
+    );
+
+    expect(proc.kill).not.toHaveBeenCalled();
   });
 });
