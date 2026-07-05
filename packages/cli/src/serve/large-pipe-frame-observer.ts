@@ -28,6 +28,9 @@ const MAX_CONTENT_DEPTH = 32;
 const MAX_JSON_APPROX_DEPTH = 32;
 const MAX_RAW_OUTPUT_APPROX_BYTES = LARGE_PIPE_FRAME_THRESHOLD_BYTES;
 const MAX_SUMMARIZED_UPDATES = 500;
+const SUMMARIZED_UPDATE_PREFIX_COUNT = Math.ceil(MAX_SUMMARIZED_UPDATES / 2);
+const SUMMARIZED_UPDATE_SUFFIX_COUNT =
+  MAX_SUMMARIZED_UPDATES - SUMMARIZED_UPDATE_PREFIX_COUNT;
 
 export type LargePipeFrameContext = Record<string, LogValue>;
 
@@ -239,18 +242,35 @@ function addUpdatesSummary(
 ): void {
   if (!Array.isArray(updates)) return;
   context['updateCount'] = updates.length;
-  const summarizedUpdateCount = Math.min(
-    updates.length,
-    MAX_SUMMARIZED_UPDATES,
-  );
-  if (summarizedUpdateCount < updates.length) {
-    context['summarizedUpdateCount'] = summarizedUpdateCount;
+  const sampledIndexes = sampleUpdateIndexes(updates.length);
+  if (sampledIndexes.length < updates.length) {
+    context['summarizedUpdateCount'] = sampledIndexes.length;
+    context['summarizedUpdateStrategy'] = 'prefix_and_suffix';
   }
   const summary: UpdateSummary = {};
-  for (let i = 0; i < summarizedUpdateCount; i += 1) {
-    mergeUpdateSummary(summary, summarizeUpdate(asRecord(updates[i])));
+  for (const index of sampledIndexes) {
+    mergeUpdateSummary(summary, summarizeUpdate(asRecord(updates[index])));
   }
   addUpdateSummary(context, summary);
+}
+
+function sampleUpdateIndexes(updateCount: number): number[] {
+  if (updateCount <= MAX_SUMMARIZED_UPDATES) {
+    return Array.from({ length: updateCount }, (_, index) => index);
+  }
+
+  const indexes: number[] = [];
+  for (let i = 0; i < SUMMARIZED_UPDATE_PREFIX_COUNT; i += 1) {
+    indexes.push(i);
+  }
+  for (
+    let i = updateCount - SUMMARIZED_UPDATE_SUFFIX_COUNT;
+    i < updateCount;
+    i += 1
+  ) {
+    indexes.push(i);
+  }
+  return indexes;
 }
 
 function summarizeUpdate(

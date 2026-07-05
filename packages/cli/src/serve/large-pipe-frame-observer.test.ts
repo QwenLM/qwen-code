@@ -392,7 +392,51 @@ describe('large pipe frame observer', () => {
     expect(context).toMatchObject({
       updateCount: 501,
       summarizedUpdateCount: 500,
+      summarizedUpdateStrategy: 'prefix_and_suffix',
       maxContentTextBytes: Buffer.byteLength('sampled', 'utf8'),
+    });
+  });
+
+  it('samples suffix updates so late large payloads are attributed', () => {
+    const rawOutput = 'r'.repeat(300 * 1024);
+    const updates = [
+      ...Array.from({ length: 500 }, () => ({
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'x' },
+      })),
+      {
+        sessionUpdate: 'tool_call_update',
+        rawOutput,
+        _meta: { toolName: 'shell', provenance: 'builtin' },
+      },
+    ];
+
+    const context = classifyLargePipeFrame({
+      direction: 'outbound',
+      bytes: LARGE_PIPE_FRAME_THRESHOLD_BYTES,
+      message: {
+        jsonrpc: '2.0',
+        id: 6,
+        result: {
+          _meta: {
+            [LOAD_REPLAY_META_KEY]: {
+              updates,
+            },
+          },
+        },
+      },
+    });
+
+    expect(context).toMatchObject({
+      sourceClass: 'load_session_bulk_replay_response',
+      updateCount: 501,
+      summarizedUpdateCount: 500,
+      summarizedUpdateStrategy: 'prefix_and_suffix',
+      sessionUpdate: 'tool_call_update',
+      toolName: 'shell',
+      toolProvenance: 'builtin',
+      maxRawOutputTextBytes: Buffer.byteLength(rawOutput, 'utf8'),
+      rawOutputKind: 'string',
     });
   });
 
