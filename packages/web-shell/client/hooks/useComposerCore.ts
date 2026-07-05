@@ -23,7 +23,6 @@ import {
   closeCompletion,
   completionStatus,
   moveCompletionSelection,
-  pickedCompletion,
   startCompletion,
   type Completion,
 } from '@codemirror/autocomplete';
@@ -45,11 +44,8 @@ import {
   DEFAULT_COMMAND_CATEGORY_ORDER,
   type CommandDisplayCategoryOrder,
 } from '../utils/commandDisplay';
-import {
-  createAtCompletionSource,
-  type AtReferenceCompletion,
-} from '../completions/atCompletion';
 import { useInputHistory } from '../hooks/useInputHistory';
+import { useAtMentionMenu, type AtMentionMenuState } from './useAtMentionMenu';
 import { useI18n } from '../i18n';
 import {
   inputHighlight,
@@ -61,9 +57,9 @@ import type {
   WebShellComposerApi,
   WebShellComposerInput,
   WebShellComposerTag,
-  WebShellComposerTagKind,
   WebShellComposerTagOptions,
   WebShellComposerTextOptions,
+  WebShellAtProvider,
 } from '../customization';
 
 // ---- Large paste handling (shared utilities) ----
@@ -500,24 +496,6 @@ export function getComposerTagDisplay(tag: WebShellComposerTag): string {
   return getComposerTagValue(tag) || getComposerTagLabel(tag) || tag.id;
 }
 
-function buildAtReferenceTag(
-  completion: AtReferenceCompletion,
-): WebShellComposerTag | null {
-  if (!completion.atReferenceKind || !completion.label) return null;
-  const kind = completion.atReferenceKind as WebShellComposerTagKind;
-  const serialized =
-    typeof completion.apply === 'string'
-      ? completion.apply.trim()
-      : completion.label.trim();
-  return {
-    id: serialized,
-    kind,
-    label: completion.atReferenceLabel,
-    value: completion.atReferenceValue,
-    serialized,
-  };
-}
-
 export function buildComposerPrompt(
   text: string,
   tags: readonly WebShellComposerTag[],
@@ -822,6 +800,7 @@ export interface UseComposerCoreOptions {
   sessionName?: string;
   composerInput?: WebShellComposerInput;
   composerInputVersion?: number;
+  atProviders?: readonly WebShellAtProvider[];
   /** CodeMirror theme extension for the editor view. Each variant provides its own. */
   editorTheme: Parameters<typeof EditorView.theme>[0];
 }
@@ -930,6 +909,13 @@ export interface UseComposerCoreReturn {
   closeSlashMenu: () => void;
   selectSlashCompletion: (index: number) => boolean;
   acceptSlashCompletion: (index?: number) => boolean;
+  atMenu: AtMentionMenuState | null;
+  closeAtMenu: () => void;
+  selectAtCompletion: (index: number) => boolean;
+  acceptAtCompletion: (index?: number) => boolean;
+  enterAtCategory: (index?: number) => boolean;
+  backAtCategories: () => false | 'items' | 'categories';
+  updateAtSearch: (query: string) => boolean;
 }
 
 export function useComposerCore(
@@ -955,6 +941,7 @@ export function useComposerCore(
     sessionName,
     composerInput,
     composerInputVersion,
+    atProviders,
     editorTheme,
   } = options;
 
@@ -997,6 +984,15 @@ export function useComposerCore(
   const [shellMode, setShellMode] = useState(false);
   const shellModeRef = useRef(shellMode);
   shellModeRef.current = shellMode;
+  const atMenu = useAtMentionMenu({
+    viewRef,
+    disabledRef,
+    shellModeRef,
+    workspaceActionsRef,
+    providers: atProviders,
+  });
+  const closeAtMenuState = atMenu.close;
+  const refreshAtMenuForView = atMenu.refreshForView;
   const toggleShellMode = useCallback(() => {
     if (followupStateRef.current?.isVisible) {
       onDismissFollowupRef.current?.();
@@ -1044,6 +1040,42 @@ export function useComposerCore(
     setSlashMenuState(next);
   }, []);
 
+  const clearAutoAtTriggerIfIntact = useCallback(() => {
+    const trigger = autoTriggerRef.current;
+    const view = viewRef.current;
+    if (!trigger || !view) return;
+    const doc = view.state.doc;
+    const to = trigger.from + trigger.text.length;
+    if (
+      doc.length === to &&
+      doc.sliceString(trigger.from, to) === trigger.text
+    ) {
+      view.dispatch({
+        changes: {
+          from: trigger.from,
+          to,
+          insert: '',
+        },
+      });
+    }
+    autoTriggerRef.current = null;
+  }, []);
+
+  const closeAtMenu = useCallback(() => {
+    clearAutoAtTriggerIfIntact();
+    closeAtMenuState();
+  }, [clearAutoAtTriggerIfIntact, closeAtMenuState]);
+
+  const closeAtMenuIfOpenFn = atMenu.closeIfOpen;
+  const closeAtMenuIfOpen = useCallback(() => {
+    const result = closeAtMenuIfOpenFn();
+    if (!result) return false;
+    if (result === 'closed') {
+      clearAutoAtTriggerIfIntact();
+    }
+    return true;
+  }, [clearAutoAtTriggerIfIntact, closeAtMenuIfOpenFn]);
+
   const refreshSlashMenuForView = useCallback(
     (view: EditorView | null, preferredIndex?: number) => {
       if (!view || disabledRef.current || shellModeRef.current) {
@@ -1075,6 +1107,7 @@ export function useComposerCore(
         setSlashMenu(null);
         return;
       }
+      closeAtMenu();
       const currentIndex =
         preferredIndex ?? slashMenuRef.current?.selectedIndex ?? 0;
       const selectedIndex = Math.max(
@@ -1083,7 +1116,7 @@ export function useComposerCore(
       );
       setSlashMenu({ ...result, selectedIndex });
     },
-    [setSlashMenu],
+    [closeAtMenu, setSlashMenu],
   );
 
   const closeSlashMenu = useCallback(() => {
@@ -1211,6 +1244,7 @@ export function useComposerCore(
     const view = viewRef.current;
     if (!view) return;
     closeSlashMenu();
+    closeAtMenu();
     const query = view.state.doc.toString();
     searchDraftRef.current = query;
     setSearchMode(true);
@@ -1222,7 +1256,7 @@ export function useComposerCore(
     setSearchActiveIndex(0);
     history.resetSearch();
     setTimeout(() => searchInputRef.current?.focus(), 0);
-  }, [closeSlashMenu, getSearchMatches]);
+  }, [closeAtMenu, closeSlashMenu, getSearchMatches]);
   const openHistorySearchRef = useRef(openHistorySearch);
   openHistorySearchRef.current = openHistorySearch;
 
@@ -1391,31 +1425,6 @@ export function useComposerCore(
     };
     submitTextRef.current = submitText;
 
-    const completionSources = [
-      createAtCompletionSource(
-        () => workspaceActionsRef.current?.globWorkspace,
-        () => workspaceActionsRef.current?.loadExtensionsStatus,
-        () =>
-          workspaceActionsRef.current?.loadMcpStatus
-            ? async () => {
-                const status =
-                  await workspaceActionsRef.current!.loadMcpStatus();
-                return {
-                  servers: (status?.servers ?? []).map((server) => ({
-                    name: server.name,
-                    description: server.description,
-                  })),
-                };
-              }
-            : undefined,
-        {
-          extensions: t('quickActions.extensions'),
-          mcpServers: t('mcp.title'),
-          files: t('editor.hintFiles'),
-        },
-      ),
-    ];
-
     const insertNewline = (view: EditorView) => {
       view.dispatch(view.state.replaceSelection('\n'));
       return true;
@@ -1492,6 +1501,9 @@ export function useComposerCore(
       {
         key: 'Enter',
         run: (view) => {
+          if (atMenu.accept()) {
+            return true;
+          }
           if (slashMenuRef.current) {
             return acceptSlashCompletion();
           }
@@ -1527,6 +1539,9 @@ export function useComposerCore(
       {
         key: 'Escape',
         run: () => {
+          if (closeAtMenuIfOpen()) {
+            return true;
+          }
           if (slashMenuRef.current) {
             closeSlashMenu();
             return true;
@@ -1565,6 +1580,7 @@ export function useComposerCore(
           // auto-opened menu is closed. (Gate uses historyBrowseActiveRef, not
           // the sticky history.isNavigating — see its declaration.)
           if (!isBrowsingHistory) {
+            if (atMenu.moveSelection('up')) return true;
             if (moveSlashCompletionSelection('up')) return true;
             if (completionStatus(view.state) === 'active') {
               return moveCompletionSelection(false)(view);
@@ -1572,6 +1588,7 @@ export function useComposerCore(
           } else {
             closeCompletion(view);
             closeSlashMenu();
+            closeAtMenu();
           }
           const multilineBoundary = handleMultilineHistoryBoundary(view, 'up');
           if (multilineBoundary === 'handled') return true;
@@ -1614,6 +1631,7 @@ export function useComposerCore(
           // the slash menu and native completion only capture arrows once the
           // user is no longer paging through history.
           if (!isBrowsingHistory) {
+            if (atMenu.moveSelection('down')) return true;
             if (moveSlashCompletionSelection('down')) return true;
             if (completionStatus(view.state) === 'active') {
               return moveCompletionSelection(true)(view);
@@ -1621,6 +1639,7 @@ export function useComposerCore(
           } else {
             closeCompletion(view);
             closeSlashMenu();
+            closeAtMenu();
           }
           const multilineBoundary = handleMultilineHistoryBoundary(
             view,
@@ -1660,6 +1679,9 @@ export function useComposerCore(
       {
         key: 'Tab',
         run: (view) => {
+          if (atMenu.accept()) {
+            return true;
+          }
           if (acceptFollowupIntoEditor(view, 'tab')) {
             return true;
           }
@@ -1746,6 +1768,15 @@ export function useComposerCore(
       }
       if (update.docChanged || update.selectionSet) {
         refreshSlashMenuForView(update.view);
+        // Match slash command behavior: history-recalled text like "@foo"
+        // should stay as plain recalled input until the user edits it.
+        if (historyBrowseActiveRef.current) {
+          closeAtMenu();
+        } else {
+          if (refreshAtMenuForView(update.view)) {
+            closeSlashMenu();
+          }
+        }
       }
     });
 
@@ -1771,7 +1802,13 @@ export function useComposerCore(
               d.length === from + trigger.text.length &&
               d.sliceString(from) === trigger.text
             ) {
-              view.dispatch({ changes: { from, to: d.length, insert: '' } });
+              view.dispatch({
+                changes: {
+                  from,
+                  to: from + trigger.text.length,
+                  insert: '',
+                },
+              });
             }
           }, 0);
         }
@@ -1790,38 +1827,18 @@ export function useComposerCore(
         history(),
         keymap.of([...defaultKeymap, ...historyKeymap]),
         autocompletion({
-          override: completionSources,
+          override: [],
           activateOnTyping: true,
           icons: false,
           optionClass: (completion) => {
-            const ref = completion as AtReferenceCompletion;
             const classes: string[] = [];
             if (completion.type === 'file') classes.push('cm-file-completion');
-            if (ref.atReferenceKind) {
-              classes.push(`cm-at-ref-completion-${ref.atReferenceKind}`);
-            }
             if (hasCommandHoverInfo(completion)) {
               classes.push('cm-command-info-completion');
             }
             return classes.join(' ');
           },
           addToOptions: [
-            {
-              render: (completion) => {
-                const ref = completion as AtReferenceCompletion;
-                if (!ref.atReferenceKind) return null;
-                const iconUrl = getComposerTagIconUrl(ref.atReferenceKind);
-                if (!iconUrl) return null;
-                const icon = document.createElement('span');
-                icon.className = 'cm-at-ref-completion-icon';
-                icon.style.setProperty(
-                  '--composer-tag-icon-url',
-                  `url("${iconUrl}")`,
-                );
-                return icon;
-              },
-              position: 20,
-            },
             {
               render: renderCompletionHoverInfo,
               position: 90,
@@ -1862,29 +1879,6 @@ export function useComposerCore(
         triggerCleanupListener,
         // Update hasContent state when document changes
         EditorView.updateListener.of((update) => {
-          for (const tr of update.transactions) {
-            const completion = tr.annotation(pickedCompletion) as
-              | AtReferenceCompletion
-              | undefined;
-            if (!completion) continue;
-            const tag = buildAtReferenceTag(completion);
-            if (!tag) continue;
-            const inserted = serializeComposerTag(tag);
-            const changes = tr.changes;
-            if (changes.empty) continue;
-            let from = -1;
-            changes.iterChanges((_fA, _tA, fromB, toB, insertedText) => {
-              if (from !== -1) return;
-              if (insertedText.toString().includes(inserted)) {
-                from = fromB;
-              }
-            });
-            if (from === -1) continue;
-            const to = from + inserted.length;
-            update.view.dispatch({
-              effects: addInlineTagEffect.of({ from, to, tag }),
-            });
-          }
           if (update.docChanged) {
             const text = update.state.doc.toString();
             const followup = followupStateRef.current;
@@ -1920,8 +1914,25 @@ export function useComposerCore(
           return false;
         }),
         EditorView.domEventHandlers({
-          blur() {
+          blur(event) {
             closeSlashMenu();
+            if (
+              event.relatedTarget instanceof Element &&
+              event.relatedTarget.closest('[data-at-mention-panel="true"]')
+            ) {
+              return false;
+            }
+            window.setTimeout(() => {
+              const currentView = viewRef.current;
+              if (currentView?.hasFocus) return;
+              if (
+                document.activeElement instanceof Element &&
+                document.activeElement.closest('[data-at-mention-panel="true"]')
+              ) {
+                return;
+              }
+              closeAtMenu();
+            }, 0);
             return false;
           },
           paste(event) {
@@ -2095,11 +2106,12 @@ export function useComposerCore(
     if (!view) return;
     if (dialogOpen) {
       closeSlashMenu();
+      closeAtMenu();
       view.contentDOM.blur();
     } else {
       view.focus();
     }
-  }, [dialogOpen, closeSlashMenu]);
+  }, [closeAtMenu, dialogOpen, closeSlashMenu]);
 
   // Global keydown handler for focus-stealing
   useEffect(() => {
@@ -2196,7 +2208,8 @@ export function useComposerCore(
         window.setTimeout(() => {
           const nextView = viewRef.current;
           if (nextView && nextView.hasFocus) {
-            startCompletion(nextView);
+            closeSlashMenu();
+            refreshAtMenuForView(nextView);
           }
         }, 0);
       }
@@ -2204,7 +2217,14 @@ export function useComposerCore(
 
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
-  }, [searchMode, dialogOpen, refreshSlashMenuForView, toggleShellMode]);
+  }, [
+    refreshAtMenuForView,
+    closeSlashMenu,
+    searchMode,
+    dialogOpen,
+    refreshSlashMenuForView,
+    toggleShellMode,
+  ]);
 
   // ---- Imperative methods ----
 
@@ -2285,12 +2305,13 @@ export function useComposerCore(
         window.setTimeout(() => {
           const nextView = viewRef.current;
           if (nextView && nextView.hasFocus) {
-            startCompletion(nextView);
+            closeSlashMenu();
+            refreshAtMenuForView(nextView);
           }
         }, 0);
       }
     },
-    [refreshSlashMenuForView],
+    [closeSlashMenu, refreshAtMenuForView, refreshSlashMenuForView],
   );
 
   const getText = useCallback(() => {
@@ -2760,5 +2781,12 @@ export function useComposerCore(
     closeSlashMenu,
     selectSlashCompletion,
     acceptSlashCompletion,
+    atMenu: atMenu.state,
+    closeAtMenu,
+    selectAtCompletion: atMenu.select,
+    acceptAtCompletion: atMenu.accept,
+    enterAtCategory: atMenu.enterCategory,
+    backAtCategories: atMenu.backToCategories,
+    updateAtSearch: atMenu.updateSearch,
   };
 }
