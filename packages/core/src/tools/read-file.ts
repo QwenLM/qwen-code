@@ -17,6 +17,7 @@ import type { PermissionDecision } from '../permissions/types.js';
 import {
   processSingleFileContent,
   getSpecificMimeType,
+  isCacheableReadResult,
 } from '../utils/fileUtils.js';
 import { parsePDFPageRange } from '../utils/pdf.js';
 import type { Config } from '../config/config.js';
@@ -267,9 +268,7 @@ class ReadFileToolInvocation extends BaseToolInvocation<
     // hash on the read pipeline (deferred follow-up — see Risk
     // section in the PR description).
     if (cacheEnabled && (result.stats ?? stats)) {
-      const cacheable =
-        typeof result.llmContent === 'string' &&
-        result.originalLineCount !== undefined;
+      const cacheable = isCacheableReadResult(result);
       const recordStats: Stats = result.stats ?? stats!;
       cache.recordRead(absPath, recordStats, {
         full: isFullRead && !result.isTruncated,

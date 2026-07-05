@@ -277,6 +277,8 @@ describe('qwen serve — capabilities envelope', () => {
       'session_close',
       'session_archive',
       'session_metadata',
+      'session_organization',
+      'session_export',
       'mcp_guardrails',
       'workspace_mcp_manage',
       'mcp_guardrail_events',

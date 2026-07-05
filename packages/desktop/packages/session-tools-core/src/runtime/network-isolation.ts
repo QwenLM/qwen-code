@@ -22,7 +22,11 @@ function canUseSandboxExec(): boolean {
     return false;
   }
 
-  const probe = spawnSync('sandbox-exec', ['-p', '(version 1) (allow default)', '/usr/bin/true'], { stdio: 'ignore' });
+  const probe = spawnSync(
+    'sandbox-exec',
+    ['-p', '(version 1) (allow default)', '/usr/bin/true'],
+    { stdio: 'ignore' },
+  );
   sandboxExecUsableCache = probe.status === 0;
   return sandboxExecUsableCache;
 }
@@ -41,7 +45,10 @@ function canUseUnshare(): boolean {
  * - Linux: unshare -n (preferred) or firejail --net=none
  * - others: unavailable (fail-safe for script_sandbox)
  */
-export function applyNetworkIsolation(command: string, args: string[]): NetworkIsolationPlan {
+export function applyNetworkIsolation(
+  command: string,
+  args: string[],
+): NetworkIsolationPlan {
   if (process.platform === 'darwin' && canUseSandboxExec()) {
     const profile = '(version 1) (deny network*)';
     return {

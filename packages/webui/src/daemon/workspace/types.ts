@@ -29,7 +29,6 @@ import type {
   DaemonMcpRestartResult,
   DaemonMcpManageAction,
   DaemonMcpManageResult,
-  DaemonSessionArchiveState,
   DaemonUpdateAgentRequest,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentsStatus,
@@ -51,7 +50,17 @@ import type {
   DaemonWorkspaceToolsStatus,
   DaemonWorkspaceSettingsStatus,
   DaemonSettingUpdateResult,
+  DaemonSessionGroup,
+  DaemonSessionGroupCatalog,
+  DaemonSessionGroupInput,
+  DaemonSessionGroupUpdate,
+  DaemonSessionListPage,
+  DaemonSessionListPageOptions,
+  DaemonSessionOrganizationResult,
+  DaemonSessionOrganizationUpdate,
   DaemonSessionSummary,
+  DaemonSessionExportFormat,
+  DaemonSessionExportResult,
   DaemonStatusReport,
   DaemonStatusReportDetail,
   DaemonWriteMemoryRequest,
@@ -145,16 +154,35 @@ export interface DaemonGlobResult {
 
 export interface DaemonWorkspaceActions {
   // Sessions
-  listSessions(options?: {
-    pageSize?: number;
-    archiveState?: DaemonSessionArchiveState;
-  }): Promise<DaemonSessionSummary[]>;
+  listSessions(
+    options?: DaemonSessionListPageOptions,
+  ): Promise<DaemonSessionSummary[]>;
+  listSessionsPage(
+    options?: DaemonSessionListPageOptions,
+  ): Promise<DaemonSessionListPage>;
+  listSessionGroups(): Promise<DaemonSessionGroupCatalog>;
+  createSessionGroup(
+    input: DaemonSessionGroupInput,
+  ): Promise<DaemonSessionGroup>;
+  updateSessionGroup(
+    groupId: string,
+    update: DaemonSessionGroupUpdate,
+  ): Promise<DaemonSessionGroup>;
+  deleteSessionGroup(groupId: string): Promise<{ deleted: boolean }>;
+  updateSessionOrganization(
+    sessionId: string,
+    update: DaemonSessionOrganizationUpdate,
+  ): Promise<DaemonSessionOrganizationResult>;
   deleteSession(sessionId: string): Promise<boolean>;
   deleteSessions(sessionIds: string[]): Promise<{
     removed: string[];
     notFound: string[];
     errors: Array<{ sessionId: string; error: string }>;
   }>;
+  exportSession(
+    sessionId: string,
+    format?: DaemonSessionExportFormat,
+  ): Promise<DaemonSessionExportResult>;
   /**
    * Move a session to the archived directory. Idempotent: an
    * already-archived session resolves `true`. Rejects if the daemon

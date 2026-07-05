@@ -6,6 +6,11 @@
   --secondary: #1e1e1e;
   --border: #2a2a2a;
   --agent-blue-500: #6785ff;
+  /* Chart series colors — mirror App.module.css .themeDark. DialogShell portals
+     to document.body, outside the app root that defines these, so the dialog's
+     own theme scope must carry them or SVG strokes resolve to `none`. */
+  --agent-blue-400: #8aa0ff;
+  --primary: #fafafa;
   --success-color: #48bb78;
   --warning-color: #ecc94b;
   --error-color: #fc8181;
@@ -25,6 +30,9 @@
   --secondary: #f3f3f5;
   --border: #e3e4e6;
   --agent-blue-500: #0033ff;
+  /* Chart series colors — mirror App.module.css .themeLight (see .themeDark). */
+  --agent-blue-400: #335cff;
+  --primary: #151517;
   --success-color: #1f7a3a;
   --warning-color: #9a6a00;
   --error-color: #c0362c;
@@ -157,6 +165,28 @@
   transform: rotate(-45deg);
 }
 
+/* Shared header icon-button styling (fullscreen toggle); mirrors .close's hover
+   treatment without the ::before/::after "X". */
+.iconButton {
+  display: inline-flex;
+  width: 26px;
+  height: 26px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+}
+
+.iconButton:hover,
+.iconButton:focus-visible {
+  background: var(--muted);
+  color: var(--foreground);
+}
+
 .body {
   display: flex;
   flex-direction: column;
@@ -167,6 +197,18 @@
   padding: 14px;
 }
 
+/* Fullscreen: expand to (near) the whole viewport, overriding the size width
+   and the 80vh caps on the panel and its scrolling body. */
+.panelFullscreen {
+  width: calc(100vw - 32px);
+  max-width: none;
+  max-height: calc(100vh - 32px);
+}
+
+.panelFullscreen .body {
+  max-height: calc(100vh - 32px - 46px);
+}
+
 @media (max-width: 560px) {
   .backdrop {
     align-items: center;
@@ -175,6 +217,13 @@
 
   .panel {
     max-height: min(80vh, calc(100vh - 32px));
+  }
+
+  /* Keep fullscreen dominant on mobile: `.panel` above has equal specificity
+     and comes later in source order than the base `.panelFullscreen`, so
+     without this it clamps fullscreen back to 80vh on narrow screens. */
+  .panelFullscreen {
+    max-height: calc(100vh - 32px);
   }
 
   .body {

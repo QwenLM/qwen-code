@@ -239,6 +239,39 @@ const ALLOWED_SINGLE_WORDS = new Set([
   'no',
 ]);
 
+const KNOWN_ABBREVIATIONS = new Set([
+  'Mr',
+  'Mrs',
+  'Dr',
+  'Ms',
+  'Prof',
+  'Sr',
+  'Jr',
+  'St',
+  'vs',
+  'etc',
+]);
+
+const SENTENCE_BOUNDARY_RE = /[.!?]\s+[A-Z]/g;
+
+function hasSentenceBoundary(suggestion: string): boolean {
+  for (const m of suggestion.matchAll(SENTENCE_BOUNDARY_RE)) {
+    const i = m.index!;
+    const before = suggestion.slice(0, i);
+    const wordMatch = before.match(/(\w+)$/);
+    if (!wordMatch) return true;
+    const word = wordMatch[1];
+    if (KNOWN_ABBREVIATIONS.has(word)) continue;
+    if (
+      (word === 'g' && /e\.g$/i.test(before)) ||
+      (word === 'e' && /i\.e$/i.test(before))
+    )
+      continue;
+    return true;
+  }
+  return false;
+}
+
 /**
  * Returns the filter reason if the suggestion should be suppressed, or null if it passes.
  */
@@ -299,7 +332,7 @@ export function getFilterReason(suggestion: string): string | null {
     if (suggestion.length > 30) return 'too_many_words';
   }
   if (suggestion.length >= 100) return 'too_long';
-  if (/[.!?]\s+[A-Z]/.test(suggestion)) return 'multiple_sentences';
+  if (hasSentenceBoundary(suggestion)) return 'multiple_sentences';
   if (/[\n*]|\*\*/.test(suggestion)) return 'has_formatting';
 
   if (

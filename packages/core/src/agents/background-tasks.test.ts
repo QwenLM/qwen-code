@@ -511,16 +511,24 @@ describe('BackgroundTaskRegistry', () => {
       expect(registry.get('bg-1')?.prompt).toBe('resumed continuation');
     });
 
-    it('does not count foreground, paused, or terminal entries toward the cap', () => {
+    it('counts foreground agents toward the cap but not paused or terminal entries', () => {
       registry = new BackgroundTaskRegistry({
         maxConcurrentBackgroundAgents: 1,
       });
 
+      // A foreground agent occupies a slot.
       registry.register(
         makeRegistration('fg-1', {
           isBackgrounded: false,
         }),
       );
+
+      expect(() => registry.register(makeRegistration('bg-1'))).toThrow(
+        'maximum concurrent background agents (1) reached',
+      );
+
+      // Paused entries do not occupy a slot.
+      registry.unregisterForeground('fg-1');
       registry.register(
         makeRegistration('paused-1', {
           status: 'paused',
@@ -535,7 +543,6 @@ describe('BackgroundTaskRegistry', () => {
       registry.complete('bg-1', 'done');
       registry.register(makeRegistration('bg-2'));
 
-      expect(registry.get('fg-1')).toBeDefined();
       expect(registry.get('paused-1')).toBeDefined();
       expect(registry.get('bg-2')?.status).toBe('running');
     });

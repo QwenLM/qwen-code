@@ -8,6 +8,7 @@ import type { Components, Options } from 'react-markdown';
 import type { DaemonStreamingState } from '@qwen-code/webui/daemon-react-sdk';
 import type { ACPToolCall } from './adapters/types';
 import type { WelcomeHeaderProps } from './components/WelcomeHeader';
+import type { WebShellTheme } from './themeContext';
 
 export type MarkdownContentSource = 'assistant' | 'thinking';
 
@@ -15,11 +16,46 @@ export interface MarkdownRenderContext {
   source: MarkdownContentSource;
 }
 
+export interface WebShellCodeBlockRenderInfo {
+  /**
+   * Raw fenced-code language from the markdown class name, restricted to safe
+   * fence-language characters.
+   */
+  language: string;
+  /**
+   * Canonical Shiki language id after applying built-in aliases, or `text`
+   * when the language is unsupported by the fallback highlighter.
+   */
+  resolvedLanguage: string;
+  className?: string;
+  code: string;
+  /** True while the assistant message is still streaming partial content. */
+  isStreaming: boolean;
+  source: MarkdownContentSource;
+  theme: WebShellTheme;
+}
+
+/**
+ * Return a React node to replace the default code block rendering. Return
+ * `null`, `undefined`, or `false` to decline and fall back to the built-in code
+ * block renderer. Expensive renderers should debounce or defer work while
+ * `info.isStreaming` is true.
+ */
+export type CodeBlockRenderer = (
+  info: WebShellCodeBlockRenderInfo,
+) => ReactNode | null | undefined;
+
 export interface WebShellMarkdownCustomization {
   transformMarkdown?: (
     markdown: string,
     context: MarkdownRenderContext,
   ) => string;
+  renderCodeBlock?: CodeBlockRenderer;
+  /**
+   * Custom markdown components override Web Shell's built-ins. In particular,
+   * `components.code` replaces the default code renderer, so `renderCodeBlock`
+   * will not be called for that source.
+   */
   components?: Components;
   remarkPlugins?: Options['remarkPlugins'];
   rehypePlugins?: Options['rehypePlugins'];
@@ -79,6 +115,25 @@ export interface WebShellComposerInput {
   tags?: readonly WebShellComposerTag[];
   tagPlacement?: WebShellComposerTagPlacement;
   submit?: boolean;
+}
+
+export interface WebShellAtItem {
+  id: string;
+  label: string;
+  description?: string;
+  detail?: string;
+  insertText?: string;
+}
+
+export interface WebShellAtProvider {
+  id: string;
+  label: string;
+  description?: string;
+  order?: number;
+  search(params: {
+    query: string;
+    signal: AbortSignal;
+  }): Promise<readonly WebShellAtItem[]>;
 }
 
 export interface WebShellComposerApi {
