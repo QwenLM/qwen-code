@@ -74,7 +74,11 @@ import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { WebShellSidebar } from './components/sidebar/WebShellSidebar';
-import { getLocalCommands } from './constants/localCommands';
+import {
+  getLocalCommands,
+  localizeBuiltinDescriptions,
+  skillDescriptionKey,
+} from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
@@ -3380,16 +3384,22 @@ export function App({
 
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
-    return mergeCommands(connection.commands ?? [], getLocalCommands(t))
+    return localizeBuiltinDescriptions(
+      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      t,
+    )
       .filter(
         (command) => !hiddenCommands.has(normalizeHiddenCommand(command.name)),
       )
       .map((command) => {
         if (!skillNames.has(command.name)) return command;
+        const skillKey = skillDescriptionKey(command.name);
         return {
           ...command,
           displayCategory: 'skill' as const,
-          description: command.description || t('skills.run'),
+          description: skillKey
+            ? t(skillKey)
+            : command.description || t('skills.run'),
         };
       });
   }, [connection.commands, connection.skills, hiddenCommands, t]);
