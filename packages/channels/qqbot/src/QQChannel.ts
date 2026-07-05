@@ -281,14 +281,28 @@ export class QQChannel extends ChannelBase {
                       this.cronBuffer.set(sessionId, entry!);
                     }
                     setTimeout(() => {
-                      this._cronTextHandler?.(sessionId, '');
-                    }, 2000);
+                      const retryEntry = this.cronBuffer.get(sessionId);
+                      if (!retryEntry || !retryEntry.buffer) return;
+                      const retryTarget = this.router.getTarget(sessionId);
+                      if (!retryTarget) return;
+                      this.sendMessage(retryTarget.chatId, retryEntry.buffer)
+                        .then(() => {
+                          this.cronRetryCount.delete(sessionId);
+                          this.cronBuffer.delete(sessionId);
+                        })
+                        .catch((retryErr) => {
+                          process.stderr.write(
+                            `[QQ:${this.name}] Cron flush retry error: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}
+`,
+                          );
+                        });
+                    }, 2000).unref();
                   });
                 return;
               }
             }
             this.cronBuffer.delete(sessionId);
-          }, 2000);
+          }, 2000).unref();
         });
       };
       this.attachCronHandler();
@@ -450,12 +464,10 @@ export class QQChannel extends ChannelBase {
       );
 
       if (!resp.ok) {
+        // Always consume response body to prevent undici resource leak
+        const errBody = sanitizeLogText(await resp.text().catch(() => ''), 200);
         // Log diagnostic info for non-429 failures
         if (resp.status !== 429) {
-          const errBody = sanitizeLogText(
-            await resp.text().catch(() => ''),
-            200,
-          );
           process.stderr.write(
             `[QQ:${this.name}] Send failed (HTTP ${resp.status}: ${errBody})
 `,
@@ -652,6 +664,7 @@ export class QQChannel extends ChannelBase {
     this.msgSeqMap.clear();
     this.botOpenIdByGroup.clear();
     this.seenMessages.clear();
+    this.crossEventDedup.clear();
     this.coldStart = true;
     for (const [, state] of this.streamState) {
       if (state.timer) clearTimeout(state.timer);
@@ -1019,41 +1032,72 @@ export class QQChannel extends ChannelBase {
       }
 
       if (raw.chatTypeMap) {
+        const arr = raw.chatTypeMap as Array<[string, unknown]>;
         this.chatTypeMap = new Map(
-          (raw.chatTypeMap as Array<[string, unknown]>).filter(
-            ([, v]) => v === 'c2c' || v === 'group',
-          ),
+          Array.isArray(arr)
+            ? arr.filter(
+                ([k, v]) =>
+                  typeof k === 'string' &&
+                  k.length <= 256 &&
+                  (v === 'c2c' || v === 'group'),
+              )
+            : [],
         ) as Map<string, 'c2c' | 'group'>;
       }
       if (raw.replyMsgId) {
+        const arr = raw.replyMsgId as Array<[string, unknown]>;
         this.replyMsgId = new Map(
-          (raw.replyMsgId as Array<[string, unknown]>).map(([k, v]) => [
-            k,
-            typeof v === 'string'
-              ? { msgId: v, timestamp: Date.now() }
-              : (v as { msgId: string; timestamp: number }),
-          ]),
+          Array.isArray(arr)
+            ? arr
+                .filter(([k]) => typeof k === 'string' && k.length <= 256)
+                .map(([k, v]) => [
+                  k,
+                  typeof v === 'string' && v.length <= 128
+                    ? { msgId: v, timestamp: Date.now() }
+                    : (v as { msgId: string; timestamp: number }),
+                ])
+            : [],
         );
       }
       if (raw.msgSeqMap) {
+        const arr = raw.msgSeqMap as Array<[string, unknown]>;
         this.msgSeqMap = new Map(
-          (raw.msgSeqMap as Array<[string, unknown]>).filter(
-            ([, v]) => typeof v === 'number' && v >= 0,
-          ),
+          Array.isArray(arr)
+            ? arr.filter(
+                ([k, v]) =>
+                  typeof k === 'string' &&
+                  k.length <= 256 &&
+                  Number.isFinite(v as number) &&
+                  (v as number) >= 0,
+              )
+            : [],
         ) as Map<string, number>;
       }
       if (raw.groupActiveMsgEnabled) {
+        const arr = raw.groupActiveMsgEnabled as Array<[string, unknown]>;
         this.groupActiveMsgEnabled = new Map(
-          (raw.groupActiveMsgEnabled as Array<[string, unknown]>).filter(
-            ([, v]) => typeof v === 'boolean',
-          ),
+          Array.isArray(arr)
+            ? arr.filter(
+                ([k, v]) =>
+                  typeof k === 'string' &&
+                  k.length <= 256 &&
+                  typeof v === 'boolean',
+              )
+            : [],
         ) as Map<string, boolean>;
       }
       if (raw.botOpenIdByGroup) {
+        const arr = raw.botOpenIdByGroup as Array<[string, unknown]>;
         this.botOpenIdByGroup = new Map(
-          (raw.botOpenIdByGroup as Array<[string, unknown]>).filter(
-            ([, v]) => typeof v === 'string' && /^[A-F0-9]{32}$/i.test(v),
-          ),
+          Array.isArray(arr)
+            ? arr.filter(
+                ([k, v]) =>
+                  typeof k === 'string' &&
+                  k.length <= 256 &&
+                  typeof v === 'string' &&
+                  /^[A-F0-9]{32}$/i.test(v),
+              )
+            : [],
         ) as Map<string, string>;
       }
       return true;
@@ -1078,7 +1122,7 @@ export class QQChannel extends ChannelBase {
       }
     } catch (e) {
       process.stderr.write(
-        `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+        `[QQ:${this.name}] backupGlobalSessions failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
 `,
       );
     }
@@ -1098,7 +1142,7 @@ export class QQChannel extends ChannelBase {
       }
     } catch (e) {
       process.stderr.write(
-        `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+        `[QQ:${this.name}] restoreGlobalSessions failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
 `,
       );
     }
@@ -1144,7 +1188,7 @@ export class QQChannel extends ChannelBase {
       }
     } catch (e) {
       process.stderr.write(
-        `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
+        `[QQ:${this.name}] fixRestoredSessions failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
 `,
       );
     }
@@ -1342,6 +1386,7 @@ export class QQChannel extends ChannelBase {
       // gone; skip the RESUME attempt and go straight to IDENTIFY.
       if (code !== 1000 && code !== 4000) {
         this.tryResume = false;
+        this.coldStart = true;
       }
       if (shouldReconnect && this.connectReject) {
         this.connectReject(
@@ -1936,10 +1981,6 @@ export class QQChannel extends ChannelBase {
       return;
     }
 
-    // Also check cross-event dedup: GROUP_AT_MESSAGE_CREATE may have already handled this message.
-    if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
-      return;
-
     const result = this.prepareGroupMessage(event, chatId);
     if (!result) return;
     const { isSlash, text, senderName, isAtBot } = result;
@@ -1965,6 +2006,12 @@ export class QQChannel extends ChannelBase {
       );
       if (!matched) return;
     }
+
+    // Dedup after policy check: GROUP_AT_MESSAGE_CREATE may have already handled this message.
+    // isDuplicate/isCrossEventDuplicate add entries when returning false, so calling them before
+    // the policy check would consume dedup slots for messages that may later be filtered out.
+    if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
+      return;
 
     this.handleInbound({
       channelName: this.name,

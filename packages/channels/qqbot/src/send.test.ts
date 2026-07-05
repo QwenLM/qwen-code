@@ -1513,13 +1513,13 @@ describe('restoreQQState validation filters', () => {
 
     const msgSeqMap = (ch as unknown as { msgSeqMap: Map<string, number> })
       .msgSeqMap;
-    expect(msgSeqMap.size).toBe(5);
+    expect(msgSeqMap.size).toBe(4);
     expect(msgSeqMap.get('e')).toBe(42);
     expect(msgSeqMap.get('f')).toBe(0);
-    // PR-D does NOT filter safe-integer or fractional values — only non-number and negative
+    // PR-D now filters Infinity/NaN via Number.isFinite; 1e999 becomes Infinity and is rejected
     expect(msgSeqMap.has('a')).toBe(true);
     expect(msgSeqMap.has('b')).toBe(true);
-    expect(msgSeqMap.has('c')).toBe(true);
+    expect(msgSeqMap.has('c')).toBe(false);
     expect(msgSeqMap.has('d')).toBe(false);
   });
 
