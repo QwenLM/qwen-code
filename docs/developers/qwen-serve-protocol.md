@@ -154,7 +154,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
  'workspace_preflight', 'session_context', 'session_context_usage',
  'session_supported_commands', 'session_tasks', 'session_stats',
  'session_lsp', 'session_status',
- 'session_close', 'session_metadata', 'session_archive', 'mcp_guardrails',
+ 'session_close', 'session_metadata', 'session_organization',
+ 'session_archive', 'mcp_guardrails',
  'workspace_mcp_manage', 'mcp_guardrail_events',
  'mcp_server_runtime_mutation',
  'workspace_file_read', 'workspace_file_bytes', 'workspace_file_write',
@@ -182,6 +183,8 @@ registry. Clients **must** gate UI off `features`, not off `mode` (per design
 `client_heartbeat` advertises `POST /session/:id/heartbeat`. Older daemons return `404`; pre-flight this tag before issuing periodic heartbeats.
 
 `session_close` and `session_metadata` advertise `DELETE /session/:id` and `PATCH /session/:id/metadata`. Older daemons return `404`; pre-flight these tags before exposing close or rename affordances.
+
+`session_organization` advertises custom session groups and pinning. It adds `GET/POST/PATCH/DELETE /workspace/:id/session-groups`, `PATCH /session/:id/organization`, and the opt-in organized list view `GET /workspace/:id/sessions?view=organized`. Older daemons return `404` for the mutation/group routes and ignore the organized view contract, so WebShell/SDK clients must pre-flight this tag before showing grouping or pinning UI.
 
 `session_archive` advertises the v1 directory-state archive API: `POST /sessions/archive`, `POST /sessions/unarchive`, and `GET /workspace/:id/sessions?archiveState=active|archived`. Archived sessions cannot be loaded or resumed until they are unarchived.
 
@@ -322,6 +325,12 @@ Response shape:
     },
     "perf": {
       "eventLoop": { "meanMs": 0, "p50Ms": 0, "p99Ms": 0, "maxMs": 0 },
+      "promptQueueWait": {
+        "count": 0,
+        "meanMs": 0,
+        "maxMs": 0,
+        "lastMs": null
+      },
       "pipe": {
         "inbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 },
         "outbound": { "count": 0, "totalBytes": 0, "maxBytes": 0 }
@@ -329,6 +338,8 @@ Response shape:
     },
     "activity": {
       "activePrompts": 0,
+      "pendingPrompts": 0,
+      "queuedPrompts": 0,
       "lastActivityAt": null,
       "idleSinceMs": null
     }
@@ -337,8 +348,8 @@ Response shape:
 ```
 
 `runtime.perf` is optional. When present, it reports daemon-process event loop
-lag and daemon-child pipe byte counters only; ACP child event loop lag is not
-included in `/daemon/status`.
+lag, prompt FIFO queue wait samples, and daemon-child pipe byte counters only;
+ACP child event loop lag is not included in `/daemon/status`.
 
 `status` is `error` if any issue has error severity, `warning` if any issue has
 warning severity, otherwise `ok`. Issue codes are stable and include
@@ -351,7 +362,7 @@ mounted, `/daemon/status` may report `daemon_runtime_starting`; if the async
 runtime mount fails, it reports `daemon_runtime_failed` while non-status
 runtime routes return `503`.
 
-`runtime.activity` reports daemon-wide prompt activity. `activePrompts` counts sessions with an in-flight prompt. `lastActivityAt` is the ISO 8601 timestamp of the last prompt start/end or session spawn; `null` when the daemon has never processed any activity since boot. `idleSinceMs` is computed from `lastActivityAt` at response generation time.
+`runtime.activity` reports daemon-wide prompt activity. `activePrompts` counts sessions with an in-flight prompt. `pendingPrompts` counts all accepted prompts that have not settled yet, including the running prompt and FIFO-waiting prompts. `queuedPrompts` counts FIFO-waiting prompts that have been accepted but not dispatched. `lastActivityAt` is the ISO 8601 timestamp of the last prompt start/end or session spawn; `null` when the daemon has never processed any activity since boot. `idleSinceMs` is computed from `lastActivityAt` at response generation time.
 
 `runtime.channel.live` reports the ACP bridge channel inside the daemon. It is
 not the channel-adapter worker. Daemon-managed channels use
@@ -1185,6 +1196,13 @@ Response:
 
 `attached: true` means a session for that workspace already existed and you're now sharing it.
 
+Multi-client integrations that want independent conversations should send
+`sessionScope: "thread"` on each `POST /session`. Use the default `single`
+scope only when clients intentionally share one collaborative session; shared
+sessions serialize prompts through one FIFO, visible through
+`/daemon/status` as `runtime.activity.pendingPrompts` and
+`runtime.activity.queuedPrompts`.
+
 Concurrent `POST /session` calls for the same workspace are **coalesced** to one spawn — both callers get the same `sessionId`, exactly one reports `attached: false`. If the underlying spawn fails (init timeout, malformed agent output, OOM), **all coalesced callers receive the same error** — the in-flight slot is cleared so a follow-up call can retry from scratch.
 
 > ⚠️ **`modelServiceId` rejection on a fresh session is silent on the
@@ -1259,7 +1277,7 @@ Use `/load` when the client has no history rendered (cold reconnect, picker → 
 
 ### `GET /workspace/:id/sessions`
 
-List persisted sessions whose canonical workspace matches `:id` (URL-encoded absolute cwd). The default list is active sessions from `chats/`; pass `archiveState=archived` to list archived sessions from `chats/archive/`. `archiveState=all` is not supported in v1.
+List persisted sessions whose canonical workspace matches `:id` (URL-encoded absolute cwd). The default list is active sessions from `chats/`; pass `archiveState=archived` to list archived sessions from `chats/archive/`. `archiveState=all` is not supported in v1. The default response and numeric `cursor` semantics are unchanged by `session_organization`.
 
 ```bash
 curl http://127.0.0.1:4170/workspace/$(jq -rn --arg c "$PWD" '$c|@uri')/sessions
@@ -1268,11 +1286,13 @@ curl http://127.0.0.1:4170/workspace/$(jq -rn --arg c "$PWD" '$c|@uri')/sessions
 
 Query parameters:
 
-| Field          | Required | Notes                                                                                                   |
-| -------------- | -------- | ------------------------------------------------------------------------------------------------------- |
-| `archiveState` | no       | `active` (default) or `archived`. Any other value returns `400 { code: "invalid_archive_state" }`.      |
-| `cursor`       | no       | Pagination cursor from the previous response.                                                           |
-| `size`         | no       | Page size. Invalid values return `400 { code: "invalid_cursor" }` or the existing page-size validation. |
+| Field          | Required | Notes                                                                                                                                                                                           |
+| -------------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `archiveState` | no       | `active` (default) or `archived`. Any other value returns `400 { code: "invalid_archive_state" }`.                                                                                              |
+| `cursor`       | no       | Pagination cursor from the previous response.                                                                                                                                                   |
+| `size`         | no       | Page size. Invalid values return `400 { code: "invalid_cursor" }` or the existing page-size validation.                                                                                         |
+| `view`         | no       | Omit for the legacy recent list. `organized` opts into server-side pinned/group ordering and adds optional organization fields. Any other value returns `400 { code: "invalid_session_view" }`. |
+| `group`        | no       | Only meaningful with `view=organized`. `all` (default), `pinned`, `ungrouped`, or a custom group id. Unknown group ids return `404 { code: "group_not_found" }`.                                |
 
 Response:
 
@@ -1293,7 +1313,78 @@ Response:
 }
 ```
 
+With `view=organized`, the daemon reads `<Storage.getProjectDir(cwd)>/session-organization.v1.json`, returns pinned sessions first, then activity time descending, and then `sessionId` for stable ties. The organized cursor is opaque base64url JSON and must not be reused with the legacy recent list. `pinned` is a virtual filter, not a group. `groupId: null` means ungrouped. Archived sessions keep their organization metadata, but `archiveState=archived&view=organized` still returns only archived sessions.
+
+Additional fields may appear on each session when `view=organized`:
+
+```json
+{
+  "isPinned": true,
+  "pinnedAt": "2026-07-04T12:00:00.000Z",
+  "groupId": "018f..."
+}
+```
+
 Active lists include live daemon overlay fields such as `clientCount` and `hasActivePrompt`. Archived lists are storage-only: `isArchived` is `true`, and live overlay fields remain absent or false. Empty array (not 404) when no sessions exist — a session-picker UI shouldn't error just because the workspace is idle.
+
+### `GET /workspace/:id/session-groups`
+
+List user-defined session groups for a workspace. Pre-flight `caps.features.includes('session_organization')`.
+
+Response:
+
+```json
+{
+  "groups": [
+    {
+      "id": "018f...",
+      "name": "Frontend",
+      "color": "blue",
+      "order": 0,
+      "createdAt": "2026-07-04T12:00:00.000Z",
+      "updatedAt": "2026-07-04T12:00:00.000Z"
+    }
+  ],
+  "colorOptions": ["red", "orange", "yellow", "green", "blue", "purple"]
+}
+```
+
+Colors are protocol tokens only; clients localize display names. No default color-named groups are created.
+
+### `POST /workspace/:id/session-groups`
+
+Create a custom session group. Strict mutation gate. Pre-flight `caps.features.includes('session_organization')`.
+
+Request:
+
+```json
+{ "name": "Frontend", "color": "blue" }
+```
+
+`name` is trimmed, must be 1-64 characters, cannot contain control characters, and is unique within the workspace by case-insensitive trimmed comparison. Duplicate names return `409 { code: "group_name_conflict" }`. `color` must be one of the returned `colorOptions`.
+
+Response:
+
+```json
+{
+  "group": {
+    "id": "018f...",
+    "name": "Frontend",
+    "color": "blue",
+    "order": 0,
+    "createdAt": "...",
+    "updatedAt": "..."
+  }
+}
+```
+
+### `PATCH /workspace/:id/session-groups/:groupId`
+
+Update a custom session group. Strict mutation gate. Pre-flight `caps.features.includes('session_organization')`. Body fields are optional: `{ "name"?: string, "color"?: string, "order"?: number }`. Unknown group ids return `404 { code: "group_not_found" }`; duplicate/invalid names and colors use the same errors as create.
+
+### `DELETE /workspace/:id/session-groups/:groupId`
+
+Delete a custom session group. Strict mutation gate. Pre-flight `caps.features.includes('session_organization')`. Sessions referencing the group are cleared to `groupId: null`; pinned state is preserved. Response is `{ "deleted": true }` when a group was removed and `{ "deleted": false }` when the id did not exist.
 
 ### `POST /sessions/delete`
 
@@ -1412,6 +1503,11 @@ curl -X POST http://127.0.0.1:4170/session/$SID/cancel
 
 > **Multi-prompt contract:** cancel only affects the active prompt. Any prompts the same client previously POSTed and are still queued behind the active one will continue to execute. Multi-prompt queueing is a daemon-introduced behavior (not in ACP spec); the contract for queued prompts is "they keep running unless you cancel each, or kill the session via channel exit".
 
+If queued prompts are unexpected in a multi-client deployment, first confirm
+whether callers are sharing a default `sessionScope: "single"` session. For
+independent per-thread conversations, create sessions with
+`sessionScope: "thread"` so prompts serialize only within that thread.
+
 ### `DELETE /session/:id`
 
 Explicitly close a live session. Force-closes even when other clients are attached — cancels any active prompt, resolves pending permissions as cancelled, publishes `session_closed` event, closes the EventBus, and removes the session from daemon maps. On-disk persisted sessions are NOT deleted — they can be reloaded via `POST /session/:id/load`. Pre-flight `caps.features.session_close`.
@@ -1427,7 +1523,7 @@ Idempotent: returns `404` for unknown sessions (same `SessionNotFoundError` shap
 
 ### `PATCH /session/:id/metadata`
 
-Update mutable session metadata. Currently supports `displayName` only. Pre-flight `caps.features.session_metadata`.
+Update mutable session metadata. Currently supports `displayName` only. Pre-flight `caps.features.session_metadata`. Grouping and pinning are intentionally not part of this route; use `PATCH /session/:id/organization` under `session_organization`.
 
 Request:
 
@@ -1446,6 +1542,35 @@ Response:
 ```
 
 Publishes a `session_metadata_updated` event on the session's SSE stream with `{ sessionId, displayName }`.
+
+### `PATCH /session/:id/organization`
+
+Update local session organization state. Strict mutation gate. Pre-flight `caps.features.includes('session_organization')`.
+
+Request:
+
+```json
+{ "isPinned": true, "groupId": "018f..." }
+```
+
+| Field      | Required | Notes                                                                                                |
+| ---------- | -------- | ---------------------------------------------------------------------------------------------------- |
+| `isPinned` | no       | Boolean. `true` sets `pinnedAt` if it was not already pinned; `false` clears `pinnedAt`.             |
+| `groupId`  | no       | Custom group id or `null` for ungrouped. Unknown group ids return `404 { code: "group_not_found" }`. |
+
+Response:
+
+```json
+{
+  "sessionId": "<uuid>",
+  "groupId": "018f...",
+  "isPinned": true,
+  "pinnedAt": "2026-07-04T12:00:00.000Z",
+  "updatedAt": "2026-07-04T12:00:00.000Z"
+}
+```
+
+This state is stored in the project-level session organization sidecar under the daemon runtime storage directory. It is not transcript content, does not update transcript `mtime`, is not exported with transcripts, and is preserved across archive/unarchive.
 
 ### `POST /session/:id/heartbeat`
 

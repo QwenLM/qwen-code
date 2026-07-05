@@ -64,7 +64,14 @@ export interface WebShellMarkdownCustomization {
 export type MarkdownTableMode = 'basic' | 'advanced';
 
 export type ToolHeaderKind =
-  'agent' | 'edit' | 'fetch' | 'read' | 'shell' | 'todo' | 'write' | 'other';
+  | 'agent'
+  | 'edit'
+  | 'fetch'
+  | 'read'
+  | 'shell'
+  | 'todo'
+  | 'write'
+  | 'other';
 
 export interface ToolHeaderExtraRenderInfo {
   kind: ToolHeaderKind;
@@ -203,7 +210,9 @@ export interface WebShellMonitorTask extends WebShellTaskBase {
 }
 
 export type WebShellTaskInfo =
-  WebShellAgentTask | WebShellShellTask | WebShellMonitorTask;
+  | WebShellAgentTask
+  | WebShellShellTask
+  | WebShellMonitorTask;
 
 // ---- Model info (public type for footer renderer) ----
 

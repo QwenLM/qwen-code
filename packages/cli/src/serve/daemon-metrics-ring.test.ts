@@ -17,7 +17,7 @@ const GAUGES: DaemonMetricsGauges = {
   heapUsedBytes: 50,
   activeSessions: 2,
   activePrompts: 1,
-  pendingPrompts: 3,
+  queuedPrompts: 3,
   eventLoopLagP99Ms: 3,
   sseConnections: 4,
   wsConnections: 1,
@@ -80,7 +80,7 @@ describe('DaemonMetricsRing', () => {
     expect(b.pipeOutBytes).toBe(256);
     // new gauges snapshot verbatim
     expect(b.cpuPercent).toBe(12);
-    expect(b.pendingPrompts).toBe(3);
+    expect(b.queuedPrompts).toBe(3);
     expect(b.sseConnections).toBe(4);
     expect(b.wsConnections).toBe(1);
     expect(b.acpConnections).toBe(2);

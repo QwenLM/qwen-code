@@ -2100,6 +2100,87 @@ describe('runQwenServe runtime startup failures', () => {
     expect(bridge.shutdown).toHaveBeenCalledTimes(1);
   });
 
+  it('accumulates prompt queue wait stats in daemon status perf data', async () => {
+    tmpDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-queue-wait-')),
+    );
+    vi.spyOn(qwenCore, 'resolveTelemetrySettings').mockResolvedValue({
+      enabled: false,
+      sensitiveSpanAttributeMaxLength: 1024 * 1024,
+    });
+    const telemetry: ReturnType<typeof qwenCore.createDaemonBridgeTelemetry> = {
+      captureContext() {
+        return undefined;
+      },
+      runWithContext(_captured, fn) {
+        return fn();
+      },
+      withSpan(_operation, _attributes, fn) {
+        return fn();
+      },
+      event: vi.fn(),
+      injectPromptContext(request) {
+        return request;
+      },
+    };
+    vi.spyOn(qwenCore, 'createDaemonBridgeTelemetry').mockReturnValue(
+      telemetry,
+    );
+    const recordPromptQueueWait = vi.spyOn(
+      qwenCore,
+      'recordDaemonPromptQueueWait',
+    );
+    const bridge = makeRuntimeBridge();
+    vi.spyOn(acpBridge, 'createAcpSessionBridge').mockReturnValue(
+      bridge as ReturnType<typeof acpBridge.createAcpSessionBridge>,
+    );
+
+    const handle = await runQwenServe(
+      {
+        port: 0,
+        hostname: '127.0.0.1',
+        mode: 'http-bridge',
+        workspace: tmpDir,
+        maxSessions: 1,
+        serveWebShell: false,
+      },
+      { resolveOnListen: true },
+    );
+
+    try {
+      await handle.runtimeReady;
+      telemetry.metrics?.promptQueueWait(10);
+      telemetry.metrics?.promptQueueWait(30);
+      telemetry.metrics?.promptQueueWait(5);
+
+      const res = await fetch(`${handle.url}/daemon/status`);
+      expect(res.status).toBe(200);
+      const body = (await res.json()) as {
+        runtime?: {
+          perf?: {
+            promptQueueWait?: {
+              count: number;
+              meanMs: number;
+              maxMs: number;
+              lastMs: number | null;
+            };
+          };
+        };
+      };
+      expect(body.runtime?.perf?.promptQueueWait).toEqual({
+        count: 3,
+        meanMs: 15,
+        maxMs: 30,
+        lastMs: 5,
+      });
+      expect(recordPromptQueueWait).toHaveBeenNthCalledWith(1, 10);
+      expect(recordPromptQueueWait).toHaveBeenNthCalledWith(2, 30);
+      expect(recordPromptQueueWait).toHaveBeenNthCalledWith(3, 5);
+    } finally {
+      await handle.close();
+    }
+  });
+
   it('fails runtimeReady and health when runtime startup times out', async () => {
     tmpDir = fs.realpathSync(
       fs.mkdtempSync(path.join(os.tmpdir(), 'qws-runtime-timeout-')),

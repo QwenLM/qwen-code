@@ -35,6 +35,7 @@ import {
   readLastJsonStringFieldsSync,
 } from '../utils/sessionStorageUtils.js';
 import { getUsageOutputTokenCountForPromptEstimate } from './tokenEstimation.js';
+import { SessionOrganizationService } from './session-organization-service.js';
 
 const debugLogger = createDebugLogger('SESSION');
 
@@ -406,6 +407,35 @@ export class SessionService {
       if (fs.existsSync(sidecar)) {
         this.removeFileIfExists(sidecar);
       }
+    }
+  }
+
+  private async removeSessionOrganization(sessionId: string): Promise<void> {
+    try {
+      await new SessionOrganizationService(this.projectRoot, (message) => {
+        this.warn(message);
+      }).removeSession(sessionId);
+    } catch (error) {
+      this.warn(
+        `removeSession: failed to clear session organization for ${sessionId}: ${error}`,
+      );
+    }
+  }
+
+  private async removeSessionOrganizations(
+    sessionIds: string[],
+  ): Promise<void> {
+    if (sessionIds.length === 0) return;
+    try {
+      await new SessionOrganizationService(this.projectRoot, (message) => {
+        this.warn(message);
+      }).removeSessions(sessionIds);
+    } catch (error) {
+      this.warn(
+        `removeSessions: failed to clear session organization for ${sessionIds.join(
+          ', ',
+        )}: ${error}`,
+      );
     }
   }
 
@@ -1031,6 +1061,14 @@ export class SessionService {
    * @returns true if removed, false if not found
    */
   async removeSession(sessionId: string): Promise<boolean> {
+    const removed = await this.removeSessionFiles(sessionId);
+    if (removed) {
+      await this.removeSessionOrganization(sessionId);
+    }
+    return removed;
+  }
+
+  private async removeSessionFiles(sessionId: string): Promise<boolean> {
     if (!SESSION_FILE_PATTERN.test(`${sessionId}.jsonl`)) {
       return false;
     }
@@ -1220,7 +1258,7 @@ export class SessionService {
 
     const uniqueSessionIds = [...new Set(sessionIds)];
     const results = await Promise.allSettled(
-      uniqueSessionIds.map((sessionId) => this.removeSession(sessionId)),
+      uniqueSessionIds.map((sessionId) => this.removeSessionFiles(sessionId)),
     );
 
     for (let i = 0; i < results.length; i++) {
@@ -1238,6 +1276,8 @@ export class SessionService {
         errors.push({ sessionId, error: result.reason as Error });
       }
     }
+
+    await this.removeSessionOrganizations(removed);
 
     return { removed, notFound, errors };
   }

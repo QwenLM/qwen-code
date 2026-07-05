@@ -1791,10 +1791,10 @@ export class GeminiChat {
     // closure can also access it.
     //
     // The subagent path sets params.config.maxOutputTokens explicitly; the
-    // interactive path leaves it undefined but will escalate to
-    // max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')) on MAX_TOKENS.
-    // Pre-reserving that space prevents the dead zone between the adjusted
-    // auto threshold and an unadjusted hard threshold (issue #5950).
+    // interactive path leaves it undefined but may still use up to
+    // max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')) across MAX_TOKENS
+    // handling. Pre-reserving that space prevents the dead zone between the
+    // adjusted auto threshold and an unadjusted hard threshold (issue #5950).
     const cgConfigForThresholds = this.config.getContentGeneratorConfig();
     const parsedEnvMaxTokensForThreshold = parsePositiveIntegerEnvValue(
       process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
@@ -2454,78 +2454,92 @@ export class GeminiChat {
           }
         }
 
-        // Max output tokens escalation: if the retry loop succeeded but hit
-        // MAX_TOKENS, retry once at the model's full output limit. This ensures
-        // models with large output limits (e.g., 128K for Claude Opus, GPT-5)
-        // are fully utilized, while using ESCALATED_MAX_TOKENS (64K) as a floor
-        // for unknown models.
+        // Max output tokens handling: if the retry loop succeeded but hit
+        // MAX_TOKENS, retry once at an escalated output limit only when that
+        // would raise the effective initial limit. When the initial limit is
+        // already at or above the escalation floor (for example 64K+ output
+        // models), skip the no-op escalation call but still run continuation
+        // recovery on the partial response.
         // Placed outside the retry loop so that any errors from the
-        // escalated stream propagate directly (not caught by retry logic).
+        // escalated/recovery streams propagate directly (not caught by retry
+        // logic).
         const requestedMaxOutputTokens = params.config?.maxOutputTokens;
+        const effectiveInitialMaxOutputTokens =
+          requestedMaxOutputTokens ?? tokenLimit(model, 'output');
         const escalatedLimit = Math.max(
           ESCALATED_MAX_TOKENS,
           tokenLimit(model, 'output'),
         );
         const shouldEscalateMaxOutputTokens =
-          requestedMaxOutputTokens === undefined ||
-          requestedMaxOutputTokens < escalatedLimit;
+          effectiveInitialMaxOutputTokens < escalatedLimit;
 
         if (
           lastError === null &&
           lastFinishReason === FinishReason.MAX_TOKENS &&
           !maxTokensEscalated &&
-          !hasUserMaxTokensOverride &&
-          shouldEscalateMaxOutputTokens
+          !hasUserMaxTokensOverride
         ) {
           maxTokensEscalated = true;
-          const startingLimitLabel =
-            requestedMaxOutputTokens === undefined
-              ? 'default max_tokens'
-              : `${requestedMaxOutputTokens} tokens`;
-          debugLogger.info(
-            `Output truncated at ${startingLimitLabel}. Escalating to ${escalatedLimit} tokens.`,
-          );
-          // Remove partial model response from history
-          // (processStreamResponse already pushed it)
-          if (
-            self.history.length > 0 &&
-            self.history[self.history.length - 1].role === 'model'
-          ) {
-            self.history.pop();
-          }
-          // Signal UI to discard partial output
-          yield {
-            type: StreamEventType.RETRY,
-            maxOutputTokensEscalated: escalatedLimit,
-          };
-          // Retry with escalated max_tokens
-          const escalatedParams: SendMessageParameters = {
-            ...params,
-            config: {
-              ...params.config,
-              maxOutputTokens: escalatedLimit,
-            },
-          };
-          let escalatedFinishReason: string | undefined;
-          const escalatedStream = await self.makeApiCallAndProcessStream(
-            model,
-            requestContents,
-            escalatedParams,
-            prompt_id,
-          );
-          for await (const chunk of escalatedStream) {
-            const fr = chunk.candidates?.[0]?.finishReason;
-            if (fr) escalatedFinishReason = fr;
-            yield { type: StreamEventType.CHUNK, value: chunk };
+          let recoveryFinishReason: string | undefined = lastFinishReason;
+          let recoveryParams: SendMessageParameters = params;
+
+          if (shouldEscalateMaxOutputTokens) {
+            const startingLimitLabel =
+              requestedMaxOutputTokens === undefined
+                ? 'default max_tokens'
+                : `${requestedMaxOutputTokens} tokens`;
+            debugLogger.info(
+              `Output truncated at ${startingLimitLabel}. Escalating to ${escalatedLimit} tokens.`,
+            );
+            // Remove partial model response from history
+            // (processStreamResponse already pushed it)
+            if (
+              self.history.length > 0 &&
+              self.history[self.history.length - 1].role === 'model'
+            ) {
+              self.history.pop();
+            }
+            // Signal UI to discard partial output
+            yield {
+              type: StreamEventType.RETRY,
+              maxOutputTokensEscalated: escalatedLimit,
+            };
+            // Retry with escalated max_tokens
+            const escalatedParams: SendMessageParameters = {
+              ...params,
+              config: {
+                ...params.config,
+                maxOutputTokens: escalatedLimit,
+              },
+            };
+            recoveryParams = escalatedParams;
+            recoveryFinishReason = undefined;
+            const escalatedStream = await self.makeApiCallAndProcessStream(
+              model,
+              requestContents,
+              escalatedParams,
+              prompt_id,
+            );
+            for await (const chunk of escalatedStream) {
+              const fr = chunk.candidates?.[0]?.finishReason;
+              if (fr) recoveryFinishReason = fr;
+              yield { type: StreamEventType.CHUNK, value: chunk };
+            }
+          } else {
+            debugLogger.info(
+              `Output truncated at ${effectiveInitialMaxOutputTokens} tokens; ` +
+                `skipping no-op escalation to ${escalatedLimit} tokens and running recovery.`,
+            );
           }
 
-          // Recovery: if the escalated response is also truncated, keep the
-          // partial response in history and inject a recovery message so the
-          // model can continue from where it left off.
+          // Recovery: if the escalated response (or, when escalation is a
+          // no-op, the initial response) is still truncated, keep the partial
+          // response in history and inject a recovery message so the model can
+          // continue from where it left off.
           let recoveryCount = 0;
           let successfulRecoveries = 0;
           while (
-            escalatedFinishReason === FinishReason.MAX_TOKENS &&
+            recoveryFinishReason === FinishReason.MAX_TOKENS &&
             recoveryCount < MAX_OUTPUT_RECOVERY_ATTEMPTS
           ) {
             // Skip recovery when the truncated turn already contains a
@@ -2547,7 +2561,7 @@ export class GeminiChat {
 
             recoveryCount++;
             debugLogger.info(
-              `Output still truncated after escalation. ` +
+              `Output still truncated after max_tokens handling. ` +
                 `Recovery attempt ${recoveryCount}/${MAX_OUTPUT_RECOVERY_ATTEMPTS}.`,
             );
             // The partial model response is already in history
@@ -2564,17 +2578,17 @@ export class GeminiChat {
             yield { type: StreamEventType.RETRY, isContinuation: true };
             // Re-send with the updated history (includes partial + recovery)
             const recoveryContents = self.getRequestHistory(currentUserContent);
-            escalatedFinishReason = undefined;
+            recoveryFinishReason = undefined;
             try {
               const recoveryStream = await self.makeApiCallAndProcessStream(
                 model,
                 recoveryContents,
-                escalatedParams,
+                recoveryParams,
                 prompt_id,
               );
               for await (const chunk of recoveryStream) {
                 const fr = chunk.candidates?.[0]?.finishReason;
-                if (fr) escalatedFinishReason = fr;
+                if (fr) recoveryFinishReason = fr;
                 yield { type: StreamEventType.CHUNK, value: chunk };
               }
               // Iteration fully succeeded: both the user recovery turn and
