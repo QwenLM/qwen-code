@@ -16,7 +16,7 @@
  *  - **window aggregates** (`requests`, `tokensIn`, the `*P95Ms`/`*P50Ms`
  *    percentiles, `promptsCompleted`, `pipe*Bytes`, `rateLimitRejected`):
  *    summarize everything that happened *during* the window.
- *  - **gauges** (`activeSessions`, `activePrompts`, `pendingPrompts`,
+ *  - **gauges** (`activeSessions`, `activePrompts`, `queuedPrompts`,
  *    `cpuPercent`, `rssBytes`, `heapUsedBytes`, `eventLoopLagP99Ms`, the
  *    `*Connections`): the instantaneous reading at seal time `t`.
  * Windowing server-side means the client never diffs cumulative counters — it
@@ -33,7 +33,7 @@ export interface DaemonMetricsBucket {
   activePrompts: number;
   /** Prompts queued (accepted but not yet dispatched) across all sessions at
    *  seal time — the backpressure depth complementing prompt queue-wait. */
-  pendingPrompts: number;
+  queuedPrompts: number;
 
   // —— HTTP throughput / latency (window aggregate) ——
   /** HTTP requests completed in this window. */
@@ -113,7 +113,7 @@ export interface DaemonMetricsGauges {
   heapUsedBytes: number;
   activeSessions: number;
   activePrompts: number;
-  pendingPrompts: number;
+  queuedPrompts: number;
   eventLoopLagP99Ms: number;
   sseConnections: number;
   wsConnections: number;
@@ -222,7 +222,7 @@ export class DaemonMetricsRing {
       t: now,
       activeSessions: finiteGauge(gauges.activeSessions),
       activePrompts: finiteGauge(gauges.activePrompts),
-      pendingPrompts: finiteGauge(gauges.pendingPrompts),
+      queuedPrompts: finiteGauge(gauges.queuedPrompts),
       requests: this.curRequests,
       errors: this.curErrors,
       latencyP50Ms: percentile(this.curDurations, 0.5),

@@ -137,7 +137,7 @@ function makeBucket(t: number): DaemonMetricsSeriesBucket {
     t,
     activeSessions: 1,
     activePrompts: 0,
-    pendingPrompts: 0,
+    queuedPrompts: 0,
     requests: 5,
     errors: 0,
     latencyP50Ms: 2,
