@@ -1236,6 +1236,15 @@ export class GeminiClient {
     let history: Content[] = [];
     let snapshotEntries: AvailableSkillEntry[] = [];
     let deferredReminderCount = 0;
+    const finishProfile = (ok: boolean) => {
+      profiler.finish({
+        ok,
+        extraHistoryLength: extraHistory?.length ?? 0,
+        historyLength: history.length,
+        snapshotEntryCount: snapshotEntries.length,
+        deferredReminderCount,
+      });
+    };
 
     try {
       // Warm the tool registry before building startup reminders and tool
@@ -1344,22 +1353,10 @@ export class GeminiClient {
 
       await profiler.time('set_tools', () => this.setTools());
 
-      profiler.finish({
-        ok: true,
-        extraHistoryLength: extraHistory?.length ?? 0,
-        historyLength: history.length,
-        snapshotEntryCount: snapshotEntries.length,
-        deferredReminderCount,
-      });
+      finishProfile(true);
       return this.chat;
     } catch (error) {
-      profiler.finish({
-        ok: false,
-        extraHistoryLength: extraHistory?.length ?? 0,
-        historyLength: history.length,
-        snapshotEntryCount: snapshotEntries.length,
-        deferredReminderCount,
-      });
+      finishProfile(false);
       await reportError(
         error,
         'Error initializing chat session.',

@@ -94,6 +94,32 @@ describe('session-start-profiler', () => {
     ]);
   });
 
+  it('accumulates repeated stage durations', () => {
+    const records: SessionStartProfileRecord[] = [];
+    const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
+      enabled: true,
+      now: clockFrom([10, 12, 15, 18, 23, 30]),
+      writeRecord: (record) => records.push(record),
+      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
+    });
+
+    expect(profiler.timeSync('system_instruction', () => 'first')).toBe(
+      'first',
+    );
+    expect(profiler.timeSync('system_instruction', () => 'second')).toBe(
+      'second',
+    );
+    profiler.finish({ ok: true });
+
+    expect(records[0]).toMatchObject({
+      ok: true,
+      totalMs: 20,
+      stages: {
+        system_instruction: 8,
+      },
+    });
+  });
+
   it('rethrows stage errors and preserves the failed stage', async () => {
     const records: SessionStartProfileRecord[] = [];
     const profiler = createSessionStartProfiler(SessionStartSource.Startup, {
