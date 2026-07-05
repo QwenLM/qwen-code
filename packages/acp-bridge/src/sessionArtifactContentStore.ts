@@ -312,7 +312,17 @@ export class SessionArtifactContentStore {
           retained.push(entry);
           continue;
         }
-        await fs.rm(fullPath, { recursive: true, force: true });
+        try {
+          await fs.rm(fullPath, { recursive: true, force: true });
+        } catch (error) {
+          writeStderrLine(
+            `[artifacts] action=content_gc_remove_failed contentId=${entry} reason=${JSON.stringify(
+              error instanceof Error ? error.message : String(error),
+            )}`,
+          );
+          retained.push(entry);
+          continue;
+        }
         if (this.cachedTotalBytes !== undefined) {
           this.cachedTotalBytes = Math.max(
             0,

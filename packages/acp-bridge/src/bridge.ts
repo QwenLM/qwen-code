@@ -4846,7 +4846,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         });
         if (copiedContentRef && contentRef) {
           artifactContentStore.releaseContentRef(contentRef);
-          await gcArtifactContent(entry).catch(() => undefined);
+          await gcArtifactContent(entry).catch((error: unknown) => {
+            writeStderrLine(
+              `[artifacts] session=${entry.sessionId} action=pin_content_gc_failed reason=${JSON.stringify(
+                error instanceof Error ? error.message : String(error),
+              )}`,
+            );
+          });
         }
         if (contentRef && result.changes.length === 0) {
           if (!(await entry.artifacts.get(artifactId))) {
@@ -4862,7 +4868,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       } catch (error) {
         if (copiedContentRef && contentRef) {
           artifactContentStore.releaseContentRef(contentRef);
-          await gcArtifactContent(entry).catch(() => undefined);
+          await gcArtifactContent(entry).catch((error: unknown) => {
+            writeStderrLine(
+              `[artifacts] session=${entry.sessionId} action=pin_content_rollback_gc_failed reason=${JSON.stringify(
+                error instanceof Error ? error.message : String(error),
+              )}`,
+            );
+          });
         }
         throw error;
       }
