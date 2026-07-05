@@ -3292,6 +3292,29 @@ describe('WeComChannel', () => {
     );
   });
 
+  it('keeps fenced code blocks balanced across markdown chunks', async () => {
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+    const text = `intro\n\`\`\`ts\n${'a'.repeat(3900)}\n\`\`\`\noutro`;
+
+    await channel.sendMessage('chat-1', text);
+
+    const chunks = client.sendMessage.mock.calls.map((call) => {
+      const message = call[1] as { markdown: { content: string } };
+      return message.markdown.content;
+    });
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(Buffer.byteLength(chunk, 'utf8')).toBeLessThan(4096);
+      expect((chunk.match(/```/g) ?? []).length % 2).toBe(0);
+    }
+    expect(chunks[0]).toMatch(/^intro\n```ts\n/);
+    expect(chunks[0]).toMatch(/\n```$/);
+    expect(chunks[1]).toMatch(/^```/);
+    expect(chunks.at(-1)).toContain('outro');
+  });
+
   it('resolves relative outbound image paths from channel cwd', async () => {
     const parent = join(tmpdir(), 'channel-files');
     mkdirSync(parent, { recursive: true });

@@ -1222,36 +1222,54 @@ function splitMarkdownChunks(text: string): string[] {
 
   const chunks: string[] = [];
   let current = '';
+  let inCode = false;
+  const fits = (value: string): boolean =>
+    Buffer.byteLength(inCode ? `${value}\n\`\`\`` : value, 'utf8') <=
+    MARKDOWN_CHUNK_BYTES;
+  const flush = (closeCode = true): void => {
+    if (!current) return;
+    chunks.push(closeCode && inCode ? `${current}\n\`\`\`` : current);
+    current = closeCode && inCode ? '```' : '';
+  };
+
   for (const line of text.split('\n')) {
     const candidate = current ? `${current}\n${line}` : line;
-    if (Buffer.byteLength(candidate, 'utf8') <= MARKDOWN_CHUNK_BYTES) {
+    if (fits(candidate)) {
       current = candidate;
+      inCode = toggleCodeFenceState(line, inCode);
       continue;
     }
 
-    if (current) {
-      chunks.push(current);
-      current = '';
+    flush();
+    const retried = current ? `${current}\n${line}` : line;
+    if (fits(retried)) {
+      current = retried;
+      inCode = toggleCodeFenceState(line, inCode);
+      continue;
     }
 
-    let slice = '';
-    let sliceBytes = 0;
+    let needsLineBreak = Boolean(current);
     for (const char of line) {
-      const charBytes = Buffer.byteLength(char, 'utf8');
-      if (sliceBytes + charBytes > MARKDOWN_CHUNK_BYTES) {
-        if (slice) chunks.push(slice);
-        slice = char;
-        sliceBytes = charBytes;
+      const addition = needsLineBreak && current ? `\n${char}` : char;
+      const candidate = `${current}${addition}`;
+      if (!fits(candidate)) {
+        flush();
+        current = current ? `${current}\n${char}` : char;
       } else {
-        slice += char;
-        sliceBytes += charBytes;
+        current = candidate;
       }
+      needsLineBreak = false;
     }
-    current = slice;
+    inCode = toggleCodeFenceState(line, inCode);
   }
 
-  if (current) chunks.push(current);
+  flush(false);
   return chunks;
+}
+
+function toggleCodeFenceState(line: string, inCode: boolean): boolean {
+  const fenceCount = line.match(/```/g)?.length ?? 0;
+  return fenceCount % 2 === 0 ? inCode : !inCode;
 }
 
 async function readOutboundMedia(
