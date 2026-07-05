@@ -624,6 +624,28 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
+  it('keeps the delayed kick reconnect retry referenced', () => {
+    const unref = vi.fn();
+    const timeout = { unref } as unknown as ReturnType<typeof setTimeout>;
+    const setTimeoutSpy = vi
+      .spyOn(globalThis, 'setTimeout')
+      .mockReturnValue(timeout);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    const inspectable = channel as unknown as {
+      kickReconnectRetry?: ReturnType<typeof setTimeout>;
+      scheduleKickReconnectRetry(
+        reason: unknown,
+        disconnectGeneration: number,
+      ): void;
+    };
+
+    inspectable.scheduleKickReconnectRetry('kicked', 0);
+
+    expect(inspectable.kickReconnectRetry).toBe(timeout);
+    expect(unref).not.toHaveBeenCalled();
+    setTimeoutSpy.mockRestore();
+  });
+
   it('stops kick reconnect after repeated retry cycles are exhausted', async () => {
     vi.useFakeTimers();
     const stderr = vi

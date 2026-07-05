@@ -829,7 +829,6 @@ export class WeComChannel extends ChannelBase {
       this.kickReconnectAttempts = 0;
       this.startKickReconnect(reason);
     }, KICK_RECONNECT_RETRY_MS);
-    this.kickReconnectRetry.unref?.();
   }
 
   private startKickReconnect(reason: unknown): void {
