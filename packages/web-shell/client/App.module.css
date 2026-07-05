@@ -415,6 +415,21 @@
   width: 100%;
 }
 
+/* The chat view (message list + composer) stays mounted while a panel is shown,
+   just hidden — so the composer keeps its unsent draft and attachments instead
+   of losing them on unmount. */
+.chatViewWrap {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.chatViewHidden {
+  display: none;
+}
+
 .footer {
   position: relative;
   width: min(100%, var(--chat-shell-width));

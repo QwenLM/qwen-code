@@ -1198,6 +1198,21 @@ export function App({
     null,
   );
   const closePanel = useCallback(() => setActivePanel(null), []);
+  // The Settings / Daemon Status panel is a view, not a modal, so it lacks
+  // DialogShell's focus trap/restore. Move focus to the Back button when a panel
+  // opens and back to the composer when it closes, so keyboard users aren't
+  // stranded on an element that is about to be hidden.
+  const panelBackRef = useRef<HTMLButtonElement | null>(null);
+  const prevActivePanelRef = useRef(activePanel);
+  useEffect(() => {
+    const prev = prevActivePanelRef.current;
+    prevActivePanelRef.current = activePanel;
+    if (activePanel && !prev) {
+      panelBackRef.current?.focus();
+    } else if (!activePanel && prev) {
+      editorRef.current?.focus();
+    }
+  }, [activePanel]);
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);
@@ -3475,8 +3490,15 @@ export function App({
       // reaching this window listener, so this only fires when the panel itself
       // is the topmost surface.
       if (e.key === 'Escape' && live.activePanel) {
-        e.preventDefault();
-        live.closePanel();
+        // The sidebar stays usable beside the panel and its search input clears
+        // on Escape without stopping the event; don't also close the panel when
+        // Escape is being handled inside the sidebar. Scope the panel close to
+        // Escape originating outside the sidebar drawer.
+        const target = e.target as HTMLElement | null;
+        if (!target?.closest('[data-mobile-drawer]')) {
+          e.preventDefault();
+          live.closePanel();
+        }
         return;
       }
 
@@ -3569,11 +3591,24 @@ export function App({
       // Model IDs from the picker arrive as bare model IDs (baseModelId), not
       // ACP format. The model picker strips the (authType) suffix before
       // calling this handler.
-      sendPrompt(`/model --fast ${modelId}`).catch((error: unknown) => {
-        reportError(error, 'Failed to switch fast model');
-      });
+      sendPrompt(`/model --fast ${modelId}`)
+        .then(() => {
+          // The Settings panel stays mounted behind the picker, so reload
+          // workspace settings once the command applies — otherwise the panel
+          // keeps showing the previous fast model after the picker closes.
+          reloadWorkspaceSettings();
+        })
+        .catch((error: unknown) => {
+          reportError(error, 'Failed to switch fast model');
+        });
     },
-    [blockLocalCommandDuringTurn, sendPrompt, streamingState, reportError],
+    [
+      blockLocalCommandDuringTurn,
+      sendPrompt,
+      streamingState,
+      reportError,
+      reloadWorkspaceSettings,
+    ],
   );
 
   const handleVoiceModelSelect = useCallback(
@@ -4042,7 +4077,7 @@ export function App({
                   </svg>
                 </button>
               )}
-              {activePanel ? (
+              {activePanel && (
                 <section
                   className={styles.panelHost}
                   role="region"
@@ -4054,6 +4089,7 @@ export function App({
                 >
                   <div className={styles.panelHeader}>
                     <button
+                      ref={panelBackRef}
                       type="button"
                       className={styles.panelBack}
                       onClick={closePanel}
@@ -4101,7 +4137,14 @@ export function App({
                     </div>
                   </div>
                 </section>
-              ) : (
+              )}
+              <div
+                className={
+                  activePanel
+                    ? `${styles.chatViewWrap} ${styles.chatViewHidden}`
+                    : styles.chatViewWrap
+                }
+              >
                 <WebShellCustomizationProvider value={customization}>
                   <CompactModeContext.Provider value={compactMode}>
                     <TodoContextsProvider
@@ -4328,7 +4371,7 @@ export function App({
                     )}
                   </div>
                 </WebShellCustomizationProvider>
-              )}
+              </div>
             </div>
           </div>
         </div>
