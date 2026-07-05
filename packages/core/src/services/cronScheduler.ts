@@ -643,7 +643,17 @@ export class CronScheduler {
     // file) are skipped but left on disk: installing one would make the
     // tick's matches() throw from the interval, while dropping it from
     // the file would discard what the user wrote over a typo.
-    const tasks = read.filter(hasParseableCron);
+    //
+    // Disabled tasks (enabled === false) are skipped the same way — the
+    // management UI's off switch must stop firing without losing the
+    // task's config. Treating them as absent here is what makes the
+    // toggle effective: the reconcile below deletes any live job whose id
+    // is no longer in this filtered set, so toggling off removes the job,
+    // and toggling on reinstalls it on the next watcher reload. Absent
+    // `enabled` counts as enabled, so tool-created tasks keep firing.
+    const tasks = read.filter(
+      (t) => hasParseableCron(t) && t.enabled !== false,
+    );
 
     const now = Date.now();
     const missedOneShots: DurableCronTask[] = [];

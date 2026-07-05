@@ -68,6 +68,7 @@ interface WebShellSidebarProps {
   onCollapsedChange: (collapsed: boolean) => void;
   onOpenSettings: () => void;
   onOpenDaemonStatus: () => void;
+  onOpenScheduledTasks: () => void;
   onNewSession: () => Promise<boolean> | boolean;
   onLoadSession: (sessionId: string) => Promise<void> | void;
   onError: (error: unknown, fallback: string) => void;
@@ -211,6 +212,15 @@ function IconPulse() {
   return (
     <svg viewBox="0 0 24 24" aria-hidden="true">
       <path d="M3 12h4l3-8 4 16 3-8h4" />
+    </svg>
+  );
+}
+
+function IconSchedule() {
+  return (
+    <svg viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
     </svg>
   );
 }
@@ -404,6 +414,7 @@ export function WebShellSidebar({
   onCollapsedChange,
   onOpenSettings,
   onOpenDaemonStatus,
+  onOpenScheduledTasks,
   onNewSession,
   onLoadSession,
   onError,
@@ -2339,6 +2350,15 @@ export function WebShellSidebar({
             {versionLabel}
           </span>
         )}
+        <button
+          className={styles.collapseButton}
+          type="button"
+          title={t('sidebar.scheduledTasks')}
+          aria-label={t('sidebar.scheduledTasks')}
+          onClick={onOpenScheduledTasks}
+        >
+          <IconSchedule />
+        </button>
         <button
           className={styles.collapseButton}
           type="button"
