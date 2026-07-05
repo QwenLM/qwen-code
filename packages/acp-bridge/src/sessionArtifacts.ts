@@ -261,11 +261,13 @@ export class SessionArtifactStore {
   }
 
   async contentRefs(): Promise<SessionArtifactContentRef[]> {
-    return this.enqueue(async () =>
-      Array.from(this.artifacts.values())
-        .map((artifact) => artifact.contentRef)
-        .filter((ref): ref is SessionArtifactContentRef => ref !== undefined),
-    );
+    return this.enqueue(async () => this.currentContentRefs());
+  }
+
+  async withContentRefsLocked<T>(
+    operation: (refs: SessionArtifactContentRef[]) => Promise<T>,
+  ): Promise<T> {
+    return this.enqueue(async () => operation(this.currentContentRefs()));
   }
 
   async upsertMany(
@@ -1084,6 +1086,12 @@ export class SessionArtifactStore {
       () => undefined,
     );
     return result;
+  }
+
+  private currentContentRefs(): SessionArtifactContentRef[] {
+    return Array.from(this.artifacts.values())
+      .map((artifact) => artifact.contentRef)
+      .filter((ref): ref is SessionArtifactContentRef => ref !== undefined);
   }
 
   private denyCrossClientMutation(

@@ -129,7 +129,10 @@ import {
   type SessionArtifactInput,
   type SessionArtifactMutationResult,
 } from './sessionArtifacts.js';
-import { SessionArtifactContentStore } from './sessionArtifactContentStore.js';
+import {
+  SessionArtifactContentStore,
+  type SessionArtifactGcResult,
+} from './sessionArtifactContentStore.js';
 
 const NOOP_BRIDGE_TELEMETRY: BridgeTelemetry = {
   captureContext: () => undefined,
@@ -2789,18 +2792,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     return { retention: options.retention };
   };
 
-  const gcArtifactContent = async (entry: SessionEntry): Promise<void> => {
-    const refs = await entry.artifacts.contentRefs();
-    const releaseRefs = artifactContentStore.leaseContentRefs(refs);
-    try {
-      await artifactContentStore.gc(
-        entry.sessionId,
-        new Set(refs.map((ref) => ref.contentId)),
-      );
-    } finally {
-      releaseRefs();
-    }
-  };
+  const gcArtifactContent = async (
+    entry: SessionEntry,
+  ): Promise<SessionArtifactGcResult> =>
+    entry.artifacts.withContentRefsLocked(async (refs) => {
+      const releaseRefs = artifactContentStore.leaseContentRefs(refs);
+      try {
+        return await artifactContentStore.gc(
+          entry.sessionId,
+          new Set(refs.map((ref) => ref.contentId)),
+        );
+      } finally {
+        releaseRefs();
+      }
+    });
 
   const pruneExpiredArtifactPins = async (
     entry: SessionEntry,
@@ -4885,16 +4890,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
-      const refs = await entry.artifacts.contentRefs();
-      const releaseRefs = artifactContentStore.leaseContentRefs(refs);
-      try {
-        return await artifactContentStore.gc(
-          sessionId,
-          new Set(refs.map((ref) => ref.contentId)),
-        );
-      } finally {
-        releaseRefs();
-      }
+      return gcArtifactContent(entry);
     },
 
     listWorkspaceSessions(workspaceCwd) {

@@ -257,6 +257,63 @@ describe('SessionArtifactStore', () => {
     await expect(store.contentRefs()).resolves.toEqual([]);
   });
 
+  it('keeps artifact mutations queued while content refs are locked', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-content-refs-lock',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await store.upsertMany(
+      [
+        { title: 'First', url: 'https://example.com/first' },
+        { title: 'Second', url: 'https://example.com/second' },
+      ],
+      { strict: true },
+    );
+    const firstId = created.changes[0]!.artifactId;
+    const secondId = created.changes[1]!.artifactId;
+    const firstRef = {
+      kind: 'managed_copy' as const,
+      contentId: `${'a'.repeat(64)}-${'b'.repeat(16)}`,
+      sha256: 'a'.repeat(64),
+      sizeBytes: 12,
+      createdAt: '2026-07-04T00:00:00.000Z',
+    };
+    const secondRef = {
+      kind: 'managed_copy' as const,
+      contentId: `${'c'.repeat(64)}-${'d'.repeat(16)}`,
+      sha256: 'c'.repeat(64),
+      sizeBytes: 34,
+      createdAt: '2026-07-04T00:00:01.000Z',
+    };
+
+    await store.pin(firstId, { contentRef: firstRef });
+    let pinSettled = false;
+    let pinPromise: Promise<unknown> | undefined;
+    const refs = await store.withContentRefsLocked(async (lockedRefs) => {
+      pinPromise = store
+        .pin(secondId, { contentRef: secondRef })
+        .then((result) => {
+          pinSettled = true;
+          return result;
+        });
+      await Promise.resolve();
+      expect(pinSettled).toBe(false);
+      return lockedRefs;
+    });
+
+    expect(refs).toEqual([firstRef]);
+    expect(pinPromise).toBeDefined();
+    await expect(pinPromise!).resolves.toMatchObject({
+      changes: [{ action: 'updated', artifactId: secondId }],
+    });
+    expect(pinSettled).toBe(true);
+    await expect(store.contentRefs()).resolves.toEqual([firstRef, secondRef]);
+  });
+
   it('pins and unpins artifact retention state', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
     const store = new SessionArtifactStore({

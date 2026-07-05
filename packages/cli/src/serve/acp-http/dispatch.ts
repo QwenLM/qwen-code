@@ -447,13 +447,25 @@ function pickSessionArtifactPinRequest(
 ): SessionArtifactPinRequest {
   const request: SessionArtifactPinRequest = {};
   if (params['mode'] !== undefined) {
-    request.mode = params['mode'] as SessionArtifactPinRequest['mode'];
+    const mode = params['mode'];
+    if (mode !== 'metadata' && mode !== 'content') {
+      throw new AcpParamError('`mode` must be "metadata" or "content"');
+    }
+    request.mode = mode;
   }
   if (params['ttlDays'] !== undefined) {
-    request.ttlDays = params['ttlDays'] as number;
+    const ttlDays = params['ttlDays'];
+    if (typeof ttlDays !== 'number' || !Number.isSafeInteger(ttlDays)) {
+      throw new AcpParamError('`ttlDays` must be a safe integer');
+    }
+    request.ttlDays = ttlDays;
   }
   if (params['clientRetained'] !== undefined) {
-    request.clientRetained = params['clientRetained'] as boolean;
+    const clientRetained = params['clientRetained'];
+    if (typeof clientRetained !== 'boolean') {
+      throw new AcpParamError('`clientRetained` must be a boolean');
+    }
+    request.clientRetained = clientRetained;
   }
   return request;
 }
@@ -462,18 +474,22 @@ function pickSessionArtifactUnpinRequest(
   params: Record<string, unknown>,
 ): SessionArtifactUnpinRequest {
   const retention = params['retention'];
-  return retention === undefined
-    ? {}
-    : { retention: retention as SessionArtifactUnpinRequest['retention'] };
+  if (retention === undefined) return {};
+  if (retention !== 'ephemeral' && retention !== 'restorable') {
+    throw new AcpParamError('`retention` must be "ephemeral" or "restorable"');
+  }
+  return { retention };
 }
 
 function pickSessionArtifactRemoveRequest(
   params: Record<string, unknown>,
 ): SessionArtifactRemoveRequest {
   const deleteContent = params['deleteContent'];
-  return deleteContent === undefined
-    ? {}
-    : { deleteContent: deleteContent as boolean };
+  if (deleteContent === undefined) return {};
+  if (typeof deleteContent !== 'boolean') {
+    throw new AcpParamError('`deleteContent` must be a boolean');
+  }
+  return { deleteContent };
 }
 
 /**

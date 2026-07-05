@@ -3209,7 +3209,7 @@ export class DaemonClient {
     options?: DaemonSessionArtifactPinOptions,
   ): Promise<DaemonSessionArtifactMutationResult> {
     return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
-      `/session/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/pin`,
+      `/session/${urlEncode(sessionId)}/artifacts/${urlEncode(artifactId)}/pin`,
       'POST /session/:id/artifacts/:artifactId/pin',
       {
         method: 'POST',
@@ -3226,7 +3226,7 @@ export class DaemonClient {
     options?: DaemonSessionArtifactUnpinOptions,
   ): Promise<DaemonSessionArtifactMutationResult> {
     return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
-      `/session/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/pin`,
+      `/session/${urlEncode(sessionId)}/artifacts/${urlEncode(artifactId)}/pin`,
       'DELETE /session/:id/artifacts/:artifactId/pin',
       {
         method: 'DELETE',
@@ -3241,7 +3241,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSessionArtifactFsckResult> {
     return await this.jsonRequest<DaemonSessionArtifactFsckResult>(
-      `/session/${encodeURIComponent(sessionId)}/artifacts/fsck`,
+      `/session/${urlEncode(sessionId)}/artifacts/fsck`,
       'GET /session/:id/artifacts/fsck',
       { clientId },
     );
@@ -3252,7 +3252,7 @@ export class DaemonClient {
     clientId?: string,
   ): Promise<DaemonSessionArtifactGcResult> {
     return await this.jsonRequest<DaemonSessionArtifactGcResult>(
-      `/session/${encodeURIComponent(sessionId)}/artifacts/gc`,
+      `/session/${urlEncode(sessionId)}/artifacts/gc`,
       'POST /session/:id/artifacts/gc',
       {
         method: 'POST',

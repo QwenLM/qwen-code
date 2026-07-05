@@ -6196,6 +6196,37 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(bridge.lastRemovedArtifact).toBeUndefined();
     });
 
+    it('_qwen/session/artifacts/remove rejects invalid deleteContent', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 60,
+        method: '_qwen/session/artifacts/remove',
+        params: {
+          sessionId: 'sess-1',
+          artifactId: 'artifact-1',
+          deleteContent: 'yes',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          message: '`deleteContent` must be a boolean',
+        },
+      });
+      expect(bridge.lastRemovedArtifact).toBeUndefined();
+    });
+
     it('_qwen/session/artifacts/remove maps artifact authorization errors', async () => {
       bridge.removeSessionArtifact = async () => {
         throw new SessionArtifactAuthorizationError(
@@ -6274,6 +6305,39 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       });
     });
 
+    it('_qwen/session/artifacts/pin rejects invalid retention options', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 61,
+        method: '_qwen/session/artifacts/pin',
+        params: {
+          sessionId: 'sess-1',
+          artifactId: 'artifact-1',
+          mode: 'forever',
+          ttlDays: '7',
+          clientRetained: 'false',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          message: '`mode` must be "metadata" or "content"',
+        },
+      });
+      expect(bridge.lastPinnedArtifact).toBeUndefined();
+    });
+
     it('_qwen/session/artifacts/unpin forwards artifact id', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);
@@ -6308,6 +6372,37 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
         artifactId: 'artifact-1',
         options: { retention: 'ephemeral' },
       });
+    });
+
+    it('_qwen/session/artifacts/unpin rejects invalid retention', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 99,
+        method: 'session/new',
+        params: {},
+      });
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 62,
+        method: '_qwen/session/artifacts/unpin',
+        params: {
+          sessionId: 'sess-1',
+          artifactId: 'artifact-1',
+          retention: 'pinned',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 2);
+      expect(frames[1]).toMatchObject({
+        error: {
+          code: -32602,
+          message: '`retention` must be "ephemeral" or "restorable"',
+        },
+      });
+      expect(bridge.lastUnpinnedArtifact).toBeUndefined();
     });
 
     it('_qwen/session/artifacts/fsck returns integrity status', async () => {
