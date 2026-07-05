@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { SessionStartSource } from '../hooks/types.js';
 import {
+  SESSION_START_PROFILE_ENV,
   createSessionStartProfiler,
   type SessionStartProfileRecord,
 } from './session-start-profiler.js';
@@ -263,7 +264,7 @@ describe('session-start-profiler', () => {
       join(tmpdir(), 'session-start-profiler-'),
     );
     vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
-    vi.stubEnv('QWEN_CODE_PROFILE_SESSION_START', '1');
+    vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
 
     try {
       const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
