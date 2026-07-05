@@ -421,7 +421,7 @@ export interface WebShellProps {
    * Called before a prompt is submitted. Return a Promise — the prompt is held
    * until the Promise resolves. If the Promise rejects, the prompt is cancelled.
    * `sessionId` is `undefined` when the session has not yet been created (deferred).
-   * Not called for queued prompts (submitted while a turn is streaming).
+   * Also called for queued prompts (submitted while a turn is streaming).
    */
   onSubmitBefore?: (params: {
     sessionId: string | undefined;
@@ -1519,9 +1519,32 @@ export function App({
 
   const enqueuePrompt = useCallback(
     (text: string, images?: PromptImage[], onComplete?: () => void) => {
-      // Intentional: onSubmitBefore is not called for queued prompts.
-      // Queued prompts are fire-and-forget while streaming; the pre-submit
-      // hook is designed for synchronous interception of direct submissions.
+      if (onSubmitBeforeRef.current) {
+        onSubmitBeforeRef
+          .current({
+            sessionId: connectionRef.current.sessionId,
+            prompt: text,
+          })
+          .then(() => {
+            rawEnqueuePrompt(text, images, onComplete);
+            const sessionId = connectionRef.current.sessionId;
+            if (sessionId && text.trim()) {
+              dispatchSessionChangeRef.current?.({
+                type: 'submit',
+                sessionId,
+                prompt: text,
+                queued: true,
+              });
+            }
+          })
+          .catch((err: unknown) => {
+            console.warn(
+              '[web-shell] onSubmitBefore rejected queued prompt, cancelled',
+              err,
+            );
+          });
+        return true;
+      }
       const result = rawEnqueuePrompt(text, images, onComplete);
       const sessionId = connectionRef.current.sessionId;
       if (sessionId && text.trim()) {
