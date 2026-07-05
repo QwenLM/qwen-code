@@ -56,6 +56,12 @@ describe('convertSchema', () => {
       expect(convertSchema(input, 'openapi_30')).toEqual(expected);
     });
 
+    it('should fall back to the original type when all types are null', () => {
+      const input = { type: ['null'] };
+      const expected = { type: 'null', nullable: true };
+      expect(convertSchema(input, 'openapi_30')).toEqual(expected);
+    });
+
     it('should convert const to enum', () => {
       const input = { const: 'foo' };
       const expected = { enum: ['foo'] };
