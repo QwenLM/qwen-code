@@ -366,7 +366,7 @@ async function extractArchive(
       preservePaths: false,
       filter: (p, entry) => isSafeTarEntry(p, entry, resolvedDest),
     });
-    validateExtractedPaths(fs.realpathSync(destDir));
+    validateExtractedPaths(fs.realpathSync(destDir), { symlinksOnly: true });
   }
 }
 
@@ -449,11 +449,68 @@ async function smokeTest(newInstallDir: string, target: string): Promise<void> {
   debugLogger.info(`Smoke test passed: ${version}`);
 }
 
+// Check .deferred marker and .new directory for an in-flight swap from a
+// previous Windows update. Called from both acquireLock fast-path and
+// slow-path so that a freshly created lock file cannot bypass the check.
+function checkDeferredSwap(standaloneDir: string): void {
+  const deferredMarker = `${standaloneDir}.deferred`;
+  if (fs.existsSync(deferredMarker)) {
+    try {
+      const batPid = parseInt(
+        fs.readFileSync(deferredMarker, 'utf-8').trim(),
+        10,
+      );
+      if (!Number.isNaN(batPid) && isProcessAlive(batPid)) {
+        throw new Error(
+          'A previous update is still being applied. Please wait a moment and try again.',
+        );
+      }
+    } catch (readErr) {
+      if (
+        readErr instanceof Error &&
+        readErr.message.startsWith('A previous update')
+      ) {
+        throw readErr;
+      }
+    }
+    // Bat script has exited (or crashed) — clean up stale marker
+    try {
+      fs.unlinkSync(deferredMarker);
+    } catch {
+      // already gone
+    }
+  }
+
+  if (fs.existsSync(`${standaloneDir}.new`)) {
+    throw new Error(
+      `A previous update left a pending swap at ${standaloneDir}.new. ` +
+        'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.',
+    );
+  }
+}
+
 export function acquireLock(lockPath: string, standaloneDir?: string): boolean {
   try {
     fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
+    if (standaloneDir) {
+      checkDeferredSwap(standaloneDir);
+    }
     return true;
-  } catch {
+  } catch (fastPathErr) {
+    if (
+      fastPathErr instanceof Error &&
+      (fastPathErr.message.startsWith('A previous update') ||
+        fastPathErr.message.includes('pending swap'))
+    ) {
+      // Lock was acquired but deferred swap check failed — release the lock
+      try {
+        fs.unlinkSync(lockPath);
+      } catch {
+        // best-effort
+      }
+      throw fastPathErr;
+    }
+
     let pidStr: string;
     try {
       pidStr = fs.readFileSync(lockPath, 'utf-8').trim();
@@ -467,43 +524,8 @@ export function acquireLock(lockPath: string, standaloneDir?: string): boolean {
       return false;
     }
 
-    // Check .deferred marker: a previous Windows update spawned a bat script
-    // that may still be running the swap. The marker contains the bat PID.
     if (standaloneDir) {
-      const deferredMarker = `${standaloneDir}.deferred`;
-      if (fs.existsSync(deferredMarker)) {
-        try {
-          const batPid = parseInt(
-            fs.readFileSync(deferredMarker, 'utf-8').trim(),
-            10,
-          );
-          if (!Number.isNaN(batPid) && isProcessAlive(batPid)) {
-            throw new Error(
-              'A previous update is still being applied. Please wait a moment and try again.',
-            );
-          }
-        } catch (readErr) {
-          if (
-            readErr instanceof Error &&
-            readErr.message.startsWith('A previous update')
-          ) {
-            throw readErr;
-          }
-        }
-        // Bat script has exited (or crashed) — clean up stale marker
-        try {
-          fs.unlinkSync(deferredMarker);
-        } catch {
-          // already gone
-        }
-      }
-    }
-
-    if (standaloneDir && fs.existsSync(`${standaloneDir}.new`)) {
-      throw new Error(
-        `A previous update left a pending swap at ${standaloneDir}.new. ` +
-          'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.',
-      );
+      checkDeferredSwap(standaloneDir);
     }
 
     try {
@@ -659,13 +681,19 @@ function atomicReplace(
       stdio: 'ignore',
       windowsHide: true,
     });
+    child.on('error', (err) => {
+      debugLogger.warn('Deferred bat script failed to spawn:', err);
+    });
     child.unref();
+    if (!child.pid) {
+      throw new Error(
+        'Failed to spawn deferred update script. Update was not applied.',
+      );
+    }
     // Write .deferred marker with the bat script PID so future `qwen update`
     // calls can detect the in-flight swap via isProcessAlive(batPid).
     // acquireLock checks this marker before allowing lock theft.
-    if (child.pid) {
-      fs.writeFileSync(deferredMarker, String(child.pid));
-    }
+    fs.writeFileSync(deferredMarker, String(child.pid));
     return 'deferred';
   } else {
     // Unix: rename is atomic on same filesystem. newDir is a sibling of
@@ -1040,18 +1068,13 @@ export async function performStandaloneUpdate(
       migrationArtifacts = ensureBinWrapper(standaloneDir, target);
       surfaceBinWrapperWarnings(migrationArtifacts);
     } catch (wrapperErr) {
-      const detail =
-        wrapperErr instanceof Error ? wrapperErr.message : String(wrapperErr);
-      if (isFirstTimeMigration) {
-        throw new Error(
-          `Update installed, but failed to create the PATH wrapper: ${detail}`,
-        );
-      }
       debugLogger.warn('Failed to refresh bin wrapper:', wrapperErr);
       updateEventEmitter.emit('update-info', {
-        message:
-          'Update completed, but the PATH wrapper could not be refreshed. ' +
-          'The existing installation remains usable.',
+        message: isFirstTimeMigration
+          ? 'Update installed, but the PATH wrapper could not be created. ' +
+            'Add the standalone bin directory to your PATH manually, or re-run the update.'
+          : 'Update completed, but the PATH wrapper could not be refreshed. ' +
+            'The existing installation remains usable.',
       });
     }
 
@@ -1061,15 +1084,6 @@ export async function performStandaloneUpdate(
     const pendingDir = `${standaloneDir}.new`;
     if (updateResult !== 'deferred' && fs.existsSync(pendingDir)) {
       fs.rmSync(pendingDir, { recursive: true, force: true });
-    }
-    // Clean up .deferred marker if atomicReplace created it before throwing
-    const deferredMarker = `${standaloneDir}.deferred`;
-    if (updateResult !== 'deferred' && fs.existsSync(deferredMarker)) {
-      try {
-        fs.unlinkSync(deferredMarker);
-      } catch {
-        // already gone
-      }
     }
     cleanupEmptyStandaloneDir(standaloneDir);
     if (isFirstTimeMigration) {

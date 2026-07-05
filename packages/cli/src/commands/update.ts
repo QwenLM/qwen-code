@@ -19,12 +19,14 @@ export const updateCommand: CommandModule = {
       installationInfoModule,
       standaloneUpdate,
       stdioHelpers,
+      { updateEventEmitter },
     ] = await Promise.all([
       import('../config/settings.js'),
       import('../ui/utils/updateCheck.js'),
       import('../utils/installationInfo.js'),
       import('../utils/standalone-update.js'),
       import('../utils/stdioHelpers.js'),
+      import('../utils/updateEventEmitter.js'),
     ]);
 
     const { formatUpdateInstructions, getInstallationInfo } =
@@ -75,6 +77,10 @@ export const updateCommand: CommandModule = {
     const installationInfo = getInstallationInfo(cwd, true);
 
     if (installationInfo.isStandalone && installationInfo.standaloneDir) {
+      const handleUpdateInfo = (data: { message: string }) => {
+        writeStdoutLine(data.message);
+      };
+      updateEventEmitter.on('update-info', handleUpdateInfo);
       try {
         writeStdoutLine(t('Downloading update...'));
         const result = await performStandaloneUpdate(
@@ -101,6 +107,8 @@ export const updateCommand: CommandModule = {
           }),
         );
         process.exitCode = 1;
+      } finally {
+        updateEventEmitter.off('update-info', handleUpdateInfo);
       }
       return;
     }
