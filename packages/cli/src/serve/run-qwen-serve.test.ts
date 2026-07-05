@@ -38,6 +38,7 @@ import type {
   CreateChannelWorkerSupervisorOptions,
 } from './channel-worker-supervisor.js';
 import type { ServiceInfo } from '../commands/channel/pidfile.js';
+import { LARGE_PIPE_FRAME_THRESHOLD_BYTES } from './large-pipe-frame-observer.js';
 
 const BASE_BRIDGE_SNAPSHOT: BridgeDaemonStatusSnapshot = {
   limits: {
@@ -2675,7 +2676,7 @@ describe('runQwenServe Web Shell signals on RunHandle', () => {
       pipeHooks?.onMessageReceived?.(456);
       pipeHooks?.onMessageObserved?.({
         direction: 'sent',
-        bytes: 1,
+        bytes: LARGE_PIPE_FRAME_THRESHOLD_BYTES,
         message: {
           jsonrpc: '2.0',
           method: 'session/update',

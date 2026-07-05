@@ -4,6 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+import { LOAD_REPLAY_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import type { DaemonLogger } from './daemon-logger.js';
 
 export const LARGE_PIPE_FRAME_THRESHOLD_BYTES = 256 * 1024;
@@ -23,6 +24,8 @@ type SourceClass =
 type LogValue = string | number | boolean;
 
 const MAX_ATTR_STRING_LENGTH = 128;
+const MAX_CONTENT_DEPTH = 32;
+const MAX_SUMMARIZED_UPDATES = 500;
 
 export type LargePipeFrameContext = Record<string, LogValue>;
 
@@ -46,12 +49,23 @@ export interface LargePipeFrameObserverOptions {
 }
 
 interface UpdateSummary {
+  maxObservedUpdateBytes?: number;
   maxContentTextBytes?: number;
+  maxRawOutputApproxBytes?: number;
+  maxRawOutputObservedBytes?: number;
   maxRawOutputTextBytes?: number;
+  mixedSessionUpdate?: boolean;
   rawOutputKind?: string;
   sessionUpdate?: string;
   toolName?: string;
   toolProvenance?: string;
+}
+
+interface SourceClassification {
+  sourceClass: SourceClass;
+  replay?: Record<string, unknown>;
+  result?: Record<string, unknown>;
+  update?: Record<string, unknown>;
 }
 
 export function createLargePipeFrameObserver(
@@ -65,6 +79,7 @@ export function createLargePipeFrameObserver(
   let windowStartedAt = now();
   let emittedInWindow = 0;
   let suppressedCount = 0;
+  let suppressedWindowStartMs: number | undefined;
 
   return (observation) => {
     try {
@@ -78,6 +93,7 @@ export function createLargePipeFrameObserver(
 
       if (emittedInWindow >= logLimit) {
         suppressedCount += 1;
+        suppressedWindowStartMs ??= windowStartedAt;
         return;
       }
 
@@ -85,7 +101,11 @@ export function createLargePipeFrameObserver(
       if (!context) return;
       if (suppressedCount > 0) {
         context['suppressedCount'] = suppressedCount;
+        if (suppressedWindowStartMs !== undefined) {
+          context['suppressedWindowStartMs'] = suppressedWindowStartMs;
+        }
         suppressedCount = 0;
+        suppressedWindowStartMs = undefined;
       }
       emittedInWindow += 1;
 
@@ -94,9 +114,13 @@ export function createLargePipeFrameObserver(
       } catch {
         // Observability must not affect transport behavior.
       }
-      options.emitTelemetryLog?.('Large ACP pipe frame observed.', context, {
-        eventName: LARGE_PIPE_FRAME_EVENT_NAME,
-      });
+      try {
+        options.emitTelemetryLog?.('Large ACP pipe frame observed.', context, {
+          eventName: LARGE_PIPE_FRAME_EVENT_NAME,
+        });
+      } catch {
+        // Observability must not affect transport behavior.
+      }
     } catch {
       // Observability must not affect transport behavior.
     }
@@ -112,26 +136,24 @@ export function classifyLargePipeFrame(
   const message = asRecord(observation.message);
   const messageKind = message ? getMessageKind(message) : 'unknown';
   const method = message ? stringValue(message['method']) : undefined;
-  const sourceClass = classifySource(message, messageKind, method);
+  const classification = classifySource(message, messageKind, method);
   const context: LargePipeFrameContext = {
     direction: observation.direction,
     bytes: observation.bytes,
     thresholdBytes,
     messageKind,
-    sourceClass,
+    sourceClass: classification.sourceClass,
   };
   addString(context, 'method', method);
 
-  if (sourceClass === 'session_update_notification') {
-    const params = asRecord(message?.['params']);
-    const update = asRecord(params?.['update']);
-    addUpdateSummary(context, summarizeUpdate(update));
-  } else if (sourceClass === 'load_session_bulk_replay_response') {
-    const replay = getBulkReplay(message);
-    addUpdatesSummary(context, replay?.['updates']);
-  } else if (sourceClass === 'load_updates_response') {
-    const result = asRecord(message?.['result']);
-    addUpdatesSummary(context, result?.['updates']);
+  if (classification.sourceClass === 'session_update_notification') {
+    addUpdateSummary(context, summarizeUpdate(classification.update));
+  } else if (
+    classification.sourceClass === 'load_session_bulk_replay_response'
+  ) {
+    addUpdatesSummary(context, classification.replay?.['updates']);
+  } else if (classification.sourceClass === 'load_updates_response') {
+    addUpdatesSummary(context, classification.result?.['updates']);
   }
 
   return context;
@@ -141,22 +163,26 @@ function classifySource(
   message: Record<string, unknown> | undefined,
   messageKind: MessageKind,
   method: string | undefined,
-): SourceClass {
-  if (!message) return 'unknown';
-  if (
-    messageKind === 'notification' &&
-    method === 'session/update' &&
-    asRecord(asRecord(message['params'])?.['update'])
-  ) {
-    return 'session_update_notification';
+): SourceClassification {
+  if (!message) return { sourceClass: 'unknown' };
+  const params = asRecord(message['params']);
+  const update = asRecord(params?.['update']);
+  if (messageKind === 'notification' && method === 'session/update' && update) {
+    return { sourceClass: 'session_update_notification', update };
   }
   if (messageKind === 'response') {
-    if (getBulkReplay(message)) return 'load_session_bulk_replay_response';
-    if (isLoadUpdatesResponse(message)) return 'load_updates_response';
-    return 'jsonrpc_response';
+    const replay = getBulkReplay(message);
+    if (replay) {
+      return { sourceClass: 'load_session_bulk_replay_response', replay };
+    }
+    const result = asRecord(message['result']);
+    if (isLoadUpdatesResult(result)) {
+      return { sourceClass: 'load_updates_response', result };
+    }
+    return { sourceClass: 'jsonrpc_response' };
   }
-  if (method) return 'jsonrpc_request';
-  return 'unknown';
+  if (method) return { sourceClass: 'jsonrpc_request' };
+  return { sourceClass: 'unknown' };
 }
 
 function getMessageKind(message: Record<string, unknown>): MessageKind {
@@ -177,11 +203,12 @@ function getBulkReplay(
 ): Record<string, unknown> | undefined {
   const result = asRecord(message?.['result']);
   const meta = asRecord(result?.['_meta']);
-  return asRecord(meta?.['qwen.session.loadReplay']);
+  return asRecord(meta?.[LOAD_REPLAY_META_KEY]);
 }
 
-function isLoadUpdatesResponse(message: Record<string, unknown>): boolean {
-  const result = asRecord(message['result']);
+function isLoadUpdatesResult(
+  result: Record<string, unknown> | undefined,
+): boolean {
   if (!Array.isArray(result?.['updates'])) return false;
   return (
     typeof result['startTime'] === 'string' ||
@@ -197,9 +224,16 @@ function addUpdatesSummary(
 ): void {
   if (!Array.isArray(updates)) return;
   context['updateCount'] = updates.length;
+  const summarizedUpdateCount = Math.min(
+    updates.length,
+    MAX_SUMMARIZED_UPDATES,
+  );
+  if (summarizedUpdateCount < updates.length) {
+    context['summarizedUpdateCount'] = summarizedUpdateCount;
+  }
   const summary: UpdateSummary = {};
-  for (const update of updates) {
-    mergeUpdateSummary(summary, summarizeUpdate(asRecord(update)));
+  for (let i = 0; i < summarizedUpdateCount; i += 1) {
+    mergeUpdateSummary(summary, summarizeUpdate(asRecord(updates[i])));
   }
   addUpdateSummary(context, summary);
 }
@@ -218,12 +252,29 @@ function summarizeUpdate(
   if (contentBytes > 0) {
     summary.maxContentTextBytes = contentBytes;
   }
+  summary.maxObservedUpdateBytes = contentBytes;
 
   if (Object.hasOwn(update, 'rawOutput')) {
     const rawOutput = update['rawOutput'];
     summary.rawOutputKind = rawOutputKind(rawOutput);
     if (typeof rawOutput === 'string') {
-      summary.maxRawOutputTextBytes = Buffer.byteLength(rawOutput, 'utf8');
+      const rawOutputTextBytes = Buffer.byteLength(rawOutput, 'utf8');
+      summary.maxRawOutputTextBytes = rawOutputTextBytes;
+      summary.maxRawOutputObservedBytes = rawOutputTextBytes;
+      summary.maxObservedUpdateBytes = Math.max(
+        summary.maxObservedUpdateBytes,
+        rawOutputTextBytes,
+      );
+    } else {
+      const rawOutputApproxBytes = jsonByteLength(rawOutput);
+      if (rawOutputApproxBytes !== undefined) {
+        summary.maxRawOutputApproxBytes = rawOutputApproxBytes;
+        summary.maxRawOutputObservedBytes = rawOutputApproxBytes;
+        summary.maxObservedUpdateBytes = Math.max(
+          summary.maxObservedUpdateBytes,
+          rawOutputApproxBytes,
+        );
+      }
     }
   }
 
@@ -231,10 +282,26 @@ function summarizeUpdate(
 }
 
 function mergeUpdateSummary(target: UpdateSummary, next: UpdateSummary): void {
-  target.sessionUpdate ??= next.sessionUpdate;
-  target.toolName ??= next.toolName;
-  target.toolProvenance ??= next.toolProvenance;
-  target.rawOutputKind ??= next.rawOutputKind;
+  if (
+    next.sessionUpdate &&
+    target.sessionUpdate &&
+    next.sessionUpdate !== target.sessionUpdate
+  ) {
+    target.mixedSessionUpdate = true;
+  }
+  if (next.mixedSessionUpdate) {
+    target.mixedSessionUpdate = true;
+  }
+  if (
+    next.maxObservedUpdateBytes !== undefined &&
+    (target.maxObservedUpdateBytes === undefined ||
+      next.maxObservedUpdateBytes > target.maxObservedUpdateBytes)
+  ) {
+    target.maxObservedUpdateBytes = next.maxObservedUpdateBytes;
+    target.sessionUpdate = next.sessionUpdate;
+    target.toolName = next.toolName;
+    target.toolProvenance = next.toolProvenance;
+  }
   if (
     next.maxContentTextBytes !== undefined &&
     (target.maxContentTextBytes === undefined ||
@@ -248,6 +315,20 @@ function mergeUpdateSummary(target: UpdateSummary, next: UpdateSummary): void {
       next.maxRawOutputTextBytes > target.maxRawOutputTextBytes)
   ) {
     target.maxRawOutputTextBytes = next.maxRawOutputTextBytes;
+  }
+  if (
+    next.maxRawOutputApproxBytes !== undefined &&
+    (target.maxRawOutputApproxBytes === undefined ||
+      next.maxRawOutputApproxBytes > target.maxRawOutputApproxBytes)
+  ) {
+    target.maxRawOutputApproxBytes = next.maxRawOutputApproxBytes;
+  }
+  if (
+    next.maxRawOutputObservedBytes !== undefined &&
+    (target.maxRawOutputObservedBytes === undefined ||
+      next.maxRawOutputObservedBytes > target.maxRawOutputObservedBytes)
+  ) {
+    target.maxRawOutputObservedBytes = next.maxRawOutputObservedBytes;
     target.rawOutputKind = next.rawOutputKind;
   }
 }
@@ -259,15 +340,25 @@ function addUpdateSummary(
   addString(context, 'sessionUpdate', summary.sessionUpdate);
   addString(context, 'toolName', summary.toolName);
   addString(context, 'toolProvenance', summary.toolProvenance);
+  if (summary.mixedSessionUpdate) context['mixedSessionUpdate'] = true;
   addNumber(context, 'maxContentTextBytes', summary.maxContentTextBytes);
   addNumber(context, 'maxRawOutputTextBytes', summary.maxRawOutputTextBytes);
+  addNumber(
+    context,
+    'maxRawOutputApproxBytes',
+    summary.maxRawOutputApproxBytes,
+  );
   addString(context, 'rawOutputKind', summary.rawOutputKind);
 }
 
-function contentTextBytes(value: unknown): number {
+function contentTextBytes(value: unknown, depth = 0): number {
+  if (depth > MAX_CONTENT_DEPTH) return 0;
   if (typeof value === 'string') return Buffer.byteLength(value, 'utf8');
   if (Array.isArray(value)) {
-    return value.reduce((sum, item) => sum + contentTextBytes(item), 0);
+    return value.reduce(
+      (sum, item) => sum + contentTextBytes(item, depth + 1),
+      0,
+    );
   }
   const record = asRecord(value);
   if (!record) return 0;
@@ -275,9 +366,20 @@ function contentTextBytes(value: unknown): number {
   const text = stringValue(record['text']);
   if (text) total += Buffer.byteLength(text, 'utf8');
   if (Object.hasOwn(record, 'content')) {
-    total += contentTextBytes(record['content']);
+    total += contentTextBytes(record['content'], depth + 1);
   }
   return total;
+}
+
+function jsonByteLength(value: unknown): number | undefined {
+  try {
+    const json = JSON.stringify(value);
+    return typeof json === 'string'
+      ? Buffer.byteLength(json, 'utf8')
+      : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function rawOutputKind(value: unknown): string {

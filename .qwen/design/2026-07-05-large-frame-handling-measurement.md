@@ -22,7 +22,7 @@ The daemon records existing pipe counts, totals, maximums, histogram metrics, an
 
 Large-frame logs are sampled with a per-daemon process window of 50 records per 60 seconds. Suppressed sample counts are attached to the next recorded large-frame log.
 
-Logged fields are restricted to low-sensitive attribution: direction, byte size, threshold, JSON-RPC message kind, method, source class, update count, session update type, tool name, tool provenance, and shallow text-byte maxima for content and raw output. Payloads, session IDs, client IDs, file paths, prompts, and raw tool output are not logged.
+Logged fields are restricted to low-sensitive attribution: direction, byte size, threshold, JSON-RPC message kind, method, source class, update count, summarized update count when capped, session update type, mixed-session-update marker, tool name, tool provenance, raw output kind, shallow text-byte maxima for content and raw output, approximate non-string raw output bytes, and rate-limit suppression counters. Payloads, session IDs, client IDs, file paths, prompts, and raw tool output are not logged.
 
 The histogram remains low-cardinality and keeps only `direction`; fields such as method, tool name, session update, and source class are not added as metric attributes.
 
@@ -45,7 +45,7 @@ The likely sidecar target is large tool output carried by `tool_call_update`, es
 
 Metadata should travel through `_meta` so older clients ignore it and newer clients can opt into resolving sidecar content. The sidecar contract should define lifecycle, access control, cleanup, byte thresholds, fallback behavior, and client UX before implementation.
 
-Bulk replay and `qwen/session/loadUpdates` need separate handling because a response can be large through many medium updates or a few large updates. The measurement fields include `updateCount`, `maxContentTextBytes`, and `maxRawOutputTextBytes` to separate those cases.
+Bulk replay and `qwen/session/loadUpdates` need separate handling because a response can be large through many medium updates or a few large updates. The measurement fields include `updateCount`, `summarizedUpdateCount`, `maxContentTextBytes`, `maxRawOutputTextBytes`, and `maxRawOutputApproxBytes` to separate those cases without walking unbounded update arrays.
 
 ## Non-Goals
 

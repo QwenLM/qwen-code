@@ -5,6 +5,7 @@
  */
 
 import { describe, expect, it, vi } from 'vitest';
+import { LOAD_REPLAY_META_KEY } from '@qwen-code/acp-bridge/bridgeTypes';
 import {
   classifyLargePipeFrame,
   createLargePipeFrameObserver,
@@ -97,7 +98,7 @@ describe('large pipe frame observer', () => {
         id: 1,
         result: {
           _meta: {
-            'qwen.session.loadReplay': {
+            [LOAD_REPLAY_META_KEY]: {
               v: 1,
               partial: false,
               updates: [
@@ -118,6 +119,33 @@ describe('large pipe frame observer', () => {
       sourceClass: 'load_session_bulk_replay_response',
       updateCount: 1,
       maxContentTextBytes: Buffer.byteLength(contentText, 'utf8'),
+    });
+  });
+
+  it('classifies generic JSON-RPC result and error responses', () => {
+    expect(
+      classifyLargePipeFrame({
+        direction: 'outbound',
+        bytes: LARGE_PIPE_FRAME_THRESHOLD_BYTES,
+        message: { jsonrpc: '2.0', id: 1, result: { ok: true } },
+      }),
+    ).toMatchObject({
+      messageKind: 'response',
+      sourceClass: 'jsonrpc_response',
+    });
+    expect(
+      classifyLargePipeFrame({
+        direction: 'outbound',
+        bytes: LARGE_PIPE_FRAME_THRESHOLD_BYTES,
+        message: {
+          jsonrpc: '2.0',
+          id: 2,
+          error: { code: -32000, message: 'failed' },
+        },
+      }),
+    ).toMatchObject({
+      messageKind: 'response',
+      sourceClass: 'jsonrpc_response',
     });
   });
 
@@ -182,7 +210,84 @@ describe('large pipe frame observer', () => {
       messageKind: 'response',
       sourceClass: 'load_updates_response',
       updateCount: 2,
+      maxRawOutputApproxBytes: Buffer.byteLength(
+        JSON.stringify({ type: 'task_execution' }),
+        'utf8',
+      ),
       rawOutputKind: 'object',
+    });
+  });
+
+  it('uses byte-dominant update attribution for mixed bulk updates', () => {
+    const rawOutput = 'r'.repeat(256);
+    const context = classifyLargePipeFrame({
+      direction: 'outbound',
+      bytes: LARGE_PIPE_FRAME_THRESHOLD_BYTES,
+      message: {
+        jsonrpc: '2.0',
+        id: 3,
+        result: {
+          _meta: {
+            [LOAD_REPLAY_META_KEY]: {
+              updates: [
+                {
+                  sessionUpdate: 'agent_message_chunk',
+                  content: { type: 'text', text: 'small' },
+                },
+                {
+                  sessionUpdate: 'tool_call_update',
+                  rawOutput,
+                  _meta: { toolName: 'shell', provenance: 'builtin' },
+                },
+              ],
+            },
+          },
+        },
+      },
+    });
+
+    expect(context).toMatchObject({
+      sourceClass: 'load_session_bulk_replay_response',
+      updateCount: 2,
+      mixedSessionUpdate: true,
+      sessionUpdate: 'tool_call_update',
+      toolName: 'shell',
+      toolProvenance: 'builtin',
+      maxRawOutputTextBytes: Buffer.byteLength(rawOutput, 'utf8'),
+      rawOutputKind: 'string',
+    });
+  });
+
+  it('caps shallow update and content traversal work', () => {
+    let nestedContent: unknown = { type: 'text', text: 'too-deep' };
+    for (let i = 0; i < 64; i += 1) {
+      nestedContent = { content: nestedContent };
+    }
+    const updates = Array.from({ length: 501 }, (_, index) => ({
+      sessionUpdate: 'agent_message_chunk',
+      content: index === 0 ? { type: 'text', text: 'sampled' } : nestedContent,
+    }));
+
+    const context = classifyLargePipeFrame({
+      direction: 'outbound',
+      bytes: LARGE_PIPE_FRAME_THRESHOLD_BYTES,
+      message: {
+        jsonrpc: '2.0',
+        id: 4,
+        result: {
+          _meta: {
+            [LOAD_REPLAY_META_KEY]: {
+              updates,
+            },
+          },
+        },
+      },
+    });
+
+    expect(context).toMatchObject({
+      updateCount: 501,
+      summarizedUpdateCount: 500,
+      maxContentTextBytes: Buffer.byteLength('sampled', 'utf8'),
     });
   });
 
@@ -228,11 +333,37 @@ describe('large pipe frame observer', () => {
     expect(daemonLog.warn).toHaveBeenCalledTimes(3);
     expect(daemonLog.warn.mock.calls[2]?.[1]).toMatchObject({
       suppressedCount: 1,
+      suppressedWindowStartMs: 0,
     });
     expect(emitTelemetryLog).toHaveBeenCalledWith(
       'Large ACP pipe frame observed.',
-      expect.objectContaining({ suppressedCount: 1 }),
+      expect.objectContaining({
+        suppressedCount: 1,
+        suppressedWindowStartMs: 0,
+      }),
       expect.objectContaining({ eventName: LARGE_PIPE_FRAME_EVENT_NAME }),
+    );
+  });
+
+  it('logs without a telemetry hook', () => {
+    const daemonLog = { warn: vi.fn() };
+    const observe = createLargePipeFrameObserver({ daemonLog });
+
+    observe({
+      direction: 'inbound',
+      bytes: LARGE_PIPE_FRAME_THRESHOLD_BYTES,
+      message: {
+        jsonrpc: '2.0',
+        method: 'session/update',
+        params: { update: { sessionUpdate: 'agent_message_chunk' } },
+      },
+    });
+
+    expect(daemonLog.warn).toHaveBeenCalledWith(
+      'large ACP pipe frame observed',
+      expect.objectContaining({
+        sourceClass: 'session_update_notification',
+      }),
     );
   });
 
