@@ -360,7 +360,7 @@ export class WeComChannel extends ChannelBase {
       text,
       messageId,
       isGroup,
-      isMentioned: !isGroup || (explicitMention ?? true),
+      isMentioned: !isGroup || (explicitMention ?? false),
       isReplyToBot: false,
       referencedText: extractQuoteText(body),
     };
@@ -1472,9 +1472,16 @@ function isPublicIpAddress(address: string): boolean {
     const isAllZeros = groups.every((group) => group === 0);
     const isLoopback =
       groups.slice(0, 7).every((group) => group === 0) && groups[7] === 1;
+    const lowZeroEmbeddedIpv4 = hexGroupsToIpv4(groups[6], groups[7]);
+    const hasLowZeroPrivateIpv4 =
+      groups.slice(0, 5).every((group) => group === 0) &&
+      lowZeroEmbeddedIpv4 !== undefined &&
+      (groups[6] !== 0 || groups[7] !== 0) &&
+      !isPublicIpv4(lowZeroEmbeddedIpv4);
     return !(
       isAllZeros ||
       isLoopback ||
+      hasLowZeroPrivateIpv4 ||
       (first >= 0xfc00 && first <= 0xfdff) ||
       (first >= 0xff00 && first <= 0xffff) ||
       (first === 0x2001 && groups[1] === 0x0db8) ||

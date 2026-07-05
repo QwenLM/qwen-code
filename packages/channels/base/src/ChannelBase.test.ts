@@ -5958,6 +5958,48 @@ describe('ChannelBase', () => {
       );
     });
 
+    it('collect: does not preflight the coalesced followup again', async () => {
+      class CountingPreflightChannel extends TestChannel {
+        preflightTexts: string[] = [];
+
+        protected override preflightInbound(
+          message: Envelope,
+        ): boolean | Promise<boolean> {
+          this.preflightTexts.push(message.text);
+          return super.preflightInbound(message);
+        }
+      }
+
+      let resolveFirst!: (v: string) => void;
+      const firstPrompt = new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+      let callCount = 0;
+      (bridge.prompt as ReturnType<typeof vi.fn>).mockImplementation(() => {
+        callCount++;
+        if (callCount === 1) return firstPrompt;
+        return Promise.resolve('coalesced response');
+      });
+
+      const ch = new CountingPreflightChannel(
+        'test-chan',
+        defaultConfig({ dispatchMode: 'collect' }),
+        bridge,
+      );
+
+      const first = ch.handleInbound(envelope({ text: 'first' }));
+      await new Promise((resolve) => setTimeout(resolve, 10));
+
+      await ch.handleInbound(envelope({ text: 'second' }));
+      await ch.handleInbound(envelope({ text: 'third' }));
+
+      resolveFirst('first response');
+      await first;
+      await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+
+      expect(ch.preflightTexts).toEqual(['first', 'second', 'third']);
+    });
+
     it('collect: no followup if no messages buffered', async () => {
       const ch = createChannel({ dispatchMode: 'collect' });
       await ch.handleInbound(envelope({ text: 'only message' }));

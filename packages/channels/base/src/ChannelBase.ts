@@ -2840,7 +2840,7 @@ export abstract class ChannelBase {
           };
           // Queue the coalesced prompt (don't await to avoid deadlock on the queue).
           // Surface a drain failure instead of silently losing buffered turns.
-          this.handleInbound(syntheticEnvelope).catch((err) => {
+          this.processInbound(syntheticEnvelope).catch((err) => {
             process.stderr.write(
               `[${this.name}] dropped ${lost} buffered message(s) on collect re-entry for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
                 err instanceof Error ? err.message : String(err)

@@ -1073,6 +1073,28 @@ describe('WeComChannel', () => {
     expect(channel.envelopes).toHaveLength(0);
   });
 
+  it('treats missing group mention metadata as unmentioned', async () => {
+    const channel = new TestWeComChannel(
+      'bot',
+      makeConfig({ groupPolicy: 'open', groups: { '*': {} } }),
+      makeBridge(),
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.text', {
+      msgid: 'msg-missing-mention-metadata',
+      msgtype: 'text',
+      chattype: 'group',
+      chatid: 'group-1',
+      from: { userid: 'bob' },
+      text: { content: 'background' },
+    });
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(channel.envelopes).toHaveLength(0);
+  });
+
   it('does not download attachments for messages rejected by mention gate', async () => {
     const channel = new TestWeComChannel(
       'bot',
@@ -1171,6 +1193,7 @@ describe('WeComChannel', () => {
       chatid: 'group-1',
       from: { userid: 'alice' },
       text: { content: '!pwd' },
+      mentions: [{ userid: 'bot-id' }],
     });
 
     await vi.waitFor(() => expect(client.sendMessage).toHaveBeenCalled());
@@ -1987,6 +2010,46 @@ describe('WeComChannel', () => {
     mocks.lookup.mockResolvedValueOnce([
       { address: '0:0:0:0:0:ffff:7f00:1', family: 6 },
     ]);
+    const options = mocks.httpCalls[0]?.options as RequestOptionsWithLookup;
+    const callback = vi.fn<LookupCallback>();
+
+    options.lookup?.('example.invalid', { all: true }, callback);
+
+    await vi.waitFor(() =>
+      expect(callback).toHaveBeenCalledWith(expect.any(Error), '', 0),
+    );
+  });
+
+  it('rejects low-zero IPv6 private IPv4 embeddings during request-time lookup validation', async () => {
+    type LookupCallback = (
+      err: Error | null,
+      address: string | Array<{ address: string; family: number }>,
+      family?: number,
+    ) => void;
+    type RequestOptionsWithLookup = {
+      lookup?: (
+        hostname: string,
+        options: { all?: boolean },
+        callback: LookupCallback,
+      ) => void;
+    };
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.image', {
+      msgid: 'msg-lookup-low-zero-private',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: {
+        url: 'https://example.invalid/image',
+        aeskey: 'k1',
+      },
+    });
+
+    await vi.waitFor(() => expect(mocks.httpCalls).toHaveLength(1));
+    mocks.lookup.mockResolvedValueOnce([{ address: '::1:a9fe:1', family: 6 }]);
     const options = mocks.httpCalls[0]?.options as RequestOptionsWithLookup;
     const callback = vi.fn<LookupCallback>();
 
