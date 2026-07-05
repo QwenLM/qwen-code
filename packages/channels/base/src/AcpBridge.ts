@@ -385,7 +385,7 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
       { sessionId },
     );
     if (!response) {
-      return {};
+      return { payload: { jsonrpc: '2.0', id: 0, result: {} } };
     }
     return { payload: response };
   }
