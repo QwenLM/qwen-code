@@ -397,6 +397,33 @@ describe('startCommand.handler', () => {
     expect(mockChannelLoopScheduler).not.toHaveBeenCalled();
   });
 
+  it('does not expose channel loops when starting all channels with cron disabled', async () => {
+    const channels = {
+      telegram: { type: 'telegram' },
+      feishu: { type: 'feishu' },
+    };
+    process.env['QWEN_CODE_DISABLE_CRON'] = '1';
+    mockLoadSettings.mockReturnValue({ merged: { channels } });
+    const exitSpy = vi.spyOn(process, 'exit').mockImplementation((code) => {
+      throw new Error(`process.exit: ${String(code)}`);
+    });
+
+    try {
+      await expect(invokeStartHandler({})).rejects.toThrow('process.exit: 1');
+    } finally {
+      exitSpy.mockRestore();
+      delete process.env['QWEN_CODE_DISABLE_CRON'];
+    }
+
+    expect(mockCreateChannel).toHaveBeenCalledTimes(2);
+    for (const call of mockCreateChannel.mock.calls) {
+      const options = call[3] as ChannelBaseOptions;
+      expect(options.loopController).toBeUndefined();
+    }
+    expect(mockChannelLoopStore).not.toHaveBeenCalled();
+    expect(mockChannelLoopScheduler).not.toHaveBeenCalled();
+  });
+
   it('does not expose channel loops when cron is disabled in settings', async () => {
     const channels = { telegram: { type: 'telegram' } };
     mockLoadSettings.mockReturnValue({

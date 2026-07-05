@@ -1601,6 +1601,7 @@ describe('ChannelBase', () => {
       const result = await handler!.create('s-1', {
         cron: '  */5 * * * *  ',
         prompt: 'drink water',
+        recurring: false,
       });
 
       expect(createForTarget).toHaveBeenCalledWith(
@@ -1617,7 +1618,7 @@ describe('ChannelBase', () => {
           cron: '*/5 * * * *',
           prompt: 'drink water',
           label: 'drink water',
-          recurring: true,
+          recurring: false,
           createdBy: 'user1',
         },
         10,

@@ -6207,6 +6207,9 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       // callback (see the sibling bootstrap test for rationale).
       sendSdkMcpMessage: expect.any(Function),
     });
+    expect(innerConfig.initialize).toHaveBeenCalledWith({
+      sendSdkMcpMessage: expect.any(Function),
+    });
     expect(initialize).toHaveBeenCalledTimes(1);
     expect(fireSessionStartEvent).toHaveBeenCalledTimes(1);
     expect(fireSessionStartEvent).toHaveBeenCalledWith(
