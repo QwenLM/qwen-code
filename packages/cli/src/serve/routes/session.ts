@@ -272,6 +272,7 @@ export function registerSessionRoutes(
               ? await bridge.loadSession({
                   sessionId,
                   workspaceCwd: cwd,
+                  historyReplay: 'response',
                   ...(clientId !== undefined ? { clientId } : {}),
                 })
               : await bridge.resumeSession({
