@@ -396,4 +396,68 @@ describe('package scripts', () => {
     );
     expect(buildStep).toContain('npm run build\n          npm run bundle');
   });
+
+  it('fast-tracks trusted autofix issue triggers before LLM assessment', () => {
+    const workflow = readWorkflow('.github/workflows/qwen-autofix.yml');
+    const issueJob = getWorkflowJob(workflow, 'issue-autofix');
+    const scanStep = getWorkflowStep(issueJob, 'Find candidate issues');
+    const fastTrackStep = getWorkflowStep(issueJob, 'Fast-track decision');
+    const assessStep = getWorkflowStep(issueJob, 'Assess candidates');
+
+    expect(issueJob.indexOf(scanStep)).toBeLessThan(
+      issueJob.indexOf(fastTrackStep),
+    );
+    expect(issueJob.indexOf(fastTrackStep)).toBeLessThan(
+      issueJob.indexOf(assessStep),
+    );
+    expect(fastTrackStep).toContain("id: 'fasttrack'");
+    expect(fastTrackStep).toContain('FAST_TRACK=false');
+    expect(fastTrackStep).toContain('FAST_TRACK=true');
+    expect(fastTrackStep).toContain('fast_tracked=false');
+    expect(fastTrackStep).toContain('-n "${FORCED_ISSUE}"');
+    expect(fastTrackStep).toContain(
+      'Fast-tracked: trusted trigger bypasses LLM assessment.',
+    );
+    expect(assessStep).toContain(
+      "steps.fasttrack.outputs.fast_tracked != 'true'",
+    );
+  });
+
+  it('skips autofix install-time prepare without disabling dependency scripts', () => {
+    const workflow = readWorkflow('.github/workflows/qwen-autofix.yml');
+
+    for (const jobName of ['issue-autofix', 'review-address']) {
+      const job = getWorkflowJob(workflow, jobName);
+      const installStep = getWorkflowStep(
+        job,
+        'Install dependencies and build',
+      );
+
+      expect(installStep).toContain("QWEN_SKIP_PREPARE: '1'");
+      expect(installStep).toContain(
+        'npm ci --prefer-offline --no-audit --progress=false',
+      );
+      expect(installStep).toContain('git config core.hooksPath .husky');
+      expect(installStep).not.toContain('--ignore-scripts');
+    }
+  });
+
+  it('runs changed autofix tests instead of full touched-package suites', () => {
+    const workflow = readWorkflow('.github/workflows/qwen-autofix.yml');
+
+    for (const jobName of ['issue-autofix', 'review-address']) {
+      const job = getWorkflowJob(workflow, jobName);
+      const verifyStep = getWorkflowStep(job, 'Verification gate');
+
+      expect(verifyStep).toContain(
+        'npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests',
+      );
+      expect(verifyStep).toContain("grep -oE '^packages/[^/]+'");
+      expect(verifyStep).toContain('pkg.scripts?.test');
+      expect(verifyStep).toContain('!= *vitest*');
+      expect(verifyStep).not.toContain(
+        'npm run test --workspace "${p}" --if-present\n',
+      );
+    }
+  });
 });

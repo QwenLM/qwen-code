@@ -44,7 +44,8 @@ export interface EchartsRuntime {
 }
 
 export type EchartsRuntimeLoader = () =>
-  EchartsRuntime | Promise<EchartsRuntime>;
+  | EchartsRuntime
+  | Promise<EchartsRuntime>;
 
 export interface EchartsFullDataResolvedDataset {
   dimensions: string[];

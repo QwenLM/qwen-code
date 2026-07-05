@@ -194,6 +194,7 @@ const WS_READ_METHODS = new Set([
   '_qwen/workspace/providers',
   '_qwen/workspace/env',
   '_qwen/workspace/preflight',
+  '_qwen/workspace/session_groups/list',
   '_qwen/workspace/trust',
   '_qwen/workspace/permissions',
   '_qwen/workspace/voice',

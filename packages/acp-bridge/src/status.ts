@@ -114,6 +114,9 @@ export const SERVE_STATUS_EXT_METHODS = {
   workspaceHooks: 'qwen/status/workspace/hooks',
   sessionHooks: 'qwen/status/session/hooks',
   workspaceExtensions: 'qwen/status/workspace/extensions',
+  // Process-wide rss/cpu of this ACP child, self-reported to the daemon for
+  // the Daemon Status resource charts (workspace-scoped; no sessionId).
+  workspaceResource: 'qwen/status/workspace/resource',
 } as const;
 
 /**
