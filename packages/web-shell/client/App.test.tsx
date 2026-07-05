@@ -376,6 +376,7 @@ describe('App session callbacks', () => {
       'hello',
       expect.objectContaining({ retry: undefined }),
     );
+    expect(editorClear).toHaveBeenCalledTimes(1);
     expect(onSessionChange).toHaveBeenCalledWith({
       type: 'submit',
       sessionId: 'session-1',
@@ -415,12 +416,14 @@ describe('App session callbacks', () => {
     expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
 
     mockSessionActions.sendPrompt.mockClear();
+    editorClear.mockClear();
     testState.prompt = 'blocked';
     await clickSubmit(container);
     await flush();
 
     expect(mockSessionActions.sendPrompt).not.toHaveBeenCalled();
     expect(mockFollowup.clear).toHaveBeenCalledTimes(1);
+    expect(editorClear).toHaveBeenCalledTimes(0);
     expect(testState.latestChatEditorProps?.isPreparing).toBe(false);
     expect(container.querySelector('[data-testid="retry"]')).not.toBeNull();
 

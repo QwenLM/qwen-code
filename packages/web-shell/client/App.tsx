@@ -2445,7 +2445,9 @@ export function App({
         errorMessage: string,
         opts?: { optimisticUserMessage?: boolean; retry?: boolean },
       ) => {
-        const clearComposerOnPromptStart = !connectionRef.current.sessionId;
+        const clearComposerOnPromptStart =
+          !connectionRef.current.sessionId ||
+          Boolean(onSubmitBeforeRef.current);
         sendPrompt(promptText, promptImages, {
           ...opts,
           clearComposerOnPromptStart,
