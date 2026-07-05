@@ -1,8 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { SetStateAction } from 'react';
 import type { RefObject } from 'react';
+import type { StateEffect } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import type { WebShellAtItem, WebShellAtProvider } from '../customization';
+import type {
+  WebShellAtItem,
+  WebShellAtProvider,
+  WebShellComposerTag,
+} from '../customization';
 import { useI18n } from '../i18n';
 
 export interface AtMentionProviderView {
@@ -150,6 +155,11 @@ export interface UseAtMentionMenuOptions {
   shellModeRef: RefObject<boolean>;
   workspaceActionsRef: RefObject<AtMentionWorkspaceActions | undefined>;
   providers?: readonly WebShellAtProvider[];
+  createInlineTagEffect?: (range: {
+    from: number;
+    to: number;
+    tag: WebShellComposerTag;
+  }) => StateEffect<unknown>;
 }
 
 const AT_PATTERN = /@((?:[\p{L}\p{N}_./:-]|\\.)*)$/u;
@@ -166,7 +176,6 @@ const ANSI_RE = new RegExp(`${ESC}(?:[@-Z\\\\-_]|\\[[0-?]*[ -/]*[@-~])`, 'g');
 const BIDI_CONTROL_RE = /[\u200B\u200E\u200F\u061C\u2066-\u2069\u202A-\u202E]/g;
 const SAFE_DISPLAY_FALLBACK = '[invalid]';
 const AT_REFERENCE_UNSAFE_CHARS = /[^\p{L}\p{N}_./-]/gu;
-
 function isBuiltinProviderId(providerId: string): boolean {
   return (
     providerId === FILE_PROVIDER_ID ||
@@ -401,6 +410,29 @@ function safeDisplayText(raw: string | undefined): string {
   return sanitizeDisplayText(raw) ?? SAFE_DISPLAY_FALLBACK;
 }
 
+function sanitizeOptionalInsertText(
+  raw: string | undefined,
+): string | undefined {
+  if (raw === undefined) return undefined;
+  return sanitizeInsertText(raw).trim();
+}
+
+function sanitizeComposerTag(
+  tag: WebShellComposerTag | undefined,
+): WebShellComposerTag | undefined {
+  if (!tag) return undefined;
+  const kind =
+    tag.kind === undefined ? undefined : sanitizeDisplayText(tag.kind);
+  return {
+    id: sanitizeDisplayText(tag.id) ?? SAFE_DISPLAY_FALLBACK,
+    label: tag.label === undefined ? undefined : sanitizeDisplayText(tag.label),
+    value: tag.value === undefined ? undefined : sanitizeDisplayText(tag.value),
+    removable: tag.removable,
+    kind,
+    serialized: sanitizeOptionalInsertText(tag.serialized),
+  };
+}
+
 function sanitizeAtMentionItem(
   item: AtMentionItem,
   options?: { customProvider?: boolean },
@@ -418,6 +450,7 @@ function sanitizeAtMentionItem(
       item.insertText === undefined
         ? undefined
         : sanitizeInsertText(item.insertText),
+    composerTag: sanitizeComposerTag(item.composerTag),
   };
   if (!options?.customProvider) {
     return sanitized;
@@ -429,6 +462,46 @@ function sanitizeAtMentionItem(
     ...safe,
     kind: 'insert',
   };
+}
+
+function createComposerTagForItem(
+  providerId: string | undefined,
+  item: AtMentionItem,
+  insert: string,
+): WebShellComposerTag | null {
+  const serialized = insert.trim();
+  if (!serialized) return null;
+  if (item.composerTag) {
+    return {
+      ...item.composerTag,
+      serialized: item.composerTag.serialized?.trim() || serialized,
+    };
+  }
+  if (providerId === EXTENSIONS_PROVIDER_ID) {
+    return {
+      id: `extension:${serialized}`,
+      kind: 'extension',
+      value: item.label,
+      serialized,
+    };
+  }
+  if (providerId === MCP_RESOURCES_PROVIDER_ID) {
+    return {
+      id: `mcp:${serialized}`,
+      kind: 'mcp',
+      value: item.label,
+      serialized,
+    };
+  }
+  if (providerId === FILE_PROVIDER_ID) {
+    return {
+      id: `file:${serialized}`,
+      kind: 'file',
+      value: item.description ?? item.label,
+      serialized,
+    };
+  }
+  return null;
 }
 
 function createFileProvider(
@@ -686,6 +759,7 @@ export function useAtMentionMenu({
   shellModeRef,
   workspaceActionsRef,
   providers = EMPTY_PROVIDERS,
+  createInlineTagEffect,
 }: UseAtMentionMenuOptions) {
   const { t } = useI18n();
   const [state, setState] = useState<AtMentionMenuState | null>(null);
@@ -1577,8 +1651,25 @@ export function useAtMentionMenu({
         return true;
       }
       preserveProviderSelectionRef.current = true;
+      const tag = createComposerTagForItem(
+        current.selectedProviderId,
+        item,
+        insert,
+      );
+      const tagText = insert.trimEnd();
+      const effects =
+        tag && createInlineTagEffect
+          ? [
+              createInlineTagEffect({
+                from: current.from,
+                to: current.from + tagText.length,
+                tag,
+              }),
+            ]
+          : undefined;
       view.dispatch({
         changes: { from: current.from, to: current.to, insert },
+        ...(effects ? { effects } : {}),
         selection: { anchor: current.from + insert.length },
         scrollIntoView: true,
       });
@@ -1589,6 +1680,7 @@ export function useAtMentionMenu({
     [
       close,
       enterCategory,
+      createInlineTagEffect,
       scheduleLoadItems,
       scheduleLoadMcpResourceItems,
       viewRef,

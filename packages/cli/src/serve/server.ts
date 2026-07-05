@@ -118,6 +118,7 @@ import { registerWorkspaceToolsRoutes } from './routes/workspace-tools.js';
 
 export {
   createDefaultFsAuditEmit,
+  resolveBoundWorkspacesFromIdeEnv,
   resolveBridgeFsFactory,
 } from './server/fs-factory.js';
 export {
@@ -321,7 +322,7 @@ export function createServeApp(
     );
   }
   const fsFactory = resolveBridgeFsFactory({
-    boundWorkspace,
+    boundWorkspaces: [boundWorkspace],
     injected: deps.fsFactory,
     trusted: false,
   });

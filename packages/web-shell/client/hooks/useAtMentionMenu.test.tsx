@@ -2,9 +2,9 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { act } from 'react';
 import { createRoot, type Root } from 'react-dom/client';
-import { EditorState } from '@codemirror/state';
+import { EditorState, StateEffect } from '@codemirror/state';
 import type { EditorView } from '@codemirror/view';
-import type { WebShellAtProvider } from '../customization';
+import type { WebShellAtProvider, WebShellComposerTag } from '../customization';
 import {
   useAtMentionMenu,
   type AtMentionWorkspaceActions,
@@ -47,12 +47,18 @@ function Harness({
   providers,
   shellMode = false,
   view,
+  createInlineTagEffect,
 }: {
   actions?: AtMentionWorkspaceActions;
   disabled?: boolean;
   providers?: readonly WebShellAtProvider[];
   shellMode?: boolean;
   view?: EditorView | null;
+  createInlineTagEffect?: (range: {
+    from: number;
+    to: number;
+    tag: WebShellComposerTag;
+  }) => StateEffect<unknown>;
 }) {
   latest = useAtMentionMenu({
     viewRef: { current: view ?? null },
@@ -60,6 +66,7 @@ function Harness({
     shellModeRef: { current: shellMode },
     workspaceActionsRef: { current: actions },
     providers,
+    createInlineTagEffect,
   });
   return null;
 }
@@ -70,12 +77,18 @@ function mount({
   providers,
   shellMode,
   view,
+  createInlineTagEffect,
 }: {
   actions?: AtMentionWorkspaceActions;
   disabled?: boolean;
   providers?: readonly WebShellAtProvider[];
   shellMode?: boolean;
   view?: EditorView | null;
+  createInlineTagEffect?: (range: {
+    from: number;
+    to: number;
+    tag: WebShellComposerTag;
+  }) => StateEffect<unknown>;
 } = {}) {
   container = document.createElement('div');
   document.body.appendChild(container);
@@ -88,6 +101,7 @@ function mount({
         providers={providers}
         shellMode={shellMode}
         view={view}
+        createInlineTagEffect={createInlineTagEffect}
       />,
     );
   });
@@ -569,6 +583,58 @@ describe('useAtMentionMenu', () => {
     });
   });
 
+  it('decorates accepted extension refs as inline composer tags', async () => {
+    vi.useFakeTimers();
+    const inlineTagEffect = StateEffect.define<{
+      from: number;
+      to: number;
+      tag: WebShellComposerTag;
+    }>();
+    const view = makeView('@');
+    mount({
+      view,
+      createInlineTagEffect: (range) => inlineTagEffect.of(range),
+      actions: {
+        loadExtensionsStatus: vi.fn().mockResolvedValue({
+          extensions: [
+            {
+              name: 'review',
+              displayName: 'Review',
+              isActive: true,
+            },
+          ],
+        }),
+      },
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(1));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept()).toBe(true);
+    });
+
+    const spec = vi.mocked(view.dispatch).mock.calls[0]?.[0];
+    expect(spec).toMatchObject({
+      changes: { from: 0, to: 1, insert: '@ext:review ' },
+      selection: { anchor: 12 },
+      scrollIntoView: true,
+    });
+    expect(Array.isArray(spec?.effects)).toBe(true);
+    const effect = Array.isArray(spec?.effects) ? spec.effects[0] : undefined;
+    expect(effect?.is(inlineTagEffect)).toBe(true);
+    expect(effect?.value).toEqual({
+      from: 0,
+      to: 11,
+      tag: {
+        id: 'extension:@ext:review',
+        kind: 'extension',
+        value: 'review',
+        serialized: '@ext:review',
+      },
+    });
+  });
+
   it('clears a pending provider search when closing from items', async () => {
     vi.useFakeTimers();
     const search = vi.fn().mockResolvedValue([]);
@@ -750,6 +816,65 @@ describe('useAtMentionMenu', () => {
       scrollIntoView: true,
     });
     expect(latest!.state).toBeNull();
+  });
+
+  it('decorates custom items when they provide composer tags', async () => {
+    vi.useFakeTimers();
+    const inlineTagEffect = StateEffect.define<{
+      from: number;
+      to: number;
+      tag: WebShellComposerTag;
+    }>();
+    const view = makeView('@');
+    mount({
+      view,
+      createInlineTagEffect: (range) => inlineTagEffect.of(range),
+      providers: [
+        {
+          id: 'custom',
+          label: 'Custom',
+          order: 0,
+          search: vi.fn().mockResolvedValue([
+            {
+              id: 'ticket-123',
+              label: 'TICKET-123',
+              insertText: '@ticket:TICKET-123 ',
+              composerTag: {
+                id: 'ticket-123',
+                kind: 'table',
+                value: 'TICKET-123',
+              },
+            },
+          ]),
+        },
+      ],
+    });
+
+    act(() => latest!.refreshForView(view));
+    act(() => latest!.enterCategory(0));
+    await runDebounce();
+    act(() => {
+      expect(latest!.accept()).toBe(true);
+    });
+
+    const spec = vi.mocked(view.dispatch).mock.calls[0]?.[0];
+    expect(spec).toMatchObject({
+      changes: { from: 0, to: 1, insert: '@ticket:TICKET-123 ' },
+      selection: { anchor: 19 },
+      scrollIntoView: true,
+    });
+    const effect = Array.isArray(spec?.effects) ? spec.effects[0] : undefined;
+    expect(effect?.is(inlineTagEffect)).toBe(true);
+    expect(effect?.value).toEqual({
+      from: 0,
+      to: 18,
+      tag: {
+        id: 'ticket-123',
+        kind: 'table',
+        value: 'TICKET-123',
+        serialized: '@ticket:TICKET-123',
+      },
+    });
   });
 
   it('sanitizes custom item label fallbacks before insertion', async () => {

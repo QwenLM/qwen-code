@@ -1276,6 +1276,17 @@ const SETTINGS_SCHEMA = {
     showInDialog: true,
   },
 
+  modelFallbacks: {
+    type: 'string',
+    label: 'Model Fallbacks',
+    category: 'Model',
+    requiresRestart: true,
+    default: '',
+    description:
+      'Ordered list of fallback model IDs (comma-separated, max 3) to try when the primary model hits capacity errors (429/503/529). Example: "qwen-plus,qwen-turbo". Set via CLI with --fallback-model.',
+    showInDialog: true,
+  },
+
   voiceModel: {
     type: 'string',
     label: 'Voice Model',
