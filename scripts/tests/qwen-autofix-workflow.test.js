@@ -491,6 +491,8 @@ describe('qwen-autofix workflow', () => {
       expect(step).toContain(
         'node .github/scripts/build-autofix-prompt.mjs "${AUTOFIX_INVOCATION}"',
       );
+      expect(step).toContain('qwen_status=$?');
+      expect(step).toContain('"${WORKDIR}/failure.md"');
       expect(step).not.toMatch(/PROMPT: \|-\n\s+\/autofix /);
       expect(step).not.toContain('for attempt in 1 2; do');
       expect(step).not.toContain('Qwen Code failed on attempt');

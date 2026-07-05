@@ -481,7 +481,18 @@ jobs:
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           rm -f "${WORKDIR}/decision.json"
           PROMPT="$(node .github/scripts/build-autofix-prompt.mjs "${AUTOFIX_INVOCATION}")"
+          set +e
           qwen --yolo --prompt "${PROMPT}"
+          qwen_status=$?
+          set -e
+          if [[ "${qwen_status}" -ne 0 ]]; then
+            {
+              echo "Qwen exited with status ${qwen_status} during assess-candidates."
+              echo
+              echo 'See the Assess candidates step logs for model/tool output.'
+            } > "${WORKDIR}/failure.md"
+            exit "${qwen_status}"
+          fi
 
       - name: 'Read decision'
         id: 'decision'
@@ -636,7 +647,18 @@ jobs:
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           PROMPT="$(node .github/scripts/build-autofix-prompt.mjs "${AUTOFIX_INVOCATION}")"
+          set +e
           qwen --yolo --prompt "${PROMPT}"
+          qwen_status=$?
+          set -e
+          if [[ "${qwen_status}" -ne 0 ]]; then
+            {
+              echo "Qwen exited with status ${qwen_status} during develop-issue."
+              echo
+              echo 'See the Develop fix step logs for model/tool output.'
+            } > "${WORKDIR}/failure.md"
+            exit "${qwen_status}"
+          fi
 
       - name: 'Verification gate'
         id: 'verify'
@@ -1153,7 +1175,18 @@ jobs:
           fi
           printf '%s\n' "${SETTINGS_JSON}" > .qwen/settings.json
           PROMPT="$(node .github/scripts/build-autofix-prompt.mjs "${AUTOFIX_INVOCATION}")"
+          set +e
           qwen --yolo --prompt "${PROMPT}"
+          qwen_status=$?
+          set -e
+          if [[ "${qwen_status}" -ne 0 ]]; then
+            {
+              echo "Qwen exited with status ${qwen_status} during address-review."
+              echo
+              echo 'See the Triage and address step logs for model/tool output.'
+            } > "${WORKDIR}/failure.md"
+            exit "${qwen_status}"
+          fi
 
       - name: 'Verification gate'
         id: 'verify'
