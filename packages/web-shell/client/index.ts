@@ -30,6 +30,8 @@ export type {
   WebShellFooterRenderInfo,
   FooterRenderer,
   LoadingPhrasesResolver,
+  WebShellAtItem,
+  WebShellAtProvider,
   WebShellCodeBlockRenderInfo,
   WebShellTaskInfo,
   WebShellAgentTask,
