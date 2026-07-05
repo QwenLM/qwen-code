@@ -264,7 +264,7 @@ Files work with any model — no multimodal support required.
 
 | Feature  | Telegram                                     | WeChat                           | DingTalk                                      | Feishu                                                      |
 | -------- | -------------------------------------------- | -------------------------------- | --------------------------------------------- | ----------------------------------------------------------- |
-| Images   | Direct download via Bot API                  | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (authenticated GET)             |
+| Images   | Direct download via Bot API                  | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (authenticated GET, 50MB limit) |
 | Files    | Direct download via Bot API (20MB limit)     | CDN download with AES decryption | downloadCode API (two-step)                   | Open API resources endpoint (50MB limit)                    |
 | Captions | Photo/file captions included as message text | Not applicable                   | Rich text: mixed text + images in one message | Rich text (`post`): text extracted; embedded images ignored |
 
