@@ -586,6 +586,16 @@ export const TableRenderer: React.FC<TableRendererProps> = ({
   // A zero-row table is the live streaming header box: never vertical — the
   // vertical fallback iterates the rows and with none would render an empty
   // string (a blank box) on a narrow terminal where the width trigger fires.
+  //
+  // KNOWN LIMITATION: `maxRowLines` depends on the column widths, which track
+  // content (a wider row redraws the table). For a table with very long cell
+  // text whose wrapped height sits right at MAX_ROW_LINES, a later row can grow
+  // the columns and nudge the wrap count across the threshold, so the format can
+  // still oscillate vertical↔horizontal WHILE STREAMING. This is an accepted
+  // trade-off of redraw-on-wider column sizing (only extreme wide/long-text
+  // tables hit it; normal tables stay well clear of the threshold). Eliminating
+  // it would require a content-independent decision (which mis-sizes common
+  // key/value tables) or frozen column widths (losing redraw-on-wider).
   const useVerticalFormat =
     rowMetrics.length > 0 &&
     (contentWidth < minHorizontalTableWidth || maxRowLines > MAX_ROW_LINES);
