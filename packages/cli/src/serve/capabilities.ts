@@ -95,6 +95,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_close: { since: 'v1' },
   session_archive: { since: 'v1' },
   session_metadata: { since: 'v1' },
+  session_organization: { since: 'v1' },
   session_export: { since: 'v1' },
   // Daemon supports the MCP client guardrail surface: an in-process
   // counter exposed on `GET /workspace/mcp`, a `--mcp-client-budget=N`

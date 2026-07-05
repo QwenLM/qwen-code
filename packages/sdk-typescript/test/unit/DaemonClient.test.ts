@@ -2281,6 +2281,151 @@ describe('DaemonClient', () => {
         client.listWorkspaceSessions('relative'),
       ).rejects.toMatchObject({ status: 400 });
     });
+
+    it('returns the session list page envelope for organized views', async () => {
+      const { fetch, calls } = recordingFetch(() =>
+        jsonResponse(200, {
+          sessions: [
+            {
+              sessionId: 's-1',
+              workspaceCwd: '/work/a',
+              isPinned: true,
+              groupId: 'g-1',
+            },
+          ],
+          nextCursor: 'next',
+        }),
+      );
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const page = await client.listWorkspaceSessionsPage('/work/a', {
+        view: 'organized',
+        group: 'g-1',
+        pageSize: 50,
+        cursor: 'cur',
+      });
+
+      expect(page.nextCursor).toBe('next');
+      expect(page.sessions[0]).toMatchObject({
+        sessionId: 's-1',
+        isPinned: true,
+        groupId: 'g-1',
+      });
+      expect(calls[0]?.url).toBe(
+        'http://daemon/workspace/%2Fwork%2Fa/sessions?size=50&cursor=cur&view=organized&group=g-1',
+      );
+    });
+
+    it('manages session groups and session organization', async () => {
+      const { fetch, calls } = recordingFetch((request) => {
+        if (
+          request.url.endsWith('/workspace/%2Fwork%2Fa/session-groups') &&
+          request.method === 'GET'
+        ) {
+          return jsonResponse(200, {
+            groups: [],
+            colorOptions: [
+              'red',
+              'orange',
+              'yellow',
+              'green',
+              'blue',
+              'purple',
+            ],
+          });
+        }
+        if (
+          request.url.endsWith('/workspace/%2Fwork%2Fa/session-groups') &&
+          request.method === 'POST'
+        ) {
+          return jsonResponse(201, {
+            group: {
+              id: 'g-1',
+              name: 'Frontend',
+              color: 'blue',
+              order: 0,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-01T00:00:00.000Z',
+            },
+          });
+        }
+        if (
+          request.url.endsWith('/workspace/%2Fwork%2Fa/session-groups/g-1') &&
+          request.method === 'PATCH'
+        ) {
+          return jsonResponse(200, {
+            group: {
+              id: 'g-1',
+              name: 'UI',
+              color: 'green',
+              order: 1,
+              createdAt: '2026-01-01T00:00:00.000Z',
+              updatedAt: '2026-01-02T00:00:00.000Z',
+            },
+          });
+        }
+        if (
+          request.url.endsWith('/workspace/%2Fwork%2Fa/session-groups/g-1') &&
+          request.method === 'DELETE'
+        ) {
+          return jsonResponse(200, { deleted: true });
+        }
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          isPinned: true,
+          groupId: 'g-1',
+        });
+      });
+      const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+      const catalog = await client.listSessionGroups('/work/a');
+      const group = await client.createSessionGroup('/work/a', {
+        name: 'Frontend',
+        color: 'blue',
+      });
+      const updated = await client.updateSessionGroup('/work/a', group.id, {
+        name: 'UI',
+        color: 'green',
+        order: 1,
+      });
+      const deleted = await client.deleteSessionGroup('/work/a', group.id);
+      const organization = await client.updateSessionOrganization('s-1', {
+        isPinned: true,
+        groupId: group.id,
+      });
+
+      expect(catalog.colorOptions).toContain('purple');
+      expect(group.id).toBe('g-1');
+      expect(updated).toMatchObject({ id: 'g-1', name: 'UI', color: 'green' });
+      expect(deleted).toEqual({ deleted: true });
+      expect(organization).toEqual({
+        sessionId: 's-1',
+        isPinned: true,
+        groupId: 'g-1',
+      });
+      expect(calls[0]?.method).toBe('GET');
+      expect(calls[1]?.method).toBe('POST');
+      expect(JSON.parse(calls[1]!.body!)).toEqual({
+        name: 'Frontend',
+        color: 'blue',
+      });
+      expect(calls[2]?.url).toBe(
+        'http://daemon/workspace/%2Fwork%2Fa/session-groups/g-1',
+      );
+      expect(calls[2]?.method).toBe('PATCH');
+      expect(JSON.parse(calls[2]!.body!)).toEqual({
+        name: 'UI',
+        color: 'green',
+        order: 1,
+      });
+      expect(calls[3]?.method).toBe('DELETE');
+      expect(calls[4]?.url).toBe('http://daemon/session/s-1/organization');
+      expect(calls[4]?.method).toBe('PATCH');
+      expect(JSON.parse(calls[4]!.body!)).toEqual({
+        isPinned: true,
+        groupId: 'g-1',
+      });
+    });
   });
 
   describe('setSessionModel', () => {
