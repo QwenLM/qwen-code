@@ -223,9 +223,26 @@ vi.mock('./components/MessageList', async () => {
 vi.mock('./components/sidebar/WebShellSidebar', async () => {
   const React = await import('react');
   return {
-    WebShellSidebar: (props: { sessionListReloadToken?: number }) => {
+    WebShellSidebar: (props: {
+      sessionListReloadToken?: number;
+      onOpenDaemonStatus?: () => void;
+    }) => {
       sidebarTokens.push(props.sessionListReloadToken);
-      return React.createElement('div', { 'data-testid': 'sidebar' });
+      // Expose the Daemon Status opener so tests can exercise the
+      // activePanel === 'status' branch (there is no slash command for it).
+      return React.createElement(
+        'div',
+        { 'data-testid': 'sidebar' },
+        React.createElement(
+          'button',
+          {
+            'data-testid': 'open-daemon-status',
+            type: 'button',
+            onClick: props.onOpenDaemonStatus,
+          },
+          'daemon status',
+        ),
+      );
     },
   };
 });
@@ -659,6 +676,29 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('opens the Daemon Status panel and auto-closes it on a pending approval', async () => {
+    // Covers the activePanel === 'status' branch (DaemonStatusDialog); the other
+    // panel tests all open via /settings, so this guards the 'status' literal and
+    // confirms the auto-close is panel-type-agnostic.
+    const { container, rerender } = renderApp();
+    await flush();
+
+    await act(async () => {
+      container
+        .querySelector<HTMLButtonElement>('[data-testid="open-daemon-status"]')
+        ?.click();
+      await Promise.resolve();
+    });
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
     expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
   });
 
