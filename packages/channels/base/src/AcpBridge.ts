@@ -359,7 +359,14 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
           [CLIENT_MCP_OVER_WS_CONFIG_FLAG]: true,
         },
       })
-      .then(() => {
+      .then((result: unknown) => {
+        if (isSkippedMcpRegistration(result)) {
+          this.channelLoopMcpRegistered = false;
+          process.stderr.write(
+            `[AcpBridge] Channel loop MCP server registration skipped${formatSkippedRegistrationReason(result)}\n`,
+          );
+          return;
+        }
         this.channelLoopMcpRegistered = true;
       })
       .catch((error: unknown) => {
@@ -418,6 +425,12 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private resolveChannelLoopToolHandler(
     sessionId: string,
   ): ChannelLoopToolHandler {
+    if (
+      this.channelLoopToolHandlers.length === 1 &&
+      !this.channelLoopToolHandlers[0]!.canHandle
+    ) {
+      return this.channelLoopToolHandlers[0]!;
+    }
     const handler = this.channelLoopToolHandlers.find(
       (candidate) => candidate.canHandle?.(sessionId) === true,
     );
@@ -428,4 +441,18 @@ export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
         : `No channel loop handler matched session ${sessionId}.`,
     );
   }
+}
+
+function isSkippedMcpRegistration(result: unknown): boolean {
+  return (
+    typeof result === 'object' &&
+    result !== null &&
+    (result as { skipped?: unknown }).skipped === true
+  );
+}
+
+function formatSkippedRegistrationReason(result: unknown): string {
+  if (typeof result !== 'object' || result === null) return '.';
+  const reason = (result as { reason?: unknown }).reason;
+  return typeof reason === 'string' && reason.length > 0 ? `: ${reason}` : '.';
 }

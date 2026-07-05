@@ -141,6 +141,28 @@ describe('AcpBridge', () => {
     expect(newSession).toHaveBeenCalledTimes(1);
   });
 
+  it('retries channel loop MCP registration when the runtime skips registration', async () => {
+    const extMethod = vi
+      .fn()
+      .mockResolvedValueOnce({ skipped: true, reason: 'budget_warning_only' })
+      .mockResolvedValueOnce({});
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.connection = { extMethod };
+    bridge.channelLoopMcpServer = {};
+
+    await bridge.registerChannelLoopMcpServer();
+
+    expect(bridge.channelLoopMcpRegistered).toBe(false);
+
+    await bridge.registerChannelLoopMcpServer();
+
+    expect(extMethod).toHaveBeenCalledTimes(2);
+    expect(bridge.channelLoopMcpRegistered).toBe(true);
+  });
+
   it('returns a synthetic payload ack for MCP notifications', async () => {
     const bridge = new AcpBridge({
       cliEntryPath: '/tmp/qwen',
@@ -191,6 +213,21 @@ describe('AcpBridge', () => {
     expect(() => bridge.resolveChannelLoopToolHandler('s-2')).toThrow(
       'No channel loop handler matched session s-2.',
     );
+  });
+
+  it('uses the only channel loop tool handler when canHandle is omitted', () => {
+    const handler: ChannelLoopToolHandler = {
+      create: vi.fn(),
+      list: vi.fn(),
+      cancel: vi.fn(),
+    };
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    }) as unknown as TestableAcpBridge;
+    bridge.channelLoopToolHandlers = [handler];
+
+    expect(bridge.resolveChannelLoopToolHandler('s-1')).toBe(handler);
   });
 
   it('kills the ACP child when it reports a large event loop stall', async () => {
