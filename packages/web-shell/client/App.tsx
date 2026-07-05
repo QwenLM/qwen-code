@@ -1204,19 +1204,42 @@ export function App({
   const closePanel = useCallback(() => setActivePanel(null), []);
   // The Settings / Daemon Status panel is a view, not a modal, so it lacks
   // DialogShell's focus trap/restore. Move focus to the Back button when a panel
-  // opens and back to the composer when it closes, so keyboard users aren't
-  // stranded on an element that is about to be hidden.
+  // opens (or when switching directly between panels) and back to the composer
+  // when it closes, so keyboard users aren't stranded on an element that is
+  // about to be hidden.
   const panelBackRef = useRef<HTMLButtonElement | null>(null);
   const prevActivePanelRef = useRef(activePanel);
   useEffect(() => {
     const prev = prevActivePanelRef.current;
     prevActivePanelRef.current = activePanel;
-    if (activePanel && !prev) {
+    if (activePanel) {
+      // Covers null→panel and panel→panel: the Back button lives outside the
+      // keyed panel body so it survives a switch, but refocus explicitly rather
+      // than depending on that DOM coincidence.
       panelBackRef.current?.focus();
-    } else if (!activePanel && prev) {
-      editorRef.current?.focus();
+    } else if (prev) {
+      // Panel just closed. Return focus to the composer — unless an approval
+      // overlay is what forced it closed (see the effect below): that overlay
+      // drives its own keyboard handling and ToolApproval ignores keys from
+      // editable targets, so focusing the composer here would swallow its
+      // shortcuts and leave the user unable to respond by keyboard.
+      if (!pendingToolApproval && !pendingAskUserApproval) {
+        editorRef.current?.focus();
+      }
     }
-  }, [activePanel]);
+  }, [activePanel, pendingToolApproval, pendingAskUserApproval]);
+  // A pending approval (a gated tool call or an AskUserQuestion) renders its
+  // overlay in the chat footer, which is hidden (display:none) while a panel is
+  // shown. Left alone, the turn would hang behind Settings/Status with no
+  // visible prompt. Close the panel so the approval surfaces. Only actionable
+  // approvals count — pendingToolApproval/pendingAskUserApproval already gate on
+  // canActOnPendingApproval, so a non-owner in a shared session isn't yanked out
+  // of Settings by someone else's prompt.
+  useEffect(() => {
+    if ((pendingToolApproval || pendingAskUserApproval) && activePanel) {
+      setActivePanel(null);
+    }
+  }, [pendingToolApproval, pendingAskUserApproval, activePanel]);
   const [showMemoryDialog, setShowMemoryDialog] = useState(false);
   const [showAuthDialog, setShowAuthDialog] = useState(false);
   const [memoryRefreshSignal, setMemoryRefreshSignal] = useState(0);

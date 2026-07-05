@@ -306,6 +306,29 @@ async function clickSubmit(container: HTMLElement): Promise<void> {
   });
 }
 
+// A transcript block shaped like extractPendingPermission() expects, for a
+// non-AskUserQuestion tool so it resolves to a pendingToolApproval.
+function makePendingPermissionBlock(
+  overrides: { resolved?: boolean } = {},
+): unknown {
+  return {
+    kind: 'permission',
+    resolved: overrides.resolved ?? false,
+    requestId: 'req-1',
+    sessionId: 'session-1',
+    title: 'Run ls',
+    toolCall: {
+      toolCallId: 'tc-1',
+      kind: 'execute',
+      _meta: { toolName: 'run_shell_command' },
+    },
+    options: [
+      { optionId: 'proceed_once', label: 'Allow', raw: {} },
+      { optionId: 'cancel', label: 'Reject', raw: {} },
+    ],
+  };
+}
+
 beforeEach(() => {
   Object.defineProperty(window, 'matchMedia', {
     configurable: true,
@@ -573,6 +596,51 @@ describe('App session callbacks', () => {
     expect(onSessionChange).not.toHaveBeenCalledWith(
       expect.objectContaining({ type: 'turn_complete' }),
     );
+  });
+
+  it('auto-closes an open Settings/Status panel when a tool approval becomes pending', async () => {
+    // Regression: the approval overlay lives in the chat footer, which is
+    // hidden (display:none) while a panel is shown. If a gated tool call
+    // arrives while Settings/Status is open, the panel must step aside so the
+    // approval is visible instead of the turn hanging behind it.
+    const { container, rerender } = renderApp();
+    await flush();
+
+    // Open the Settings panel via the /settings command (the only <section> in
+    // the app is the panel host, so its presence tracks the panel).
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('section')).not.toBeNull();
+
+    // A gated tool call arrives.
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock()];
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('section')).toBeNull();
+  });
+
+  it('keeps the panel open when transcript blocks carry no actionable approval', async () => {
+    // Negative control: a resolved permission is not actionable, so the panel
+    // must stay put (guards against an unconditional "close on any block").
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('section')).not.toBeNull();
+
+    await act(async () => {
+      testState.blocks = [makePendingPermissionBlock({ resolved: true })];
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('section')).not.toBeNull();
   });
 
   it('dispatches rename only after the current session name changes', async () => {

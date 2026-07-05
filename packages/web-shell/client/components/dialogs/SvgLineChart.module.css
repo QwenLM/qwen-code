@@ -17,8 +17,10 @@
      dialog), so give each plot real vertical detail instead of the old 52px
      sliver — the taller curve is where most of the "use the height" win comes
      from. (The former fullscreen-only 120px override is gone: the panel layout
-     can't carry `data-dialog-fullscreen`, and 140px is the baseline now.) */
-  height: 140px;
+     can't carry `data-dialog-fullscreen`, and 140px is the baseline now.)
+     Exposed as `--chart-height` so a more constrained caller — e.g. a sidebar
+     card — can shrink the plot without forking this rule. */
+  height: var(--chart-height, 140px);
   overflow: visible;
   cursor: crosshair;
   touch-action: none;
