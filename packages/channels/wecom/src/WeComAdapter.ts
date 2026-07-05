@@ -313,9 +313,9 @@ export class WeComChannel extends ChannelBase {
       }
     }
     if (mediaErrors.length > 0) {
-      throw new Error(
-        `[WeCom:${this.name}] ${mediaErrors.length} media send(s) failed (markdown text may already be delivered): ${mediaErrors.join('; ')}`,
-      );
+      const message = `[WeCom:${this.name}] ${mediaErrors.length} media send(s) failed (markdown text may already be delivered): ${mediaErrors.join('; ')}`;
+      process.stderr.write(`${message}\n`);
+      throw new Error(message);
     }
   }
 
@@ -799,6 +799,7 @@ export class WeComChannel extends ChannelBase {
         this.disconnectGeneration === disconnectGeneration;
       this.pendingKickReconnect = false;
       if (shouldRetryPendingKick) {
+        this.kickReconnectAttempts = 0;
         this.startKickReconnect(reason);
       }
     }

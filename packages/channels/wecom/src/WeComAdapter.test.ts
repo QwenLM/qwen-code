@@ -788,6 +788,30 @@ describe('WeComChannel', () => {
     channel.disconnect();
   });
 
+  it('resets exhausted kick attempts before replaying a pending kick', async () => {
+    vi.useFakeTimers();
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    mocks.state.connectErrorsRemaining = 3;
+
+    lastClient().emit('event.disconnected_event', 'kicked');
+    (
+      channel as unknown as {
+        pendingKickReconnect: boolean;
+      }
+    ).pendingKickReconnect = true;
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.advanceTimersByTimeAsync(2_000);
+    await vi.advanceTimersByTimeAsync(4_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(4));
+
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(5));
+
+    channel.disconnect();
+  });
+
   it('does not clear adapter state when reconnecting after a kick', async () => {
     vi.useFakeTimers();
     const bridge = makeBridge();
@@ -3294,6 +3318,9 @@ describe('WeComChannel', () => {
       expect.stringContaining(
         'media send failed for image: errcode=45009 errmsg=api freq out of limit',
       ),
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] 1 media send(s) failed (markdown text may already be delivered): image: errcode=45009 errmsg=api freq out of limit\n',
     );
     stderr.mockRestore();
   });
