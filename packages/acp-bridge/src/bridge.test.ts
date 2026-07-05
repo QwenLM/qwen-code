@@ -567,6 +567,131 @@ describe('createAcpSessionBridge', () => {
     }
   });
 
+  it('leases reused retained content before re-pinning an existing content artifact', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-workspace-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    const bridge = makeBridge({
+      boundWorkspace: workspace,
+      channelFactory: async () => makeChannel().channel,
+    });
+    const leaseSpy = vi.spyOn(
+      SessionArtifactContentStore.prototype,
+      'leaseContentRefs',
+    );
+    const copySpy = vi.spyOn(
+      SessionArtifactContentStore.prototype,
+      'pinWorkspaceFile',
+    );
+    try {
+      await fsp.mkdir(path.join(workspace, 'reports'), { recursive: true });
+      await fsp.writeFile(path.join(workspace, 'reports', 'report.txt'), 'hi');
+      const session = await bridge.spawnOrAttach({ workspaceCwd: workspace });
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Report',
+          workspacePath: 'reports/report.txt',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      const firstPin = await bridge.pinSessionArtifact(
+        session.sessionId,
+        artifactId,
+        { clientId: session.clientId },
+        { mode: 'content' },
+      );
+      const contentRef = firstPin.changes[0]?.artifact?.contentRef;
+      expect(contentRef).toBeDefined();
+      if (!contentRef) {
+        throw new Error('expected content ref');
+      }
+      leaseSpy.mockClear();
+      copySpy.mockClear();
+
+      await expect(
+        bridge.pinSessionArtifact(session.sessionId, artifactId, {
+          clientId: session.clientId,
+        }),
+      ).resolves.toMatchObject({ changes: [] });
+
+      expect(copySpy).not.toHaveBeenCalled();
+      expect(leaseSpy).toHaveBeenCalledTimes(1);
+      expect(leaseSpy.mock.calls[0]?.[0]).toEqual([contentRef]);
+    } finally {
+      leaseSpy.mockRestore();
+      copySpy.mockRestore();
+      await bridge.shutdown();
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(tempHome, { recursive: true, force: true });
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('runs content GC when killing a session', async () => {
+    const previousQwenHome = process.env['QWEN_HOME'];
+    const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-workspace-'),
+    );
+    process.env['QWEN_HOME'] = tempHome;
+    const bridge = makeBridge({
+      boundWorkspace: workspace,
+      channelFactory: async () => makeChannel().channel,
+    });
+    const gcSpy = vi.spyOn(SessionArtifactContentStore.prototype, 'gc');
+    try {
+      await fsp.mkdir(path.join(workspace, 'reports'), { recursive: true });
+      await fsp.writeFile(path.join(workspace, 'reports', 'report.txt'), 'hi');
+      const session = await bridge.spawnOrAttach({ workspaceCwd: workspace });
+      const created = await bridge.addSessionArtifact(
+        session.sessionId,
+        {
+          title: 'Report',
+          workspacePath: 'reports/report.txt',
+        },
+        { clientId: session.clientId },
+      );
+      const artifactId = created.changes[0]!.artifactId;
+      const firstPin = await bridge.pinSessionArtifact(
+        session.sessionId,
+        artifactId,
+        { clientId: session.clientId },
+        { mode: 'content' },
+      );
+      const contentRef = firstPin.changes[0]?.artifact?.contentRef;
+      expect(contentRef).toBeDefined();
+      if (!contentRef) {
+        throw new Error('expected content ref');
+      }
+      gcSpy.mockClear();
+
+      await bridge.killSession(session.sessionId);
+
+      expect(gcSpy).toHaveBeenCalledTimes(1);
+      expect(gcSpy.mock.calls[0]?.[0]).toBe(session.sessionId);
+      expect(gcSpy.mock.calls[0]?.[1]).toEqual(new Set([contentRef.contentId]));
+    } finally {
+      gcSpy.mockRestore();
+      await bridge.shutdown();
+      if (previousQwenHome === undefined) {
+        delete process.env['QWEN_HOME'];
+      } else {
+        process.env['QWEN_HOME'] = previousQwenHome;
+      }
+      await fsp.rm(tempHome, { recursive: true, force: true });
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
   it('keeps unpin successful when best-effort content GC fails', async () => {
     const previousQwenHome = process.env['QWEN_HOME'];
     const tempHome = await fsp.mkdtemp(path.join(os.tmpdir(), 'qwen-home-'));

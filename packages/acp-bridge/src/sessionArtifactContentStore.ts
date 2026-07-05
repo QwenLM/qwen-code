@@ -691,11 +691,19 @@ async function cleanTmpDir(tmpDir: string): Promise<void> {
     }
     throw error;
   }
-  await Promise.all(
-    entries.map((entry) =>
-      fs.rm(path.join(tmpDir, entry), { recursive: true, force: true }),
-    ),
-  );
+  for (const entry of entries) {
+    try {
+      await fs.rm(path.join(tmpDir, entry), { recursive: true, force: true });
+    } catch (error) {
+      writeStderrLine(
+        `[artifacts] action=content_tmp_cleanup_failed entry=${JSON.stringify(
+          entry,
+        )} reason=${JSON.stringify(
+          error instanceof Error ? error.message : String(error),
+        )}`,
+      );
+    }
+  }
 }
 
 function isValidContentId(contentId: string): boolean {

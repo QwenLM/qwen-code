@@ -4786,97 +4786,111 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!currentArtifact) {
         return { v: 1, sessionId, changes: [] };
       }
-      const pruneWarnings = await pruneExpiredArtifactPins(entry, clientId);
       const refreshPinnedContent =
         currentArtifact.retention === 'pinned' &&
         requestOptions?.mode === 'content';
-      if (currentArtifact.retention === 'pinned' && !refreshPinnedContent) {
-        const result =
-          requestOptions === undefined
-            ? await entry.artifacts.pin(artifactId, { clientId })
-            : await entry.artifacts.pin(artifactId, {
-                retention: mode === 'metadata' ? 'restorable' : 'pinned',
-                ...(expiresAt !== undefined ? { expiresAt } : {}),
-                ...(clientRetained !== undefined ? { clientRetained } : {}),
-                clientId,
-              });
-        const warnings = [...pruneWarnings, ...(result.warnings ?? [])];
-        if (requestOptions?.mode === 'metadata' && result.changes.length > 0) {
-          try {
-            await gcArtifactContent(entry);
-          } catch (error) {
-            warnings.push('content_delete_preserved');
-            writeStderrLine(
-              `[artifacts] session=${entry.sessionId} action=pin_metadata_gc_failed reason=${JSON.stringify(
-                error instanceof Error ? error.message : String(error),
-              )}`,
-            );
-          }
-        }
-        publishArtifactChanges(entry, result.changes, clientId);
-        return warnings.length > 0 ? { ...result, warnings } : result;
-      }
-      let contentRef: SessionArtifactContentRef | undefined;
-      let copiedContentRef = false;
+      const reusableContentRef =
+        mode === 'content' && !refreshPinnedContent
+          ? currentArtifact.contentRef
+          : undefined;
+      const releaseReusableContentRef = reusableContentRef
+        ? artifactContentStore.leaseContentRefs([reusableContentRef])
+        : undefined;
       try {
-        if (mode === 'content') {
-          if (!refreshPinnedContent && currentArtifact.contentRef) {
-            contentRef = currentArtifact.contentRef;
-          } else {
-            contentRef = await artifactContentStore.pinWorkspaceFile(
-              sessionId,
-              currentArtifact,
-              entry.workspaceCwd,
-            );
-            copiedContentRef = contentRef !== undefined;
+        const pruneWarnings = await pruneExpiredArtifactPins(entry, clientId);
+        if (currentArtifact.retention === 'pinned' && !refreshPinnedContent) {
+          const result =
+            requestOptions === undefined
+              ? await entry.artifacts.pin(artifactId, { clientId })
+              : await entry.artifacts.pin(artifactId, {
+                  retention: mode === 'metadata' ? 'restorable' : 'pinned',
+                  ...(expiresAt !== undefined ? { expiresAt } : {}),
+                  ...(clientRetained !== undefined ? { clientRetained } : {}),
+                  clientId,
+                });
+          const warnings = [...pruneWarnings, ...(result.warnings ?? [])];
+          if (
+            requestOptions?.mode === 'metadata' &&
+            result.changes.length > 0
+          ) {
+            try {
+              await gcArtifactContent(entry);
+            } catch (error) {
+              warnings.push('content_delete_preserved');
+              writeStderrLine(
+                `[artifacts] session=${entry.sessionId} action=pin_metadata_gc_failed reason=${JSON.stringify(
+                  error instanceof Error ? error.message : String(error),
+                )}`,
+              );
+            }
           }
+          publishArtifactChanges(entry, result.changes, clientId);
+          return warnings.length > 0 ? { ...result, warnings } : result;
         }
-        if (mode === 'content' && !contentRef) {
-          throw new SessionArtifactValidationError(
-            'artifact content is not available for retention',
-            'artifactId',
-          );
-        }
-        const result = await entry.artifacts.pin(artifactId, {
-          retention: mode === 'metadata' ? 'restorable' : 'pinned',
-          ...(contentRef ? { contentRef } : {}),
-          ...(expiresAt !== undefined ? { expiresAt } : {}),
-          ...(clientRetained !== undefined ? { clientRetained } : {}),
-          clientId,
-        });
-        if (copiedContentRef && contentRef) {
-          artifactContentStore.releaseContentRef(contentRef);
-          await gcArtifactContent(entry).catch((error: unknown) => {
-            writeStderrLine(
-              `[artifacts] session=${entry.sessionId} action=pin_content_gc_failed reason=${JSON.stringify(
-                error instanceof Error ? error.message : String(error),
-              )}`,
-            );
-          });
-        }
-        if (contentRef && result.changes.length === 0) {
-          if (!(await entry.artifacts.get(artifactId))) {
+        let contentRef: SessionArtifactContentRef | undefined;
+        let copiedContentRef = false;
+        try {
+          if (mode === 'content') {
+            if (reusableContentRef) {
+              contentRef = reusableContentRef;
+            } else {
+              contentRef = await artifactContentStore.pinWorkspaceFile(
+                sessionId,
+                currentArtifact,
+                entry.workspaceCwd,
+              );
+              copiedContentRef = contentRef !== undefined;
+            }
+          }
+          if (mode === 'content' && !contentRef) {
             throw new SessionArtifactValidationError(
-              'artifact no longer exists',
+              'artifact content is not available for retention',
               'artifactId',
             );
           }
-        }
-        publishArtifactChanges(entry, result.changes, clientId);
-        const warnings = [...pruneWarnings, ...(result.warnings ?? [])];
-        return warnings.length > 0 ? { ...result, warnings } : result;
-      } catch (error) {
-        if (copiedContentRef && contentRef) {
-          artifactContentStore.releaseContentRef(contentRef);
-          await gcArtifactContent(entry).catch((error: unknown) => {
-            writeStderrLine(
-              `[artifacts] session=${entry.sessionId} action=pin_content_rollback_gc_failed reason=${JSON.stringify(
-                error instanceof Error ? error.message : String(error),
-              )}`,
-            );
+          const result = await entry.artifacts.pin(artifactId, {
+            retention: mode === 'metadata' ? 'restorable' : 'pinned',
+            ...(contentRef ? { contentRef } : {}),
+            ...(expiresAt !== undefined ? { expiresAt } : {}),
+            ...(clientRetained !== undefined ? { clientRetained } : {}),
+            clientId,
           });
+          if (copiedContentRef && contentRef) {
+            artifactContentStore.releaseContentRef(contentRef);
+            await gcArtifactContent(entry).catch((error: unknown) => {
+              writeStderrLine(
+                `[artifacts] session=${entry.sessionId} action=pin_content_gc_failed reason=${JSON.stringify(
+                  error instanceof Error ? error.message : String(error),
+                )}`,
+              );
+            });
+          }
+          if (contentRef && result.changes.length === 0) {
+            if (!(await entry.artifacts.get(artifactId))) {
+              throw new SessionArtifactValidationError(
+                'artifact no longer exists',
+                'artifactId',
+              );
+            }
+          }
+          publishArtifactChanges(entry, result.changes, clientId);
+          const warnings = [...pruneWarnings, ...(result.warnings ?? [])];
+          return warnings.length > 0 ? { ...result, warnings } : result;
+        } catch (error) {
+          if (copiedContentRef && contentRef) {
+            artifactContentStore.releaseContentRef(contentRef);
+            await gcArtifactContent(entry).catch((error: unknown) => {
+              writeStderrLine(
+                `[artifacts] session=${entry.sessionId} action=pin_content_rollback_gc_failed reason=${JSON.stringify(
+                  error instanceof Error ? error.message : String(error),
+                )}`,
+              );
+            });
+          }
+          throw error;
         }
-        throw error;
+      } finally {
+        releaseReusableContentRef?.();
       }
     },
 
@@ -6566,6 +6580,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // channelInfo. Keep `channelInfoForEntry(entry)` until a
       // deterministic overlap test lands.
       const ci = channelInfoForEntry(entry);
+      let killEmptyChannelAfterCleanup = false;
       if (!ci) {
         // Same diagnostic as `closeSession` — when the entry's channel
         // is already gone, the cleanup below short-circuits silently.
@@ -6576,6 +6591,10 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       }
       if (ci && ci.channel === entry.channel) {
         ci.sessionIds.delete(sessionId);
+        if (resolvedChannelIdleTimeoutMs() <= 0 && hasNoChannelWork(ci)) {
+          ci.isDying = true;
+          killEmptyChannelAfterCleanup = true;
+        }
       }
       await notifyAgentSessionClose(entry, ci, 'killSession');
       // Tombstone the killed sessionId so any in-flight
@@ -6583,6 +6602,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // seed the early-event buffer for a subsequent load/resume of
       // the same persisted id.
       ci?.client.markSessionClosed(sessionId);
+      try {
+        await gcArtifactContent(entry);
+      } catch (error) {
+        writeStderrLine(
+          `qwen serve: session artifact GC failed during kill for ${JSON.stringify(
+            sessionId,
+          )}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
       // Publish `session_died` BEFORE closing the bus. After the eager
       // `byId.delete` above, the channel.exited handler's
       // `byId.get(...)` returns undefined so the automatic publish
@@ -6605,7 +6633,11 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // SIGTERM the restore mid-flight and 500 the caller for a
       // failure orthogonal to their request.
       if (ci && hasNoChannelWork(ci)) {
-        await reapPendingEmptyChannel(ci);
+        if (killEmptyChannelAfterCleanup) {
+          await killChannelWithLog(ci, `killSession "${sessionId}"`);
+        } else {
+          await reapPendingEmptyChannel(ci);
+        }
         if (!ci.isDying) {
           await startIdleTimer(ci, `killSession "${sessionId}"`);
         }

@@ -3866,6 +3866,35 @@ describe('SessionArtifactContentStore', () => {
     await expect(fs.readdir(tmpDir)).resolves.toEqual([]);
   });
 
+  it('continues cleaning temporary content files after an rm failure', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const tmpDir = path.join(contentRoot, '.tmp');
+    await fs.mkdir(tmpDir, { recursive: true });
+    await fs.writeFile(path.join(tmpDir, 'stuck.bin'), 'stuck');
+    await fs.writeFile(path.join(tmpDir, 'gone.bin'), 'gone');
+    const originalRm = fs.rm.bind(fs);
+    vi.spyOn(fs, 'rm').mockImplementation((async (target, options) => {
+      if (path.basename(String(target)) === 'stuck.bin') {
+        throw new Error('busy');
+      }
+      return originalRm(target, options);
+    }) as typeof fs.rm);
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    await expect(
+      contentStore.gc('content-session', new Set()),
+    ).resolves.toEqual({
+      removed: [],
+      retained: [],
+    });
+    await expect(fs.readdir(tmpDir)).resolves.toEqual(['stuck.bin']);
+    const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+    expect(logged).toContain('content_tmp_cleanup_failed');
+    expect(logged).toContain('stuck.bin');
+  });
+
   it('logs and retains content when gc cannot read its manifest', async () => {
     const contentStore = new SessionArtifactContentStore(contentRoot);
     const contentId = fakeContentId('bad-manifest');
