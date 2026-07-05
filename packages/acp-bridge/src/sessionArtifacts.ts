@@ -705,6 +705,9 @@ export class SessionArtifactStore {
     if (!snapshot) return [];
     return this.enqueue(async () => {
       const warnings = [...snapshot.warnings];
+      const previousState = this.cloneState();
+      const warningCountBeforeRestore = warnings.length;
+      let restoredCount = 0;
       this.artifacts.clear();
       this.tombstonedIds.clear();
       this.stickyEphemeralIds.clear();
@@ -789,6 +792,7 @@ export class SessionArtifactStore {
             insertSeq: ++this.insertSeq,
           };
           this.artifacts.set(stored.id, stored);
+          restoredCount++;
         } catch (error) {
           warnings.push(
             `skipped artifact restore: ${
@@ -796,6 +800,17 @@ export class SessionArtifactStore {
             }`,
           );
         }
+      }
+      if (
+        snapshot.artifacts.length > 0 &&
+        restoredCount === 0 &&
+        warnings.length > warningCountBeforeRestore
+      ) {
+        this.restoreState(previousState);
+        warnings.push(
+          'artifact snapshot restore failed; kept existing live artifacts',
+        );
+        return warnings;
       }
       const evicted = await this.evictOverflow(new Set(), []);
       if (evicted.length > 0) {

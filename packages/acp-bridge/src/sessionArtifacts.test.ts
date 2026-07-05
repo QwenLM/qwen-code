@@ -3039,6 +3039,54 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('keeps live artifacts when a non-empty restore snapshot fully fails', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-fail-closed',
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live' },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId: 's11-restore-fail-closed',
+      sequence: 8,
+      artifacts: [
+        {
+          id: 'bad-id',
+          kind: 'link',
+          storage: 'external_url',
+          source: 'client',
+          status: 'available',
+          title: 'Bad',
+          url: 'https://example.com/bad',
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    expect(warnings).toEqual([
+      'skipped artifact with mismatched id bad-id',
+      'artifact snapshot restore failed; kept existing live artifacts',
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: liveId,
+          title: 'Live',
+        },
+      ],
+    });
+  });
+
   it('prunes over-limit restored artifacts and records eviction tombstones', async () => {
     const sourceEvents: SessionArtifactEventRecordPayload[] = [];
     const source = new SessionArtifactStore({
