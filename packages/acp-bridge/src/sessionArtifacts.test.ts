@@ -3108,6 +3108,74 @@ describe('SessionArtifactStore', () => {
     );
   });
 
+  it('strips retained content when restored expiresAt is invalid', async () => {
+    const events: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-invalid-expires',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          events.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    const created = await source.upsertMany(
+      [{ title: 'Pinned', url: 'https://example.com/pinned' }],
+      { strict: true },
+    );
+    const artifactId = created.changes[0]!.artifactId;
+    await source.pin(artifactId, {
+      contentRef: {
+        kind: 'managed_copy',
+        contentId: `${'e'.repeat(64)}-${'f'.repeat(16)}`,
+        sha256: 'e'.repeat(64),
+        sizeBytes: 12,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      },
+    });
+    const persisted = {
+      ...events[1]!.changes[0]!.artifact!,
+      expiresAt: 'not-a-date',
+    };
+    const restored = new SessionArtifactStore({
+      sessionId: 's11-restore-invalid-expires',
+      workspaceCwd: workspace,
+    });
+    const verifyContentRef = vi.fn(async () => undefined);
+
+    await expect(
+      restored.restore(
+        {
+          v: 2,
+          sessionId: 's11-restore-invalid-expires',
+          sequence: 2,
+          artifacts: [persisted],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+          warnings: [],
+        },
+        { verifyContentRef },
+      ),
+    ).resolves.toEqual([]);
+
+    expect(verifyContentRef).not.toHaveBeenCalled();
+    await expect(restored.list()).resolves.toMatchObject({
+      artifacts: [
+        expect.objectContaining({
+          id: artifactId,
+          retention: 'restorable',
+          restoreState: 'restored',
+          status: 'missing',
+          persistenceWarning: 'content_expired',
+        }),
+      ],
+    });
+    const restoredArtifact = (await restored.list()).artifacts[0];
+    expect(restoredArtifact).not.toHaveProperty('contentRef');
+    expect(restoredArtifact).not.toHaveProperty('expiresAt');
+  });
+
   it('downgrades restored pinned records to restorable even when content is valid', async () => {
     const events: SessionArtifactEventRecordPayload[] = [];
     const source = new SessionArtifactStore({

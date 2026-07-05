@@ -419,6 +419,7 @@ describe('createAcpSessionBridge', () => {
         { clientId: session.clientId },
         { mode: 'content' },
       );
+      const gcSpy = vi.spyOn(SessionArtifactContentStore.prototype, 'gc');
 
       await expect(
         bridge.pinSessionArtifact(
@@ -439,6 +440,7 @@ describe('createAcpSessionBridge', () => {
           },
         ],
       });
+      expect(gcSpy).toHaveBeenCalledTimes(1);
     } finally {
       await bridge.shutdown();
       if (previousQwenHome === undefined) {

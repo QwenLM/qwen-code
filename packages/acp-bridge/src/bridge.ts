@@ -4777,6 +4777,18 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
                 clientId,
               });
         const warnings = [...pruneWarnings, ...(result.warnings ?? [])];
+        if (requestOptions?.mode === 'metadata' && result.changes.length > 0) {
+          try {
+            await gcArtifactContent(entry);
+          } catch (error) {
+            warnings.push('content_delete_preserved');
+            writeStderrLine(
+              `[artifacts] session=${entry.sessionId} action=pin_metadata_gc_failed reason=${JSON.stringify(
+                error instanceof Error ? error.message : String(error),
+              )}`,
+            );
+          }
+        }
         publishArtifactChanges(entry, result.changes, clientId);
         return warnings.length > 0 ? { ...result, warnings } : result;
       }

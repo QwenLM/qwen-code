@@ -751,13 +751,17 @@ export class SessionArtifactStore {
             contentRef = undefined;
             expiresAt = undefined;
             persistenceWarning = 'sticky_override_active';
-          } else if (expiresAt && Date.parse(expiresAt) <= Date.now()) {
-            contentRef = undefined;
-            expiresAt = undefined;
-            retention = 'restorable';
-            status = 'missing';
-            persistenceWarning = 'content_expired';
-          } else if (contentRef && options.verifyContentRef) {
+          } else if (expiresAt) {
+            const expiresAtMs = Date.parse(expiresAt);
+            if (!Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+              contentRef = undefined;
+              expiresAt = undefined;
+              retention = 'restorable';
+              status = 'missing';
+              persistenceWarning = 'content_expired';
+            }
+          }
+          if (contentRef && options.verifyContentRef) {
             const warning = await options.verifyContentRef(artifact);
             if (warning) {
               contentRef = undefined;
