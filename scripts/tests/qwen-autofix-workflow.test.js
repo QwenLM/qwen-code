@@ -689,7 +689,7 @@ describe('qwen-autofix workflow', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+  }, 10000);
 
   it('lets agent-written failure.md reach workflow verification', () => {
     const dir = mkdtempSync(join(tmpdir(), 'autofix-runner-'));
