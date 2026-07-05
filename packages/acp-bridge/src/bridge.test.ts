@@ -41,6 +41,7 @@ import {
 } from './bridgeErrors.js';
 import { MAX_WORKSPACE_PATH_LENGTH } from './workspacePaths.js';
 import { extractErrorMessage, extractErrorCode } from './bridge.js';
+import { SERVE_STATUS_EXT_METHODS } from './status.js';
 import type { ChannelFactory } from './channel.js';
 import type { BridgeTelemetry } from './bridgeOptions.js';
 import { createInMemoryChannel } from './inMemoryChannel.js';
@@ -13466,5 +13467,47 @@ describe('createAcpSessionBridge — mid-turn message queue (enqueueMidTurnMessa
     release?.();
     await prompt;
     await bridge.shutdown();
+  });
+});
+
+describe('createAcpSessionBridge — child-resource refresh', () => {
+  it('single-flights the refresh so a slow child cannot pile up concurrent polls', async () => {
+    let release: (() => void) | undefined;
+    const handle = makeChannel({
+      extMethodImpl: async (method) => {
+        if (method === SERVE_STATUS_EXT_METHODS.workspaceResource) {
+          // Block the RPC in-flight until the test releases it.
+          await new Promise<void>((r) => {
+            release = r;
+          });
+          return { rssBytes: 1, cpuPercent: 2 };
+        }
+        return {};
+      },
+    });
+    const bridge = makeBridge({ channelFactory: async () => handle.channel });
+    const wrCalls = () =>
+      handle.agent.extMethodCalls.filter(
+        (c) => c.method === SERVE_STATUS_EXT_METHODS.workspaceResource,
+      ).length;
+    try {
+      await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+      // Fire two refreshes while the first RPC is still blocked in-flight.
+      const p1 = bridge.refreshChildResource!();
+      const p2 = bridge.refreshChildResource!();
+      // Exactly one workspaceResource RPC reaches the child; the second is
+      // skipped by the childResourceRefreshing guard (no concurrent pile-up).
+      await vi.waitFor(() => expect(wrCalls()).toBe(1));
+      release?.();
+      await Promise.all([p1, p2]);
+      expect(wrCalls()).toBe(1);
+      // Guard cleared in the finally: a fresh refresh polls again.
+      const p3 = bridge.refreshChildResource!();
+      await vi.waitFor(() => expect(wrCalls()).toBe(2));
+      release?.();
+      await p3;
+    } finally {
+      await bridge.shutdown();
+    }
   });
 });

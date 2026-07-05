@@ -339,6 +339,15 @@ interface ChannelInfo {
    */
   statusClosedReject?: Promise<never>;
   /**
+   * Latest self-reported ACP-child resource sample (rss/cpu), refreshed by the
+   * daemon's metrics sampler via `refreshChildResource`. Kept on the channel so
+   * it drops automatically on a channel swap — the sampler always reads the
+   * live channel's cache.
+   */
+  childRssBytes?: number;
+  childCpuPercent?: number;
+  childResourceAt?: number;
+  /**
    * MUST be set to `true` synchronously by any teardown path BEFORE
    * awaiting `channel.kill()`. `ensureChannel` treats a dying channel
    * as absent and spawns a fresh one — without this flag a concurrent
@@ -1638,6 +1647,16 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         // unreachable.
         opts.clientMcpSender,
         (sessionId) => sessionIds.has(sessionId),
+        // Daemon token-burn accounting: forward per-round token usage observed
+        // at the session/update fan-in to the daemon host's metrics ring via
+        // the telemetry seam. Optional-chained so non-daemon callers (tests,
+        // Mode A) that wire no `tokenUsage` metric are a silent no-op.
+        (inputTokens, outputTokens, durationMs) =>
+          telemetry.metrics?.tokenUsage?.(
+            inputTokens,
+            outputTokens,
+            durationMs,
+          ),
       );
       const connection = new ClientSideConnection(() => client, channel.stream);
 
@@ -2202,6 +2221,76 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       method,
     );
     return response as unknown as T;
+  };
+
+  // Daemon Status child-resource: poll the live child's `workspaceResource`
+  // extMethod and cache rss/cpu on the channel. The daemon's metrics sampler
+  // fires this fire-and-forget, then reads the cache synchronously — keeping the
+  // async round-trip off the sampler's hot path.
+  const STALE_CHILD_RESOURCE_MS = 30_000;
+  // In-flight guard: `requestWorkspaceStatus` waits up to `initTimeoutMs` (10s),
+  // longer than the 5s sample cadence — so without this a degraded child (the
+  // exact case the chart should surface) would accumulate concurrent polls and
+  // pile more load onto an already-struggling pipe. At most one outstanding poll.
+  let childResourceRefreshing = false;
+  const refreshChildResource = async (): Promise<void> => {
+    if (childResourceRefreshing) return;
+    const info = liveChannelInfo();
+    if (!info) return;
+    childResourceRefreshing = true;
+    try {
+      const res = await requestWorkspaceStatus<{
+        rssBytes?: unknown;
+        cpuPercent?: unknown;
+      }>(SERVE_STATUS_EXT_METHODS.workspaceResource, () => ({}));
+      // A channel swap during the await would otherwise stamp a dead channel;
+      // only write if this is still the live one.
+      if (liveChannelInfo() !== info) return;
+      // `typeof NaN === 'number'` is true, so also require finiteness at this
+      // trust boundary — a misbehaving child returning NaN would otherwise be
+      // cached and read as NaN before the sampler's finiteGauge() catches it.
+      if (typeof res.rssBytes === 'number' && Number.isFinite(res.rssBytes)) {
+        info.childRssBytes = res.rssBytes;
+      }
+      if (
+        typeof res.cpuPercent === 'number' &&
+        Number.isFinite(res.cpuPercent)
+      ) {
+        // Clamp on receive too — enforce the [0,100] JSDoc invariant here, not
+        // only on the child's send side.
+        info.childCpuPercent = Math.min(100, Math.max(0, res.cpuPercent));
+      }
+      info.childResourceAt = Date.now();
+    } catch (err) {
+      // Child unreachable / mid-swap — keep the last good cache (or nothing
+      // before the first success). The staleness guard in the reader drops it
+      // once it ages out, so a stuck child reads 0 rather than a frozen value.
+      // Log at debug so an operator watching child rss/cpu flatline to 0 can
+      // tell "the poll is failing" apart from "the child is genuinely idle".
+      teeServeDebugLine(
+        `child-resource refresh failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    } finally {
+      childResourceRefreshing = false;
+    }
+  };
+  const getChildResourceSnapshot = ():
+    | { rssBytes: number; cpuPercent: number }
+    | undefined => {
+    const info = liveChannelInfo();
+    if (!info || info.childResourceAt === undefined) return undefined;
+    // Staleness: a child that goes unresponsive without a channel swap would
+    // otherwise show its last-good rss/cpu forever (a zombie looking healthy).
+    // Drop the reading once it ages past the window so the chart reads 0.
+    if (Date.now() - info.childResourceAt > STALE_CHILD_RESOURCE_MS) {
+      return undefined;
+    }
+    return {
+      rssBytes: info.childRssBytes ?? 0,
+      cpuPercent: info.childCpuPercent ?? 0,
+    };
   };
 
   const requestSessionStatus = async <T>(
@@ -3410,6 +3499,27 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
     get sessionCount() {
       return byId.size;
     },
+
+    get pendingPromptTotal() {
+      // Queue-depth gauge for the Daemon Status "Queued" chart: count only
+      // prompts still waiting in the per-session FIFO (`state === 'queued'`),
+      // NOT the running one. `pendingPromptCount` bundles running + queued, so
+      // summing it would overstate backpressure by the number of in-flight
+      // prompts and shadow the separate "Active tasks" line. Cheap: each list
+      // is bounded by maxPendingPromptsPerSession.
+      let total = 0;
+      for (const entry of byId.values()) {
+        for (const pending of entry.pendingPromptList) {
+          if (pending.state === 'queued') total += 1;
+        }
+      }
+      return total;
+    },
+
+    // Daemon Status child-resource: sync cache read for the sampler + the async
+    // refresh it fires each tick to update that cache.
+    getChildResourceSnapshot,
+    refreshChildResource,
 
     get activePromptCount() {
       return activePromptCounter;

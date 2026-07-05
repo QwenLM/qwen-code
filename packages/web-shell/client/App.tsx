@@ -3565,6 +3565,7 @@ export function App({
             <DialogShell
               title={t('daemon.title')}
               size="xl"
+              allowFullscreen
               onClose={() => setShowDaemonStatusDialog(false)}
             >
               <DaemonStatusDialog />

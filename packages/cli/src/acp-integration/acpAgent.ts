@@ -139,6 +139,7 @@ import { Readable, Writable } from 'node:stream';
 import { normalizeDisabledToolList } from '../config/normalizeDisabledTools.js';
 import { pipeline } from 'node:stream/promises';
 import * as fs from 'node:fs/promises';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import { createGunzip } from 'node:zlib';
 import type { LoadedSettings } from '../config/settings.js';
@@ -256,6 +257,7 @@ import {
 } from '@qwen-code/acp-bridge/bridgeTypes';
 import { isValidServerName } from '../serve/validate-server-name.js';
 import { MAX_REMEMBER_CONTENT_BYTES } from '../serve/workspace-memory-remember-constants.js';
+import { computeCpuPercent } from '../serve/daemon-metrics-ring.js';
 import {
   collectContextData,
   formatContextUsageText,
@@ -2704,6 +2706,24 @@ function parseAcpSessionListCursor(
 class QwenAgent implements Agent {
   private sessions: Map<string, Session> = new Map();
   private clientCapabilities: ClientCapabilities | undefined;
+  // CPU-usage delta baseline for the daemon's `workspaceResource` extMethod
+  // (Daemon Status child-resource chart). The daemon polls this at a fixed
+  // cadence, so successive calls form a clean delta window independent of tool
+  // activity. Init is guarded — `process.cpuUsage()` can throw in restricted
+  // containers.
+  private readonly childCpuCoreCount =
+    os.availableParallelism?.() ?? os.cpus().length ?? 1;
+  private prevChildCpu: NodeJS.CpuUsage | null = (() => {
+    try {
+      return process.cpuUsage();
+    } catch {
+      // null (not {0,0}) so the first successful poll skips the delta instead
+      // of billing the since-start total as one window — mirrors the daemon's
+      // own safeCpuUsage() null-on-failure contract.
+      return null;
+    }
+  })();
+  private prevChildCpuAt = Date.now();
 
   /**
    * Workspace-shared MCP transport pool. Eagerly constructed; lazy
@@ -5538,6 +5558,49 @@ class QwenAgent implements Agent {
         return (await this.buildAcpPreflightCells(
           this.config,
         )) as unknown as Record<string, unknown>;
+      case SERVE_STATUS_EXT_METHODS.workspaceResource: {
+        // Process-wide rss/cpu of this ACP child, for the Daemon Status
+        // child-resource chart. cpuPercent is a delta since the previous poll
+        // (mirrors the daemon's own self-sampler), normalized by core count and
+        // clamped to [0,100].
+        const now = Date.now();
+        let cpu: NodeJS.CpuUsage | null = null;
+        try {
+          cpu = process.cpuUsage();
+        } catch {
+          /* keep prev baseline on failure → this window reads 0, and the next
+             successful poll still measures a correct delta window */
+        }
+        // Shared delta math: returns 0 when either sample is null (init-time or
+        // read failure) or the window is non-positive, so no phantom spike.
+        const cpuPercent = computeCpuPercent(
+          this.prevChildCpu,
+          cpu,
+          now - this.prevChildCpuAt,
+          this.childCpuCoreCount,
+        );
+        // Advance the baseline ONLY on a successful read (this also seeds it
+        // after an init-time null). Advancing prevAt after a throw would pair a
+        // full since-last-success cpuUs with a short since-last-failure
+        // elapsedMs on the next poll → a ~2x phantom spike.
+        if (cpu) {
+          this.prevChildCpu = cpu;
+          this.prevChildCpuAt = now;
+        }
+        // Guard memoryUsage too (same restricted-container risk as cpuUsage): on
+        // failure report 0 rss but keep the already-computed cpuPercent rather
+        // than throwing the whole handler.
+        let rssBytes = 0;
+        try {
+          rssBytes = process.memoryUsage().rss;
+        } catch {
+          /* restricted container — report 0 rss */
+        }
+        return {
+          rssBytes,
+          cpuPercent,
+        };
+      }
       case SERVE_STATUS_EXT_METHODS.sessionContext: {
         const sessionId = params['sessionId'];
         if (typeof sessionId !== 'string' || sessionId.length === 0) {
