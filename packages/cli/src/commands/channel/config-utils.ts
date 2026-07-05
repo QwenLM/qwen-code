@@ -1,7 +1,8 @@
 import type { ChannelConfig } from '@qwen-code/channel-base';
 import { resolvePath } from '@qwen-code/channel-base';
-import * as path from 'node:path';
 import { getPlugin, supportedTypes } from './channel-registry.js';
+
+export { findCliEntryPath } from './cli-entry-path.js';
 
 export function resolveEnvVars(value: string): string {
   if (value.startsWith('$')) {
@@ -15,14 +16,6 @@ export function resolveEnvVars(value: string): string {
     return envValue;
   }
   return value;
-}
-
-export function findCliEntryPath(): string {
-  const mainModule = process.argv[1];
-  if (mainModule) {
-    return path.resolve(mainModule);
-  }
-  throw new Error('Cannot determine CLI entry path');
 }
 
 function resolveOptionalStringField(
@@ -42,9 +35,65 @@ function resolveOptionalStringField(
   return resolveEnvVars(value);
 }
 
+/**
+ * Validate identity/memoryScope shape at parse time. settings.json is
+ * hand-edited; a malformed value would otherwise surface as an opaque
+ * TypeError on the first prompt of every session instead of at startup.
+ */
+function parseObjectStringFields<Field extends string>(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+  key: 'identity' | 'memoryScope',
+  fields: readonly Field[],
+): Record<string, string> | undefined {
+  const value = rawConfig[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(
+      `Channel "${channelName}" field "${key}" must be an object.`,
+    );
+  }
+  const record = value as Record<string, unknown>;
+  const result: Record<string, string> = {};
+  for (const field of fields) {
+    const fieldValue = record[field];
+    if (fieldValue === undefined || fieldValue === null || fieldValue === '') {
+      continue;
+    }
+    if (typeof fieldValue !== 'string') {
+      throw new Error(
+        `Channel "${channelName}" field "${key}.${field}" must be a string.`,
+      );
+    }
+    result[field] = fieldValue;
+  }
+  return Object.keys(result).length > 0 ? result : undefined;
+}
+
+function parseMemoryScopeConfig(
+  channelName: string,
+  rawConfig: Record<string, unknown>,
+): ChannelConfig['memoryScope'] {
+  const parsed = parseObjectStringFields(
+    channelName,
+    rawConfig,
+    'memoryScope',
+    ['namespace', 'mode'] as const,
+  );
+  if (parsed?.['mode'] !== undefined && parsed['mode'] !== 'metadata-only') {
+    throw new Error(
+      `Channel "${channelName}" field "memoryScope.mode" must be "metadata-only".`,
+    );
+  }
+  return parsed as ChannelConfig['memoryScope'];
+}
+
 export async function parseChannelConfig(
   name: string,
   rawConfig: Record<string, unknown>,
+  defaultCwd: string = process.cwd(),
 ): Promise<ChannelConfig & Record<string, unknown>> {
   if (!rawConfig['type']) {
     throw new Error(`Channel "${name}" is missing required field "type".`);
@@ -90,9 +139,15 @@ export async function parseChannelConfig(
     allowedUsers: (rawConfig['allowedUsers'] as string[]) || [],
     sessionScope:
       (rawConfig['sessionScope'] as ChannelConfig['sessionScope']) || 'user',
-    cwd: resolvePath((rawConfig['cwd'] as string) || process.cwd()),
+    cwd: resolvePath((rawConfig['cwd'] as string) || defaultCwd),
     approvalMode: rawConfig['approvalMode'] as string | undefined,
     instructions: rawConfig['instructions'] as string | undefined,
+    identity: parseObjectStringFields(name, rawConfig, 'identity', [
+      'id',
+      'displayName',
+      'description',
+    ] as const) as ChannelConfig['identity'],
+    memoryScope: parseMemoryScopeConfig(name, rawConfig),
     model: rawConfig['model'] as string | undefined,
     groupPolicy:
       (rawConfig['groupPolicy'] as ChannelConfig['groupPolicy']) || 'disabled',

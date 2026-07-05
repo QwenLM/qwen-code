@@ -40,58 +40,88 @@ so rendered history chunks do not break fenced code blocks unnecessarily.
 */
 
 /**
- * Checks if a given character index within a string is inside a fenced (```) code block.
- * @param content The full string content.
- * @param indexToTest The character index to test.
- * @returns True if the index is inside a code block's content, false otherwise.
+ * Finds the next fenced-code delimiter (a run of 3+ ``` or ~~~) at or after
+ * `from`, returning its index, fence character and the FULL run length. Both
+ * fence types are recognized. The run length matters: `indexOf('```')` matches
+ * only the first 3 chars of a longer run, so callers must advance past the whole
+ * run (index + length) or a 6-backtick fence would be miscounted as two.
+ */
+const findNextFence = (
+  content: string,
+  from: number,
+): { index: number; char: '`' | '~'; length: number } | null => {
+  const backtick = content.indexOf('```', from);
+  const tilde = content.indexOf('~~~', from);
+  if (backtick === -1 && tilde === -1) return null;
+  let index: number;
+  let char: '`' | '~';
+  if (tilde === -1 || (backtick !== -1 && backtick < tilde)) {
+    index = backtick;
+    char = '`';
+  } else {
+    index = tilde;
+    char = '~';
+  }
+  let length = 0;
+  while (content[index + length] === char) length++;
+  return { index, char, length };
+};
+
+/**
+ * Checks if a given character index is inside a fenced code block (``` or ~~~).
+ * A fence only closes a block opened with the SAME character AND a run at least
+ * as long (mirroring CommonMark / MarkdownDisplay), so a ``` inside a ~~~ block
+ * — or a shorter run inside a longer fence — does not toggle the state.
  */
 const isIndexInsideCodeBlock = (
   content: string,
   indexToTest: number,
 ): boolean => {
-  let fenceCount = 0;
+  let openChar: '`' | '~' | '' = '';
+  let openLen = 0;
   let searchPos = 0;
   while (searchPos < content.length) {
-    const nextFence = content.indexOf('```', searchPos);
-    if (nextFence === -1 || nextFence >= indexToTest) {
-      break;
+    const fence = findNextFence(content, searchPos);
+    if (!fence || fence.index >= indexToTest) break;
+    if (openChar === '') {
+      openChar = fence.char;
+      openLen = fence.length;
+    } else if (fence.char === openChar && fence.length >= openLen) {
+      openChar = '';
+      openLen = 0;
     }
-    fenceCount++;
-    searchPos = nextFence + 3;
+    searchPos = fence.index + fence.length;
   }
-  return fenceCount % 2 === 1;
+  return openChar !== '';
 };
 
 /**
- * Finds the starting index of the code block that encloses the given index.
- * Returns -1 if the index is not inside a code block.
- * @param content The markdown content.
- * @param index The index to check.
- * @returns Start index of the enclosing code block or -1.
+ * Finds the starting index of the code block (``` or ~~~) that encloses the
+ * given index. Returns -1 if the index is not inside a code block.
  */
 const findEnclosingCodeBlockStart = (
   content: string,
   index: number,
 ): number => {
-  if (!isIndexInsideCodeBlock(content, index)) {
-    return -1;
-  }
-  let currentSearchPos = 0;
-  while (currentSearchPos < index) {
-    const blockStartIndex = content.indexOf('```', currentSearchPos);
-    if (blockStartIndex === -1 || blockStartIndex >= index) {
-      break;
+  let openChar: '`' | '~' | '' = '';
+  let openLen = 0;
+  let openIndex = -1;
+  let searchPos = 0;
+  while (searchPos < content.length) {
+    const fence = findNextFence(content, searchPos);
+    if (!fence || fence.index >= index) break;
+    if (openChar === '') {
+      openChar = fence.char;
+      openLen = fence.length;
+      openIndex = fence.index;
+    } else if (fence.char === openChar && fence.length >= openLen) {
+      openChar = '';
+      openLen = 0;
+      openIndex = -1;
     }
-    const blockEndIndex = content.indexOf('```', blockStartIndex + 3);
-    if (blockStartIndex < index) {
-      if (blockEndIndex === -1 || index < blockEndIndex + 3) {
-        return blockStartIndex;
-      }
-    }
-    if (blockEndIndex === -1) break;
-    currentSearchPos = blockEndIndex + 3;
+    searchPos = fence.index + fence.length;
   }
-  return -1;
+  return openChar !== '' ? openIndex : -1;
 };
 
 export const findLastSafeSplitPoint = (

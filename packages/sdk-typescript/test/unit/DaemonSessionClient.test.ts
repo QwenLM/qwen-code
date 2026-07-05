@@ -144,6 +144,25 @@ describe('DaemonSessionClient', () => {
     });
   });
 
+  it('preserves active prompt state from createOrAttach responses', async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(200, {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+        hasActivePrompt: true,
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.createOrAttach(client, {
+      workspaceCwd: '/work/a',
+    });
+
+    expect(session.hasActivePrompt).toBe(true);
+  });
+
   it('forwards a persisted client id through create, load, and resume', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session')) {
@@ -228,6 +247,7 @@ describe('DaemonSessionClient', () => {
           attached: false,
           clientId: 'client-1',
           state: { configOptions: [] },
+          hasActivePrompt: true,
           lastEventId: 42,
           compactedReplay: [{ id: 1, v: 1, type: 'session_update', data: {} }],
           liveJournal: [{ id: 42, v: 1, type: 'session_update', data: {} }],
@@ -246,6 +266,7 @@ describe('DaemonSessionClient', () => {
 
     expect(session.sessionId).toBe('s-1');
     expect(session.clientId).toBe('client-1');
+    expect(session.hasActivePrompt).toBe(true);
     expect(session.state).toEqual({ configOptions: [] });
     expect(session.replaySnapshot.compactedReplay).toHaveLength(1);
     expect(session.replaySnapshot.liveJournal).toHaveLength(1);
@@ -257,6 +278,31 @@ describe('DaemonSessionClient', () => {
     expect(calls[1]?.headers['last-event-id']).toBe('42');
   });
 
+  it('loads restored prompt activity from hasActivePrompt responses', async () => {
+    const { fetch } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/load')) {
+        return jsonResponse(200, {
+          sessionId: 's-1',
+          workspaceCwd: '/work/a',
+          attached: true,
+          clientId: 'client-1',
+          state: {},
+          hasActivePrompt: true,
+          compactedReplay: [],
+          liveJournal: [],
+        });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+
+    const session = await DaemonSessionClient.load(client, 's-1', {
+      workspaceCwd: '/work/a',
+    });
+
+    expect(session.hasActivePrompt).toBe(true);
+  });
+
   it('resumes an existing daemon session using server watermark', async () => {
     const { fetch, calls } = recordingFetch((req) => {
       if (req.url.endsWith('/session/s-1/resume')) {
@@ -266,6 +312,7 @@ describe('DaemonSessionClient', () => {
           attached: true,
           clientId: 'client-1',
           state: { modes: null },
+          hasActivePrompt: true,
           lastEventId: 99,
         });
       }
@@ -280,6 +327,7 @@ describe('DaemonSessionClient', () => {
 
     expect(session.attached).toBe(true);
     expect(session.clientId).toBe('client-1');
+    expect(session.hasActivePrompt).toBe(true);
     expect(session.state).toEqual({ modes: null });
     expect(session.replaySnapshot.compactedReplay).toHaveLength(0);
     expect(session.replaySnapshot.liveJournal).toHaveLength(0);
@@ -392,6 +440,77 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
   });
 
+  it('forwards artifact helpers through DaemonClient with the bound clientId', async () => {
+    const listEnvelope = {
+      v: 1 as const,
+      sessionId: 's-1',
+      artifacts: [],
+      generatedAt: '2026-07-01T00:00:00.000Z',
+      limits: { maxArtifacts: 200 },
+    };
+    const mutationResult = {
+      v: 1 as const,
+      sessionId: 's-1',
+      changes: [],
+    };
+    const { fetch, calls } = recordingFetch((req) => {
+      if (
+        req.method === 'GET' &&
+        req.url === 'http://daemon/session/s-1/artifacts'
+      ) {
+        return jsonResponse(200, listEnvelope);
+      }
+      if (
+        req.method === 'POST' &&
+        req.url === 'http://daemon/session/s-1/artifacts'
+      ) {
+        return jsonResponse(200, mutationResult);
+      }
+      if (
+        req.method === 'DELETE' &&
+        req.url === 'http://daemon/session/s-1/artifacts/artifact-1'
+      ) {
+        return jsonResponse(200, mutationResult);
+      }
+      return jsonResponse(500, {
+        error: `unexpected ${req.method} ${req.url}`,
+      });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.artifacts()).resolves.toEqual(listEnvelope);
+    await expect(
+      session.addArtifact({
+        title: 'Client report',
+        url: 'https://example.com/report',
+      }),
+    ).resolves.toEqual(mutationResult);
+    await expect(session.removeArtifact('artifact-1')).resolves.toEqual(
+      mutationResult,
+    );
+
+    expect(calls.map((call) => call.headers['x-qwen-client-id'])).toEqual([
+      'client-1',
+      'client-1',
+      'client-1',
+    ]);
+    expect(calls[1]?.body).toBe(
+      JSON.stringify({
+        title: 'Client report',
+        url: 'https://example.com/report',
+      }),
+    );
+  });
+
   it('forwards recap through DaemonClient with the bound clientId and signal', async () => {
     const { fetch, calls } = recordingFetch(() =>
       jsonResponse(200, {
@@ -419,6 +538,94 @@ describe('DaemonSessionClient', () => {
     expect(calls[0]?.method).toBe('POST');
     expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
     expect(calls[0]?.signal).toBe(ctrl.signal);
+  });
+
+  it('forwards pending prompt list requests with encoded session id and clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, {
+        pendingPrompts: [
+          {
+            promptId: 'prompt-1',
+            text: 'hello',
+            state: 'queued',
+            queuedAt: 1_700_000_000_000,
+          },
+        ],
+      }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(session.getPendingPrompts()).resolves.toEqual({
+      pendingPrompts: [
+        {
+          promptId: 'prompt-1',
+          text: 'hello',
+          state: 'queued',
+          queuedAt: 1_700_000_000_000,
+        },
+      ],
+    });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/pending-prompts',
+    );
+    expect(calls[0]?.method).toBe('GET');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
+  it('forwards pending prompt removals with encoded ids and clientId', async () => {
+    const { fetch, calls } = recordingFetch(() =>
+      jsonResponse(200, { removed: false }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 'session with/slash',
+        workspaceCwd: '/work/a',
+        attached: true,
+        clientId: 'client-1',
+      },
+    });
+
+    await expect(
+      session.removePendingPrompt('prompt with/slash'),
+    ).resolves.toEqual({ removed: false });
+    expect(calls[0]?.url).toBe(
+      'http://daemon/session/session%20with%2Fslash/pending-prompts/prompt%20with%2Fslash',
+    );
+    expect(calls[0]?.method).toBe('DELETE');
+    expect(calls[0]?.headers['x-qwen-client-id']).toBe('client-1');
+  });
+
+  it('maps pending prompt HTTP failures through DaemonClient errors', async () => {
+    const { fetch } = recordingFetch(() =>
+      jsonResponse(404, { error: 'not found' }),
+    );
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+
+    await expect(session.getPendingPrompts()).rejects.toMatchObject({
+      status: 404,
+    });
+    await expect(session.removePendingPrompt('p-1')).rejects.toMatchObject({
+      status: 404,
+    });
   });
 
   it('forwards session-scoped operations through DaemonClient', async () => {
@@ -933,6 +1140,31 @@ describe('DaemonSessionClient', () => {
     expect(result).toBeInstanceOf(Error);
     expect((result as Error).message).toBe('SSE stream ended');
     expect(pendingPromptIds(session)).toEqual([]);
+  });
+
+  it('submits prompts without waiting for turn completion', async () => {
+    const { fetch, calls } = recordingFetch((req) => {
+      if (req.url.endsWith('/session/s-1/prompt')) {
+        return jsonResponse(202, { promptId: 'p-1', lastEventId: 9 });
+      }
+      return jsonResponse(500, { error: `unexpected ${req.url}` });
+    });
+    const client = new DaemonClient({ baseUrl: 'http://daemon', fetch });
+    const session = new DaemonSessionClient({
+      client,
+      session: {
+        sessionId: 's-1',
+        workspaceCwd: '/work/a',
+        attached: true,
+      },
+    });
+
+    await expect(
+      session.submitPrompt({ prompt: [{ type: 'text', text: 'hi' }] }),
+    ).resolves.toEqual({ promptId: 'p-1', lastEventId: 9 });
+    expect(calls.map((call) => call.url)).toEqual([
+      'http://daemon/session/s-1/prompt',
+    ]);
   });
 
   it('surfaces permission races and session operation failures', async () => {

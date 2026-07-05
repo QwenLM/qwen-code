@@ -57,6 +57,7 @@ import type { PromptRegistry } from '../prompts/prompt-registry.js';
 import type { ResourceRegistry } from '../resources/resource-registry.js';
 import { getErrorMessage } from '../utils/errors.js';
 import { createDebugLogger } from '../utils/debugLogger.js';
+import { retryWithBackoff } from './mcp-retry.js';
 import { normalizePathEnvForWindows } from '../utils/windowsPath.js';
 import type {
   Unsubscribe,
@@ -332,7 +333,14 @@ export class McpClient {
         // it ahead of `updateStatus` guarantees the field is populated
         // by the time the listener fires.
         this.lastTransportError = error;
-        debugLogger.error(`MCP ERROR (${this.serverName}):`, error.toString());
+        // Use getErrorMessage (not `error.toString()`) so the underlying
+        // syscall behind opaque wrappers like undici's `TypeError: fetch
+        // failed` (e.g. `ECONNREFUSED`, a proxy `502`) is surfaced instead of
+        // a bare "fetch failed". Critical for diagnosing local-server /
+        // proxy connectivity issues.
+        debugLogger.error(
+          `MCP ERROR (${this.serverName}): ${getErrorMessage(error)}`,
+        );
         this.updateStatus(MCPServerStatus.DISCONNECTED);
       };
 
@@ -468,8 +476,8 @@ export class McpClient {
       // Prompts, resources, and tools are independent reads with no data
       // dependency; run them concurrently (the SDK client multiplexes
       // requests by JSON-RPC id) to save round-trips per server at startup.
-      // Each helper swallows its own errors and returns [], so Promise.all
-      // never rejects here.
+      // Each helper retries transient errors internally, then swallows
+      // permanent errors and returns [], so Promise.all never rejects here.
       const [prompts, resources, tools] = await Promise.all([
         listMcpPrompts(this.serverName, this.client),
         listMcpResources(this.serverName, this.client),
@@ -692,14 +700,22 @@ async function handleAutomaticOAuth(
     const resourceMetadataUri =
       OAuthUtils.parseWWWAuthenticateHeader(wwwAuthenticate);
     if (resourceMetadataUri) {
-      oauthConfig = await OAuthUtils.discoverOAuthConfig(resourceMetadataUri);
+      oauthConfig = await retryWithBackoff(
+        () => OAuthUtils.discoverOAuthConfig(resourceMetadataUri),
+        `${mcpServerName}/oauth-discovery`,
+        { maxRetries: 1 },
+      );
     } else if (hasNetworkTransport(mcpServerConfig)) {
       // Fallback: try to discover OAuth config from the base URL
       const serverUrl = new URL(
         mcpServerConfig.httpUrl || mcpServerConfig.url!,
       );
       const baseUrl = `${serverUrl.protocol}//${serverUrl.host}`;
-      oauthConfig = await OAuthUtils.discoverOAuthConfig(baseUrl);
+      oauthConfig = await retryWithBackoff(
+        () => OAuthUtils.discoverOAuthConfig(baseUrl),
+        `${mcpServerName}/oauth-discovery`,
+        { maxRetries: 1 },
+      );
     }
 
     if (!oauthConfig) {
@@ -960,7 +976,10 @@ export async function discoverTools(
     const mcpCallableTool = mcpToTool(mcpClient, {
       timeout: mcpServerConfig.timeout ?? MCP_DEFAULT_TIMEOUT_MSEC,
     });
-    const tool = await mcpCallableTool.tool();
+    const tool = await retryWithBackoff(
+      () => mcpCallableTool.tool(),
+      `${mcpServerName}/tools/list`,
+    );
 
     if (!Array.isArray(tool.functionDeclarations)) {
       // This is a valid case for a prompt-only server
@@ -1024,7 +1043,9 @@ export async function discoverTools(
             cliConfig,
             mcpClient, // raw MCP Client for direct callTool with progress
             mcpTimeout,
+            cliConfig?.getMcpToolIdleTimeoutMs?.(),
             annotationsMap.get(funcDecl.name!),
+            mcpServerConfig.alwaysLoadTools === true,
           ),
         );
       } catch (error) {
@@ -1088,9 +1109,13 @@ export async function listMcpPrompts(
   mcpClient: Client,
 ): Promise<DiscoveredMCPPrompt[]> {
   try {
-    const response = await mcpClient.request(
-      { method: 'prompts/list', params: {} },
-      ListPromptsResultSchema,
+    const response = await retryWithBackoff(
+      () =>
+        mcpClient.request(
+          { method: 'prompts/list', params: {} },
+          ListPromptsResultSchema,
+        ),
+      `${mcpServerName}/prompts/list`,
     );
 
     return response.prompts.map((prompt) => ({
@@ -1199,9 +1224,13 @@ export async function listMcpResources(
   mcpClient: Client,
 ): Promise<DiscoveredMCPResource[]> {
   try {
-    const response = await mcpClient.request(
-      { method: 'resources/list', params: {} },
-      ListResourcesResultSchema,
+    const response = await retryWithBackoff(
+      () =>
+        mcpClient.request(
+          { method: 'resources/list', params: {} },
+          ListResourcesResultSchema,
+        ),
+      `${mcpServerName}/resources/list`,
     );
 
     return response.resources.map((resource) => ({
@@ -1552,7 +1581,11 @@ export async function connectToMcpServer(
           >;
           try {
             // Try to discover OAuth configuration from the base URL
-            oauthConfig = await OAuthUtils.discoverOAuthConfig(baseUrl);
+            oauthConfig = await retryWithBackoff(
+              () => OAuthUtils.discoverOAuthConfig(baseUrl),
+              `${mcpServerName}/oauth-discovery`,
+              { maxRetries: 1 },
+            );
           } catch (discoveryError) {
             const oauthMessage =
               `OAuth discovery failed for server '${mcpServerName}'. ` +

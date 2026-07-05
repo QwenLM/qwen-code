@@ -50,6 +50,18 @@ describe('convertSchema', () => {
       expect(convertSchema(input, 'openapi_30')).toEqual(expected);
     });
 
+    it('should not emit null as the fallback type for nullable unions', () => {
+      const input = { type: ['null', 'string', 'number'] };
+      const expected = { type: 'string', nullable: true };
+      expect(convertSchema(input, 'openapi_30')).toEqual(expected);
+    });
+
+    it('should fall back to the original type when all types are null', () => {
+      const input = { type: ['null'] };
+      const expected = { type: 'null', nullable: true };
+      expect(convertSchema(input, 'openapi_30')).toEqual(expected);
+    });
+
     it('should convert const to enum', () => {
       const input = { const: 'foo' };
       const expected = { enum: ['foo'] };
@@ -82,6 +94,22 @@ describe('convertSchema', () => {
             maximum: 5,
             exclusiveMaximum: true,
           },
+        },
+      };
+      expect(convertSchema(input, 'openapi_30')).toEqual(expected);
+    });
+
+    it('should convert nested nullable union fallbacks recursively', () => {
+      const input = {
+        type: 'object',
+        properties: {
+          prop1: { type: ['null', 'object', 'string'] },
+        },
+      };
+      const expected = {
+        type: 'object',
+        properties: {
+          prop1: { type: 'object', nullable: true },
         },
       };
       expect(convertSchema(input, 'openapi_30')).toEqual(expected);

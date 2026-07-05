@@ -49,7 +49,9 @@ export type DaemonUiEventType =
   | 'workspace.agent.changed'
   | 'workspace.tool.toggled'
   | 'workspace.settings.changed'
+  | 'workspace.trust.change.requested'
   | 'workspace.initialized'
+  | 'workspace.github.setup.completed'
   | 'workspace.mcp.budget_warning'
   | 'workspace.mcp.child_refused'
   | 'workspace.mcp.server_restarted'
@@ -386,10 +388,13 @@ export interface DaemonUiSessionBranchedEvent extends DaemonUiEventBase {
 
 export interface DaemonUiWorkspaceMemoryChangedEvent extends DaemonUiEventBase {
   type: 'workspace.memory.changed';
-  scope: 'workspace' | 'global';
-  filePath: string;
-  mode: 'append' | 'replace';
-  bytesWritten: number;
+  scope: 'workspace' | 'global' | 'managed';
+  filePath?: string;
+  mode?: 'append' | 'replace';
+  bytesWritten?: number;
+  source?: string;
+  taskId?: string;
+  touchedScopes?: Array<'user' | 'project'>;
 }
 
 export interface DaemonUiWorkspaceAgentChangedEvent extends DaemonUiEventBase {
@@ -413,10 +418,27 @@ export interface DaemonUiWorkspaceSettingsChangedEvent
   value: unknown;
 }
 
+export interface DaemonUiTrustChangeRequestedEvent extends DaemonUiEventBase {
+  type: 'workspace.trust.change.requested';
+  workspaceCwd: string;
+  desiredState: 'trusted' | 'untrusted';
+  reason?: string;
+}
+
 export interface DaemonUiWorkspaceInitializedEvent extends DaemonUiEventBase {
   type: 'workspace.initialized';
   path: string;
   action: 'created' | 'overwrote' | 'noop';
+}
+
+export interface DaemonUiGithubSetupCompletedEvent extends DaemonUiEventBase {
+  type: 'workspace.github.setup.completed';
+  releaseTag: string;
+  readmeUrl: string;
+  secretsUrl?: string;
+  workflows: unknown[];
+  gitignore: unknown;
+  warnings: string[];
 }
 
 export interface DaemonUiMcpBudgetWarningEvent extends DaemonUiEventBase {
@@ -549,7 +571,9 @@ export type DaemonUiEvent =
   | DaemonUiWorkspaceAgentChangedEvent
   | DaemonUiWorkspaceToolToggledEvent
   | DaemonUiWorkspaceSettingsChangedEvent
+  | DaemonUiTrustChangeRequestedEvent
   | DaemonUiWorkspaceInitializedEvent
+  | DaemonUiGithubSetupCompletedEvent
   | DaemonUiMcpBudgetWarningEvent
   | DaemonUiMcpChildRefusedEvent
   | DaemonUiMcpServerRestartedEvent

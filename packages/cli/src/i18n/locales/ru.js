@@ -283,7 +283,7 @@ export default {
   'Open in editor': 'Открыть в редакторе',
   'Edit tools': 'Редактировать инструменты',
   'Edit color': 'Редактировать цвет',
-  '❌ Error:': '❌ Ошибка:',
+  '✗ Error:': '✗ Ошибка:',
   'Are you sure you want to delete agent "{{name}}"?':
     'Вы уверены, что хотите удалить агента "{{name}}"?',
   // ============================================================================
@@ -291,12 +291,12 @@ export default {
   // ============================================================================
   'Project Level (.qwen/agents/)': 'Уровень проекта (.qwen/agents/)',
   'User Level (~/.qwen/agents/)': 'Уровень пользователя (~/.qwen/agents/)',
-  '✅ Subagent Created Successfully!': '✅ Подагент успешно создан!',
+  '✓ Subagent Created Successfully!': '✓ Подагент успешно создан!',
   'Subagent "{{name}}" has been saved to {{level}} level.':
     'Подагент "{{name}}" сохранен на уровне {{level}}.',
   'Name: ': 'Имя: ',
   'Location: ': 'Расположение: ',
-  '❌ Error saving subagent:': '❌ Ошибка сохранения подагента:',
+  '✗ Error saving subagent:': '✗ Ошибка сохранения подагента:',
   'Warnings:': 'Предупреждения:',
   'Name "{{name}}" already exists at {{level}} level - will overwrite existing subagent':
     'Имя "{{name}}" уже существует на уровне {{level}} - существующий подагент будет перезаписан',
@@ -1128,9 +1128,9 @@ export default {
     'Выберите, как продолжить сессию:',
   'Start new chat session': 'Начать новую сессию чата',
   'Continue previous conversation': 'Продолжить предыдущий диалог',
-  '👋 Welcome back! (Last updated: {{timeAgo}})':
-    '👋 С возвращением! (Последнее обновление: {{timeAgo}})',
-  '🎯 Overall Goal:': '🎯 Общая цель:',
+  'Welcome back! (Last updated: {{timeAgo}})':
+    'С возвращением! (Последнее обновление: {{timeAgo}})',
+  'Overall Goal:': 'Общая цель:',
   'Connect a Provider': 'Подключить провайдера',
   'You must connect a provider to proceed. Press Ctrl+C again to exit.':
     'Необходимо подключить провайдера для продолжения. Нажмите Ctrl+C снова для выхода.',
@@ -1299,8 +1299,8 @@ export default {
   // Статус MCP
   // ============================================================================
   'No MCP servers configured.': 'MCP servers не настроены.',
-  '⏳ MCP servers are starting up ({{count}} initializing)...':
-    '⏳ MCP servers запускаются ({{count}} инициализируется)...',
+  '◌ MCP servers are starting up ({{count}} initializing)...':
+    '◌ MCP servers запускаются ({{count}} инициализируется)...',
   'Note: First startup may take longer. Tool availability will update automatically.':
     'Примечание: Первый запуск может занять больше времени. Доступность инструментов обновится автоматически.',
   'Configured MCP servers:': 'Настроенные MCP servers:',
@@ -1324,7 +1324,7 @@ export default {
   'Prompts:': 'Промпты:',
   'Resources:': 'Ресурсы:',
   Blocked: 'Заблокировано',
-  '💡 Tips:': '💡 Подсказки:',
+  '★ Tips:': '★ Подсказки:',
   Use: 'Используйте',
   'to show server and tool descriptions':
     'для показа описаний сервера и инструментов',
@@ -1425,6 +1425,8 @@ export default {
   'No tasks currently running': 'Нет запущенных задач',
   'No entry to show.': 'Нет записи для отображения.',
   'needs approval': 'требует подтверждения',
+  'rejected — edit config to re-approve':
+    'отклонено — измените конфигурацию для повторного подтверждения',
   'Background agent needs approval': 'Фоновый агент требует подтверждения',
   'Approve or deny the request above': 'Подтвердите или отклоните запрос выше',
   Running: 'Выполняется',
@@ -1832,8 +1834,8 @@ export default {
   'Enter your Coding Plan API key: ': 'Введите ваш API Key Coding Plan: ',
   'Select authentication method:': 'Выберите метод аутентификации:',
   '\n=== Authentication Status ===\n': '\n=== Статус аутентификации ===\n',
-  '⚠️  No authentication method configured.\n':
-    '⚠️  Метод аутентификации не настроен.\n',
+  '⚠  No authentication method configured.\n':
+    '⚠  Метод аутентификации не настроен.\n',
   'Run one of the following commands to get started:\n':
     'Выполните одну из следующих команд для начала:\n',
   '  qwen auth qwen-oauth     - Authenticate with Qwen OAuth (discontinued)':
@@ -1854,8 +1856,8 @@ export default {
   '  Current Model: {{model}}': '  Текущая модель: {{model}}',
   '  Config Version: {{version}}': '  Версия конфигурации: {{version}}',
   '  Status: API key configured\n': '  Статус: API Key настроен\n',
-  '⚠️  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
-    '⚠️  Метод аутентификации: Alibaba Cloud Coding Plan (Не завершён)',
+  '⚠  Authentication Method: Alibaba Cloud Coding Plan (Incomplete)':
+    '⚠  Метод аутентификации: Alibaba Cloud Coding Plan (Не завершён)',
   '  Issue: API key not found in environment or settings\n':
     '  Проблема: API Key не найден в окружении или настройках\n',
   '  Run `qwen auth coding-plan` to re-configure.\n':
@@ -1875,6 +1877,8 @@ export default {
     'Нажмите Ctrl+O для показа полного вывода инструментов',
   'Switch to plan mode or exit plan mode':
     'Переключиться в режим плана или выйти из режима плана',
+  'Set how hard reasoning-capable models think ({{tiers}}); mapped and clamped per provider.':
+    'Задаёт интенсивность рассуждений у моделей с поддержкой рассуждений ({{tiers}}); сопоставляется и ограничивается для каждого провайдера.',
   'Exited plan mode. Previous approval mode restored.':
     'Режим плана завершён. Предыдущий режим утверждения восстановлен.',
   'Enabled plan mode. The agent will analyze and plan without executing tools.':

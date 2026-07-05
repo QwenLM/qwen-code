@@ -4,7 +4,14 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import { ModelsConfig, tokenLimit } from '@qwen-code/qwen-code-core';
+import {
+  ApprovalMode,
+  APPROVAL_MODES,
+  createDebugLogger,
+  ModelsConfig,
+  resolveProviderProtocol,
+  tokenLimit,
+} from '@qwen-code/qwen-code-core';
 import type { AuthType } from '@qwen-code/qwen-code-core';
 import type {
   ServeWorkspaceProviderCurrent,
@@ -25,6 +32,8 @@ import {
   parseAcpBaseModelId,
   sanitizeProviderBaseUrl,
 } from '../utils/acpModelUtils.js';
+
+const debugLogger = createDebugLogger('WORKSPACE_PROVIDERS_STATUS');
 
 export type WorkspaceProvidersStatusProvider = (
   workspaceCwd: string,
@@ -71,6 +80,7 @@ function buildWorkspaceProvidersStatus(
     const modelsConfig = new ModelsConfig({
       initialAuthType: selectedAuthType,
       modelProvidersConfig: settings.modelProviders,
+      providerProtocolConfig: settings.providerProtocol,
       generationConfig: resolvedCliConfig.generationConfig,
       generationConfigSources: resolvedCliConfig.sources,
     });
@@ -92,12 +102,21 @@ function buildWorkspaceProvidersStatus(
       typeof settings.fastModel === 'string' && settings.fastModel.length > 0
         ? settings.fastModel
         : undefined;
+    const visionModelId =
+      typeof settings.visionModel === 'string' &&
+      settings.visionModel.length > 0
+        ? settings.visionModel
+        : undefined;
+    const approvalMode = resolveApprovalMode(settings);
     const providers = new Map<string, ServeWorkspaceProviderStatus>();
     const explicitModelBaseUrls = buildExplicitModelBaseUrls(
       settings.modelProviders,
+      settings.providerProtocol,
     );
 
-    for (const model of modelsConfig.getAllConfiguredModels()) {
+    for (const model of modelsConfig
+      .getAllConfiguredModels()
+      .filter(isMainSelectableModel)) {
       if (model.isRuntimeModel) continue;
       const authType = String(model.authType);
       let provider = providers.get(authType);
@@ -153,6 +172,7 @@ function buildWorkspaceProvidersStatus(
       currentAcpModelId,
       currentBaseUrl,
       fastModelId,
+      visionModelId,
     );
 
     return {
@@ -161,6 +181,7 @@ function buildWorkspaceProvidersStatus(
       initialized: true,
       acpChannelLive,
       ...(current ? { current } : {}),
+      approvalMode,
       providers: [...providers.values()],
       ...(resolvedCliConfig.warnings.length > 0
         ? {
@@ -192,6 +213,31 @@ function buildWorkspaceProvidersStatus(
   }
 }
 
+function resolveApprovalMode(settings: Settings): ApprovalMode {
+  const value = settings.tools?.approvalMode;
+  if (typeof value !== 'string') return ApprovalMode.DEFAULT;
+
+  const normalized = value.trim().toLowerCase().replaceAll('_', '-');
+  const mode = normalized === 'autoedit' ? ApprovalMode.AUTO_EDIT : normalized;
+  if ((APPROVAL_MODES as readonly string[]).includes(mode)) {
+    return mode as ApprovalMode;
+  }
+
+  if (value.trim().length > 0) {
+    debugLogger.warn(
+      `[workspace-providers-status] unrecognized approvalMode "${value}", falling back to default`,
+    );
+  }
+  return ApprovalMode.DEFAULT;
+}
+
+function isMainSelectableModel(model: {
+  fastOnly?: boolean;
+  voiceOnly?: boolean;
+}): boolean {
+  return model.fastOnly !== true && model.voiceOnly !== true;
+}
+
 function matchesCurrentModel(
   currentModelId: string,
   baseModelId: string,
@@ -211,11 +257,14 @@ function matchesCurrentBaseUrl(
 
 function buildExplicitModelBaseUrls(
   modelProviders: Settings['modelProviders'],
+  providerProtocol: Settings['providerProtocol'],
 ): Set<string> {
   const baseUrls = new Set<string>();
   if (!modelProviders) return baseUrls;
 
-  for (const [authType, providerConfig] of Object.entries(modelProviders)) {
+  for (const [providerId, providerConfig] of Object.entries(modelProviders)) {
+    const authType = resolveProviderProtocol(providerId, providerProtocol);
+    if (!authType) continue;
     const models = readProviderModels(providerConfig);
     for (const model of models) {
       if (
@@ -348,12 +397,15 @@ function buildCurrent(
   modelId: string | undefined,
   baseUrl: string | undefined,
   fastModelId: string | undefined,
+  visionModelId: string | undefined,
 ): ServeWorkspaceProviderCurrent | undefined {
-  if (!authType && !modelId && !baseUrl && !fastModelId) return undefined;
+  if (!authType && !modelId && !baseUrl && !fastModelId && !visionModelId)
+    return undefined;
   return {
     ...(authType ? { authType: String(authType) } : {}),
     ...(modelId ? { modelId } : {}),
     ...(baseUrl ? { baseUrl: sanitizeProviderBaseUrl(baseUrl) } : {}),
     ...(fastModelId ? { fastModelId } : {}),
+    ...(visionModelId ? { visionModelId } : {}),
   };
 }

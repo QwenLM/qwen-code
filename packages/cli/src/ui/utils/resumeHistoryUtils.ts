@@ -382,7 +382,11 @@ function convertToHistoryItems(
             });
             currentToolGroup = [];
           }
-          items.push({ type: 'gemini', text });
+          items.push({
+            type: 'gemini',
+            text,
+            timestamp: new Date(record.timestamp).getTime(),
+          });
         }
 
         // Track function calls for pairing with results
@@ -564,16 +568,37 @@ export function expandCollapsedHistory(items: HistoryItem[]): HistoryItem[] {
 export function applyCollapsePolicyAndSummary(
   rawItems: HistoryItem[],
   collapseOnResume: boolean,
+  collapsePreviewCount: number = 0,
 ): HistoryItem[] {
   if (!collapseOnResume) return rawItems;
+  if (collapsePreviewCount === -1) return rawItems;
 
-  const uiHistoryItems = applyResumeDisplayPolicy(rawItems);
+  let boundary = rawItems.length;
+  if (collapsePreviewCount > 0) {
+    let userTurnCount = 0;
+    for (let i = rawItems.length - 1; i >= 0; i--) {
+      if (rawItems[i].type === MessageType.USER) {
+        userTurnCount++;
+        if (userTurnCount === collapsePreviewCount) {
+          boundary = i;
+          break;
+        }
+      }
+    }
+    if (userTurnCount < collapsePreviewCount) {
+      boundary = 0;
+    }
+  }
 
-  if (rawItems.length > 0) {
+  const hiddenItems = applyResumeDisplayPolicy(rawItems.slice(0, boundary));
+  const visibleItems = rawItems.slice(boundary);
+  const uiHistoryItems = [...hiddenItems, ...visibleItems];
+
+  if (boundary > 0) {
     const nextId = rawItems[rawItems.length - 1].id + 1;
     return [
       ...uiHistoryItems,
-      { id: nextId, ...createHistoryCollapseSummaryItem(rawItems.length) },
+      { id: nextId, ...createHistoryCollapseSummaryItem(boundary) },
     ];
   }
 

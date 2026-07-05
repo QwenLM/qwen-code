@@ -7,7 +7,7 @@
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
-import type { Config } from '@qwen-code/qwen-code-core';
+import type { Config, Extension } from '@qwen-code/qwen-code-core';
 import {
   getErrorMessage,
   isNodeError,
@@ -27,6 +27,22 @@ import type {
 } from '../types.js';
 import { ToolCallStatus } from '../types.js';
 import { matchMcpServerPrefix } from './mcpResourceRef.js';
+import {
+  parseExtensionRef,
+  matchExtensionByRef,
+  buildExtensionRef,
+} from './extension-mention-ref.js';
+import {
+  buildExtensionMentionContext,
+  EXTENSION_CONTEXT_BUDGET,
+  getExtensionDisplayName,
+} from '../../utils/extension-mention.js';
+import {
+  buildMcpServerContextText,
+  buildMcpServerRef,
+  matchMcpServerByRef,
+  parseMcpServerRef,
+} from '../../utils/mcp-server-mention.js';
 
 export interface ResolveAtCommandParams {
   query: string;
@@ -204,6 +220,17 @@ export async function resolveAtCommandQuery({
     serverName: string;
     uri: string;
   }> = [];
+  const mcpServerMentions: Array<{
+    originalAtPath: string;
+    serverName: string;
+  }> = [];
+
+  // Extension references (`@ext:<name>`) collected during the loop.
+  const activeExtensions = config.getActiveExtensions?.() ?? [];
+  const extensionMentions: Array<{
+    originalAtPath: string;
+    extension: Extension;
+  }> = [];
 
   for (const atPathPart of atPathCommandParts) {
     const originalAtPath = atPathPart.content; // e.g., "@file.txt" or "@"
@@ -217,6 +244,28 @@ export async function resolveAtCommandQuery({
 
     const pathName = originalAtPath.substring(1);
 
+    // Extension reference (`@ext:<name>`): detected BEFORE MCP/filesystem
+    // resolution. Only matches when the path starts with `ext:` and the name
+    // corresponds to an active extension.
+    const extRef = parseExtensionRef(pathName);
+    if (extRef) {
+      const extension = matchExtensionByRef(extRef.name, activeExtensions);
+      if (extension) {
+        if (
+          !extensionMentions.some((m) => m.extension.name === extension.name)
+        ) {
+          extensionMentions.push({ originalAtPath, extension });
+        }
+        atPathToResolvedSpecMap.set(originalAtPath, pathName);
+        continue;
+      }
+      onDebugMessage(
+        `Extension "${extRef.name}" not found among active extensions. ` +
+          `Available: ${activeExtensions.map((e) => e.name).join(', ') || '(none)'}`,
+      );
+      continue;
+    }
+
     // MCP resource reference (`@server:uri`): detected BEFORE filesystem
     // resolution so a resource URI containing ':' / '//' isn't mistaken for
     // a path. Only matches when `server` is a configured MCP server; all
@@ -226,6 +275,34 @@ export async function resolveAtCommandQuery({
       mcpResourceRefs.push({ originalAtPath, ...resourceRef });
       // Keep `@server:uri` verbatim in the text sent to the model.
       atPathToResolvedSpecMap.set(originalAtPath, pathName);
+      continue;
+    }
+
+    const mcpServerRef = parseMcpServerRef(pathName);
+    if (mcpServerRef) {
+      const matched = matchMcpServerByRef(
+        mcpServerRef.name,
+        config.getMcpServers() || {},
+      );
+      if (matched) {
+        if (
+          !mcpServerMentions.some((m) => m.serverName === matched.serverName)
+        ) {
+          mcpServerMentions.push({
+            originalAtPath,
+            serverName: matched.serverName,
+          });
+        }
+        atPathToResolvedSpecMap.set(
+          originalAtPath,
+          buildMcpServerRef(matched.serverName),
+        );
+        continue;
+      }
+      onDebugMessage(
+        `MCP server "${mcpServerRef.name}" not found among configured MCP servers. ` +
+          `Available: ${Object.keys(config.getMcpServers() || {}).join(', ') || '(none)'}`,
+      );
       continue;
     }
 
@@ -444,8 +521,13 @@ export async function resolveAtCommandQuery({
 
   // Fallback for lone "@" or completely invalid @-commands resulting in empty
   // initialQueryText — only when there is nothing to read at all (no valid
-  // file paths AND no resource references).
-  if (pathSpecsToRead.length === 0 && mcpResourceRefs.length === 0) {
+  // file paths, resource references, or extension mentions).
+  if (
+    pathSpecsToRead.length === 0 &&
+    mcpResourceRefs.length === 0 &&
+    mcpServerMentions.length === 0 &&
+    extensionMentions.length === 0
+  ) {
     onDebugMessage('No valid file paths found in @ commands to read.');
     if (initialQueryText === '@' && query.trim() === '@') {
       // If the only thing was a lone @, pass original query (which might have spaces)
@@ -461,8 +543,79 @@ export async function resolveAtCommandQuery({
     };
   }
 
+  // Build extension context parts and display cards for @-mentioned extensions.
+  // Processed BEFORE file reads so that extension labels/displays are available
+  // in the file-read error path (mirroring how resourceDisplays/resourceLabels
+  // are already built before the file read).
+  // Aggregate cap across all extensions to prevent unbounded context injection.
+  let extensionContextBudgetRemaining = EXTENSION_CONTEXT_BUDGET;
+
+  const scopedMentionEntries: Array<{
+    originalAtPath: string;
+    part: Part;
+    label: string;
+    display: IndividualToolCallDisplay;
+  }> = [];
+  for (let i = 0; i < extensionMentions.length; i++) {
+    const { originalAtPath, extension } = extensionMentions[i];
+    const displayName = getExtensionDisplayName(extension);
+    const callId = `client-extension-${userMessageTimestamp}-${i}`;
+
+    const context = await buildExtensionMentionContext(extension, {
+      remainingBudget: extensionContextBudgetRemaining,
+      signal,
+      onDebugMessage,
+    });
+    extensionContextBudgetRemaining = context.remainingBudget;
+
+    scopedMentionEntries.push({
+      originalAtPath,
+      part: { text: context.text },
+      label: buildExtensionRef(extension.name),
+      display: {
+        callId,
+        name: 'Activate Extension',
+        description: `Activated extension ${displayName}`,
+        status: ToolCallStatus.Success,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      },
+    });
+  }
+
+  for (let i = 0; i < mcpServerMentions.length; i++) {
+    const { originalAtPath, serverName } = mcpServerMentions[i];
+    scopedMentionEntries.push({
+      originalAtPath,
+      part: { text: buildMcpServerContextText(config, serverName) },
+      label: buildMcpServerRef(serverName),
+      display: {
+        callId: `client-mcp-server-${userMessageTimestamp}-${i}`,
+        name: 'Activate MCP Server',
+        description: `Activated MCP server ${serverName}`,
+        status: ToolCallStatus.Success,
+        resultDisplay: undefined,
+        confirmationDetails: undefined,
+      },
+    });
+  }
+
+  const scopedMentionOrder = new Map(
+    atPathCommandParts.map((part, index) => [part.content, index]),
+  );
+  scopedMentionEntries.sort(
+    (a, b) =>
+      (scopedMentionOrder.get(a.originalAtPath) ?? Number.MAX_SAFE_INTEGER) -
+      (scopedMentionOrder.get(b.originalAtPath) ?? Number.MAX_SAFE_INTEGER),
+  );
+  const scopedMentionParts = scopedMentionEntries.map((entry) => entry.part);
+  const scopedMentionLabels = scopedMentionEntries.map((entry) => entry.label);
+  const scopedMentionDisplays = scopedMentionEntries.map(
+    (entry) => entry.display,
+  );
+
   // Read files (if any). A hard read error aborts the turn, as before — but
-  // any resource tool-cards already gathered are still surfaced.
+  // any extension/resource tool-cards already gathered are still surfaced.
   const fileParts: Part[] = [];
   let fileDisplays: IndividualToolCallDisplay[] = [];
   if (pathSpecsToRead.length > 0) {
@@ -477,7 +630,6 @@ export async function resolveAtCommandQuery({
         ? result.contentParts
         : [result.contentParts];
 
-      // Create individual tool call displays for each file read
       fileDisplays = result.files.map((file, index) => ({
         callId: `client-read-${userMessageTimestamp}-${index}`,
         name: file.isDirectory ? 'Read Directory' : 'Read File',
@@ -492,7 +644,6 @@ export async function resolveAtCommandQuery({
       }));
 
       if (parts.length > 0 && !result.error) {
-        // readManyFiles now returns properly formatted parts with headers and prefixes
         for (const part of parts) {
           fileParts.push(typeof part === 'string' ? { text: part } : part);
         }
@@ -512,14 +663,19 @@ export async function resolveAtCommandQuery({
         typeof errorToolCallDisplay.resultDisplay === 'string'
           ? errorToolCallDisplay.resultDisplay
           : undefined;
-      // Resource labels are merged in too: a resource may have been read
-      // successfully before the file read failed, and its card is already in
-      // `resourceDisplays` above — the audit trail must not drop it.
-      const labelsOnError = [...contentLabelsForDisplay, ...resourceLabels];
+      const labelsOnError = [
+        ...scopedMentionLabels,
+        ...contentLabelsForDisplay,
+        ...resourceLabels,
+      ];
       return {
         processedQuery: null,
         shouldProceed: false,
-        toolDisplays: [...resourceDisplays, errorToolCallDisplay],
+        toolDisplays: [
+          ...scopedMentionDisplays,
+          ...resourceDisplays,
+          errorToolCallDisplay,
+        ],
         filesRead: labelsOnError,
         recording: {
           filesRead: labelsOnError,
@@ -537,15 +693,24 @@ export async function resolveAtCommandQuery({
   // positional alignment, so grouping is safe.
   const processedQueryParts: PartListUnion = [
     { text: initialQueryText },
+    ...scopedMentionParts,
     ...fileParts,
     ...resourceParts,
   ];
-  const allLabels = [...contentLabelsForDisplay, ...resourceLabels];
+  const allLabels = [
+    ...scopedMentionLabels,
+    ...contentLabelsForDisplay,
+    ...resourceLabels,
+  ];
 
   return {
     processedQuery: processedQueryParts,
     shouldProceed: true,
-    toolDisplays: [...fileDisplays, ...resourceDisplays],
+    toolDisplays: [
+      ...scopedMentionDisplays,
+      ...fileDisplays,
+      ...resourceDisplays,
+    ],
     filesRead: allLabels,
     recording: {
       filesRead: allLabels,

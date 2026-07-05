@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-// Pre-submission checks for /review Step 9. Runs three deterministic
+// Pre-submission checks for /review Step 7. Runs three deterministic
 // gh-API queries and emits a single JSON report describing self-PR status,
 // CI / build status, existing Qwen Code comment classification, and the
 // downgrade decisions the LLM should apply when constructing the review
@@ -257,7 +257,7 @@ async function runPresubmit(args: PresubmitArgs): Promise<void> {
 export const presubmitCommand: CommandModule = {
   command: 'presubmit <pr_number> <commit_sha> <owner_repo> <out_path>',
   describe:
-    'Pre-submission checks for /review Step 9 (self-PR detection, CI status, existing-comments classification)',
+    'Pre-submission checks for /review Step 7 (self-PR detection, CI status, existing-comments classification)',
   builder: (yargs) =>
     yargs
       .positional('pr_number', {

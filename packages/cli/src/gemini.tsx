@@ -39,6 +39,7 @@ import {
   preResolveHomeEnvOverrides,
 } from './config/settings.js';
 import { SettingsWatcher } from './config/settingsWatcher.js';
+import { registerMcpHotReload } from './config/hot-reload.js';
 import { initializeI18n, resolveLanguageSetting } from './i18n/index.js';
 import {
   setupStartupWorktree,
@@ -597,6 +598,19 @@ export async function main() {
     );
     profileCheckpoint('after_load_cli_config');
 
+    // Subscribe the running Config to settings changes so MCP servers
+    // reconnect / disconnect / restart without a session restart (#3696,
+    // sub-task 3). Skipped in bare mode (no watcher).
+    if (settingsWatcher) {
+      const disposeMcpHotReload = registerMcpHotReload(
+        settingsWatcher,
+        settings,
+        config,
+        config.getTopTierMcpServers(),
+      );
+      registerCleanup(disposeMcpHotReload);
+    }
+
     // Phase D-1: persist the WorktreeSession sidecar so Phase C's restore
     // machinery on a subsequent `--resume` picks the worktree back up, and
     // capture any override of a previously-resumed session's worktree so
@@ -779,6 +793,11 @@ export async function main() {
     let input = config.getQuestion();
     const startupWarnings = [
       ...new Set([
+        ...(config.isSafeMode()
+          ? [
+              '⚠ SAFE MODE — all customizations disabled (hooks, extensions, skills, MCP servers, QWEN.md). Restart without --safe-mode to resume normal operation.',
+            ]
+          : []),
         ...(await getStartupWarnings()),
         ...(await getUserStartupWarnings({
           workspaceRoot: process.cwd(),

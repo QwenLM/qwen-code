@@ -33,6 +33,13 @@ import {
 } from '../goals/activeGoalStore.js';
 import { abortGoalForStopHookCap } from '../goals/goalHook.js';
 import { formatStopHookBlockingCapWarning } from '../hooks/stopHookCap.js';
+import { buildContextUsage } from '../hooks/context-usage.js';
+import {
+  DEFAULT_TOKEN_LIMIT,
+  ESCALATED_MAX_TOKENS,
+  parsePositiveIntegerEnvValue,
+  tokenLimit,
+} from './tokenLimits.js';
 
 const debugLogger = createDebugLogger('CLIENT');
 
@@ -87,11 +94,13 @@ import {
 // Utilities
 import {
   formatDateForContext,
-  buildAddedMcpToolsReminder,
-  buildAddedSkillsReminder,
+  buildChangedAgentsReminder,
+  buildChangedMcpToolsReminder,
+  buildChangedSkillsReminder,
   getDirectoryContextString,
   getInitialChatHistory,
   getStartupContextLength,
+  type AgentAvailabilityEntry,
 } from '../utils/environmentContext.js';
 import {
   collectAvailableSkillEntries,
@@ -115,6 +124,7 @@ import { subagentNameContext } from '../utils/subagentNameContext.js';
 import { escapeSystemReminderTags } from '../utils/xml.js';
 import { ApiRetryEvent } from '../telemetry/types.js';
 import { logApiRetry } from '../telemetry/loggers.js';
+import { shouldUsePlanOnlyReminderInSubagentContext } from '../agents/runtime/subagent-plan-tool-policy.js';
 
 // Hook types and utilities
 import {
@@ -222,7 +232,12 @@ export class GeminiClient {
   private lastSessionStartContext: string | undefined;
   private lastSessionStartSource: SessionStartSource | undefined;
   private announcedDeferredToolNames = new Set<string>();
+  // MCP-only subset the model has actually seen via startup or delta reminders.
+  // `announcedDeferredToolNames` is broader and exists for deferred tool-search
+  // dedup; MCP add/remove deltas need this narrower model-visible set.
+  private announcedMcpToolNames = new Set<string>();
   private pendingAddedMcpTools = new Map<string, DeferredToolSummary>();
+  private pendingRemovedMcpToolNames = new Set<string>();
   // Dedup state for the per-turn skill/command "now available" delta reminders
   // (drainSkillAndCommandReminders). Keys are "skill:<name>" / "cmd:<name>". The
   // set is seeded on the first drain from the current skills (the startup
@@ -232,6 +247,8 @@ export class GeminiClient {
   // suppressNextSkillListing / "don't re-inject on compact".
   private announcedSkillReminderKeys = new Set<string>();
   private skillRemindersInitialized = false;
+  private announcedAgentReminderNames = new Set<string>();
+  private agentRemindersInitialized = false;
 
   private static skillEntryKey(e: AvailableSkillEntry): string {
     return e.level !== undefined ? `skill:${e.name}` : `cmd:${e.name}`;
@@ -251,6 +268,20 @@ export class GeminiClient {
       snapshotEntries.map(GeminiClient.skillEntryKey),
     );
     this.skillRemindersInitialized = true;
+  }
+
+  private async seedAgentReminderDedupFromCurrent(): Promise<void> {
+    try {
+      const agents = await this.config.getSubagentManager().listSubagents();
+      this.announcedAgentReminderNames = new Set(
+        agents.map((agent) => agent.name),
+      );
+      this.agentRemindersInitialized = true;
+    } catch (error) {
+      debugLogger.warn('seedAgentReminderDedupFromCurrent failed', error);
+      this.announcedAgentReminderNames.clear();
+      this.agentRemindersInitialized = false;
+    }
   }
 
   /**
@@ -427,7 +458,8 @@ export class GeminiClient {
       const text =
         message.parts
           ?.filter(
-            (part): part is { text: string } => typeof part.text === 'string',
+            (part): part is { text: string } =>
+              typeof part.text === 'string' && !part.thought,
           )
           .map((part) => part.text)
           .join('') ?? '';
@@ -464,14 +496,14 @@ export class GeminiClient {
    *     one and the new one — and the model would see context the user
    *     thought had been undone.
    */
-  stripOrphanedUserEntriesFromHistory() {
+  stripOrphanedUserEntriesFromHistory(): Content[] {
     const chat = this.getChat();
     const before = chat.getHistoryLength();
-    chat.stripOrphanedUserEntriesFromHistory();
+    const strippedEntries = chat.stripOrphanedUserEntriesFromHistory();
     const after = chat.getHistoryLength();
     if (after >= before) {
       // Nothing to strip — leave caches and IDE context alone.
-      return;
+      return strippedEntries;
     }
     // Stripped trailing user entries can include read_file
     // functionResponses from a failed-then-retried request. The
@@ -488,6 +520,7 @@ export class GeminiClient {
     // entirely or send only a diff against a now-removed baseline. Match
     // the invalidation `setHistory()` / `truncateHistory()` already do.
     this.forceFullIdeContext = true;
+    return strippedEntries;
   }
 
   /**
@@ -794,6 +827,7 @@ export class GeminiClient {
       this.config,
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
+    await this.seedAgentReminderDedupFromCurrent();
     this.getChat().setHistory(
       startupContext ? [startupContext, ...remaining] : remaining,
     );
@@ -828,6 +862,7 @@ export class GeminiClient {
       this.config,
     );
     this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
+    await this.seedAgentReminderDedupFromCurrent();
     if (startupContext) {
       this.getChat().setHistory([startupContext, ...currentHistory]);
     }
@@ -897,7 +932,13 @@ export class GeminiClient {
     this.announcedDeferredToolNames = new Set(
       (deferredTools ?? []).map((tool) => tool.name),
     );
+    this.announcedMcpToolNames = new Set(
+      (deferredTools ?? [])
+        .filter((tool) => tool.serverName)
+        .map((tool) => tool.name),
+    );
     this.pendingAddedMcpTools.clear();
+    this.pendingRemovedMcpToolNames.clear();
   }
 
   private queueAddedMcpToolsReminder(
@@ -906,9 +947,17 @@ export class GeminiClient {
     const currentDeferredNames = new Set(
       deferredTools.map((tool) => tool.name),
     );
+    const currentMcpToolNames = new Set(
+      deferredTools.filter((tool) => tool.serverName).map((tool) => tool.name),
+    );
     for (const name of this.pendingAddedMcpTools.keys()) {
       if (!currentDeferredNames.has(name)) {
         this.pendingAddedMcpTools.delete(name);
+      }
+    }
+    for (const name of this.pendingRemovedMcpToolNames) {
+      if (currentMcpToolNames.has(name)) {
+        this.pendingRemovedMcpToolNames.delete(name);
       }
     }
 
@@ -922,23 +971,36 @@ export class GeminiClient {
         this.announcedDeferredToolNames.delete(name);
       }
     }
+    for (const name of this.announcedMcpToolNames) {
+      if (!currentMcpToolNames.has(name)) {
+        this.pendingRemovedMcpToolNames.add(name);
+      }
+    }
 
     for (const tool of deferredTools) {
-      if (tool.serverName && !this.announcedDeferredToolNames.has(tool.name)) {
-        this.pendingAddedMcpTools.set(tool.name, tool);
+      if (tool.serverName) {
+        if (!this.announcedMcpToolNames.has(tool.name)) {
+          this.pendingAddedMcpTools.set(tool.name, tool);
+        }
       }
       this.announcedDeferredToolNames.add(tool.name);
     }
   }
 
   private drainPendingAddedMcpToolsReminder(): void {
-    if (this.pendingAddedMcpTools.size === 0) {
+    if (
+      this.pendingAddedMcpTools.size === 0 &&
+      this.pendingRemovedMcpToolNames.size === 0
+    ) {
       return;
     }
 
     const addedMcpTools = Array.from(this.pendingAddedMcpTools.values());
-    const reminder = buildAddedMcpToolsReminder(addedMcpTools);
-    this.pendingAddedMcpTools.clear();
+    const removedMcpToolNames = Array.from(this.pendingRemovedMcpToolNames);
+    const reminder = buildChangedMcpToolsReminder(
+      addedMcpTools,
+      removedMcpToolNames,
+    );
 
     if (!reminder) {
       return;
@@ -948,6 +1010,15 @@ export class GeminiClient {
       role: 'user',
       parts: [{ text: reminder }],
     });
+
+    for (const name of removedMcpToolNames) {
+      this.announcedMcpToolNames.delete(name);
+    }
+    for (const tool of addedMcpTools) {
+      this.announcedMcpToolNames.add(tool.name);
+    }
+    this.pendingAddedMcpTools.clear();
+    this.pendingRemovedMcpToolNames.clear();
   }
 
   /**
@@ -990,11 +1061,16 @@ export class GeminiClient {
     }
 
     const currentKeys = new Set(entries.map(GeminiClient.skillEntryKey));
+    const wasInitialized = this.skillRemindersInitialized;
+    const removedNames: string[] = [];
 
     // Prune announced keys no longer present so a later re-enable / reconnect
     // re-announces (mirrors the MCP added-tools prune above).
     for (const key of this.announcedSkillReminderKeys) {
       if (!currentKeys.has(key)) {
+        if (wasInitialized) {
+          removedNames.push(key.slice(key.indexOf(':') + 1));
+        }
         this.announcedSkillReminderKeys.delete(key);
       }
     }
@@ -1034,10 +1110,10 @@ export class GeminiClient {
       newEntries.push(entry);
     }
 
-    if (newEntries.length === 0) {
+    if (newEntries.length === 0 && removedNames.length === 0) {
       return;
     }
-    const reminder = buildAddedSkillsReminder(newEntries);
+    const reminder = buildChangedSkillsReminder(newEntries, removedNames);
     if (!reminder) {
       return;
     }
@@ -1045,6 +1121,62 @@ export class GeminiClient {
       role: 'user',
       parts: [{ text: reminder }],
     });
+  }
+
+  private async drainAgentReminders(): Promise<void> {
+    const toolRegistry = this.config.getToolRegistry();
+    if (!toolRegistry?.getTool(ToolNames.AGENT)) {
+      return;
+    }
+
+    if (!this.agentRemindersInitialized) {
+      await this.seedAgentReminderDedupFromCurrent();
+      return;
+    }
+
+    let agents: AgentAvailabilityEntry[];
+    try {
+      agents = await this.config.getSubagentManager().listSubagents();
+    } catch (error) {
+      debugLogger.warn('drainAgentReminders: listSubagents failed', error);
+      return;
+    }
+
+    const currentByName = new Map(agents.map((agent) => [agent.name, agent]));
+    const addedAgents: AgentAvailabilityEntry[] = [];
+    const removedAgentNames: string[] = [];
+
+    for (const name of this.announcedAgentReminderNames) {
+      if (!currentByName.has(name)) {
+        removedAgentNames.push(name);
+      }
+    }
+
+    for (const agent of currentByName.values()) {
+      if (this.announcedAgentReminderNames.has(agent.name)) {
+        continue;
+      }
+      addedAgents.push({
+        name: agent.name,
+        description: agent.description,
+      });
+    }
+
+    const reminder = buildChangedAgentsReminder(addedAgents, removedAgentNames);
+    if (!reminder) {
+      return;
+    }
+    this.getChat().addHistory({
+      role: 'user',
+      parts: [{ text: reminder }],
+    });
+
+    for (const name of removedAgentNames) {
+      this.announcedAgentReminderNames.delete(name);
+    }
+    for (const agent of addedAgents) {
+      this.announcedAgentReminderNames.add(agent.name);
+    }
   }
 
   private toPermissionMode(approvalMode: ApprovalMode): PermissionMode {
@@ -1140,6 +1272,7 @@ export class GeminiClient {
         extraHistory,
       );
       this.seedSkillReminderDedupFromSnapshot(snapshotEntries);
+      await this.seedAgentReminderDedupFromCurrent();
       const systemInstruction = this.getMainSessionSystemInstruction();
 
       this.chat = new GeminiChat(
@@ -1423,6 +1556,7 @@ export class GeminiClient {
           threshold: AUTO_SKILL_THRESHOLD,
           maxTurns: DEFAULT_AUTO_SKILL_MAX_TURNS,
           timeoutMs: DEFAULT_AUTO_SKILL_TIMEOUT_MS,
+          confirmBeforePersist: this.config.getAutoSkillConfirmEnabled(),
         });
         if (skillReviewResult.status === 'scheduled') {
           // Reset tool-call counter when a review is dispatched so the next
@@ -1647,9 +1781,49 @@ export class GeminiClient {
     turns: number = MAX_TURNS,
   ): AsyncGenerator<ServerGeminiStreamEvent, Turn> {
     const messageType = options?.type ?? SendMessageType.UserQuery;
+    let strippedRetryEntries: Content[] = [];
+    // Snapshot of GeminiChat's user-content push counter, taken right after the
+    // strip. The Retry's re-submitted content is the first thing the send
+    // pushes, so if the counter advances at all that content landed.
+    let pushCountAfterStrip = 0;
+    const currentPushCount = () =>
+      this.getChat().getUserContentPushCount?.() ?? 0;
+
+    const restoreStrippedRetryEntries = () => {
+      if (strippedRetryEntries.length === 0) {
+        return;
+      }
+      // `chat.sendMessageStream` pushes the re-submitted user content back into
+      // history before the API call. Restore the stripped entries only when
+      // that push never landed (the send threw before pushing, or the push was
+      // rolled back on a setup error) — otherwise re-adding would duplicate it.
+      //
+      // Gate on the push counter, not on history length: auto-compression
+      // inside `sendMessageStream` runs BEFORE the push and shrinks history
+      // independently of it, so a length comparison can read "history didn't
+      // grow" even after a successful push and duplicate the prompt. The counter
+      // only advances on a push that survived (it's decremented if the push is
+      // rolled back), so it is invariant under compression.
+      const pushCountNow = currentPushCount();
+      if (pushCountNow <= pushCountAfterStrip) {
+        // Diagnostic: restoring means the send never pushed the re-submitted
+        // content. If the counter were ever wrong, this line is the anchor for
+        // a silent duplicate/loss.
+        debugLogger.info('[Retry] restoring stripped orphan entries', {
+          entries: strippedRetryEntries.length,
+          pushCountAfterStrip,
+          pushCountNow,
+        });
+        for (const entry of strippedRetryEntries) {
+          this.getChat().addHistory(entry);
+        }
+      }
+      strippedRetryEntries = [];
+    };
 
     if (messageType === SendMessageType.Retry) {
-      this.stripOrphanedUserEntriesFromHistory();
+      strippedRetryEntries = this.stripOrphanedUserEntriesFromHistory() ?? [];
+      pushCountAfterStrip = currentPushCount();
       // The matching dangling-`functionCall` repair runs inside
       // `chat.sendMessageStream` AFTER the user content is pushed, so any
       // tool_result the user is supplying (Retry of a ToolResult
@@ -1772,7 +1946,10 @@ export class GeminiClient {
         messageType === SendMessageType.UserQuery ||
         messageType === SendMessageType.Cron
       ) {
-        if (this.config.getManagedAutoMemoryEnabled()) {
+        if (
+          this.config.isManagedMemoryAvailable() &&
+          this.config.getManagedAutoMemoryEnabled()
+        ) {
           // A previous recall may still be pending (slow side-query, new user
           // turn arrived before it settled). Abort it before installing the
           // new handle so the orphan doesn't keep running indefinitely.
@@ -2011,8 +2188,21 @@ export class GeminiClient {
         (messageType === SendMessageType.UserQuery ||
           messageType === SendMessageType.Cron)
       ) {
-        this.drainPendingAddedMcpToolsReminder();
-        await this.drainSkillAndCommandReminders();
+        try {
+          this.drainPendingAddedMcpToolsReminder();
+        } catch (error) {
+          debugLogger.warn('drainPendingAddedMcpToolsReminder failed', error);
+        }
+        try {
+          await this.drainSkillAndCommandReminders();
+        } catch (error) {
+          debugLogger.warn('drainSkillAndCommandReminders failed', error);
+        }
+        try {
+          await this.drainAgentReminders();
+        } catch (error) {
+          debugLogger.warn('drainAgentReminders failed', error);
+        }
       }
 
       const turn = new Turn(this.getChat(), prompt_id);
@@ -2055,7 +2245,12 @@ export class GeminiClient {
         // add plan mode system reminder if approval mode is plan
         if (this.config.getApprovalMode() === ApprovalMode.PLAN) {
           systemReminders.push(
-            getPlanModeSystemReminder(this.config.getSdkMode()),
+            // SDK clients do not receive the interactive exit-plan flow, so
+            // they need plan-only guidance even outside subagent contexts.
+            getPlanModeSystemReminder(
+              shouldUsePlanOnlyReminderInSubagentContext() ||
+                this.config.getSdkMode(),
+            ),
           );
         }
 
@@ -2142,9 +2337,10 @@ export class GeminiClient {
           didUpdateIdeContextState = true;
         }
 
-        // Always-on safety checks (consecutive-identical tool-call guard +
-        // per-turn tool-call cap). These fire before the skipLoopDetection
-        // gate so they cannot be bypassed by configuration.
+        // Always-on safety checks (consecutive-identical tool-call guard,
+        // shell inspection stagnation, and per-turn tool-call cap). These fire
+        // before the skipLoopDetection gate so they cannot be bypassed by
+        // configuration.
         const alwaysOnLoop = this.loopDetector.checkAlwaysOnSafeties(event);
         if (alwaysOnLoop) {
           // Drop every tool call collected before the guard fired so the run
@@ -2174,9 +2370,10 @@ export class GeminiClient {
         // interruptions. Only the historically false-positive-prone heuristics
         // (content/thought repetition, read-file and action stagnation,
         // global-duplicate and alternating tool-call patterns) sit behind this
-        // flag. The precise consecutive-identical guard and the per-turn cap
-        // run unconditionally in checkAlwaysOnSafeties above, so the documented
-        // escape hatch only relaxes the heuristics (see nonInteractiveCli.ts).
+        // flag. The precise consecutive-identical guard, shell inspection
+        // stagnation guard, and per-turn cap run unconditionally in
+        // checkAlwaysOnSafeties above, so the documented escape hatch only
+        // relaxes the heuristics (see nonInteractiveCli.ts).
         const skipLoopDetection = this.config.getSkipLoopDetection();
         const heuristicLoop =
           !skipLoopDetection &&
@@ -2280,6 +2477,12 @@ export class GeminiClient {
         const responseText =
           this.getLastModelMessageText() || '[no response text]';
 
+        const contextUsage = buildContextUsage(
+          this.config.getContentGeneratorConfig()?.contextWindowSize ??
+            DEFAULT_TOKEN_LIMIT,
+          uiTelemetryService.getLastPromptTokenCount(),
+        );
+
         const response = await messageBus.request<
           HookExecutionRequest,
           HookExecutionResponse
@@ -2290,6 +2493,7 @@ export class GeminiClient {
             input: {
               stop_hook_active: true,
               last_assistant_message: responseText,
+              ...contextUsage,
             },
             signal,
           },
@@ -2402,6 +2606,18 @@ export class GeminiClient {
               stopHookCount: response.stopHookCount ?? 1,
             },
           };
+
+          // A blocking Stop hook (e.g. /goal) feeds a fresh user-role prompt
+          // back to the model, starting a new logical turn — reset per-turn
+          // loop accounting so each continuation gets its own tool-call
+          // budget. Without this, a goal chain accumulates every iteration's
+          // tool calls into one "turn" and trips TURN_TOOL_CALL_CAP after a
+          // handful of healthy iterations. The ACP daemon path already has
+          // these semantics (fresh DaemonToolLoopState per continuation).
+          // Runaway protection is preserved: the cap still bounds each
+          // iteration, and the chain itself is bounded by
+          // stopHookBlockingCap / MAX_GOAL_ITERATIONS.
+          this.loopDetector.reset(prompt_id);
 
           const continueRequest = [{ text: continueReason }];
           const activeGoal = getActiveGoal(this.config.getSessionId());
@@ -2521,6 +2737,7 @@ export class GeminiClient {
       normalCompletion = true;
       return turn;
     } finally {
+      restoreStrippedRetryEntries();
       // Belt-and-suspenders: abort the prefetch on any exit other than the
       // bottom-of-try `return turn`. Catches uncaught exceptions and guards
       // against future early-return sites that forget to call cancel.
@@ -2645,14 +2862,33 @@ export class GeminiClient {
     signal?: AbortSignal,
     customInstructions?: string,
   ): Promise<ChatCompressionInfo> {
+    // Compute reservedOutputTokens using the same fallback logic as
+    // GeminiChat.sendMessageStream so the cheap-gate thresholds align with
+    // the real available input budget (issue #5950).
+    const cgConfig = this.config.getContentGeneratorConfig();
+    const model = this.config.getModel();
+    const parsedEnvMaxTokens = parsePositiveIntegerEnvValue(
+      process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
+    );
+    const hasUserMaxTokensOverride =
+      (cgConfig?.samplingParams?.max_tokens !== undefined &&
+        cgConfig?.samplingParams?.max_tokens !== null) ||
+      parsedEnvMaxTokens !== undefined;
+    const reservedOutputTokens: number = hasUserMaxTokensOverride
+      ? (cgConfig?.samplingParams?.max_tokens ?? parsedEnvMaxTokens ?? 0)
+      : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output'));
+
     const previousSessionStartContext = this.lastSessionStartContext;
     const previousSessionStartSource = this.lastSessionStartSource;
     const info = await this.getChat().tryCompress(
       prompt_id,
-      this.config.getModel(),
+      model,
       force,
       signal,
-      customInstructions ? { customInstructions } : undefined,
+      {
+        ...(customInstructions ? { customInstructions } : undefined),
+        reservedOutputTokens,
+      },
     );
     if (info.compressionStatus === CompressionStatus.COMPRESSED) {
       const chat = this.getChat();

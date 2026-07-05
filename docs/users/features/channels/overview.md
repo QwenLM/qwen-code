@@ -47,24 +47,25 @@ Channels are configured under the `channels` key in `settings.json`. Each channe
 
 ### Options
 
-| Option                   | Required | Description                                                                                                                                    |
-| ------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
-| `type`                   | Yes      | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `feishu`, or a custom type from an extension (see [Plugins](./plugins))                  |
-| `token`                  | Telegram | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat or DingTalk                                    |
-| `clientId`               | DingTalk | DingTalk AppKey. Supports `$ENV_VAR` syntax                                                                                                    |
-| `clientSecret`           | DingTalk | DingTalk AppSecret. Supports `$ENV_VAR` syntax                                                                                                 |
-| `model`                  | No       | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input       |
-| `senderPolicy`           | No       | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                           |
-| `allowedUsers`           | No       | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                           |
-| `sessionScope`           | No       | How sessions are scoped: `user` (default), `thread`, or `single`                                                                               |
-| `cwd`                    | No       | Working directory for the agent. Defaults to the current directory                                                                             |
-| `instructions`           | No       | Custom instructions prepended to the first message of each session                                                                             |
-| `groupPolicy`            | No       | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                               |
-| `groups`                 | No       | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                             |
-| `dispatchMode`           | No       | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes) |
-| `blockStreaming`         | No       | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                |
-| `blockStreamingChunk`    | No       | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                            |
-| `blockStreamingCoalesce` | No       | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                      |
+| Option                   | Required | Description                                                                                                                                                            |
+| ------------------------ | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `type`                   | Yes      | Channel type: `telegram`, `weixin`, `qq`, `dingtalk`, `feishu`, or a custom type from an extension (see [Plugins](./plugins))                                          |
+| `token`                  | Telegram | Bot token. Supports `$ENV_VAR` syntax to read from environment variables. Not needed for WeChat or DingTalk                                                            |
+| `clientId`               | DingTalk | DingTalk AppKey. Supports `$ENV_VAR` syntax                                                                                                                            |
+| `clientSecret`           | DingTalk | DingTalk AppSecret. Supports `$ENV_VAR` syntax                                                                                                                         |
+| `model`                  | No       | Model to use for this channel (e.g., `qwen3.5-plus`). Overrides the default model. Useful for multimodal models that support image input                               |
+| `senderPolicy`           | No       | Who can talk to the bot: `allowlist` (default), `open`, or `pairing`                                                                                                   |
+| `allowedUsers`           | No       | List of user IDs allowed to use the bot (used by `allowlist` and `pairing` policies)                                                                                   |
+| `sessionScope`           | No       | How sessions are scoped: `user` (default), `thread`, or `single`                                                                                                       |
+| `cwd`                    | No       | Working directory for the agent. Defaults to the current directory                                                                                                     |
+| `instructions`           | No       | Custom instructions prepended to the first message of each session                                                                                                     |
+| `groupPolicy`            | No       | Group chat access: `disabled` (default), `allowlist`, or `open`. See [Group Chats](#group-chats)                                                                       |
+| `groupHistoryLimit`      | No       | Opt-in group history backfill. `0` or omitted disables it. A positive number persists that many authorized, unmentioned group messages for the next bot mention/reply. |
+| `groups`                 | No       | Per-group settings. Keys are group chat IDs or `"*"` for defaults. See [Group Chats](#group-chats)                                                                     |
+| `dispatchMode`           | No       | What happens when you send a message while the bot is busy: `steer` (default), `collect`, or `followup`. See [Dispatch Modes](#dispatch-modes)                         |
+| `blockStreaming`         | No       | Progressive response delivery: `on` or `off` (default). See [Block Streaming](#block-streaming)                                                                        |
+| `blockStreamingChunk`    | No       | Chunk size bounds: `{ "minChars": 400, "maxChars": 1000 }`. See [Block Streaming](#block-streaming)                                                                    |
+| `blockStreamingCoalesce` | No       | Idle flush: `{ "idleMs": 1500 }`. See [Block Streaming](#block-streaming)                                                                                              |
 
 ### Sender Policy
 
@@ -81,6 +82,18 @@ Controls how conversation sessions are managed:
 - **`user`** (default) — One session per user. All messages from the same user share a conversation.
 - **`thread`** — One session per thread/topic. Useful for group chats with threads.
 - **`single`** — One shared session for all users. Everyone shares the same conversation.
+
+### Channel Memory
+
+Channel memory lets an authorized channel member save stable context for one chat or thread. Qwen Code injects that memory when a fresh channel session starts, including after `/clear`.
+
+Commands:
+
+- `/remember-channel <text>` saves a memory line for the current chat or thread.
+- `/channel-memory` shows saved memory for the current chat or thread.
+- `/forget-channel confirm` clears saved memory for the current chat or thread.
+
+Only users listed in `allowedUsers` can read, write, or clear channel memory. If `allowedUsers` is empty, channel memory commands are disabled for everyone.
 
 ### Token Security
 
@@ -157,6 +170,38 @@ Configure per-group with the `groups` setting:
 - **`"*"`** — Default settings for all groups. Only sets config defaults, not an allowlist entry.
 - **Group chat ID** — Override settings for a specific group. Overrides `"*"` defaults.
 - **`requireMention`** (default: `true`) — When `true`, the bot only responds to messages that @mention it or reply to one of its messages. When `false`, the bot responds to all messages (useful for dedicated task groups).
+
+### Group History Backfill
+
+By default, Qwen ignores unmentioned group messages and does not store them as session turns. To let the next `@mention` include recent group context, set `groupHistoryLimit` to a positive number.
+
+```json
+{
+  "channels": {
+    "my-dingtalk": {
+      "type": "dingtalk",
+      "clientId": "$DINGTALK_CLIENT_ID",
+      "clientSecret": "$DINGTALK_CLIENT_SECRET",
+      "groupPolicy": "open",
+      "groupHistoryLimit": 50,
+      "groups": {
+        "*": { "requireMention": true },
+        "sensitive-group-id": {
+          "requireMention": true,
+          "groupHistoryLimit": 0
+        }
+      }
+    }
+  }
+}
+```
+
+- Omitted or `0` disables backfill.
+- Group-level `groupHistoryLimit` overrides the channel-level value.
+- Only messages from authorized senders are persisted.
+- Messages rejected by `groupPolicy` or group allowlist are not persisted.
+- Pending group history is stored as local JSONL under `~/.qwen/channels/<channel-name>-group-history.jsonl` or `$QWEN_HOME/channels/<channel-name>-group-history.jsonl`.
+- Cached messages are injected as untrusted context on the next real trigger and are not written as standalone session turns.
 
 ### How group messages are evaluated
 
@@ -311,6 +356,24 @@ qwen channel stop
 ```
 
 The bot runs in the foreground. Press `Ctrl+C` to stop, or use `qwen channel stop` from another terminal.
+
+### Experimental Daemon-Managed Mode
+
+You can also run configured channels under `qwen serve`:
+
+```bash
+# Start one channel under the daemon lifecycle
+qwen serve --channel my-channel
+
+# Start all configured channels
+qwen serve --channel all
+```
+
+This mode starts one channel worker process owned by `qwen serve`. The worker connects back to the daemon through the SDK and uses the same channel adapters. It is separate from the daemon process, so a channel adapter crash does not crash the daemon.
+
+`qwen serve --channel` is not the same service as `qwen channel start`. Standalone `qwen channel start` still uses the ACP-backed channel service and can run channel configs with different `cwd` values. Daemon-managed channels require every selected channel's `cwd` to resolve to the daemon workspace.
+
+When channels are serve-managed, `qwen channel status` shows the owner as `qwen serve`, and `qwen channel stop` tells you to stop the daemon instead of signaling the worker directly. If a ready worker exits unexpectedly, the daemon continues running and reports a channel-worker warning in `/daemon/status`.
 
 ### Multi-Channel Mode
 

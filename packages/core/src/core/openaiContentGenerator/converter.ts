@@ -332,7 +332,7 @@ export async function convertGeminiToolsToOpenAI(
 
     if (actualTool.functionDeclarations) {
       for (const func of actualTool.functionDeclarations) {
-        if (func.name && func.description) {
+        if (func.name) {
           let parameters: Record<string, unknown> | undefined;
 
           // Handle both Gemini tools (parameters) and MCP tools (parametersJsonSchema)
@@ -358,7 +358,7 @@ export async function convertGeminiToolsToOpenAI(
             type: 'function',
             function: {
               name: func.name,
-              description: func.description,
+              description: func.description ?? '',
               parameters,
             },
           });
@@ -1716,6 +1716,24 @@ function mergeConsecutiveAssistantMessages(
               tool_calls?: OpenAI.Chat.ChatCompletionMessageToolCall[];
             }
           ).tool_calls = combinedToolCalls;
+        }
+
+        // Combine reasoning_content the same way content is combined. Otherwise
+        // the merged-away turn's reasoning is silently dropped, while
+        // cleanOrphanedToolCalls (which also merges assistant turns) keeps it.
+        const lastReasoning = (
+          lastMessage as ExtendedChatCompletionAssistantMessageParam
+        ).reasoning_content;
+        const currentReasoning = (
+          message as ExtendedChatCompletionAssistantMessageParam
+        ).reasoning_content;
+        const combinedReasoning = [lastReasoning, currentReasoning]
+          .filter(Boolean)
+          .join('');
+        if (combinedReasoning) {
+          (
+            lastMessage as ExtendedChatCompletionAssistantMessageParam
+          ).reasoning_content = combinedReasoning;
         }
 
         continue; // Skip adding the current message since it's been merged

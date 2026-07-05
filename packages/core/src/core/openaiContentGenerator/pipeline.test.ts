@@ -21,7 +21,11 @@ import { StreamingToolCallParser } from './streamingToolCallParser.js';
 import type { Config } from '../../config/config.js';
 import { AuthType, type ContentGeneratorConfig } from '../contentGenerator.js';
 import type { OpenAICompatibleProvider } from './provider/index.js';
-import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './constants.js';
+import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  MAX_STREAM_IDLE_TIMEOUT_MS,
+  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+} from './constants.js';
 
 // Mock dependencies
 vi.mock('./converter.js', () => ({
@@ -1102,6 +1106,141 @@ describe('ContentGenerationPipeline', () => {
       const apiCall = (mockClient.chat.completions.create as Mock).mock
         .calls[0][0];
       expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('disables qwen thinking via chat_template_kwargs on a non-DashScope endpoint (vLLM/SGLang)', async () => {
+      // Self-hosted OpenAI-compatible servers render the chat template
+      // server-side and read the thinking switch from `chat_template_kwargs`,
+      // silently ignoring a top-level `enable_thinking`. A qwen model on such
+      // an endpoint must therefore get the switch nested, not top-level — and
+      // any top-level `enable_thinking: true` a provider preset injected via
+      // extra_body must be stripped so it can't contradict the opt-out.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://llm.example.com/v1',
+        model: 'Qwen3.6-27B',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        enable_thinking: true, // Simulates extra_body injection
+      }));
+
+      const request: GenerateContentParameters = {
+        model: 'Qwen3.6-27B',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.chat_template_kwargs).toEqual({ enable_thinking: false });
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('disables coder-model thinking via chat_template_kwargs on a non-DashScope endpoint', async () => {
+      // `coder-model` is the QWEN_OAUTH default, but a user can point it at a
+      // self-hosted endpoint. The `model === 'coder-model'` arm must reach the
+      // non-DashScope chat_template_kwargs path just like a `qwen*` model.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://llm.example.com/v1',
+        model: 'coder-model',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      const request: GenerateContentParameters = {
+        model: 'coder-model',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.chat_template_kwargs).toEqual({ enable_thinking: false });
+      expect(apiCall.enable_thinking).toBeUndefined();
+    });
+
+    it('merges enable_thinking into pre-existing chat_template_kwargs on a non-DashScope endpoint', async () => {
+      // The non-DashScope path spreads any existing `chat_template_kwargs`
+      // before appending `enable_thinking: false`. Guard the merge so a future
+      // refactor can't silently drop user-configured kwargs.
+      mockContentGeneratorConfig = {
+        ...mockContentGeneratorConfig,
+        baseUrl: 'https://llm.example.com/v1',
+        model: 'Qwen3.6-27B',
+      } as ContentGeneratorConfig;
+      mockConfig = {
+        ...mockConfig,
+        contentGeneratorConfig: mockContentGeneratorConfig,
+      };
+      pipeline = new ContentGenerationPipeline(mockConfig);
+
+      (mockProvider.buildRequest as Mock).mockImplementation((req) => ({
+        ...req,
+        chat_template_kwargs: { apply_chat_template: true },
+      }));
+
+      const request: GenerateContentParameters = {
+        model: 'Qwen3.6-27B',
+        contents: [{ parts: [{ text: 'Suggest' }], role: 'user' }],
+        config: { thinkingConfig: { includeThoughts: false } },
+      };
+
+      (mockConverter.convertGeminiRequestToOpenAI as Mock).mockReturnValue([
+        { role: 'user', content: 'Suggest' },
+      ]);
+      (mockConverter.convertOpenAIResponseToGemini as Mock).mockReturnValue(
+        new GenerateContentResponse(),
+      );
+      (mockClient.chat.completions.create as Mock).mockResolvedValue({
+        id: 'r',
+        choices: [{ message: { content: 'ok' }, finish_reason: 'stop' }],
+      } as OpenAI.Chat.ChatCompletion);
+
+      await pipeline.execute(request, 'forked_query');
+
+      const apiCall = (mockClient.chat.completions.create as Mock).mock
+        .calls[0][0];
+      expect(apiCall.chat_template_kwargs).toEqual({
+        apply_chat_template: true,
+        enable_thinking: false,
+      });
     });
 
     it('does NOT emit enable_thinking on a non-qwen model routed through DashScope', async () => {
@@ -3075,10 +3214,15 @@ describe('ContentGenerationPipeline', () => {
           return r;
         },
       );
+      // Clean baseline: ignore any ambient QWEN_STREAM_IDLE_TIMEOUT_MS from the
+      // dev/CI shell so the default-timeout tests aren't silently overridden.
+      // Env-specific tests re-stub it; afterEach unstubs everything.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, undefined);
       vi.useFakeTimers();
     });
     afterEach(() => {
       vi.useRealTimers();
+      vi.unstubAllEnvs();
     });
 
     it('aborts and throws ETIMEDOUT when the stream is silent past the idle timeout', async () => {
@@ -3101,13 +3245,38 @@ describe('ContentGenerationPipeline', () => {
       const err = await captured;
       expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
       expect((err as Error).message).toBe(
-        'No stream activity for 1000ms after 0 chunks (stream lifetime: 1000ms)',
+        'No stream activity for 1000ms after 0 chunks ' +
+          '(stream lifetime: 1000ms). Set QWEN_STREAM_IDLE_TIMEOUT_MS ' +
+          'to increase this window (or 0 to disable it).',
       );
       expect(err).toMatchObject({ code: 'ETIMEDOUT' });
       expect((err as StreamInactivityTimeoutError).chunksReceived).toBe(0);
       expect((err as StreamInactivityTimeoutError).streamLifetimeMs).toBe(1000);
       expect(gated.wasReturned()).toBe(true);
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('includes the idle detail and env override hint in timeout errors', async () => {
+      const gated = gatedStream(); // never push/end → silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(1000);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      const captured = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch((e: unknown) => e);
+      await vi.advanceTimersByTimeAsync(1000);
+      const err = await captured;
+      expect(err).toBeInstanceOf(StreamInactivityTimeoutError);
+      const message = (err as Error).message;
+      expect(message).toContain('No stream activity for 1000ms after 0 chunks');
+      expect(message).toContain('QWEN_STREAM_IDLE_TIMEOUT_MS');
     });
 
     it('uses the default stream idle timeout when no override is configured', async () => {
@@ -3421,6 +3590,264 @@ describe('ContentGenerationPipeline', () => {
       expect(gated.wasReturned()).toBe(true);
       // Proves the bypass: the handler (which would strip the code) is skipped.
       expect(mockErrorHandler.handle).not.toHaveBeenCalled();
+    });
+
+    it('honors QWEN_STREAM_IDLE_TIMEOUT_MS when no explicit config is set', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '3000');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no explicit streamIdleTimeoutMs → env applies
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(2999);
+      expect(settled).toBe(false); // not yet at the env value
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // tripped at 3000ms from the env
+    });
+
+    it('lets an explicit streamIdleTimeoutMs config take precedence over the env', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '1000');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(5000); // config 5000 wins over env 1000
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(1000); // env value — must NOT trip
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(4000); // reach the config value (5000)
+      await consume;
+      expect(settled).toBe(true);
+    });
+
+    it('ignores a malformed QWEN_STREAM_IDLE_TIMEOUT_MS and falls back to the default', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, 'not-a-number');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; invalid env → default
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      // The effective timeout must be the default: not tripped just before it
+      // (so a malformed value did not become 0/NaN and fire immediately), and
+      // tripped exactly at it (so the default — not some other value — is used).
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true);
+    });
+
+    it('ignores an oversized QWEN_STREAM_IDLE_TIMEOUT_MS (beyond the timer ceiling)', async () => {
+      // A value above the JS timer ceiling must be rejected (fall back to the
+      // default), not used verbatim. If it were used, the watchdog would be
+      // scheduled ~24.8 days out, so advancing only to the default would never
+      // trip it — asserting it trips AT the default proves the value was
+      // rejected. (In real Node such a delay is silently compressed to 1ms,
+      // which would make the watchdog fire almost immediately.)
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '9999999999');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; oversized env → default
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false); // not before the default → not used verbatim
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at the default
+    });
+
+    it('rejects a non-decimal QWEN_STREAM_IDLE_TIMEOUT_MS (hex/scientific) and uses the default', async () => {
+      // Number('0x10') === 16; a strict decimal-integer check must reject it so
+      // a typo can't silently become a 16ms timeout.
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '0x10');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; non-decimal env → default
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false); // would have tripped at 16ms if '0x10' parsed
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at the default
+    });
+
+    it('rejects an out-of-range config streamIdleTimeoutMs and falls back', async () => {
+      // A config value above the timer ceiling would overflow setTimeout; it
+      // must be rejected (fall back to env/default), not used verbatim.
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1); // oversized config
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS - 1);
+      expect(settled).toBe(false);
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at the default (config rejected)
+    });
+
+    it('accepts the exact MAX_STREAM_IDLE_TIMEOUT_MS boundary value', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      // The exact ceiling must be accepted (not rejected as out-of-range).
+      // Guards against an off-by-one changing `<=` to `<`.
+      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      // Must NOT trip at the default (which would mean the ceiling was rejected).
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
+    });
+
+    it('falls back from an invalid config to the env value (config→env cascade)', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '4000');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      // Config is oversized → rejected; env = 4000 → used (not default).
+      const p = buildPipeline(MAX_STREAM_IDLE_TIMEOUT_MS + 1);
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().catch(() => (settled = true));
+      await vi.advanceTimersByTimeAsync(3999);
+      expect(settled).toBe(false); // not yet at the env value
+      await vi.advanceTimersByTimeAsync(1);
+      await consume;
+      expect(settled).toBe(true); // trips at 4000ms from the env (not default)
+    });
+
+    it('disables the watchdog when QWEN_STREAM_IDLE_TIMEOUT_MS=0', async () => {
+      vi.stubEnv(QWEN_STREAM_IDLE_TIMEOUT_MS_ENV, '0');
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(); // no config; env=0 → disabled
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      // Well past the default — must NOT trip (watchdog disabled).
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS + 60000);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
+    });
+
+    it('disables the watchdog with a negative config value', async () => {
+      const gated = gatedStream(); // silent
+      (mockClient.chat.completions.create as Mock).mockResolvedValue(
+        gated.stream,
+      );
+      const p = buildPipeline(-1); // negative → disabled (idleMs > 0 guard)
+      const gen = await p.executeStream(
+        streamingRequest(new AbortController().signal),
+        'id',
+      );
+      let settled = false;
+      const consume = (async () => {
+        for await (const _ of gen) {
+          /* drain */
+        }
+      })().then(
+        () => (settled = true),
+        () => (settled = true),
+      );
+      await vi.advanceTimersByTimeAsync(DEFAULT_STREAM_IDLE_TIMEOUT_MS + 60000);
+      expect(settled).toBe(false);
+      gated.end();
+      await consume;
     });
   });
 });

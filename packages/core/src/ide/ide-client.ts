@@ -75,6 +75,11 @@ type ParsedConnectionLockFile = {
   parsed: IdeConnectionConfig;
 };
 
+type LegacyConnectionConfigResult = {
+  config: IdeConnectionConfig;
+  source: 'pid' | 'env-port';
+};
+
 function getRealPath(path: string): string {
   try {
     return fs.realpathSync(path);
@@ -97,6 +102,7 @@ export class IdeClient {
   private currentIde: IdeInfo | undefined;
   private ideProcessInfo: { pid: number; command: string } | undefined;
   private connectionConfig: IdeConnectionConfig | undefined;
+  private workspaceRejectedPorts = new Set<string>();
   private authToken: string | undefined;
   private diffResponses = new Map<string, (result: DiffUpdateResult) => void>();
   private statusListeners = new Set<(state: IDEConnectionState) => void>();
@@ -197,7 +203,7 @@ export class IdeClient {
     }
 
     const portFromEnv = this.getPortFromEnv();
-    if (portFromEnv) {
+    if (portFromEnv && !this.workspaceRejectedPorts.has(portFromEnv)) {
       const connected = await this.establishHttpConnection(portFromEnv);
       if (connected) {
         return;
@@ -210,6 +216,15 @@ export class IdeClient {
       if (connected) {
         return;
       }
+    }
+
+    if (this.workspaceRejectedPorts.size > 0) {
+      this.setState(
+        IDEConnectionStatus.Disconnected,
+        `Found IDE companion extension, but its workspace does not match the current directory. Run Qwen Code from the workspace open in your IDE, or switch the IDE to this project.`,
+        true,
+      );
+      return;
     }
 
     this.setState(
@@ -543,6 +558,16 @@ export class IdeClient {
     return { isValid: true };
   }
 
+  private static matchesCurrentWorkspace(
+    config: IdeConnectionConfig,
+    cwd: string,
+  ): boolean {
+    return (
+      config.workspacePath === undefined ||
+      IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid
+    );
+  }
+
   private getPortFromEnv(): string | undefined {
     const port = process.env['QWEN_CODE_IDE_SERVER_PORT'];
     if (!port || !/^\d+$/.test(port)) {
@@ -589,39 +614,66 @@ export class IdeClient {
   private async getConnectionConfigFromFile(): Promise<
     IdeConnectionConfig | undefined
   > {
+    this.workspaceRejectedPorts.clear();
     const portFromEnv = this.getPortFromEnv();
+    const cwd = process.cwd();
 
     if (portFromEnv) {
       try {
         const ideDir = Storage.getGlobalIdeDir();
         const lockFile = path.join(ideDir, `${portFromEnv}.lock`);
         const lockFileContents = await fs.promises.readFile(lockFile, 'utf8');
-        return JSON.parse(lockFileContents);
+        const config = JSON.parse(lockFileContents) as IdeConnectionConfig;
+        if (IdeClient.matchesCurrentWorkspace(config, cwd)) {
+          return config;
+        }
+        this.workspaceRejectedPorts.add(config.port ?? portFromEnv);
+        debugLogger.debug(
+          `Ignoring IDE env lock file: workspace "${config.workspacePath}" does not match cwd "${cwd}".`,
+        );
       } catch (_) {
         // Fall through to legacy discovery.
       }
     }
 
     // Legacy discovery for VSCode extension < v0.5.1.
-    const legacyConfig = await this.getLegacyConnectionConfig(portFromEnv);
-    if (legacyConfig) {
-      return legacyConfig;
+    const legacyResult = await this.getLegacyConnectionConfig(portFromEnv);
+    if (legacyResult) {
+      const legacyConfig = legacyResult.config;
+      if (IdeClient.matchesCurrentWorkspace(legacyConfig, cwd)) {
+        return legacyConfig;
+      }
+      if (legacyConfig.port) {
+        this.workspaceRejectedPorts.add(legacyConfig.port);
+      }
+      if (legacyResult.source === 'env-port' && portFromEnv) {
+        this.workspaceRejectedPorts.add(portFromEnv);
+      }
+      debugLogger.debug(
+        `Ignoring legacy IDE connection config: workspace "${legacyConfig.workspacePath}" does not match cwd "${cwd}".`,
+      );
     }
 
     const ideDir = Storage.getGlobalIdeDir();
     const configs = await this.getAllConnectionConfigs(ideDir);
-    const cwd = process.cwd();
-    return configs.find(
-      (config) =>
-        config.workspacePath !== undefined &&
-        IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid,
-    );
+    for (const config of configs) {
+      if (config.workspacePath === undefined) {
+        continue;
+      }
+      if (IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid) {
+        return config;
+      }
+      if (config.port) {
+        this.workspaceRejectedPorts.add(config.port);
+      }
+    }
+    return undefined;
   }
 
   // Legacy connection files were written in the global temp directory.
   private async getLegacyConnectionConfig(
     portFromEnv?: string,
-  ): Promise<IdeConnectionConfig | undefined> {
+  ): Promise<LegacyConnectionConfigResult | undefined> {
     if (this.ideProcessInfo) {
       try {
         const portFile = path.join(
@@ -629,7 +681,10 @@ export class IdeClient {
           `qwen-code-ide-server-${this.ideProcessInfo.pid}.json`,
         );
         const portFileContents = await fs.promises.readFile(portFile, 'utf8');
-        return JSON.parse(portFileContents);
+        return {
+          config: JSON.parse(portFileContents) as IdeConnectionConfig,
+          source: 'pid',
+        };
       } catch (_) {
         // For older/newer extension versions, the file name matches the pattern
         // /^qwen-code-ide-server-${pid}-\d+\.json$/. If multiple IDE
@@ -645,7 +700,10 @@ export class IdeClient {
           `qwen-code-ide-server-${portFromEnv}.json`,
         );
         const portFileContents = await fs.promises.readFile(portFile, 'utf8');
-        return JSON.parse(portFileContents);
+        return {
+          config: JSON.parse(portFileContents) as IdeConnectionConfig,
+          source: 'env-port',
+        };
       } catch (_) {
         // Ignore and fall through.
       }
@@ -772,13 +830,13 @@ export class IdeClient {
         continue;
       }
 
-      if (
-        config.workspacePath !== undefined &&
+      if (config.workspacePath === undefined) {
+        // Fallback keeps old extension locks usable after a stale primary port fails.
+        otherConfigs.push(config);
+      } else if (
         IdeClient.validateWorkspacePath(config.workspacePath, cwd).isValid
       ) {
         workspaceMatches.push(config);
-      } else {
-        otherConfigs.push(config);
       }
     }
 

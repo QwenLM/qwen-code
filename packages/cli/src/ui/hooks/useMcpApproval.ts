@@ -10,9 +10,10 @@ import type {
   MCPServerConfig,
   McpServerScope,
 } from '@qwen-code/qwen-code-core';
-import { isGatedMcpScope } from '@qwen-code/qwen-code-core';
+import { ApprovalMode, isGatedMcpScope } from '@qwen-code/qwen-code-core';
 import { loadMcpApprovals } from '../../config/mcpApprovals.js';
 import { McpApprovalChoice } from '../components/mcp/MCPServerApprovalDialog.js';
+import { appEvents, AppEvent } from '../../utils/events.js';
 
 export interface PendingMcpServer {
   name: string;
@@ -74,11 +75,15 @@ function summarize(config: MCPServerConfig): string {
 export const useMcpApproval = (config: Config) => {
   const [queue, setQueue] = useState<PendingMcpServer[]>([]);
 
-  useEffect(() => {
+  // Recompute the pending-approval queue from the authoritative sources (the
+  // live server map + persisted approvals). Reused for both the initial mount
+  // and mid-session recomputes triggered by a settings hot-reload.
+  const computePending = useCallback((): PendingMcpServer[] => {
+    if (config.getApprovalMode() === ApprovalMode.YOLO) return [];
     const servers = config.getMcpServers() ?? {};
     const approvals = loadMcpApprovals();
     const root = config.getWorkingDir();
-    const pending: PendingMcpServer[] = Object.entries(servers)
+    return Object.entries(servers)
       .filter(([, c]) => isGatedMcpScope(c.scope))
       .filter(([name, c]) => approvals.getState(root, name, c) === 'pending')
       .map(([name, c]) => ({
@@ -87,8 +92,27 @@ export const useMcpApproval = (config: Config) => {
         summary: summarize(c),
         source: sourceLabel(c.scope),
       }));
-    setQueue(pending);
   }, [config]);
+
+  // Initial queue at startup.
+  useEffect(() => {
+    setQueue(computePending());
+  }, [computePending]);
+
+  // A hot-reload may push a gated server into `pending` mid-session (e.g. an
+  // edit invalidated its hash-bound approval). Re-evaluate so the dialog pops
+  // immediately instead of only at startup. Servers the user has since
+  // approved/rejected are filtered out by `computePending` reading the
+  // persisted file, so this never re-prompts a settled decision. See #4615.
+  useEffect(() => {
+    const onPendingChanged = () => {
+      setQueue(computePending());
+    };
+    appEvents.on(AppEvent.McpPendingApprovalChanged, onPendingChanged);
+    return () => {
+      appEvents.off(AppEvent.McpPendingApprovalChanged, onPendingChanged);
+    };
+  }, [computePending]);
 
   const reconnect = useCallback(
     (name: string) => {

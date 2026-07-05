@@ -119,6 +119,7 @@ import { useSettingsCommand } from './hooks/useSettingsCommand.js';
 import { useModelCommand } from './hooks/useModelCommand.js';
 import { useArenaCommand } from './hooks/useArenaCommand.js';
 import { useApprovalModeCommand } from './hooks/useApprovalModeCommand.js';
+import { useEffortCommand } from './hooks/use-effort-command.js';
 import { useBranchCommand } from './hooks/useBranchCommand.js';
 import { useResumeCommand } from './hooks/useResumeCommand.js';
 import { useDeleteCommand } from './hooks/useDeleteCommand.js';
@@ -208,6 +209,7 @@ import {
   useBackgroundTaskViewState,
   useBackgroundTaskViewActions,
 } from './contexts/BackgroundTaskViewContext.js';
+import { getLiveAgentPanelLayoutKey } from './components/background-view/liveAgentPanelVisibility.js';
 import { t } from '../i18n/index.js';
 import { useWelcomeBack } from './hooks/useWelcomeBack.js';
 import { useDialogClose } from './hooks/useDialogClose.js';
@@ -628,10 +630,13 @@ export const AppContainer = (props: AppContainerProps) => {
         const rawItems = buildResumedHistoryItems(resumedSessionData, config);
         const collapseOnResume =
           settings.merged.ui?.history?.collapseOnResume ?? false;
+        const collapsePreviewCount =
+          settings.merged.ui?.history?.collapsePreviewCount ?? 0;
 
         const historyItems = applyCollapsePolicyAndSummary(
           rawItems,
           collapseOnResume,
+          collapsePreviewCount,
         );
         historyManager.loadHistory(historyItems);
 
@@ -870,6 +875,12 @@ export const AppContainer = (props: AppContainerProps) => {
   // Note: isIdleRef.current is assigned after streamingState becomes available
   // (see the assignment below useGeminiStream).
   const isIdleRef = useRef(true);
+  // Live content-area height, kept in a ref so useGeminiStream (called above the
+  // point where availableTerminalHeight is computed) can read the current value
+  // when bounding the pending item's rendered height. terminalWidthRef pairs
+  // with it so the commit loop reads width and height consistently (both live).
+  const availableTerminalHeightRef = useRef(0);
+  const terminalWidthRef = useRef(0);
   const updateHandlerRef = useRef<{
     cleanup: () => void;
     flush: () => void;
@@ -1016,6 +1027,9 @@ export const AppContainer = (props: AppContainerProps) => {
     handleApprovalModeSelect,
   } = useApprovalModeCommand(settings, config);
 
+  const { isEffortDialogOpen, openEffortDialog, handleEffortSelect } =
+    useEffortCommand(settings, config, historyManager.addItem);
+
   const auth = useAuthCommand(
     settings,
     config,
@@ -1095,6 +1109,7 @@ export const AppContainer = (props: AppContainerProps) => {
     isModelDialogOpen,
     isFastModelMode,
     isVoiceModelMode,
+    isVisionModelMode,
     openModelDialog,
     closeModelDialog,
   } = useModelCommand();
@@ -1209,6 +1224,99 @@ export const AppContainer = (props: AppContainerProps) => {
     setIsDiffDialogOpen(false);
   }, []);
 
+  // Skill-review dialog: confirms auto-generated skills before they enter the
+  // skill library. This state is populated by the skill-review subscription
+  // effect below; the dialog component itself lives in SkillReviewDialog.tsx.
+  const [isSkillReviewDialogOpen, setIsSkillReviewDialogOpen] = useState(false);
+  const [skillReviewPending, setSkillReviewPending] =
+    useState<UIState['skillReviewPending']>(null);
+  // Batches the user dismissed via Esc ("decide later"), so the idle effect
+  // doesn't immediately reopen them. A Set (not a single value) so dismissing
+  // batch B can't accidentally re-arm a still-dismissed batch A.
+  const skillReviewDismissedTaskIdsRef = useRef<Set<string>>(new Set());
+  // Esc: defer the current batch — record it and close.
+  const dismissSkillReviewDialog = useCallback(() => {
+    if (skillReviewPending) {
+      skillReviewDismissedTaskIdsRef.current.add(skillReviewPending.taskId);
+    }
+    setIsSkillReviewDialogOpen(false);
+  }, [skillReviewPending]);
+  // Worked through the batch (keep/discard/all): close WITHOUT marking it
+  // dismissed, so if some accepts failed the unresolved skills can reopen.
+  const closeSkillReviewDialog = useCallback(
+    () => setIsSkillReviewDialogOpen(false),
+    [],
+  );
+  const acceptPendingSkill = useCallback(
+    (skillName: string) => {
+      if (!skillReviewPending) return;
+      void config
+        .getMemoryManager()
+        .acceptPendingSkillFromTask(skillReviewPending.taskId, skillName)
+        .catch(() => {
+          // Failure is logged in the manager; swallow here so an unhandled
+          // rejection doesn't surface in the UI. The skill stays pending.
+        });
+    },
+    [config, skillReviewPending],
+  );
+  const rejectPendingSkill = useCallback(
+    (skillName: string) => {
+      if (!skillReviewPending) return;
+      void config
+        .getMemoryManager()
+        .rejectPendingSkillFromTask(skillReviewPending.taskId, skillName)
+        .catch(() => {
+          // Failure is logged in the manager; swallow here so an unhandled
+          // rejection doesn't surface in the UI. The skill stays pending.
+        });
+    },
+    [config, skillReviewPending],
+  );
+
+  // Subscribe to skill-review task changes and keep skillReviewPending in sync.
+  useEffect(() => {
+    const mgr = config.getMemoryManager();
+    const projectRoot = config.getProjectRoot();
+    // Skip the state update (and the re-render of every UIState consumer) when
+    // the pending set hasn't actually changed — skill-review notifications fire
+    // for unrelated transitions too.
+    let lastSig = '';
+    const refresh = () => {
+      const tasks = mgr.listTasksByType('skill-review', projectRoot);
+      const withPending = tasks.find((tk) => {
+        const p = tk.metadata?.['pendingSkills'];
+        return Array.isArray(p) && p.length > 0;
+      });
+      if (!withPending) {
+        if (lastSig !== '') {
+          lastSig = '';
+          setSkillReviewPending(null);
+        }
+        return;
+      }
+      const pendingSkills = withPending.metadata!['pendingSkills'] as Array<{
+        name: string;
+        description: string;
+      }>;
+      const sig = `${withPending.id}|${pendingSkills
+        .map((p) => p.name)
+        .join(' ')}`;
+      if (sig === lastSig) return;
+      lastSig = sig;
+      setSkillReviewPending({
+        taskId: withPending.id,
+        skills: pendingSkills.map((p) => ({
+          name: p.name,
+          description: p.description,
+        })),
+      });
+    };
+    const unsub = mgr.subscribe(refresh, { taskType: 'skill-review' });
+    refresh();
+    return unsub;
+  }, [config]);
+
   const slashCommandActions = useMemo(
     () => ({
       openAuthDialog,
@@ -1222,6 +1330,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openArenaDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
+      openEffortDialog,
       quit: (messages: HistoryItem[]) => {
         setQuittingMessages(messages);
         // Signal the client to skip background memory tasks (extract, dream,
@@ -1265,6 +1374,7 @@ export const AppContainer = (props: AppContainerProps) => {
       openTrustDialog,
       openPermissionsDialog,
       openApprovalModeDialog,
+      openEffortDialog,
       addConfirmUpdateExtensionRequest,
       openSubagentCreateDialog,
       openAgentsManagerDialog,
@@ -1439,6 +1549,24 @@ export const AppContainer = (props: AppContainerProps) => {
   );
 
   const performMemoryRefresh = useCallback(async () => {
+    // Safe mode: skip all context file loading, matching refreshHierarchicalMemory()
+    if (config.isSafeMode()) {
+      config.setUserMemory('');
+      config.setGeminiMdFileCount(0);
+      config.setConditionalRulesRegistry(
+        new ConditionalRulesRegistry([], config.getWorkingDir()),
+      );
+      setGeminiMdFileCount(0);
+      historyManager.addItem(
+        {
+          type: MessageType.INFO,
+          text: 'Safe mode active — skipping context file refresh.',
+        },
+        Date.now(),
+      );
+      return;
+    }
+
     historyManager.addItem(
       {
         type: MessageType.INFO,
@@ -1542,6 +1670,8 @@ export const AppContainer = (props: AppContainerProps) => {
     terminalHeight,
     midTurnDrainRef,
     logger,
+    availableTerminalHeightRef,
+    terminalWidthRef,
   );
 
   // Now that streamingState is available, keep isIdleRef in sync and
@@ -1556,6 +1686,18 @@ export const AppContainer = (props: AppContainerProps) => {
       setWorkflowKeywordActive(false);
     }
   }, [streamingState]);
+
+  // Auto-open the skill-review dialog when idle and there are pending skills.
+  useEffect(() => {
+    if (
+      skillReviewPending &&
+      skillReviewPending.skills.length > 0 &&
+      streamingState === StreamingState.Idle &&
+      !skillReviewDismissedTaskIdsRef.current.has(skillReviewPending.taskId)
+    ) {
+      setIsSkillReviewDialogOpen(true);
+    }
+  }, [skillReviewPending, streamingState]);
 
   // Contextual tips — show tips based on context usage after model responses
   // Defer TipHistory loading when tips are disabled to avoid side effects
@@ -1584,7 +1726,11 @@ export const AppContainer = (props: AppContainerProps) => {
   const [hasTabConsumer, setHasTabConsumer] = useState(false);
 
   const agentViewState = useAgentViewState();
-  const { dialogOpen: bgTasksDialogOpen } = useBackgroundTaskViewState();
+  const {
+    dialogOpen: bgTasksDialogOpen,
+    entries: bgTaskEntries,
+    livePanelFocused: bgLivePanelFocused,
+  } = useBackgroundTaskViewState();
   const { closeDialog: closeBgTasksDialog } = useBackgroundTaskViewActions();
 
   // Prompt suggestion state
@@ -1995,9 +2141,10 @@ export const AppContainer = (props: AppContainerProps) => {
     [historyManager.history, pendingHistoryItems],
   );
   const stickyTodos = useStableStickyTodos(rawStickyTodos);
+  const hasExecutingTool = isToolExecuting(pendingHistoryItems);
 
   // Terminal tab progress bar (OSC 9;4) for iTerm2/Ghostty
-  useTerminalProgress(streamingState, isToolExecuting(pendingHistoryItems));
+  useTerminalProgress(streamingState, hasExecutingTool);
 
   cancelHandlerRef.current = useCallback(
     (info?: CancelSubmitInfo) => {
@@ -2509,12 +2656,14 @@ export const AppContainer = (props: AppContainerProps) => {
     isHooksDialogOpen ||
     isStatsDialogOpen ||
     isApprovalModeDialogOpen ||
+    isEffortDialogOpen ||
     isResumeDialogOpen ||
     isDeleteDialogOpen ||
     isHelpDialogOpen ||
     isExtensionsManagerDialogOpen ||
     isRewindSelectorOpen ||
     isDiffDialogOpen ||
+    isSkillReviewDialogOpen ||
     bgTasksDialogOpen ||
     showWorktreeExitDialog ||
     !!(settings.corruptedPath && !settings.corruptionDialogDismissed);
@@ -2535,6 +2684,15 @@ export const AppContainer = (props: AppContainerProps) => {
       )
     : 'hidden';
   const [controlsHeight, setControlsHeight] = useState(0);
+
+  // Re-measure the footer whenever the LiveAgentPanel's height can change
+  // (agents launching / finishing / focus), so `controlsHeight` — and thus
+  // `availableTerminalHeight` — never goes stale below the composer. See
+  // getLiveAgentPanelLayoutKey for the full rationale (#5798).
+  const liveAgentPanelLayoutKey = getLiveAgentPanelLayoutKey(
+    bgTaskEntries,
+    bgLivePanelFocused,
+  );
 
   useLayoutEffect(() => {
     if (!mainControlsRef.current) {
@@ -2557,19 +2715,34 @@ export const AppContainer = (props: AppContainerProps) => {
     btwItem,
     dialogsVisible,
     stickyTodosLayoutKey,
+    liveAgentPanelLayoutKey,
   ]);
 
   // agentViewState is declared earlier (before handleFinalSubmit) so it
   // is available for input routing. Referenced here for layout computation.
   const tabBarHeight = agentViewState.agents.size > 0 ? 1 : 0;
+  // `staticExtraHeight` + `MAIN_CONTENT_HEIGHT_RESERVATION` only cap how tall an
+  // *inline* streaming/pending message may grow before it commits to <Static>;
+  // they do NOT reserve blank rows under the composer. In legacy mode completed
+  // history lives in <Static> (terminal scrollback) and the composer flows to
+  // the very bottom of the output. VP mode owns the whole viewport in the React
+  // tree, so to match that bottom spacing the composer must reach the bottom
+  // too — reserve nothing. (controlsHeight is measured one frame late, so a
+  // composer that grows can briefly overshoot by a row before the re-measure
+  // corrects, the same way legacy mode lets the terminal scroll on growth.)
+  const mainContentHeightReservation = useTerminalBuffer
+    ? 0
+    : staticExtraHeight + MAIN_CONTENT_HEIGHT_RESERVATION;
   const availableTerminalHeight = Math.max(
     0,
     terminalHeight -
       controlsHeight -
-      staticExtraHeight -
-      MAIN_CONTENT_HEIGHT_RESERVATION -
+      mainContentHeightReservation -
       tabBarHeight,
   );
+  // Expose to useGeminiStream (called earlier) for rendered-height-aware commit.
+  availableTerminalHeightRef.current = availableTerminalHeight;
+  terminalWidthRef.current = terminalWidth;
 
   config.setShellExecutionConfig({
     terminalWidth: Math.floor(terminalWidth * SHELL_WIDTH_FRACTION),
@@ -2938,7 +3111,7 @@ export const AppContainer = (props: AppContainerProps) => {
           historyManager.addItem(
             {
               type: MessageType.ERROR,
-              text: `❌ Migration failed: ${getErrorMessage(error)}`,
+              text: `✗ Migration failed: ${getErrorMessage(error)}`,
             },
             Date.now(),
           );
@@ -2962,6 +3135,7 @@ export const AppContainer = (props: AppContainerProps) => {
     settings.merged.ui?.customWittyPhrases,
     responseCandidateTokens,
     streamingResponseLengthRef.current,
+    hasExecutingTool,
   );
 
   useAttentionNotifications({
@@ -3003,6 +3177,8 @@ export const AppContainer = (props: AppContainerProps) => {
     handleThemeSelect,
     isApprovalModeDialogOpen,
     handleApprovalModeSelect,
+    isEffortDialogOpen,
+    handleEffortSelect,
     isAuthDialogOpen,
     closeAuthDialog,
     pendingAuthType,
@@ -3021,6 +3197,8 @@ export const AppContainer = (props: AppContainerProps) => {
     handleWelcomeBackClose,
     isHelpDialogOpen,
     closeHelpDialog,
+    isSkillReviewDialogOpen,
+    dismissSkillReviewDialog,
     isBackgroundTasksDialogOpen: bgTasksDialogOpen,
     closeBackgroundTasksDialog: closeBgTasksDialog,
     isDiffDialogOpen,
@@ -3331,8 +3509,12 @@ export const AppContainer = (props: AppContainerProps) => {
         // character left if the prompt has focus. Cosmetic; tracked
         // for a follow-up that introduces a `consumed` return value
         // on KeypressHandler so global handlers can swallow keys.
-        const executingShell = pendingToolCallsRef.current.find(
-          (tc) =>
+        const promotableShells = pendingToolCallsRef.current.filter(
+          (
+            tc,
+          ): tc is TrackedExecutingToolCall & {
+            promoteAbortController: AbortController;
+          } =>
             tc.status === 'executing' &&
             // Defense-in-depth: also gate on the tool name. Today only
             // the shell tool's invocation wires `promoteAbortController`,
@@ -3342,8 +3524,9 @@ export const AppContainer = (props: AppContainerProps) => {
             // whose service has no promote-handoff handler.
             tc.request.name === ToolNames.SHELL &&
             tc.promoteAbortController !== undefined,
-        ) as TrackedExecutingToolCall | undefined;
-        if (executingShell?.promoteAbortController) {
+        );
+        if (promotableShells.length === 1) {
+          const executingShell = promotableShells[0];
           debugLogger.debug(
             `Ctrl+B promote: matched executing shell tool call ${executingShell.request.callId}`,
           );
@@ -3353,9 +3536,10 @@ export const AppContainer = (props: AppContainerProps) => {
           return;
         }
         debugLogger.debug(
-          `Ctrl+B promote: no executing shell tool call; falling through ` +
+          `Ctrl+B promote: expected exactly one executing shell tool call; falling through ` +
             `(streamingState=${streamingState}, ` +
-            `pendingToolCalls=${pendingToolCallsRef.current.length})`,
+            `pendingToolCalls=${pendingToolCallsRef.current.length}, ` +
+            `promotableShells=${promotableShells.length})`,
         );
       }
     },
@@ -3497,13 +3681,17 @@ export const AppContainer = (props: AppContainerProps) => {
       statusLineSettingsVersion,
       statusLineConfigOverride,
       isMemoryDialogOpen,
+      isSkillReviewDialogOpen,
+      skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
       isVoiceModelMode,
+      isVisionModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
+      isEffortDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -3633,13 +3821,17 @@ export const AppContainer = (props: AppContainerProps) => {
       statusLineSettingsVersion,
       statusLineConfigOverride,
       isMemoryDialogOpen,
+      isSkillReviewDialogOpen,
+      skillReviewPending,
       isModelDialogOpen,
       isFastModelMode,
       isVoiceModelMode,
+      isVisionModelMode,
       isTrustDialogOpen,
       activeArenaDialog,
       isPermissionsDialogOpen,
       isApprovalModeDialogOpen,
+      isEffortDialogOpen,
       isResumeDialogOpen,
       resumeMatchedSessions,
       isDeleteDialogOpen,
@@ -3763,9 +3955,14 @@ export const AppContainer = (props: AppContainerProps) => {
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
+      dismissSkillReviewDialog,
+      closeSkillReviewDialog,
+      acceptPendingSkill,
+      rejectPendingSkill,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
+      handleEffortSelect,
       auth: authActions,
       handleEditorSelect,
       exitEditorDialog,
@@ -3849,9 +4046,14 @@ export const AppContainer = (props: AppContainerProps) => {
       openThemeDialog,
       openEditorDialog,
       openMemoryDialog,
+      dismissSkillReviewDialog,
+      closeSkillReviewDialog,
+      acceptPendingSkill,
+      rejectPendingSkill,
       handleThemeSelect,
       handleThemeHighlight,
       handleApprovalModeSelect,
+      handleEffortSelect,
       authActions,
       handleEditorSelect,
       exitEditorDialog,

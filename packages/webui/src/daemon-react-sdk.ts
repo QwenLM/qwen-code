@@ -100,6 +100,11 @@ export { useDaemonSessions as useSessions } from './daemon/index.js';
 /** Available slash-command skills. */
 export { useDaemonSkills as useSkills } from './daemon/index.js';
 
+/** Consolidated daemon status report (`GET /daemon/status`). */
+export { useDaemonStatusReport as useStatusReport } from './daemon/index.js';
+/** Options for `useStatusReport` (detail level + resource load flags). */
+export type { DaemonStatusReportOptions as StatusReportOptions } from './daemon/index.js';
+
 /** Registered tools and their configuration. */
 export { useDaemonTools as useTools } from './daemon/index.js';
 
@@ -139,6 +144,15 @@ export { useDaemonFollowupSuggestion } from './daemon/index.js';
 
 /** Notifies when the daemon drains browser-queued messages into the running turn. */
 export { useDaemonMidTurnInjected } from './daemon/index.js';
+
+/** Notifies when the daemon's pending prompt queue changes (added/started/completed). */
+export {
+  getPendingPromptVersion,
+  getPendingPromptEvents,
+  consumePendingPromptEvents,
+  subscribePendingPromptEvents,
+  subscribePendingPromptVersion,
+} from './daemon/index.js';
 
 // ── Constants ─────────────────────────────────────────────────────
 
@@ -203,8 +217,14 @@ export type {
   DaemonSessionStatsStatus,
   /** Per-tool call count, success/fail, and duration within a stats response. */
   DaemonSessionStatsToolByName,
+  /** Options for pending prompt queue actions scoped to a session. */
+  PendingPromptActionOptions,
   /** Options for `sendPrompt()`: optimistic message, image attachments. */
   SendPromptOptions,
+  /** Options for non-blocking `submitPrompt()`. */
+  SubmitPromptOptions,
+  /** Result of non-blocking `submitPrompt()`: the daemon-assigned promptId. */
+  SubmitPromptResult,
 } from './daemon/index.js';
 
 // ── Types: Todos ─────────────────────────────────────────────────
@@ -261,6 +281,20 @@ export type {
 export type {
   /** Session list entry: id, title, timestamps, client count, active prompt flag. */
   DaemonSessionSummary,
+  /** Daemon status report envelope from `GET /daemon/status`. */
+  DaemonStatusReport,
+  /** Status report detail level: `'summary' | 'full'`. */
+  DaemonStatusReportDetail,
+  /** One triage finding in the daemon status rollup. */
+  DaemonStatusReportIssue,
+  /** Overall daemon health rollup: `'ok' | 'warning' | 'error'`. */
+  DaemonStatusReportLevel,
+  /** Per-section workspace diagnostics in a `detail=full` report. */
+  DaemonStatusReportSection,
+  /** Per-session diagnostics row in a `detail=full` report. */
+  DaemonStatusReportSession,
+  /** One time-bucketed sample in the Daemon Status metrics series (charts). */
+  DaemonMetricsSeriesBucket,
   /** Full agent detail including system prompt, tools, and run config. */
   DaemonWorkspaceAgentDetail,
   /** Agent list entry: name, description, level, model, builtin flag. */
@@ -271,6 +305,10 @@ export type {
   DaemonWorkspaceMcpToolStatus,
   /** All tools from a single MCP server. */
   DaemonWorkspaceMcpToolsStatus,
+  /** Single MCP resource: uri, name, title, mime type, size, description. */
+  DaemonWorkspaceMcpResourceStatus,
+  /** All resources from a single MCP server. */
+  DaemonWorkspaceMcpResourcesStatus,
   /** Memory file entry: path, scope, byte size. */
   DaemonWorkspaceMemoryFile,
   /** Skill status: name, description, level, model-invocable flag. */

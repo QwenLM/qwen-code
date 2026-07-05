@@ -11,21 +11,32 @@
  */
 
 import fs from 'node:fs';
+import { createRequire } from 'node:module';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const defaultRootDir = path.resolve(__dirname, '..');
+const TEST_FILE_RE = /\.(test|spec)\.(d\.)?[mc]?[jt]s(\.map)?$/;
 
-export function preparePackage({ rootDir = defaultRootDir } = {}) {
+export function preparePackage({
+  rootDir = defaultRootDir,
+  requireNativeAudioCapture = process.env
+    .QWEN_REQUIRE_AUDIO_CAPTURE_PREBUILD === '1',
+} = {}) {
   const distDir = path.join(rootDir, 'dist');
 
   verifyBundleArtifacts(rootDir, distDir);
   copyDocumentationFiles(rootDir, distDir);
   copyLocales(rootDir, distDir);
   copyExtensionExamples(rootDir, distDir);
-  writeDistPackageJson(rootDir, distDir);
+  const bundleNativeAudioCapture = copyNativeAudioCapturePackage(
+    rootDir,
+    distDir,
+    { required: requireNativeAudioCapture },
+  );
+  writeDistPackageJson(rootDir, distDir, { bundleNativeAudioCapture });
   printPackageStructure(distDir);
 }
 
@@ -129,32 +140,168 @@ function copyExtensionExamples(rootDir, distDir) {
   }
 }
 
-function writeDistPackageJson(rootDir, distDir) {
+function copyNativeAudioCapturePackage(rootDir, distDir, { required } = {}) {
+  console.log('Copying native audio capture package...');
+
+  const addonSrc = path.join(rootDir, 'packages', 'audio-capture');
+  const addonDest = path.join(
+    distDir,
+    'node_modules',
+    '@qwen-code',
+    'audio-capture',
+  );
+  const requiredPaths = [
+    path.join(addonSrc, 'dist'),
+    path.join(addonSrc, 'prebuilds'),
+    path.join(addonSrc, 'package.json'),
+  ];
+
+  fs.rmSync(addonDest, { recursive: true, force: true });
+
+  for (const requiredPath of requiredPaths) {
+    if (!fs.existsSync(requiredPath)) {
+      const message = `audio capture package artifact not found at ${requiredPath}`;
+      if (required) {
+        throw new Error(
+          `Required ${message}. ` +
+            'Cannot publish package without native voice capture.',
+        );
+      }
+      console.warn(`Warning: ${message}`);
+      return false;
+    }
+  }
+  for (const [artifactPath, description, predicate] of [
+    [
+      path.join(addonSrc, 'dist'),
+      'runtime JS',
+      (filePath) => /\.[cm]?js$/.test(filePath) && !TEST_FILE_RE.test(filePath),
+    ],
+    [
+      path.join(addonSrc, 'prebuilds'),
+      'native prebuild',
+      (filePath) => filePath.endsWith('.node'),
+    ],
+  ]) {
+    if (!hasFileMatching(artifactPath, predicate)) {
+      const message = `audio capture package artifact has no ${description}: ${artifactPath}`;
+      if (required) {
+        throw new Error(
+          `Required ${message}. ` +
+            'Cannot publish package without native voice capture.',
+        );
+      }
+      console.warn(`Warning: ${message}`);
+      return false;
+    }
+  }
+
+  let addonPkg;
+  try {
+    addonPkg = JSON.parse(
+      fs.readFileSync(path.join(addonSrc, 'package.json'), 'utf8'),
+    );
+  } catch {
+    const message = `audio capture package.json is not valid JSON at ${path.join(
+      addonSrc,
+      'package.json',
+    )}`;
+    if (required) {
+      throw new Error(
+        `Required ${message}. ` +
+          'Cannot publish package without native voice capture.',
+      );
+    }
+    console.warn(`Warning: ${message}`);
+    return false;
+  }
+  const dependencySources = [];
+  const addonRequire = createRequire(path.join(addonSrc, 'package.json'));
+  for (const dependencyName of Object.keys(addonPkg.dependencies ?? {})) {
+    try {
+      dependencySources.push([
+        dependencyName,
+        path.dirname(addonRequire.resolve(`${dependencyName}/package.json`)),
+      ]);
+    } catch {
+      const message = `audio capture dependency not resolvable: ${dependencyName}`;
+      if (required) {
+        throw new Error(
+          `Required ${message}. ` +
+            'Cannot publish package without native voice capture.',
+        );
+      }
+      console.warn(`Warning: ${message}`);
+      return false;
+    }
+  }
+
+  delete addonPkg.scripts;
+  delete addonPkg.devDependencies;
+
+  const copyOpts = {
+    recursive: true,
+    dereference: true,
+    verbatimSymlinks: false,
+  };
+
+  fs.mkdirSync(addonDest, { recursive: true });
+
+  fs.writeFileSync(
+    path.join(addonDest, 'package.json'),
+    JSON.stringify(addonPkg, null, 2) + '\n',
+  );
+  fs.cpSync(path.join(addonSrc, 'dist'), path.join(addonDest, 'dist'), {
+    ...copyOpts,
+    filter: (src) => !TEST_FILE_RE.test(src),
+  });
+  fs.cpSync(
+    path.join(addonSrc, 'prebuilds'),
+    path.join(addonDest, 'prebuilds'),
+    {
+      ...copyOpts,
+      filter: (src) => {
+        const stat = fs.statSync(src);
+        return stat.isDirectory() || src.endsWith('.node');
+      },
+    },
+  );
+
+  for (const [dependencyName, dependencySrc] of dependencySources) {
+    fs.cpSync(
+      dependencySrc,
+      path.join(addonDest, 'node_modules', dependencyName),
+      copyOpts,
+    );
+  }
+
+  console.log('Copied native audio capture package');
+  return true;
+}
+
+function hasFileMatching(dir, predicate) {
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const entryPath = path.join(dir, entry.name);
+    const stat = fs.statSync(entryPath);
+    if (stat.isDirectory()) {
+      if (hasFileMatching(entryPath, predicate)) return true;
+    } else if (stat.isFile() && predicate(entryPath)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function writeDistPackageJson(
+  rootDir,
+  distDir,
+  { bundleNativeAudioCapture = false } = {},
+) {
   console.log('Creating package.json for distribution...');
 
-  const cliEntryContent = `#!/usr/bin/env node
-import { spawnSync } from 'node:child_process';
-import { fileURLToPath } from 'node:url';
-import { dirname, join } from 'node:path';
-
-const __dirname = dirname(fileURLToPath(import.meta.url));
-const cliPath = join(__dirname, 'cli.js');
-
-const result = spawnSync(
-  process.execPath,
-  ['--expose-gc', cliPath, ...process.argv.slice(2)],
-  { stdio: 'inherit' },
-);
-
-if (result.signal) {
-  process.kill(process.pid, result.signal);
-} else {
-  process.exit(result.status ?? 1);
-}
-`;
-
   const cliEntryPath = path.join(distDir, 'cli-entry.js');
-  fs.writeFileSync(cliEntryPath, cliEntryContent, { mode: 0o755 });
+  fs.copyFileSync(path.join(__dirname, 'cli-entry.js'), cliEntryPath);
+  fs.chmodSync(cliEntryPath, 0o755);
   console.log('Created dist cli-entry.js wrapper');
 
   const rootPackageJson = JSON.parse(
@@ -190,6 +337,9 @@ if (result.signal) {
       'bundled',
       'web-shell',
     ],
+    ...(bundleNativeAudioCapture
+      ? { bundledDependencies: ['@qwen-code/audio-capture'] }
+      : {}),
     config: rootPackageJson.config,
     dependencies: {},
     optionalDependencies: {

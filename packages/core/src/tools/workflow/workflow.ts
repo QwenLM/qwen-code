@@ -112,8 +112,8 @@ const WORKFLOW_PARAM_SCHEMA = {
         'in this build" (parity with upstream). isolation=worktree refuses to ' +
         'run when the parent working tree has uncommitted changes (the subagent ' +
         'would see a stale HEAD). ' +
-        'Workflow subagents always have SendMessage / ExitPlanMode in their ' +
-        'disallowed-tool floor regardless of agentType. ' +
+        'Workflow subagents always have SendMessage / Monitor / EnterPlanMode / ExitPlanMode ' +
+        'in their disallowed-tool floor regardless of agentType. ' +
         'Concurrency: `parallel([() => agent(...), ...])` runs thunks ' +
         'through a shared per-run window (default ' +
         '`max(1, min(16, cpus-2))` agents in flight; override via ' +
@@ -543,9 +543,7 @@ function buildLivePhaseTreeDisplay(entry: WorkflowTask): string {
  */
 function resolveUsageBanner(
   config: Config,
-  registry:
-    | { shouldShowUsageWarning(): boolean }
-    | undefined,
+  registry: { shouldShowUsageWarning(): boolean } | undefined,
   budgetTotal: number | null,
 ): string {
   if (!registry) return '';

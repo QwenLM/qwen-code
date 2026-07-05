@@ -14,6 +14,8 @@ import type {
   DaemonForkSessionResult,
   DaemonSessionBtwResult,
   DaemonMidTurnMessageResult,
+  DaemonPendingPromptsResult,
+  DaemonRemovePendingPromptResult,
   DaemonSessionContextStatus,
   DaemonSessionContextUsageStatus,
   DaemonSessionRecapResult,
@@ -70,6 +72,8 @@ export interface DaemonConnectionState {
   supportedCommands?: DaemonSessionSupportedCommandsStatus;
   context?: DaemonSessionContextStatus;
   capabilities?: DaemonCapabilities;
+  /** True while the current session transcript is being loaded. */
+  loadingTranscript?: boolean;
   /** True while replaying buffered events after a reconnect. */
   catchingUp?: boolean;
   error?: string;
@@ -90,8 +94,8 @@ export interface DaemonSessionProviderProps {
   token?: string;
   /** Workspace cwd used when creating, loading, or resuming daemon sessions. */
   workspaceCwd?: string;
-  /** Session id to load on mount instead of creating or attaching automatically. */
-  initialSessionId?: string;
+  /** Session id to load. Undefined keeps the page empty until a prompt creates one. */
+  sessionId?: string;
   /** Stable client identity to reuse for session-scoped daemon requests. */
   clientId?: string;
   /** Extra create-session options, excluding workspaceCwd which is owned by the provider. */
@@ -108,8 +112,6 @@ export interface DaemonSessionProviderProps {
   autoConnect?: boolean;
   /** Reconnect automatically after recoverable daemon/session failures. */
   autoReconnect?: boolean;
-  /** Behavior when the active session is missing (404/410). Defaults to create. */
-  missingSessionBehavior?: 'create' | 'disconnect';
   /** Initial reconnect delay in milliseconds. */
   reconnectDelayMs?: number;
   /** Maximum reconnect delay in milliseconds after backoff. */
@@ -150,6 +152,7 @@ export type DaemonNoticeOperation =
   | 'set_approval_mode'
   | 'submit_permission'
   | 'cancel_prompt'
+  | 'attach_session'
   | 'load_session'
   | 'resume_session'
   | 'create_session'
@@ -233,6 +236,15 @@ export interface SendPromptOptions {
   retry?: boolean;
 }
 
+export interface SubmitPromptOptions extends SendPromptOptions {
+  sessionId?: string;
+  signal?: AbortSignal;
+}
+
+export interface PendingPromptActionOptions {
+  sessionId?: string;
+}
+
 export interface DaemonPromptImage {
   data: string;
   mimeType?: string;
@@ -259,8 +271,22 @@ export interface DaemonTodoList {
   raw: Extract<DaemonTranscriptBlock, { kind: 'tool' }>;
 }
 
+export interface SubmitPromptResult {
+  promptId: string;
+}
+
 export interface DaemonSessionActions {
   sendPrompt(text: string, options?: SendPromptOptions): Promise<PromptResult>;
+  /**
+   * Non-blocking prompt submission. POSTs to the daemon and returns
+   * immediately with the `promptId`. The daemon queues the prompt in its
+   * FIFO if a turn is already running. Use this during streaming to
+   * enqueue prompts without waiting for the current turn to complete.
+   */
+  submitPrompt(
+    text: string,
+    options?: SubmitPromptOptions,
+  ): Promise<SubmitPromptResult>;
   cancel(): Promise<void>;
   setModel(modelId: string): Promise<SetModelResult>;
   setApprovalMode(
@@ -281,10 +307,18 @@ export interface DaemonSessionActions {
     answers?: Record<string, string>,
   ): Promise<boolean>;
   heartbeat(): Promise<HeartbeatResult | undefined>;
-  listSessions(): Promise<DaemonSessionSummary[]>;
+  listSessions(options?: {
+    pageSize?: number;
+  }): Promise<DaemonSessionSummary[]>;
   loadSession(sessionId: string): Promise<void>;
   resumeSession(sessionId: string): Promise<void>;
+  /**
+   * Create a daemon session and update local session state. Callers that need
+   * transcript/event streaming must follow with `attachSession()`.
+   */
   createSession(): Promise<DaemonSession>;
+  attachSession(): Promise<void>;
+  clearSession(): Promise<void>;
   newSession(): Promise<void>;
   releaseSession(sessionId: string): Promise<void>;
   closeSession(): Promise<void>;
@@ -314,6 +348,13 @@ export interface DaemonSessionActions {
     message: string,
     opts?: { signal?: AbortSignal },
   ): Promise<DaemonMidTurnMessageResult>;
+  getPendingPrompts(
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonPendingPromptsResult>;
+  removePendingPrompt(
+    promptId: string,
+    opts?: PendingPromptActionOptions,
+  ): Promise<DaemonRemovePendingPromptResult>;
   sendShellCommand(command: string): Promise<DaemonShellCommandResult>;
   getTasks(): Promise<DaemonSessionTasksStatus>;
   cancelTask(
@@ -375,7 +416,7 @@ export type SettledPrompt =
 export interface PendingSessionLoad {
   id: number;
   sessionId: string;
-  mode: 'load' | 'resume';
+  mode: 'load' | 'resume' | 'attach';
   timeout: ReturnType<typeof setTimeout>;
   resolve: () => void;
   reject: (error: unknown) => void;

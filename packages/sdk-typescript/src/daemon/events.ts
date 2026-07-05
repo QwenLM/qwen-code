@@ -8,6 +8,7 @@ import type {
   DaemonEvent,
   DaemonErrorKind,
   DaemonMcpTransport,
+  DaemonSessionArtifactChange,
   PermissionOutcome,
 } from './types.js';
 // Single source of truth: the daemon publisher owns the wire literal in
@@ -18,8 +19,18 @@ import type {
 // (same lightweight mechanism as `@qwen-code/acp-bridge/mcpTimeouts`). A `const`
 // keeps its literal type, so it still narrows in `switch (event.type)` and works
 // as a `typeof`-d type argument.
-import { MID_TURN_MESSAGE_INJECTED_EVENT } from '@qwen-code/acp-bridge/daemonEventTypes';
-export { MID_TURN_MESSAGE_INJECTED_EVENT };
+import {
+  MID_TURN_MESSAGE_INJECTED_EVENT,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
+} from '@qwen-code/acp-bridge/daemonEventTypes';
+export {
+  MID_TURN_MESSAGE_INJECTED_EVENT,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
+};
 
 export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_update',
@@ -31,7 +42,11 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'session_died',
   'session_closed',
   'session_metadata_updated',
+  'artifact_changed',
   MID_TURN_MESSAGE_INJECTED_EVENT,
+  PENDING_PROMPT_ADDED_EVENT,
+  PENDING_PROMPT_STARTED_EVENT,
+  PENDING_PROMPT_COMPLETED_EVENT,
   'client_evicted',
   'slow_client_warning',
   'stream_error',
@@ -71,7 +86,9 @@ export const DAEMON_KNOWN_EVENT_TYPE_VALUES = [
   'approval_mode_changed',
   'tool_toggled',
   'settings_changed',
+  'trust_change_requested',
   'workspace_initialized',
+  'github_setup_completed',
   'mcp_server_restarted',
   'mcp_server_restart_refused',
   'settings_reloaded',
@@ -265,6 +282,12 @@ export interface DaemonSessionMetadataUpdatedData {
   [key: string]: unknown;
 }
 
+export interface DaemonArtifactChangedData {
+  sessionId: string;
+  change: DaemonSessionArtifactChange;
+  [key: string]: unknown;
+}
+
 /**
  * `mid_turn_message_injected` payload. Emitted when the daemon drains
  * browser-queued mid-turn messages into the running turn (web-shell mid-turn
@@ -303,6 +326,11 @@ export interface DaemonMidTurnMessageInjectedData {
 export interface DaemonClientEvictedData {
   reason: string;
   droppedAfter?: number;
+  queueSize?: number;
+  maxQueued?: number;
+  queuedBytes?: number;
+  maxQueuedBytes?: number;
+  eventBytes?: number;
   [key: string]: unknown;
 }
 
@@ -317,6 +345,12 @@ export interface DaemonSlowClientWarningData {
    * `Last-Event-ID` or detach + drain.
    */
   lastEventId: number;
+  /** Approximate serialized bytes queued for this subscriber's live backlog. */
+  queuedBytes?: number;
+  /** Per-subscriber serialized-byte backlog cap. */
+  maxQueuedBytes?: number;
+  /** Which backlog threshold caused the warning. */
+  threshold?: 'frames' | 'bytes' | 'frames_and_bytes';
   [key: string]: unknown;
 }
 
@@ -444,13 +478,29 @@ export interface DaemonMcpChildRefusedBatchData {
  * ~/.qwen/QWEN.md), `mode` is the requested write mode, and
  * `bytesWritten` is the size of the file post-write.
  */
-export interface DaemonMemoryChangedData {
+export interface DaemonFileMemoryChangedData {
   scope: 'workspace' | 'global';
   filePath: string;
   mode: 'append' | 'replace';
   bytesWritten: number;
   [key: string]: unknown;
 }
+
+export interface DaemonManagedMemoryChangedData {
+  scope: 'managed';
+  source:
+    | 'workspace_memory_remember'
+    | 'workspace_memory_forget'
+    | 'workspace_memory_dream'
+    | (string & {});
+  taskId: string;
+  touchedScopes: Array<'user' | 'project'>;
+  [key: string]: unknown;
+}
+
+export type DaemonMemoryChangedData =
+  | DaemonFileMemoryChangedData
+  | DaemonManagedMemoryChangedData;
 
 /**
  * A workspace agent CRUD mutation completed successfully. `change`
@@ -582,6 +632,13 @@ export interface DaemonToolToggledData {
   [key: string]: unknown;
 }
 
+export interface DaemonTrustChangeRequestedData {
+  workspaceCwd: string;
+  desiredState: 'trusted' | 'untrusted';
+  reason?: string;
+  [key: string]: unknown;
+}
+
 /**
  * Workspace-scoped: fan-outs to every active session SSE bus when
  * `POST /workspace/init` is invoked. The `action` field discriminates
@@ -602,6 +659,27 @@ export interface DaemonWorkspaceInitializedData {
   path: string;
   action: 'created' | 'overwrote' | 'noop';
   originatorClientId?: string;
+  [key: string]: unknown;
+}
+
+export interface DaemonGithubSetupCompletedData {
+  releaseTag: string;
+  readmeUrl: string;
+  secretsUrl?: string;
+  workflows: Array<{
+    sourcePath?: string;
+    path: string;
+    status: 'written' | 'failed';
+    sizeBytes?: number;
+    error?: string;
+  }>;
+  gitignore: {
+    path: '.gitignore';
+    status: 'created' | 'updated' | 'unchanged' | 'failed' | 'skipped';
+    added?: string[];
+    error?: string;
+  };
+  warnings: string[];
   [key: string]: unknown;
 }
 
@@ -814,10 +892,49 @@ export type DaemonSessionMetadataUpdatedEvent = DaemonEventEnvelope<
   'session_metadata_updated',
   DaemonSessionMetadataUpdatedData
 >;
+export type DaemonArtifactChangedEvent = DaemonEventEnvelope<
+  'artifact_changed',
+  DaemonArtifactChangedData
+>;
 export type DaemonMidTurnMessageInjectedEvent = DaemonEventEnvelope<
   typeof MID_TURN_MESSAGE_INJECTED_EVENT,
   DaemonMidTurnMessageInjectedData
 >;
+export interface DaemonPendingPromptAddedData {
+  sessionId: string;
+  promptId: string;
+  text: string;
+  queuedAt: number;
+  [key: string]: unknown;
+}
+export interface DaemonPendingPromptStartedData {
+  sessionId: string;
+  promptId: string;
+  text: string;
+  [key: string]: unknown;
+}
+export interface DaemonPendingPromptCompletedData {
+  sessionId: string;
+  promptId: string;
+  state: 'completed' | 'removed';
+  [key: string]: unknown;
+}
+export type DaemonPendingPromptAddedEvent = DaemonEventEnvelope<
+  typeof PENDING_PROMPT_ADDED_EVENT,
+  DaemonPendingPromptAddedData
+>;
+export type DaemonPendingPromptStartedEvent = DaemonEventEnvelope<
+  typeof PENDING_PROMPT_STARTED_EVENT,
+  DaemonPendingPromptStartedData
+>;
+export type DaemonPendingPromptCompletedEvent = DaemonEventEnvelope<
+  typeof PENDING_PROMPT_COMPLETED_EVENT,
+  DaemonPendingPromptCompletedData
+>;
+export type DaemonPendingPromptEvent =
+  | DaemonPendingPromptAddedEvent
+  | DaemonPendingPromptStartedEvent
+  | DaemonPendingPromptCompletedEvent;
 export type DaemonClientEvictedEvent = DaemonEventEnvelope<
   'client_evicted',
   DaemonClientEvictedData
@@ -862,9 +979,17 @@ export type DaemonSettingsChangedEvent = DaemonEventEnvelope<
   'settings_changed',
   Record<string, unknown>
 >;
+export type DaemonTrustChangeRequestedEvent = DaemonEventEnvelope<
+  'trust_change_requested',
+  DaemonTrustChangeRequestedData
+>;
 export type DaemonWorkspaceInitializedEvent = DaemonEventEnvelope<
   'workspace_initialized',
   DaemonWorkspaceInitializedData
+>;
+export type DaemonGithubSetupCompletedEvent = DaemonEventEnvelope<
+  'github_setup_completed',
+  DaemonGithubSetupCompletedData
 >;
 export type DaemonMcpServerRestartedEvent = DaemonEventEnvelope<
   'mcp_server_restarted',
@@ -950,7 +1075,9 @@ export type DaemonSessionEvent =
   | DaemonSessionDiedEvent
   | DaemonSessionClosedEvent
   | DaemonSessionMetadataUpdatedEvent
+  | DaemonArtifactChangedEvent
   | DaemonMidTurnMessageInjectedEvent
+  | DaemonPendingPromptEvent
   | DaemonSessionBranchedEvent;
 
 export type DaemonControlEvent =
@@ -963,6 +1090,7 @@ export type DaemonControlEvent =
   | DaemonToolToggledEvent
   | DaemonSettingsChangedEvent
   | DaemonWorkspaceInitializedEvent
+  | DaemonGithubSetupCompletedEvent
   | DaemonMcpServerRestartedEvent
   | DaemonMcpServerRestartRefusedEvent
   | DaemonSettingsReloadedEvent
@@ -995,6 +1123,7 @@ export type DaemonMcpGuardrailEvent =
 export type DaemonWorkspaceMutationEvent =
   | DaemonMemoryChangedEvent
   | DaemonAgentChangedEvent
+  | DaemonTrustChangeRequestedEvent
   | DaemonExtensionsChangedEvent;
 
 /**
@@ -1397,9 +1526,25 @@ export function asKnownDaemonEvent(
       return isSessionMetadataUpdatedData(event.data)
         ? (event as DaemonSessionMetadataUpdatedEvent)
         : undefined;
+    case 'artifact_changed':
+      return isArtifactChangedData(event.data)
+        ? (event as DaemonArtifactChangedEvent)
+        : undefined;
     case MID_TURN_MESSAGE_INJECTED_EVENT:
       return isMidTurnMessageInjectedData(event.data)
         ? (event as DaemonMidTurnMessageInjectedEvent)
+        : undefined;
+    case PENDING_PROMPT_ADDED_EVENT:
+      return isPendingPromptAddedData(event.data)
+        ? (event as DaemonPendingPromptAddedEvent)
+        : undefined;
+    case PENDING_PROMPT_STARTED_EVENT:
+      return isPendingPromptStartedData(event.data)
+        ? (event as DaemonPendingPromptStartedEvent)
+        : undefined;
+    case PENDING_PROMPT_COMPLETED_EVENT:
+      return isPendingPromptCompletedData(event.data)
+        ? (event as DaemonPendingPromptCompletedEvent)
         : undefined;
     case 'client_evicted':
       return isClientEvictedData(event.data)
@@ -1468,9 +1613,17 @@ export function asKnownDaemonEvent(
             Record<string, unknown>
           >)
         : undefined;
+    case 'trust_change_requested':
+      return isTrustChangeRequestedData(event.data)
+        ? (event as DaemonTrustChangeRequestedEvent)
+        : undefined;
     case 'workspace_initialized':
       return isWorkspaceInitializedData(event.data)
         ? (event as DaemonWorkspaceInitializedEvent)
+        : undefined;
+    case 'github_setup_completed':
+      return isGithubSetupCompletedData(event.data)
+        ? (event as DaemonGithubSetupCompletedEvent)
         : undefined;
     case 'mcp_server_restarted':
       return isMcpServerRestartedData(event.data)
@@ -1845,6 +1998,8 @@ export function reduceDaemonSessionEvent(
       };
     case 'settings_changed':
       return base;
+    case 'trust_change_requested':
+      return base;
     case 'workspace_initialized':
       // Workspace-scoped fan-out. Non-terminal — just records that a
       // QWEN.md scaffold was performed.
@@ -1853,6 +2008,8 @@ export function reduceDaemonSessionEvent(
         workspaceInitCount: base.workspaceInitCount + 1,
         lastWorkspaceInit: mergeOriginator(event.data, event),
       };
+    case 'github_setup_completed':
+      return base;
     case 'mcp_server_restarted':
       return {
         ...base,
@@ -1892,7 +2049,11 @@ export function reduceDaemonSessionEvent(
     case 'mcp_server_removed':
     case 'settings_reloaded':
     case 'extensions_changed':
+    case 'artifact_changed':
     case MID_TURN_MESSAGE_INJECTED_EVENT:
+    case PENDING_PROMPT_ADDED_EVENT:
+    case PENDING_PROMPT_STARTED_EVENT:
+    case PENDING_PROMPT_COMPLETED_EVENT:
       return base;
     case 'session_rewound':
       return {
@@ -2324,6 +2485,22 @@ function isSessionMetadataUpdatedData(
   );
 }
 
+function isArtifactChangedData(
+  value: unknown,
+): value is DaemonArtifactChangedData {
+  if (!isRecord(value) || !isNonEmptyString(value['sessionId'])) {
+    return false;
+  }
+  const change = value['change'];
+  if (!isRecord(change) || !isNonEmptyString(change['artifactId'])) {
+    return false;
+  }
+  return (
+    isNonEmptyString(change['action']) &&
+    (change['reason'] === undefined || isNonEmptyString(change['reason']))
+  );
+}
+
 function isMidTurnMessageInjectedData(
   value: unknown,
 ): value is DaemonMidTurnMessageInjectedData {
@@ -2335,11 +2512,50 @@ function isMidTurnMessageInjectedData(
   );
 }
 
+function isPendingPromptAddedData(
+  value: unknown,
+): value is DaemonPendingPromptAddedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['promptId']) &&
+    typeof value['text'] === 'string' &&
+    typeof value['queuedAt'] === 'number'
+  );
+}
+
+function isPendingPromptStartedData(
+  value: unknown,
+): value is DaemonPendingPromptStartedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['promptId']) &&
+    typeof value['text'] === 'string'
+  );
+}
+
+function isPendingPromptCompletedData(
+  value: unknown,
+): value is DaemonPendingPromptCompletedData {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value['sessionId']) &&
+    isNonEmptyString(value['promptId']) &&
+    (value['state'] === 'completed' || value['state'] === 'removed')
+  );
+}
+
 function isClientEvictedData(value: unknown): value is DaemonClientEvictedData {
   return (
     isRecord(value) &&
     isNonEmptyString(value['reason']) &&
-    isOptionalNumber(value['droppedAfter'])
+    isOptionalNumber(value['droppedAfter']) &&
+    isOptionalNumber(value['queueSize']) &&
+    isOptionalNumber(value['maxQueued']) &&
+    isOptionalNumber(value['queuedBytes']) &&
+    isOptionalNumber(value['maxQueuedBytes']) &&
+    isOptionalNumber(value['eventBytes'])
   );
 }
 
@@ -2361,11 +2577,18 @@ function isSlowClientWarningData(
   // (`isOptionalNumber` → `isFiniteNumber`): `typeof NaN === 'number'`
   // and `typeof Infinity === 'number'` both pass a bare `typeof`
   // check but would be schema garbage for a queue-size measurement.
+  if (!isRecord(value)) return false;
+  const threshold = value['threshold'];
   return (
-    isRecord(value) &&
     isFiniteNumber(value['queueSize']) &&
     isFiniteNumber(value['maxQueued']) &&
-    isFiniteNumber(value['lastEventId'])
+    isFiniteNumber(value['lastEventId']) &&
+    isOptionalNumber(value['queuedBytes']) &&
+    isOptionalNumber(value['maxQueuedBytes']) &&
+    (threshold === undefined ||
+      threshold === 'frames' ||
+      threshold === 'bytes' ||
+      threshold === 'frames_and_bytes')
   );
 }
 
@@ -2436,6 +2659,15 @@ function isMcpChildRefusedBatchData(
 function isMemoryChangedData(value: unknown): value is DaemonMemoryChangedData {
   if (!isRecord(value)) return false;
   const scope = value['scope'];
+  if (scope === 'managed') {
+    const touchedScopes = value['touchedScopes'];
+    return (
+      isNonEmptyString(value['source']) &&
+      isNonEmptyString(value['taskId']) &&
+      Array.isArray(touchedScopes) &&
+      touchedScopes.every((s) => s === 'user' || s === 'project')
+    );
+  }
   const mode = value['mode'];
   return (
     (scope === 'workspace' || scope === 'global') &&
@@ -2561,6 +2793,18 @@ function isToolToggledData(value: unknown): value is DaemonToolToggledData {
   );
 }
 
+function isTrustChangeRequestedData(
+  value: unknown,
+): value is DaemonTrustChangeRequestedData {
+  if (!isRecord(value)) return false;
+  const desiredState = value['desiredState'];
+  return (
+    isNonEmptyString(value['workspaceCwd']) &&
+    (desiredState === 'trusted' || desiredState === 'untrusted') &&
+    (value['reason'] === undefined || typeof value['reason'] === 'string')
+  );
+}
+
 function isWorkspaceInitializedData(
   value: unknown,
 ): value is DaemonWorkspaceInitializedData {
@@ -2568,6 +2812,45 @@ function isWorkspaceInitializedData(
   if (!isNonEmptyString(value['path'])) return false;
   const action = value['action'];
   return action === 'created' || action === 'overwrote' || action === 'noop';
+}
+
+function isGithubSetupCompletedData(
+  value: unknown,
+): value is DaemonGithubSetupCompletedData {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['releaseTag'])) return false;
+  if (!isNonEmptyString(value['readmeUrl'])) return false;
+  if (!Array.isArray(value['workflows'])) return false;
+  if (!value['workflows'].every(isGithubSetupWorkflowResult)) return false;
+  if (!isGithubSetupGitignoreResult(value['gitignore'])) return false;
+  return (
+    Array.isArray(value['warnings']) &&
+    value['warnings'].every((warning) => typeof warning === 'string')
+  );
+}
+
+function isGithubSetupWorkflowResult(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value['path'])) return false;
+  const status = value['status'];
+  if (status !== 'written' && status !== 'failed') return false;
+  if (value['sizeBytes'] !== undefined && !isFiniteNumber(value['sizeBytes'])) {
+    return false;
+  }
+  return value['error'] === undefined || typeof value['error'] === 'string';
+}
+
+function isGithubSetupGitignoreResult(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value['path'] !== '.gitignore') return false;
+  const status = value['status'];
+  return (
+    status === 'created' ||
+    status === 'updated' ||
+    status === 'unchanged' ||
+    status === 'failed' ||
+    status === 'skipped'
+  );
 }
 
 function isMcpServerRestartedData(

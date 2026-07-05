@@ -53,7 +53,10 @@ export type {
   DaemonTodoStatus,
   DaemonStreamingState,
   DaemonWorkspaceEventSignals,
+  PendingPromptActionOptions,
   SendPromptOptions,
+  SubmitPromptOptions,
+  SubmitPromptResult,
 } from './session/index.js';
 
 // ── Workspace axis (per-workspace, outlives sessions) ──────────────
@@ -72,6 +75,7 @@ export {
   useDaemonResource,
   useDaemonSessions,
   useDaemonSkills,
+  useDaemonStatusReport,
   useDaemonTools,
   useDaemonSettings,
 } from './workspace/index.js';
@@ -82,6 +86,7 @@ export type {
   DaemonGlobOptions,
   DaemonGlobResult,
   DaemonResourceOptions,
+  DaemonStatusReportOptions,
   DaemonWorkspaceActions,
   DaemonWorkspaceContextValue,
   DaemonWorkspaceProviderProps,
@@ -96,6 +101,14 @@ export {
 } from './useDaemonFollowupSuggestion.js';
 
 export { useDaemonMidTurnInjected } from './useDaemonMidTurnInjected.js';
+
+export {
+  getPendingPromptVersion,
+  getPendingPromptEvents,
+  consumePendingPromptEvents,
+  subscribePendingPromptEvents,
+  subscribePendingPromptVersion,
+} from './pendingPromptVersion.js';
 
 // ── Re-exported SDK types/constants for UI consumers ──────────────
 // These allow web-shell and other UI packages to depend only on
@@ -120,11 +133,20 @@ export type {
   DaemonSessionStatsStatus,
   DaemonSessionStatsToolByName,
   DaemonSessionSummary,
+  DaemonStatusReport,
+  DaemonStatusReportDetail,
+  DaemonStatusReportIssue,
+  DaemonStatusReportLevel,
+  DaemonStatusReportSection,
+  DaemonStatusReportSession,
+  DaemonMetricsSeriesBucket,
   DaemonWorkspaceAgentDetail,
   DaemonWorkspaceAgentSummary,
   DaemonWorkspaceMcpServerStatus,
   DaemonWorkspaceMcpToolStatus,
   DaemonWorkspaceMcpToolsStatus,
+  DaemonWorkspaceMcpResourceStatus,
+  DaemonWorkspaceMcpResourcesStatus,
   DaemonWorkspaceMemoryFile,
   DaemonWorkspaceSkillStatus,
   DaemonWorkspaceToolStatus,

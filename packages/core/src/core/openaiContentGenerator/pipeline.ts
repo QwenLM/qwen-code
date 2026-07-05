@@ -20,7 +20,11 @@ import type { PipelineConfig, RequestContext } from './types.js';
 import { redactProxyError } from '../../utils/runtimeFetchOptions.js';
 import { runtimeDiagnostics } from '../../utils/runtimeDiagnostics.js';
 import { createChildAbortController } from '../../utils/abortController.js';
-import { DEFAULT_STREAM_IDLE_TIMEOUT_MS } from './constants.js';
+import {
+  DEFAULT_STREAM_IDLE_TIMEOUT_MS,
+  MAX_STREAM_IDLE_TIMEOUT_MS,
+  QWEN_STREAM_IDLE_TIMEOUT_MS_ENV,
+} from './constants.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 
 const debugLogger = createDebugLogger('OPENAI_PIPELINE');
@@ -52,10 +56,63 @@ export class StreamInactivityTimeoutError extends Error {
     readonly streamLifetimeMs: number,
   ) {
     super(
-      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks (stream lifetime: ${streamLifetimeMs}ms)`,
+      `No stream activity for ${idleMs}ms after ${chunksReceived} chunks ` +
+        `(stream lifetime: ${streamLifetimeMs}ms). Set ` +
+        `${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV} to increase this window ` +
+        `(or 0 to disable it).`,
     );
     this.name = 'StreamInactivityTimeoutError';
   }
+}
+
+/**
+ * Resolve the effective streaming inactivity timeout (ms). Precedence:
+ * explicit `ContentGeneratorConfig.streamIdleTimeoutMs` (programmatic, wins —
+ * including `0` to disable) > the `QWEN_STREAM_IDLE_TIMEOUT_MS` env deployment
+ * knob > the built-in default. A malformed env value is ignored (with a
+ * `console.warn`) rather than failing the request.
+ */
+function resolveStreamIdleTimeoutMs(config: ContentGeneratorConfig): number {
+  // 1. Explicit config field (programmatic) wins:
+  //    - `<= 0` disables the watchdog (downstream `idleMs > 0` guard skips it).
+  //    - Values above the JS timer ceiling are rejected: setTimeout silently
+  //      compresses them to 1ms, which would fire near-immediately.
+  //    - NaN/Infinity/non-integer are invalid.
+  const fromConfig = config.streamIdleTimeoutMs;
+  if (typeof fromConfig === 'number') {
+    if (
+      Number.isInteger(fromConfig) &&
+      fromConfig <= MAX_STREAM_IDLE_TIMEOUT_MS
+    ) {
+      return fromConfig;
+    }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring out-of-range streamIdleTimeoutMs=${fromConfig} ` +
+        `(expected an integer in (-∞, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
+        `falling back to ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}/default.`,
+    );
+  }
+  // 2. Env deployment knob. Strict decimal integer only — reject hex/scientific
+  //    notation/floats/signs so a typo can't silently become a surprising
+  //    timeout. `0` disables; values above the timer ceiling are rejected.
+  const raw = process.env[QWEN_STREAM_IDLE_TIMEOUT_MS_ENV];
+  const trimmed = raw?.trim();
+  if (trimmed) {
+    if (/^\d+$/.test(trimmed)) {
+      const parsed = Number(trimmed);
+      if (parsed <= MAX_STREAM_IDLE_TIMEOUT_MS) {
+        return parsed;
+      }
+    }
+    // eslint-disable-next-line no-console
+    console.warn(
+      `[qwen-code] Ignoring invalid ${QWEN_STREAM_IDLE_TIMEOUT_MS_ENV}="${raw}" ` +
+        `(expected an integer of milliseconds in [0, ${MAX_STREAM_IDLE_TIMEOUT_MS}]); ` +
+        `using default ${DEFAULT_STREAM_IDLE_TIMEOUT_MS}ms.`,
+    );
+  }
+  return DEFAULT_STREAM_IDLE_TIMEOUT_MS;
 }
 
 /**
@@ -130,10 +187,16 @@ export type { PipelineConfig } from './types.js';
 export class ContentGenerationPipeline {
   client: OpenAI;
   private contentGeneratorConfig: ContentGeneratorConfig;
+  // Resolved once (config field > env > default) so the env read + any
+  // invalid-value warning happen per pipeline, not per streaming request.
+  private readonly streamIdleTimeoutMs: number;
 
   constructor(private config: PipelineConfig) {
     this.contentGeneratorConfig = config.contentGeneratorConfig;
     this.client = this.config.provider.buildClient();
+    this.streamIdleTimeoutMs = resolveStreamIdleTimeoutMs(
+      this.contentGeneratorConfig,
+    );
   }
 
   async execute(
@@ -205,9 +268,7 @@ export class ContentGenerationPipeline {
         // response, so a stream that returns 200 then goes silent is otherwise
         // unbounded. Abort + surface a retryable ETIMEDOUT after `idleMs` of no
         // chunks. `<= 0` disables it.
-        const idleMs =
-          this.contentGeneratorConfig.streamIdleTimeoutMs ??
-          DEFAULT_STREAM_IDLE_TIMEOUT_MS;
+        const idleMs = this.streamIdleTimeoutMs;
         const guarded =
           idleMs > 0
             ? withStreamInactivityTimeout(
@@ -523,13 +584,39 @@ export class ContentGenerationPipeline {
       // start with `qwen` but is the most common hybrid-thinking model
       // for first-time users, so it must be covered.
       const model = (context.model ?? '').toLowerCase();
-      if (
-        DashScopeOpenAICompatibleProvider.isDashScopeProvider(
-          this.contentGeneratorConfig,
-        ) &&
-        (model.startsWith('qwen') || model === 'coder-model')
-      ) {
-        typed['enable_thinking'] = false;
+      if (model.startsWith('qwen') || model === 'coder-model') {
+        if (
+          DashScopeOpenAICompatibleProvider.isDashScopeProvider(
+            this.contentGeneratorConfig,
+          )
+        ) {
+          typed['enable_thinking'] = false;
+        } else {
+          // Non-DashScope OpenAI-compatible servers (vLLM, SGLang, ...) render
+          // the model's chat template server-side and read the thinking switch
+          // from `chat_template_kwargs`, not a top-level `enable_thinking`
+          // (which they silently ignore). Send it there so hybrid qwen models
+          // actually stop emitting <think> when reasoning is disabled — e.g.
+          // the auto-mode permission classifier's short structured-output
+          // calls, which otherwise spend their small token budget on thinking
+          // and fail closed. Servers that don't recognise `chat_template_kwargs`
+          // ignore the unknown field, so the switch is a harmless no-op there.
+          //
+          // Drop any top-level `enable_thinking` a provider preset injected via
+          // extra_body (provider-config.ts emits it for models configured with
+          // `enableThinking: true`): leaving it would contradict the
+          // `chat_template_kwargs` opt-out on servers that honour both, and
+          // keeps this path from leaking the qwen-specific field top-level.
+          delete typed['enable_thinking'];
+          const existing = (typed['chat_template_kwargs'] ?? {}) as Record<
+            string,
+            unknown
+          >;
+          typed['chat_template_kwargs'] = {
+            ...existing,
+            enable_thinking: false,
+          };
+        }
       }
       // Strip reasoning config — extra_body could inject it, overriding
       // buildReasoningConfig's decision to return {} for disabled thinking.

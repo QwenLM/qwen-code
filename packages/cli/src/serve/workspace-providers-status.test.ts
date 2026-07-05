@@ -15,6 +15,13 @@ const coreMock = vi.hoisted(() => ({
   throwModelsConfigError: false,
   modelsConfigErrorMessage:
     'Failed loading provider https://user:secret@broken.example/v1',
+  debugLogger: {
+    debug: vi.fn(),
+    error: vi.fn(),
+    info: vi.fn(),
+    isEnabled: vi.fn(() => false),
+    warn: vi.fn(),
+  },
 }));
 
 vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
@@ -30,6 +37,7 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   }
   return {
     ...actual,
+    createDebugLogger: () => coreMock.debugLogger,
     ModelsConfig: TestModelsConfig,
   };
 });
@@ -62,6 +70,7 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     coreMock.throwModelsConfigError = false;
     coreMock.modelsConfigErrorMessage =
       'Failed loading provider https://user:secret@broken.example/v1';
+    coreMock.debugLogger.warn.mockClear();
     resetHomeEnvBootstrapForTesting();
   });
 
@@ -122,6 +131,42 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(second.current?.modelId).toBe('model-b(openai)');
   });
 
+  it('returns the workspace approval mode', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      tools: { approvalMode: 'yolo' },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(result.approvalMode).toBe('yolo');
+  });
+
+  it('normalizes legacy workspace approval mode spelling', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      tools: { approvalMode: 'auto_edit' },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(result.approvalMode).toBe('auto-edit');
+  });
+
+  it('warns and falls back for an unknown workspace approval mode', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      tools: { approvalMode: 'auto-edt' },
+    });
+
+    const result = await provider(workspace, false);
+
+    expect(result.approvalMode).toBe('default');
+    expect(coreMock.debugLogger.warn).toHaveBeenCalledWith(
+      '[workspace-providers-status] unrecognized approvalMode "auto-edt", falling back to default',
+    );
+  });
+
   it('marks only the model matching persisted model.baseUrl as current', async () => {
     const provider = createWorkspaceProvidersStatusProvider({ env: {} });
     await writeUserSettings({
@@ -156,6 +201,73 @@ describe('createWorkspaceProvidersStatusProvider', () => {
     expect(
       models.find((m) => m.baseUrl === 'https://api-two.example/v1')?.isCurrent,
     ).toBe(true);
+  });
+
+  it('filters fastOnly and voiceOnly models from the workspace provider catalog', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'main-model' },
+      modelProviders: {
+        openai: [
+          { id: 'main-model', name: 'Main Model' },
+          { id: 'fast-model', name: 'Fast Model', fastOnly: true },
+          { id: 'voice-model', name: 'Voice Model', voiceOnly: true },
+        ],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const modelIds = result.providers.flatMap((p) =>
+      p.models.map((m) => m.modelId),
+    );
+
+    expect(modelIds).toContain('main-model(openai)');
+    expect(modelIds).not.toContain('fast-model(openai)');
+    expect(modelIds).not.toContain('voice-model(openai)');
+  });
+
+  it('reports custom providerProtocol models under their resolved auth type', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: {
+        name: 'custom-model',
+        baseUrl: 'https://idealab.example/v1',
+      },
+      providerProtocol: { idealab: 'openai' },
+      modelProviders: {
+        idealab: [
+          {
+            id: 'custom-model',
+            name: 'Idealab Current',
+            baseUrl: 'https://idealab.example/v1',
+          },
+        ],
+        unmapped: [{ id: 'ignored-model', name: 'Ignored Model' }],
+      },
+    });
+
+    const result = await provider(workspace, false);
+    const openaiProvider = result.providers.find(
+      (p) => p.authType === 'openai',
+    );
+
+    expect(openaiProvider?.models).toMatchObject([
+      {
+        modelId: 'custom-model(openai)',
+        baseModelId: 'custom-model',
+        name: 'Idealab Current',
+        baseUrl: 'https://idealab.example/v1',
+        isCurrent: true,
+      },
+    ]);
+    expect(openaiProvider?.current).toBe(true);
+    expect(
+      result.providers
+        .flatMap((p) => p.models)
+        .some((m) => m.modelId === 'ignored-model(openai)'),
+    ).toBe(false);
   });
 
   it('sanitizes credentials from provider warning URLs', async () => {
@@ -266,6 +378,33 @@ describe('createWorkspaceProvidersStatusProvider', () => {
 
     const withEmptyFastModel = await provider(workspace, false);
     expect(withEmptyFastModel.current).not.toHaveProperty('fastModelId');
+  });
+
+  it('includes only non-empty vision model settings in current selection', async () => {
+    const provider = createWorkspaceProvidersStatusProvider({ env: {} });
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'main-model' },
+      visionModel: 'vision-model',
+      modelProviders: {
+        openai: [{ id: 'main-model', name: 'Main Model' }],
+      },
+    });
+
+    const withVisionModel = await provider(workspace, false);
+    expect(withVisionModel.current?.visionModelId).toBe('vision-model');
+
+    await writeUserSettings({
+      security: { auth: { selectedType: 'openai' } },
+      model: { name: 'main-model' },
+      visionModel: '',
+      modelProviders: {
+        openai: [{ id: 'main-model', name: 'Main Model' }],
+      },
+    });
+
+    const withEmptyVisionModel = await provider(workspace, false);
+    expect(withEmptyVisionModel.current).not.toHaveProperty('visionModelId');
   });
 
   it('does not include runtime models in the workspace provider catalog', async () => {

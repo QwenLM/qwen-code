@@ -281,6 +281,16 @@ describe('parseArguments', () => {
     expect(argv.prompt).toBeUndefined();
   });
 
+  it('parses --insecure as a boolean flag (default false)', async () => {
+    process.argv = ['node', 'script.js'];
+    const defaultArgv = await parseArguments();
+    expect(defaultArgv.insecure).toBe(false);
+
+    process.argv = ['node', 'script.js', '--insecure'];
+    const argv = await parseArguments();
+    expect(argv.insecure).toBe(true);
+  });
+
   it('rejects --json-schema combined with --acp', async () => {
     // ACP runs an independent turn loop (runAcpAgent) that doesn't honour
     // the synthetic structured_output terminal contract. The yargs check
@@ -959,6 +969,64 @@ describe('loadCliConfig', () => {
     expect(config.getPreventSystemSleepEnabled()).toBe(true);
   });
 
+  describe('--insecure flag', () => {
+    const savedEnv: Record<string, string | undefined> = {};
+    let errorSpy: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      for (const key of ['QWEN_TLS_INSECURE', 'NODE_TLS_REJECT_UNAUTHORIZED']) {
+        savedEnv[key] = process.env[key];
+        delete process.env[key];
+      }
+      // Silence (and capture) the intentional MITM warning loadCliConfig emits.
+      errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    });
+
+    afterEach(() => {
+      errorSpy.mockRestore();
+      for (const [key, value] of Object.entries(savedEnv)) {
+        if (value === undefined) delete process.env[key];
+        else process.env[key] = value;
+      }
+    });
+
+    it('sets QWEN_TLS_INSECURE=1 and NODE_TLS_REJECT_UNAUTHORIZED=0 when --insecure is passed', async () => {
+      process.argv = ['node', 'script.js', '--insecure'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+      expect(process.env['QWEN_TLS_INSECURE']).toBe('1');
+      expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBe('0');
+      expect(errorSpy).toHaveBeenCalled();
+    });
+
+    it('leaves TLS env vars unset without --insecure', async () => {
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+      expect(process.env['QWEN_TLS_INSECURE']).toBeUndefined();
+      expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBeUndefined();
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+
+    it('propagates a pre-set QWEN_TLS_INSECURE to NODE_TLS_REJECT_UNAUTHORIZED=0', async () => {
+      process.env['QWEN_TLS_INSECURE'] = '1';
+      process.argv = ['node', 'script.js'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+      expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBe('0');
+      expect(errorSpy).toHaveBeenCalled();
+    });
+
+    it('skips re-assignment and warning when NODE_TLS_REJECT_UNAUTHORIZED is already 0', async () => {
+      process.env['NODE_TLS_REJECT_UNAUTHORIZED'] = '0';
+      process.argv = ['node', 'script.js', '--insecure'];
+      const argv = await parseArguments();
+      await loadCliConfig({}, argv);
+      expect(process.env['NODE_TLS_REJECT_UNAUTHORIZED']).toBe('0');
+      expect(errorSpy).not.toHaveBeenCalled();
+    });
+  });
+
   it('should propagate runtime sleep prevention setting', async () => {
     process.argv = ['node', 'script.js'];
     const argv = await parseArguments();
@@ -1564,6 +1632,26 @@ describe('loadCliConfig telemetry', () => {
     const settings: Settings = { telemetry: { enabled: true } };
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(false);
+  });
+
+  it('should use sensitiveSpanAttributeMaxLength from settings', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { sensitiveSpanAttributeMaxLength: 65_536 },
+    };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(65_536);
+  });
+
+  it('should default sensitiveSpanAttributeMaxLength to 1MiB', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = { telemetry: { enabled: true } };
+    const config = await loadCliConfig(settings, argv);
+    expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(
+      1024 * 1024,
+    );
   });
 
   it('should use telemetry OTLP protocol from settings if CLI flag is not present', async () => {
@@ -2540,6 +2628,27 @@ describe('loadCliConfig with includeDirectories', () => {
     expect(config.getAutoSkillEnabled()).toBe(true);
   });
 
+  it('autoSkillConfirm: defaults to true when unset', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const config = await loadCliConfig({}, argv, undefined, []);
+
+    expect(config.getAutoSkillConfirmEnabled()).toBe(true);
+  });
+
+  it('autoSkillConfirm: passes memory.autoSkillConfirm: false through to config', async () => {
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      memory: {
+        autoSkillConfirm: false,
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getAutoSkillConfirmEnabled()).toBe(false);
+  });
+
   it('should force minimal startup behavior in bare mode', async () => {
     process.argv = ['node', 'script.js', '--bare'];
     const argv = await parseArguments();
@@ -2609,6 +2718,140 @@ describe('loadCliConfig with includeDirectories', () => {
     const config = await loadCliConfig(settings, argv, undefined, []);
 
     expect(config.getPlansDir()).toContain('project-plans');
+  });
+});
+
+describe('loadCliConfig safe mode', () => {
+  const originalArgv = process.argv;
+
+  beforeEach(() => {
+    vi.resetAllMocks();
+    vi.mocked(os.homedir).mockReturnValue('/mock/home/user');
+    vi.stubEnv('GEMINI_API_KEY', 'test-api-key');
+    vi.spyOn(process, 'cwd').mockReturnValue(
+      path.resolve(path.sep, 'home', 'user', 'project'),
+    );
+  });
+
+  afterEach(() => {
+    process.argv = originalArgv;
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('should strip settings-sourced permissions in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      permissions: {
+        allow: ['Bash(*)'],
+        ask: ['Edit'],
+        deny: ['ReadFile'],
+        autoMode: { hints: { allow: ['everything'] } },
+      },
+      tools: {
+        allowed: ['ShellTool'],
+        exclude: ['WriteFile'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getPermissionsAllow()).toEqual([]);
+    expect(config.getPermissionsAsk()).toEqual([]);
+    // mergedDeny should not contain settings-sourced rules.
+    // Non-interactive mode exclusions (run_shell_command, monitor, edit,
+    // write_file) are expected since no prompt/interactive flag was passed.
+    expect(config.getPermissionsDeny()).not.toContain('WriteFile');
+    expect(config.getAutoModeSettings()).toEqual({});
+  });
+
+  it('should ignore settings-sourced coreTools in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        core: [ToolNames.WEB_FETCH],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getCoreTools()).toBeUndefined();
+  });
+
+  it('should ignore settings-sourced allowedTools in safe mode but keep argv ones', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '--safe-mode',
+      '--allowed-tools',
+      'ReadFile',
+    ];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        allowed: ['ShellTool'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getPermissionsAllow()).toContain('ReadFile');
+    expect(config.getPermissionsAllow()).not.toContain('ShellTool');
+  });
+
+  it('should ignore settings-sourced approvalMode in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings = {
+      tools: {
+        approvalMode: 'yolo',
+      },
+    } as unknown as Settings;
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getApprovalMode()).toBe(ServerConfig.ApprovalMode.DEFAULT);
+  });
+
+  it('should ignore settings-sourced disabled slash commands in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      slashCommands: {
+        disabled: ['/review', '/bug'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getDisabledSlashCommands()).toEqual([]);
+  });
+
+  it('should ignore settings-sourced disabledTools in safe mode', async () => {
+    process.argv = ['node', 'script.js', '--safe-mode'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      tools: {
+        disabled: ['WebFetch', 'ReadFile'],
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getDisabledTools().size).toBe(0);
+  });
+
+  it('should respect safe mode via QWEN_CODE_SAFE_MODE env var', async () => {
+    vi.stubEnv('QWEN_CODE_SAFE_MODE', 'true');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      permissions: {
+        allow: ['Bash(*)'],
+        autoMode: { hints: { allow: ['everything'] } },
+      },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+
+    expect(config.getPermissionsAllow()).toEqual([]);
+    expect(config.getAutoModeSettings()).toEqual({});
+    expect(config.isSafeMode()).toBe(true);
   });
 });
 
@@ -3364,6 +3607,17 @@ describe('Telemetry configuration via environment variables', () => {
     };
     const config = await loadCliConfig(settings, argv, undefined, []);
     expect(config.getTelemetryIncludeSensitiveSpanAttributes()).toBe(true);
+  });
+
+  it('should prioritize QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH over settings', async () => {
+    vi.stubEnv('QWEN_TELEMETRY_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH', '131072');
+    process.argv = ['node', 'script.js'];
+    const argv = await parseArguments();
+    const settings: Settings = {
+      telemetry: { sensitiveSpanAttributeMaxLength: 65_536 },
+    };
+    const config = await loadCliConfig(settings, argv, undefined, []);
+    expect(config.getTelemetrySensitiveSpanAttributeMaxLength()).toBe(131_072);
   });
 
   it('should prioritize QWEN_TELEMETRY_OUTFILE over settings', async () => {

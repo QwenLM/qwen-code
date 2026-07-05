@@ -32,18 +32,28 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { promises as fsp } from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { pathToFileURL } from 'node:url';
 import type {
   ReadTextFileRequest,
   ReadTextFileResponse,
+  SessionNotification,
   WriteTextFileRequest,
   WriteTextFileResponse,
 } from '@agentclientprotocol/sdk';
 import { RequestError } from '@agentclientprotocol/sdk';
+import {
+  ClientMcpRegistrar,
+  ToolNames,
+  type ClientMcpFrame,
+} from '@qwen-code/qwen-code-core';
+import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import { BridgeClient } from './bridgeClient.js';
 import type { BridgeFileSystem } from './bridgeFileSystem.js';
 import type { MidTurnQueueEntry } from './bridgeTypes.js';
+import type { ClientMcpMessageSender } from './bridgeOptions.js';
 import { CancelSentinelCollisionError } from './bridgeErrors.js';
 import { CANCEL_VOTE_SENTINEL } from './permissionMediator.js';
+import { SessionArtifactStore } from './sessionArtifacts.js';
 
 /**
  * Minimal-stub constructor for a `BridgeClient` whose only purpose is
@@ -538,6 +548,1011 @@ describe('BridgeClient — original timestamp preservation', () => {
   });
 });
 
+describe('BridgeClient — token usage accounting', () => {
+  const noFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+
+  function makeClientWithTokenHook(
+    sessionId: string,
+    onTokenUsage: (inputTokens: number, outputTokens: number) => void,
+  ) {
+    const fakeEntry = {
+      sessionId,
+      events: { publish: vi.fn().mockReturnValue(true) },
+    };
+    return new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noFlow as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      undefined, // clientMcpSender
+      undefined, // ownsSession → default () => true
+      onTokenUsage,
+    );
+  }
+
+  it('reports per-round input/output tokens from update._meta.usage', async () => {
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:usage', onTokenUsage);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:usage',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          usage: { inputTokens: 1200, outputTokens: 340, totalTokens: 1540 },
+          durationMs: 4200,
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(onTokenUsage).toHaveBeenCalledTimes(1);
+    // The sibling `_meta.durationMs` (LLM round-trip) rides through too.
+    expect(onTokenUsage).toHaveBeenCalledWith(1200, 340, 4200);
+  });
+
+  it('does not report when the update carries no usage meta', async () => {
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:nousage', onTokenUsage);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:nousage',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: 'hello' },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(onTokenUsage).not.toHaveBeenCalled();
+  });
+
+  it('defaults a missing input or output token field to 0', async () => {
+    const onTokenUsage = vi.fn();
+    const client = makeClientWithTokenHook('sess:partial', onTokenUsage);
+
+    await client.sessionUpdate({
+      sessionId: 'sess:partial',
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: { usage: { outputTokens: 50 } },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    // No `_meta.durationMs` on this frame → the round-trip arg is undefined.
+    expect(onTokenUsage).toHaveBeenCalledWith(0, 50, undefined);
+  });
+
+  it('does NOT count tokens for replayed history frames (no live entry yet)', async () => {
+    // Regression guard for the `session/load` replay path: HistoryReplayer
+    // re-emits saved assistant usage as live `session/update` frames that reach
+    // sessionUpdate *before* the session entry is registered, so `resolveEntry`
+    // returns undefined and events flow through the pending-restore bus instead.
+    // Counting those would dump the whole session's historical token total into
+    // the current window as a phantom burn spike; the `&& entry` guard blocks it.
+    const onTokenUsage = vi.fn();
+    const publish = vi.fn().mockReturnValue(true);
+    const sessionId = 'sess:replay';
+    const client = new BridgeClient(
+      (() => undefined) as never, // resolveEntry → no live entry yet (replay)
+      ((sid: string) => (sid === sessionId ? { publish } : undefined)) as never, // restore bus
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      undefined, // clientMcpSender
+      undefined, // ownsSession → default () => true
+      onTokenUsage,
+    );
+
+    await client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'agent_message_chunk',
+        content: { type: 'text', text: '' },
+        _meta: {
+          usage: { inputTokens: 5000, outputTokens: 1200, totalTokens: 6200 },
+          durationMs: 900,
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    // The frame is still published to the restore bus (history replay works)...
+    expect(publish).toHaveBeenCalled();
+    // ...but its historical usage is NOT added to the live token-burn metric.
+    expect(onTokenUsage).not.toHaveBeenCalled();
+  });
+
+  it('does NOT count tokens when replaying history via seedSessionUpdates (batch load)', async () => {
+    // #6309 routes batch load-replay through seedSessionUpdates, which prepares
+    // frames and seeds them WITHOUT going through the live sessionUpdate token
+    // sniff. Even though a replayed assistant frame carries usage, it must not
+    // land in the live token-burn metric.
+    const onTokenUsage = vi.fn();
+    const sessionId = 'sess:seed';
+    const fakeEntry = {
+      sessionId,
+      events: {
+        publish: vi.fn().mockReturnValue(true),
+        seedReplayEvents: vi.fn(),
+      },
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      (() => undefined) as never,
+      { request: noFlow } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      undefined, // clientMcpSender
+      undefined, // ownsSession
+      onTokenUsage,
+    );
+
+    await client.seedSessionUpdates(
+      fakeEntry as never,
+      [
+        {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: '' },
+          _meta: { usage: { inputTokens: 9000, outputTokens: 2000 } },
+        },
+      ] as never,
+    );
+
+    // History is seeded into the event bus...
+    expect(fakeEntry.events.seedReplayEvents).toHaveBeenCalled();
+    // ...but the replayed usage is NOT counted as live burn.
+    expect(onTokenUsage).not.toHaveBeenCalled();
+  });
+});
+
+describe('BridgeClient — artifact ingress', () => {
+  const noPermissionFlow = () => {
+    throw new Error('test: permission flow should not run');
+  };
+
+  it('stores tool result artifacts and publishes artifact_changed', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-bridge-artifacts-'),
+    );
+    try {
+      const sessionId = 'sess:artifacts';
+      const publish = vi.fn().mockReturnValue(true);
+      const artifactUrl = pathToFileURL(
+        path.join(workspace, 'dashboard.html'),
+      ).href;
+      const fakeEntry = {
+        sessionId,
+        events: { publish },
+        artifacts: new SessionArtifactStore({
+          sessionId,
+          workspaceCwd: workspace,
+        }),
+        pendingPermissionIds: new Set<string>(),
+        midTurnMessageQueue: [] as MidTurnQueueEntry[],
+        promptActive: true,
+      };
+      const client = new BridgeClient(
+        ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+        noPermissionFlow as never,
+        { request: noPermissionFlow } as never,
+        0,
+        Infinity,
+      );
+
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-artifact',
+          status: 'completed',
+          content: [],
+          _meta: {
+            toolName: ToolNames.ARTIFACT,
+            artifacts: [
+              {
+                title: 'Dashboard',
+                storage: 'published',
+                url: artifactUrl,
+                managedId: 'managed-1',
+              },
+            ],
+          },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+      expect(publish.mock.calls.map(([event]) => event.type)).toEqual([
+        'session_update',
+        'artifact_changed',
+      ]);
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'session_update' }),
+      );
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'artifact_changed',
+          data: {
+            sessionId,
+            change: expect.objectContaining({
+              action: 'created',
+              artifact: expect.objectContaining({
+                title: 'Dashboard',
+                storage: 'published',
+              }),
+            }),
+          },
+        }),
+      );
+      await expect(fakeEntry.artifacts.list()).resolves.toMatchObject({
+        artifacts: [
+          {
+            title: 'Dashboard',
+            storage: 'published',
+            managedId: 'managed-1',
+          },
+        ],
+      });
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('strips raw tool artifacts from session updates before publishing', async () => {
+    const sessionId = 'sess:sanitized-artifacts';
+    const publish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: {
+        inputBatchLimit: () => 1,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-sanitize',
+          status: 'completed',
+          content: [],
+          _meta: {
+            toolName: ToolNames.ARTIFACT,
+            keep: 'visible',
+            artifacts: [
+              'not-an-artifact',
+              { title: 'One', url: 'https://example.com/1' },
+              { title: 'Two', url: 'https://example.com/2' },
+            ],
+          },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+      const sessionUpdate = publish.mock.calls
+        .map(([event]) => event as { type: string; data: SessionNotification })
+        .find((event) => event.type === 'session_update');
+      expect(sessionUpdate).toBeDefined();
+      const publishedMeta = (
+        sessionUpdate!.data.update as { _meta?: Record<string, unknown> }
+      )._meta;
+      expect(publishedMeta).toEqual({
+        toolName: ToolNames.ARTIFACT,
+        keep: 'visible',
+      });
+      expect(upsertMany).toHaveBeenCalledWith(
+        [expect.objectContaining({ title: 'One' })],
+        { trustedPublisher: true },
+      );
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('reason=malformed');
+      expect(logged).toContain('source=tool');
+      expect(logged).toContain('index=0');
+      expect(logged).toContain('artifact batch limit exceeded');
+      expect(logged).toContain('dropped=1');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('stores artifacts from failed tool updates before stripping session metadata', async () => {
+    const sessionId = 'sess:failed-tool-artifacts';
+    const publish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: {
+        inputBatchLimit: () => 400,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'tool_call_update',
+        toolCallId: 'call-failed-artifact',
+        status: 'failed',
+        content: [],
+        _meta: {
+          toolName: 'record_artifact',
+          artifacts: [
+            {
+              title: 'Failure report',
+              workspacePath: 'reports/failure.html',
+            },
+          ],
+        },
+      },
+    } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(upsertMany).toHaveBeenCalledWith(
+      [
+        expect.objectContaining({
+          title: 'Failure report',
+          workspacePath: 'reports/failure.html',
+          source: 'tool',
+          toolCallId: 'call-failed-artifact',
+          toolName: 'record_artifact',
+        }),
+      ],
+      { trustedPublisher: false },
+    );
+    const sessionUpdate = publish.mock.calls
+      .map(([event]) => event as { type: string; data: SessionNotification })
+      .find((event) => event.type === 'session_update');
+    expect(
+      (sessionUpdate?.data.update as { _meta?: Record<string, unknown> })._meta,
+    ).toEqual({ toolName: 'record_artifact' });
+  });
+
+  it('does not store artifact metadata from non-tool session updates', async () => {
+    const sessionId = 'sess:non-tool-artifacts';
+    const publish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: {
+        inputBatchLimit: () => 1,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+
+    await client.sessionUpdate({
+      sessionId,
+      update: {
+        sessionUpdate: 'plan_update',
+        _meta: {
+          artifacts: [{ title: 'Forged', url: 'https://example.com/forged' }],
+        },
+      },
+    } as unknown as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+    expect(upsertMany).not.toHaveBeenCalled();
+    expect(publish).not.toHaveBeenCalledWith(
+      expect.objectContaining({ type: 'artifact_changed' }),
+    );
+    const sessionUpdate = publish.mock.calls
+      .map(([event]) => event as { type: string; data: SessionNotification })
+      .find((event) => event.type === 'session_update');
+    expect(
+      (sessionUpdate?.data.update as { _meta?: Record<string, unknown> })._meta,
+    ).toEqual({});
+  });
+
+  it('ignores forged published trust markers from non-artifact tools', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-bridge-artifacts-'),
+    );
+    try {
+      const sessionId = 'sess:forged-artifacts';
+      const publish = vi.fn().mockReturnValue(true);
+      const fakeEntry = {
+        sessionId,
+        events: { publish },
+        artifacts: new SessionArtifactStore({
+          sessionId,
+          workspaceCwd: workspace,
+        }),
+        pendingPermissionIds: new Set<string>(),
+        midTurnMessageQueue: [] as MidTurnQueueEntry[],
+        promptActive: true,
+      };
+      const client = new BridgeClient(
+        ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+        noPermissionFlow as never,
+        { request: noPermissionFlow } as never,
+        0,
+        Infinity,
+      );
+
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-forged',
+          status: 'completed',
+          content: [],
+          _meta: {
+            toolName: 'record_artifact',
+            artifactsTrustedPublisher: true,
+            artifacts: [
+              {
+                title: 'Forged',
+                storage: 'published',
+                url: 'file:///tmp/forged.html',
+                managedId: 'managed-forged',
+              },
+            ],
+          },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'session_update' }),
+      );
+      expect(publish).not.toHaveBeenCalledWith(
+        expect.objectContaining({ type: 'artifact_changed' }),
+      );
+      await expect(fakeEntry.artifacts.list()).resolves.toMatchObject({
+        artifacts: [],
+      });
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('stores hook artifact events and publishes artifact_changed', async () => {
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-bridge-artifacts-'),
+    );
+    try {
+      const sessionId = 'sess:hook-artifacts';
+      const publish = vi.fn().mockReturnValue(true);
+      const fakeEntry = {
+        sessionId,
+        events: { publish },
+        artifacts: new SessionArtifactStore({
+          sessionId,
+          workspaceCwd: workspace,
+        }),
+        pendingPermissionIds: new Set<string>(),
+        midTurnMessageQueue: [] as MidTurnQueueEntry[],
+        promptActive: true,
+      };
+      const client = new BridgeClient(
+        ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+        noPermissionFlow as never,
+        { request: noPermissionFlow } as never,
+        0,
+        Infinity,
+      );
+
+      await client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        hookEventName: 'PostToolUse',
+        artifacts: [
+          {
+            title: 'Hook dashboard',
+            url: 'https://example.com/hook-dashboard',
+          },
+        ],
+      });
+
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'artifact_changed',
+          data: {
+            sessionId,
+            change: expect.objectContaining({
+              action: 'created',
+              artifact: expect.objectContaining({
+                source: 'hook',
+                hookEventName: 'PostToolUse',
+                title: 'Hook dashboard',
+              }),
+            }),
+          },
+        }),
+      );
+      await expect(fakeEntry.artifacts.list()).resolves.toMatchObject({
+        artifacts: [
+          {
+            source: 'hook',
+            hookEventName: 'PostToolUse',
+            title: 'Hook dashboard',
+          },
+        ],
+      });
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('drops artifact events for sessions outside this bridge channel', async () => {
+    const ownedSessionId = 'sess:owned-artifacts';
+    const forgedSessionId = 'sess:forged-artifacts';
+    const publish = vi.fn().mockReturnValue(true);
+    const resolveEntry = vi.fn((sid: string | undefined) =>
+      sid === forgedSessionId
+        ? {
+            sessionId: forgedSessionId,
+            events: { publish },
+            artifacts: {
+              inputBatchLimit: () => 400,
+              upsertMany: vi.fn().mockResolvedValue({ changes: [] }),
+            },
+            pendingPermissionIds: new Set<string>(),
+            midTurnMessageQueue: [] as MidTurnQueueEntry[],
+          }
+        : undefined,
+    );
+    const client = new BridgeClient(
+      resolveEntry as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (sid) => sid === ownedSessionId,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        client.extNotification('qwen/notify/session/artifact-event', {
+          sessionId: forgedSessionId,
+          artifacts: [{ title: 'Forged', url: 'https://example.com/forged' }],
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(resolveEntry).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('reason=session_not_owned');
+      expect(logged).toContain(forgedSessionId);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('drops session updates for sessions outside this bridge channel', async () => {
+    const ownedSessionId = 'sess:owned-session-update';
+    const forgedSessionId = 'sess:forged-session-update';
+    const publish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const resolveEntry = vi.fn((sid: string | undefined) =>
+      sid === forgedSessionId
+        ? {
+            sessionId: forgedSessionId,
+            events: { publish },
+            artifacts: {
+              inputBatchLimit: () => 400,
+              upsertMany,
+            },
+            pendingPermissionIds: new Set<string>(),
+            midTurnMessageQueue: [] as MidTurnQueueEntry[],
+          }
+        : undefined,
+    );
+    const client = new BridgeClient(
+      resolveEntry as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      (sid) => sid === ownedSessionId,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await client.sessionUpdate({
+        sessionId: forgedSessionId,
+        update: {
+          sessionUpdate: 'tool_call_update',
+          toolCallId: 'call-forged-session-update',
+          status: 'completed',
+          content: [],
+          _meta: {
+            toolName: ToolNames.ARTIFACT,
+            artifacts: [
+              {
+                title: 'Forged',
+                storage: 'published',
+                url: 'file:///tmp/forged.html',
+                managedId: 'managed-forged',
+              },
+            ],
+          },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+      expect(resolveEntry).not.toHaveBeenCalled();
+      expect(upsertMany).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('type=session_update');
+      expect(logged).toContain('reason=session_not_owned');
+      expect(logged).toContain(forgedSessionId);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('allows session updates during an in-flight restore on this channel', async () => {
+    const sessionId = 'sess:restore-session-update';
+    const publish = vi.fn().mockReturnValue(true);
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      ((sid: string) => (sid === sessionId ? { publish } : undefined)) as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+    );
+    client.markRestoreInFlight(sessionId);
+    try {
+      await client.sessionUpdate({
+        sessionId,
+        update: {
+          sessionUpdate: 'agent_message_chunk',
+          content: { type: 'text', text: 'restored' },
+        },
+      } as Parameters<BridgeClient['sessionUpdate']>[0]);
+
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'session_update',
+          data: expect.objectContaining({ sessionId }),
+        }),
+      );
+    } finally {
+      client.clearRestoreInFlight(sessionId);
+    }
+  });
+
+  it('allows artifact events during an in-flight restore on this channel', async () => {
+    const sessionId = 'sess:restore-artifact-event';
+    const publish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: {
+        inputBatchLimit: () => 400,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      () => false,
+    );
+    client.markRestoreInFlight(sessionId);
+    try {
+      await client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        hookEventName: 'PostToolUse',
+        artifacts: [
+          {
+            title: 'Restored hook artifact',
+            url: 'https://example.com/restored-hook',
+          },
+        ],
+      });
+
+      expect(upsertMany).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({
+            source: 'hook',
+            hookEventName: 'PostToolUse',
+            title: 'Restored hook artifact',
+          }),
+        ],
+        undefined,
+      );
+    } finally {
+      client.clearRestoreInFlight(sessionId);
+    }
+  });
+
+  it('logs and drops artifact events when store ingestion fails', async () => {
+    const sessionId = 'sess:artifact-error';
+    const publish = vi.fn().mockReturnValue(true);
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: {
+        inputBatchLimit: () => 400,
+        upsertMany: vi
+          .fn()
+          .mockRejectedValue(new Error('artifact store unavailable')),
+      },
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        client.extNotification('qwen/notify/session/artifact-event', {
+          sessionId,
+          artifacts: [{ title: 'Dropped', url: 'https://example.com/drop' }],
+        }),
+      ).resolves.toBeUndefined();
+      expect(publish).not.toHaveBeenCalled();
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('artifact store unavailable');
+      expect(logged).toContain('"name":"Error"');
+      expect(logged).toContain('"stack":');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('caps oversized artifact event batches before store ingestion', async () => {
+    const sessionId = 'sess:artifact-batch-cap';
+    const publish = vi.fn().mockReturnValue(true);
+    const upsertMany = vi.fn().mockResolvedValue({ changes: [] });
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: {
+        inputBatchLimit: () => 2,
+        upsertMany,
+      },
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: true,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const lateArtifact = {};
+    Object.defineProperty(lateArtifact, 'title', {
+      get: () => {
+        throw new Error('artifact past cap should not be mapped');
+      },
+    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await client.extNotification('qwen/notify/session/artifact-event', {
+        sessionId,
+        artifacts: [
+          { title: 'One', url: 'https://example.com/1' },
+          { title: 'Two', url: 'https://example.com/2' },
+          lateArtifact,
+        ],
+      });
+
+      expect(upsertMany).toHaveBeenCalledWith(
+        [
+          expect.objectContaining({ title: 'One' }),
+          expect.objectContaining({ title: 'Two' }),
+        ],
+        undefined,
+      );
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('artifact batch limit exceeded');
+      expect(logged).toContain('dropped=1');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('stores hook artifact events for child-initiated turns', async () => {
+    const sessionId = 'sess:child-artifacts';
+    const publish = vi.fn().mockReturnValue(true);
+    const workspace = await fsp.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-bridge-artifacts-'),
+    );
+    const fakeEntry = {
+      sessionId,
+      events: { publish },
+      artifacts: new SessionArtifactStore({
+        sessionId,
+        workspaceCwd: workspace,
+      }),
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: false,
+    };
+    const client = new BridgeClient(
+      ((sid: string) => (sid === sessionId ? fakeEntry : undefined)) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    try {
+      await expect(
+        client.extNotification('qwen/notify/session/artifact-event', {
+          sessionId,
+          source: 'hook',
+          hookEventName: 'PostToolUse',
+          toolName: 'read_file',
+          toolCallId: 'call-idle',
+          artifacts: [{ title: 'Idle', url: 'https://example.com/idle' }],
+        }),
+      ).resolves.toBeUndefined();
+      await expect(fakeEntry.artifacts.list()).resolves.toMatchObject({
+        artifacts: [
+          expect.objectContaining({
+            title: 'Idle',
+            source: 'hook',
+            hookEventName: 'PostToolUse',
+            toolName: 'read_file',
+            toolCallId: 'call-idle',
+          }),
+        ],
+      });
+      expect(publish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          type: 'artifact_changed',
+        }),
+      );
+    } finally {
+      await fsp.rm(workspace, { recursive: true, force: true });
+    }
+  });
+
+  it('logs and drops artifact events for unknown sessions', async () => {
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        client.extNotification('qwen/notify/session/artifact-event', {
+          sessionId: 'sess:missing',
+          artifacts: [{ title: 'Lost', url: 'https://example.com/lost' }],
+        }),
+      ).resolves.toBeUndefined();
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('reason=session_not_found');
+      expect(logged).toContain('sess:missing');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('logs and drops malformed artifact events before resolving a session', async () => {
+    const publish = vi.fn().mockReturnValue(true);
+    const resolveEntry = vi.fn(() => ({
+      sessionId: 'sess:malformed',
+      events: { publish },
+      artifacts: new SessionArtifactStore({
+        sessionId: 'sess:malformed',
+        workspaceCwd: process.cwd(),
+      }),
+      pendingPermissionIds: new Set<string>(),
+      midTurnMessageQueue: [] as MidTurnQueueEntry[],
+      promptActive: true,
+    }));
+    const client = new BridgeClient(
+      resolveEntry as never,
+      noPermissionFlow as never,
+      { request: noPermissionFlow } as never,
+      0,
+      Infinity,
+    );
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+    try {
+      await expect(
+        client.extNotification('qwen/notify/session/artifact-event', {
+          artifacts: [{ title: 'Missing session' }],
+        }),
+      ).resolves.toBeUndefined();
+      await expect(
+        client.extNotification('qwen/notify/session/artifact-event', {
+          sessionId: 'sess:malformed',
+          artifacts: 'not-array',
+        }),
+      ).resolves.toBeUndefined();
+
+      expect(resolveEntry).not.toHaveBeenCalled();
+      expect(publish).not.toHaveBeenCalled();
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('reason=malformed');
+      expect(logged).toContain('session=<missing>');
+      expect(logged).toContain('session=sess:malformed');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+});
+
 /**
  * Wenshao review #4335 / 3271978365 — `requestPermission`'s pre-publish
  * `CancelSentinelCollisionError` guard prevents an orphan SSE
@@ -779,6 +1794,159 @@ describe('BridgeClient — mid-turn queue drain (craft/drainMidTurnQueue)', () =
     const client = makeClientWithEntry('sess:x', undefined);
     const err = await client
       .extMethod('craft/somethingElse', { sessionId: 'sess:x' })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RequestError);
+    expect((err as RequestError).code).toBe(-32601);
+  });
+});
+
+/**
+ * Reverse tool channel (issue #5626, Phase 2). The ACP child's session
+ * `McpClientManager` routes a client-hosted (extension) MCP server's
+ * `sendSdkMcpMessage` UP to the parent via the
+ * `qwen/control/client_mcp/message` ext-method. `BridgeClient.extMethod`
+ * answers it by reaching the per-WS-connection `ClientMcpRegistrar` (looked up
+ * by `server` name through the injected `clientMcpSender`), which carries the
+ * JSON-RPC frame down the daemon WS and resolves with the correlated response.
+ *
+ * These tests exercise the REAL `BridgeClient.extMethod` + the REAL
+ * `ClientMcpRegistrar` round-trip (the child side is simulated by calling
+ * `extMethod` directly with the exact param shape `acpAgent.buildClientMcpSender`
+ * sends; the WS/extension side is simulated by answering frames via
+ * `resolveMessage`). Server-name routing + the `{ payload }` envelope are
+ * the contract this method owns.
+ */
+describe('BridgeClient — reverse tool channel (qwen/control/client_mcp/message)', () => {
+  const thrower = () => {
+    throw new Error('test: permission flow should not run');
+  };
+
+  /**
+   * Build a `BridgeClient` whose `clientMcpSender` resolves `server` to a real
+   * `ClientMcpRegistrar`'s sender (mirroring `ClientMcpSenderRegistry.lookup` in
+   * the serve layer). The registrar pushes outbound frames to `onFrame` so the
+   * test can answer them like the extension's WS would.
+   */
+  function makeClientWithRegistrar(
+    registrar: ClientMcpRegistrar,
+  ): BridgeClient {
+    const sender: ClientMcpMessageSender = (serverName: string) =>
+      registrar.hasServer(serverName)
+        ? (payload: unknown) =>
+            registrar.sendSdkMcpMessage(serverName, payload as JSONRPCMessage)
+        : undefined;
+    return new BridgeClient(
+      (() => undefined) as never, // resolveEntry: client_mcp/message is sessionless
+      (() => undefined) as never, // resolvePendingRestoreEvents
+      { request: thrower } as never,
+      0,
+      Infinity,
+      undefined, // fileSystem
+      undefined, // onModelPromoted
+      undefined, // onModePromoted
+      sender, // clientMcpSender
+    );
+  }
+
+  it('round-trips a JSON-RPC request through the registrar and returns { payload }', async () => {
+    const outbound: ClientMcpFrame[] = [];
+    const registrar = new ClientMcpRegistrar({
+      sendFrame: (frame) => {
+        outbound.push(frame);
+      },
+    });
+    registrar.registerServer('chrome-tools');
+    const client = makeClientWithRegistrar(registrar);
+
+    // Simulate the child's `buildClientMcpSender` call shape exactly.
+    const callP = client.extMethod('qwen/control/client_mcp/message', {
+      server: 'chrome-tools',
+      payload: { jsonrpc: '2.0', id: 7, method: 'tools/list' },
+    });
+
+    // The registrar put one outbound frame on the (simulated) WS — answer it
+    // like the extension would, echoing the correlation id.
+    await vi.waitFor(() => expect(outbound).toHaveLength(1));
+    const frame = outbound[0];
+    expect(frame.server).toBe('chrome-tools');
+    expect(frame.payload).toMatchObject({ method: 'tools/list', id: 7 });
+    registrar.resolveMessage(frame.id, {
+      jsonrpc: '2.0',
+      id: 7,
+      result: { tools: [{ name: 'chrome_read_page' }] },
+    } as JSONRPCMessage);
+
+    const result = await callP;
+    // The ext-method wraps the client-hosted reply in `{ payload }`.
+    expect(result).toEqual({
+      payload: {
+        jsonrpc: '2.0',
+        id: 7,
+        result: { tools: [{ name: 'chrome_read_page' }] },
+      },
+    });
+  });
+
+  it('round-trips a notification (no id) as a synthetic ack envelope', async () => {
+    const outbound: ClientMcpFrame[] = [];
+    const registrar = new ClientMcpRegistrar({
+      sendFrame: (frame) => {
+        outbound.push(frame);
+      },
+    });
+    registrar.registerServer('chrome-tools');
+    const client = makeClientWithRegistrar(registrar);
+
+    // `notifications/initialized` has no JSON-RPC id — the registrar
+    // fire-and-forgets and resolves with a synthetic ack (no WS response).
+    const result = await client.extMethod('qwen/control/client_mcp/message', {
+      server: 'chrome-tools',
+      payload: { jsonrpc: '2.0', method: 'notifications/initialized' },
+    });
+    expect(outbound).toHaveLength(1);
+    expect((result as { payload?: unknown }).payload).toBeDefined();
+  });
+
+  it('rejects (invalidParams) when the named server is not connected', async () => {
+    const registrar = new ClientMcpRegistrar({ sendFrame: () => {} });
+    // No registerServer call — the lookup returns undefined.
+    const client = makeClientWithRegistrar(registrar);
+    const err = await client
+      .extMethod('qwen/control/client_mcp/message', {
+        server: 'gone',
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RequestError);
+    expect((err as RequestError).code).toBe(-32602);
+  });
+
+  it('rejects (invalidParams) on a malformed frame (missing server)', async () => {
+    const registrar = new ClientMcpRegistrar({ sendFrame: () => {} });
+    const client = makeClientWithRegistrar(registrar);
+    const err = await client
+      .extMethod('qwen/control/client_mcp/message', {
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      })
+      .catch((e: unknown) => e);
+    expect(err).toBeInstanceOf(RequestError);
+    expect((err as RequestError).code).toBe(-32602);
+  });
+
+  it('rejects (methodNotFound) when no clientMcpSender is wired (Mode A / tests)', async () => {
+    // The default 5-arg construction omits the sender entirely.
+    const client = new BridgeClient(
+      (() => undefined) as never,
+      (() => undefined) as never,
+      { request: thrower } as never,
+      0,
+      Infinity,
+    );
+    const err = await client
+      .extMethod('qwen/control/client_mcp/message', {
+        server: 'chrome-tools',
+        payload: { jsonrpc: '2.0', id: 1, method: 'tools/list' },
+      })
       .catch((e: unknown) => e);
     expect(err).toBeInstanceOf(RequestError);
     expect((err as RequestError).code).toBe(-32601);

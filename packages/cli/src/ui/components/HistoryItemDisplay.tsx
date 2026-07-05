@@ -28,6 +28,7 @@ import {
   WarningMessage,
   ErrorMessage,
   RetryCountdownMessage,
+  VisionNoticeMessage,
   SuccessMessage,
   AwayRecapMessage,
 } from './messages/StatusMessages.js';
@@ -41,6 +42,7 @@ import { AboutBox } from './AboutBox.js';
 import { StatsDisplay } from './StatsDisplay.js';
 import { ModelStatsDisplay } from './ModelStatsDisplay.js';
 import { ToolStatsDisplay } from './ToolStatsDisplay.js';
+import { SkillStatsDisplay } from './SkillStatsDisplay.js';
 import { SessionSummaryDisplay } from './SessionSummaryDisplay.js';
 import { Help } from './Help.js';
 import type { SlashCommand } from '../commands/types.js';
@@ -57,7 +59,6 @@ import { BtwMessage } from './messages/BtwMessage.js';
 import { MemorySavedMessage } from './messages/MemorySavedMessage.js';
 import { DiffStatsDisplay } from './messages/DiffStatsDisplay.js';
 import { GoalStatusMessage } from './messages/GoalStatusMessage.js';
-import { useCompactMode } from '../contexts/CompactModeContext.js';
 import { useSettings } from '../contexts/SettingsContext.js';
 import { useThoughtExpanded } from '../contexts/ThoughtExpandedContext.js';
 import { useThinkingViewer } from '../contexts/ThinkingViewerContext.js';
@@ -76,21 +77,6 @@ interface HistoryItemDisplayProps {
   activeShellPtyId?: number | null;
   embeddedShellFocused?: boolean;
   availableTerminalHeightGemini?: number;
-  /**
-   * When the item is a `tool_group`, an optional short LLM-generated label
-   * summarizing the batch. Replaces the generic "Tool × N" line in compact
-   * mode. Computed by the parent from `tool_use_summary` history items.
-   */
-  compactLabel?: string;
-  /**
-   * When the item is a `tool_use_summary`, true if a sibling tool_group has
-   * absorbed this label via its compact-mode header. The standalone `● <label>`
-   * line is suppressed in that case. False for force-expanded groups in
-   * compact mode (they render through the full ToolGroupMessage path and
-   * don't consume compactLabel, so the standalone line is the label's only
-   * path to the screen) and for all tool_use_summary items in full mode.
-   */
-  summaryAbsorbed?: boolean;
   sourceCopyIndexOffsets?: MarkdownSourceCopyIndexOffsets;
   /** Force thinking blocks expanded (e.g. in SessionPreview). */
   thoughtExpanded?: boolean;
@@ -122,6 +108,10 @@ const ClickableThinkMessage: React.FC<{
 }) => {
   const ref = useRef<DOMElement>(null);
   const { openThinkingViewer } = useThinkingViewer();
+  // Click-to-expand needs SGR mouse tracking. We do NOT pass `bypassVpGate`, so
+  // useMouseEvents enables it only in VP mode; in non-VP the click handler
+  // stays dormant and native terminal scrollback is preserved (the block still
+  // expands via Alt+T — the "option+t to expand" affordance it already shows).
   const isActive = !isPending && !expanded;
   const sanitizedViewerText = useMemo(
     () => escapeAnsiCtrlCodes(viewerText),
@@ -189,6 +179,7 @@ function getHistoryItemMarginTop(item: HistoryItem): number {
     case 'stop_hook_loop':
     case 'stop_hook_system_message':
     case 'goal_status':
+    case 'vision_notice':
       return 0;
     default:
       return 1;
@@ -206,15 +197,12 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
   activeShellPtyId,
   embeddedShellFocused,
   availableTerminalHeightGemini,
-  compactLabel,
-  summaryAbsorbed = false,
   sourceCopyIndexOffsets,
   thoughtExpanded,
   thinkingFullText,
 }) => {
   const marginTop = getHistoryItemMarginTop(item);
 
-  const { compactMode } = useCompactMode();
   const contextThoughtExpanded = useThoughtExpanded();
   const resolvedThoughtExpanded = thoughtExpanded ?? contextThoughtExpanded;
   const settings = useSettings();
@@ -249,6 +237,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
               [
               {new Date(itemForDisplay.timestamp).toLocaleTimeString('en-US', {
                 hour12: false,
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
               })}
               ]
             </Text>
@@ -318,6 +309,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       {itemForDisplay.type === 'retry_countdown' && (
         <RetryCountdownMessage text={itemForDisplay.text} />
       )}
+      {itemForDisplay.type === 'vision_notice' && (
+        <VisionNoticeMessage text={itemForDisplay.text} />
+      )}
       {itemForDisplay.type === 'about' && (
         <AboutBox {...itemForDisplay.systemInfo} width={boxWidth} />
       )}
@@ -335,6 +329,9 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
       )}
       {itemForDisplay.type === 'tool_stats' && (
         <ToolStatsDisplay width={boxWidth} />
+      )}
+      {itemForDisplay.type === 'skill_stats' && (
+        <SkillStatsDisplay width={boxWidth} />
       )}
       {itemForDisplay.type === 'quit' && (
         <SessionSummaryDisplay
@@ -355,33 +352,13 @@ const HistoryItemDisplayComponent: React.FC<HistoryItemDisplayProps> = ({
           memoryWriteCount={itemForDisplay.memoryWriteCount}
           memoryReadCount={itemForDisplay.memoryReadCount}
           isUserInitiated={itemForDisplay.isUserInitiated}
-          compactLabel={compactLabel}
         />
       )}
-      {/*
-        `tool_use_summary` as a standalone inline item.
-
-        In full mode (`compactMode=false`), the label arrives via the fast-model
-        call AFTER the tool_group has been committed to Ink's append-only
-        <Static>, so we cannot update the tool_group's header retroactively.
-        Rendering a standalone `● <label>` line appends cleanly.
-
-        In compact mode, the label is normally absorbed into the merged
-        tool_group's header (via `compactLabel` prop to CompactToolGroupDisplay),
-        and `summaryAbsorbed=true` is set so this block does nothing. But when
-        the sibling tool_group is force-expanded (errors, confirmations,
-        user-initiated, focused shell), the full-expand path ignores
-        `compactLabel`, and `MainContent` leaves `summaryAbsorbed=false` —
-        the standalone line below is then the label's only route to the UI,
-        which is exactly the case where a summary is most diagnostically
-        useful ("Fixed NPE in UserService" on an errored batch).
-      */}
-      {itemForDisplay.type === 'tool_use_summary' &&
-        (!compactMode || !summaryAbsorbed) && (
-          <Box paddingLeft={1}>
-            <Text dimColor>● {itemForDisplay.summary}</Text>
-          </Box>
-        )}
+      {itemForDisplay.type === 'tool_use_summary' && (
+        <Box paddingLeft={1}>
+          <Text dimColor>● {itemForDisplay.summary}</Text>
+        </Box>
+      )}
       {itemForDisplay.type === 'compression' && (
         <CompressionMessage compression={itemForDisplay.compression} />
       )}

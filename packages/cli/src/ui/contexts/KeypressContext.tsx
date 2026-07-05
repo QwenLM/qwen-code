@@ -24,6 +24,7 @@ import { PassThrough } from 'node:stream';
 import { noteInteraction } from '../../utils/housekeeping/lastInteractionAt.js';
 import {
   parseSGRMouseEvent,
+  MAX_SGR_MOUSE_SEQUENCE_LENGTH,
   type MouseEvent as SgrMouseEvent,
 } from '../utils/mouse.js';
 import {
@@ -46,6 +47,15 @@ import { clipboardHasImage } from '../utils/clipboardUtils.js';
 import { FOCUS_IN, FOCUS_OUT } from '../hooks/useFocus.js';
 
 const ESC = '\u001B';
+// On macOS, when the terminal's Option key is in its default "compose
+// character" mode (iTerm2 "Normal", VS Code without macOptionIsMeta), Option+t
+// is delivered to the app as the dagger glyph "†" (U+2020) with no modifier
+// metadata — so there is no way to tell Option was held. Terminals that speak
+// the Kitty keyboard protocol (e.g. Ghostty) instead report a real Alt+t event,
+// which is why the shortcut already works there. We treat a lone "†" as Alt+t so
+// the "expand thinking" shortcut works everywhere without requiring users to
+// reconfigure their terminal. See handleKeypress for where this is applied.
+const OPTION_T_COMPOSED_GLYPH = '†';
 export const PASTE_MODE_PREFIX = `${ESC}[200~`;
 export const PASTE_MODE_SUFFIX = `${ESC}[201~`;
 export const DRAG_COMPLETION_TIMEOUT_MS = 100; // Broadcast full path after 100ms if no more input
@@ -218,6 +228,18 @@ export function KeypressProvider({
     let swallowingSgrMouse = false;
     let sgrMouseBuffer = '';
     let sgrMouseTimeout: NodeJS.Timeout | null = null;
+
+    // Abandon any in-progress SGR mouse reassembly: clear the swallow flag, the
+    // partial buffer, and the reassembly timeout. Shared by every branch that
+    // bails out of mouse parsing (bracketed-paste takeover, ctrl+c, teardown).
+    const resetSgrMouse = () => {
+      swallowingSgrMouse = false;
+      sgrMouseBuffer = '';
+      if (sgrMouseTimeout) {
+        clearTimeout(sgrMouseTimeout);
+        sgrMouseTimeout = null;
+      }
+    };
 
     const updateKittyBuffer = (value: string) => {
       kittySequenceBufferRef.current = value;
@@ -705,14 +727,29 @@ export function KeypressProvider({
       // \x1b[< followed by individual character events. We buffer the
       // fragments, reconstruct the full sequence, parse it, and forward
       // to registered mouse handlers.
-      if (swallowingSgrMouse) {
+      //
+      // While a bracketed paste is in progress, never reconstruct or dispatch
+      // SGR mouse events: pasted content can embed `\x1b[<0;col;rowM`, and
+      // delivering that as a real click would let a paste choose dialog
+      // options or move the cursor. Let those bytes fall through to the paste
+      // buffer instead, and discard any half-built mouse fragment.
+      if (isPaste) {
+        // resetSgrMouse() is idempotent (a no-op when nothing is in flight),
+        // so call it unconditionally — matching the other reset call sites.
+        resetSgrMouse();
+      } else if (swallowingSgrMouse) {
         if (key.ctrl && key.name === 'c') {
-          swallowingSgrMouse = false;
-          sgrMouseBuffer = '';
-          if (sgrMouseTimeout) {
-            clearTimeout(sgrMouseTimeout);
-            sgrMouseTimeout = null;
-          }
+          resetSgrMouse();
+        } else if (key.name === 'paste-start') {
+          // Bracketed paste takes priority over a half-built SGR mouse
+          // fragment. If a paste begins mid-reassembly (e.g. a mouse-move
+          // `\x1b[<…` arrived without its terminating `M`, then paste-start),
+          // we must NOT swallow paste-start into sgrMouseBuffer — doing so
+          // would skip the paste-start handler below, leave `isPaste` false,
+          // and let an SGR sequence embedded in the pasted content be
+          // reconstructed into a real click. Discard the fragment and fall
+          // through so the paste-start handler sets `isPaste = true`.
+          resetSgrMouse();
         } else {
           sgrMouseBuffer += key.sequence;
           if (key.name === 'm' || key.sequence === 'M') {
@@ -728,11 +765,18 @@ export function KeypressProvider({
               }
             }
             sgrMouseBuffer = '';
+          } else if (sgrMouseBuffer.length >= MAX_SGR_MOUSE_SEQUENCE_LENGTH) {
+            // A malformed `\x1b[<` (e.g. from subprocess output) without a
+            // terminator would otherwise swallow every subsequent keystroke
+            // until the 200ms timeout fires. Mirror the 50-byte cap in
+            // isIncompleteMouseSequence: bail out early so the next keystroke
+            // is handled normally instead of being buffered and discarded.
+            resetSgrMouse();
           }
           return;
         }
       }
-      if (key.sequence === `${ESC}[<`) {
+      if (!isPaste && key.sequence === `${ESC}[<`) {
         swallowingSgrMouse = true;
         sgrMouseBuffer = `${ESC}[<`;
         if (sgrMouseTimeout) {
@@ -1048,6 +1092,22 @@ export function KeypressProvider({
       if (key.name === 'return' && key.sequence === `${ESC}\r`) {
         key.meta = true;
       }
+
+      // macOS "Option as compose character" terminals turn Option+t into the
+      // bare glyph "†" (U+2020) with no modifier metadata. Rewrite it to a
+      // synthetic Alt+t so the "expand thinking" shortcut fires; the meta flag
+      // also stops the glyph from being inserted into the input buffer (the
+      // text buffer skips printable input when meta/ctrl is set), so it looks
+      // exactly like Alt was pressed.
+      if (
+        process.platform === 'darwin' &&
+        !isPaste &&
+        key.sequence === OPTION_T_COMPOSED_GLYPH
+      ) {
+        key.name = 't';
+        key.meta = true;
+      }
+
       broadcast({ ...key, paste: isPaste });
     };
 
@@ -1226,12 +1286,7 @@ export function KeypressProvider({
       clearKittyBufferAndTimeout();
       clearPasteIdleTimeout();
 
-      if (sgrMouseTimeout) {
-        clearTimeout(sgrMouseTimeout);
-        sgrMouseTimeout = null;
-      }
-      swallowingSgrMouse = false;
-      sgrMouseBuffer = '';
+      resetSgrMouse();
 
       if (rawFlushTimeout) {
         clearTimeout(rawFlushTimeout);

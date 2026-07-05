@@ -241,6 +241,15 @@ export async function removeCronTasks(
   return removed;
 }
 
+// Finite, not just number: JSON like -1e999 parses to -Infinity, and a
+// non-finite timestamp poisons downstream date math — new Date(...)
+// .toISOString() throws mid-load, and age/expiry comparisons go
+// degenerate. Rejecting the entry routes it through the same
+// fix-or-delete contract as any other corrupt field.
+function isFiniteTimestamp(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
 function isValidTask(value: unknown): value is DurableCronTask {
   if (typeof value !== 'object' || value === null) return false;
   const obj = value as Record<string, unknown>;
@@ -249,7 +258,7 @@ function isValidTask(value: unknown): value is DurableCronTask {
     typeof obj['cron'] === 'string' &&
     typeof obj['prompt'] === 'string' &&
     typeof obj['recurring'] === 'boolean' &&
-    typeof obj['createdAt'] === 'number' &&
-    (obj['lastFiredAt'] === null || typeof obj['lastFiredAt'] === 'number')
+    isFiniteTimestamp(obj['createdAt']) &&
+    (obj['lastFiredAt'] === null || isFiniteTimestamp(obj['lastFiredAt']))
   );
 }

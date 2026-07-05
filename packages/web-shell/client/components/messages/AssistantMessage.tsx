@@ -37,10 +37,12 @@ export const AssistantMessage = memo(function AssistantMessage({
     if (!write) {
       return;
     }
-    void write.then(() => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 2000);
-    }).catch(() => {});
+    void write
+      .then(() => {
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 2000);
+      })
+      .catch(() => {});
   }, [content]);
   return (
     <div className={styles.message}>
@@ -50,7 +52,7 @@ export const AssistantMessage = memo(function AssistantMessage({
             <Markdown
               content={content}
               source="assistant"
-              deferMermaid={isStreaming}
+              isStreaming={isStreaming}
             />
           </div>
         </div>
@@ -229,9 +231,10 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                     : styles.thinkingSummaryText
                 }
               >
-                {t(thinkingSummaryKey, {
-                  duration: thinkingActive ? thinkingDuration : '',
-                })}
+                {t(
+                  thinkingSummaryKey,
+                  thinkingActive ? { duration: thinkingDuration } : {},
+                )}
               </span>
               <span
                 className={
@@ -254,7 +257,7 @@ export const ThinkingMessage = memo(function ThinkingMessage({
                   <Markdown
                     content={content}
                     source="thinking"
-                    deferMermaid={isStreaming}
+                    isStreaming={isStreaming}
                   />
                 </div>
               </div>

@@ -27,7 +27,8 @@ vi.mock('./dream.js', () => ({
   runManagedAutoMemoryDream: vi.fn(),
 }));
 
-vi.mock('./skillReviewAgentPlanner.js', () => ({
+vi.mock('./skillReviewAgentPlanner.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('./skillReviewAgentPlanner.js')>()),
   runSkillReviewByAgent: vi.fn(),
 }));
 
@@ -136,31 +137,37 @@ describe('MemoryManager', () => {
       expect(tasks.some((t) => t.status === 'completed')).toBe(true);
     });
 
-    it('skips extraction when history writes to a memory file', async () => {
-      const mgr = new MemoryManager();
-      const result = await mgr.scheduleExtract({
-        projectRoot,
-        sessionId: 'sess-1',
-        history: [
-          {
-            role: 'model',
-            parts: [
-              {
-                functionCall: {
-                  name: 'write_file',
-                  args: {
-                    file_path: `${projectRoot}/.qwen/memory/user/test.md`,
+    it.each([
+      ['private', '.qwen/memory/user/test.md'],
+      ['team', '.qwen/team-memory/test.md'],
+    ])(
+      'skips extraction when history writes to a %s memory file',
+      async (_label, filePath) => {
+        const mgr = new MemoryManager();
+        const result = await mgr.scheduleExtract({
+          projectRoot,
+          sessionId: 'sess-1',
+          history: [
+            {
+              role: 'model',
+              parts: [
+                {
+                  functionCall: {
+                    name: 'write_file',
+                    args: {
+                      file_path: path.join(projectRoot, filePath),
+                    },
                   },
                 },
-              },
-            ],
-          },
-        ],
-      });
+              ],
+            },
+          ],
+        });
 
-      expect(result.skippedReason).toBe('memory_tool');
-      expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
-    });
+        expect(result.skippedReason).toBe('memory_tool');
+        expect(vi.mocked(runAutoMemoryExtract)).not.toHaveBeenCalled();
+      },
+    );
 
     it('queues a trailing extract when one is already running', async () => {
       let resolveFirst!: (
@@ -348,6 +355,125 @@ describe('MemoryManager', () => {
     });
   });
 
+  // ─── scheduleSkillReview() confirmBeforePersist ───────────────────────────
+
+  describe('scheduleSkillReview() confirmBeforePersist', () => {
+    let tempDir: string;
+    let projectRoot: string;
+    let skillFilePath: string;
+
+    beforeEach(async () => {
+      vi.resetAllMocks();
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-skill-confirm-'));
+      projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      skillFilePath = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-foo',
+        'SKILL.md',
+      );
+      // The agent CREATES the skill at run time (it did not exist before the
+      // review) — staging only quarantines newly-created skills, so the mock
+      // must write the file when invoked rather than the test pre-creating it.
+      vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
+        await fs.mkdir(path.dirname(skillFilePath), { recursive: true });
+        await fs.writeFile(
+          skillFilePath,
+          '---\ndescription: Foo skill\n---\n# Foo\n',
+        );
+        return { touchedSkillFiles: [skillFilePath] };
+      });
+    });
+
+    afterEach(async () => {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    it('stages the skill and records pendingSkills when confirmBeforePersist is true', async () => {
+      const mgr = new MemoryManager();
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      });
+
+      expect(result.status).toBe('scheduled');
+      const record = await result.promise!;
+
+      expect(record.status).toBe('completed');
+      const pendingSkills = record.metadata?.['pendingSkills'] as
+        | unknown[]
+        | undefined;
+      expect(pendingSkills).toBeDefined();
+      expect(pendingSkills).toHaveLength(1);
+
+      // The skill must no longer be under .qwen/skills/
+      await expect(fs.access(skillFilePath)).rejects.toThrow();
+    });
+
+    it('leaves the skill in place and sets no pendingSkills when confirmBeforePersist is false', async () => {
+      const mgr = new MemoryManager();
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: false,
+      });
+
+      expect(result.status).toBe('scheduled');
+      const record = await result.promise!;
+
+      expect(record.status).toBe('completed');
+      expect(record.metadata?.['pendingSkills']).toBeUndefined();
+
+      // The skill must still be under .qwen/skills/
+      await expect(fs.access(skillFilePath)).resolves.toBeUndefined();
+    });
+
+    it('falls back to systemMessage as progress text when staging yields zero pending', async () => {
+      // The skill exists BEFORE the review, so the agent edits it in place and
+      // staging skips it (only new skills are staged) — zero pending, but the
+      // edit is still a durable change, so the agent's systemMessage should win
+      // over the "without durable changes" default.
+      await fs.mkdir(path.dirname(skillFilePath), { recursive: true });
+      await fs.writeFile(skillFilePath, '---\ndescription: Foo\n---\n# Foo\n');
+      vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
+        await fs.writeFile(
+          skillFilePath,
+          '---\ndescription: Foo v2\n---\n# Foo v2\n',
+        );
+        return {
+          touchedSkillFiles: [skillFilePath],
+          systemMessage: 'Skill review updated 1 file(s).',
+        };
+      });
+      const mgr = new MemoryManager();
+      const record = await mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      }).promise!;
+      expect(record.metadata?.['pendingSkills']).toBeUndefined();
+      expect(record.progressText).toBe('Skill review updated 1 file(s).');
+    });
+  });
+
   // ─── listTasksByType() ────────────────────────────────────────────────────
 
   describe('listTasksByType()', () => {
@@ -455,6 +581,172 @@ describe('MemoryManager', () => {
       });
       await mgr.drain();
       expect(fires.mock.calls.length).toBe(firesBeforeUnsubscribe);
+    });
+  });
+
+  // ─── skill-review subscription + accept/reject ───────────────────────────
+
+  describe('skill-review subscriptions and pending APIs', () => {
+    let tempDir: string;
+    let projectRoot: string;
+    let skillFilePath: string;
+
+    beforeEach(async () => {
+      vi.resetAllMocks();
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'mgr-skill-pending-'));
+      projectRoot = path.join(tempDir, 'project');
+      await fs.mkdir(projectRoot, { recursive: true });
+      skillFilePath = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-foo',
+        'SKILL.md',
+      );
+    });
+
+    afterEach(async () => {
+      await fs.rm(tempDir, { recursive: true, force: true });
+    });
+
+    /** Produce a completed skill-review task with one pending skill. */
+    async function scheduleAndAwait(mgr: MemoryManager) {
+      // The agent creates the skill at run time (not pre-existing) so staging
+      // quarantines it.
+      vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
+        await fs.mkdir(path.dirname(skillFilePath), { recursive: true });
+        await fs.writeFile(
+          skillFilePath,
+          '---\ndescription: Foo skill\n---\n# Foo\n',
+        );
+        return { touchedSkillFiles: [skillFilePath] };
+      });
+      const result = mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      });
+      expect(result.status).toBe('scheduled');
+      const record = await result.promise!;
+      return record;
+    }
+
+    it('skill-review notify wakes type-filtered skill-review subscribers', async () => {
+      const mgr = new MemoryManager();
+      const fn = vi.fn();
+      const dreamFn = vi.fn();
+      const unsub = mgr.subscribe(fn, { taskType: 'skill-review' });
+      const unsubDream = mgr.subscribe(dreamFn, { taskType: 'dream' });
+
+      await scheduleAndAwait(mgr);
+
+      // At minimum storeWith (running) + update (completed) = 2 notifies
+      expect(fn.mock.calls.length).toBeGreaterThanOrEqual(1);
+      // skill-review notifies must NOT wake dream-filtered subscribers
+      expect(dreamFn).not.toHaveBeenCalled();
+      unsub();
+      unsubDream();
+    });
+
+    it('acceptPendingSkillFromTask promotes the skill and removes it from pendingSkills', async () => {
+      const mgr = new MemoryManager();
+      const record = await scheduleAndAwait(mgr);
+
+      const taskId = record.id;
+      await mgr.acceptPendingSkillFromTask(taskId, 'auto-skill-foo');
+
+      // The skill must now exist at its final path under .qwen/skills/
+      const finalPath = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-foo',
+        'SKILL.md',
+      );
+      await expect(fs.access(finalPath)).resolves.toBeUndefined();
+
+      // The task record must reflect 0 remaining pending skills
+      const updated = mgr.getTask(taskId);
+      const remaining = updated?.metadata?.['pendingSkills'] as unknown[];
+      expect(remaining).toHaveLength(0);
+    });
+
+    it('rejectPendingSkillFromTask deletes the staged skill and removes it from pendingSkills', async () => {
+      const mgr = new MemoryManager();
+      const record = await scheduleAndAwait(mgr);
+
+      const taskId = record.id;
+      await mgr.rejectPendingSkillFromTask(taskId, 'auto-skill-foo');
+
+      // The skill must NOT exist under .qwen/skills/
+      const finalPath = path.join(
+        projectRoot,
+        '.qwen',
+        'skills',
+        'auto-skill-foo',
+        'SKILL.md',
+      );
+      await expect(fs.access(finalPath)).rejects.toThrow();
+
+      // The staged dir must also be gone
+      const stagedPath = path.join(
+        projectRoot,
+        '.qwen',
+        'pending-skills',
+        'auto-skill-foo',
+      );
+      await expect(fs.access(stagedPath)).rejects.toThrow();
+
+      // The task record must reflect 0 remaining pending skills
+      const updated = mgr.getTask(taskId);
+      const remaining = updated?.metadata?.['pendingSkills'] as unknown[];
+      expect(remaining).toHaveLength(0);
+    });
+
+    it('concurrent accept (Keep all) removes every entry, not just the last', async () => {
+      const mgr = new MemoryManager();
+      const names = ['auto-skill-a', 'auto-skill-b', 'auto-skill-c'];
+      const files = names.map((n) =>
+        path.join(projectRoot, '.qwen', 'skills', n, 'SKILL.md'),
+      );
+      vi.mocked(runSkillReviewByAgent).mockImplementation(async () => {
+        for (const f of files) {
+          await fs.mkdir(path.dirname(f), { recursive: true });
+          await fs.writeFile(f, '---\ndescription: x\n---\n# x\n');
+        }
+        return { touchedSkillFiles: files };
+      });
+      const record = await mgr.scheduleSkillReview({
+        projectRoot,
+        sessionId: 'sess',
+        history: [{ role: 'user', parts: [{ text: 'hi' }] }],
+        toolCallCount: 25,
+        threshold: 2,
+        skillsModified: false,
+        config: makeMockConfig(),
+        confirmBeforePersist: true,
+      }).promise!;
+      const taskId = record.id;
+      const pending = record.metadata?.['pendingSkills'] as Array<{
+        name: string;
+      }>;
+      expect(pending).toHaveLength(3);
+
+      // "Keep all" fires onAccept for each skill concurrently. The race bug
+      // (reading pendingSkills before the await) left all-but-one behind.
+      await Promise.all(
+        pending.map((p) => mgr.acceptPendingSkillFromTask(taskId, p.name)),
+      );
+
+      const remaining = mgr.getTask(taskId)?.metadata?.['pendingSkills'] as
+        | unknown[]
+        | undefined;
+      expect(remaining).toHaveLength(0);
     });
   });
 
@@ -1340,6 +1632,37 @@ describe('MemoryManager', () => {
 
       expect(result.status).toBe('skipped');
       expect(result.skippedReason).toBe('memory_pressure');
+    });
+  });
+
+  describe('appendToUserMemory', () => {
+    it('forwards options to buildManagedAutoMemoryPrompt', () => {
+      const mgr = new MemoryManager();
+
+      // Without forceFullProtocol (all indexes empty → condensed path)
+      const condensed = mgr.appendToUserMemory(
+        '',
+        '/project/.qwen/memory',
+        null,
+      );
+
+      // With forceFullProtocol → full verbose path
+      const full = mgr.appendToUserMemory(
+        '',
+        '/project/.qwen/memory',
+        null,
+        undefined,
+        undefined,
+        { forceFullProtocol: true },
+      );
+
+      // Condensed path uses short section headers
+      expect(condensed).toContain('## Memory types');
+      expect(condensed).not.toContain('## Types of memory');
+
+      // Full path uses verbose section headers
+      expect(full).toContain('## Types of memory');
+      expect(full).toContain('## What NOT to save in memory');
     });
   });
 });

@@ -24,16 +24,18 @@ import type {
   McpToolProgressData,
   FileDiff,
 } from '@qwen-code/qwen-code-core';
+import { ToolNames, ToolNamesMigration } from '@qwen-code/qwen-code-core';
 import { ToolConfirmationMessage } from './ToolConfirmationMessage.js';
 import { PlanSummaryDisplay } from '../PlanSummaryDisplay.js';
 import { ShellInputPrompt } from '../ShellInputPrompt.js';
 import { SHELL_COMMAND_NAME, SHELL_NAME } from '../../constants.js';
+import { isCollapsibleTool } from './CompactToolGroupDisplay.js';
 import { localizeToolDisplayName } from '../../../i18n/index.js';
 import { formatDuration, formatTokenCount } from '../../utils/formatters.js';
 import { theme } from '../../semantic-colors.js';
 import { useSettings } from '../../contexts/SettingsContext.js';
 import type { LoadedSettings } from '../../../config/settings.js';
-import { useCompactMode } from '../../contexts/CompactModeContext.js';
+
 import {
   escapeAnsiCtrlCodes,
   getCachedStringWidth,
@@ -45,6 +47,17 @@ import {
   STATUS_INDICATOR_WIDTH,
 } from '../shared/ToolStatusIndicator.js';
 import { ToolElapsedTime } from '../shared/ToolElapsedTime.js';
+
+// Names that resolve to the agent tool: the canonical name plus whatever
+// legacy request aliases core's migration map declares (e.g. 'task').
+// Tool-usage stats key on the raw request name, so the scrollback
+// sub-agent count must accept all of them.
+const AGENT_TOOL_NAMES: ReadonlySet<string> = new Set([
+  ToolNames.AGENT,
+  ...Object.entries(ToolNamesMigration)
+    .filter(([, canonical]) => canonical === ToolNames.AGENT)
+    .map(([legacy]) => legacy),
+]);
 
 const STATIC_HEIGHT = 1;
 const RESERVED_LINE_COUNT = 5; // for tool name, status, padding etc.
@@ -205,7 +218,7 @@ const useResultDisplayRenderer = (
       const totalStr = progress.total != null ? `/${progress.total}` : '';
       return {
         type: 'string',
-        data: `⏳ [${progress.progress}${totalStr}] ${msg}`,
+        data: `◌ [${progress.progress}${totalStr}] ${msg}`,
       };
     }
 
@@ -340,7 +353,7 @@ const SubagentExecutionRenderer: React.FC<{
     return (
       <Box paddingLeft={1}>
         <Text color={theme.text.secondary} dimColor>
-          ⏳ Queued approval:{' '}
+          ◌ Queued approval:{' '}
         </Text>
         <Text dimColor>{agentLabel}</Text>
       </Box>
@@ -395,13 +408,23 @@ const SubagentScrollbackSummary: React.FC<{
       `${stats.totalToolCalls} tool${stats.totalToolCalls === 1 ? '' : 's'}`,
     );
   }
+  // Direct children this agent spawned = its successful AgentTool calls
+  // (per-tool usage already rides in executionSummary — no extra
+  // plumbing). Blocked spawns (depth/fork guards) return an error result
+  // and land in `failure`, so they don't count.
+  const subagentSpawns = (stats?.toolUsage ?? [])
+    .filter((tu) => AGENT_TOOL_NAMES.has(tu.name))
+    .reduce((sum, tu) => sum + tu.success, 0);
+  if (subagentSpawns > 0) {
+    parts.push(`${subagentSpawns} sub-agent${subagentSpawns === 1 ? '' : 's'}`);
+  }
   if (stats?.totalDurationMs !== undefined) {
     parts.push(
       formatDuration(stats.totalDurationMs, { hideTrailingZeros: true }),
     );
   }
-  if (stats?.totalTokens && stats.totalTokens > 0) {
-    parts.push(`${formatTokenCount(stats.totalTokens)} tokens`);
+  if (stats?.outputTokens && stats.outputTokens > 0) {
+    parts.push(`${formatTokenCount(stats.outputTokens)} tokens`);
   }
   // Sanitize every user/LLM-controlled string before it reaches Ink.
   // `subagentName` is subagent config (user-authored or model-chosen),
@@ -667,15 +690,18 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
     renderOutputAsMarkdown = false;
   }
 
-  // Use the custom hook to determine the display type
-  const displayRenderer = useResultDisplayRenderer(resultDisplay);
-  const { compactMode } = useCompactMode();
+  const effectiveDisplayRenderer = useResultDisplayRenderer(resultDisplay);
 
-  const isCompleted = status === ToolCallStatus.Success;
-  const shouldCollapse = compactMode && isCompleted && !forceShowResult;
-  const effectiveDisplayRenderer = shouldCollapse
-    ? { type: 'none' as const }
-    : displayRenderer;
+  // Collapse text/ANSI output for completed collapsible tools (read/search/list)
+  // to reduce scrollback noise. Non-collapsible tools (command/edit/agent/MCP/etc.)
+  // always show results — their output IS the answer. Canceled tools keep partial
+  // output visible. Diff, plan, todo, task results always render regardless.
+  const shouldCollapseResult =
+    !forceShowResult &&
+    status === ToolCallStatus.Success &&
+    isCollapsibleTool(name) &&
+    (effectiveDisplayRenderer.type === 'string' ||
+      effectiveDisplayRenderer.type === 'ansi');
 
   return (
     <Box paddingX={1} paddingY={0} flexDirection="column">
@@ -701,7 +727,7 @@ export const ToolMessage: React.FC<ToolMessageProps> = ({
         />
         {emphasis === 'high' && <TrailingIndicator />}
       </Box>
-      {effectiveDisplayRenderer.type !== 'none' && (
+      {effectiveDisplayRenderer.type !== 'none' && !shouldCollapseResult && (
         <Box paddingLeft={STATUS_INDICATOR_WIDTH} width="100%">
           <Box flexDirection="column">
             {effectiveDisplayRenderer.type === 'todo' && (
@@ -782,7 +808,6 @@ const ToolInfo: React.FC<ToolInfo> = ({
   status,
   emphasis,
 }) => {
-  const { compactMode } = useCompactMode();
   const nameColor = React.useMemo<string>(() => {
     switch (emphasis) {
       case 'high':
@@ -797,15 +822,10 @@ const ToolInfo: React.FC<ToolInfo> = ({
       }
     }
   }, [emphasis]);
-  const isDim = compactMode && status === ToolCallStatus.Success;
   return (
     <Box flexGrow={1}>
-      <Text
-        wrap="truncate-end"
-        strikethrough={status === ToolCallStatus.Canceled}
-        dimColor={isDim}
-      >
-        <Text color={nameColor} bold={!isDim}>
+      <Text wrap="wrap" strikethrough={status === ToolCallStatus.Canceled}>
+        <Text color={nameColor} bold>
           {localizeToolDisplayName(name)}
         </Text>{' '}
         <Text color={theme.text.secondary}>{description}</Text>

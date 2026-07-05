@@ -18,6 +18,8 @@ vi.mock('../telemetry/index.js', () => ({
   })),
   DEFAULT_TELEMETRY_TARGET: 'none',
   DEFAULT_OTLP_ENDPOINT: '',
+  DEFAULT_SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH: 1024 * 1024,
+  SENSITIVE_SPAN_ATTRIBUTE_MAX_LENGTH_LIMIT: 100 * 1024 * 1024,
   isTelemetrySdkInitialized: vi.fn().mockReturnValue(false),
   shutdownTelemetry: vi.fn().mockResolvedValue(undefined),
   refreshSessionContext: vi.fn(),
@@ -166,5 +168,15 @@ describe('Workflow anti-recursion guard', () => {
       '../agents/runtime/agent-core.js'
     );
     expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.WORKFLOW)).toBe(true);
+  });
+
+  it('artifact tools are in EXCLUDED_TOOLS_FOR_SUBAGENTS', async () => {
+    const { EXCLUDED_TOOLS_FOR_SUBAGENTS } = await import(
+      '../agents/runtime/agent-core.js'
+    );
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.ARTIFACT)).toBe(true);
+    expect(EXCLUDED_TOOLS_FOR_SUBAGENTS.has(ToolNames.RECORD_ARTIFACT)).toBe(
+      true,
+    );
   });
 });
