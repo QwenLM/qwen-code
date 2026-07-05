@@ -950,6 +950,9 @@ describe('Gemini Client (client.ts)', () => {
         SessionStartSource.Resume,
         SessionStartSource.Clear,
       ]);
+      for (const profiler of sessionStartProfilerMocks.profilers) {
+        expect(profiler.finish).toHaveBeenCalledTimes(1);
+      }
     });
 
     it('finalizes successful startChat profiles with bounded counts', async () => {

@@ -127,28 +127,28 @@ class EnabledSessionStartProfiler implements SessionStartProfiler {
     }
     this.finished = true;
 
-    const record: SessionStartProfileRecord = {
-      timestamp: this.getTimestamp().toISOString(),
-      source: this.source,
-      ok: attrs.ok,
-      totalMs: roundMs(this.now() - this.startMs),
-      stages: { ...this.stages },
-      ...(attrs.extraHistoryLength !== undefined
-        ? { extraHistoryLength: attrs.extraHistoryLength }
-        : {}),
-      ...(attrs.historyLength !== undefined
-        ? { historyLength: attrs.historyLength }
-        : {}),
-      ...(attrs.snapshotEntryCount !== undefined
-        ? { snapshotEntryCount: attrs.snapshotEntryCount }
-        : {}),
-      ...(attrs.deferredReminderCount !== undefined
-        ? { deferredReminderCount: attrs.deferredReminderCount }
-        : {}),
-      ...(this.failedStage ? { failedStage: this.failedStage } : {}),
-    };
-
     try {
+      const record: SessionStartProfileRecord = {
+        timestamp: this.getTimestamp().toISOString(),
+        source: this.source,
+        ok: attrs.ok,
+        totalMs: roundMs(this.now() - this.startMs),
+        stages: { ...this.stages },
+        ...(attrs.extraHistoryLength !== undefined
+          ? { extraHistoryLength: attrs.extraHistoryLength }
+          : {}),
+        ...(attrs.historyLength !== undefined
+          ? { historyLength: attrs.historyLength }
+          : {}),
+        ...(attrs.snapshotEntryCount !== undefined
+          ? { snapshotEntryCount: attrs.snapshotEntryCount }
+          : {}),
+        ...(attrs.deferredReminderCount !== undefined
+          ? { deferredReminderCount: attrs.deferredReminderCount }
+          : {}),
+        ...(this.failedStage ? { failedStage: this.failedStage } : {}),
+      };
+
       this.writeRecord(record);
     } catch {
       // Profiling must never affect session creation.

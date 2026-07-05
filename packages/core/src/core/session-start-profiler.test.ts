@@ -121,6 +121,52 @@ describe('session-start-profiler', () => {
     });
   });
 
+  it('rethrows sync stage errors and preserves the failed stage', () => {
+    const records: SessionStartProfileRecord[] = [];
+    const profiler = createSessionStartProfiler(SessionStartSource.Startup, {
+      enabled: true,
+      now: clockFrom([100, 110, 120, 130]),
+      writeRecord: (record) => records.push(record),
+      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
+    });
+    const error = new Error('system instruction failed');
+
+    expect(() =>
+      profiler.timeSync('system_instruction', () => {
+        throw error;
+      }),
+    ).toThrow(error);
+    profiler.finish({ ok: false });
+
+    expect(records[0]).toMatchObject({
+      ok: false,
+      totalMs: 30,
+      stages: {
+        system_instruction: 10,
+      },
+      failedStage: 'system_instruction',
+    });
+  });
+
+  it('writes at most one record when finish is called multiple times', () => {
+    const records: SessionStartProfileRecord[] = [];
+    const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
+      enabled: true,
+      now: clockFrom([1, 2, 3]),
+      writeRecord: (record) => records.push(record),
+      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
+    });
+
+    profiler.finish({ ok: true });
+    profiler.finish({ ok: false });
+
+    expect(records).toHaveLength(1);
+    expect(records[0]).toMatchObject({
+      ok: true,
+      totalMs: 1,
+    });
+  });
+
   it('does not throw when the output writer fails', () => {
     const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
       enabled: true,
@@ -132,6 +178,21 @@ describe('session-start-profiler', () => {
     });
 
     expect(() => profiler.finish({ ok: true })).not.toThrow();
+  });
+
+  it('does not throw when finish metadata collection fails', () => {
+    const writeRecord = vi.fn();
+    const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
+      enabled: true,
+      now: clockFrom([1, 2]),
+      writeRecord,
+      getTimestamp: () => {
+        throw new Error('clock failed');
+      },
+    });
+
+    expect(() => profiler.finish({ ok: false })).not.toThrow();
+    expect(writeRecord).not.toHaveBeenCalled();
   });
 
   it('writes bounded JSONL without sensitive fields', async () => {
