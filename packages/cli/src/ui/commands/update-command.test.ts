@@ -84,7 +84,7 @@ describe('updateCommand', () => {
   it('delegates to handleAutoUpdate in interactive mode', async () => {
     const commandContext = context('interactive');
     handleAutoUpdate.mockImplementation((_info, settings) => {
-      expect(settings.merged.general?.enableAutoUpdate).toBe(true);
+      expect(settings.merged.general?.enableAutoUpdate).toBeUndefined();
     });
 
     const result = await updateCommand.action!(commandContext, '');
@@ -98,7 +98,7 @@ describe('updateCommand', () => {
     expect(
       commandContext.services.settings.merged.general?.enableAutoUpdate,
     ).toBeUndefined();
-    expect(getInstallationInfo).not.toHaveBeenCalled();
+    expect(getInstallationInfo).toHaveBeenCalledWith('/repo', true);
   });
 
   it('returns the manual update command in non-interactive mode', async () => {
@@ -113,28 +113,46 @@ describe('updateCommand', () => {
     expect(handleAutoUpdate).not.toHaveBeenCalled();
   });
 
-  it('delegates to handleAutoUpdate in interactive mode when auto-update is disabled', async () => {
+  it('returns manual instructions in interactive mode when auto-update is disabled', async () => {
     const commandContext = context('interactive', false);
-    handleAutoUpdate.mockImplementation((_info, settings) => {
-      expect(settings.merged.general?.enableAutoUpdate).toBe(true);
-    });
 
     const result = await updateCommand.action!(commandContext, '');
 
-    expect(result).toBeUndefined();
-    expect(handleAutoUpdate).toHaveBeenCalledWith(
-      expect.objectContaining({ message: 'Update available: 1.2.3' }),
-      commandContext.services.settings,
-      '/repo',
-    );
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nRun the following to update:\n  npm install -g @qwen-code/qwen-code@1.2.3',
+    });
+    expect(handleAutoUpdate).not.toHaveBeenCalled();
     expect(
       commandContext.services.settings.merged.general?.enableAutoUpdate,
     ).toBe(false);
-    expect(getInstallationInfo).not.toHaveBeenCalled();
   });
 
-  it('restores enableAutoUpdate even when handleAutoUpdate throws', async () => {
-    const commandContext = context('interactive', false);
+  it('does not update standalone installs in interactive mode when auto-update is disabled', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: true,
+      standaloneDir: '/tmp/qwen-code',
+    });
+
+    const result = await updateCommand.action!(
+      context('interactive', false),
+      '',
+    );
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nManual update required. Please reinstall Qwen Code.',
+    });
+    expect(handleAutoUpdate).not.toHaveBeenCalled();
+    expect(performStandaloneUpdate).not.toHaveBeenCalled();
+  });
+
+  it('does not mutate enableAutoUpdate when handleAutoUpdate throws', async () => {
+    const commandContext = context('interactive');
     handleAutoUpdate.mockImplementation(() => {
       throw new Error('spawn failed');
     });
@@ -144,7 +162,23 @@ describe('updateCommand', () => {
     );
     expect(
       commandContext.services.settings.merged.general?.enableAutoUpdate,
-    ).toBe(false);
+    ).toBeUndefined();
+  });
+
+  it('falls back to manual guidance in interactive mode when auto-update cannot act', async () => {
+    getInstallationInfo.mockReturnValue({
+      isStandalone: false,
+    });
+
+    const result = await updateCommand.action!(context('interactive'), '');
+
+    expect(result).toEqual({
+      type: 'message',
+      messageType: 'info',
+      content:
+        'Update available: 1.2.3\nManual update required. Please reinstall Qwen Code.',
+    });
+    expect(handleAutoUpdate).not.toHaveBeenCalled();
   });
 
   it('returns the manual update command in ACP mode', async () => {

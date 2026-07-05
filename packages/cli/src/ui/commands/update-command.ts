@@ -66,21 +66,33 @@ export const updateCommand: SlashCommand = {
     }
 
     const info = updateCheck.info;
+    const installInfo = getInstallationInfo(projectRoot || process.cwd(), true);
+    const manualInstructions = () => {
+      const lines = [
+        info.message,
+        ...formatUpdateInstructions(installInfo, info.update.latest).map(
+          (line) => t(line),
+        ),
+      ];
+      return {
+        type: 'message' as const,
+        messageType: 'info' as const,
+        content: lines.join('\n'),
+      };
+    };
 
     if (context.executionMode === 'interactive' && projectRoot) {
-      const previousEnableAutoUpdate =
-        settings.merged.general?.enableAutoUpdate;
-      settings.merged.general ??= {};
-      settings.merged.general.enableAutoUpdate = true;
-      try {
+      const isAutoUpdateEnabled =
+        settings.merged.general?.enableAutoUpdate !== false;
+      const canAutoUpdate =
+        installInfo.updateCommand ||
+        (installInfo.isStandalone && installInfo.standaloneDir);
+      if (isAutoUpdateEnabled && canAutoUpdate) {
         handleAutoUpdate(info, settings, projectRoot);
-      } finally {
-        settings.merged.general.enableAutoUpdate = previousEnableAutoUpdate;
+        return;
       }
-      return;
+      return manualInstructions();
     }
-
-    const installInfo = getInstallationInfo(projectRoot || process.cwd(), true);
 
     if (installInfo.isStandalone && installInfo.standaloneDir) {
       try {
@@ -113,19 +125,7 @@ export const updateCommand: SlashCommand = {
       }
     }
 
-    const lines = [
-      info.message,
-      ...formatUpdateInstructions(installInfo, info.update.latest).map((line) =>
-        t(line),
-      ),
-    ];
-
     // Non-interactive / ACP mode: report the available update and manual command.
-    const msg = lines.join('\n');
-    return {
-      type: 'message' as const,
-      messageType: 'info' as const,
-      content: msg,
-    };
+    return manualInstructions();
   },
 };

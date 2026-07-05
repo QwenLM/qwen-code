@@ -366,9 +366,7 @@ async function extractArchive(
       preservePaths: false,
       filter: (p, entry) => isSafeTarEntry(p, entry, resolvedDest),
     });
-    // Post-extraction defense-in-depth: detect chained symlink attacks that
-    // bypass the string-level filter (e.g. symlink A → ".", then A/payload → "../../etc")
-    validateExtractedPaths(fs.realpathSync(destDir), { symlinksOnly: true });
+    validateExtractedPaths(fs.realpathSync(destDir));
   }
 }
 
@@ -451,7 +449,7 @@ async function smokeTest(newInstallDir: string, target: string): Promise<void> {
   debugLogger.info(`Smoke test passed: ${version}`);
 }
 
-function acquireLock(lockPath: string, standaloneDir?: string): boolean {
+export function acquireLock(lockPath: string, standaloneDir?: string): boolean {
   try {
     fs.writeFileSync(lockPath, String(process.pid), { flag: 'wx' });
     return true;
@@ -503,7 +501,8 @@ function acquireLock(lockPath: string, standaloneDir?: string): boolean {
 
     if (standaloneDir && fs.existsSync(`${standaloneDir}.new`)) {
       throw new Error(
-        'A previous update is pending swap. Restart the CLI to apply it before updating again.',
+        `A previous update left a pending swap at ${standaloneDir}.new. ` +
+          'If no qwen-update.bat process is running, remove the pending swap and .qwen-update.lock, then try again.',
       );
     }
 
@@ -538,12 +537,14 @@ function cleanupEmptyStandaloneDir(standaloneDir: string): void {
 export type ShellPathUpdate = {
   rcFile?: string;
   blockAdded: boolean;
+  error?: string;
 };
 
 export type BinWrapperArtifacts = {
   wrapperPath?: string;
   wrapperCreated: boolean;
   shellPathUpdate?: ShellPathUpdate;
+  wrapperNeedsAttention?: boolean;
 };
 
 const UNSAFE_SHELL_CHARS = /[\0\n\r]/;
@@ -714,32 +715,40 @@ export function ensureBinWrapper(
       }
       const wrapperPath = path.join(binDir, 'qwen.cmd');
       artifacts.wrapperPath = wrapperPath;
+      const content = `@echo off\r\ncall "${standaloneDir}\\bin\\qwen.cmd" %*\r\n`;
       try {
-        const content = `@echo off\r\ncall "${standaloneDir}\\bin\\qwen.cmd" %*\r\n`;
         fs.writeFileSync(wrapperPath, content, { flag: 'wx' });
         artifacts.wrapperCreated = true;
       } catch (err) {
         if (!isAlreadyExistsError(err)) {
           throw err;
         }
+        artifacts.wrapperNeedsAttention = !existingWrapperMatches(
+          wrapperPath,
+          standaloneDir,
+        );
       }
     } else {
       assertSafeForSingleQuotedShellPath(standaloneDir, 'standaloneDir');
       const wrapperPath = path.join(binDir, 'qwen');
       artifacts.wrapperPath = wrapperPath;
+      // Match install-qwen-standalone.sh's write_unix_wrapper:
+      // uses /usr/bin/env sh for portability, and single-quoted paths.
+      const quotedQwenBin = shellQuoteForSh(
+        path.join(standaloneDir, 'bin', 'qwen'),
+      );
+      const content = `#!/usr/bin/env sh\nexec ${quotedQwenBin} "$@"\n`;
       try {
-        // Match install-qwen-standalone.sh's write_unix_wrapper:
-        // uses /usr/bin/env sh for portability, and single-quoted paths.
-        const quotedQwenBin = shellQuoteForSh(
-          path.join(standaloneDir, 'bin', 'qwen'),
-        );
-        const content = `#!/usr/bin/env sh\nexec ${quotedQwenBin} "$@"\n`;
         fs.writeFileSync(wrapperPath, content, { mode: 0o755, flag: 'wx' });
         artifacts.wrapperCreated = true;
       } catch (err) {
         if (!isAlreadyExistsError(err)) {
           throw err;
         }
+        artifacts.wrapperNeedsAttention = !existingWrapperMatches(
+          wrapperPath,
+          standaloneDir,
+        );
       }
       artifacts.shellPathUpdate = ensurePathInShellRc(binDir);
     }
@@ -747,6 +756,17 @@ export function ensureBinWrapper(
   } catch (err) {
     const detail = err instanceof Error ? err.message : String(err);
     throw new Error(`Failed to create bin wrapper: ${detail}`);
+  }
+}
+
+function existingWrapperMatches(
+  wrapperPath: string,
+  standaloneDir: string,
+): boolean {
+  try {
+    return fs.readFileSync(wrapperPath, 'utf-8').includes(standaloneDir);
+  } catch {
+    return false;
   }
 }
 
@@ -808,7 +828,29 @@ export function ensurePathInShellRc(binDir: string): ShellPathUpdate {
     return { rcFile, blockAdded: true };
   } catch (err) {
     debugLogger.debug('Failed to update shell rc:', err);
-    return { rcFile, blockAdded: false };
+    return {
+      rcFile,
+      blockAdded: false,
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+function surfaceBinWrapperWarnings(artifacts?: BinWrapperArtifacts): void {
+  if (!artifacts) return;
+  if (artifacts.wrapperNeedsAttention && artifacts.wrapperPath) {
+    const message =
+      `Update completed, but the existing wrapper at ${artifacts.wrapperPath} ` +
+      'does not point to this standalone installation.';
+    debugLogger.warn(message);
+    updateEventEmitter.emit('update-info', { message });
+  }
+  if (artifacts.shellPathUpdate?.error && artifacts.shellPathUpdate.rcFile) {
+    const message =
+      `Update completed, but ${artifacts.shellPathUpdate.rcFile} could not be updated. ` +
+      'Add ~/.local/bin to PATH manually.';
+    debugLogger.warn(message);
+    updateEventEmitter.emit('update-info', { message });
   }
 }
 
@@ -958,11 +1000,6 @@ export async function performStandaloneUpdate(
     debugLogger.info('Running smoke test...');
     await smokeTest(newInstallDir, target);
 
-    // Ensure the PATH wrapper can be created before mutating the active install.
-    // This is critical for npm→standalone migration: a wrapper failure should not
-    // be reported as a generic update failure after the install has been swapped.
-    migrationArtifacts = ensureBinWrapper(standaloneDir, target);
-
     debugLogger.info('Replacing installation...');
     updateResult = atomicReplace(standaloneDir, newInstallDir, lockPath);
 
@@ -999,16 +1036,35 @@ export async function performStandaloneUpdate(
       }
     }
 
+    try {
+      migrationArtifacts = ensureBinWrapper(standaloneDir, target);
+      surfaceBinWrapperWarnings(migrationArtifacts);
+    } catch (wrapperErr) {
+      const detail =
+        wrapperErr instanceof Error ? wrapperErr.message : String(wrapperErr);
+      if (isFirstTimeMigration) {
+        throw new Error(
+          `Update installed, but failed to create the PATH wrapper: ${detail}`,
+        );
+      }
+      debugLogger.warn('Failed to refresh bin wrapper:', wrapperErr);
+      updateEventEmitter.emit('update-info', {
+        message:
+          'Update completed, but the PATH wrapper could not be refreshed. ' +
+          'The existing installation remains usable.',
+      });
+    }
+
     debugLogger.info('Standalone update complete.');
     return updateResult;
   } catch (err) {
     const pendingDir = `${standaloneDir}.new`;
-    if (fs.existsSync(pendingDir)) {
+    if (updateResult !== 'deferred' && fs.existsSync(pendingDir)) {
       fs.rmSync(pendingDir, { recursive: true, force: true });
     }
     // Clean up .deferred marker if atomicReplace created it before throwing
     const deferredMarker = `${standaloneDir}.deferred`;
-    if (fs.existsSync(deferredMarker)) {
+    if (updateResult !== 'deferred' && fs.existsSync(deferredMarker)) {
       try {
         fs.unlinkSync(deferredMarker);
       } catch {

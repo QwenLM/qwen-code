@@ -9,6 +9,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import * as os from 'node:os';
 import {
+  acquireLock,
   rollbackStandaloneUpdate,
   ensureBinWrapper,
   ensurePathInShellRc,
@@ -354,7 +355,7 @@ describe('standalone-update', () => {
 
       await expect(
         performStandaloneUpdate(standaloneDir, '1.0.0'),
-      ).rejects.toThrow('A previous update is pending swap');
+      ).rejects.toThrow('A previous update left a pending swap');
 
       expect(fs.existsSync(lockPath)).toBe(true);
       expect(fs.existsSync(`${standaloneDir}.new`)).toBe(true);
@@ -551,6 +552,43 @@ describe('standalone-update', () => {
       fs.writeFileSync(lockPath, '999999999');
       const result = rollbackStandaloneUpdate(standaloneDir);
       expect(result.ok).toBe(true);
+    });
+  });
+
+  describe('acquireLock deferred marker handling', () => {
+    it('rejects lock takeover while a deferred bat process is alive', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.writeFileSync(lockPath, '999999999');
+      fs.writeFileSync(`${standaloneDir}.deferred`, String(process.pid));
+
+      expect(() => acquireLock(lockPath, standaloneDir)).toThrow(
+        'A previous update is still being applied',
+      );
+      expect(fs.existsSync(lockPath)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(true);
+    });
+
+    it('cleans a stale deferred marker before taking over a dead lock', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.writeFileSync(lockPath, '999999999');
+      fs.writeFileSync(`${standaloneDir}.deferred`, '999999998');
+
+      expect(acquireLock(lockPath, standaloneDir)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(false);
+      expect(fs.readFileSync(lockPath, 'utf-8')).toBe(String(process.pid));
+    });
+
+    it('cleans an unparseable deferred marker before taking over a dead lock', () => {
+      const standaloneDir = path.join(tempDir, 'qwen-code');
+      const lockPath = path.join(tempDir, '.qwen-update.lock');
+      fs.writeFileSync(lockPath, '999999999');
+      fs.writeFileSync(`${standaloneDir}.deferred`, 'not-a-pid');
+
+      expect(acquireLock(lockPath, standaloneDir)).toBe(true);
+      expect(fs.existsSync(`${standaloneDir}.deferred`)).toBe(false);
+      expect(fs.readFileSync(lockPath, 'utf-8')).toBe(String(process.pid));
     });
   });
 
