@@ -3689,9 +3689,12 @@ export function App({
       // calling this handler.
       sendPrompt(`/model --fast ${modelId}`)
         .then(() => {
-          // The Settings panel stays mounted behind the picker, so reload
-          // workspace settings once the command applies — otherwise the panel
-          // keeps showing the previous fast model after the picker closes.
+          // sendPrompt resolves only after the `/model --fast` turn *completes*
+          // (actions.ts → waitForAcceptedPromptCompletion), so the change is
+          // already applied here — this reload reads the new value, not a stale
+          // one. It's needed because the command path, unlike the
+          // setWorkspaceSetting pickers (vision/voice), doesn't bump the
+          // settingsVersion signal that auto-reloads the still-mounted panel.
           reloadWorkspaceSettings();
         })
         .catch((error: unknown) => {
@@ -4177,6 +4180,7 @@ export function App({
                 <section
                   className={styles.panelHost}
                   role="region"
+                  data-testid="inline-panel"
                   aria-label={
                     activePanel === 'settings'
                       ? t('settings.title')

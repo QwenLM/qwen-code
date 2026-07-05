@@ -306,11 +306,17 @@ async function clickSubmit(container: HTMLElement): Promise<void> {
   });
 }
 
-// A transcript block shaped like extractPendingPermission() expects, for a
-// non-AskUserQuestion tool so it resolves to a pendingToolApproval.
+// A transcript block shaped like extractPendingPermission() expects. Defaults to
+// a non-AskUserQuestion tool (→ pendingToolApproval); pass toolName
+// 'ask_user_question' to exercise the pendingAskUserApproval branch instead.
+// isAskUserPermission() classifies by rawInput.questions being a non-empty
+// array, so the ask-user variant carries a toolCall.input.questions payload
+// (getPermissionRawInput reads toolCall.input) — a bare toolName isn't enough.
 function makePendingPermissionBlock(
-  overrides: { resolved?: boolean } = {},
+  overrides: { resolved?: boolean; toolName?: string } = {},
 ): unknown {
+  const toolName = overrides.toolName ?? 'run_shell_command';
+  const isAskUser = toolName === 'ask_user_question';
   return {
     kind: 'permission',
     resolved: overrides.resolved ?? false,
@@ -319,8 +325,11 @@ function makePendingPermissionBlock(
     title: 'Run ls',
     toolCall: {
       toolCallId: 'tc-1',
-      kind: 'execute',
-      _meta: { toolName: 'run_shell_command' },
+      kind: isAskUser ? 'other' : 'execute',
+      _meta: { toolName },
+      ...(isAskUser
+        ? { input: { questions: [{ question: 'Pick one', options: [] }] } }
+        : {}),
     },
     options: [
       { optionId: 'proceed_once', label: 'Allow', raw: {} },
@@ -606,12 +615,12 @@ describe('App session callbacks', () => {
     const { container, rerender } = renderApp();
     await flush();
 
-    // Open the Settings panel via the /settings command (the only <section> in
-    // the app is the panel host, so its presence tracks the panel).
+    // Open the Settings panel via the /settings command; the panel host carries
+    // data-testid="inline-panel", so its presence tracks the panel.
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('section')).not.toBeNull();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
 
     // A gated tool call arrives.
     await act(async () => {
@@ -620,7 +629,30 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector('section')).toBeNull();
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
+  });
+
+  it('auto-closes an open panel when an AskUserQuestion approval becomes pending', async () => {
+    // The auto-close effect gates on pendingToolApproval || pendingAskUserApproval;
+    // this covers the second branch (ask_user_question resolves to
+    // pendingAskUserApproval), whose overlay is also hidden behind the panel.
+    const { container, rerender } = renderApp();
+    await flush();
+
+    testState.prompt = '/settings';
+    await clickSubmit(container);
+    await flush();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
+
+    await act(async () => {
+      testState.blocks = [
+        makePendingPermissionBlock({ toolName: 'ask_user_question' }),
+      ];
+      rerender();
+      await Promise.resolve();
+    });
+
+    expect(container.querySelector('[data-testid="inline-panel"]')).toBeNull();
   });
 
   it('keeps the panel open when transcript blocks carry no actionable approval', async () => {
@@ -632,7 +664,7 @@ describe('App session callbacks', () => {
     testState.prompt = '/settings';
     await clickSubmit(container);
     await flush();
-    expect(container.querySelector('section')).not.toBeNull();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
 
     await act(async () => {
       testState.blocks = [makePendingPermissionBlock({ resolved: true })];
@@ -640,7 +672,7 @@ describe('App session callbacks', () => {
       await Promise.resolve();
     });
 
-    expect(container.querySelector('section')).not.toBeNull();
+    expect(container.querySelector('[data-testid="inline-panel"]')).not.toBeNull();
   });
 
   it('dispatches rename only after the current session name changes', async () => {
