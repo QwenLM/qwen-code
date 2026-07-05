@@ -540,7 +540,7 @@ export class IdeClient {
       };
     }
 
-    const ideWorkspacePaths = ideWorkspacePath.split(path.delimiter);
+    const ideWorkspacePaths = IdeClient.parseWorkspacePathEnv(ideWorkspacePath);
     const realCwd = getRealPath(cwd);
     const isWithinWorkspace = ideWorkspacePaths.some((workspacePath) => {
       const idePath = getRealPath(workspacePath);
@@ -556,6 +556,27 @@ export class IdeClient {
       };
     }
     return { isValid: true };
+  }
+
+  private static parseWorkspacePathEnv(value: string): string[] {
+    if (value.trimStart().startsWith('[')) {
+      try {
+        const parsed = JSON.parse(value) as unknown;
+        if (
+          Array.isArray(parsed) &&
+          parsed.every((item) => typeof item === 'string')
+        ) {
+          return parsed.filter(
+            (item) => item.length > 0 && path.isAbsolute(item),
+          );
+        }
+      } catch {
+        // Fall through to the legacy delimiter parser below.
+      }
+    }
+    return value
+      .split(path.delimiter)
+      .filter((item) => item.length > 0 && path.isAbsolute(item));
   }
 
   private static matchesCurrentWorkspace(

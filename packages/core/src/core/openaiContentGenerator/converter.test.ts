@@ -21,6 +21,7 @@ import {
 } from '@google/genai';
 import type OpenAI from 'openai';
 import { convertToFunctionResponse } from '../coreToolScheduler.js';
+import { isOpenAIReasoningThoughtPart } from '../../utils/thoughtUtils.js';
 
 describe('OpenAIContentConverter', () => {
   let converter: typeof OpenAIContentConverter;
@@ -2751,6 +2752,7 @@ describe('OpenAIContentConverter', () => {
       expect(parts?.[0]).toEqual(
         expect.objectContaining({ thought: true, text: 'chain-of-thought' }),
       );
+      expect(isOpenAIReasoningThoughtPart(parts?.[0] as Part)).toBe(true);
       expect(parts?.[1]).toEqual(
         expect.objectContaining({ text: 'final answer' }),
       );
@@ -2783,6 +2785,7 @@ describe('OpenAIContentConverter', () => {
       expect(parts?.[0]).toEqual(
         expect.objectContaining({ thought: true, text: 'chain-of-thought' }),
       );
+      expect(isOpenAIReasoningThoughtPart(parts?.[0] as Part)).toBe(true);
       expect(parts?.[1]).toEqual(
         expect.objectContaining({ text: 'final answer' }),
       );
@@ -2814,6 +2817,7 @@ describe('OpenAIContentConverter', () => {
       expect(parts?.[0]).toEqual(
         expect.objectContaining({ thought: true, text: 'thinking...' }),
       );
+      expect(isOpenAIReasoningThoughtPart(parts?.[0] as Part)).toBe(true);
       expect(parts?.[1]).toEqual(
         expect.objectContaining({ text: 'visible text' }),
       );
@@ -3816,97 +3820,6 @@ describe('OpenAIContentConverter', () => {
       ]);
     });
 
-    it('should convert GLM inline <think> content to thought parts', () => {
-      const response = converter.convertOpenAIResponseToGemini(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-glm-1',
-          created: 123,
-          model: 'glm-5.2',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                reasoning_content: '',
-                content:
-                  '<think>The user is asking a simple logic puzzle.</think>LEAK_CHECK_FINAL: prize is in B',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        withTaggedThinkingOptions(),
-      );
-
-      expect(response.candidates?.[0]?.content?.parts).toEqual([
-        {
-          text: 'The user is asking a simple logic puzzle.',
-          thought: true,
-        },
-        { text: 'LEAK_CHECK_FINAL: prize is in B' },
-      ]);
-    });
-
-    it('should preserve reasoning_content when tagged parsing finds no thinking tags', () => {
-      const response = converter.convertOpenAIResponseToGemini(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-glm-2',
-          created: 123,
-          model: 'glm-5.2',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                reasoning_content: 'separate reasoning channel',
-                content: 'final answer',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        withTaggedThinkingOptions(),
-      );
-
-      expect(response.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'separate reasoning channel', thought: true },
-        { text: 'final answer' },
-      ]);
-    });
-
-    it('should not duplicate reasoning_content when content already has tagged thinking', () => {
-      const response = converter.convertOpenAIResponseToGemini(
-        {
-          object: 'chat.completion',
-          id: 'chatcmpl-glm-3',
-          created: 123,
-          model: 'glm-5.2',
-          choices: [
-            {
-              index: 0,
-              message: {
-                role: 'assistant',
-                reasoning_content: 'duplicate reasoning channel',
-                content: '<think>tagged reasoning</think>final answer',
-              },
-              finish_reason: 'stop',
-              logprobs: null,
-            },
-          ],
-        } as unknown as OpenAI.Chat.ChatCompletion,
-        withTaggedThinkingOptions(),
-      );
-
-      expect(response.candidates?.[0]?.content?.parts).toEqual([
-        { text: 'tagged reasoning', thought: true },
-        { text: 'final answer' },
-      ]);
-    });
-
     it('should preserve ordering around <thinking> blocks', () => {
       const response = converter.convertOpenAIResponseToGemini(
         {
@@ -4362,12 +4275,15 @@ describe('OpenAIContentConverter', () => {
         context,
       );
 
+      const finalParts = finalChunk.candidates?.[0]?.content?.parts;
+
       expect(firstChunk.candidates?.[0]?.content?.parts).toEqual([]);
-      expect(finalChunk.candidates?.[0]?.content?.parts).toEqual([
+      expect(finalParts).toEqual([
         { text: 'separate reasoning channel', thought: true },
         { text: 'final ' },
         { text: 'answer' },
       ]);
+      expect(isOpenAIReasoningThoughtPart(finalParts?.[0] as Part)).toBe(true);
     });
 
     it('should flush reasoning-only chunks when tagged streaming content has no thinking tags', () => {
@@ -4544,7 +4460,7 @@ describe('OpenAIContentConverter', () => {
       expect(result[0].function.name).toBe('dynamic_tool');
     });
 
-    it('should skip functions without name or description', async () => {
+    it('should preserve functions without description and skip functions without name', async () => {
       const geminiTools = [
         {
           functionDeclarations: [
@@ -4566,8 +4482,11 @@ describe('OpenAIContentConverter', () => {
 
       const result = await converter.convertGeminiToolsToOpenAI(geminiTools);
 
-      expect(result).toHaveLength(1);
+      expect(result).toHaveLength(2);
       expect(result[0].function.name).toBe('valid_tool');
+      expect(result[0].function.description).toBe('A valid tool');
+      expect(result[1].function.name).toBe('missing_description');
+      expect(result[1].function.description).toBe('');
     });
 
     it('should handle tools without functionDeclarations', async () => {

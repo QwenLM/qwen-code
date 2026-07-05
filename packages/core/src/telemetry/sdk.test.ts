@@ -195,7 +195,9 @@ describe('Telemetry SDK', () => {
     const previousDebugLogFileEnv = process.env['QWEN_DEBUG_LOG_FILE'];
     try {
       process.env['QWEN_DEBUG_LOG_FILE'] = '1';
-      setDebugLogSession({ getSessionId: () => 'otel-diag-test-session' });
+      setDebugLogSession({
+        getSessionId: () => '11111111-2222-4333-8444-555555555555',
+      });
 
       diag.error(
         JSON.stringify({
@@ -215,7 +217,7 @@ describe('Telemetry SDK', () => {
       expect(consoleWarnSpy).not.toHaveBeenCalled();
       expect(mkdirSpy).toHaveBeenCalled();
       expect(appendFileSpy).toHaveBeenCalledWith(
-        expect.stringContaining('otel-diag-test-session'),
+        expect.stringContaining('11111111-2222-4333-8444-555555555555'),
         expectOtelDebugLogLine(
           'ERROR',
           '{"message":"Error: PeriodicExportingMetricReader: metrics export failed (error Error: connect ECONNREFUSED)"}',
@@ -223,12 +225,12 @@ describe('Telemetry SDK', () => {
         'utf8',
       );
       expect(appendFileSpy).toHaveBeenCalledWith(
-        expect.stringContaining('otel-diag-test-session'),
+        expect.stringContaining('11111111-2222-4333-8444-555555555555'),
         expectOtelDebugLogLine('ERROR', 'A different OpenTelemetry diagnostic'),
         'utf8',
       );
       expect(appendFileSpy).toHaveBeenCalledWith(
-        expect.stringContaining('otel-diag-test-session'),
+        expect.stringContaining('11111111-2222-4333-8444-555555555555'),
         expectOtelDebugLogLine('WARN', 'An OpenTelemetry warning'),
         'utf8',
       );

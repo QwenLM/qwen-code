@@ -217,6 +217,19 @@ export class ToolRegistry {
     });
   }
 
+  // Stable declaration order keeps the serialized tools block independent of
+  // async registration history (MCP discovery, reconnects, ToolSearch reveals).
+  private static compareToolsByDeclarationName(
+    a: AnyDeclarativeTool,
+    b: AnyDeclarativeTool,
+  ): number {
+    const aName = a.schema.name ?? a.name;
+    const bName = b.schema.name ?? b.name;
+    const byName = aName.localeCompare(bName);
+    if (byName !== 0) return byName;
+    return a.displayName.localeCompare(b.displayName);
+  }
+
   /**
    * Returns true when `name` is in the Config's `disabledTools` set, in
    * which case `registerTool` / `registerFactory` will skip it. This is
@@ -679,19 +692,16 @@ export class ToolRegistry {
     includeDeferred?: boolean;
   }): FunctionDeclaration[] {
     const includeDeferred = options?.includeDeferred === true;
-    const declarations: FunctionDeclaration[] = [];
-    this.tools.forEach((tool) => {
-      if (
-        !includeDeferred &&
-        tool.shouldDefer &&
-        !tool.alwaysLoad &&
-        !this.revealedDeferred.has(tool.name)
-      ) {
-        return;
-      }
-      declarations.push(tool.schema);
-    });
-    return declarations;
+    return Array.from(this.tools.values())
+      .filter(
+        (tool) =>
+          includeDeferred ||
+          !tool.shouldDefer ||
+          tool.alwaysLoad ||
+          this.revealedDeferred.has(tool.name),
+      )
+      .sort(ToolRegistry.compareToolsByDeclarationName)
+      .map((tool) => tool.schema);
   }
 
   /**

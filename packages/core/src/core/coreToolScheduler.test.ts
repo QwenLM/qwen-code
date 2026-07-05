@@ -900,6 +900,158 @@ describe('CoreToolScheduler', () => {
     }
   });
 
+  it('forwards a parent signal abort to the timeout controller', async () => {
+    const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+    process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '10000';
+    try {
+      const parentController = new AbortController();
+      let toolSawAbort = false;
+      const execute = vi.fn(
+        (_params: unknown, signal?: AbortSignal) =>
+          new Promise<ToolResult>((_resolve, reject) => {
+            signal?.addEventListener('abort', () => {
+              toolSawAbort = true;
+              reject(new Error('aborted by parent'));
+            });
+          }),
+      );
+      const toolsByName = new Map<string, MockTool>([
+        [
+          'read_file',
+          new MockTool({ name: 'read_file', canUpdateOutput: true, execute }),
+        ],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({
+          toolsByName,
+        });
+
+      // Abort the parent shortly after scheduling (well before the 10s timeout)
+      setTimeout(() => parentController.abort(), 20);
+
+      await scheduler.schedule(
+        [
+          {
+            callId: 'parent-abort-1',
+            name: 'read_file',
+            args: { file_path: 'a.ts' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-pa',
+          },
+        ],
+        parentController.signal,
+      );
+
+      // The tool should have seen the abort forwarded from the parent signal
+      expect(toolSawAbort).toBe(true);
+      // Parent abort takes precedence: the scheduler's `signal.aborted`
+      // check after the catch path overrides the tool rejection with
+      // 'cancelled' status, even though the tool rejected.
+      const completedCall = (
+        onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+      )[0];
+      expect(completedCall.status).toBe('cancelled');
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+      } else {
+        process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = previousTimeout;
+      }
+    }
+  }, 15000);
+
+  it('aborts immediately when the parent signal is already aborted before scheduling', async () => {
+    const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+    process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '10000';
+    try {
+      const parentController = new AbortController();
+      parentController.abort(); // Pre-abort
+
+      const execute = vi.fn().mockResolvedValue({
+        llmContent: 'should not reach',
+        returnDisplay: 'should not reach',
+      });
+      const toolsByName = new Map<string, MockTool>([
+        ['read_file', new MockTool({ name: 'read_file', execute })],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({ toolsByName });
+
+      await scheduler.schedule(
+        [
+          {
+            callId: 'pre-abort-1',
+            name: 'read_file',
+            args: { file_path: 'a.ts' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-pre',
+          },
+        ],
+        parentController.signal,
+      );
+
+      const completedCall = (
+        onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+      )[0];
+      // Should be cancelled, not timed out
+      expect(completedCall.status).toBe('cancelled');
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+      } else {
+        process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = previousTimeout;
+      }
+    }
+  });
+
+  it('propagates a tool rejection even when timeout is active', async () => {
+    const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+    process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '5000';
+    try {
+      const execute = vi.fn().mockRejectedValue(new Error('disk full'));
+      const toolsByName = new Map<string, MockTool>([
+        [
+          'read_file',
+          new MockTool({ name: 'read_file', canUpdateOutput: true, execute }),
+        ],
+      ]);
+      const { scheduler, onAllToolCallsComplete } =
+        createSchedulerForLegacyToolTests({ toolsByName });
+
+      await scheduler.schedule(
+        [
+          {
+            callId: 'reject-1',
+            name: 'read_file',
+            args: { file_path: 'a.ts' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-reject',
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      const completedCall = (
+        onAllToolCallsComplete.mock.calls[0][0] as ToolCall[]
+      )[0];
+      expect(completedCall.status).toBe('error');
+      if (completedCall.status === 'error') {
+        // Should NOT be classified as a timeout
+        expect(completedCall.response.errorType).not.toBe(
+          ToolErrorType.EXECUTION_TIMEOUT,
+        );
+        expect(completedCall.response.error?.message).toContain('disk full');
+      }
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+      } else {
+        process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = previousTimeout;
+      }
+    }
+  });
+
+
   it('executes only the first request for duplicate callIds in one batch', async () => {
     const execute = vi.fn().mockResolvedValue({
       llmContent: 'first result',
@@ -2186,6 +2338,12 @@ describe('CoreToolScheduler', () => {
                       hookSpecificOutput: {
                         hookEventName: 'PostToolBatch',
                         additionalContext: 'batch context',
+                        artifacts: [
+                          {
+                            title: 'Batch report',
+                            workspacePath: 'batch.html',
+                          },
+                        ],
                       },
                     }
                   : { decision: 'allow' },
@@ -2283,13 +2441,20 @@ describe('CoreToolScheduler', () => {
       .calls as unknown as Array<[ToolCall[]]>;
     const completedCalls = completionCalls[0]?.[0];
     const lastCompletedCall = completedCalls?.at(-1);
-    const lastResponse =
+    const lastCompletedResponse =
       lastCompletedCall && 'response' in lastCompletedCall
-        ? lastCompletedCall.response.responseParts.at(-1)
+        ? lastCompletedCall.response
         : undefined;
+    const lastResponse = lastCompletedResponse?.responseParts.at(-1);
     expect(lastResponse?.functionResponse?.response?.['output']).toContain(
       'batch context',
     );
+    expect(lastCompletedResponse?.artifacts).toEqual([
+      {
+        title: 'Batch report',
+        workspacePath: 'batch.html',
+      },
+    ]);
     expect(
       (
         scheduler as unknown as {
@@ -6672,9 +6837,14 @@ describe('CoreToolScheduler telemetry spans', () => {
   }
 
   function buildScheduler(options: {
-    execute?: () => Promise<ToolResult>;
+    execute?: (
+      params: { [key: string]: unknown },
+      signal?: AbortSignal,
+      updateOutput?: (output: string) => void,
+    ) => Promise<ToolResult>;
     messageBus?: { request: ReturnType<typeof vi.fn> };
     disableHooks?: boolean;
+    canUpdateOutput?: boolean;
     includeSensitiveSpanAttributes?: boolean;
     sensitiveSpanAttributeMaxLength?: number;
   }): {
@@ -6683,6 +6853,7 @@ describe('CoreToolScheduler telemetry spans', () => {
   } {
     const mockTool = new MockTool({
       name: 'mockTool',
+      canUpdateOutput: options.canUpdateOutput,
       execute:
         options.execute ??
         vi.fn().mockResolvedValue({
@@ -6748,10 +6919,15 @@ describe('CoreToolScheduler telemetry spans', () => {
 
   async function runSingleTool(
     options: {
-      execute?: () => Promise<ToolResult>;
+      execute?: (
+        params: { [key: string]: unknown },
+        signal?: AbortSignal,
+        updateOutput?: (output: string) => void,
+      ) => Promise<ToolResult>;
       messageBus?: { request: ReturnType<typeof vi.fn> };
       disableHooks?: boolean;
       abortController?: AbortController;
+      canUpdateOutput?: boolean;
       throwSpanSetAttribute?: boolean;
       throwSpanSetStatus?: boolean;
       includeSensitiveSpanAttributes?: boolean;
@@ -6986,6 +7162,116 @@ describe('CoreToolScheduler telemetry spans', () => {
     expectSanitizedFailure(spanRecord, 'Tool execution failed', 'tool_error');
   });
 
+  it('preserves PostToolUseFailure artifacts on toolResult.error responses', async () => {
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output: { decision: 'allow' },
+        })
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'failure-hook',
+          success: true,
+          output: {
+            hookSpecificOutput: {
+              artifacts: [
+                {
+                  title: 'Failure report',
+                  workspacePath: 'reports/failure.html',
+                },
+              ],
+            },
+          },
+        }),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'failed',
+        returnDisplay: 'failed',
+        error: {
+          message: 'tool failed',
+          type: ToolErrorType.EXECUTION_FAILED,
+        },
+      }),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.artifacts).toEqual([
+        {
+          title: 'Failure report',
+          workspacePath: 'reports/failure.html',
+        },
+      ]);
+    }
+  });
+
+  it('preserves PostToolUse artifacts on successful responses', async () => {
+    const messageBus = {
+      request: vi
+        .fn()
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'pre-hook',
+          success: true,
+          output: { decision: 'allow' },
+        })
+        .mockResolvedValueOnce({
+          type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+          correlationId: 'post-hook',
+          success: true,
+          output: {
+            hookSpecificOutput: {
+              artifacts: [
+                {
+                  title: 'Hook report',
+                  workspacePath: 'reports/hook.html',
+                },
+              ],
+            },
+          },
+        }),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockResolvedValue({
+        llmContent: 'ok',
+        returnDisplay: 'ok',
+        artifacts: [
+          {
+            title: 'Tool report',
+            workspacePath: 'reports/tool.html',
+          },
+        ],
+      }),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('success');
+    if (completedCall.status === 'success') {
+      expect(completedCall.response.artifacts).toEqual([
+        {
+          title: 'Tool report',
+          workspacePath: 'reports/tool.html',
+        },
+        {
+          title: 'Hook report',
+          workspacePath: 'reports/hook.html',
+        },
+      ]);
+    }
+  });
+
   it('sets tool failure status when span attribute recording fails', async () => {
     const { spanRecord, completedCalls } = await runSingleTool({
       throwSpanSetAttribute: true,
@@ -7024,6 +7310,46 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(spanRecord.statusCalls).toEqual([]);
     expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('tool_error');
     expect(spanRecord.ended).toBe(true);
+  });
+
+  it('sets timeout failure_kind on span when tool exceeds execution timeout', async () => {
+    const previousTimeout = process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+    process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = '30';
+    try {
+      toolSpanRecords.length = 0;
+      const { scheduler, onAllToolCallsComplete } = buildScheduler({
+        execute: () =>
+          new Promise(() => {
+            /* never settles */
+          }),
+      });
+      await scheduler.schedule(
+        [
+          {
+            callId: 'timeout-span',
+            name: 'mockTool',
+            args: { input: 'x' },
+            isClientInitiated: false,
+            prompt_id: 'prompt-timeout-span',
+          },
+        ],
+        new AbortController().signal,
+      );
+
+      const spanRecord = getLastToolSpan();
+      const completedCalls = onAllToolCallsComplete.mock.calls.at(-1)?.[0] as
+        | ToolCall[]
+        | undefined;
+      expect(completedCalls?.[0].status).toBe('error');
+      expect(spanRecord.spanAttributes['tool.failure_kind']).toBe('timeout');
+      expect(spanRecord.ended).toBe(true);
+    } finally {
+      if (previousTimeout === undefined) {
+        delete process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'];
+      } else {
+        process.env['QWEN_CODE_TOOL_EXECUTION_TIMEOUT_MS'] = previousTimeout;
+      }
+    }
   });
 
   it('preserves original tool errors when the failure hook rejects', async () => {
@@ -7617,6 +7943,146 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(failureHookSpan!.hookMetadata?.success).toBe(true);
   });
 
+  it('preserves PostToolUseFailure artifacts on user-abort cancellations', async () => {
+    const abortController = new AbortController();
+    const messageBus = {
+      request: vi.fn(async (req: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${req.eventName}-hook`,
+        success: true,
+        output:
+          req.eventName === 'PostToolUseFailure'
+            ? {
+                hookSpecificOutput: {
+                  artifacts: [
+                    {
+                      title: 'Cancel report',
+                      workspacePath: 'reports/cancel.html',
+                    },
+                  ],
+                },
+              }
+            : { decision: 'allow' },
+      })),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        throw new Error('aborted');
+      }),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('cancelled');
+    if (completedCall.status === 'cancelled') {
+      expect(completedCall.response.artifacts).toEqual([
+        {
+          title: 'Cancel report',
+          workspacePath: 'reports/cancel.html',
+        },
+      ]);
+    }
+  });
+
+  it('preserves PostToolUseFailure artifacts when an aborted tool resolves', async () => {
+    const abortController = new AbortController();
+    const messageBus = {
+      request: vi.fn(async (req: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${req.eventName}-hook`,
+        success: true,
+        output:
+          req.eventName === 'PostToolUseFailure'
+            ? {
+                hookSpecificOutput: {
+                  artifacts: [
+                    {
+                      title: 'Resolved cancel report',
+                      workspacePath: 'reports/resolved-cancel.html',
+                    },
+                  ],
+                },
+              }
+            : { decision: 'allow' },
+      })),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockImplementation(async () => {
+        abortController.abort();
+        return { llmContent: 'done', returnDisplay: 'done' };
+      }),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('cancelled');
+    if (completedCall.status === 'cancelled') {
+      expect(completedCall.response.artifacts).toEqual([
+        {
+          title: 'Resolved cancel report',
+          workspacePath: 'reports/resolved-cancel.html',
+        },
+      ]);
+    }
+  });
+
+  it('preserves live output when hook artifacts are attached to user-abort cancellations', async () => {
+    const abortController = new AbortController();
+    const messageBus = {
+      request: vi.fn(async (req: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${req.eventName}-hook`,
+        success: true,
+        output:
+          req.eventName === 'PostToolUseFailure'
+            ? {
+                hookSpecificOutput: {
+                  artifacts: [
+                    {
+                      title: 'Cancel report',
+                      workspacePath: 'reports/cancel.html',
+                    },
+                  ],
+                },
+              }
+            : { decision: 'allow' },
+      })),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      abortController,
+      messageBus,
+      disableHooks: false,
+      canUpdateOutput: true,
+      execute: vi.fn(async (_params, _signal, updateOutput) => {
+        updateOutput?.('live output before abort');
+        abortController.abort();
+        throw new Error('aborted');
+      }),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('cancelled');
+    if (completedCall.status === 'cancelled') {
+      expect(completedCall.response.resultDisplay).toBe(
+        'live output before abort',
+      );
+      expect(completedCall.response.artifacts).toEqual([
+        {
+          title: 'Cancel report',
+          workspacePath: 'reports/cancel.html',
+        },
+      ]);
+    }
+  });
+
   it('PostToolUseFailure hook span records is_interrupt=false on real exception path (#4321)', async () => {
     // Companion to the abort test — same hook event but the
     // executeError-not-from-abort branch tags is_interrupt:false. A
@@ -7643,6 +8109,46 @@ describe('CoreToolScheduler telemetry spans', () => {
     expect(failureHookSpan).toBeDefined();
     expect(failureHookSpan!.attributes['is_interrupt']).toBe(false);
     expect(failureHookSpan!.hookMetadata?.success).toBe(true);
+  });
+
+  it('preserves PostToolUseFailure artifacts on thrown exceptions', async () => {
+    const messageBus = {
+      request: vi.fn(async (req: { eventName: string }) => ({
+        type: MessageBusType.HOOK_EXECUTION_RESPONSE,
+        correlationId: `${req.eventName}-hook`,
+        success: true,
+        output:
+          req.eventName === 'PostToolUseFailure'
+            ? {
+                hookSpecificOutput: {
+                  artifacts: [
+                    {
+                      title: 'Exception report',
+                      workspacePath: 'reports/exception.html',
+                    },
+                  ],
+                },
+              }
+            : { decision: 'allow' },
+      })),
+    };
+
+    const { completedCalls } = await runSingleTool({
+      messageBus,
+      disableHooks: false,
+      execute: vi.fn().mockRejectedValue(new Error('real boom')),
+    });
+
+    const completedCall = completedCalls[0];
+    expect(completedCall.status).toBe('error');
+    if (completedCall.status === 'error') {
+      expect(completedCall.response.artifacts).toEqual([
+        {
+          title: 'Exception report',
+          workspacePath: 'reports/exception.html',
+        },
+      ]);
+    }
   });
 
   it('every span recorded in a successful tool call is ended (#3731 Phase 2)', async () => {

@@ -19,6 +19,7 @@ import {
   matchesAnyServerPattern,
 } from './config.js';
 import { Storage } from './storage.js';
+import { DEFAULT_MAX_TOOL_CALLS_PER_TURN } from '../services/loopDetectionService.js';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
@@ -500,6 +501,71 @@ describe('Server Config (config.ts)', () => {
     );
   });
 
+  describe('getMaxSubagentDepth', () => {
+    it('defaults to 5 when unset', () => {
+      expect(new Config(baseParams).getMaxSubagentDepth()).toBe(5);
+    });
+
+    it('respects an explicit value', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 3,
+        }).getMaxSubagentDepth(),
+      ).toBe(3);
+    });
+
+    it('clamps values below 1 up to 1 (never disables sub-agents)', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 0,
+        }).getMaxSubagentDepth(),
+      ).toBe(1);
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: -4,
+        }).getMaxSubagentDepth(),
+      ).toBe(1);
+    });
+
+    it('floors fractional values', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 3.9,
+        }).getMaxSubagentDepth(),
+      ).toBe(3);
+    });
+
+    it('falls back to the default on non-finite values', () => {
+      // JSON `1e309` parses to Infinity — must not disable the recursion cap.
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: Infinity,
+        }).getMaxSubagentDepth(),
+      ).toBe(5);
+      // NaN comparisons are always false — must not silently block nesting.
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: NaN,
+        }).getMaxSubagentDepth(),
+      ).toBe(5);
+    });
+
+    it('caps absurdly large values at 100', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          maxSubagentDepth: 5000,
+        }).getMaxSubagentDepth(),
+      ).toBe(100);
+    });
+  });
+
   describe('getTeamMemoryEnabled', () => {
     const prevEnv = process.env['QWEN_CODE_MEMORY_TEAM'];
     afterEach(() => {
@@ -542,6 +608,91 @@ describe('Server Config (config.ts)', () => {
           enableTeamMemory: true,
         }).getTeamMemoryEnabled(),
       ).toBe(false);
+    });
+  });
+
+  describe('getCronRecurringMaxAgeDays', () => {
+    const prevEnv = process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+    afterEach(() => {
+      if (prevEnv === undefined) {
+        delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      } else {
+        process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = prevEnv;
+      }
+    });
+
+    it('defaults to 7 days and follows the setting', () => {
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(7);
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 30,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(30);
+    });
+
+    it('maps 0 to Infinity (no expiry)', () => {
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 0,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(Infinity);
+    });
+
+    it('QWEN_CODE_CRON_MAX_AGE_DAYS overrides the setting', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '90';
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: 30,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(90);
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '0';
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(
+        Infinity,
+      );
+    });
+
+    it('falls back to the default on invalid values', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = 'not-a-number';
+      expect(new Config(baseParams).getCronRecurringMaxAgeDays()).toBe(7);
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(
+        new Config({
+          ...baseParams,
+          cronRecurringMaxAgeDays: -3,
+        }).getCronRecurringMaxAgeDays(),
+      ).toBe(7);
+    });
+
+    it('warns on the console once at construction for an invalid value', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = 'not-a-number';
+      const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+      try {
+        const config = new Config(baseParams);
+        // The warning fires during construction, before any getter call,
+        // and repeated getter calls do not re-emit it.
+        expect(config.getCronRecurringMaxAgeDays()).toBe(7);
+        expect(config.getCronRecurringMaxAgeDays()).toBe(7);
+        const cronWarnings = warnSpy.mock.calls.filter((call) =>
+          String(call[0]).includes('QWEN_CODE_CRON_MAX_AGE_DAYS'),
+        );
+        expect(cronWarnings).toHaveLength(1);
+      } finally {
+        warnSpy.mockRestore();
+      }
+    });
+
+    it('resolves once at construction, ignoring later env changes (requiresRestart)', () => {
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '90';
+      const config = new Config(baseParams);
+      process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'] = '3';
+      expect(config.getCronRecurringMaxAgeDays()).toBe(90);
+      delete process.env['QWEN_CODE_CRON_MAX_AGE_DAYS'];
+      expect(config.getCronRecurringMaxAgeDays()).toBe(90);
     });
   });
 
@@ -860,6 +1011,118 @@ describe('Server Config (config.ts)', () => {
         id: 'vl-same-provider',
         baseUrl: 'https://primary.example.com',
       });
+    });
+  });
+
+  describe('getModelFallbacks', () => {
+    it('returns empty array by default when unset', () => {
+      expect(new Config(baseParams).getModelFallbacks()).toEqual([]);
+    });
+
+    it('returns empty array when set to undefined', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: undefined,
+        }).getModelFallbacks(),
+      ).toEqual([]);
+    });
+
+    it('returns empty array when set to empty array', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [],
+        }).getModelFallbacks(),
+      ).toEqual([]);
+    });
+
+    it('accepts an array of model IDs', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('caps at 3 entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [
+            'model-a',
+            'model-b',
+            'model-c',
+            'model-d',
+            'model-e',
+          ],
+        }).getModelFallbacks(),
+      ).toEqual(['model-a', 'model-b', 'model-c']);
+    });
+
+    it('deduplicates entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', 'qwen-turbo', 'qwen-plus'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('trims whitespace from entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['  qwen-plus  ', ' qwen-turbo '],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('removes blank entries', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['', '  ', 'qwen-plus', '', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('deduplicates after trimming', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: ['qwen-plus', ' qwen-plus ', 'qwen-turbo'],
+        }).getModelFallbacks(),
+      ).toEqual(['qwen-plus', 'qwen-turbo']);
+    });
+
+    it('returns a readonly array', () => {
+      const config = new Config({
+        ...baseParams,
+        modelFallbacks: ['qwen-plus'],
+      });
+      const fallbacks = config.getModelFallbacks();
+      // The returned array should be readonly (TypeScript enforces this,
+      // but verify the reference is stable)
+      expect(fallbacks).toEqual(['qwen-plus']);
+    });
+
+    it('caps at 3 after deduplication and blank removal', () => {
+      expect(
+        new Config({
+          ...baseParams,
+          modelFallbacks: [
+            '',
+            'model-a',
+            'model-a', // duplicate
+            '',
+            'model-b',
+            'model-c',
+            'model-d', // 4th unique, should be dropped
+          ],
+        }).getModelFallbacks(),
+      ).toEqual(['model-a', 'model-b', 'model-c']);
     });
   });
 
@@ -1702,6 +1965,158 @@ describe('Server Config (config.ts)', () => {
     });
   });
 
+  it('should no-op LSP reinitialize when disabled or unavailable', async () => {
+    const disabledConfig = new Config({
+      ...baseParams,
+      lsp: { enabled: false },
+    });
+    await expect(disabledConfig.reinitializeLsp()).resolves.toBeUndefined();
+
+    const noClientConfig = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+    });
+    await expect(noClientConfig.reinitializeLsp()).resolves.toBeUndefined();
+  });
+
+  it('should delegate LSP reinitialize to the configured client', async () => {
+    const result = {
+      reconcile: {
+        added: ['tsserver'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi.fn().mockResolvedValue(result);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(reinitialize).toHaveBeenCalledOnce();
+  });
+
+  it('should surface partial LSP reinitialize failures in status snapshot', async () => {
+    const result = {
+      reconcile: {
+        added: ['tsserver'],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: ['clangd'],
+      },
+      skipped: [],
+    };
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize: vi.fn().mockResolvedValue(result),
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'LSP reload partially failed: clangd',
+    });
+  });
+
+  it('should surface LSP reinitialize failures in status snapshot', async () => {
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize: vi.fn().mockRejectedValue(new Error('invalid lsp json')),
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).rejects.toThrow('invalid lsp json');
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'invalid lsp json',
+    });
+  });
+
+  it('should clear previous LSP reinitialize failures after recovery', async () => {
+    const result = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: ['tsserver'],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('invalid lsp json'))
+      .mockResolvedValueOnce(result);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).rejects.toThrow('invalid lsp json');
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'invalid lsp json',
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(result);
+    expect(config.getLspStatusSnapshot().initializationError).toBeUndefined();
+  });
+
+  it('should clear partial LSP reinitialize failures after full recovery', async () => {
+    const partialFailure = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: [],
+        failed: ['clangd'],
+      },
+      skipped: [],
+    };
+    const success = {
+      reconcile: {
+        added: [],
+        removed: [],
+        restarted: [],
+        unchanged: ['clangd'],
+        failed: [],
+      },
+      skipped: [],
+    };
+    const reinitialize = vi
+      .fn()
+      .mockResolvedValueOnce(partialFailure)
+      .mockResolvedValueOnce(success);
+    const config = new Config({
+      ...baseParams,
+      lsp: { enabled: true },
+      lspClient: {
+        reinitialize,
+      } as unknown as ConfigParameters['lspClient'],
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(partialFailure);
+    expect(config.getLspStatusSnapshot()).toMatchObject({
+      initializationError: 'LSP reload partially failed: clangd',
+    });
+
+    await expect(config.reinitializeLsp()).resolves.toBe(success);
+    expect(config.getLspStatusSnapshot().initializationError).toBeUndefined();
+  });
+
   describe('initialize', () => {
     it('should throw an error if initialized more than once', async () => {
       const config = new Config({
@@ -1773,6 +2188,49 @@ describe('Server Config (config.ts)', () => {
       expect(registeredNames).toContain(ToolNames.READ_MCP_RESOURCE);
     });
 
+    it('does not register artifact tools when artifacts are disabled', async () => {
+      const config = new Config({ ...baseParams });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).not.toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers both artifact tools when artifacts are enabled', async () => {
+      const config = new Config({
+        ...baseParams,
+        artifactEnabled: true,
+        interactive: true,
+        sdkMode: false,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
+    it('registers only record_artifact for daemon artifact metadata', async () => {
+      const config = new Config({
+        ...baseParams,
+        artifactEnabled: true,
+        interactive: false,
+        sdkMode: false,
+      });
+      await config.initialize();
+
+      const registeredNames = (
+        ToolRegistry.prototype.registerFactory as Mock
+      ).mock.calls.map((call) => call[0]);
+      expect(registeredNames).not.toContain(ToolNames.ARTIFACT);
+      expect(registeredNames).toContain(ToolNames.RECORD_ARTIFACT);
+    });
+
     describe('isArtifactEnabled', () => {
       const originalForceEnable = process.env['QWEN_CODE_ENABLE_ARTIFACT'];
       const originalDisable = process.env['QWEN_CODE_DISABLE_ARTIFACT'];
@@ -1836,7 +2294,7 @@ describe('Server Config (config.ts)', () => {
         expect(config.isArtifactEnabled()).toBe(false);
       });
 
-      it('stays disabled outside interactive mode even when force-enabled', () => {
+      it('keeps the Artifact tool disabled for daemon CLI env enablement', () => {
         process.env['QWEN_CODE_ENABLE_ARTIFACT'] = '1';
 
         const config = new Config({
@@ -1846,6 +2304,19 @@ describe('Server Config (config.ts)', () => {
         });
 
         expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
+      });
+
+      it('lets daemon sessions record metadata from settings without publishing', () => {
+        const config = new Config({
+          ...baseParams,
+          artifactEnabled: true,
+          interactive: false,
+          sdkMode: false,
+        });
+
+        expect(config.isArtifactEnabled()).toBe(false);
+        expect(config.isRecordArtifactEnabled()).toBe(true);
       });
 
       it('lets QWEN_CODE_ENABLE_ARTIFACT force-enable interactive CLI use', () => {
@@ -3491,7 +3962,8 @@ describe('Server Config (config.ts)', () => {
 
     const lastCall = vi.mocked(loadServerHierarchicalMemory).mock.calls.at(-1);
     const options = lastCall?.at(-1) as
-      LoadServerHierarchicalMemoryOptions | undefined;
+      | LoadServerHierarchicalMemoryOptions
+      | undefined;
     expect(options?.onInstructionsLoaded).toEqual(expect.any(Function));
 
     await options?.onInstructionsLoaded?.({
@@ -4466,6 +4938,31 @@ describe('Server Config (config.ts)', () => {
         Number.POSITIVE_INFINITY,
       );
     });
+  });
+
+  describe('getMaxToolCallsPerTurn', () => {
+    it('should return the default cap when unset', () => {
+      const config = new Config(baseParams);
+      expect(config.getMaxToolCallsPerTurn()).toBe(
+        DEFAULT_MAX_TOOL_CALLS_PER_TURN,
+      );
+    });
+
+    it('should use a custom maxToolCallsPerTurn if provided', () => {
+      const config = new Config({ ...baseParams, maxToolCallsPerTurn: 42 });
+      expect(config.getMaxToolCallsPerTurn()).toBe(42);
+    });
+
+    it.each([0, -1])(
+      'should return infinity (cap disabled) when set to %d',
+      (capValue) => {
+        const config = new Config({
+          ...baseParams,
+          maxToolCallsPerTurn: capValue,
+        });
+        expect(config.getMaxToolCallsPerTurn()).toBe(Number.POSITIVE_INFINITY);
+      },
+    );
   });
 
   describe('getClearContextOnIdle', () => {
@@ -5835,8 +6332,9 @@ describe('Model Switching and Config Updates', () => {
     }
 
     it('resolves getters to the runtime view inside the frame, instance fields outside', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = new Config(baseParams);
       const parentGenerator = {
         generateContentStream: vi.fn(),
@@ -5883,8 +6381,9 @@ describe('Model Switching and Config Updates', () => {
     });
 
     it('falls back to the parent model id when the runtime view config has no model', async () => {
-      const { runWithRuntimeContentGenerator } =
-        await import('../agents/runtime/agent-context.js');
+      const { runWithRuntimeContentGenerator } = await import(
+        '../agents/runtime/agent-context.js'
+      );
       const config = new Config(baseParams);
       setInstanceFields(
         config,

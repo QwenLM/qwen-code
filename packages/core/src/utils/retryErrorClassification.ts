@@ -18,11 +18,7 @@ export type RetryErrorKind =
   | 'provider-business'
   | 'unknown';
 
-export type RetryErrorDiagnosis =
-  | 'retryable'
-  | 'fail-fast'
-  | 'fallback-eligible'
-  | 'unknown';
+export type RetryErrorDiagnosis = 'retryable' | 'fail-fast' | 'unknown';
 
 export interface RetryErrorClassificationContext {
   authType?: AuthType | string;
@@ -137,9 +133,8 @@ export function classifyRetryError(
       details.transport === 'sse' ? 'sse-provider' : 'http';
 
     if (statusCode === 529) {
-      // Retryable here: this PR retries 529 via isTransientCapacityError and
-      // does not implement model/provider fallback. Labeling it
-      // "fallback-eligible" would imply behavior that does not exist yet.
+      // 529 stays retryable for existing consumers. Model fallback is decided
+      // separately by status code after same-model retries are exhausted.
       return {
         kind,
         diagnosis: 'retryable',
@@ -294,4 +289,25 @@ function getProviderFields(error: unknown): ProviderFields {
     ...(providerMessage !== undefined ? { providerMessage } : {}),
     ...(requestId !== undefined ? { requestId } : {}),
   };
+}
+
+const FALLBACK_ELIGIBLE_STATUS_CODES = new Set([429, 503, 529]);
+
+/**
+ * Determines whether a classified error is eligible for model fallback.
+ *
+ * The PR scope is intentionally narrow: fallback only applies to the explicit
+ * capacity statuses documented for the feature (429/503/529), after same-model
+ * retries are exhausted.
+ */
+export function isFallbackEligible(
+  classification: RetryErrorClassification,
+): boolean {
+  return (
+    classification.kind !== 'transport' &&
+    classification.statusCode !== undefined &&
+    FALLBACK_ELIGIBLE_STATUS_CODES.has(classification.statusCode) &&
+    classification.diagnosis !== 'fail-fast' &&
+    classification.diagnosis !== 'unknown'
+  );
 }

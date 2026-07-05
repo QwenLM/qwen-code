@@ -121,6 +121,42 @@ describe('createSpawnChannelFactory env policy', () => {
     const args = mockSpawn.mock.calls[0]?.[1] as string[] | undefined;
     expect(args?.slice(-2)).toEqual(['--acp', '--experimental-lsp']);
   });
+
+  it('threads NDJSON pipe hooks through daemon-side spawned channels', async () => {
+    const child = createFakeChildProcess();
+    mockSpawn.mockReturnValue(child);
+    const onMessageSent = vi.fn();
+    const onMessageReceived = vi.fn();
+    const factory = createSpawnChannelFactory({
+      pipeHooks: { onMessageSent, onMessageReceived },
+    });
+    const channel = await factory('/tmp/project');
+    const writer = channel.stream.writable.getWriter();
+    const reader = channel.stream.readable.getReader();
+
+    await writer.write({ jsonrpc: '2.0', method: 'daemon-to-child' });
+    (child.stdout as PassThrough).write(
+      `${JSON.stringify({ jsonrpc: '2.0', method: 'child-to-daemon' })}\n`,
+    );
+    await expect(reader.read()).resolves.toMatchObject({
+      value: { jsonrpc: '2.0', method: 'child-to-daemon' },
+      done: false,
+    });
+
+    expect(onMessageSent).toHaveBeenCalledWith(
+      Buffer.byteLength(
+        JSON.stringify({ jsonrpc: '2.0', method: 'daemon-to-child' }),
+      ),
+    );
+    expect(onMessageReceived).toHaveBeenCalledWith(
+      Buffer.byteLength(
+        JSON.stringify({ jsonrpc: '2.0', method: 'child-to-daemon' }),
+      ),
+    );
+
+    reader.releaseLock();
+    writer.releaseLock();
+  });
 });
 
 describe('createStderrForwarder', () => {

@@ -14,5 +14,9 @@ export { useDaemonMemory } from './useDaemonMemory.js';
 export { useDaemonResource } from './useDaemonResource.js';
 export { useDaemonSessions } from './useDaemonSessions.js';
 export { useDaemonSkills } from './useDaemonSkills.js';
+export {
+  useDaemonStatusReport,
+  type DaemonStatusReportOptions,
+} from './useDaemonStatusReport.js';
 export { useDaemonTools } from './useDaemonTools.js';
 export { useDaemonSettings } from './useDaemonSettings.js';
