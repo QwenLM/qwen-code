@@ -51,6 +51,22 @@ import {
 } from './turn.js';
 import { LoopType } from '../telemetry/types.js';
 
+type MockSessionStartProfiler = {
+  time: Mock;
+  timeSync: Mock;
+  finish: Mock;
+};
+
+const sessionStartProfilerMocks = vi.hoisted(() => ({
+  createSessionStartProfiler: vi.fn(),
+  profilers: [] as MockSessionStartProfiler[],
+}));
+
+vi.mock('./session-start-profiler.js', () => ({
+  createSessionStartProfiler:
+    sessionStartProfilerMocks.createSessionStartProfiler,
+}));
+
 vi.mock('../utils/retry.js', () => ({
   retryWithBackoff: vi.fn(async (fn) => await fn()),
   isUnattendedMode: vi.fn(() => false),
@@ -414,6 +430,20 @@ describe('Gemini Client (client.ts)', () => {
   };
   beforeEach(async () => {
     vi.resetAllMocks();
+    sessionStartProfilerMocks.profilers.length = 0;
+    sessionStartProfilerMocks.createSessionStartProfiler.mockImplementation(
+      () => {
+        const profiler: MockSessionStartProfiler = {
+          time: vi.fn(async (_stage: string, fn: () => Promise<unknown>) =>
+            fn(),
+          ),
+          timeSync: vi.fn((_stage: string, fn: () => unknown) => fn()),
+          finish: vi.fn(),
+        };
+        sessionStartProfilerMocks.profilers.push(profiler);
+        return profiler;
+      },
+    );
     vi.mocked(uiTelemetryService.setLastPromptTokenCount).mockClear();
 
     // Default: createContentGenerator rejects (simulates test env without auth).
@@ -896,6 +926,93 @@ describe('Gemini Client (client.ts)', () => {
       ).resolves.toBeUndefined();
       expect(debugLogger.warn).toHaveBeenCalledWith(
         'SessionStart hook failed: Error: hook failed',
+      );
+    });
+  });
+
+  describe('startChat — session start profiling', () => {
+    beforeEach(() => {
+      sessionStartProfilerMocks.createSessionStartProfiler.mockClear();
+      sessionStartProfilerMocks.profilers.length = 0;
+    });
+
+    it('passes startup, resume, and clear sources to the profiler', async () => {
+      await client.startChat();
+      await client.startChat([{ role: 'user', parts: [{ text: 'hi' }] }]);
+      await client.startChat(undefined, SessionStartSource.Clear);
+
+      expect(
+        sessionStartProfilerMocks.createSessionStartProfiler.mock.calls.map(
+          ([source]) => source,
+        ),
+      ).toEqual([
+        SessionStartSource.Startup,
+        SessionStartSource.Resume,
+        SessionStartSource.Clear,
+      ]);
+    });
+
+    it('finalizes successful startChat profiles with bounded counts', async () => {
+      const hookSystem = {
+        fireSessionStartEvent: vi.fn().mockResolvedValue(
+          createHookOutput('SessionStart', {
+            hookSpecificOutput: {
+              additionalContext: 'hook output',
+            },
+          }),
+        ),
+      };
+      vi.mocked(mockConfig.getDisableAllHooks).mockReturnValue(false);
+      vi.mocked(mockConfig.hasHooksForEvent).mockReturnValue(true);
+      vi.mocked(mockConfig.getHookSystem).mockReturnValue(
+        hookSystem as unknown as ReturnType<Config['getHookSystem']>,
+      );
+
+      await client.startChat(undefined, SessionStartSource.Clear);
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ok: true,
+          extraHistoryLength: 0,
+          historyLength: 1,
+          snapshotEntryCount: 0,
+          deferredReminderCount: 0,
+        }),
+      );
+      expect(profiler.time.mock.calls.map(([stage]) => stage)).toEqual([
+        'tool_registry_warm',
+        'initial_chat_history',
+        'agent_reminder_seed',
+        'session_start_hook',
+        'set_tools',
+      ]);
+      expect(profiler.timeSync.mock.calls.map(([stage]) => stage)).toEqual([
+        'resume_deferred_tool_reveal',
+        'deferred_reminder_resolution',
+        'skill_reminder_seed',
+        'system_instruction',
+        'gemini_chat_construct',
+        'orphan_tool_use_repair',
+        'session_start_context_apply',
+      ]);
+    });
+
+    it('finalizes failed startChat profiles without changing the thrown error', async () => {
+      vi.mocked(getInitialChatHistory).mockRejectedValueOnce(
+        new Error('history failed'),
+      );
+
+      await expect(client.startChat()).rejects.toThrow(
+        'Failed to initialize chat: history failed',
+      );
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ok: false,
+          extraHistoryLength: 0,
+        }),
       );
     });
   });
