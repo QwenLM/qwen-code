@@ -81,6 +81,33 @@ describe('SessionArtifactStore', () => {
     });
   });
 
+  it('gets artifacts and refreshes stale workspace status', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's1-get',
+      workspaceCwd: workspace,
+    });
+    await fs.writeFile(path.join(workspace, 'report.txt'), 'hello');
+    const created = await store.upsertMany([
+      { title: 'Report', workspacePath: 'report.txt' },
+    ]);
+    const artifactId = created.changes[0]!.artifactId;
+
+    await expect(store.get(artifactId)).resolves.toMatchObject({
+      id: artifactId,
+      title: 'Report',
+      status: 'available',
+      sizeBytes: 5,
+    });
+    await expect(store.get('missing')).resolves.toBeUndefined();
+
+    await fs.rm(path.join(workspace, 'report.txt'));
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date(Date.now() + 6_000));
+    const missing = await store.get(artifactId);
+    expect(missing).toMatchObject({ id: artifactId, status: 'missing' });
+    expect(missing).not.toHaveProperty('sizeBytes');
+  });
+
   it('prevents one client from removing another client retained artifact', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-client-owner',
@@ -1581,6 +1608,39 @@ describe('SessionArtifactStore', () => {
     expect(result.changes[0]?.artifact?.metadata).not.toHaveProperty('hookKey');
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [{ title: 'Tool title' }],
+    });
+  });
+
+  it('keeps strongest retention when coalescing duplicate identities', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's5-coalesce-retention',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {},
+      },
+    });
+
+    const result = await store.upsertMany(
+      [
+        {
+          title: 'Ephemeral',
+          url: 'https://example.com/retention',
+          retention: 'ephemeral',
+        },
+        {
+          title: 'Restorable',
+          url: 'https://example.com/retention',
+          retention: 'restorable',
+        },
+      ],
+      { strict: true },
+    );
+
+    expect(result.changes).toHaveLength(1);
+    expect(result.changes[0]?.artifact).toMatchObject({
+      title: 'Ephemeral',
+      retention: 'restorable',
     });
   });
 
