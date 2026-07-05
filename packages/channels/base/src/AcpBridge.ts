@@ -13,6 +13,12 @@ import type {
   RequestPermissionRequest,
   RequestPermissionResponse,
 } from '@agentclientprotocol/sdk';
+import type {
+  AvailableCommand,
+  ChannelAgentBridge,
+  ToolCallEvent,
+} from './ChannelAgentBridge.js';
+export type { AvailableCommand, ToolCallEvent } from './ChannelAgentBridge.js';
 
 export interface AcpBridgeOptions {
   cliEntryPath: string;
@@ -20,21 +26,33 @@ export interface AcpBridgeOptions {
   model?: string;
 }
 
-export interface AvailableCommand {
-  name: string;
-  description: string;
+/**
+ * Read a command's aliases off a raw wire `available_commands_update` entry. ACP
+ * carries them in `_meta` (its only extension point); a top-level `altNames` is
+ * also accepted for forward-compat. Returns undefined when absent so the field
+ * stays optional and entries without aliases are left byte-identical.
+ */
+export function readAvailableCommandAltNames(
+  raw: unknown,
+): string[] | undefined {
+  if (typeof raw !== 'object' || raw === null) return undefined;
+  const record = raw as Record<string, unknown>;
+  const meta = record['_meta'];
+  const fromMeta =
+    typeof meta === 'object' && meta !== null
+      ? (meta as Record<string, unknown>)['altNames']
+      : undefined;
+  const source = Array.isArray(record['altNames'])
+    ? record['altNames']
+    : Array.isArray(fromMeta)
+      ? fromMeta
+      : undefined;
+  if (!source) return undefined;
+  const names = source.filter((n): n is string => typeof n === 'string');
+  return names.length > 0 ? names : undefined;
 }
 
-export interface ToolCallEvent {
-  sessionId: string;
-  toolCallId: string;
-  kind: string;
-  title: string;
-  status: string;
-  rawInput?: Record<string, unknown>;
-}
-
-export class AcpBridge extends EventEmitter {
+export class AcpBridge extends EventEmitter implements ChannelAgentBridge {
   private child: ChildProcess | null = null;
   private connection: ClientSideConnection | null = null;
   private options: AcpBridgeOptions;
@@ -52,7 +70,11 @@ export class AcpBridge extends EventEmitter {
   async start(): Promise<void> {
     const { cliEntryPath, cwd } = this.options;
 
-    const args = [cliEntryPath, '--acp'];
+    const args = [
+      ...process.execArgv.filter((a) => !/^--inspect(-brk)?($|=)/.test(a)),
+      cliEntryPath,
+      '--acp',
+    ];
     if (this.options.model) {
       args.push('--model', this.options.model);
     }
@@ -75,6 +97,8 @@ export class AcpBridge extends EventEmitter {
       process.stderr.write(
         `[AcpBridge] Process exited (code=${code}, signal=${signal})\n`,
       );
+      // Do not emit sessionDied here: a full ACP process exit is handled by
+      // channel start crash recovery, which reloads the persisted sessions.
       this.connection = null;
       this.child = null;
       this.emit('disconnected', code, signal);
@@ -226,9 +250,12 @@ export class AcpBridge extends EventEmitter {
       }
       case 'available_commands_update': {
         if (Array.isArray(update['availableCommands'])) {
-          this._availableCommands = update[
-            'availableCommands'
-          ] as AvailableCommand[];
+          this._availableCommands = (
+            update['availableCommands'] as AvailableCommand[]
+          ).map((cmd) => {
+            const altNames = readAvailableCommandAltNames(cmd);
+            return altNames ? { ...cmd, altNames } : cmd;
+          });
         }
         break;
       }

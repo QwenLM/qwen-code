@@ -11,14 +11,17 @@
  * state (messages, pending approvals, live outputs) that the UI reads.
  */
 
+import {
+  createAbortController,
+  createChildAbortController,
+} from '../../utils/abortController.js';
+import { childLaunchDepth, runWithAgentContext } from './agent-context.js';
 import { createDebugLogger } from '../../utils/debugLogger.js';
 import { type AgentEventEmitter, AgentEventType } from './agent-events.js';
 import type {
-  AgentRoundTextEvent,
-  AgentToolCallEvent,
-  AgentToolResultEvent,
-  AgentToolOutputUpdateEvent,
   AgentApprovalRequestEvent,
+  AgentToolOutputUpdateEvent,
+  AgentToolResultEvent,
 } from './agent-events.js';
 import type { AgentStatsSummary } from './agent-statistics.js';
 import type { AgentCore } from './agent-core.js';
@@ -54,40 +57,49 @@ export class AgentInteractive {
   readonly config: AgentInteractiveConfig;
   private readonly core: AgentCore;
   private readonly queue = new AsyncMessageQueue<string>();
-  private readonly messages: AgentMessage[] = [];
+
+  /**
+   * This agent's nesting depth, captured from the spawner's ambient frame at
+   * construction (0 when spawned from the top-level session). start() and
+   * runLoop() re-enter the agent identity frame pinned at this depth, so
+   * prepareTools()' depth gating and the AgentTool's runtime guards see an
+   * in-process interactive agent (Arena, in-process teammate) as an agent —
+   * not as the top-level session. Pinning (rather than auto-increment)
+   * matters because runLoop() restarts itself from its own finally block and
+   * enqueueMessage() may be called from arbitrary chains.
+   */
+  private readonly agentDepth: number;
 
   private status: AgentStatus = AgentStatus.INITIALIZING;
   private error: string | undefined;
   private lastRoundError: string | undefined;
   private executionPromise: Promise<void> | undefined;
-  private masterAbortController = new AbortController();
+  private masterAbortController = createAbortController();
   private roundAbortController: AbortController | undefined;
   private chat: GeminiChat | undefined;
   private toolsList: FunctionDeclaration[] = [];
   private processing = false;
   private roundCancelledByUser = false;
 
-  // Pending tool approval requests. Keyed by callId.
-  // Populated by TOOL_WAITING_APPROVAL, removed by TOOL_RESULT or when
-  // the user responds. The UI reads this to show confirmation dialogs.
-  private readonly pendingApprovals = new Map<
-    string,
-    ToolCallConfirmationDetails
-  >();
-
-  // Live streaming output for currently-executing tools. Keyed by callId.
-  // Populated by TOOL_OUTPUT_UPDATE (replaces previous), cleared on TOOL_RESULT.
-  // The UI reads this via getLiveOutputs() to show real-time stdout.
-  private readonly liveOutputs = new Map<string, ToolResultDisplay>();
-
-  // PTY PIDs for currently-executing shell tools. Keyed by callId.
-  // Populated by TOOL_OUTPUT_UPDATE when pid is present, cleared on TOOL_RESULT.
-  // The UI reads this via getShellPids() to enable interactive shell input.
-  private readonly shellPids = new Map<string, number>();
+  // Wall-clock timestamp when each currently-executing tool transitioned into
+  // the scheduler's `executing` state. Keyed by callId. First TOOL_OUTPUT_UPDATE
+  // carrying executionStartTime wins; later events that re-carry it are ignored
+  // so the timer is stable. Lives on InteractiveAgent (not AgentCore) because
+  // it's only consumed by the interactive UI's elapsed-time indicator.
+  private readonly executionStartTimes = new Map<string, number>();
 
   constructor(config: AgentInteractiveConfig, core: AgentCore) {
     this.config = config;
     this.core = core;
+    // Ambient capture: reads the SPAWNER's AsyncLocalStorage frame, so this
+    // is correct only while construction stays on the spawner's await chain
+    // (today: InProcessBackend.spawnAgent, whose entry paths are top-level
+    // gated). A future factory/queue/deferred construction would silently
+    // record depth 0 — the same deferral-loses-frame failure the resume
+    // path solves explicitly by persisting AgentMeta.depth. If construction
+    // ever moves off the spawn chain, thread the depth through
+    // AgentInteractiveConfig instead.
+    this.agentDepth = childLaunchDepth();
     this.setupEventListeners();
   }
 
@@ -95,9 +107,19 @@ export class AgentInteractive {
 
   /**
    * Start the agent. Initializes the chat session, then kicks off
-   * processing if an initialTask is configured.
+   * processing if an initialTask is configured. Runs inside this agent's
+   * identity frame so prepareTools() depth-gates the AgentTool correctly
+   * (see agentDepth).
    */
-  async start(context: ContextState): Promise<void> {
+  start(context: ContextState): Promise<void> {
+    return runWithAgentContext(
+      this.config.agentId,
+      () => this.startInner(context),
+      this.agentDepth,
+    );
+  }
+
+  private async startInner(context: ContextState): Promise<void> {
     this.setStatus(AgentStatus.INITIALIZING);
 
     this.chat = await this.core.createChat(context, {
@@ -110,7 +132,7 @@ export class AgentInteractive {
       return;
     }
 
-    this.toolsList = this.core.prepareTools();
+    this.toolsList = await this.core.prepareTools();
     this.core.stats.start(Date.now());
 
     if (this.config.chatHistory?.length) {
@@ -122,15 +144,26 @@ export class AgentInteractive {
 
     if (this.config.initialTask) {
       this.queue.enqueue(this.config.initialTask);
-      this.executionPromise = this.runLoop();
+      this.executionPromise = this.startRunLoop();
     }
   }
 
   /**
    * Run loop: process all pending messages, then settle status.
-   * Exits when the queue is empty or the agent is aborted.
+   * Exits when the queue is empty or the agent is aborted. Runs inside this
+   * agent's identity frame (pinned at agentDepth) so tool bodies — including
+   * a nested `agent` spawn and its depth guard — attribute to this agent
+   * rather than the top-level session.
    */
-  private async runLoop(): Promise<void> {
+  private runLoop(): Promise<void> {
+    return runWithAgentContext(
+      this.config.agentId,
+      () => this.runLoopInner(),
+      this.agentDepth,
+    );
+  }
+
+  private async runLoopInner(): Promise<void> {
     this.processing = true;
     try {
       let message = this.queue.dequeue();
@@ -151,6 +184,22 @@ export class AgentInteractive {
       debugLogger.error('AgentInteractive processing failed:', err);
     } finally {
       this.processing = false;
+      // A message enqueued during the synchronous IDLE STATUS_CHANGE
+      // emit (e.g. TeamManager flushing a held message the moment the
+      // agent settles) arrives after the dequeue loop's final empty
+      // check but while `processing` is still true — enqueueMessage
+      // sees the loop as live and won't restart it, stranding the
+      // message in the queue. Re-check here, after the flag flips.
+      // The sync prefix of the restarted loop re-arms `processing`
+      // before any interleaved enqueueMessage can observe it false,
+      // so the two restart paths can't double-run.
+      if (
+        this.queue.size > 0 &&
+        !this.masterAbortController.signal.aborted &&
+        !isTerminalStatus(this.status)
+      ) {
+        this.executionPromise = this.startRunLoop();
+      }
     }
   }
 
@@ -164,14 +213,9 @@ export class AgentInteractive {
     this.setStatus(AgentStatus.RUNNING);
     this.lastRoundError = undefined;
     this.roundCancelledByUser = false;
-    this.roundAbortController = new AbortController();
-
-    // Propagate master abort to round
-    const onMasterAbort = () => this.roundAbortController?.abort();
-    this.masterAbortController.signal.addEventListener('abort', onMasterAbort);
-    if (this.masterAbortController.signal.aborted) {
-      this.roundAbortController.abort();
-    }
+    this.roundAbortController = createChildAbortController(
+      this.masterAbortController,
+    );
 
     try {
       const initialMessages = [
@@ -210,10 +254,10 @@ export class AgentInteractive {
       debugLogger.error('AgentInteractive round error:', err);
       this.addMessage('info', errorMessage, { metadata: { level: 'error' } });
     } finally {
-      this.masterAbortController.signal.removeEventListener(
-        'abort',
-        onMasterAbort,
-      );
+      // Helper's reverse-cleanup detaches the parent listener automatically
+      // when the round controller aborts; abort here so cleanup fires whether
+      // or not the round was already cancelled.
+      this.roundAbortController?.abort();
       this.roundAbortController = undefined;
     }
   }
@@ -227,7 +271,7 @@ export class AgentInteractive {
   cancelCurrentRound(): void {
     this.roundCancelledByUser = true;
     this.roundAbortController?.abort();
-    this.pendingApprovals.clear();
+    this.core.clearPendingApprovals();
     this.addMessage('info', 'Agent round cancelled.', {
       metadata: { level: 'warning' },
     });
@@ -255,7 +299,15 @@ export class AgentInteractive {
   abort(): void {
     this.masterAbortController.abort();
     this.queue.drain();
-    this.pendingApprovals.clear();
+    this.core.clearPendingApprovals();
+    // When no run loop is in flight (idle/initializing agent), nothing
+    // will ever observe the aborted signal and settle status — the
+    // agent would sit non-terminal forever and lifecycle gates like
+    // TeamManager's allTeammatesTerminated() would never fire. Settle
+    // it here; a live loop exits via its own aborted check instead.
+    if (!this.processing && !isTerminalStatus(this.status)) {
+      this.setStatus(AgentStatus.CANCELLED);
+    }
   }
 
   // ─── Message Queue ─────────────────────────────────────────
@@ -266,14 +318,14 @@ export class AgentInteractive {
   enqueueMessage(message: string): void {
     this.queue.enqueue(message);
     if (!this.processing) {
-      this.executionPromise = this.runLoop();
+      this.executionPromise = this.startRunLoop();
     }
   }
 
-  // ─── State Accessors ───────────────────────────────────────
+  // ─── State Accessors (delegates to AgentCore) ──────────────
 
   getMessages(): readonly AgentMessage[] {
-    return this.messages;
+    return this.core.getMessages();
   }
 
   getStatus(): AgentStatus {
@@ -301,7 +353,7 @@ export class AgentInteractive {
     return this.core;
   }
 
-  getEventEmitter(): AgentEventEmitter | undefined {
+  getEventEmitter(): AgentEventEmitter {
     return this.core.getEventEmitter();
   }
 
@@ -311,7 +363,7 @@ export class AgentInteractive {
    * The UI reads this to render confirmation dialogs inside ToolGroupMessage.
    */
   getPendingApprovals(): ReadonlyMap<string, ToolCallConfirmationDetails> {
-    return this.pendingApprovals;
+    return this.core.getPendingApprovals();
   }
 
   /**
@@ -320,7 +372,7 @@ export class AgentInteractive {
    * Entries are cleared when TOOL_RESULT arrives for the call.
    */
   getLiveOutputs(): ReadonlyMap<string, ToolResultDisplay> {
-    return this.liveOutputs;
+    return this.core.getLiveOutputs();
   }
 
   /**
@@ -330,7 +382,18 @@ export class AgentInteractive {
    * interactive shell input via HistoryItemDisplay's activeShellPtyId prop.
    */
   getShellPids(): ReadonlyMap<string, number> {
-    return this.shellPids;
+    return this.core.getShellPids();
+  }
+
+  /**
+   * Returns wall-clock start timestamps (ms since epoch) for currently-
+   * executing tools, from the scheduler's `→ executing` transition.
+   * Keyed by callId; entries are cleared when TOOL_RESULT arrives. The UI
+   * uses this to render an elapsed-time indicator that excludes approval
+   * and scheduling wait.
+   */
+  getExecutionStartTimes(): ReadonlyMap<string, number> {
+    return this.executionStartTimes;
   }
 
   /**
@@ -344,6 +407,13 @@ export class AgentInteractive {
 
   // ─── Private Helpers ───────────────────────────────────────
 
+  private startRunLoop(): Promise<void> {
+    if (this.config.runInContext) {
+      return this.config.runInContext(() => this.runLoop());
+    }
+    return this.runLoop();
+  }
+
   /**
    * Settle status after the run loop empties.
    * On success → IDLE (agent stays alive for follow-up messages).
@@ -352,6 +422,8 @@ export class AgentInteractive {
   private settleRoundStatus(): void {
     if (this.lastRoundError && !this.roundCancelledByUser) {
       this.setStatus(AgentStatus.FAILED);
+    } else if (this.config.completeOnIdle) {
+      this.setStatus(AgentStatus.COMPLETED);
     } else {
       this.setStatus(AgentStatus.IDLE);
     }
@@ -377,75 +449,31 @@ export class AgentInteractive {
     content: string,
     options?: { thought?: boolean; metadata?: Record<string, unknown> },
   ): void {
-    const message: AgentMessage = {
-      role,
-      content,
-      timestamp: Date.now(),
-    };
-    if (options?.thought) {
-      message.thought = true;
-    }
-    if (options?.metadata) {
-      message.metadata = options.metadata;
-    }
-    this.messages.push(message);
+    this.core.pushMessage(role, content, options);
   }
 
+  /**
+   * Wraps TOOL_WAITING_APPROVAL's onConfirm so a Cancel outcome aborts
+   * the current round (headless agents bypass this path entirely).
+   * Core already owns the message / live-output / shell-PID listeners.
+   */
   private setupEventListeners(): void {
     const emitter = this.core.eventEmitter;
-    if (!emitter) return;
-
-    emitter.on(AgentEventType.ROUND_TEXT, (event: AgentRoundTextEvent) => {
-      if (event.thoughtText) {
-        this.addMessage('assistant', event.thoughtText, { thought: true });
-      }
-      if (event.text) {
-        this.addMessage('assistant', event.text);
-      }
-    });
-
-    emitter.on(AgentEventType.TOOL_CALL, (event: AgentToolCallEvent) => {
-      this.addMessage('tool_call', `Tool call: ${event.name}`, {
-        metadata: {
-          callId: event.callId,
-          toolName: event.name,
-          args: event.args,
-          description: event.description,
-          renderOutputAsMarkdown: event.isOutputMarkdown,
-          round: event.round,
-        },
-      });
-    });
 
     emitter.on(
       AgentEventType.TOOL_OUTPUT_UPDATE,
       (event: AgentToolOutputUpdateEvent) => {
-        this.liveOutputs.set(event.callId, event.outputChunk);
-        if (event.pid !== undefined) {
-          this.shellPids.set(event.callId, event.pid);
+        if (
+          event.executionStartTime !== undefined &&
+          !this.executionStartTimes.has(event.callId)
+        ) {
+          this.executionStartTimes.set(event.callId, event.executionStartTime);
         }
       },
     );
 
     emitter.on(AgentEventType.TOOL_RESULT, (event: AgentToolResultEvent) => {
-      this.liveOutputs.delete(event.callId);
-      this.shellPids.delete(event.callId);
-      this.pendingApprovals.delete(event.callId);
-
-      const statusText = event.success ? 'succeeded' : 'failed';
-      const summary = event.error
-        ? `Tool ${event.name} ${statusText}: ${event.error}`
-        : `Tool ${event.name} ${statusText}`;
-      this.addMessage('tool_result', summary, {
-        metadata: {
-          callId: event.callId,
-          toolName: event.name,
-          success: event.success,
-          resultDisplay: event.resultDisplay,
-          outputFile: event.outputFile,
-          round: event.round,
-        },
-      });
+      this.executionStartTimes.delete(event.callId);
     });
 
     emitter.on(
@@ -457,17 +485,17 @@ export class AgentInteractive {
             outcome: Parameters<ToolCallConfirmationDetails['onConfirm']>[0],
             payload?: Parameters<ToolCallConfirmationDetails['onConfirm']>[1],
           ) => {
-            this.pendingApprovals.delete(event.callId);
+            this.core.deletePendingApproval(event.callId);
             // Nudge the UI to re-render so the tool transitions visually
             // from Confirming → Executing without waiting for the first
             // real TOOL_OUTPUT_UPDATE from the tool's execution.
-            this.core.eventEmitter?.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
+            this.core.eventEmitter.emit(AgentEventType.TOOL_OUTPUT_UPDATE, {
               subagentId: this.core.subagentId,
               round: event.round,
               callId: event.callId,
               outputChunk: '',
               timestamp: Date.now(),
-            } as AgentToolOutputUpdateEvent);
+            });
             await event.respond(outcome, payload);
             // When the user denies a tool, cancel the round immediately
             // so the agent doesn't waste a turn "acknowledging" the denial.
@@ -477,7 +505,7 @@ export class AgentInteractive {
           },
         } as ToolCallConfirmationDetails;
 
-        this.pendingApprovals.set(event.callId, fullDetails);
+        this.core.setPendingApproval(event.callId, fullDetails);
       },
     );
   }
@@ -503,6 +531,11 @@ function terminateModeMessage(
       return { text: 'Agent stopped: time limit reached.', level: 'warning' };
     case AgentTerminateMode.ERROR:
       return { text: 'Agent stopped due to an error.', level: 'error' };
+    case AgentTerminateMode.LOOP_DETECTED:
+      return {
+        text: 'Agent stopped: duplicate tool-call loop detected.',
+        level: 'error',
+      };
     case AgentTerminateMode.CANCELLED:
     case AgentTerminateMode.SHUTDOWN:
       return null;

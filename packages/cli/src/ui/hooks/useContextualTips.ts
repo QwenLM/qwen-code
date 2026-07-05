@@ -10,7 +10,11 @@
  */
 
 import { useEffect, useRef } from 'react';
-import { type Config, DEFAULT_TOKEN_LIMIT } from '@qwen-code/qwen-code-core';
+import {
+  type Config,
+  DEFAULT_TOKEN_LIMIT,
+  computeThresholds,
+} from '@qwen-code/qwen-code-core';
 import {
   StreamingState,
   MessageType,
@@ -81,6 +85,10 @@ export function useContextualTips({
       sessionPromptCount,
       sessionCount: tipHistory.sessionCount,
       platform: process.platform,
+      thresholds: computeThresholds(
+        contextWindowSize,
+        config.getAutoCompactThreshold(),
+      ),
     };
 
     const tip = selectTip('post-response', tipContext, tipRegistry, tipHistory);
@@ -89,7 +97,7 @@ export function useContextualTips({
       addItem(
         {
           type: MessageType.INFO,
-          text: `💡 ${t(tip.content)}`,
+          text: `★ ${t(tip.content)}`,
         },
         Date.now(),
       );

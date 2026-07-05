@@ -1,0 +1,173 @@
+/**
+ * @license
+ * Copyright 2025 Qwen Team
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+import { describe, expect, it, vi } from 'vitest';
+import type { ChatRecord, Config } from '@qwen-code/qwen-code-core';
+import { normalizeSessionData } from './normalize.js';
+import type { ExportConfig } from './types.js';
+
+describe('normalizeSessionData', () => {
+  const config = {
+    getToolRegistry: vi.fn().mockReturnValue(undefined),
+  } as unknown as Config;
+
+  it('does not export truncated saved-session previews as full diffs', () => {
+    const record: ChatRecord = {
+      uuid: 'tool-1',
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: '2025-01-01T00:00:00.000Z',
+      type: 'tool_result',
+      cwd: '',
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'edit_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        callId: 'call-1',
+        resultDisplay: {
+          fileName: '/test/file.ts',
+          fileDiff:
+            '--- /test/file.ts\n+++ /test/file.ts\n@@ -1 +1 @@\n-omitted\n+preview',
+          originalContent: 'old preview',
+          newContent: 'new preview',
+          truncatedForSession: true,
+          fileDiffLength: 200000,
+          fileDiffTruncated: true,
+        },
+      },
+    };
+
+    const normalized = normalizeSessionData(
+      {
+        sessionId: 'session-1',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [],
+      },
+      [record],
+      config,
+    );
+
+    expect(normalized.messages[0].toolCall?.content).toEqual([
+      {
+        type: 'content',
+        content: {
+          type: 'text',
+          text: 'Full diff omitted from saved session history for /test/file.ts. Original fileDiff length: 200000 chars.',
+        },
+      },
+    ]);
+  });
+
+  it('accepts the minimal daemon export config shape', () => {
+    const minimalConfig: ExportConfig = {};
+    const record: ChatRecord = {
+      uuid: 'tool-1',
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: '2025-01-01T00:00:00.000Z',
+      type: 'tool_result',
+      cwd: '',
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'call-1',
+              name: 'read_file',
+              response: { output: 'ok' },
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        callId: 'call-1',
+        resultDisplay: 'read result',
+      },
+    };
+
+    const normalized = normalizeSessionData(
+      {
+        sessionId: 'session-1',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [],
+      },
+      [record],
+      minimalConfig,
+    );
+
+    expect(normalized.messages[0].toolCall?.title).toBe('read_file');
+  });
+
+  it('matches tool results by functionResponse id when callId is absent', () => {
+    const record: ChatRecord = {
+      uuid: 'tool-result-record',
+      parentUuid: null,
+      sessionId: 'session-1',
+      timestamp: '2025-01-01T00:00:00.000Z',
+      type: 'tool_result',
+      cwd: '',
+      version: '1.0.0',
+      message: {
+        role: 'user',
+        parts: [
+          {
+            functionResponse: {
+              id: 'function-response-call-id',
+              name: 'read_file',
+              response: { output: 'read result' },
+            },
+          },
+        ],
+      },
+      toolCallResult: {
+        resultDisplay: 'read result',
+      },
+    };
+
+    const normalized = normalizeSessionData(
+      {
+        sessionId: 'session-1',
+        startTime: '2025-01-01T00:00:00.000Z',
+        messages: [
+          {
+            uuid: 'tool-call-record',
+            sessionId: 'session-1',
+            timestamp: '2025-01-01T00:00:00.000Z',
+            type: 'tool_call',
+            toolCall: {
+              toolCallId: 'function-response-call-id',
+              kind: 'other',
+              title: 'read_file',
+              status: 'in_progress',
+            },
+          },
+        ],
+      },
+      [record],
+      config,
+    );
+
+    expect(normalized.messages).toHaveLength(1);
+    expect(normalized.messages[0].toolCall?.status).toBe('completed');
+    expect(normalized.messages[0].toolCall?.content).toEqual([
+      {
+        type: 'content',
+        content: { type: 'text', text: 'read result' },
+      },
+    ]);
+  });
+});

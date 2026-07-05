@@ -79,7 +79,7 @@ describe('approvalModeCommand', () => {
 
       expect(result.type).toBe('message');
       expect(result.messageType).toBe('info');
-      expect(result.content).toContain('yolo');
+      expect(result.content).toContain('YOLO');
       expect(mockSetApprovalMode).toHaveBeenCalledWith('yolo');
     });
 
@@ -103,7 +103,8 @@ describe('approvalModeCommand', () => {
 
       expect(result.type).toBe('message');
       expect(result.messageType).toBe('info');
-      expect(result.content).toContain('default');
+      // "default" is displayed using its formatted name, not the raw enum value.
+      expect(result.content).toContain('Ask permissions');
       expect(mockSetApprovalMode).toHaveBeenCalledWith('default');
     });
 

@@ -126,6 +126,94 @@ describe('textBufferReducer', () => {
     });
   });
 
+  describe('kill_line_left action', () => {
+    it('should clear text to the left of cursor on the same line', () => {
+      const stateWithText: TextBufferState = {
+        ...initialState,
+        lines: ['hello world'],
+        cursorRow: 0,
+        cursorCol: 5,
+      };
+      const action: TextBufferAction = { type: 'kill_line_left' };
+      const state = textBufferReducer(stateWithText, action);
+      expect(state).toHaveOnlyValidCharacters();
+      expect(state.lines).toEqual([' world']);
+      expect(state.cursorCol).toBe(0);
+    });
+
+    it('should join with previous line when cursor is at column 0', () => {
+      const stateWithText: TextBufferState = {
+        ...initialState,
+        lines: ['hello', 'world'],
+        cursorRow: 1,
+        cursorCol: 0,
+      };
+      const action: TextBufferAction = { type: 'kill_line_left' };
+      const state = textBufferReducer(stateWithText, action);
+      expect(state).toHaveOnlyValidCharacters();
+      expect(state.lines).toEqual(['helloworld']);
+      expect(state.cursorRow).toBe(0);
+      expect(state.cursorCol).toBe(5);
+    });
+
+    it('should do nothing when cursor is at the very beginning', () => {
+      const stateWithText: TextBufferState = {
+        ...initialState,
+        lines: ['hello'],
+        cursorRow: 0,
+        cursorCol: 0,
+      };
+      const action: TextBufferAction = { type: 'kill_line_left' };
+      const state = textBufferReducer(stateWithText, action);
+      expect(state).toHaveOnlyValidCharacters();
+      expect(state.lines).toEqual(['hello']);
+      expect(state.cursorRow).toBe(0);
+      expect(state.cursorCol).toBe(0);
+    });
+
+    it('should join multiple lines when pressing kill_line_left repeatedly', () => {
+      const stateWithText: TextBufferState = {
+        ...initialState,
+        lines: ['line1', 'line2', 'line3'],
+        cursorRow: 2,
+        cursorCol: 0,
+      };
+      const action: TextBufferAction = { type: 'kill_line_left' };
+      const state1 = textBufferReducer(stateWithText, action);
+      expect(state1).toHaveOnlyValidCharacters();
+      expect(state1.lines).toEqual(['line1', 'line2line3']);
+      expect(state1.cursorRow).toBe(1);
+      expect(state1.cursorCol).toBe(5);
+
+      const stateAtCol0: TextBufferState = {
+        ...state1,
+        cursorCol: 0,
+      };
+      const state2 = textBufferReducer(stateAtCol0, action);
+      expect(state2).toHaveOnlyValidCharacters();
+      expect(state2.lines).toEqual(['line1line2line3']);
+      expect(state2.cursorRow).toBe(0);
+      expect(state2.cursorCol).toBe(5);
+    });
+
+    it('should undo a join operation', () => {
+      const stateWithText: TextBufferState = {
+        ...initialState,
+        lines: ['hello', 'world'],
+        cursorRow: 1,
+        cursorCol: 0,
+      };
+      const action: TextBufferAction = { type: 'kill_line_left' };
+      const joined = textBufferReducer(stateWithText, action);
+      expect(joined.lines).toEqual(['helloworld']);
+
+      const undone = textBufferReducer(joined, { type: 'undo' });
+      expect(undone.lines).toEqual(['hello', 'world']);
+      expect(undone.cursorRow).toBe(1);
+      expect(undone.cursorCol).toBe(0);
+    });
+  });
+
   describe('undo/redo actions', () => {
     it('should undo and redo a change', () => {
       // 1. Insert text
@@ -578,6 +666,322 @@ describe('useTextBuffer', () => {
       act(() => result.current.insert(shortText, { paste: true }));
       expect(getBufferState(result).text).toBe(shortText);
     });
+
+    it('should prepend @ to multiple quoted file paths separated by spaces', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      const filePaths =
+        "'/path/to/file1.txt' '/path/to/file2.txt' '/path/to/file3.txt'";
+      act(() => result.current.insert(filePaths, { paste: true }));
+      expect(getBufferState(result).text).toBe(
+        '@/path/to/file1.txt @/path/to/file2.txt @/path/to/file3.txt ',
+      );
+    });
+
+    it('should prepend @ to multiple unquoted file paths separated by spaces', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === '/path/to/file1.txt' ||
+            p === '/path/to/file2.txt' ||
+            p === '/path/to/file3.txt',
+        }),
+      );
+      const filePaths =
+        '/path/to/file1.txt /path/to/file2.txt /path/to/file3.txt';
+      act(() => result.current.insert(filePaths, { paste: true }));
+      expect(getBufferState(result).text).toBe(
+        '@/path/to/file1.txt @/path/to/file2.txt @/path/to/file3.txt ',
+      );
+    });
+
+    it('should prepend @ to multiple file paths separated by newlines', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      const filePaths =
+        '/path/to/file1.txt\n/path/to/file2.txt\n/path/to/file3.txt';
+      act(() => result.current.insert(filePaths, { paste: true }));
+      expect(getBufferState(result).text).toBe(
+        '@/path/to/file1.txt @/path/to/file2.txt @/path/to/file3.txt ',
+      );
+    });
+
+    it('should prepend @ to multiple quoted file paths separated by newlines', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      const filePaths =
+        "'/path/to/file1.txt'\n'/path/to/file2.txt'\n'/path/to/file3.txt'";
+      act(() => result.current.insert(filePaths, { paste: true }));
+      expect(getBufferState(result).text).toBe(
+        '@/path/to/file1.txt @/path/to/file2.txt @/path/to/file3.txt ',
+      );
+    });
+
+    it('should handle mixed quoted and unquoted file paths separated by spaces', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      const filePaths =
+        "'/path/to/file1.txt' /path/to/file2.txt '/path/to/file3.txt'";
+      act(() => result.current.insert(filePaths, { paste: true }));
+      expect(getBufferState(result).text).toBe(
+        '@/path/to/file1.txt @/path/to/file2.txt @/path/to/file3.txt ',
+      );
+    });
+
+    it('should preserve original content when not all tokens are valid paths', () => {
+      // When any token is not a valid path, preserve the original paste
+      // to prevent silent data loss (wenshao #4544 review).
+      const { result: result2 } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (path: string) =>
+            path.includes('file1') || path.includes('file2'),
+        }),
+      );
+      const filePaths =
+        "'/path/to/file1.txt' '/path/to/invalid.txt' '/path/to/file2.txt'";
+      act(() => result2.current.insert(filePaths, { paste: true }));
+      // Content preserved unchanged because not all tokens are valid paths
+      expect(getBufferState(result2).text).toBe(filePaths);
+    });
+
+    it('should transform when all tokens are valid paths', () => {
+      // When every token is a valid path, transform all of them
+      const { result: result3 } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (path: string) =>
+            path.includes('file1') ||
+            path.includes('file2') ||
+            path.includes('file3'),
+        }),
+      );
+      const filePaths =
+        "'/path/to/file1.txt' '/path/to/file2.txt' '/path/to/file3.txt'";
+      act(() => result3.current.insert(filePaths, { paste: true }));
+      expect(getBufferState(result3).text).toBe(
+        '@/path/to/file1.txt @/path/to/file2.txt @/path/to/file3.txt ',
+      );
+    });
+
+    it('should handle quoted paths with spaces via greedy matching', () => {
+      // Critical 3: Test greedy multi-token matching and escapePath integration
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === '/path/to/my file.txt' || p === '/path/to/another file.txt',
+        }),
+      );
+      act(() =>
+        result.current.insert(
+          "'/path/to/my file.txt' '/path/to/another file.txt'",
+          { paste: true },
+        ),
+      );
+      expect(getBufferState(result).text).toBe(
+        '@/path/to/my\\ file.txt @/path/to/another\\ file.txt ',
+      );
+    });
+
+    it('should handle unquoted paths with spaces via greedy matching', () => {
+      // Critical 3: Test unquoted paths with spaces
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) => p === '/path/to/my file.txt',
+        }),
+      );
+      act(() => result.current.insert('/path/to/my file.txt', { paste: true }));
+      expect(getBufferState(result).text).toBe('@/path/to/my\\ file.txt ');
+    });
+
+    it('should handle CRLF-separated paths', () => {
+      // Suggestion 6: Test CRLF normalization
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: () => true }),
+      );
+      act(() =>
+        result.current.insert('/a.txt\r\n/b.txt\r\n/c.txt', { paste: true }),
+      );
+      expect(getBufferState(result).text).toBe('@/a.txt @/b.txt @/c.txt ');
+    });
+
+    it('should preserve newline paste content when no valid paths found', () => {
+      // Suggestion 6: Test null return from tryExtractFilePaths
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: () => false,
+        }),
+      );
+      const text = 'line one\nline two';
+      act(() => result.current.insert(text, { paste: true }));
+      expect(getBufferState(result).text).toBe(text);
+    });
+
+    it('should preserve newline paste content in shell mode', () => {
+      // Suggestion 6: Test shellModeActive + newline paste
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: () => true,
+          shellModeActive: true,
+        }),
+      );
+      const text = '/a.txt\n/b.txt\n/c.txt';
+      act(() => result.current.insert(text, { paste: true }));
+      expect(getBufferState(result).text).toBe(text);
+    });
+
+    it('should escape commas in paths for parseAllAtCommands compatibility', () => {
+      // Suggestion 7: Test comma escaping
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) => p === '/path/to/report,v2.txt',
+        }),
+      );
+      act(() =>
+        result.current.insert("'/path/to/report,v2.txt'", { paste: true }),
+      );
+      // Comma should be escaped so parseAllAtCommands doesn't truncate
+      expect(getBufferState(result).text).toBe('@/path/to/report\\,v2.txt ');
+    });
+
+    it('should escape shell metacharacters like parentheses in paths', () => {
+      // Suggestion 4 (wenshao #4544): Test shell metacharacters in paths
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === '/Downloads/report(v2).txt' ||
+            p === '/data[2024].csv' ||
+            p === '/report;v2.txt',
+        }),
+      );
+      // Test parentheses
+      act(() =>
+        result.current.insert("'/Downloads/report(v2).txt'", { paste: true }),
+      );
+      expect(getBufferState(result).text).toBe(
+        '@/Downloads/report\\(v2\\).txt ',
+      );
+
+      // Reset buffer and test brackets
+      act(() => result.current.setText(''));
+      act(() => result.current.insert("'/data[2024].csv'", { paste: true }));
+      expect(getBufferState(result).text).toBe('@/data\\[2024\\].csv ');
+
+      // Reset buffer and test semicolon
+      act(() => result.current.setText(''));
+      act(() => result.current.insert("'/report;v2.txt'", { paste: true }));
+      expect(getBufferState(result).text).toBe('@/report\\;v2.txt ');
+    });
+
+    it('should handle relative paths like ./src/index.ts', () => {
+      // Suggestion 1 (wenshao #4544): looksLikePath should support relative paths
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === './src/index.ts' ||
+            p === '../lib/utils.ts' ||
+            p === '~/notes.md',
+        }),
+      );
+      const filePaths = './src/index.ts ../lib/utils.ts ~/notes.md';
+      act(() => result.current.insert(filePaths, { paste: true }));
+      // Paths with ~ are escaped by escapePath
+      expect(getBufferState(result).text).toBe(
+        '@./src/index.ts @../lib/utils.ts @\\~/notes.md ',
+      );
+    });
+
+    it('should handle unquoted paths with spaces via longest-match-first greedy matching', () => {
+      // Suggestion 2 (wenshao #4544): longest-match-first greedy matching
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === '/tmp/a b.txt' || p === '/tmp/a' || p === 'b.txt',
+        }),
+      );
+      // Without longest-match-first, this would match "/tmp/a" + "b.txt" (invalid)
+      // With longest-match-first, this matches "/tmp/a b.txt"
+      act(() => result.current.insert('/tmp/a b.txt', { paste: true }));
+      expect(getBufferState(result).text).toBe('@/tmp/a\\ b.txt ');
+    });
+
+    it('should handle unquoted invalid paths without crashing', () => {
+      // Suggestion 4 (wenshao #4544): cover the !found branch
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) => p === '/valid/file.txt',
+        }),
+      );
+      const filePaths = '/valid/file.txt /nonexistent/path';
+      act(() => result.current.insert(filePaths, { paste: true }));
+      // Content preserved unchanged because not all tokens are valid paths
+      expect(getBufferState(result).text).toBe(filePaths);
+    });
+
+    it('should handle Windows drive-letter paths', () => {
+      // Suggestion 6 (wenshao #4544): test drive-letter branch of looksLikePath
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === 'C:\\Users\\file.txt' || p === 'D:\\data\\report.csv',
+        }),
+      );
+      act(() =>
+        result.current.insert('C:\\Users\\file.txt D:\\data\\report.csv', {
+          paste: true,
+        }),
+      );
+      expect(getBufferState(result).text).toBe(
+        '@C:\\Users\\file.txt @D:\\data\\report.csv ',
+      );
+    });
+
+    it('should handle quoted Windows paths with spaces', () => {
+      // Suggestion 3 (wenshao #4544): test quoted Windows paths
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          viewport,
+          isValidPath: (p: string) =>
+            p === 'C:\\Users\\my file.txt' || p === 'D:\\data\\report.csv',
+        }),
+      );
+      act(() =>
+        result.current.insert(
+          "'C:\\Users\\my file.txt' 'D:\\data\\report.csv'",
+          {
+            paste: true,
+          },
+        ),
+      );
+      // escapePath escapes spaces, so "my file" becomes "my\ file"
+      expect(getBufferState(result).text).toBe(
+        '@C:\\Users\\my\\ file.txt @D:\\data\\report.csv ',
+      );
+    });
+
+    it('should prepend @ to a bare filename when isValidPath returns true', () => {
+      // Suggestion 3 (wenshao #4544): test bare filename for single-token segments
+      const { result } = renderHook(() =>
+        useTextBuffer({ viewport, isValidPath: (p) => p === 'README.md' }),
+      );
+      act(() => result.current.insert('README.md', { paste: true }));
+      expect(getBufferState(result).text).toBe('@README.md ');
+    });
   });
 
   describe('Shell Mode Behavior', () => {
@@ -806,6 +1210,26 @@ describe('useTextBuffer', () => {
       expect(state.allVisualLines).toEqual(['l1', 'l2', 'l3', 'l4', 'l5']);
       expect(state.viewportVisualLines).toEqual(['l1', 'l2', 'l3']);
       expect(state.visualCursor).toEqual([0, 0]);
+    });
+
+    it('moves left across a hard-wrapped single-line boundary', () => {
+      const { result } = renderHook(() =>
+        useTextBuffer({
+          initialText: '1234567890ABCDE',
+          initialCursorOffset: 10,
+          viewport: { width: 10, height: 1 },
+          isValidPath: () => false,
+        }),
+      );
+
+      expect(getBufferState(result).viewportVisualLines).toEqual(['ABCDE']);
+
+      act(() => result.current.move('left'));
+
+      const state = getBufferState(result);
+      expect(state.cursor).toEqual([0, 9]);
+      expect(state.visualCursor).toEqual([0, 9]);
+      expect(state.viewportVisualLines).toEqual(['1234567890']);
     });
   });
 

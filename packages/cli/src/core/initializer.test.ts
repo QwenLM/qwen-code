@@ -21,6 +21,8 @@ vi.mock('./theme.js', () => ({
 
 vi.mock('../i18n/index.js', () => ({
   initializeI18n: (...args: unknown[]) => mockInitializeI18n(...args),
+  resolveLanguageSetting: (settingsLang?: string) =>
+    process.env['QWEN_CODE_LANG'] || settingsLang || 'auto',
 }));
 
 const mockConnect = vi.fn();

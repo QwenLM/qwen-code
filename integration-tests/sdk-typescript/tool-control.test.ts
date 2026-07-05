@@ -19,6 +19,7 @@ import {
   type SDKMessage,
   type SDKUserMessage,
 } from '@qwen-code/sdk';
+import { fakeToolCall, startFakeOpenAIServer } from '../fake-openai-server.js';
 import {
   SDKTestHelper,
   extractText,
@@ -31,6 +32,12 @@ import {
 
 const SHARED_TEST_OPTIONS = createSharedTestOptions();
 const TEST_TIMEOUT = 60000;
+const SANDBOX_MODE = process.env['QWEN_SANDBOX']?.toLowerCase().trim();
+const IS_CONTAINER_SANDBOX =
+  SANDBOX_MODE === 'docker' || SANDBOX_MODE === 'podman';
+const LOCAL_OPENAI_NO_PROXY = IS_CONTAINER_SANDBOX
+  ? '127.0.0.1,localhost,host.docker.internal'
+  : '127.0.0.1,localhost';
 
 describe('Tool Control Parameters (E2E)', () => {
   let helper: SDKTestHelper;
@@ -1030,12 +1037,43 @@ describe('Tool Control Parameters (E2E)', () => {
         await helper.createFile('test.txt', 'original');
 
         const canUseToolCalls: string[] = [];
+        const fakeServer = await startFakeOpenAIServer(
+          ({ requestIndex }) => {
+            if (requestIndex === 0) {
+              return {
+                toolCalls: [
+                  fakeToolCall('read_file', {
+                    file_path: helper.getPath('test.txt'),
+                  }),
+                ],
+              };
+            }
+
+            return { content: 'Plan: leave the file unchanged.' };
+          },
+          IS_CONTAINER_SANDBOX
+            ? {
+                listenHost: '0.0.0.0',
+                baseUrlHost: 'host.docker.internal',
+              }
+            : undefined,
+        );
 
         const q = query({
           prompt: 'Read test.txt and write "modified" to it.',
           options: {
             ...SHARED_TEST_OPTIONS,
             cwd: testDir,
+            model: 'fake-model',
+            env: {
+              NO_PROXY: LOCAL_OPENAI_NO_PROXY,
+              no_proxy: LOCAL_OPENAI_NO_PROXY,
+              OPENAI_API_KEY: 'fake-key',
+              OPENAI_BASE_URL: fakeServer.baseUrl,
+              OPENAI_MODEL: 'fake-model',
+              QWEN_MODEL: 'fake-model',
+            },
+            authType: 'openai',
             permissionMode: 'plan',
             // allowedTools should be overridden by plan mode
             allowedTools: ['write_file'],
@@ -1057,14 +1095,25 @@ describe('Tool Control Parameters (E2E)', () => {
           const toolCalls = findToolCalls(messages);
           const toolNames = toolCalls.map((tc) => tc.toolUse.name);
 
-          // Should be able to read
-          expect(toolNames).toContain('read_file');
+          assertSuccessfulCompletion(messages);
 
-          // write_file should NOT be called in plan mode
-          // (plan mode blocks all write operations)
-          // The AI should respond with a plan instead
+          // read_file should be allowed in plan mode.
+          expect(toolNames).toContain('read_file');
+          const readFileResults = findToolResults(messages, 'read_file');
+          expect(readFileResults.length).toBeGreaterThan(0);
+          for (const result of readFileResults) {
+            expect(result.isError).toBe(false);
+            expect(result.content).toContain('original');
+          }
+
+          // write_file should NOT be called in plan mode.
+          // The fake model responds with a plan after reading the file.
+          expect(toolNames).not.toContain('write_file');
+          expect(canUseToolCalls.length).toBe(0);
+          expect(await helper.readFile('test.txt')).toBe('original');
         } finally {
           await q.close();
+          await fakeServer.close();
         }
       },
       TEST_TIMEOUT,
@@ -1121,15 +1170,16 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'should apply updatedInput from canUseTool callback',
       async () => {
-        await helper.createFile('test.txt', 'original');
-
+        const scenarioDirName = `updated-input-allow-${crypto.randomUUID()}`;
+        const scenarioDir = await helper.mkdir(scenarioDirName);
         let capturedInput: Record<string, unknown> = {};
 
         const q = query({
-          prompt: 'Write "new content" to test.txt.',
+          prompt:
+            'Create a new file named test.txt with exactly this content: new content. Use the write_file tool.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            cwd: testDir,
+            cwd: scenarioDir,
             permissionMode: 'default',
             coreTools: ['write_file'],
             canUseTool: async (_toolName, input) => {
@@ -1159,7 +1209,7 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(Object.keys(capturedInput).length).toBeGreaterThan(0);
 
           // The file should be modified
-          const content = await helper.readFile('test.txt');
+          const content = await helper.readFile(`${scenarioDirName}/test.txt`);
           expect(content).toBe('new content');
         } finally {
           await q.close();
@@ -1171,15 +1221,16 @@ describe('Tool Control Parameters (E2E)', () => {
     it(
       'canUseTool should not be called for allowedTools even if it would modify input',
       async () => {
-        await helper.createFile('test.txt', 'original');
-
+        const scenarioDirName = `updated-input-allowed-tool-${crypto.randomUUID()}`;
+        const scenarioDir = await helper.mkdir(scenarioDirName);
         let canUseToolCalled = false;
 
         const q = query({
-          prompt: 'Write "modified" to test.txt.',
+          prompt:
+            'Create a new file named test.txt with exactly this content: modified. Use the write_file tool.',
           options: {
             ...SHARED_TEST_OPTIONS,
-            cwd: testDir,
+            cwd: scenarioDir,
             permissionMode: 'default',
             coreTools: ['write_file'],
             // write_file is in allowedTools, so canUseTool should not be called
@@ -1206,7 +1257,7 @@ describe('Tool Control Parameters (E2E)', () => {
           expect(canUseToolCalled).toBe(false);
 
           // File should be modified (not redirected to /some/other/path.txt)
-          const content = await helper.readFile('test.txt');
+          const content = await helper.readFile(`${scenarioDirName}/test.txt`);
           expect(content).toBe('modified');
         } finally {
           await q.close();
@@ -1433,7 +1484,10 @@ describe('Tool Control Parameters (E2E)', () => {
             session_id: crypto.randomUUID(),
             message: {
               role: 'user',
-              content: 'Write "modified" to test.txt.',
+              // Read-first instruction satisfies prior-read enforcement
+              // so the deny path is exercised by canUseTool, not by the
+              // write tool's pre-write guard.
+              content: 'Read test.txt and then write "modified" to it.',
             },
             parent_tool_use_id: null,
           };
@@ -1447,14 +1501,16 @@ describe('Tool Control Parameters (E2E)', () => {
             cwd: testDir,
             permissionMode: 'default',
             coreTools: ['read_file', 'write_file'],
-            canUseTool: async (toolName) => {
+            canUseTool: async (toolName, input) => {
               if (toolName === 'write_file') {
                 return {
                   behavior: 'deny',
                   message: 'Write operations are not allowed',
                 };
               }
-              return { behavior: 'allow', updatedInput: {} };
+              // Pass-through: empty `updatedInput` would erase
+              // file_path and break the read_file call.
+              return { behavior: 'allow', updatedInput: input };
             },
             debug: false,
           },
@@ -1469,6 +1525,15 @@ describe('Tool Control Parameters (E2E)', () => {
               resultWaiter.notifyResult();
             }
           }
+
+          // Make the read-first dependency explicit: if the model
+          // skipped read_file, prior-read enforcement would surface
+          // EDIT_REQUIRES_PRIOR_READ instead of the canUseTool deny
+          // message we are asserting on below — fail fast with a
+          // clear signal instead of a confusing toContain mismatch.
+          const toolCalls = findToolCalls(messages);
+          const toolNames = toolCalls.map((tc) => tc.toolUse.name);
+          expect(toolNames).toContain('read_file');
 
           // write_file should have been attempted but stream was closed
           const writeFileResults = findToolResults(messages, 'write_file');
@@ -1533,9 +1598,12 @@ describe('Tool Control Parameters (E2E)', () => {
             cwd: testDir,
             permissionMode: 'default',
             coreTools: ['read_file', 'write_file'],
-            canUseTool: async (toolName) => {
+            canUseTool: async (toolName, input) => {
               canUseToolCalls.push(toolName);
-              return { behavior: 'allow', updatedInput: {} };
+              // Pass-through: empty `updatedInput` would erase
+              // file_path on the SDK→CLI boundary
+              // (permissionController.ts:444 truthy-replaces args).
+              return { behavior: 'allow', updatedInput: input };
             },
             debug: false,
           },

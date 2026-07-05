@@ -11,12 +11,21 @@ export type TokenLimitType = 'input' | 'output';
 export const DEFAULT_TOKEN_LIMIT: TokenCount = 131_072; // 128K (power-of-two)
 export const DEFAULT_OUTPUT_TOKEN_LIMIT: TokenCount = 32_000; // 32K tokens
 
-// Capped default for slot-reservation optimization. 99% of outputs are under 5K
-// tokens, so 32K defaults over-reserve 4-6× slot capacity. With the cap
-// enabled, <1% of requests hit the limit; those get one clean retry at 64K
-// (see geminiChat.ts max_output_tokens escalation).
-export const CAPPED_DEFAULT_MAX_TOKENS: TokenCount = 8_000;
 export const ESCALATED_MAX_TOKENS: TokenCount = 64_000;
+
+export function parsePositiveIntegerEnvValue(
+  raw: string | undefined,
+): number | undefined {
+  if (raw === undefined) return undefined;
+
+  const trimmed = raw.trim();
+  if (!/^\d+$/.test(trimmed)) return undefined;
+
+  const parsed = Number(trimmed);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) return undefined;
+
+  return parsed;
+}
 
 /**
  * Accurate numeric limits:
@@ -32,6 +41,7 @@ const LIMITS = {
   '200k': 200_000, // vendor-declared decimal, used by OpenAI, Anthropic, etc.
   '256k': 262_144,
   '272k': 272_000, // vendor-declared decimal, GPT-5.x input (400K total - 128K output)
+  '384k': 384_000, // vendor-declared decimal, DeepSeek V4 max output
   '400k': 400_000, // vendor-declared decimal, used by OpenAI GPT-5.x
   '512k': 524_288,
   '1m': 1_000_000,
@@ -125,17 +135,23 @@ const PATTERNS: Array<[RegExp, TokenCount]> = [
   // -------------------
   // DeepSeek
   // -------------------
+  [/^deepseek-v4/, LIMITS['1m']], // DeepSeek V4 (flash, pro): 1M
   [/^deepseek/, LIMITS['128k']],
 
   // -------------------
   // Zhipu GLM
   // -------------------
-  [/^glm-5/, 202_752 as TokenCount], // GLM-5: exact vendor limit
-  [/^glm-/, 202_752 as TokenCount], // GLM fallback: 128K
+  // 1M context is the forward default for new GLM releases (GLM-5.2+, GLM-6.x,
+  // and beyond) so they need no future code change. Confirmed 200K families
+  // (GLM-5 / 5.0 / 5.1, GLM-4.x and older) are pinned explicitly first.
+  [/^glm-5(\.[01])?(-|$)/, 202_752 as TokenCount], // GLM-5 / 5.0 / 5.1: 200K
+  [/^glm-(?:[5-9]|\d{2,})/, LIMITS['1m']], // GLM-5.2+, 6.x..9.x, 10.x+: 1M
+  [/^glm-/, 202_752 as TokenCount], // GLM <=4.x / non-numeric fallback: 200K
 
   // -------------------
   // MiniMax
   // -------------------
+  [/^minimax-m3/i, LIMITS['1m']], // MiniMax-M3: 1,000,000
   [/^minimax-m2\.5/i, LIMITS['192k']], // MiniMax-M2.5: 196,608
   [/^minimax-/i, LIMITS['200k']], // MiniMax fallback: 200K
 
@@ -173,15 +189,16 @@ const OUTPUT_PATTERNS: Array<[RegExp, TokenCount]> = [
   // Alibaba / Qwen
   [/^qwen3\.\d/, LIMITS['64k']],
   [/^coder-model$/, LIMITS['64k']],
-  [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 8K
+  [/^qwen/, LIMITS['32k']], // Qwen fallback (VL, turbo, plus, etc.): 32K
 
   // DeepSeek
+  [/^deepseek-v4/, LIMITS['384k']], // DeepSeek V4 (flash, pro): 384K
   [/^deepseek-reasoner/, LIMITS['64k']],
   [/^deepseek-r1/, LIMITS['64k']],
   [/^deepseek-chat/, LIMITS['8k']],
 
   // Zhipu GLM
-  [/^glm-5/, LIMITS['16k']],
+  [/^glm-5(?:\.\d+)?(?:-|$)/, LIMITS['128k']],
   [/^glm-4\.7/, LIMITS['16k']],
 
   // MiniMax

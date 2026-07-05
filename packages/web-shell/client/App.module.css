@@ -1,0 +1,589 @@
+.app {
+  --chat-content-width: 1000px;
+  --chat-shell-width: 1040px;
+  --chat-regular-content-width: 1000px;
+  --chat-regular-shell-width: 1040px;
+  --font-mono:
+    'SF Mono', 'Fira Code', 'JetBrains Mono', 'Cascadia Code', monospace;
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+  --radius: 6px;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  /*
+   * Safe-area padding for mobile devices with notch / home indicator.
+   * With `viewport-fit=cover` in index.html the page extends behind the
+   * status-bar, home-indicator, and landscape notch regions; these env()
+   * insets push the content back into the visible safe area. On desktop
+   * or phones without notches every inset evaluates to 0 so nothing
+   * changes.
+   */
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  padding-left: env(safe-area-inset-left);
+  padding-right: env(safe-area-inset-right);
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.5;
+  overflow: hidden;
+}
+
+.appChat {
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.appChatEmpty {
+  justify-content: center;
+  overflow-y: auto;
+}
+
+.appShell {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  width: 100%;
+  overflow: hidden;
+}
+
+.chatPane {
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.mobileDrawer {
+  display: contents;
+}
+
+.mobileBackdrop {
+  display: none;
+}
+
+.hamburgerButton {
+  display: none;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--foreground);
+  cursor: pointer;
+  flex-shrink: 0;
+  border-radius: var(--radius);
+}
+
+.hamburgerButton:hover {
+  background: var(--accent);
+}
+
+.hamburgerButton svg {
+  width: 20px;
+  height: 20px;
+}
+
+@media (max-width: 760px) {
+  .mobileDrawer {
+    display: block;
+    position: fixed;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    z-index: 50;
+    pointer-events: none;
+    visibility: hidden;
+    /* Keep the panel visible until the backdrop finishes fading out so they
+       disappear together instead of the panel vanishing a frame early. */
+    transition: visibility 0s linear 200ms;
+  }
+
+  .mobileDrawerOpen {
+    visibility: visible;
+    pointer-events: auto;
+    /* Show immediately on open; only the close path needs the delay above. */
+    transition-delay: 0s;
+    /* With `viewport-fit=cover`, the fixed drawer extends behind the status
+       bar, home indicator, and landscape notch. Push the sidebar content
+       into the safe area while keeping the backdrop full-screen (it is a
+       sibling, not a child). */
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+  }
+
+  .mobileBackdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    z-index: 49;
+    background: rgba(0, 0, 0, 0.5);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 200ms ease;
+  }
+
+  .mobileDrawerOpen .mobileBackdrop {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .hamburgerButton {
+    display: flex;
+  }
+}
+
+.appChatEmpty.appWithSidebar {
+  justify-content: flex-start;
+  overflow: hidden;
+}
+
+.appChatEmpty .chatPane {
+  justify-content: center;
+  overflow-y: auto;
+}
+
+@media (max-width: 760px) {
+  .appChatEmpty .hamburgerButton {
+    position: sticky;
+    top: 0;
+    z-index: 1;
+  }
+}
+
+.app,
+.app * {
+  box-sizing: border-box;
+  scrollbar-width: thin;
+  scrollbar-color: var(--scrollbar-thumb) var(--scrollbar-track);
+}
+
+:where(.app button) {
+  padding: 0;
+}
+
+.app *::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.app *::-webkit-scrollbar-track {
+  background: var(--scrollbar-track);
+}
+
+.app *::-webkit-scrollbar-thumb {
+  border: 2px solid var(--scrollbar-track);
+  border-radius: 999px;
+  background: var(--scrollbar-thumb);
+}
+
+.app *::-webkit-scrollbar-thumb:hover {
+  background: var(--scrollbar-thumb-hover);
+}
+
+.themeDark {
+  --background: #0d0d0d;
+  --foreground: #fafafa;
+  --card: #161616;
+  --card-foreground: #fafafa;
+  --popover: #1a1a1a;
+  --popover-foreground: #fafafa;
+  --primary: #fafafa;
+  --primary-foreground: #0a0a0b;
+  --secondary: #1e1e1e;
+  --secondary-foreground: #a3a3a5;
+  --muted: #161616;
+  --muted-foreground: #808598;
+  --accent: #1e1e1e;
+  --accent-foreground: #fafafa;
+  --border: #2a2a2a;
+  --ring: #747476;
+  --sidebar-background: #0d0d0d;
+  --sidebar-foreground: #fafafa;
+  --sidebar-primary: #fafafa;
+  --sidebar-primary-foreground: #0a0a0b;
+  --sidebar-accent: #1e1e1e;
+  --sidebar-accent-foreground: #fafafa;
+  --sidebar-border: #2a2a2a;
+  --sidebar-ring: #747476;
+  --agent-blue-500: #6785ff;
+  --agent-blue-400: #8aa0ff;
+  --agent-blue-300: #b4c3ff;
+  --agent-blue-200: #2f3f88;
+  --agent-blue-100: #1c254f;
+  --agent-purple-300: #bcacfe;
+  --agent-purple-400: #d5cbfe;
+  --agent-purple-600: #9a7cff;
+  --agent-purple-shadow: 0 0 40px rgba(119, 85, 254, 0.28);
+  --agent-gray-200: #2a2d34;
+  --agent-gray-500: #808598;
+  --agent-gray-800: #3b3f49;
+  --success-color: #48bb78;
+  --warning-color: #ecc94b;
+  --error-color: #fc8181;
+  --streaming-label-color: #b794f4;
+  --agent-logo-gradient: linear-gradient(
+    90deg,
+    #4796e4 0%,
+    #847ace 52%,
+    #c3677f 100%
+  );
+  --subtle-bg: rgba(255, 255, 255, 0.04);
+  --subtle-bg-strong: rgba(255, 255, 255, 0.06);
+  --success-bg: rgba(72, 187, 120, 0.12);
+  --warning-bg: rgba(236, 201, 75, 0.08);
+  --warning-border: rgba(236, 201, 75, 0.2);
+  --error-bg: rgba(252, 129, 129, 0.08);
+  --error-border: rgba(252, 129, 129, 0.2);
+  --chat-editor-bg-primary: #2f2f2f;
+  --chat-editor-bg-tertiary: #1e1e1e;
+  --chat-editor-border-color: #2a2a2a;
+  --chat-editor-text-primary: #e4e4e4;
+  --chat-editor-text-secondary: #a0a0a0;
+  --chat-editor-text-dimmed: #666;
+  --chat-editor-accent-color: #4a9eff;
+  --chat-editor-selection-bg: #3d5a7a;
+  --chat-editor-selection-color: #ffffff;
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: #3a3a3a;
+  --scrollbar-thumb-hover: #525252;
+}
+
+.themeLight {
+  --background: #ffffff;
+  --foreground: #0a0a0b;
+  --card: #ffffff;
+  --card-foreground: #0a0a0b;
+  --popover: #ffffff;
+  --popover-foreground: #0a0a0b;
+  --primary: #151517;
+  --primary-foreground: #fafafa;
+  --secondary: #f3f3f5;
+  --secondary-foreground: #747476;
+  --muted: #f3f3f5;
+  --muted-foreground: #a3a3a5;
+  --accent: #f3f3f5;
+  --accent-foreground: #151517;
+  --border: #e3e4e6;
+  --ring: #a3a3a5;
+  --sidebar-background: #fafafa;
+  --sidebar-foreground: #0a0a0b;
+  --sidebar-primary: #151517;
+  --sidebar-primary-foreground: #fafafa;
+  --sidebar-accent: #f3f3f5;
+  --sidebar-accent-foreground: #151517;
+  --sidebar-border: #e3e4e6;
+  --sidebar-ring: #a3a3a5;
+  --agent-blue-500: #0033ff;
+  --agent-blue-400: #335cff;
+  --agent-blue-300: #6785ff;
+  --agent-blue-200: #b4c3ff;
+  --agent-blue-100: #cdd7ff;
+  --agent-purple-300: #d5cbfe;
+  --agent-purple-400: #bcacfe;
+  --agent-purple-600: #7755fe;
+  --agent-purple-shadow: 0 0 40px rgba(203, 207, 254, 0.45);
+  --agent-gray-200: #d4d7e2;
+  --agent-gray-500: #808598;
+  --agent-gray-800: #3b3f49;
+  --success-color: #1f7a3a;
+  --warning-color: #9a6a00;
+  --error-color: #c0362c;
+  --streaming-label-color: #7b4ab8;
+  --agent-logo-gradient: linear-gradient(
+    90deg,
+    #0b66c3 0%,
+    #7357b8 52%,
+    #bd4f67 100%
+  );
+  --subtle-bg: rgba(32, 31, 25, 0.05);
+  --subtle-bg-strong: rgba(32, 31, 25, 0.08);
+  --success-bg: rgba(31, 122, 58, 0.11);
+  --warning-bg: rgba(154, 106, 0, 0.1);
+  --warning-border: rgba(154, 106, 0, 0.24);
+  --error-bg: rgba(192, 54, 44, 0.1);
+  --error-border: rgba(192, 54, 44, 0.24);
+  --chat-editor-bg-primary: var(--background);
+  --chat-editor-bg-tertiary: #f2f2f3;
+  --chat-editor-border-color: #d8d6cc;
+  --chat-editor-text-primary: #22231f;
+  --chat-editor-text-secondary: #5f6259;
+  --chat-editor-text-dimmed: #8b8d84;
+  --chat-editor-accent-color: #0b66c3;
+  --chat-editor-selection-bg: rgba(11, 102, 195, 0.18);
+  --chat-editor-selection-color: var(--chat-editor-text-primary);
+  --scrollbar-track: transparent;
+  --scrollbar-thumb: #c7c9cc;
+  --scrollbar-thumb-hover: #aeb1b5;
+}
+
+.content {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.contentHasMessages {
+  flex: 1 1 auto;
+}
+
+.appChatEmpty .content {
+  flex: 0 0 auto;
+  overflow: visible;
+}
+
+.footer {
+  position: relative;
+  width: min(100%, var(--chat-shell-width));
+  margin: 0 auto;
+  padding-right: 20px;
+  padding-left: 20px;
+  flex-shrink: 0;
+  transition: width 320ms ease;
+}
+
+.bottomPanels {
+  position: absolute;
+  top: -50px;
+  right: 0;
+  left: 0;
+  z-index: 3;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.bottomPanels > * {
+  pointer-events: auto;
+}
+
+.approvalOverlay {
+  position: absolute;
+  right: 20px;
+  bottom: calc(100% + 8px);
+  left: 20px;
+  z-index: 6;
+  pointer-events: auto;
+}
+
+.scrollToBottomLayer {
+  position: absolute;
+  top: -44px;
+  right: 0;
+  left: 0;
+  z-index: 3;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.scrollToBottomLayerWithTodos {
+  top: -94px;
+}
+
+.scrollToBottomButton {
+  display: inline-flex;
+  box-sizing: border-box;
+  width: 34px;
+  height: 34px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--border) 82%, transparent);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--background) 96%, transparent);
+  box-shadow: 0 8px 24px color-mix(in srgb, #000 10%, transparent);
+  color: var(--foreground);
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  pointer-events: auto;
+  transition:
+    border-color 120ms ease,
+    box-shadow 120ms ease,
+    transform 120ms ease;
+}
+
+.scrollToBottomButton:hover,
+.scrollToBottomButton:focus-visible {
+  border-color: color-mix(in srgb, var(--foreground) 24%, var(--border));
+  box-shadow: 0 10px 28px color-mix(in srgb, #000 14%, transparent);
+  outline: none;
+}
+
+.scrollToBottomIcon {
+  width: 18px;
+  height: 18px;
+  stroke-width: 1.8;
+}
+
+.btwPanel {
+  flex-shrink: 0;
+  margin: 0 auto;
+  width: min(100%, var(--chat-regular-shell-width, 1040px));
+  padding: 4px 20px;
+}
+
+.composer {
+  flex-shrink: 0;
+  padding: 0;
+}
+
+/* Esc-clear hint, shown in the composer's top status slot (where the streaming
+   loader sits) — the two never coexist, so it stays clear of the queue. */
+.escClearStatus {
+  flex-shrink: 0;
+  padding: 4px 0;
+  font-size: 13px;
+  color: var(--muted-foreground);
+}
+
+.emptyWelcomeFooter {
+  padding: 12px 0 0;
+}
+
+.queuedPrompts {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: calc(100% - 32px);
+  margin: 0 auto -8px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px 12px 0 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family: var(--font-sans, system-ui, sans-serif);
+  font-size: 14px;
+  line-height: 22px;
+}
+
+.queuedPrompt {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 28px;
+  color: var(--foreground);
+}
+
+.queuedPrompt + .queuedPrompt {
+  border-top: 0;
+}
+
+.queuedPromptIcon {
+  display: inline-flex;
+  width: 20px;
+  height: 20px;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: var(--secondary-foreground);
+}
+
+.queuedPromptMaskIcon,
+.queuedPromptActionIcon {
+  display: inline-block;
+  flex-shrink: 0;
+  background: currentColor;
+  mask: var(--queued-icon-url) center / contain no-repeat;
+  -webkit-mask: var(--queued-icon-url) center / contain no-repeat;
+}
+
+.queuedPromptMaskIcon {
+  width: 14px;
+  height: 14px;
+}
+
+.queuedPromptText {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queuedPromptState {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+  color: var(--secondary-foreground);
+}
+
+.queuedPromptSpinner {
+  width: 10px;
+  height: 10px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  border-radius: 999px;
+  animation: queuedPromptSpin 0.8s linear infinite;
+}
+
+@keyframes queuedPromptSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.queuedPromptActions {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  flex-shrink: 0;
+  color: var(--secondary-foreground);
+}
+
+.queuedPromptAction {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  appearance: none;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--secondary-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  line-height: 22px;
+  padding: 3px 6px;
+}
+
+.queuedPromptActionIcon {
+  width: 14px;
+  height: 14px;
+}
+
+.queuedPromptAction:hover {
+  background: var(--accent);
+  color: var(--foreground);
+}
+
+.queuedPromptAction:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.queuedPromptAction:disabled:hover {
+  color: var(--secondary-foreground);
+}
+
+.queuedHint {
+  display: none;
+}

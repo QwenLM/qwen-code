@@ -9,7 +9,11 @@ import * as path from 'node:path';
 import type { Part, PartListUnion } from '@google/genai';
 import type { Config } from '../config/config.js';
 import { getErrorMessage } from './errors.js';
-import { processSingleFileContent } from './fileUtils.js';
+import type { ProcessedFileReadResult } from './fileUtils.js';
+import {
+  isCacheableReadResult,
+  processSingleFileContent,
+} from './fileUtils.js';
 import { getFolderStructure } from './getFolderStructure.js';
 
 /**
@@ -26,6 +30,14 @@ export interface ReadManyFilesOptions {
    * Optional AbortSignal for cancellation support.
    */
   signal?: AbortSignal;
+
+  /**
+   * When true and the vision bridge is enabled, keep images inline for a
+   * text-only model (instead of an "unsupported" note) so the bridge can
+   * transcribe them. Set only by the interactive `@`-resolution path, not by
+   * the agent `read_many_files` tool.
+   */
+  preserveUnsupportedImageForBridge?: boolean;
 }
 
 /**
@@ -38,6 +50,14 @@ export interface FileReadInfo {
   content: PartListUnion;
   /** Whether this is a directory listing rather than file content */
   isDirectory: boolean;
+  /**
+   * Error message when the read failed (e.g. missing pdftotext,
+   * password-protected PDF, file too large). When present, `content`
+   * holds the user-facing guidance string that was surfaced to the LLM,
+   * and callers should render this entry as a failed read rather than a
+   * successful one.
+   */
+  error?: string;
 }
 
 /**
@@ -84,7 +104,7 @@ export async function readManyFiles(
   config: Config,
   options: ReadManyFilesOptions,
 ): Promise<ReadManyFilesResult> {
-  const { paths: inputPatterns } = options;
+  const { paths: inputPatterns, preserveUnsupportedImageForBridge } = options;
 
   const seenFiles = new Set<string>();
   const contentParts: Part[] = [];
@@ -110,7 +130,11 @@ export async function readManyFiles(
 
       if (stats?.isFile() && !seenFiles.has(fullPath)) {
         seenFiles.add(fullPath);
-        const readResult = await readFileContent(config, fullPath);
+        const readResult = await readFileContent(
+          config,
+          fullPath,
+          preserveUnsupportedImageForBridge,
+        );
         if (readResult) {
           contentParts.push(...readResult.contentParts);
           files.push(readResult.info);
@@ -165,18 +189,47 @@ async function readDirectory(
 async function readFileContent(
   config: Config,
   filePath: string,
+  preserveUnsupportedImage = false,
 ): Promise<{ contentParts: Part[]; info: FileReadInfo } | null> {
   try {
-    const fileReadResult = await processSingleFileContent(filePath, config);
-    if (fileReadResult.error) {
-      return null;
-    }
+    const fileReadResult = await processSingleFileContent(filePath, config, {
+      preserveUnsupportedImage,
+    });
 
     const prefixText: Part = { text: `\nContent from ${filePath}:\n` };
 
+    // Surface any error produced by processSingleFileContent instead of
+    // silently skipping the file. This preserves actionable guidance
+    // (e.g. "pdftotext is not installed, install poppler-utils...",
+    // password-protected PDFs, file-too-large) across batch reads.
+    if (fileReadResult.error) {
+      const errorText =
+        typeof fileReadResult.llmContent === 'string'
+          ? fileReadResult.llmContent
+          : `Failed to read ${filePath}: ${fileReadResult.error}`;
+      return {
+        contentParts: [prefixText, { text: errorText }],
+        info: {
+          filePath,
+          content: errorText,
+          isDirectory: false,
+          error: fileReadResult.error,
+        },
+      };
+    }
+
+    // Record the successful read in the session FileReadCache so a later
+    // Edit / WriteFile on an `@`-attached file passes prior-read enforcement
+    // without a redundant read_file (issue #6289).
+    recordAttachedFileRead(config, filePath, fileReadResult);
+
     if (typeof fileReadResult.llmContent === 'string') {
       let fileContentForLlm = '';
-      if (fileReadResult.isTruncated) {
+      if (
+        fileReadResult.isTruncated &&
+        fileReadResult.linesShown &&
+        fileReadResult.originalLineCount !== undefined
+      ) {
         const [start, end] = fileReadResult.linesShown!;
         const total = fileReadResult.originalLineCount!;
         fileContentForLlm = `Showing lines ${start}-${end} of ${total} total lines.\n---\n${fileReadResult.llmContent}`;
@@ -207,4 +260,44 @@ async function readFileContent(
   } catch {
     return null;
   }
+}
+
+/**
+ * Record an `@`-attached file read in the session {@link FileReadCache} so a
+ * later Edit / WriteFile on the same file passes prior-read enforcement
+ * without the model re-reading it via `read_file` (issue #6289). Without
+ * this, `@`-mentions loaded content into context but never touched the
+ * cache, so `checkPriorRead` saw `unknown` and rejected the edit with
+ * `EDIT_REQUIRES_PRIOR_READ`.
+ *
+ * Although `@`-mentions pass no explicit offset / limit / pages,
+ * `processSingleFileContent` applies `config.getTruncateToolOutputLines()`
+ * as a default cap, so large attachments can still be truncated and
+ * `full` may be `false` — mirroring `read-file.ts` so the two read paths
+ * agree on what Edit / WriteFile may mutate. Binary media
+ * (image / audio / native PDF) omit `stats` from the read result and are
+ * skipped here; a later Edit on them is still correctly rejected as a
+ * non-text payload by prior-read enforcement.
+ *
+ * Guards mirror `grepReadTracking.ts`: no-op when the cache is disabled or
+ * unavailable, matching the other utility that records reads outside the
+ * `read_file` tool.
+ */
+function recordAttachedFileRead(
+  config: Config,
+  filePath: string,
+  result: ProcessedFileReadResult,
+): void {
+  if (config.getFileReadCacheDisabled?.()) {
+    return;
+  }
+  const cache = config.getFileReadCache?.();
+  if (!cache || !result.stats) {
+    return;
+  }
+  const cacheable = isCacheableReadResult(result);
+  cache.recordRead(filePath, result.stats, {
+    full: !result.isTruncated,
+    cacheable,
+  });
 }

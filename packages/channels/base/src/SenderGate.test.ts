@@ -19,6 +19,11 @@ describe('SenderGate', () => {
       const gate = new SenderGate('open');
       expect(gate.check('anyone').allowed).toBe(true);
     });
+
+    it('passively allows any sender', () => {
+      const gate = new SenderGate('open');
+      expect(gate.isAllowed('anyone')).toBe(true);
+    });
   });
 
   describe('allowlist policy', () => {
@@ -37,6 +42,12 @@ describe('SenderGate', () => {
     it('works with empty allowlist', () => {
       const gate = new SenderGate('allowlist');
       expect(gate.check('anyone').allowed).toBe(false);
+    });
+
+    it('passively checks allowlisted users', () => {
+      const gate = new SenderGate('allowlist', ['alice']);
+      expect(gate.isAllowed('alice')).toBe(true);
+      expect(gate.isAllowed('eve')).toBe(false);
     });
   });
 
@@ -93,6 +104,18 @@ describe('SenderGate', () => {
       const result = gate.check('anyone');
       expect(result.allowed).toBe(false);
       expect(result.pairingCode).toBeNull();
+    });
+
+    it('passively checks pairing authorization without creating requests', () => {
+      const store = mockPairingStore({
+        isApproved: vi.fn((senderId: string) => senderId === 'approved'),
+      });
+      const gate = new SenderGate('pairing', ['admin'], store);
+
+      expect(gate.isAllowed('admin')).toBe(true);
+      expect(gate.isAllowed('approved')).toBe(true);
+      expect(gate.isAllowed('stranger')).toBe(false);
+      expect(store.createRequest).not.toHaveBeenCalled();
     });
   });
 

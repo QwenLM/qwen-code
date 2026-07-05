@@ -192,7 +192,7 @@ describe('ProcessTransport', () => {
         permissionMode: 'auto-edit',
         maxSessionTurns: 10,
         coreTools: ['read_file', 'write_file'],
-        excludeTools: ['web_search'],
+        excludeTools: ['web_fetch'],
         authType: 'api-key',
       };
 
@@ -214,7 +214,7 @@ describe('ProcessTransport', () => {
           '--core-tools',
           'read_file,write_file',
           '--exclude-tools',
-          'web_search',
+          'web_fetch',
           '--auth-type',
           'api-key',
         ]),

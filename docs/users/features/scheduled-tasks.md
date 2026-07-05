@@ -6,7 +6,7 @@ Scheduled tasks let Qwen Code re-run a prompt automatically on an interval. Use 
 
 Tasks are session-scoped: they live in the current Qwen Code process and are gone when you exit. Nothing is written to disk.
 
-> **Note:** Scheduled tasks are an experimental feature. Enable them with `experimental.cron: true` in your [settings](../configuration/settings.md), or set `QWEN_CODE_ENABLE_CRON=1` in your environment.
+> **Tip:** Scheduled tasks are enabled by default. To disable them, set `experimental.cron: false` in your [settings](../configuration/settings.md), or set `QWEN_CODE_DISABLE_CRON=1` in your environment.
 
 ## Schedule a recurring prompt with /loop
 
@@ -39,6 +39,16 @@ The scheduled prompt can itself be a command or skill invocation. This is useful
 ```
 
 Each time the job fires, Qwen Code runs `/review-pr 1234` as if you had typed it.
+
+### Autonomous mode
+
+Running `/loop` with **no prompt** starts an autonomous loop instead of repeating a fixed prompt. Qwen Code acts as a steward of the work already established in the conversation — it keeps your work moving while you're away:
+
+```text
+/loop
+```
+
+A bare `/loop` (no prompt, no interval) runs a self-paced autonomous loop; `/loop <interval>` with no prompt runs the same autonomous loop on a fixed cadence (e.g. `/loop 10m`). On each fire it advances what the conversation already set up — finishing things you started, maintaining an in-progress PR (addressing review threads, fixing failing CI, resolving conflicts), and honoring follow-up commitments. It only acts on work the transcript already established: it never invents new work or makes irreversible changes (push, delete, send) without clear authorization, and it stops once everything is quiet.
 
 ### Manage loops
 
@@ -107,9 +117,11 @@ To avoid every session hitting the API at the same wall-clock moment, the schedu
 
 The offset is derived from the task ID, so the same task always gets the same offset. If exact timing matters, pick a minute that is not `:00` or `:30`, for example `3 9 * * *` instead of `0 9 * * *`, and the one-shot jitter will not apply.
 
-### Three-day expiry
+### Recurring-task expiry
 
-Recurring tasks automatically expire 3 days after creation. The task fires one final time, then deletes itself. This bounds how long a forgotten loop can run. If you need a recurring task to last longer, cancel and recreate it before it expires.
+Recurring tasks automatically expire 7 days after creation by default. The task fires one final time, then deletes itself. This bounds how long a forgotten loop can run.
+
+To change the limit, set `experimental.cronRecurringMaxAgeDays` in your [settings](../configuration/settings.md), or set the `QWEN_CODE_CRON_MAX_AGE_DAYS` environment variable (the environment variable wins — convenient for cloud or container deployments where editing `settings.json` is impractical). A value of `0` disables expiry entirely, so tasks run until you delete them — useful for long-running daemon deployments that host daily reports, digests, or ongoing monitoring. The configured limit also applies to durable tasks restored from disk after a restart.
 
 One-shot tasks do not expire on a timer — they simply delete themselves after firing once.
 

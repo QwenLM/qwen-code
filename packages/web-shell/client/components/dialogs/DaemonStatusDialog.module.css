@@ -1,0 +1,315 @@
+/* Scrolling is delegated to the DialogShell body (one scroll container, not
+   two), so this grows to its content and the shell — including fullscreen —
+   controls the height. */
+.dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 13px;
+  color: var(--foreground);
+}
+
+.toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.toolbarActions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+}
+
+.updatedAt {
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.refreshError {
+  color: var(--error-color);
+  font-size: 12px;
+}
+
+.refreshButton {
+  padding: 4px 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--foreground);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.refreshButton:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  line-height: 1.5;
+}
+
+.levelOk {
+  color: var(--success-color);
+  background: color-mix(in srgb, var(--success-color) 14%, transparent);
+}
+
+.levelWarning {
+  color: var(--warning-color);
+  background: color-mix(in srgb, var(--warning-color) 14%, transparent);
+}
+
+.levelError {
+  color: var(--error-color);
+  background: color-mix(in srgb, var(--error-color) 14%, transparent);
+}
+
+.levelUnavailable {
+  color: var(--muted-foreground);
+  background: color-mix(in srgb, var(--muted-foreground) 14%, transparent);
+}
+
+.tabs {
+  display: flex;
+  gap: 2px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+}
+
+.tab {
+  min-height: 32px;
+  padding: 6px 14px;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  background: transparent;
+  color: var(--muted-foreground);
+  cursor: pointer;
+  font: inherit;
+  font-weight: 500;
+}
+
+.tab:hover {
+  color: var(--foreground);
+}
+
+/* Active tab: underline in the accent color, matching the dashboard's chart
+   accents; carries the selected state that `aria-selected` announces. */
+.tabActive {
+  color: var(--foreground);
+  border-bottom-color: var(--primary);
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 12px;
+}
+
+/* Fullscreen: fewer, wider chart cards so the extra viewport actually enlarges
+   the charts (paired with a taller SVG in SvgLineChart) instead of just packing
+   in more small ones. The DialogShell body carries `data-dialog-fullscreen`. */
+:global([data-dialog-fullscreen]) .grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 480px), 1fr));
+  gap: 16px;
+}
+
+.card {
+  border: 1px solid color-mix(in srgb, var(--border) 74%, transparent);
+  border-radius: 10px;
+  padding: 10px 14px;
+  min-width: 0;
+}
+
+.cardTitle {
+  margin: 0 0 8px;
+  font-size: 12px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted-foreground);
+}
+
+.row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 2px 0;
+  min-width: 0;
+}
+
+.rowLabel {
+  color: var(--muted-foreground);
+}
+
+.rowValue {
+  /* Keep short values (counts, "0 / 0 / 0", "first-responder") on one line;
+     the label wraps instead. Long path values opt back into wrapping via
+     .pathValue, which restores a small min-content width for this flex item. */
+  text-align: right;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+.pathRow {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2px 0;
+  min-width: 0;
+}
+
+.pathValue {
+  max-width: 100%;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  /* Single line, ellipsis at the START so the tail (…/parent/workspace)
+     stays visible; the row widens/narrows with the card. */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl;
+  text-align: left;
+}
+
+.empty {
+  color: var(--muted-foreground);
+  padding: 4px 0;
+}
+
+.issueRow {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 3px 0;
+}
+
+.issueMessage {
+  overflow-wrap: anywhere;
+}
+
+.featureChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  /* A long capability set shouldn't make this card tower over its neighbours;
+     cap the height and let it scroll. */
+  max-height: 132px;
+  overflow-y: auto;
+}
+
+.featureChip {
+  padding: 1px 7px;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--border) 40%, transparent);
+  color: var(--muted-foreground);
+  font-size: 11px;
+  line-height: 1.5;
+  font-family: var(--font-mono, monospace);
+  white-space: nowrap;
+}
+
+.summaryChip {
+  padding: 2px 8px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--border) 40%, transparent);
+  font-size: 12px;
+  font-family: var(--font-mono, monospace);
+  overflow-wrap: anywhere;
+}
+
+.sessionRow {
+  padding: 6px 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+
+.sessionRow:first-of-type {
+  border-top: none;
+}
+
+.sessionName {
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.sessionMeta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 2px;
+  color: var(--muted-foreground);
+  font-size: 12px;
+}
+
+.activePrompt {
+  color: var(--warning-color);
+}
+
+.workspaceRow {
+  padding: 6px 0;
+  border-top: 1px solid color-mix(in srgb, var(--border) 50%, transparent);
+}
+
+.workspaceRow:first-of-type {
+  border-top: none;
+}
+
+.workspaceRowHead {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.workspaceName {
+  font-weight: 600;
+}
+
+.workspaceDuration {
+  margin-left: auto;
+  color: var(--muted-foreground);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.workspaceError {
+  margin-top: 2px;
+  color: var(--error-color);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.workspaceSummary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+}
+
+.workspaceCell {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 12px;
+}
+
+.workspaceCellLabel {
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+}
+
+.workspaceCellMessage {
+  color: var(--muted-foreground);
+  overflow-wrap: anywhere;
+}

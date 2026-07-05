@@ -1,0 +1,610 @@
+/* TiptapMarkdownEditor — styles matching the app's markdown rendering (minimal mode) */
+
+.tiptap-editor {
+  --tiptap-bubble-z: var(--z-floating-menu, 400);
+  --tiptap-image-selection-width: 1.5px;
+  --tiptap-image-selection-color: color-mix(in oklch, var(--accent) 45%, transparent);
+  --tiptap-list-indent: 1.5rem;
+}
+
+.tiptap-editor .tiptap-prose {
+  outline: none;
+  min-height: 60px;
+}
+
+/* Placeholder */
+.tiptap-editor .tiptap-prose p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder);
+  float: left;
+  color: var(--foreground);
+  opacity: 0.3;
+  pointer-events: none;
+  height: 0;
+}
+
+/* Paragraphs */
+.tiptap-editor .tiptap-prose p {
+  margin: 0.5rem 0;
+  line-height: 1.625; /* leading-relaxed */
+}
+
+.tiptap-editor .tiptap-prose > :first-child {
+  margin-top: 0;
+}
+
+/* Headings */
+.tiptap-editor .tiptap-prose h1 {
+  font-size: 1.25rem;
+  font-weight: 700;
+  margin-top: 1.25rem;
+  margin-bottom: 0.5rem;
+  line-height: 1.3;
+}
+
+.tiptap-editor .tiptap-prose h2 {
+  font-size: 1.125rem;
+  font-weight: 600;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+  line-height: 1.3;
+}
+
+.tiptap-editor .tiptap-prose h3 {
+  font-size: 1rem;
+  font-weight: 600;
+  margin-top: 1rem;
+  margin-bottom: 0.5rem;
+  line-height: 1.3;
+}
+
+/* Bold & Italic */
+.tiptap-editor .tiptap-prose strong {
+  font-weight: 700;
+}
+
+.tiptap-editor .tiptap-prose em {
+  font-style: italic;
+}
+
+.tiptap-editor .tiptap-prose s {
+  text-decoration: line-through;
+  color: color-mix(in oklch, var(--foreground) 50%, transparent);
+}
+
+/* Lists */
+.tiptap-editor .tiptap-prose ul {
+  list-style-type: disc;
+  padding-inline-start: var(--tiptap-list-indent);
+  margin: 0.5rem 0;
+}
+
+.tiptap-editor .tiptap-prose ol {
+  list-style-type: decimal;
+  padding-inline-start: var(--tiptap-list-indent);
+  margin: 0.5rem 0;
+}
+
+.tiptap-editor .tiptap-prose li {
+  line-height: 1.625;
+}
+
+.tiptap-editor .tiptap-prose li > p {
+  margin: 0;
+}
+
+.tiptap-editor .tiptap-prose ul ::marker {
+  color: var(--md-bullets, color-mix(in oklch, var(--foreground) 50%, transparent));
+}
+
+.tiptap-editor .tiptap-prose ol ::marker {
+  color: var(--md-counters, color-mix(in oklch, var(--foreground) 50%, transparent));
+}
+
+/* Nested lists */
+.tiptap-editor .tiptap-prose ul ul,
+.tiptap-editor .tiptap-prose ol ul {
+  list-style-type: circle;
+}
+
+.tiptap-editor .tiptap-prose ul ul ul,
+.tiptap-editor .tiptap-prose ol ul ul {
+  list-style-type: square;
+}
+
+/* Blockquote */
+.tiptap-editor .tiptap-prose blockquote {
+  border-left: 2px solid color-mix(in oklch, var(--foreground) 30%, transparent);
+  padding-left: 0.75rem;
+  margin: 0.5rem 0;
+  font-style: italic;
+}
+
+/* Inline code */
+.tiptap-editor .tiptap-prose code {
+  padding: 0 0.25rem;
+  border-radius: 0.25rem;
+  background: color-mix(in oklch, var(--foreground) 4%, transparent);
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+
+/* Code blocks */
+.tiptap-editor .tiptap-prose pre {
+  margin: 0.5rem 0;
+  border-radius: 0.5rem;
+  background: color-mix(in oklch, var(--foreground) 3%, transparent);
+  padding: 0.75rem;
+  overflow-x: auto;
+}
+
+.tiptap-editor .tiptap-prose pre code {
+  background: none;
+  padding: 0;
+  border-radius: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: inherit;
+}
+
+.tiptap-hover-actions-host {
+  position: relative;
+}
+
+.tiptap-hover-actions {
+  position: absolute;
+  top: 0.5rem;
+  right: 0.5rem;
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.12s ease;
+}
+
+.tiptap-hover-actions-host:hover .tiptap-hover-actions,
+.tiptap-hover-actions-host:focus-within .tiptap-hover-actions,
+.tiptap-hover-actions-host[data-actions-open='true'] .tiptap-hover-actions,
+.ProseMirror-selectednode .tiptap-hover-actions {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.tiptap-hover-action-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.25rem;
+  min-height: 24px;
+  border-radius: 6px;
+  border: none;
+  background: var(--background);
+  box-shadow: var(--shadow-minimal);
+  color: color-mix(in oklch, var(--foreground) 65%, transparent);
+  cursor: pointer;
+  padding: 0.25rem 0.4rem;
+  transition: background-color 0.1s, color 0.1s;
+}
+
+.tiptap-hover-action-btn:hover,
+.tiptap-hover-action-btn.is-active {
+  color: var(--foreground);
+  background: color-mix(in oklch, var(--foreground) 4%, transparent);
+}
+
+.tiptap-hover-action-btn:focus-visible {
+  outline: none;
+  box-shadow: 0 0 0 1px var(--ring);
+}
+
+.tiptap-editor .tiptap-code-block-node {
+  margin: 0.5rem 0;
+}
+
+.tiptap-editor .tiptap-code-block-node pre {
+  margin: 0;
+}
+
+.tiptap-hover-action-btn.tiptap-code-block-language-trigger {
+  padding-left: 0.5rem;
+  gap: 3px;
+}
+
+.tiptap-code-block-language-label {
+  max-width: 90px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 500;
+}
+
+/* Horizontal rule */
+.tiptap-editor .tiptap-prose hr {
+  border: none;
+  border-top: 1px solid color-mix(in oklch, var(--foreground) 10%, transparent);
+  margin: 1rem 0;
+}
+
+/* Links */
+.tiptap-editor .tiptap-prose a {
+  color: var(--accent);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* Images */
+.tiptap-editor .tiptap-prose img {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0.75rem 0;
+  border-radius: 0.5rem;
+}
+
+/* Official TipTap image loading placeholder (no custom node-view) */
+.tiptap-editor .tiptap-prose img[data-loading='true'] {
+  min-height: 220px;
+  background: linear-gradient(
+    110deg,
+    color-mix(in oklch, var(--foreground) 5%, transparent) 12%,
+    color-mix(in oklch, var(--foreground) 10%, transparent) 35%,
+    color-mix(in oklch, var(--foreground) 5%, transparent) 58%
+  );
+  background-size: 200% 100%;
+  animation: tiptap-image-shimmer 1.2s linear infinite;
+}
+
+.tiptap-editor .tiptap-prose img[data-loading='false'] {
+  animation: none;
+  background: transparent;
+}
+
+@keyframes tiptap-image-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+
+/* Task list visual styling moved to ./extensions/animated-task-item.css */
+
+/* ── Shiki dual-theme ── */
+/* Light mode is default. Dark mode switches via CSS variables set by Shiki. */
+.dark .tiptap-editor .shiki,
+.dark .tiptap-editor .shiki span {
+  color: var(--shiki-dark) !important;
+  background-color: var(--shiki-dark-bg) !important;
+}
+
+/* Shiki code blocks: override pre background set by Shiki node decoration */
+.tiptap-editor .tiptap-prose pre.shiki,
+.tiptap-editor .tiptap-prose div[data-node-view-wrapper] pre {
+  background: color-mix(in oklch, var(--foreground) 3%, transparent) !important;
+}
+
+/* CodeBlockShiki wraps blocks with `.node-codeBlock.shiki`.
+   In light themes that wrapper can retain a white background, which peeks through
+   under rounded code blocks. Keep wrapper transparent and clip to rounded corners. */
+.tiptap-editor .tiptap-prose .node-codeBlock.shiki {
+  background: transparent !important;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+.tiptap-editor .tiptap-prose .node-codeBlock.shiki pre {
+  margin: 0;
+  border-radius: inherit;
+}
+
+/* ── Mermaid blocks ── */
+.tiptap-editor .tiptap-prose .node-codeBlock.shiki:has(.tiptap-mermaid-block) {
+  background: transparent !important;
+}
+
+.tiptap-editor .tiptap-mermaid-block {
+  margin: 0.5rem 0;
+  border-radius: 0.5rem;
+  overflow: hidden;
+}
+
+/* ── LaTeX blocks ── */
+.tiptap-editor .tiptap-latex-block {
+  margin: 0.5rem 0;
+  padding: 0.5rem 0;
+  border-radius: 0.5rem;
+}
+
+/* ── Bubble menu toolbar ── */
+.tiptap-bubble-menu {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  border-radius: 6px;
+  background: var(--background);
+  border: none;
+  box-shadow: var(--shadow-modal-small);
+  z-index: var(--tiptap-bubble-z);
+}
+
+.tiptap-bubble-menu--editing {
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 320px;
+  max-width: 480px;
+  padding: 6px;
+  border-radius: 10px;
+}
+
+.tiptap-bubble-btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 6px;
+  border: none;
+  cursor: pointer;
+  background: transparent;
+  color: color-mix(in oklch, var(--foreground) 70%, transparent);
+  transition: background-color 0.1s, color 0.1s;
+}
+
+.tiptap-bubble-btn:hover {
+  background: color-mix(in oklch, var(--foreground) 8%, transparent);
+  color: var(--foreground);
+}
+
+.tiptap-bubble-btn.is-active {
+  background: color-mix(in oklch, var(--foreground) 10%, transparent);
+  color: var(--foreground);
+}
+
+.tiptap-bubble-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: color-mix(in oklch, var(--foreground) 55%, transparent);
+  padding: 0 6px;
+  user-select: none;
+}
+
+.tiptap-bubble-edit-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 2px 2px 6px 2px;
+}
+
+/* Match Session Details info panel title style */
+.tiptap-bubble-panel-title {
+  font-size: 11px;
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: color-mix(in oklch, var(--muted-foreground) 60%, transparent);
+}
+
+.tiptap-bubble-done-btn {
+  font-size: 12px;
+  font-weight: 500;
+  color: color-mix(in oklch, var(--foreground) 70%, transparent);
+  background: var(--background);
+  border: none;
+  cursor: pointer;
+  padding: 2px 8px;
+  border-radius: 4px;
+  box-shadow: var(--shadow-minimal);
+  transition: background-color 0.1s, color 0.1s;
+}
+
+.tiptap-bubble-done-btn:hover {
+  background: color-mix(in oklch, var(--foreground) 3%, transparent);
+  color: var(--foreground);
+}
+
+.tiptap-bubble-textarea-shell {
+  border-radius: 6px;
+  background: var(--foreground-2);
+  box-shadow: var(--shadow-minimal);
+  transition: background-color 0.1s;
+}
+
+.tiptap-bubble-textarea-shell:focus-within {
+  background: var(--background);
+}
+
+.tiptap-bubble-textarea {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--foreground);
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  padding: 8px;
+  resize: vertical;
+  min-height: 80px;
+  max-height: 320px;
+  outline: none;
+  width: 100%;
+}
+
+/* ── Inline math edit menu ── */
+.tiptap-bubble-menu--inline-math {
+  gap: 6px;
+  padding: 4px 6px;
+}
+
+.tiptap-bubble-math-input {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--foreground);
+  background: transparent;
+  border: none;
+  padding: 0;
+  outline: none;
+  min-width: 160px;
+}
+
+/* Clickable inline math nodes in editable mode */
+.tiptap-mathematics-render--editable {
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background-color 0.1s;
+}
+
+.tiptap-mathematics-render--editable:hover {
+  background: color-mix(in oklch, var(--accent) 8%, transparent);
+}
+
+/* Highlight inline math when selected via keyboard (NodeSelection) */
+.tiptap-mathematics-render--editable.ProseMirror-selectednode {
+  background: color-mix(in oklch, var(--accent) 15%, transparent);
+}
+
+/* Suppress individual text selection inside rendered blocks.
+   The block-level highlight is handled by the SelectionHighlight decoration plugin.
+   SVG <text> ignores ::selection in Chromium, so user-select: none is required. */
+.tiptap-mermaid-block svg,
+.tiptap-mermaid-block svg * {
+  -webkit-user-select: none !important;
+  user-select: none !important;
+}
+
+.tiptap-latex-block .katex *::selection,
+.tiptap-mathematics-render--editable .katex *::selection {
+  background: transparent !important;
+  color: inherit !important;
+}
+
+/* Match text selection color to the block-level highlight */
+.tiptap-editor .tiptap-prose ::selection {
+  background: color-mix(in oklch, var(--accent) 12%, transparent);
+}
+
+/* Unified rich-block selection outline (image + mermaid + latex).
+   Covers both keyboard NodeSelection (.ProseMirror-selectednode) and range
+   decorations (.is-selected), where classes can land on the same element or
+   a wrapping ancestor depending on ProseMirror/NodeView structure. */
+.tiptap-image-block.ProseMirror-selectednode,
+.ProseMirror-selectednode .tiptap-image-block,
+.tiptap-image-block.is-selected,
+.is-selected .tiptap-image-block,
+.tiptap-mermaid-block.ProseMirror-selectednode,
+.ProseMirror-selectednode .tiptap-mermaid-block,
+.tiptap-mermaid-block.is-selected,
+.is-selected .tiptap-mermaid-block,
+.tiptap-latex-block.ProseMirror-selectednode,
+.ProseMirror-selectednode .tiptap-latex-block,
+.tiptap-latex-block.is-selected,
+.is-selected .tiptap-latex-block {
+  outline: var(--tiptap-image-selection-width) solid var(--tiptap-image-selection-color);
+  outline-offset: 2px;
+  border-radius: 0.5rem;
+  background: color-mix(in oklch, var(--accent) 5%, transparent);
+}
+
+/* Compatibility fallback: keep visual parity if selection class lands directly on <img>. */
+.tiptap-editor .tiptap-prose img.ProseMirror-selectednode,
+.tiptap-editor .tiptap-prose img.is-selected,
+.tiptap-editor .tiptap-prose .is-selected img {
+  outline: var(--tiptap-image-selection-width) solid var(--tiptap-image-selection-color);
+  outline-offset: 2px;
+  border-radius: 0.5rem;
+}
+
+.tiptap-mathematics-render--editable.is-selected,
+.is-selected .tiptap-mathematics-render--editable {
+  background: color-mix(in oklch, var(--accent) 15%, transparent);
+  border-radius: 3px;
+}
+
+/* ── Slash command menu ── */
+.tiptap-slash-menu {
+  /* Keep compact by default, but allow some growth for longer labels. */
+  width: fit-content;
+  min-width: 190px;
+  max-width: min(300px, calc(100vw - 32px));
+  max-height: 320px;
+  overflow: auto;
+  border-radius: 8px;
+  padding: 4px;
+  font-family: var(--font-sans);
+}
+
+.tiptap-slash-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.tiptap-slash-group + .tiptap-slash-group {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid color-mix(in oklch, var(--foreground) 10%, transparent);
+}
+
+.tiptap-slash-group-label {
+  padding: 2px 8px;
+  font-size: 11px;
+  font-weight: 500;
+  color: color-mix(in oklch, var(--foreground) 55%, transparent);
+  user-select: none;
+}
+
+.tiptap-slash-item {
+  position: relative;
+  text-align: left;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  border-radius: 4px;
+  background: transparent;
+  cursor: default;
+  padding: 6px 8px;
+  font-size: 13px;
+  line-height: 1.2;
+  color: var(--foreground);
+  transition: background-color 0.1s;
+}
+
+.tiptap-slash-item:hover,
+.tiptap-slash-item.is-selected {
+  background: color-mix(in oklch, var(--foreground) 3%, transparent);
+}
+
+.tiptap-slash-item-icon {
+  width: 14px;
+  min-width: 14px;
+  height: 14px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: color-mix(in oklch, var(--foreground) 70%, transparent);
+}
+
+.tiptap-slash-item-icon svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+.tiptap-slash-item-title {
+  font-size: 13px;
+  font-weight: 400;
+  color: inherit;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tiptap-slash-empty {
+  font-size: 12px;
+  color: color-mix(in oklch, var(--foreground) 55%, transparent);
+  padding: 8px;
+}

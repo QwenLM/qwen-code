@@ -1,0 +1,132 @@
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+/*
+ * Mobile overscroll / safe-area fix:
+ *
+ * On iOS Safari the rubber-band pull exposes whatever sits behind the page
+ * canvas. With `viewport-fit=cover` the status-bar and home-indicator areas
+ * also reveal the html background. Paint html/body with the active theme's
+ * background and pin overscroll so the white browser chrome never peeks
+ * through. The .theme-* classes are applied to <html> by the inline script
+ * in index.html (and kept in sync by StandaloneApp's useEffect).
+ *
+ * `overscroll-behavior-y: none` disables the pull-to-refresh / bounce; the
+ * chat pane handles its own scroll internally so this does not affect chat
+ * scrolling.
+ */
+html,
+body {
+  background: #0d0d0d;
+  color: #fafafa;
+  overscroll-behavior-y: none;
+}
+
+html.theme-light,
+html.theme-light body {
+  background: #ffffff;
+  color: #0a0a0b;
+  color-scheme: light;
+}
+
+html.theme-dark,
+html.theme-dark body {
+  background: #0d0d0d;
+  color: #fafafa;
+  color-scheme: dark;
+}
+
+/*
+ * Native-app feel (P0):
+ *
+ * `touch-action: manipulation` removes the 300ms tap delay and disables
+ * double-tap zoom — the two main giveaways that a page is "just a website".
+ * We do NOT set `user-scalable=no` / `maximum-scale=1` because those break
+ * WCAG 1.4.4 and iOS 10+ already ignores them; users can still pinch-zoom
+ * message content for accessibility.
+ *
+ * `-webkit-tap-highlight-color: transparent` removes the blue flash iOS
+ * shows on tap. `-webkit-text-size-adjust: 100%` stops iOS from silently
+ * bumping font size on orientation change.
+ *
+ * `user-select: none` + `-webkit-touch-callout: none` suppress the
+ * long-press "Copy / Look Up" callout and accidental text selection on
+ * UI chrome (buttons, nav, composer shell). Scoped to touch devices via
+ * `@media (hover: none) and (pointer: coarse)` so desktop users retain
+ * normal text selection in sidebar, error messages, toasts, etc.
+ * Message content and the editor re-enable both via
+ * `[data-user-selectable]` below so users can still copy code and
+ * long-press links inside replies.
+ */
+html,
+body {
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+@media (hover: none) and (pointer: coarse) {
+  html *,
+  html *::before,
+  html *::after {
+    -webkit-touch-callout: none;
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+
+/*
+ * Re-enable selection on user-facing text regions: message bodies, code
+ * blocks, the editor's contenteditable surface, any dialog / panel whose
+ * root opts in via `data-user-selectable`, and all ARIA dialogs (tool
+ * approval, MCP config, theme picker, etc.). Plain attribute selectors
+ * have specificity (0,1,0) which beats the blanket `html *` at (0,0,1).
+ */
+[data-user-selectable],
+[data-user-selectable] *,
+[role='dialog']:not([data-mobile-drawer]),
+[role='dialog']:not([data-mobile-drawer]) *,
+.cm-content,
+.cm-line,
+input,
+textarea,
+[contenteditable='true'] {
+  -webkit-touch-callout: default;
+  -webkit-user-select: text;
+  user-select: text;
+}
+
+/*
+ * iOS Safari auto-zooms any <input> / <textarea> / contenteditable whose
+ * computed font-size is < 16px when focused. The composer editor sits at
+ * 14px in the desktop theme (EditorView.theme at specificity 0,2,0 and
+ * `.editorArea .cm-content` in ChatEditor.module.css also at 0,2,0), so
+ * bump it to 16px on all touch devices (iPhone, iPad). The composer uses
+ * `#root [data-composer]` at specificity (1,2,0) to beat the EditorView
+ * theme. Other text inputs use `#root input[type=...]` at (1,1,0).
+ * `@supports (-webkit-touch-callout: none)` scopes to WebKit (Safari);
+ * `(hover: none) and (pointer: coarse)` matches touch devices including
+ * iPad — and avoids the deprecated `max-device-width`.
+ */
+@supports (-webkit-touch-callout: none) {
+  @media (hover: none) and (pointer: coarse) {
+    #root [data-composer] .cm-content,
+    #root [data-composer] .cm-line,
+    #root input[type='text'],
+    #root input[type='search'],
+    #root input[type='password'],
+    #root input[type='email'],
+    #root input[type='url'],
+    #root input[type='tel'],
+    #root input[type='number'],
+    #root textarea,
+    #root [contenteditable='true'] {
+      font-size: 16px;
+    }
+  }
+}

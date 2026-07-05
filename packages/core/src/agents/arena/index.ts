@@ -7,6 +7,7 @@
 // Arena-specific exports
 export * from './types.js';
 export * from './arena-events.js';
+export * from './diff-summary.js';
 export * from './ArenaManager.js';
 export * from './ArenaAgentClient.js';
 

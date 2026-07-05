@@ -68,6 +68,26 @@ describe('speculationToolGate', () => {
       expect(result.action).toBe('redirect');
     });
 
+    it('redirects edit in auto mode', async () => {
+      const result = await evaluateToolCall(
+        ToolNames.EDIT,
+        {},
+        overlayFs,
+        ApprovalMode.AUTO,
+      );
+      expect(result.action).toBe('redirect');
+    });
+
+    it('redirects write_file in auto mode', async () => {
+      const result = await evaluateToolCall(
+        ToolNames.WRITE_FILE,
+        {},
+        overlayFs,
+        ApprovalMode.AUTO,
+      );
+      expect(result.action).toBe('redirect');
+    });
+
     it('hits boundary for edit in default mode', async () => {
       const result = await evaluateToolCall(
         ToolNames.EDIT,
@@ -129,8 +149,9 @@ describe('speculationToolGate', () => {
       ToolNames.MEMORY,
       ToolNames.ASK_USER_QUESTION,
       ToolNames.EXIT_PLAN_MODE,
+      ToolNames.ENTER_PLAN_MODE,
+      ToolNames.TEAM_PLAN_APPROVAL,
       ToolNames.WEB_FETCH,
-      ToolNames.WEB_SEARCH,
     ])('hits boundary for %s', async (toolName) => {
       const result = await evaluateToolCall(
         toolName,

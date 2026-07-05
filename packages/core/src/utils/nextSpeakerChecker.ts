@@ -5,11 +5,11 @@
  */
 
 import type { Content } from '@google/genai';
-import { DEFAULT_QWEN_MODEL } from '../config/models.js';
 import type { GeminiChat } from '../core/geminiChat.js';
 import { isFunctionResponse } from './messageInspectors.js';
 import type { Config } from '../config/config.js';
 import { createDebugLogger } from './debugLogger.js';
+import { runSideQuery } from './sideQuery.js';
 
 const debugLogger = createDebugLogger('NEXT_SPEAKER');
 
@@ -48,34 +48,16 @@ export async function checkNextSpeaker(
   abortSignal: AbortSignal,
   promptId: string,
 ): Promise<NextSpeakerResponse | null> {
-  // We need to capture the curated history because there are many moments when the model will return invalid turns
-  // that when passed back up to the endpoint will break subsequent calls. An example of this is when the model decides
-  // to respond with an empty part collection if you were to send that message back to the server it will respond with
-  // a 400 indicating that model part collections MUST have content.
-  const curatedHistory = chat.getHistory(/* curated */ true);
-
-  // Ensure there's a model response to analyze
-  if (curatedHistory.length === 0) {
-    // Cannot determine next speaker if history is empty.
+  // Read the last raw history entry by design: functionResponse turns can be
+  // stripped from curated history, but they are decisive for next-speaker flow.
+  const lastComprehensiveMessage = chat.getLastHistoryEntry();
+  if (!lastComprehensiveMessage) {
     return null;
   }
-
-  const comprehensiveHistory = chat.getHistory();
-  // If comprehensiveHistory is empty, there is no last message to check.
-  // This case should ideally be caught by the curatedHistory.length check earlier,
-  // but as a safeguard:
-  if (comprehensiveHistory.length === 0) {
-    return null;
-  }
-  const lastComprehensiveMessage =
-    comprehensiveHistory[comprehensiveHistory.length - 1];
 
   // If the last message is a user message containing only function_responses,
   // then the model should speak next.
-  if (
-    lastComprehensiveMessage &&
-    isFunctionResponse(lastComprehensiveMessage)
-  ) {
+  if (isFunctionResponse(lastComprehensiveMessage)) {
     return {
       reasoning:
         'The last message was a function response, so the model should speak next.',
@@ -84,7 +66,6 @@ export async function checkNextSpeaker(
   }
 
   if (
-    lastComprehensiveMessage &&
     lastComprehensiveMessage.role === 'model' &&
     lastComprehensiveMessage.parts &&
     lastComprehensiveMessage.parts.length === 0
@@ -99,7 +80,10 @@ export async function checkNextSpeaker(
 
   // Things checked out. Let's proceed to potentially making an LLM request.
 
-  const lastMessage = curatedHistory[curatedHistory.length - 1];
+  // The next-speaker prompt only analyzes the immediately preceding response.
+  // Keep the side query and its structuredClone cost bounded to that one
+  // curated message rather than cloning and sending the entire chat history.
+  const [lastMessage] = chat.getHistoryTail(1, /* curated */ true);
   if (!lastMessage || lastMessage.role !== 'model') {
     // Cannot determine next speaker if the last turn wasn't from the model
     // or if history is empty.
@@ -107,27 +91,19 @@ export async function checkNextSpeaker(
   }
 
   const contents: Content[] = [
-    ...curatedHistory,
+    lastMessage,
     { role: 'user', parts: [{ text: CHECK_PROMPT }] },
   ];
 
   try {
-    const parsedResponse = (await config.getBaseLlmClient().generateJson({
+    return await runSideQuery<NextSpeakerResponse>(config, {
       contents,
       schema: RESPONSE_SCHEMA,
-      model: config.getModel() || DEFAULT_QWEN_MODEL,
       abortSignal,
       promptId,
-    })) as unknown as NextSpeakerResponse;
-
-    if (
-      parsedResponse &&
-      parsedResponse.next_speaker &&
-      ['user', 'model'].includes(parsedResponse.next_speaker)
-    ) {
-      return parsedResponse;
-    }
-    return null;
+      purpose: 'next-speaker',
+      skipOutputLanguagePreference: true,
+    });
   } catch (error) {
     debugLogger.warn(
       'Failed to talk to Gemini endpoint when seeing if conversation should continue.',

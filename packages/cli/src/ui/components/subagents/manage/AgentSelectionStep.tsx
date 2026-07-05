@@ -8,6 +8,7 @@ import { useState, useEffect, useMemo } from 'react';
 import { Box, Text } from 'ink';
 import { theme } from '../../../semantic-colors.js';
 import { useKeypress } from '../../../hooks/useKeypress.js';
+import { keyMatchers, Command } from '../../../keyMatchers.js';
 import { type SubagentConfig } from '@qwen-code/qwen-code-core';
 import { t } from '../../../../i18n/index.js';
 
@@ -76,7 +77,7 @@ export const AgentSelectionStep = ({
     (key) => {
       const { name } = key;
 
-      if (name === 'up' || name === 'k') {
+      if (keyMatchers[Command.SELECTION_UP](key)) {
         setNavigation((prev) => {
           if (prev.currentBlock === 'project') {
             if (prev.projectIndex > 0) {
@@ -194,7 +195,7 @@ export const AgentSelectionStep = ({
             }
           }
         });
-      } else if (name === 'down' || name === 'j') {
+      } else if (keyMatchers[Command.SELECTION_DOWN](key)) {
         setNavigation((prev) => {
           if (prev.currentBlock === 'project') {
             if (prev.projectIndex < projectAgents.length - 1) {
