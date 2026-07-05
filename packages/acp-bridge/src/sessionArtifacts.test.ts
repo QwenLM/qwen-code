@@ -571,7 +571,7 @@ describe('SessionArtifactStore', () => {
     expect(events).toHaveLength(3);
   });
 
-  it('clears stale pin expiration when repinning without a ttl', async () => {
+  it('preserves pin expiration when refreshing content without a ttl', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's1-pin-clear-expiration',
       workspaceCwd: workspace,
@@ -607,8 +607,8 @@ describe('SessionArtifactStore', () => {
 
     expect(repinned.changes[0]?.artifact).toMatchObject({
       retention: 'pinned',
+      expiresAt: '2026-08-01T00:00:00.000Z',
     });
-    expect(repinned.changes[0]?.artifact).not.toHaveProperty('expiresAt');
   });
 
   it('rolls back pin mutations when persistence fails', async () => {
@@ -3076,6 +3076,54 @@ describe('SessionArtifactStore', () => {
       'skipped artifact with mismatched id bad-id',
       'artifact snapshot restore failed; kept existing live artifacts',
     ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: liveId,
+          title: 'Live',
+        },
+      ],
+    });
+  });
+
+  it('does not trust persisted published file urls during restore', async () => {
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-published-file',
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live' },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId: 's11-restore-published-file',
+      sequence: 8,
+      artifacts: [
+        {
+          id: 'tampered-published-file',
+          kind: 'link',
+          storage: 'published',
+          source: 'client',
+          status: 'available',
+          title: 'Tampered',
+          url: 'file:///tmp/secret.html',
+          retention: 'restorable',
+          clientRetained: false,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    expect(warnings[0]).toContain('url must use http or https');
+    expect(warnings).toContain(
+      'artifact snapshot restore failed; kept existing live artifacts',
+    );
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [
         {

@@ -216,6 +216,34 @@ describe('session artifact persistence records', () => {
     ]);
   });
 
+  it('warns when oversized metadata is stripped during restore', () => {
+    const restored = rebuildSessionArtifactSnapshot([
+      event({
+        v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+        sessionId: 's1',
+        sequence: 1,
+        recordedAt: '2026-07-04T00:00:00.000Z',
+        changes: [
+          {
+            action: 'created',
+            artifactId: 'oversized-metadata',
+            artifact: artifact('s1', 'https://example.com/metadata', {
+              metadata: { blob: 'x'.repeat(5000) },
+            }),
+          },
+        ],
+      }),
+    ]);
+
+    expect(restored?.warnings).toEqual([
+      `skipped oversized metadata for artifact ${stableSessionArtifactId(
+        's1',
+        'url:https://example.com/metadata',
+      )}`,
+    ]);
+    expect(restored?.artifacts[0]).not.toHaveProperty('metadata');
+  });
+
   it('drops malformed content refs during restore normalization', () => {
     const pinned = artifact('s1', 'https://example.com/pinned', {
       retention: 'pinned',
