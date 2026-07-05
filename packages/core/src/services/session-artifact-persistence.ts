@@ -440,7 +440,7 @@ function normalizePersistedArtifact(
     return undefined;
   }
 
-  const metadata = normalizeMetadata(value['metadata']);
+  const metadata = normalizeMetadata(value['metadata'], warnings, id);
   const description = getString(value, 'description');
   const workspacePath = getString(value, 'workspacePath');
   const managedId = getString(value, 'managedId');
@@ -503,6 +503,8 @@ function normalizeContentRef(
 
 function normalizeMetadata(
   value: unknown,
+  warnings: string[],
+  artifactId: string,
 ): Record<string, string | number | boolean | null> | undefined {
   if (!isRecord(value)) return undefined;
   const normalized: Record<string, string | number | boolean | null> = {};
@@ -518,6 +520,7 @@ function normalizeMetadata(
   }
   if (Object.keys(normalized).length === 0) return undefined;
   if (Buffer.byteLength(JSON.stringify(normalized), 'utf8') > 4096) {
+    warnings.push(`skipped oversized metadata for artifact ${artifactId}`);
     return undefined;
   }
   return normalized;

@@ -526,8 +526,6 @@ export class SessionArtifactStore {
           } else {
             delete updated.expiresAt;
           }
-        } else {
-          delete updated.expiresAt;
         }
       } else {
         updated.persistenceWarning = 'metadata_only_restore';
@@ -732,7 +730,8 @@ export class SessionArtifactStore {
           let normalized = await this.normalizeInput(
             input,
             ++this.receivedSeq,
-            artifact.storage === 'published',
+            artifact.storage === 'published' &&
+              !isFileArtifactUrl(artifact.url),
           );
           if (
             this.stickyEphemeralIds.has(normalized.id) &&
@@ -1900,6 +1899,15 @@ function toPersistedArtifact(
       ? { hookEventName: artifact.hookEventName }
       : {}),
   };
+}
+
+function isFileArtifactUrl(raw: unknown): boolean {
+  if (typeof raw !== 'string') return false;
+  try {
+    return new URL(raw).protocol === 'file:';
+  } catch {
+    return false;
+  }
 }
 
 function isDurablePersistenceChange(change: SessionArtifactChange): boolean {
