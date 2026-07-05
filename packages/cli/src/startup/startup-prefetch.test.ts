@@ -65,6 +65,7 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     getProxy: () => 'http://proxy.example',
     getProjectRoot: () => '/repo',
     getIdeMode: () => true,
+    isInteractive: () => true,
     ...overrides,
   } as unknown as Config;
 }
@@ -95,6 +96,17 @@ describe('startupPrefetch', () => {
       resolvedBaseUrl: 'https://api.openai.com/v1',
       proxy: 'http://proxy.example',
     });
+  });
+
+  it('does not record an unbalanced lifecycle event for API preconnect', () => {
+    const config = makeConfig();
+
+    startEarlyStartupPrefetches(config);
+
+    expect(mockRecordStartupEvent).not.toHaveBeenCalledWith(
+      'startup_prefetch_started',
+      { name: 'api_preconnect' },
+    );
   });
 
   it('starts early prefetch only once per config', () => {
@@ -192,8 +204,9 @@ describe('startupPrefetch', () => {
 
   it('swallows telemetry initialization failures', async () => {
     const config = makeConfig();
+    const error = new Error('otel unavailable');
     mockInitializeTelemetry.mockImplementation(() => {
-      throw new Error('otel unavailable');
+      throw error;
     });
 
     expect(() =>
@@ -204,14 +217,13 @@ describe('startupPrefetch', () => {
 
     await vi.dynamicImportSettled();
 
-    expect(mockWarn).toHaveBeenCalledWith(
-      'telemetry_init failed: otel unavailable',
-    );
+    expect(mockWarn).toHaveBeenCalledWith('telemetry_init failed:', error);
   });
 
   it('swallows deferred task failures', async () => {
     const config = makeConfig();
-    mockCheckForUpdates.mockRejectedValue(new Error('network down'));
+    const error = new Error('network down');
+    mockCheckForUpdates.mockRejectedValue(error);
 
     expect(() =>
       startPostRenderPrefetches(config, makeSettings()),
@@ -219,7 +231,19 @@ describe('startupPrefetch', () => {
 
     await vi.dynamicImportSettled();
 
-    expect(mockWarn).toHaveBeenCalledWith('update_check failed: network down');
+    expect(mockWarn).toHaveBeenCalledWith('update_check failed:', error);
+  });
+
+  it('does not start housekeeping for non-interactive configs', async () => {
+    const config = makeConfig({
+      isInteractive: () => false,
+    } as Partial<Config>);
+
+    startPostRenderPrefetches(config, makeSettings());
+
+    await vi.dynamicImportSettled();
+
+    expect(mockStartBackgroundHousekeeping).not.toHaveBeenCalled();
   });
 
   it('starts post-render prefetch only once per config', async () => {

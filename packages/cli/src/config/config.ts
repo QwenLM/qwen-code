@@ -2011,6 +2011,10 @@ export async function loadCliConfig(
     showResponseTokensPerSecond:
       settings.ui?.showResponseTokensPerSecond === true,
     telemetry: telemetrySettings,
+    // Prompt-interactive (`qwen -i "prompt"`) intentionally follows the
+    // interactive telemetry trade-off: telemetry may start after the
+    // auto-submitted first prompt, because it is observational and does not
+    // affect first-request correctness like IDE context does.
     deferTelemetryInitialization: interactive && !isAcpMode,
     outboundCorrelation: settings.outboundCorrelation,
     usageStatisticsEnabled: settings.privacy?.usageStatisticsEnabled ?? true,

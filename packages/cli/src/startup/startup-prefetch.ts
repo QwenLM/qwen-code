@@ -32,9 +32,7 @@ function runDeferredTask(name: string, task: () => Promise<void> | void): void {
     })
     .catch((err) => {
       recordStartupEvent('startup_prefetch_failed', { name });
-      debugLogger.warn(
-        `${name} failed: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      debugLogger.warn(`${name} failed:`, err);
     });
 }
 
@@ -55,7 +53,6 @@ export function startEarlyStartupPrefetches(config: Config): void {
     const resolvedBaseUrl = modelsConfig.getGenerationConfig().baseUrl;
     const proxy = config.getProxy();
     preconnectApi(authType, { resolvedBaseUrl, proxy });
-    recordStartupEvent('startup_prefetch_started', { name: 'api_preconnect' });
   } catch (error) {
     debugLogger.debug(
       `Preconnect skipped due to error getting authType: ${error}`,
@@ -103,10 +100,12 @@ export function startPostRenderPrefetches(
     });
   }
 
-  runDeferredTask('background_housekeeping', async () => {
-    const { startBackgroundHousekeeping } = await import(
-      '../utils/housekeeping/scheduler.js'
-    );
-    startBackgroundHousekeeping(config, settings);
-  });
+  if (config.isInteractive()) {
+    runDeferredTask('background_housekeeping', async () => {
+      const { startBackgroundHousekeeping } = await import(
+        '../utils/housekeeping/scheduler.js'
+      );
+      startBackgroundHousekeeping(config, settings);
+    });
+  }
 }

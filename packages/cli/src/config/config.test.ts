@@ -31,6 +31,7 @@ const mockSessionServiceInstance = vi.hoisted(() => ({
 const mockSessionServiceCtor = vi.hoisted(() =>
   vi.fn(() => mockSessionServiceInstance),
 );
+const mockConfigConstructorParams = vi.hoisted(() => vi.fn());
 
 vi.mock('../utils/stdioHelpers.js', () => ({
   writeStderrLine: mockWriteStderrLine,
@@ -160,8 +161,15 @@ vi.mock('@qwen-code/qwen-code-core', async (importOriginal) => {
   SkillManagerMock.prototype.listSkills = vi.fn().mockResolvedValue([]);
   SkillManagerMock.prototype.addChangeListener = vi.fn();
   SkillManagerMock.prototype.removeChangeListener = vi.fn();
+  class ConfigWithParamCapture extends actualServer.Config {
+    constructor(...args: ConstructorParameters<typeof actualServer.Config>) {
+      mockConfigConstructorParams(args[0]);
+      super(...args);
+    }
+  }
   return {
     ...actualServer,
+    Config: ConfigWithParamCapture,
     NativeLspService: vi
       .fn()
       .mockImplementation(() => createNativeLspServiceInstance()),
@@ -1475,6 +1483,26 @@ describe('loadCliConfig telemetry', () => {
     const settings: Settings = {};
     const config = await loadCliConfig(settings, argv);
     expect(config.getTelemetryEnabled()).toBe(true);
+  });
+
+  it('should defer telemetry for prompt-interactive startup', async () => {
+    process.argv = [
+      'node',
+      'script.js',
+      '-i',
+      'hello from prompt-interactive',
+      '--telemetry',
+    ];
+    const argv = await parseArguments();
+
+    await loadCliConfig({}, argv);
+
+    expect(mockConfigConstructorParams).toHaveBeenCalledWith(
+      expect.objectContaining({
+        question: 'hello from prompt-interactive',
+        deferTelemetryInitialization: true,
+      }),
+    );
   });
 
   it('should set telemetry to false when --no-telemetry flag is present', async () => {
