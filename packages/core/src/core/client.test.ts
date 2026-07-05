@@ -1001,13 +1001,51 @@ describe('Gemini Client (client.ts)', () => {
       ]);
     });
 
+    it('records non-zero snapshot and deferred reminder counts', async () => {
+      const toolRegistry = vi.mocked(
+        mockConfig.getToolRegistry,
+      )() as unknown as {
+        getDeferredToolSummary: ReturnType<typeof vi.fn>;
+        getTool: ReturnType<typeof vi.fn>;
+      };
+      toolRegistry.getDeferredToolSummary.mockReturnValue([
+        { name: 'cron_create', description: 'schedule' },
+      ]);
+      toolRegistry.getTool.mockImplementation((name: string) =>
+        name === ToolNames.TOOL_SEARCH ? ({} as never) : null,
+      );
+      vi.mocked(getInitialChatHistory).mockResolvedValueOnce([
+        [
+          {
+            role: 'user',
+            parts: [{ text: '<system-reminder>context</system-reminder>' }],
+          },
+        ],
+        [
+          { name: 'skill-one', description: 'first skill' },
+          { name: 'skill-two', description: 'second skill' },
+        ],
+      ]);
+
+      await client.startChat();
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.finish).toHaveBeenCalledWith(
+        expect.objectContaining({
+          ok: true,
+          snapshotEntryCount: 2,
+          deferredReminderCount: 1,
+        }),
+      );
+    });
+
     it('does not record context apply stage without SessionStart context', async () => {
       await client.startChat();
 
       const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
-      expect(profiler.timeSync.mock.calls.map(([stage]) => stage)).not.toContain(
-        'session_start_context_apply',
-      );
+      expect(
+        profiler.timeSync.mock.calls.map(([stage]) => stage),
+      ).not.toContain('session_start_context_apply');
     });
 
     it('finalizes failed startChat profiles without changing the thrown error', async () => {
