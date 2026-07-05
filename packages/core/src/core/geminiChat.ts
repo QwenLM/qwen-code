@@ -2698,6 +2698,7 @@ export class GeminiChat {
               let fallbackSucceeded = false;
               let fallbackIndex = 0;
               let currentModel = model;
+              let currentResolvedModel = cgConfig?.model ?? model;
               let fallbackStreamYieldedAnyChunk = false;
 
               for (const fallbackModelId of fallbackModels) {
@@ -2737,6 +2738,15 @@ export class GeminiChat {
                       `"${fallbackModelId}": ` +
                       `${resolveErrorMessage}. ` +
                       `Trying next fallback.`,
+                  );
+                  continue;
+                }
+
+                if (resolvedFallbackModel === currentResolvedModel) {
+                  debugLogger.warn(
+                    `[FALLBACK] Skipping fallback model "${fallbackModelId}": ` +
+                      `resolved model "${resolvedFallbackModel}" matches ` +
+                      `the current model.`,
                   );
                   continue;
                 }
@@ -2795,10 +2805,12 @@ export class GeminiChat {
                   lastError = fallbackError;
 
                   if (currentFallbackYieldedAnyChunk) {
+                    self.popPendingPartialAssistantTurn();
                     debugLogger.warn(
                       `[FALLBACK] Fallback model "${resolvedFallbackModel}" ` +
-                        `failed after emitting output. Stopping fallback ` +
-                        `chain to avoid duplicating user-visible output.`,
+                        `failed after emitting output. Popped the partial ` +
+                        `assistant turn and stopped the fallback chain to ` +
+                        `avoid duplicating user-visible output.`,
                     );
                     break;
                   }
@@ -2824,6 +2836,7 @@ export class GeminiChat {
                   );
 
                   currentModel = resolvedFallbackModel;
+                  currentResolvedModel = resolvedFallbackModel;
                   currentErrorClassification = fallbackClassification;
 
                   // Only continue to next fallback if this error is also
