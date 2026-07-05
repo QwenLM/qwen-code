@@ -268,6 +268,7 @@ const MAX_NAME_LENGTH = 256;
 const DEFAULT_FILE_GLOB_MAX_RESULTS = 5000;
 const MAX_FILE_GLOB_MAX_RESULTS = 50_000;
 const MAX_FILE_LINE_LIMIT = 2000;
+const SESSION_ARTIFACT_MAX_TTL_DAYS = 365;
 
 class AcpParamError extends Error {}
 
@@ -455,8 +456,20 @@ function pickSessionArtifactPinRequest(
   }
   if (params['ttlDays'] !== undefined) {
     const ttlDays = params['ttlDays'];
-    if (typeof ttlDays !== 'number' || !Number.isSafeInteger(ttlDays)) {
-      throw new AcpParamError('`ttlDays` must be a safe integer');
+    if (request.mode === 'metadata') {
+      throw new AcpParamError('`ttlDays` is only valid with content pinning');
+    }
+    if (
+      typeof ttlDays !== 'number' ||
+      !Number.isSafeInteger(ttlDays) ||
+      ttlDays <= 0
+    ) {
+      throw new AcpParamError('`ttlDays` must be a positive safe integer');
+    }
+    if (ttlDays > SESSION_ARTIFACT_MAX_TTL_DAYS) {
+      throw new AcpParamError(
+        `\`ttlDays\` must be at most ${SESSION_ARTIFACT_MAX_TTL_DAYS}`,
+      );
     }
     request.ttlDays = ttlDays;
   }

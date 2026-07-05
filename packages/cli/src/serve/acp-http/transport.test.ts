@@ -6338,6 +6338,56 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       expect(bridge.lastPinnedArtifact).toBeUndefined();
     });
 
+    it.each([
+      [
+        'metadata ttl',
+        { mode: 'metadata', ttlDays: 7 },
+        '`ttlDays` is only valid with content pinning',
+      ],
+      [
+        'zero ttl',
+        { mode: 'content', ttlDays: 0 },
+        '`ttlDays` must be a positive safe integer',
+      ],
+      [
+        'oversized ttl',
+        { mode: 'content', ttlDays: 366 },
+        '`ttlDays` must be at most 365',
+      ],
+    ])(
+      '_qwen/session/artifacts/pin rejects %s',
+      async (_label, options, message) => {
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 99,
+          method: 'session/new',
+          params: {},
+        });
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 61,
+          method: '_qwen/session/artifacts/pin',
+          params: {
+            sessionId: 'sess-1',
+            artifactId: 'artifact-1',
+            ...options,
+          },
+        });
+        const frames = await takeFrames(await streamRes, 2);
+        expect(frames[1]).toMatchObject({
+          error: {
+            code: -32602,
+            message,
+          },
+        });
+        expect(bridge.lastPinnedArtifact).toBeUndefined();
+      },
+    );
+
     it('_qwen/session/artifacts/unpin forwards artifact id', async () => {
       const connId = await initialize();
       const streamRes = openStream(connId);

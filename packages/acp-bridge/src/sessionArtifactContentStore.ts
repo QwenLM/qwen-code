@@ -91,6 +91,7 @@ export class SessionArtifactContentStore {
       );
       let sourceHandle: FileHandle | undefined;
       let addedSizeBytes = 0;
+      let contentDir: string | undefined;
       try {
         sourceHandle = await openRegularWorkspaceFile(source);
         const { sha256, sizeBytes } = await copyOpenFileToTemp(
@@ -102,7 +103,7 @@ export class SessionArtifactContentStore {
           sessionId,
           artifact.id,
         )}`;
-        const contentDir = path.join(this.rootDir, contentId);
+        contentDir = path.join(this.rootDir, contentId);
         const dataPath = path.join(contentDir, 'content');
         if (await exists(dataPath)) {
           if (!(await contentFileMatches(dataPath, sha256, sizeBytes))) {
@@ -152,6 +153,11 @@ export class SessionArtifactContentStore {
         };
       } catch (error) {
         if (addedSizeBytes > 0) {
+          if (contentDir) {
+            await fs
+              .rm(contentDir, { recursive: true, force: true })
+              .catch(() => {});
+          }
           this.cachedTotalBytes = undefined;
         }
         if (tmpPath) {
@@ -202,7 +208,11 @@ export class SessionArtifactContentStore {
         continue;
       }
     }
-    return { checked: contentRefs.length, missing, hashMismatches };
+    const result = { checked: contentRefs.length, missing, hashMismatches };
+    writeStderrLine(
+      `[artifacts] action=fsck checked=${result.checked} missing=${result.missing.length} hashMismatches=${result.hashMismatches.length}`,
+    );
+    return result;
   }
 
   async verifyContentRef(

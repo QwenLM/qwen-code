@@ -3264,6 +3264,9 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           )}`,
         );
       }
+      if (artifactRestoreWarnings.length > 0) {
+        await gcArtifactContent(entry).catch(() => undefined);
+      }
       if (replayUpdates.length > 0) {
         await ci.client.seedSessionUpdates(entry, replayUpdates);
         ci.client.drainEarlyEvents(entry.sessionId, entry);
@@ -4737,9 +4740,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         return { v: 1, sessionId, changes: [] };
       }
       const result = await entry.artifacts.remove(artifactId, { clientId });
+      publishArtifactChanges(entry, result.changes, clientId);
       const warnings = [...(result.warnings ?? [])];
       if (result.changes.length > 0 && removeOptions.deleteContent !== false) {
-        warnings.push(...(await pruneExpiredArtifactPins(entry, clientId)));
+        try {
+          warnings.push(...(await pruneExpiredArtifactPins(entry, clientId)));
+        } catch (error) {
+          warnings.push('expired_artifact_content_retained');
+          writeStderrLine(
+            `[artifacts] session=${entry.sessionId} action=remove_prune_failed reason=${JSON.stringify(
+              error instanceof Error ? error.message : String(error),
+            )}`,
+          );
+        }
         try {
           await gcArtifactContent(entry);
         } catch (error) {
@@ -4753,7 +4766,6 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           );
         }
       }
-      publishArtifactChanges(entry, result.changes, clientId);
       return warnings.length > 0 ? { ...result, warnings } : result;
     },
 
@@ -4768,13 +4780,13 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const mode = artifactPinMode(requestOptions);
       const clientRetained = artifactClientRetained(requestOptions);
       const expiresAt = artifactExpiresAt(requestOptions, mode);
-      const pruneWarnings = await pruneExpiredArtifactPins(entry, clientId);
       const currentArtifact = await entry.artifacts.getForPin(artifactId, {
         clientId,
       });
       if (!currentArtifact) {
         return { v: 1, sessionId, changes: [] };
       }
+      const pruneWarnings = await pruneExpiredArtifactPins(entry, clientId);
       const refreshPinnedContent =
         currentArtifact.retention === 'pinned' &&
         requestOptions?.mode === 'content';
@@ -4890,7 +4902,14 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const entry = byId.get(sessionId);
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
-      return artifactContentStore.fsck(await entry.artifacts.contentRefs());
+      return entry.artifacts.withContentRefsLocked(async (refs) => {
+        const releaseRefs = artifactContentStore.leaseContentRefs(refs);
+        try {
+          return await artifactContentStore.fsck(refs);
+        } finally {
+          releaseRefs();
+        }
+      });
     },
 
     async gcSessionArtifacts(sessionId, context) {
