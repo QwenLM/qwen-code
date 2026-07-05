@@ -28,7 +28,17 @@ class TestChannel extends ChannelBase {
   }> = [];
   promptEnds: Array<{ chatId: string; sessionId: string; messageId?: string }> =
     [];
-  promptBufferDrops: Array<{ sessionId: string; messageIds: string[] }> = [];
+  promptBuffers: Array<{
+    chatId: string;
+    sessionId: string;
+    messageId?: string;
+    bufferSize: number;
+  }> = [];
+  promptBufferDrops: Array<{
+    chatId: string;
+    sessionId: string;
+    messageIds: string[];
+  }> = [];
   responseChunks: Array<{ chatId: string; chunk: string; sessionId: string }> =
     [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
@@ -92,10 +102,29 @@ class TestChannel extends ChannelBase {
   }
 
   protected override onPromptBufferDropped(
+    chatId: string,
     sessionId: string,
     messageIds: string[],
   ): void {
-    this.promptBufferDrops.push({ sessionId, messageIds });
+    this.promptBufferDrops.push({ chatId, sessionId, messageIds });
+  }
+
+  protected override onPromptBuffered(
+    chatId: string,
+    sessionId: string,
+    messageId?: string,
+  ): void {
+    const buffers = (
+      this as unknown as {
+        collectBuffers: Map<string, unknown[]>;
+      }
+    ).collectBuffers;
+    this.promptBuffers.push({
+      chatId,
+      sessionId,
+      messageId,
+      bufferSize: buffers.get(sessionId)?.length ?? 0,
+    });
   }
 
   protected override onResponseChunk(
@@ -5291,13 +5320,18 @@ describe('ChannelBase', () => {
         collectBuffers: Map<string, unknown>;
       };
       maps.collectBuffers.set(sessionId, [
-        { text: 'buffered', envelope: envelope({ text: 'buffered' }) },
+        {
+          text: 'buffered',
+          envelope: envelope({ text: 'buffered', messageId: 'm-buffered' }),
+        },
       ]);
 
       await expect(ch.cancelPromptForTest(sessionId)).resolves.toBe(true);
 
       expect(maps.collectBuffers.has(sessionId)).toBe(false);
-      expect(ch.promptBufferDrops).toEqual([{ sessionId, messageIds: [] }]);
+      expect(ch.promptBufferDrops).toEqual([
+        { chatId: 'chat1', sessionId, messageIds: ['m-buffered'] },
+      ]);
       resolvePrompt('late');
       await prompt;
     });
@@ -5923,8 +5957,12 @@ describe('ChannelBase', () => {
       await new Promise((r) => setTimeout(r, 10));
 
       // Send two more messages while first is busy — these should buffer
-      const p2 = ch.handleInbound(envelope({ text: 'second' }));
-      const p3 = ch.handleInbound(envelope({ text: 'third' }));
+      const p2 = ch.handleInbound(
+        envelope({ text: 'second', messageId: 'msg-2' }),
+      );
+      const p3 = ch.handleInbound(
+        envelope({ text: 'third', messageId: 'msg-3' }),
+      );
 
       // p2 and p3 should resolve immediately (buffered, not queued)
       await p2;
@@ -5932,6 +5970,18 @@ describe('ChannelBase', () => {
 
       // First prompt is still running, bridge.prompt called only once
       expect(callCount).toBe(1);
+      expect(ch.promptBuffers).toEqual([
+        expect.objectContaining({
+          chatId: 'chat1',
+          messageId: 'msg-2',
+          bufferSize: 1,
+        }),
+        expect.objectContaining({
+          chatId: 'chat1',
+          messageId: 'msg-3',
+          bufferSize: 2,
+        }),
+      ]);
 
       // Resolve the first prompt
       resolveFirst('first response');
@@ -7556,7 +7606,7 @@ describe('ChannelBase', () => {
       expect(ch.promptEnds).toHaveLength(0);
     });
 
-    it('does not call hooks for buffered messages in collect mode', async () => {
+    it('does not call start or end hooks for buffered messages in collect mode', async () => {
       let resolveFirst!: (v: string) => void;
       const firstPrompt = new Promise<string>((r) => {
         resolveFirst = r;
@@ -7581,6 +7631,13 @@ describe('ChannelBase', () => {
       // Only one prompt start so far (for the first message)
       expect(ch.promptStarts).toHaveLength(1);
       expect(ch.promptStarts[0]!.messageId).toBe('msg-1');
+      expect(ch.promptBuffers).toEqual([
+        expect.objectContaining({
+          chatId: 'chat1',
+          messageId: 'msg-2',
+          bufferSize: 1,
+        }),
+      ]);
 
       resolveFirst('done');
       await p1;

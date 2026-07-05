@@ -505,6 +505,7 @@ export class WeComChannel extends ChannelBase {
   }
 
   protected override onPromptBufferDropped(
+    _chatId: string,
     sessionId: string,
     messageIds: string[],
   ): void {

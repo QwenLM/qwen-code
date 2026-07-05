@@ -170,6 +170,21 @@ describe('parseChannelConfig', () => {
     delete process.env['TEST_SEC'];
   });
 
+  it('resolves env vars in WeCom wsUrl', async () => {
+    process.env['TEST_WECOM_WS_URL'] = 'wss://example.invalid/ws';
+
+    const result = await parseChannelConfig('bot', {
+      type: 'wecom',
+      botId: 'bot-id',
+      secret: 'bot-secret',
+      wsUrl: '$TEST_WECOM_WS_URL',
+    });
+
+    expect(result['wsUrl']).toBe('wss://example.invalid/ws');
+
+    delete process.env['TEST_WECOM_WS_URL'];
+  });
+
   it('does not resolve known credential fields twice', async () => {
     process.env['TEST_TOKEN'] = '$TOKEN_LITERAL_VALUE';
 

@@ -877,9 +877,10 @@ export abstract class ChannelBase {
     const buffer = this.collectBuffers.get(sessionId);
     if (!buffer) return;
     this.collectBuffers.delete(sessionId);
+    const chatId = buffer[0]?.envelope.chatId ?? '';
     const messageIds = this.collectBufferMessageIds(buffer);
     try {
-      this.onPromptBufferDropped(sessionId, messageIds);
+      this.onPromptBufferDropped(chatId, sessionId, messageIds);
     } catch (err) {
       process.stderr.write(
         `[${this.name}] onPromptBufferDropped threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
@@ -977,6 +978,7 @@ export abstract class ChannelBase {
   ): void {}
 
   protected onPromptBufferDropped(
+    _chatId: string,
     _sessionId: string,
     _messageIds: string[],
   ): void {}
@@ -2435,6 +2437,7 @@ export abstract class ChannelBase {
             buffer = [];
             this.collectBuffers.set(sessionId, buffer);
           }
+          buffer.push({ text: promptText, envelope });
           try {
             this.onPromptBuffered(
               envelope.chatId,
@@ -2446,7 +2449,6 @@ export abstract class ChannelBase {
               `[${this.name}] onPromptBuffered threw for session ${sessionId}: ${err instanceof Error ? err.message : err}\n`,
             );
           }
-          buffer.push({ text: promptText, envelope });
           return;
         }
         case 'steer': {

@@ -149,6 +149,16 @@ export async function parseChannelConfig(
       resolvedRawConfig[field] = resolveConfigEnvVar(value, envResolution);
     }
   }
+  if (
+    channelType === 'wecom' &&
+    typeof rawConfig['wsUrl'] === 'string' &&
+    rawConfig['wsUrl'] !== ''
+  ) {
+    resolvedRawConfig['wsUrl'] = resolveConfigEnvVar(
+      rawConfig['wsUrl'],
+      envResolution,
+    );
+  }
 
   // Resolve env vars for known credential fields
   const token =
