@@ -130,6 +130,27 @@ function applyUtf8Prefix(command: string, shell: ShellType): string {
 }
 
 /**
+ * Strip OSC title-setting escape sequences (OSC 0/1/2) from PTY output.
+ * Windows ConPTY passes child shell title changes (e.g. "Windows PowerShell")
+ * through the data stream, which would clobber our custom console/terminal
+ * title during command execution.
+ *
+ * OSC 0 = set icon name + window title
+ * OSC 1 = set icon name
+ * OSC 2 = set window title
+ * Terminator: BEL (\x07) or ST (ESC \)
+ */
+export function stripOscTitleSequences(data: string): string {
+  // Non-string data (Buffer) can arrive from node-pty at runtime despite
+  // the TypeScript annotation. Return early to avoid TypeError on .replace().
+  if (typeof data !== 'string') return data;
+  // ConPTY title clobbering is Windows-only; skip regex on other platforms.
+  if (process.platform !== 'win32') return data;
+  // eslint-disable-next-line no-control-regex
+  return data.replace(/\x1b\][0-2];[^\x07\x1b]*(?:\x07|\x1b\\)/g, '');
+}
+
+/**
  * Discriminated reason attached to the AbortSignal that drives execute().
  * Default behavior (no reason set, or `{ kind: 'cancel' }`) is the historical
  * tree-kill on abort. `{ kind: 'background' }` is a takeover signal: the
@@ -1684,7 +1705,8 @@ export class ShellExecutionService {
         // child) and post-promote PTY errors would `throw err` → process
         // crash.
         const dataDisposable = ptyProcess.onData((data: string) => {
-          const bufferData = Buffer.from(data, 'utf-8');
+          const filteredData = stripOscTitleSequences(data);
+          const bufferData = Buffer.from(filteredData, 'utf-8');
           handleOutput(bufferData);
         });
 
@@ -2044,7 +2066,8 @@ export class ShellExecutionService {
             try {
               postPromoteDataDisposable = ptyProcess.onData((data: string) => {
                 try {
-                  onPostData({ type: 'data', chunk: data });
+                  const filteredData = stripOscTitleSequences(data);
+                  onPostData({ type: 'data', chunk: filteredData });
                 } catch (cbErr) {
                   // Caller's handler threw — don't let it crash the
                   // child's data loop. Log + drop.

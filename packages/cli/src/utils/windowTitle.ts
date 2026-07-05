@@ -74,8 +74,14 @@ export function writeTerminalTitle(
  * Formats the terminal window title based on session name and fallback.
  *
  * Priority:
- *  1. sessionName — from /rename, auto-title, or --resume
- *  2. computeWindowTitle(folderName) — CLI_TITLE, project folder, or default
+ *  1. CLI_TITLE environment variable (if set) — multi-role launcher identity
+ *  2. sessionName — from /rename, auto-title, or --resume
+ *  3. computeWindowTitle(folderName) — project folder, or default
+ *
+ * CLI_TITLE takes highest priority so that when multiple qwen-code sessions
+ * run in parallel terminal tabs (e.g. one per AI agent role sharing one
+ * workspace), the launcher-set role name (g-glm, ap-glm, dx-glm, invest-glm)
+ * always identifies the tab regardless of session auto-naming.
  *
  * @param sessionName - Current session name, or null if not set.
  * @param folderName - Optional workspace folder name for the fallback chain.
@@ -85,7 +91,33 @@ export function formatSessionWindowTitle(
   sessionName: string | null,
   folderName?: string,
 ): string {
+  if (process.env['CLI_TITLE']) {
+    return computeWindowTitle(folderName);
+  }
   return sessionName
     ? sanitizeWindowTitle(sessionName)
     : computeWindowTitle(folderName);
+}
+
+/**
+ * Re-applies the window title directly to process.stdout.
+ *
+ * After a child process (e.g. cmd.exe spawned by shell command execution)
+ * overwrites the console window title, the title-setting useEffect in
+ * AppContainer does NOT re-fire because its dependency array
+ * (sessionName, hideWindowTitle, showStatusInTitle, config) is unchanged.
+ * This helper bridges that gap by re-emitting the OSC escape sequences.
+ */
+export function restoreWindowTitle(
+  sessionName: string | null = null,
+  folderName?: string,
+): void {
+  const title = formatSessionWindowTitle(sessionName, folderName);
+  try {
+    writeTerminalTitle((value) => process.stdout.write(value), title);
+  } catch {
+    // EPIPE or broken stdout — best effort, don't crash callers.
+    // In particular, shellCommandProcessor calls this in a .finally()
+    // block where a throw would prevent resolve() from firing.
+  }
 }

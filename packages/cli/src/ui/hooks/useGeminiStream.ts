@@ -482,6 +482,8 @@ export const useGeminiStream = (
   // Live terminal width, paired with the height ref so the commit loop reads
   // both dimensions consistently across a mid-stream resize.
   terminalWidthRef?: React.RefObject<number>,
+  sessionName?: string | null,
+  hideWindowTitle?: boolean,
 ) => {
   const [initError, setInitError] = useState<string | null>(null);
   const abortControllerRef = useRef<AbortController | null>(null);
@@ -744,6 +746,8 @@ export const useGeminiStream = (
     setShellInputFocused,
     terminalWidth,
     terminalHeight,
+    sessionName,
+    hideWindowTitle,
   );
 
   const activePtyId = activeShellPtyId || activeToolPtyId;

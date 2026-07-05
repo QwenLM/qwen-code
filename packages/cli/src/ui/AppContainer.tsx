@@ -1846,6 +1846,8 @@ export const AppContainer = (props: AppContainerProps) => {
     logger,
     availableTerminalHeightRef,
     terminalWidthRef,
+    sessionName,
+    settings.merged.ui?.hideWindowTitle,
   );
 
   // Now that streamingState is available, keep isIdleRef in sync and

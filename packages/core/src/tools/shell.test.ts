@@ -35,7 +35,7 @@ import {
   type ShellToolInvocation,
   type ShellToolParams,
 } from './shell.js';
-import { detectBlockedSleepPattern } from './shell.js';
+import { detectBlockedSleepPattern, restoreConsoleTitle } from './shell.js';
 import { stripShellWrapper } from '../utils/shell-utils.js';
 import { ApprovalMode, type Config } from '../config/config.js';
 import {
@@ -6857,5 +6857,118 @@ describe('detectBlockedSleepPattern', () => {
     expect(
       detectBlockedSleepPattern(stripShellWrapper("bash -c 'sleep 1'")),
     ).toBeNull();
+  });
+});
+
+describe('restoreConsoleTitle', () => {
+  const originalPlatform = process.platform;
+  const originalTitle = process.title;
+  const ENV_KEYS = ['TMUX', 'STY', 'ZELLIJ', 'DVTM'] as const;
+  const savedEnv: Record<string, string | undefined> = {};
+  let writeSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    writeSpy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
+    for (const key of ENV_KEYS) {
+      savedEnv[key] = process.env[key];
+      delete process.env[key];
+    }
+  });
+
+  afterEach(() => {
+    writeSpy.mockRestore();
+    Object.defineProperty(process, 'platform', {
+      value: originalPlatform,
+      configurable: true,
+    });
+    process.title = originalTitle;
+    for (const key of ENV_KEYS) {
+      if (savedEnv[key] !== undefined) {
+        process.env[key] = savedEnv[key];
+      } else {
+        delete process.env[key];
+      }
+    }
+  });
+
+  it('does nothing on non-win32 platforms', () => {
+    Object.defineProperty(process, 'platform', {
+      value: 'linux',
+      configurable: true,
+    });
+    process.title = 'TestTitle';
+    restoreConsoleTitle();
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it('does nothing when process.title is empty', () => {
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    process.title = '';
+    restoreConsoleTitle();
+    expect(writeSpy).not.toHaveBeenCalled();
+  });
+
+  it('writes OSC 0 + OSC 2 when not inside a multiplexer', () => {
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    process.title = 'MyTitle';
+
+    restoreConsoleTitle();
+
+    const expected = 'MyTitle'.padEnd(80, ' ');
+    expect(writeSpy).toHaveBeenCalledTimes(1);
+    expect(writeSpy).toHaveBeenCalledWith(
+      `\x1b]0;${expected}\x07\x1b]2;${expected}\x07`,
+    );
+  });
+
+  it('writes only OSC 2 when inside tmux', () => {
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    process.title = 'MyTitle';
+    process.env.TMUX = '/tmp/tmux-1000/default,1234,0';
+
+    restoreConsoleTitle();
+
+    const expected = 'MyTitle'.padEnd(80, ' ');
+    expect(writeSpy).toHaveBeenCalledWith(`\x1b]2;${expected}\x07`);
+  });
+
+  it('writes only OSC 2 when inside screen (STY)', () => {
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    process.title = 'MyTitle';
+    process.env.STY = '12345.tty.host';
+
+    restoreConsoleTitle();
+
+    const expected = 'MyTitle'.padEnd(80, ' ');
+    expect(writeSpy).toHaveBeenCalledWith(`\x1b]2;${expected}\x07`);
+  });
+
+  it('truncates and pads title to exactly 80 characters', () => {
+    Object.defineProperty(process, 'platform', {
+      value: 'win32',
+      configurable: true,
+    });
+    process.title = 'A'.repeat(120);
+
+    restoreConsoleTitle();
+
+    const writtenArg = writeSpy.mock.calls[0][0] as string;
+    // eslint-disable-next-line no-control-regex
+    const match = writtenArg.match(/\x1b\]2;([\s\S]*?)\x07/);
+    expect(match).toBeTruthy();
+    expect(match![1]).toHaveLength(80);
+    expect(match![1]).toBe('A'.repeat(80));
   });
 });
