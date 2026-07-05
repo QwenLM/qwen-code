@@ -86,6 +86,7 @@ const mocks = vi.hoisted(() => {
             callback(response);
             queueMicrotask(() => {
               emit('data', httpResponse.body);
+              if (state.mediaResponseNeverEnds) return;
               emit('end');
             });
           });
@@ -102,6 +103,7 @@ const mocks = vi.hoisted(() => {
     autoAuthenticate: true,
     connectErrorsRemaining: 0,
     connectNeverSettles: false,
+    mediaResponseNeverEnds: false,
   };
 
   class MockWSClient {
@@ -330,6 +332,7 @@ describe('WeComChannel', () => {
     mocks.state.autoAuthenticate = true;
     mocks.state.connectErrorsRemaining = 0;
     mocks.state.connectNeverSettles = false;
+    mocks.state.mediaResponseNeverEnds = false;
     mocks.httpResponse.statusCode = 200;
     mocks.httpResponse.headers = {};
     mocks.httpResponse.body = Buffer.from('downloaded');
@@ -1347,7 +1350,7 @@ describe('WeComChannel', () => {
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
   });
 
-  it('keeps message dedup when processing fails after side effects start', async () => {
+  it('rolls back message dedup when processing fails', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -1376,10 +1379,7 @@ describe('WeComChannel', () => {
 
     client.emit('message.text', payload);
     await new Promise((resolve) => setTimeout(resolve, 0));
-    expect(channel.processes).toHaveBeenCalledTimes(1);
-    expect(stderr).toHaveBeenCalledWith(
-      '[WeCom:bot] dropping duplicate message msg-process-fails (already seen).\n',
-    );
+    await vi.waitFor(() => expect(channel.processes).toHaveBeenCalledTimes(2));
     stderr.mockRestore();
   });
 
@@ -1916,6 +1916,36 @@ describe('WeComChannel', () => {
     expect(mocks.httpCalls[0]?.request.destroy).toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('oversized attachment'),
+    );
+    stderr.mockRestore();
+  });
+
+  it('aborts inbound attachments on absolute download timeout', async () => {
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    vi.useFakeTimers();
+    const client = lastClient();
+    mocks.state.mediaResponseNeverEnds = true;
+
+    client.emit('message.image', {
+      msgid: 'msg-slow-image',
+      msgtype: 'image',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      image: { url: 'https://example.invalid/slow-image', aeskey: 'k1' },
+    });
+
+    await vi.waitFor(() => expect(mocks.httpCalls).toHaveLength(1));
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpCalls[0]?.request.destroy).toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('media download absolute timeout'),
     );
     stderr.mockRestore();
   });

@@ -368,7 +368,6 @@ export class WeComChannel extends ChannelBase {
       referencedText: extractQuoteText(body),
     };
     let attachments: Attachment[] = [];
-    let processingStarted = false;
     const attachmentRouteKey = this.attachmentRouteKey(
       senderId,
       chatId,
@@ -396,15 +395,9 @@ export class WeComChannel extends ChannelBase {
           ? '(image)'
           : `(file: ${attachments[0]?.fileName ?? 'file'})`;
       }
-      processingStarted = true;
       await this.processInbound(envelope);
     } catch (err) {
-      if (messageId && !processingStarted) this.seenMessages.delete(messageId);
-      else if (messageId) {
-        process.stderr.write(
-          `[WeCom:${this.name}] message ${logMessageId} failed after processing started; dedup entry retained.\n`,
-        );
-      }
+      if (messageId) this.seenMessages.delete(messageId);
       throw err;
     } finally {
       if (messageId) this.inFlightMessages.delete(messageId);
@@ -1337,12 +1330,14 @@ function guardedHttpsDownload(
 ): Promise<{ buffer: Buffer; filename?: string }> {
   return new Promise((resolvePromise, rejectPromise) => {
     let settled = false;
+    const cleanup: { absoluteTimeout?: ReturnType<typeof setTimeout> } = {};
     const finish = (
       err?: Error,
       value?: { buffer: Buffer; filename?: string },
     ): void => {
       if (settled) return;
       settled = true;
+      if (cleanup.absoluteTimeout) clearTimeout(cleanup.absoluteTimeout);
       if (err) {
         rejectPromise(err);
       } else {
@@ -1406,6 +1401,11 @@ function guardedHttpsDownload(
       req.destroy();
       finish(new Error('media download timed out'));
     });
+    cleanup.absoluteTimeout = setTimeout(() => {
+      req.destroy();
+      finish(new Error('media download absolute timeout'));
+    }, 60_000);
+    cleanup.absoluteTimeout.unref?.();
     req.on('error', (err: Error) => finish(err));
     req.end();
   });
