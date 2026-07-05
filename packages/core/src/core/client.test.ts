@@ -1001,6 +1001,15 @@ describe('Gemini Client (client.ts)', () => {
       ]);
     });
 
+    it('does not record context apply stage without SessionStart context', async () => {
+      await client.startChat();
+
+      const profiler = sessionStartProfilerMocks.profilers.at(-1)!;
+      expect(profiler.timeSync.mock.calls.map(([stage]) => stage)).not.toContain(
+        'session_start_context_apply',
+      );
+    });
+
     it('finalizes failed startChat profiles without changing the thrown error', async () => {
       vi.mocked(getInitialChatHistory).mockRejectedValueOnce(
         new Error('history failed'),

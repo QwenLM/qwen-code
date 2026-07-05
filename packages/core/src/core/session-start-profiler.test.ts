@@ -95,6 +95,29 @@ describe('session-start-profiler', () => {
     ]);
   });
 
+  it('rounds elapsed durations to two decimal places', async () => {
+    const records: SessionStartProfileRecord[] = [];
+    const profiler = createSessionStartProfiler(SessionStartSource.Resume, {
+      enabled: true,
+      now: clockFrom([100.111, 100.222, 100.678, 101.111, 102.345, 102.789]),
+      writeRecord: (record) => records.push(record),
+      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
+    });
+
+    await profiler.time('initial_chat_history', async () => undefined);
+    profiler.timeSync('system_instruction', () => undefined);
+    profiler.finish({ ok: true });
+
+    expect(records[0]).toMatchObject({
+      ok: true,
+      totalMs: 2.68,
+      stages: {
+        initial_chat_history: 0.46,
+        system_instruction: 1.23,
+      },
+    });
+  });
+
   it('accumulates repeated stage durations', () => {
     const records: SessionStartProfileRecord[] = [];
     const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
