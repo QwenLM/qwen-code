@@ -3111,7 +3111,7 @@ describe('WeComChannel', () => {
     );
   });
 
-  it('continues sending later media when one upload returns no media id', async () => {
+  it('throws after sending later media when one upload returns no media id', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -3138,10 +3138,9 @@ describe('WeComChannel', () => {
       .mockResolvedValueOnce({})
       .mockResolvedValueOnce({ media_id: 'media-2' });
 
-    await channel.sendMessage(
-      'chat-1',
-      '[IMAGE: first.png]\n[IMAGE: second.png]',
-    );
+    await expect(
+      channel.sendMessage('chat-1', '[IMAGE: first.png]\n[IMAGE: second.png]'),
+    ).rejects.toThrow('1 media send(s) failed');
 
     expect(client.uploadMedia).toHaveBeenCalledTimes(2);
     expect(client.sendMediaMessage).toHaveBeenCalledTimes(1);
@@ -3156,7 +3155,7 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('continues sending later media when one media send fails', async () => {
+  it('throws after sending later media when one media send fails', async () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
@@ -3190,9 +3189,10 @@ describe('WeComChannel', () => {
       })
       .mockResolvedValueOnce({ headers: { req_id: 'media-req-2' } });
 
-    await channel.sendMessage(
-      'chat-1',
-      '[IMAGE: first.png]\n[IMAGE: second.png]',
+    await expect(
+      channel.sendMessage('chat-1', '[IMAGE: first.png]\n[IMAGE: second.png]'),
+    ).rejects.toThrow(
+      '1 media send(s) failed: image: errcode=45009 errmsg=api freq out of limit',
     );
 
     expect(client.uploadMedia).toHaveBeenCalledTimes(2);
@@ -3250,7 +3250,9 @@ describe('WeComChannel', () => {
     await channel.connect();
     const client = lastClient();
 
-    await channel.sendMessage('chat-1', `[IMAGE: ${secretPath}]`);
+    await expect(
+      channel.sendMessage('chat-1', `[IMAGE: ${secretPath}]`),
+    ).rejects.toThrow('1 media send(s) failed');
 
     expect(client.uploadMedia).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
@@ -3278,7 +3280,9 @@ describe('WeComChannel', () => {
     const client = lastClient();
 
     try {
-      await channel.sendMessage('chat-1', `[IMAGE: ${imagePath}]`);
+      await expect(
+        channel.sendMessage('chat-1', `[IMAGE: ${imagePath}]`),
+      ).rejects.toThrow('1 media send(s) failed');
 
       expect(client.uploadMedia).not.toHaveBeenCalled();
       expect(stderr).toHaveBeenCalledWith(

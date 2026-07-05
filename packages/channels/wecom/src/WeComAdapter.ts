@@ -279,6 +279,7 @@ export class WeComChannel extends ChannelBase {
       });
     }
 
+    const mediaErrors: string[] = [];
     for (const item of media) {
       if (item.type !== 'image') {
         process.stderr.write(
@@ -294,6 +295,7 @@ export class WeComChannel extends ChannelBase {
         });
         const mediaId = extractMediaId(upload);
         if (!mediaId) {
+          mediaErrors.push(`upload returned no media_id for ${item.type}`);
           process.stderr.write(
             `[WeCom:${this.name}] upload returned no media_id, skipping.\n`,
           );
@@ -301,13 +303,19 @@ export class WeComChannel extends ChannelBase {
         }
         await client.sendMediaMessage(chatId, item.type, mediaId);
       } catch (err) {
+        const message = sanitizeLogText(formatSdkError(err), 200);
+        mediaErrors.push(`${item.type}: ${message}`);
         process.stderr.write(
-          `[WeCom:${this.name}] media send failed for ${item.type}: ${sanitizeLogText(
-            formatSdkError(err),
-            200,
-          )}\n`,
+          `[WeCom:${this.name}] media send failed for ${item.type}: ${message}\n`,
         );
       }
+    }
+    if (mediaErrors.length > 0) {
+      throw new Error(
+        `[WeCom:${this.name}] ${mediaErrors.length} media send(s) failed: ${mediaErrors.join(
+          '; ',
+        )}`,
+      );
     }
   }
 
