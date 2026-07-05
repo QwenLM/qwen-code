@@ -192,6 +192,24 @@ describe('history-store', () => {
       expect(entries.map((entry) => entry.ts)).toEqual([1, 2]);
     });
 
+    it('should rewrite glued records when recovered count matches physical line count', async () => {
+      const first = makeEntry('a1', 1);
+      const second = makeEntry('a1', 2);
+      writeFileSync(
+        join(tempDir, AUTOMATIONS_HISTORY_FILE),
+        JSON.stringify(first) + JSON.stringify(second) + '\nnot-json{{{\n',
+      );
+
+      await compactAutomationHistory(tempDir, 20, 1000);
+
+      const rewritten = readFileSync(join(tempDir, AUTOMATIONS_HISTORY_FILE), 'utf-8');
+      expect(rewritten).not.toContain('}{');
+      expect(rewritten.trim().split('\n')).toHaveLength(2);
+
+      const entries = readHistory(tempDir);
+      expect(entries.map((entry) => entry.ts)).toEqual([1, 2]);
+    });
+
     it('should skip invalid recovered object segments while preserving valid glued records', async () => {
       const first = makeEntry('a1', 1);
       const second = makeEntry('a1', 2);
