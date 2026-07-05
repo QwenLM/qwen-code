@@ -76,7 +76,12 @@ export interface SubscribeOptions {
   maxQueued?: number;
 }
 
+export interface EventBusOptions {
+  maxQueuedBytes?: number;
+}
+
 const DEFAULT_MAX_QUEUED = 256;
+export const DEFAULT_MAX_QUEUED_BYTES = 2 * 1024 * 1024;
 /**
  * Default replay-ring depth per session. Sized for a 5-second
  * reconnect window over a chatty turn — a single long-running prompt
@@ -91,12 +96,12 @@ const DEFAULT_MAX_QUEUED = 256;
  */
 export const DEFAULT_RING_SIZE = 8000;
 /**
- * Fraction of `maxQueued` at which a `slow_client_warning` synthetic
- * frame is force-pushed to the at-risk subscriber. The warning fires
- * ONCE per overflow episode (tracked via `sub.warned`); the queue
- * must drain below `WARN_RESET_RATIO * maxQueued` before another
- * warning can fire — small hysteresis prevents flap-near-threshold
- * spam when a subscriber oscillates around 75% full.
+ * Fraction of the frame and byte caps at which a `slow_client_warning`
+ * synthetic frame is force-pushed to the at-risk subscriber. The warning
+ * fires ONCE per overflow episode (tracked via `sub.warned`); the queue
+ * must drain below `WARN_RESET_RATIO` for both caps before another warning
+ * can fire — small hysteresis prevents flap-near-threshold spam when a
+ * subscriber oscillates around 75% full.
  */
 const WARN_THRESHOLD_RATIO = 0.75;
 /** See `WARN_THRESHOLD_RATIO` doc. */
@@ -119,6 +124,57 @@ function getServerTimestamp(meta: Record<string, unknown> | undefined): number {
     : Date.now();
 }
 
+function normalizeMaxQueuedBytes(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_MAX_QUEUED_BYTES;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new TypeError('maxQueuedBytes must be a positive safe integer');
+  }
+  return value;
+}
+
+function serializedByteLength(event: BridgeEvent): number {
+  try {
+    const serialized = JSON.stringify(event);
+    if (serialized === undefined) return 0;
+    return Buffer.byteLength(serialized, 'utf8');
+  } catch {
+    logEventSizingFailed(event.type);
+    return 0;
+  }
+}
+
+function logEventSizingFailed(type: string): void {
+  try {
+    process.stderr.write(
+      `qwen serve: EventBus event sizing failed ${JSON.stringify({ type })}\n`,
+    );
+  } catch {
+    // Best-effort diagnostic; logging must not break publish()'s never-throws contract.
+  }
+}
+
+function logSubscriberEvicted(data: Record<string, unknown>): void {
+  try {
+    process.stderr.write(
+      `qwen serve: EventBus subscriber evicted ${JSON.stringify(data)}\n`,
+    );
+  } catch {
+    // Best-effort diagnostic; logging must not break publish()'s never-throws contract.
+  }
+}
+
+type QueueWarningThreshold = 'frames' | 'bytes' | 'frames_and_bytes';
+
+function logSlowClientWarning(data: Record<string, unknown>): void {
+  try {
+    process.stderr.write(
+      `qwen serve: EventBus slow_client_warning ${JSON.stringify(data)}\n`,
+    );
+  } catch {
+    // Best-effort diagnostic; logging must not break publish()'s never-throws contract.
+  }
+}
+
 interface InternalSub {
   queue: BoundedAsyncQueue<BridgeEvent>;
   evicted: boolean;
@@ -135,6 +191,12 @@ interface InternalSub {
   warnThreshold: number;
   /** Pre-computed `WARN_RESET_RATIO * maxQueued` — see `warnThreshold`. */
   warnResetThreshold: number;
+  /** Serialized-byte backlog cap for live entries. */
+  maxQueuedBytes: number;
+  /** Pre-computed `WARN_THRESHOLD_RATIO * maxQueuedBytes`. */
+  warnBytesThreshold: number;
+  /** Pre-computed `WARN_RESET_RATIO * maxQueuedBytes`. */
+  warnBytesResetThreshold: number;
   /**
    * True once `slow_client_warning` has been force-pushed to this
    * subscriber in the current overflow episode. Cleared when the queue
@@ -184,13 +246,17 @@ export class EventBus {
   private nextId = 1;
   private readonly ring: BridgeEvent[] = [];
   private readonly subs = new Set<InternalSub>();
+  private readonly maxQueuedBytes: number;
   private closed = false;
 
   constructor(
     private readonly ringSize: number = DEFAULT_RING_SIZE,
     private readonly maxSubscribers: number = DEFAULT_MAX_SUBSCRIBERS,
     private readonly compactionEngine?: CompactionEngine,
-  ) {}
+    opts: EventBusOptions = {},
+  ) {
+    this.maxQueuedBytes = normalizeMaxQueuedBytes(opts.maxQueuedBytes);
+  }
 
   snapshotReplay(): SessionReplaySnapshot | undefined {
     return this.compactionEngine?.snapshot();
@@ -293,12 +359,18 @@ export class EventBus {
     // profiling actually flags it, or the operator bumps
     // `--event-ring-size` to an order of magnitude larger.
     if (this.ring.length > this.ringSize) this.ring.shift();
+    let eventBytes: number | undefined;
+    const getEventBytes = () => {
+      eventBytes ??= serializedByteLength(event);
+      return eventBytes;
+    };
     // Snapshot the subscribers so an in-loop `this.subs.delete(sub)`
     // (the new immediate-eviction cleanup below) doesn't mutate the
     // Set we're iterating.
     for (const sub of Array.from(this.subs)) {
       if (sub.evicted) continue;
-      if (!sub.queue.push(event)) {
+      const pushResult = sub.queue.push(event, getEventBytes);
+      if (!pushResult.ok) {
         sub.evicted = true;
         // Synthetic terminal frame: NO `id` field. Otherwise it would
         // burn a slot in the per-session monotonic sequence (`nextId++`)
@@ -309,10 +381,22 @@ export class EventBus {
         // `BridgeEvent.id` doc-comment. Same pattern as `stream_error`
         // in server.ts; `formatSseFrame` omits the `id:` line when
         // `id` is absent.
+        const evictionData = {
+          reason: pushResult.reason,
+          droppedAfter: event.id,
+          queueSize: pushResult.liveSize,
+          maxQueued: sub.maxQueued,
+          queuedBytes: pushResult.liveBytes,
+          maxQueuedBytes: sub.maxQueuedBytes,
+          ...(pushResult.reason === 'queue_bytes_overflow'
+            ? { eventBytes: pushResult.eventBytes }
+            : {}),
+        };
+        logSubscriberEvicted(evictionData);
         const evictionFrame: BridgeEvent = {
           v: EVENT_SCHEMA_VERSION,
           type: 'client_evicted',
-          data: { reason: 'queue_overflow', droppedAfter: event.id },
+          data: evictionData,
         };
         // Force-push the eviction frame; close immediately after so the
         // consumer iterator unwinds with a final synthetic event.
@@ -358,26 +442,43 @@ export class EventBus {
       // integer compare per subscriber (after the `!warned`
       // short-circuit collapses warm-state checks to a single
       // boolean read).
-      const liveSize = sub.queue.size;
-      if (!sub.warned && liveSize >= sub.warnThreshold) {
+      const liveSize = pushResult.liveSize;
+      const liveBytes = pushResult.liveBytes;
+      if (
+        sub.warned &&
+        liveSize <= sub.warnResetThreshold &&
+        liveBytes <= sub.warnBytesResetThreshold
+      ) {
+        sub.warned = false;
+      }
+      const frameThresholdReached = liveSize >= sub.warnThreshold;
+      const byteThresholdReached = liveBytes >= sub.warnBytesThreshold;
+      if (!sub.warned && (frameThresholdReached || byteThresholdReached)) {
         sub.warned = true;
+        const threshold: QueueWarningThreshold =
+          frameThresholdReached && byteThresholdReached
+            ? 'frames_and_bytes'
+            : byteThresholdReached
+              ? 'bytes'
+              : 'frames';
+        const warningData = {
+          queueSize: liveSize,
+          maxQueued: sub.maxQueued,
+          // `event.id` is always defined here — the just-published
+          // `event` is constructed at the top of `publish()` with
+          // `id: this.nextId++`. No `??` fallback needed.
+          lastEventId: event.id as number,
+          queuedBytes: liveBytes,
+          maxQueuedBytes: sub.maxQueuedBytes,
+          threshold,
+        };
+        logSlowClientWarning(warningData);
         const warningFrame: BridgeEvent = {
           v: EVENT_SCHEMA_VERSION,
           type: 'slow_client_warning',
-          data: {
-            queueSize: liveSize,
-            maxQueued: sub.maxQueued,
-            // `event.id` is always defined here — the just-published
-            // `event` is constructed at the top of `publish()` with
-            // `id: this.nextId++`. No `??` fallback needed.
-            lastEventId: event.id as number,
-          },
+          data: warningData,
         };
         sub.queue.forcePush(warningFrame);
-      } else if (sub.warned && liveSize <= sub.warnResetThreshold) {
-        // Hysteresis: subscriber recovered well below the warn line,
-        // re-arm so a future lag spike produces a fresh warning.
-        sub.warned = false;
       }
     }
     return event;
@@ -413,7 +514,10 @@ export class EventBus {
       throw new SubscriberLimitExceededError(this.maxSubscribers);
     }
     const maxQueued = opts.maxQueued ?? DEFAULT_MAX_QUEUED;
-    const queue = new BoundedAsyncQueue<BridgeEvent>(maxQueued);
+    const queue = new BoundedAsyncQueue<BridgeEvent>(
+      maxQueued,
+      this.maxQueuedBytes,
+    );
 
     // `dispose` is assigned below (mutable so the closure can reference
     // `sub.dispose`); placeholder no-op covers the brief window between
@@ -425,6 +529,9 @@ export class EventBus {
       maxQueued,
       warnThreshold: WARN_THRESHOLD_RATIO * maxQueued,
       warnResetThreshold: WARN_RESET_RATIO * maxQueued,
+      maxQueuedBytes: this.maxQueuedBytes,
+      warnBytesThreshold: WARN_THRESHOLD_RATIO * this.maxQueuedBytes,
+      warnBytesResetThreshold: WARN_RESET_RATIO * this.maxQueuedBytes,
       warned: false,
       dispose: () => {},
     };
@@ -652,15 +759,15 @@ function emptyAsyncIterable<T>(): AsyncIterable<T> {
 }
 
 /**
- * Promise-based bounded queue. `push` returns false (instead of blocking or
- * throwing) when full so callers can decide how to react — the EventBus uses
- * that signal to evict slow subscribers.
+ * Promise-based bounded queue. `push` returns a rejection result (instead of
+ * blocking or throwing) when full so callers can decide how to react — the
+ * EventBus uses that signal to evict slow subscribers.
  *
- * The cap (`maxSize`) applies only to LIVE items pushed via `push()`. Items
- * inserted via `forcePush()` (the `Last-Event-ID` replay path on subscribe,
- * the terminal `client_evicted` frame, and the mid-stream
+ * The caps (`maxSize` and `maxBytes`) apply only to LIVE items pushed via
+ * `push()`. Items inserted via `forcePush()` (the `Last-Event-ID` replay
+ * path on subscribe, the terminal `client_evicted` frame, and the mid-stream
  * `slow_client_warning` frame) carry a `forced` tag per entry and never
- * count toward the cap. Without this split, a reconnect with a large
+ * count toward either cap. Without this split, a reconnect with a large
  * backlog would force-push ~ringSize entries into `buf`, push `buf.length`
  * past `maxSize`, and the very next live publish would evict the
  * just-resumed subscriber — defeating the resume contract.
@@ -677,9 +784,30 @@ function emptyAsyncIterable<T>(): AsyncIterable<T> {
  */
 interface BoundedQueueEntry<T> {
   value: T;
-  /** True for replay / eviction / slow_client_warning frames (don't count toward cap). */
+  /** True for replay / eviction / slow_client_warning frames (don't count toward caps). */
   forced: boolean;
+  bytes: number;
 }
+
+type PushResult =
+  | {
+      ok: true;
+      liveSize: number;
+      liveBytes: number;
+    }
+  | {
+      ok: false;
+      reason: 'queue_overflow';
+      liveSize: number;
+      liveBytes: number;
+    }
+  | {
+      ok: false;
+      reason: 'queue_bytes_overflow';
+      liveSize: number;
+      liveBytes: number;
+      eventBytes: number;
+    };
 
 class BoundedAsyncQueue<T> {
   private readonly buf: Array<BoundedQueueEntry<T>> = [];
@@ -694,8 +822,12 @@ class BoundedAsyncQueue<T> {
    * no matter where in the queue the forced entries are.
    */
   private liveCount = 0;
+  private liveBytes = 0;
 
-  constructor(private readonly maxSize: number) {}
+  constructor(
+    private readonly maxSize: number,
+    private readonly maxBytes: number,
+  ) {}
 
   /**
    * Number of LIVE (non-force-pushed) items currently waiting in the
@@ -706,19 +838,55 @@ class BoundedAsyncQueue<T> {
     return this.liveCount;
   }
 
-  /** Returns true if accepted, false if dropped due to overflow. */
-  push(value: T): boolean {
-    if (this.closed) return false;
+  get bytes(): number {
+    return this.liveBytes;
+  }
+
+  push(value: T, getBytes: () => number): PushResult {
+    if (this.closed) {
+      return {
+        ok: false,
+        reason: 'queue_overflow',
+        liveSize: this.liveCount,
+        liveBytes: this.liveBytes,
+      };
+    }
     const r = this.resolvers.shift();
     if (r) {
       r({ value, done: false });
-      return true;
+      return {
+        ok: true,
+        liveSize: this.liveCount,
+        liveBytes: this.liveBytes,
+      };
     }
     // Cap is on the LIVE backlog only.
-    if (this.liveCount >= this.maxSize) return false;
-    this.buf.push({ value, forced: false });
+    if (this.liveCount >= this.maxSize) {
+      return {
+        ok: false,
+        reason: 'queue_overflow',
+        liveSize: this.liveCount,
+        liveBytes: this.liveBytes,
+      };
+    }
+    const bytes = getBytes();
+    if (this.liveCount > 0 && this.liveBytes + bytes > this.maxBytes) {
+      return {
+        ok: false,
+        reason: 'queue_bytes_overflow',
+        liveSize: this.liveCount,
+        liveBytes: this.liveBytes,
+        eventBytes: bytes,
+      };
+    }
+    this.buf.push({ value, forced: false, bytes });
     this.liveCount += 1;
-    return true;
+    this.liveBytes += bytes;
+    return {
+      ok: true,
+      liveSize: this.liveCount,
+      liveBytes: this.liveBytes,
+    };
   }
 
   /** Bypasses the size cap. Used for replay frames, eviction terminal,
@@ -730,7 +898,7 @@ class BoundedAsyncQueue<T> {
       r({ value, done: false });
       return;
     }
-    this.buf.push({ value, forced: true });
+    this.buf.push({ value, forced: true, bytes: 0 });
   }
 
   /**
@@ -755,6 +923,7 @@ class BoundedAsyncQueue<T> {
       // closed sentinel immediately.
       this.buf.length = 0;
       this.liveCount = 0;
+      this.liveBytes = 0;
     }
     while (this.resolvers.length > 0) {
       this.resolvers.shift()!({
@@ -770,7 +939,10 @@ class BoundedAsyncQueue<T> {
     // never pushes undefined today, but the queue is generic.
     if (this.buf.length > 0) {
       const entry = this.buf.shift() as BoundedQueueEntry<T>;
-      if (!entry.forced) this.liveCount -= 1;
+      if (!entry.forced) {
+        this.liveCount -= 1;
+        this.liveBytes -= entry.bytes;
+      }
       return Promise.resolve({ value: entry.value, done: false });
     }
     if (this.closed) {
