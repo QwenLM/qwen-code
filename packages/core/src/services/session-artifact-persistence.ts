@@ -315,7 +315,13 @@ function normalizeSnapshotPayload(
   value: unknown,
   warnings: string[],
 ): SessionArtifactSnapshotRecordPayload | undefined {
-  if (!isRecord(value) || value['v'] !== SESSION_ARTIFACT_PERSISTENCE_VERSION) {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  if (value['v'] !== SESSION_ARTIFACT_PERSISTENCE_VERSION) {
+    warnings.push(
+      `skipped v${String(value['v'])} snapshot record (expected v${SESSION_ARTIFACT_PERSISTENCE_VERSION})`,
+    );
     return undefined;
   }
   if (!Array.isArray(value['artifacts'])) return undefined;
@@ -339,7 +345,13 @@ function normalizeEventPayload(
   value: unknown,
   warnings: string[],
 ): SessionArtifactEventRecordPayload | undefined {
-  if (!isRecord(value) || value['v'] !== SESSION_ARTIFACT_PERSISTENCE_VERSION) {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+  if (value['v'] !== SESSION_ARTIFACT_PERSISTENCE_VERSION) {
+    warnings.push(
+      `skipped v${String(value['v'])} event record (expected v${SESSION_ARTIFACT_PERSISTENCE_VERSION})`,
+    );
     return undefined;
   }
   if (!Array.isArray(value['changes'])) return undefined;

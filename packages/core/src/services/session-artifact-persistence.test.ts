@@ -169,6 +169,53 @@ describe('session artifact persistence records', () => {
     expect(snapshot?.sequence).toBe(3);
   });
 
+  it('warns when artifact records use an unsupported version', () => {
+    const restored = rebuildSessionArtifactSnapshot([
+      {
+        type: 'system',
+        subtype: 'session_artifact_snapshot',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION + 1,
+          sessionId: 's1',
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          artifacts: [],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+        },
+      },
+      {
+        type: 'system',
+        subtype: 'session_artifact_event',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION + 1,
+          sessionId: 's1',
+          sequence: 2,
+          recordedAt: '2026-07-04T00:00:01.000Z',
+          changes: [],
+        },
+      },
+      {
+        type: 'system',
+        subtype: 'session_artifact_snapshot',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: 's1',
+          sequence: 3,
+          recordedAt: '2026-07-04T00:00:02.000Z',
+          artifacts: [],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+        },
+      },
+    ]);
+
+    expect(restored?.warnings).toEqual([
+      `skipped v${SESSION_ARTIFACT_PERSISTENCE_VERSION + 1} snapshot record (expected v${SESSION_ARTIFACT_PERSISTENCE_VERSION})`,
+      `skipped v${SESSION_ARTIFACT_PERSISTENCE_VERSION + 1} event record (expected v${SESSION_ARTIFACT_PERSISTENCE_VERSION})`,
+    ]);
+  });
+
   it('drops malformed content refs during restore normalization', () => {
     const pinned = artifact('s1', 'https://example.com/pinned', {
       retention: 'pinned',
