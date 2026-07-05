@@ -720,6 +720,26 @@ describe('WeComChannel', () => {
     expect(mocks.instances).toHaveLength(1);
   });
 
+  it('clears pending kick reconnect state on disconnect', async () => {
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    (
+      channel as unknown as {
+        pendingKickReconnect: boolean;
+      }
+    ).pendingKickReconnect = true;
+
+    channel.disconnect();
+
+    expect(
+      (
+        channel as unknown as {
+          pendingKickReconnect: boolean;
+        }
+      ).pendingKickReconnect,
+    ).toBe(false);
+  });
+
   it('does not schedule reconnect reset after disconnect races with connect success', async () => {
     vi.useFakeTimers();
     const channel = new WeComChannel('bot', makeConfig(), makeBridge());
@@ -3255,7 +3275,7 @@ describe('WeComChannel', () => {
     await expect(
       channel.sendMessage('chat-1', '[IMAGE: first.png]\n[IMAGE: second.png]'),
     ).rejects.toThrow(
-      '1 media send(s) failed: image: errcode=45009 errmsg=api freq out of limit',
+      '1 media send(s) failed (markdown text may already be delivered): image: errcode=45009 errmsg=api freq out of limit',
     );
 
     expect(client.uploadMedia).toHaveBeenCalledTimes(2);

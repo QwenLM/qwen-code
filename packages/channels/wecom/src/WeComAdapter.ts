@@ -230,6 +230,7 @@ export class WeComChannel extends ChannelBase {
     this.disconnectGeneration += 1;
     this.kickReconnectAttempts = 0;
     this.kickReconnectRetryCycles = 0;
+    this.pendingKickReconnect = false;
     if (this.kickReconnectReset) {
       clearTimeout(this.kickReconnectReset);
       this.kickReconnectReset = undefined;
@@ -313,9 +314,7 @@ export class WeComChannel extends ChannelBase {
     }
     if (mediaErrors.length > 0) {
       throw new Error(
-        `[WeCom:${this.name}] ${mediaErrors.length} media send(s) failed: ${mediaErrors.join(
-          '; ',
-        )}`,
+        `[WeCom:${this.name}] ${mediaErrors.length} media send(s) failed (markdown text may already be delivered): ${mediaErrors.join('; ')}`,
       );
     }
   }
