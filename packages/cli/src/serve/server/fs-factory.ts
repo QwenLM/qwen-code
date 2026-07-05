@@ -7,13 +7,13 @@
 import * as path from 'node:path';
 import { writeStderrLine } from '../../utils/stdioHelpers.js';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
-import { isWithinRoot } from '@qwen-code/qwen-code-core';
 import {
-  canonicalizeWorkspaces,
+  canonicalizeWorkspace,
   createWorkspaceFileSystemFactory,
   type WorkspaceFileSystemFactory,
 } from '../fs/index.js';
-import type { PathMutexRegistry } from '../fs/workspace-file-system.js';
+import type { PathMutexRegistry } from '../fs/path-mutex-registry.js';
+import { isWithinRoot } from '../../config/path-comparison.js';
 
 const IDE_WORKSPACE_PATH_ENV_VAR = 'QWEN_CODE_IDE_WORKSPACE_PATH';
 
@@ -85,18 +85,25 @@ export function resolveBoundWorkspacesFromIdeEnv(
   includeWorkspace?: (workspace: string, index: number) => boolean,
 ): string[] {
   let primary = primaryWorkspace;
-  let envCanonicals: string[];
+  const envCanonicals: string[] = [];
   try {
-    const primaryCanonical = canonicalizeWorkspaces([primaryWorkspace])[0];
-    if (primaryCanonical === undefined) return [];
-    primary = primaryCanonical;
-    const envWorkspaces = parseIdeWorkspacePathEnv(ideWorkspacePath);
-    envCanonicals = canonicalizeWorkspaces(envWorkspaces);
+    primary = canonicalizeWorkspace(primaryWorkspace);
   } catch (err) {
     writeStderrLine(
       `qwen serve: failed to canonicalize IDE workspace paths, using primary only: ${err}`,
     );
     return [primary];
+  }
+  for (const workspace of parseIdeWorkspacePathEnv(ideWorkspacePath)) {
+    try {
+      const canonical = canonicalizeWorkspace(workspace);
+      if (envCanonicals.includes(canonical)) continue;
+      envCanonicals.push(canonical);
+    } catch (err) {
+      writeStderrLine(
+        `qwen serve: skipping IDE workspace root that failed to canonicalize: ${workspace} (${err})`,
+      );
+    }
   }
   if (
     envCanonicals.length > 0 &&
@@ -139,7 +146,7 @@ function parseIdeWorkspacePathEnv(value: string | undefined): string[] {
   }
   return value
     .split(path.delimiter)
-    .filter((workspace) => workspace.length > 0);
+    .filter((workspace) => workspace.length > 0 && path.isAbsolute(workspace));
 }
 
 function dropNestedWorkspacesPreservingPrimary(

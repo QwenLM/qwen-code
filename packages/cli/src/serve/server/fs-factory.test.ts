@@ -89,10 +89,9 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
     ).toEqual([primary]);
   });
 
-  it('does not re-canonicalize primary when env canonicalization fails', async () => {
+  it('keeps valid sibling roots when one env workspace fails canonicalization', async () => {
     const scratch = await mkScratch();
-    const dirs = await mkdirs(scratch, 'primary', 'blocked');
-    const primary = realpathSync.native(dirs.primary);
+    const dirs = await mkdirs(scratch, 'primary', 'blocked', 'sibling');
     const realpathSpy = vi
       .spyOn(realpathSync, 'native')
       .mockImplementation((p: Parameters<typeof realpathSync.native>[0]) => {
@@ -101,19 +100,34 @@ describe('resolveBoundWorkspacesFromIdeEnv', () => {
           err.code = 'EACCES';
           throw err;
         }
-        return primary;
+        return String(p);
       });
     try {
       expect(
         resolveBoundWorkspacesFromIdeEnv(
           dirs.primary,
-          JSON.stringify([dirs.blocked]),
+          JSON.stringify([dirs.primary, dirs.blocked, dirs.sibling]),
         ),
-      ).toEqual([primary]);
-      expect(realpathSpy).toHaveBeenCalledTimes(2);
+      ).toEqual([dirs.primary, dirs.sibling]);
+      expect(realpathSpy).toHaveBeenCalledTimes(4);
     } finally {
       realpathSpy.mockRestore();
     }
+  });
+
+  it('drops relative delimiter entries before canonicalization', async () => {
+    const scratch = await mkScratch();
+    const dirs = await mkdirs(scratch, 'primary', 'secondary');
+
+    expect(
+      resolveBoundWorkspacesFromIdeEnv(
+        dirs.primary,
+        [dirs.primary, 'relative', dirs.secondary].join(path.delimiter),
+      ),
+    ).toEqual([
+      realpathSync.native(dirs.primary),
+      realpathSync.native(dirs.secondary),
+    ]);
   });
 
   it('falls back to the primary string when primary canonicalization fails', async () => {

@@ -49,6 +49,7 @@ import {
   shouldIgnore,
   type IgnoreVerdict,
 } from './policy.js';
+import { PathMutexRegistry } from './path-mutex-registry.js';
 
 /**
  * Stat snapshot returned by `WorkspaceFileSystem.stat`. We
@@ -1305,27 +1306,6 @@ const CONTENT_HASH_RE = /^sha256:[0-9a-f]{64}$/;
 
 export function isContentHash(value: unknown): value is ContentHash {
   return typeof value === 'string' && CONTENT_HASH_RE.test(value);
-}
-
-export class PathMutexRegistry {
-  private readonly tails = new Map<string, Promise<void>>();
-
-  async runExclusive<T>(key: string, fn: () => Promise<T>): Promise<T> {
-    const previous = this.tails.get(key) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const tail = previous.catch(() => undefined).then(() => current);
-    this.tails.set(key, tail);
-    await previous.catch(() => undefined);
-    try {
-      return await fn();
-    } finally {
-      release();
-      if (this.tails.get(key) === tail) this.tails.delete(key);
-    }
-  }
 }
 
 interface AtomicWriteTextInput {

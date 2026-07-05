@@ -566,13 +566,17 @@ export class IdeClient {
           Array.isArray(parsed) &&
           parsed.every((item) => typeof item === 'string')
         ) {
-          return parsed.filter((item) => item.length > 0);
+          return parsed.filter(
+            (item) => item.length > 0 && path.isAbsolute(item),
+          );
         }
       } catch {
         // Fall through to the legacy delimiter parser below.
       }
     }
-    return value.split(path.delimiter).filter((item) => item.length > 0);
+    return value
+      .split(path.delimiter)
+      .filter((item) => item.length > 0 && path.isAbsolute(item));
   }
 
   private static matchesCurrentWorkspace(
