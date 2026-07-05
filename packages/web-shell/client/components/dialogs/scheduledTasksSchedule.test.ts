@@ -102,6 +102,10 @@ describe('describeCron', () => {
     expect(describeCron('0 9 * * 0', t)).toBe(
       'scheduledTasks.human.weekly(day=Sun,time=09:00)',
     );
+    // Cron allows 7 as an alternate notation for Sunday.
+    expect(describeCron('0 9 * * 7', t)).toBe(
+      'scheduledTasks.human.weekly(day=Sun,time=09:00)',
+    );
     expect(describeCron('15 * * * *', t)).toBe(
       'scheduledTasks.human.hourly(min=15)',
     );

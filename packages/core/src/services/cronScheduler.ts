@@ -16,6 +16,7 @@ import type { DurableCronTask } from './cronTasksFile.js';
 import {
   addCronTask,
   CRON_TASKS_DISPLAY_PATH,
+  generateCronTaskId,
   getCronFilePath,
   readCronTasks,
   removeCronTasks,
@@ -160,14 +161,10 @@ function computeJitter(
   return 0;
 }
 
-function generateId(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let id = '';
-  for (let i = 0; i < 8; i++) {
-    id += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return id;
-}
+// Single id scheme, shared with the daemon's scheduled-tasks route via
+// cronTasksFile so route-created and tool-created durable tasks are
+// indistinguishable on disk.
+const generateId = generateCronTaskId;
 
 export function clampWakeupSeconds(delaySeconds: number): number {
   if (!Number.isFinite(delaySeconds)) return WAKEUP_DEFAULT_SECONDS;

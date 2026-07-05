@@ -125,7 +125,7 @@ export function describeCron(cron: string, t: TranslateFn): string {
       time: `${pad(hour!)}:${pad(min!)}`,
     });
   }
-  // M H * * D → weekly on a single weekday
+  // M H * * D → weekly on a single weekday. Cron allows 0 and 7 for Sunday.
   if (
     isNum(min!) &&
     isNum(hour!) &&
@@ -133,10 +133,11 @@ export function describeCron(cron: string, t: TranslateFn): string {
     mon === '*' &&
     isNum(dow!) &&
     Number(dow) >= 0 &&
-    Number(dow) <= 6
+    Number(dow) <= 7
   ) {
     const names = t('scheduledTasks.weekdayNames').split(',');
-    const name = names[Number(dow)] ?? dow!;
+    const dayIndex = Number(dow) === 7 ? 0 : Number(dow);
+    const name = names[dayIndex] ?? dow!;
     return t('scheduledTasks.human.weekly', {
       day: name,
       time: `${pad(hour!)}:${pad(min!)}`,

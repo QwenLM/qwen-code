@@ -252,12 +252,17 @@ export function ScheduledTasksDialog({
                 <select
                   className={styles.select}
                   value={builder.frequency}
-                  onChange={(e) =>
+                  onChange={(e) => {
+                    const frequency = e.target.value as Frequency;
                     setBuilder((b) => ({
                       ...b,
-                      frequency: e.target.value as Frequency,
-                    }))
-                  }
+                      frequency,
+                      // The time picker is hidden for hourly, so reset the
+                      // minute to :00 instead of silently carrying over the
+                      // minute picked for a daily/weekly schedule.
+                      ...(frequency === 'hourly' ? { time: '00:00' } : {}),
+                    }));
+                  }}
                 >
                   {FREQUENCIES.map((f) => (
                     <option key={f} value={f}>

@@ -11,7 +11,7 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import request from 'supertest';
-import { Storage } from '@qwen-code/qwen-code-core';
+import { Storage, getCronFilePath } from '@qwen-code/qwen-code-core';
 import { registerScheduledTasksRoutes } from './scheduled-tasks.js';
 
 function safeBody(req: Request): Record<string, unknown> {
@@ -95,6 +95,25 @@ describe('scheduled-tasks routes', () => {
     const res = await create({ cron: 'not a cron', prompt: 'x' });
     expect(res.status).toBe(400);
     expect(res.body.code).toBe('invalid_cron');
+  });
+
+  it('rejects a syntactically-valid but impossible cron (Feb 30)', async () => {
+    // parseCron accepts "0 0 30 2 *" but nextFireTime rejects it — the route
+    // runs both, so a task that could never fire is refused.
+    const res = await create({ cron: '0 0 30 2 *', prompt: 'x' });
+    expect(res.status).toBe(400);
+    expect(res.body.code).toBe('invalid_cron');
+  });
+
+  it('returns 500 when the tasks file is corrupt', async () => {
+    // A file that exists but does not parse is corruption, not an empty
+    // schedule; the route surfaces it rather than hiding the user's tasks.
+    const file = getCronFilePath(h.workspace);
+    await fsp.mkdir(path.dirname(file), { recursive: true });
+    await fsp.writeFile(file, 'NOT JSON {{{', 'utf8');
+    const res = await request(h.app).get('/scheduled-tasks');
+    expect(res.status).toBe(500);
+    expect(res.body.code).toBe('scheduled_tasks_read_failed');
   });
 
   it('rejects a whitespace-only prompt', async () => {

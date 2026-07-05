@@ -27,10 +27,12 @@ import {
   readCronTasks,
   updateCronTasks,
   removeCronTasks,
+  generateCronTaskId,
   parseCron,
   nextFireTime,
   type DurableCronTask,
 } from '@qwen-code/qwen-code-core';
+import { writeStderrLine } from '../../utils/stdioHelpers.js';
 
 // Mirrors the scheduler's own MAX_JOBS (cronScheduler.ts): durable tasks share
 // that in-memory job map and loadFileTasks silently caps installs at this
@@ -75,19 +77,6 @@ function toView(task: DurableCronTask): ScheduledTaskView {
   };
 }
 
-// 8-char base36, matching cronScheduler's generateId scheme so route-created
-// and tool-created durable tasks are indistinguishable on disk (and share the
-// short-id space CronDelete accepts). Math.random is fine here — ids only need
-// to be unique within a <50-entry file, not unpredictable.
-function generateTaskId(): string {
-  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
-  let id = '';
-  for (let i = 0; i < 8; i++) {
-    id += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return id;
-}
-
 // Same validation cron_create runs: parseCron rejects malformed syntax,
 // nextFireTime rejects expressions that parse but never match a real date
 // (e.g. "0 0 30 2 *") — which would otherwise persist a task that silently
@@ -117,6 +106,9 @@ export function registerScheduledTasksRoutes(
       // A malformed/corrupt file throws (fix-or-delete contract) rather than
       // reading as empty — surface it instead of hiding the user's tasks
       // behind a silent [].
+      writeStderrLine(
+        `qwen serve: GET /scheduled-tasks failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Failed to read tasks',
         code: 'scheduled_tasks_read_failed',
@@ -194,7 +186,7 @@ export function registerScheduledTasksRoutes(
 
     const now = Date.now();
     const task: DurableCronTask = {
-      id: generateTaskId(),
+      id: generateCronTaskId(),
       cron,
       prompt,
       recurring,
@@ -219,6 +211,9 @@ export function registerScheduledTasksRoutes(
         return [...tasks, task];
       });
     } catch (err) {
+      writeStderrLine(
+        `qwen serve: POST /scheduled-tasks failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Failed to create task',
         code: 'scheduled_tasks_write_failed',
@@ -337,6 +332,9 @@ export function registerScheduledTasksRoutes(
         return tasks.map((t, i) => (i === idx ? next : t));
       });
     } catch (err) {
+      writeStderrLine(
+        `qwen serve: PATCH /scheduled-tasks/:id failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Failed to update task',
         code: 'scheduled_tasks_write_failed',
@@ -363,6 +361,9 @@ export function registerScheduledTasksRoutes(
     try {
       removed = await removeCronTasks(boundWorkspace, [id]);
     } catch (err) {
+      writeStderrLine(
+        `qwen serve: DELETE /scheduled-tasks/:id failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
       res.status(500).json({
         error: err instanceof Error ? err.message : 'Failed to delete task',
         code: 'scheduled_tasks_write_failed',

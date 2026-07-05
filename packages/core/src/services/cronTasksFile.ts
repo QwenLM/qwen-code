@@ -38,6 +38,22 @@ export interface DurableCronTask {
   enabled?: boolean;
 }
 
+/**
+ * Generates an 8-character base36 id for a durable task. Shared by the
+ * scheduler (`CronScheduler`) and the daemon's scheduled-tasks route so
+ * route-created and tool-created tasks use one id scheme — changing it here
+ * changes it everywhere. Math.random is fine: ids only need to be unique
+ * within a <50-entry file, not unpredictable.
+ */
+export function generateCronTaskId(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let id = '';
+  for (let i = 0; i < 8; i++) {
+    id += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return id;
+}
+
 const TASKS_FILENAME = 'scheduled_tasks.json';
 
 /** Generic label for the tasks file, for user-facing messages and tool
