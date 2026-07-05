@@ -9272,5 +9272,67 @@ describe('ChannelBase', () => {
         expect.any(Object),
       );
     });
+
+    it('does not preflight collected messages again after a loop prompt completes', async () => {
+      class CountingPreflightChannel extends TestChannel {
+        preflightTexts: string[] = [];
+
+        protected override preflightInbound(
+          message: Envelope,
+        ): boolean | Promise<boolean> {
+          this.preflightTexts.push(message.text);
+          return super.preflightInbound(message);
+        }
+      }
+
+      let resolveLoop: (value: string) => void = () => {};
+      (bridge.prompt as ReturnType<typeof vi.fn>)
+        .mockImplementationOnce(
+          () =>
+            new Promise<string>((resolve) => {
+              resolveLoop = resolve;
+            }),
+        )
+        .mockResolvedValueOnce('follow-up response');
+      const ch = new CountingPreflightChannel(
+        'test-chan',
+        defaultConfig({ dispatchMode: 'collect' }),
+        bridge,
+      );
+      ch.proactiveSupported = true;
+
+      const loopRun = ch.runLoopPrompt({
+        id: 'job-1',
+        channelName: 'test-chan',
+        target: {
+          channelName: 'test-chan',
+          senderId: 'user1',
+          chatId: 'chat1',
+          isGroup: false,
+        },
+        cwd: '/tmp',
+        cron: '0 9 * * *',
+        prompt: 'post summary',
+        label: 'daily summary',
+        recurring: true,
+        enabled: true,
+        createdBy: 'User 1',
+        createdAt: '2026-06-30T01:00:00.000Z',
+        consecutiveFailures: 0,
+        runCount: 0,
+      });
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledTimes(1);
+      });
+
+      await ch.handleInbound(envelope({ text: 'while loop runs' }));
+      resolveLoop('loop response');
+      await loopRun;
+
+      await vi.waitFor(() => {
+        expect(bridge.prompt).toHaveBeenCalledTimes(2);
+      });
+      expect(ch.preflightTexts).toEqual(['while loop runs']);
+    });
   });
 });

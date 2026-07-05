@@ -732,7 +732,7 @@ export abstract class ChannelBase {
             imageBase64: undefined,
             imageMimeType: undefined,
           };
-          this.handleInbound(syntheticEnvelope).catch((err) => {
+          this.processInbound(syntheticEnvelope).catch((err) => {
             process.stderr.write(
               `[${this.name}] dropped ${lost} buffered message(s) after loop ${job.id} for session ${sessionId} (last sender ${lastEnvelope.senderId}): ${
                 err instanceof Error ? err.message : String(err)
