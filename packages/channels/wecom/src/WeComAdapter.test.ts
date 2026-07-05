@@ -1937,6 +1937,7 @@ describe('WeComChannel', () => {
       10_000,
       expect.any(Function),
     );
+    expect(mocks.httpCalls[0]?.request.destroy).toHaveBeenCalled();
     expect(client.downloadFile).not.toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('redirected media URL'),
@@ -2052,6 +2053,7 @@ describe('WeComChannel', () => {
 
     await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
     expect(channel.envelopes[0]?.attachments).toBeUndefined();
+    expect(mocks.httpCalls[0]?.request.destroy).toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('media download failed: HTTP 500'),
     );

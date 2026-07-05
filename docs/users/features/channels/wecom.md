@@ -78,7 +78,7 @@ Open WeCom and send a message to the intelligent robot.
 
 For groups, set `groupPolicy` to `"allowlist"` or `"open"`. By default, group messages require a mention through `"requireMention": true`.
 
-When the WeCom SDK includes explicit mention metadata, Qwen Code uses it for this gate. If no mention metadata is present, the channel treats delivered group messages as mentioned, matching WeCom intelligent robot API mode where group delivery is expected to be scoped by WeCom.
+When the WeCom SDK includes explicit mention metadata, Qwen Code uses it for this gate. If no mention metadata is present, the channel treats delivered group messages as unmentioned. Set `"requireMention": false` only if you want to rely on WeCom-side delivery scoping instead.
 
 ## Images and Files
 

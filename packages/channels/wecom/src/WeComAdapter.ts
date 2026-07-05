@@ -1388,12 +1388,12 @@ function guardedHttpsDownload(
       (res) => {
         const statusCode = res.statusCode ?? 0;
         if (statusCode >= 300 && statusCode < 400) {
-          res.resume();
+          req.destroy();
           finish(new Error('redirected media URL'));
           return;
         }
         if (statusCode < 200 || statusCode >= 300) {
-          res.resume();
+          req.destroy();
           finish(new Error(`media download failed: HTTP ${statusCode}`));
           return;
         }
