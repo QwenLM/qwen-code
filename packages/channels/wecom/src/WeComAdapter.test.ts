@@ -1969,6 +1969,9 @@ describe('WeComChannel', () => {
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('redirected media URL'),
     );
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('https://example.invalid/redirect'),
+    );
     stderr.mockRestore();
   });
 
@@ -2083,6 +2086,9 @@ describe('WeComChannel', () => {
     expect(mocks.httpCalls[0]?.request.destroy).toHaveBeenCalled();
     expect(stderr).toHaveBeenCalledWith(
       expect.stringContaining('media download failed: HTTP 500'),
+    );
+    expect(stderr).toHaveBeenCalledWith(
+      expect.stringContaining('https://example.invalid/fails'),
     );
     stderr.mockRestore();
   });
