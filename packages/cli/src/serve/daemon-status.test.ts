@@ -15,6 +15,7 @@ import { DeviceFlowRegistry } from './auth/device-flow.js';
 import {
   buildDaemonStatusResponse,
   type BuildDaemonStatusOptions,
+  type DaemonMetricsBucket,
 } from './daemon-status.js';
 import type { ChannelWorkerSnapshot } from './channel-worker-supervisor.js';
 import type { RateLimiterInstance, RateLimitTier } from './rate-limit.js';
@@ -78,6 +79,20 @@ describe('buildDaemonStatusResponse', () => {
         expect.objectContaining({ code: 'rate_limit_hits' }),
       ]),
     });
+  });
+
+  it('embeds runtime.metrics.series when getMetricsSeries is provided, and omits it otherwise', async () => {
+    const base = makeOptions({});
+    const withSeries = await buildDaemonStatusResponse('summary', {
+      ...base,
+      getMetricsSeries: () => [{ t: 1 } as DaemonMetricsBucket],
+    });
+    expect(withSeries.runtime.metrics?.series).toHaveLength(1);
+
+    // Omitting the provider leaves no `metrics` key — backward compatible with
+    // older clients that don't expect it.
+    const without = await buildDaemonStatusResponse('summary', base);
+    expect(without.runtime.metrics).toBeUndefined();
   });
 
   it('reports permanently failed channel worker snapshots as errors', async () => {
