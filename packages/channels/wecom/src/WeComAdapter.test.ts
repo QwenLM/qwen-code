@@ -624,7 +624,7 @@ describe('WeComChannel', () => {
     stderr.mockRestore();
   });
 
-  it('keeps the delayed kick reconnect retry referenced', () => {
+  it('unrefs the delayed kick reconnect retry', () => {
     const unref = vi.fn();
     const timeout = { unref } as unknown as ReturnType<typeof setTimeout>;
     const setTimeoutSpy = vi
@@ -642,11 +642,34 @@ describe('WeComChannel', () => {
     inspectable.scheduleKickReconnectRetry('kicked', 0);
 
     expect(inspectable.kickReconnectRetry).toBe(timeout);
-    expect(unref).not.toHaveBeenCalled();
+    expect(unref).toHaveBeenCalledTimes(1);
     setTimeoutSpy.mockRestore();
   });
 
-  it('stops kick reconnect after repeated retry cycles are exhausted', async () => {
+  it('falls back to adapter reconnect when SDK disconnect stalls', async () => {
+    vi.useFakeTimers();
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockImplementation(() => true);
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const oldClient = lastClient();
+
+    oldClient.emit('disconnected', 'closed');
+
+    await vi.advanceTimersByTimeAsync(30_000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(2));
+    expect(oldClient.disconnect).toHaveBeenCalled();
+    expect(stderr).toHaveBeenCalledWith(
+      '[WeCom:bot] SDK reconnect did not recover after WebSocket closed; reconnecting adapter.\n',
+    );
+
+    channel.disconnect();
+    stderr.mockRestore();
+  });
+
+  it('continues kick reconnect after repeated retry cycles are exhausted', async () => {
     vi.useFakeTimers();
     const stderr = vi
       .spyOn(process.stderr, 'write')
@@ -671,10 +694,11 @@ describe('WeComChannel', () => {
     }
 
     expect(stderr).toHaveBeenCalledWith(
-      '[WeCom:bot] reconnect after server kick stopped after 3 exhausted retry cycles; manual intervention required.\n',
+      '[WeCom:bot] reconnect after server kick exhausted 3 retry cycles; manual intervention required; retrying later.\n',
     );
-    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
-    expect(mocks.instances).toHaveLength(10);
+    await vi.advanceTimersByTimeAsync(15 * 60 * 1000);
+    await vi.advanceTimersByTimeAsync(1_000);
+    await vi.waitFor(() => expect(mocks.instances).toHaveLength(11));
 
     channel.disconnect();
     stderr.mockRestore();
@@ -3313,6 +3337,26 @@ describe('WeComChannel', () => {
     expect(chunks[0]).toMatch(/\n```$/);
     expect(chunks[1]).toMatch(/^```/);
     expect(chunks.at(-1)).toContain('outro');
+  });
+
+  it('keeps fenced code blocks balanced when a long line is split', async () => {
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+    const text = `${'a'.repeat(3790)}\`\`\`${'b'.repeat(100)}\`\`\`outro`;
+
+    await channel.sendMessage('chat-1', text);
+
+    const chunks = client.sendMessage.mock.calls.map((call) => {
+      const message = call[1] as { markdown: { content: string } };
+      return message.markdown.content;
+    });
+    expect(chunks.length).toBeGreaterThan(1);
+    for (const chunk of chunks) {
+      expect(Buffer.byteLength(chunk, 'utf8')).toBeLessThanOrEqual(3800);
+      expect((chunk.match(/```/g) ?? []).length % 2).toBe(0);
+    }
+    expect(chunks.join('')).toContain('outro');
   });
 
   it('resolves relative outbound image paths from channel cwd', async () => {

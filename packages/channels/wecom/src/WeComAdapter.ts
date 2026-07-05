@@ -79,6 +79,8 @@ const KICK_RECONNECT_MAX_RETRY_CYCLES = 3;
 const KICK_RECONNECT_BASE_DELAY_MS = 1_000;
 const KICK_RECONNECT_RESET_MS = 60_000;
 const KICK_RECONNECT_RETRY_MS = 5 * 60 * 1000;
+const KICK_RECONNECT_LONG_RETRY_MS = 15 * 60 * 1000;
+const DISCONNECT_RECONNECT_FALLBACK_MS = 30_000;
 
 export class WeComChannel extends ChannelBase {
   private readonly wecom: WeComConfig;
@@ -96,6 +98,7 @@ export class WeComChannel extends ChannelBase {
   private dedupTimer?: ReturnType<typeof setInterval>;
   private kickReconnectReset?: ReturnType<typeof setTimeout>;
   private kickReconnectRetry?: ReturnType<typeof setTimeout>;
+  private disconnectReconnectFallback?: ReturnType<typeof setTimeout>;
   private connecting?: Promise<void>;
   private connectingClient?: WeComClient;
   private authentication?: ReturnType<typeof waitForAuthentication>;
@@ -153,6 +156,7 @@ export class WeComChannel extends ChannelBase {
         );
         return;
       }
+      this.clearDisconnectReconnectFallback();
       this.onMessage(payload).catch((err: unknown) => {
         process.stderr.write(
           `[WeCom:${this.name}] message handling failed: ${sanitizeLogText(
@@ -171,8 +175,16 @@ export class WeComChannel extends ChannelBase {
       process.stderr.write(
         `[WeCom:${this.name}] WebSocket ${formatDisconnectReason(reason)}; waiting for SDK reconnect.\n`,
       );
+      if (authenticated) {
+        this.scheduleDisconnectReconnectFallback(
+          reason,
+          client,
+          this.disconnectGeneration,
+        );
+      }
     };
     const kickedHandler = (reason: unknown) => {
+      this.clearDisconnectReconnectFallback();
       this.startKickReconnect(reason);
     };
     const handlers = {
@@ -239,6 +251,7 @@ export class WeComChannel extends ChannelBase {
       clearTimeout(this.kickReconnectRetry);
       this.kickReconnectRetry = undefined;
     }
+    this.clearDisconnectReconnectFallback();
     if (this.dedupTimer) {
       clearInterval(this.dedupTimer);
       this.dedupTimer = undefined;
@@ -734,7 +747,36 @@ export class WeComChannel extends ChannelBase {
     client?.disconnect();
   }
 
-  private async reconnectAfterKick(reason: unknown): Promise<void> {
+  private clearDisconnectReconnectFallback(): void {
+    if (!this.disconnectReconnectFallback) return;
+    clearTimeout(this.disconnectReconnectFallback);
+    this.disconnectReconnectFallback = undefined;
+  }
+
+  private scheduleDisconnectReconnectFallback(
+    reason: unknown,
+    client: WeComClient,
+    disconnectGeneration: number,
+  ): void {
+    this.clearDisconnectReconnectFallback();
+    const formattedReason = formatDisconnectReason(reason);
+    this.disconnectReconnectFallback = setTimeout(() => {
+      this.disconnectReconnectFallback = undefined;
+      if (this.disconnectGeneration !== disconnectGeneration) return;
+      if (this.client !== client) return;
+      process.stderr.write(
+        `[WeCom:${this.name}] SDK reconnect did not recover after WebSocket ${formattedReason}; reconnecting adapter.\n`,
+      );
+      this.kickReconnectAttempts = 0;
+      this.startKickReconnect(reason, 'SDK disconnect');
+    }, DISCONNECT_RECONNECT_FALLBACK_MS);
+    this.disconnectReconnectFallback.unref?.();
+  }
+
+  private async reconnectAfterKick(
+    reason: unknown,
+    reconnectReason = 'server kick',
+  ): Promise<void> {
     if (this.reconnectingAfterKick) {
       this.pendingKickReconnect = true;
       return;
@@ -747,7 +789,7 @@ export class WeComChannel extends ChannelBase {
     const previousConnecting = this.connecting;
     const disconnectGeneration = this.disconnectGeneration;
     process.stderr.write(
-      `[WeCom:${this.name}] WebSocket ${formatDisconnectReason(reason)}; reconnecting after server kick.\n`,
+      `[WeCom:${this.name}] WebSocket ${formatDisconnectReason(reason)}; reconnecting after ${reconnectReason}.\n`,
     );
     try {
       this.disconnectClientOnly(
@@ -771,12 +813,12 @@ export class WeComChannel extends ChannelBase {
           this.kickReconnectRetryCycles = 0;
           this.scheduleKickReconnectReset();
           process.stderr.write(
-            `[WeCom:${this.name}] reconnected after server kick.\n`,
+            `[WeCom:${this.name}] reconnected after ${reconnectReason}.\n`,
           );
           return;
         } catch (err) {
           process.stderr.write(
-            `[WeCom:${this.name}] reconnect after server kick attempt ${attempt} failed: ${sanitizeLogText(
+            `[WeCom:${this.name}] reconnect after ${reconnectReason} attempt ${attempt} failed: ${sanitizeLogText(
               formatSdkError(err),
               200,
             )}\n`,
@@ -786,14 +828,25 @@ export class WeComChannel extends ChannelBase {
       this.kickReconnectRetryCycles += 1;
       if (this.kickReconnectRetryCycles >= KICK_RECONNECT_MAX_RETRY_CYCLES) {
         process.stderr.write(
-          `[WeCom:${this.name}] reconnect after server kick stopped after ${this.kickReconnectRetryCycles} exhausted retry cycles; manual intervention required.\n`,
+          `[WeCom:${this.name}] reconnect after ${reconnectReason} exhausted ${this.kickReconnectRetryCycles} retry cycles; manual intervention required; retrying later.\n`,
+        );
+        this.scheduleKickReconnectRetry(
+          reason,
+          disconnectGeneration,
+          KICK_RECONNECT_LONG_RETRY_MS,
+          reconnectReason,
         );
         return;
       }
       process.stderr.write(
-        `[WeCom:${this.name}] reconnect after server kick gave up after ${KICK_RECONNECT_MAX_ATTEMPTS} attempts; retrying later.\n`,
+        `[WeCom:${this.name}] reconnect after ${reconnectReason} gave up after ${KICK_RECONNECT_MAX_ATTEMPTS} attempts; retrying later.\n`,
       );
-      this.scheduleKickReconnectRetry(reason, disconnectGeneration);
+      this.scheduleKickReconnectRetry(
+        reason,
+        disconnectGeneration,
+        KICK_RECONNECT_RETRY_MS,
+        reconnectReason,
+      );
     } finally {
       this.reconnectingAfterKick = false;
       const shouldRetryPendingKick =
@@ -802,7 +855,7 @@ export class WeComChannel extends ChannelBase {
       this.pendingKickReconnect = false;
       if (shouldRetryPendingKick) {
         this.kickReconnectAttempts = 0;
-        this.startKickReconnect(reason);
+        this.startKickReconnect(reason, reconnectReason);
       }
     }
   }
@@ -824,24 +877,32 @@ export class WeComChannel extends ChannelBase {
   private scheduleKickReconnectRetry(
     reason: unknown,
     disconnectGeneration: number,
+    delayMs = KICK_RECONNECT_RETRY_MS,
+    reconnectReason = 'server kick',
   ): void {
     this.kickReconnectRetry = setTimeout(() => {
       this.kickReconnectRetry = undefined;
       if (this.disconnectGeneration !== disconnectGeneration) return;
       this.kickReconnectAttempts = 0;
-      this.startKickReconnect(reason);
-    }, KICK_RECONNECT_RETRY_MS);
+      this.startKickReconnect(reason, reconnectReason);
+    }, delayMs);
+    this.kickReconnectRetry.unref?.();
   }
 
-  private startKickReconnect(reason: unknown): void {
-    void this.reconnectAfterKick(reason).catch((err: unknown) => {
-      process.stderr.write(
-        `[WeCom:${this.name}] kick-reconnect failed: ${sanitizeLogText(
-          formatSdkError(err),
-          200,
-        )}\n`,
-      );
-    });
+  private startKickReconnect(
+    reason: unknown,
+    reconnectReason = 'server kick',
+  ): void {
+    void this.reconnectAfterKick(reason, reconnectReason).catch(
+      (err: unknown) => {
+        process.stderr.write(
+          `[WeCom:${this.name}] kick-reconnect failed: ${sanitizeLogText(
+            formatSdkError(err),
+            200,
+          )}\n`,
+        );
+      },
+    );
   }
 
   private cleanupSeenMessages(): void {
@@ -1223,8 +1284,8 @@ function splitMarkdownChunks(text: string): string[] {
   const chunks: string[] = [];
   let current = '';
   let inCode = false;
-  const fits = (value: string): boolean =>
-    Buffer.byteLength(inCode ? `${value}\n\`\`\`` : value, 'utf8') <=
+  const fits = (value: string, codeState = inCode): boolean =>
+    Buffer.byteLength(codeState ? `${value}\n\`\`\`` : value, 'utf8') <=
     MARKDOWN_CHUNK_BYTES;
   const flush = (closeCode = true): void => {
     if (!current) return;
@@ -1234,33 +1295,41 @@ function splitMarkdownChunks(text: string): string[] {
 
   for (const line of text.split('\n')) {
     const candidate = current ? `${current}\n${line}` : line;
-    if (fits(candidate)) {
+    const candidateInCode = toggleCodeFenceState(line, inCode);
+    if (fits(candidate, candidateInCode)) {
       current = candidate;
-      inCode = toggleCodeFenceState(line, inCode);
+      inCode = candidateInCode;
       continue;
     }
 
     flush();
     const retried = current ? `${current}\n${line}` : line;
-    if (fits(retried)) {
+    const retriedInCode = toggleCodeFenceState(line, inCode);
+    if (fits(retried, retriedInCode)) {
       current = retried;
-      inCode = toggleCodeFenceState(line, inCode);
+      inCode = retriedInCode;
       continue;
     }
 
     let needsLineBreak = Boolean(current);
-    for (const char of line) {
-      const addition = needsLineBreak && current ? `\n${char}` : char;
+    for (let index = 0; index < line.length; ) {
+      const token = line.startsWith('```', index)
+        ? '```'
+        : (Array.from(line.slice(index))[0] ?? '');
+      if (!token) break;
+      const nextInCode = token === '```' ? !inCode : inCode;
+      const addition = needsLineBreak && current ? `\n${token}` : token;
       const candidate = `${current}${addition}`;
-      if (!fits(candidate)) {
+      if (!fits(candidate, nextInCode)) {
         flush();
-        current = current ? `${current}\n${char}` : char;
+        current = current ? `${current}\n${token}` : token;
       } else {
         current = candidate;
       }
+      inCode = nextInCode;
       needsLineBreak = false;
+      index += token.length;
     }
-    inCode = toggleCodeFenceState(line, inCode);
   }
 
   flush(false);
