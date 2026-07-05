@@ -1,12 +1,5 @@
-import {
-  lstatSync,
-  mkdirSync,
-  realpathSync,
-  rmSync,
-  statSync,
-  writeFileSync,
-} from 'node:fs';
-import { readFile } from 'node:fs/promises';
+import { lstatSync, mkdirSync, realpathSync, rmSync, statSync } from 'node:fs';
+import { readFile, writeFile } from 'node:fs/promises';
 import { request as httpsRequest } from 'node:https';
 import type { IncomingHttpHeaders } from 'node:http';
 import { randomUUID } from 'node:crypto';
@@ -456,11 +449,11 @@ export class WeComChannel extends ChannelBase {
         });
       } else {
         const dir = join(tmpdir(), 'channel-files', randomUUID());
-        mkdirSync(dir, { recursive: true });
+        mkdirSync(dir, { recursive: true, mode: 0o700 });
         this.rememberAttachmentDir(dir, messageId, routeKey);
         const safeName = fileName || `wecom_${ref.type}`;
         const filePath = join(dir, safeName);
-        writeFileSync(filePath, data);
+        await writeFile(filePath, data, { mode: 0o600 });
         attachments.push({
           type: ref.type === 'voice' ? 'audio' : ref.type,
           filePath,
@@ -1142,8 +1135,23 @@ function parseOutboundMediaMarkers(text: string): {
 
 function findCodeRanges(text: string): Array<[number, number]> {
   const ranges: Array<[number, number]> = [];
-  for (const match of text.matchAll(/```[\s\S]*?```|`[^`]*`/g)) {
+  let fenceStart: number | undefined;
+  for (const match of text.matchAll(/```/g)) {
     const start = match.index ?? 0;
+    if (fenceStart === undefined) {
+      fenceStart = start;
+    } else {
+      ranges.push([fenceStart, start + 3]);
+      fenceStart = undefined;
+    }
+  }
+  if (fenceStart !== undefined) {
+    ranges.push([fenceStart, text.length]);
+  }
+
+  for (const match of text.matchAll(/`[^`\n]*`/g)) {
+    const start = match.index ?? 0;
+    if (ranges.some(([from, to]) => start >= from && start < to)) continue;
     ranges.push([start, start + match[0].length]);
   }
   return ranges;

@@ -45,6 +45,9 @@ const mocks = vi.hoisted(() => {
   const readFile = vi.fn(async (_path: string) =>
     Buffer.from([0x89, 0x50, 0x4e, 0x47]),
   );
+  const writeFile = vi.fn(
+    async (_path: string, _data: Buffer, _options: unknown) => {},
+  );
   const httpResponse = {
     statusCode: 200,
     headers: {} as Record<string, string>,
@@ -168,6 +171,7 @@ const mocks = vi.hoisted(() => {
     lookup,
     decryptFile,
     readFile,
+    writeFile,
     httpResponse,
     httpsRequest,
     state,
@@ -186,6 +190,7 @@ vi.mock('node:https', () => ({
 }));
 vi.mock('node:fs/promises', () => ({
   readFile: mocks.readFile,
+  writeFile: mocks.writeFile,
 }));
 
 import { WeComChannel } from './WeComAdapter.js';
@@ -335,6 +340,11 @@ describe('WeComChannel', () => {
     vi.clearAllMocks();
     mocks.decryptFile.mockImplementation((buffer: Buffer) => buffer);
     mocks.readFile.mockResolvedValue(Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    mocks.writeFile.mockImplementation(
+      async (path: string, data: Buffer, _options: unknown) => {
+        writeFileSync(path, data);
+      },
+    );
     mocks.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
     rmSync(join(tmpdir(), 'channel-files'), { recursive: true, force: true });
   });
@@ -2043,6 +2053,32 @@ describe('WeComChannel', () => {
     expect(mocks.httpsRequest).toHaveBeenCalledTimes(1);
   });
 
+  it('stores inbound file attachments in private temp files asynchronously', async () => {
+    const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgid: 'msg-private-file',
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'report.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(channel.envelopes).toHaveLength(1));
+    const filePath = channel.envelopes[0]?.attachments?.[0]?.filePath;
+    expect(filePath).toBeDefined();
+    expect(mocks.writeFile).toHaveBeenCalledWith(
+      filePath,
+      Buffer.from('downloaded'),
+      { mode: 0o600 },
+    );
+  });
+
   it('rejects media URLs that resolve to IPv6 link-local addresses', async () => {
     mocks.lookup.mockResolvedValue([{ address: 'fe90::1', family: 6 }]);
     const channel = new TestWeComChannel('bot', makeConfig(), makeBridge());
@@ -2839,6 +2875,28 @@ describe('WeComChannel', () => {
       'image',
       'media-1',
     );
+  });
+
+  it('leaves media markers inside unclosed fenced code blocks as text', async () => {
+    const parent = join(tmpdir(), 'channel-files');
+    mkdirSync(parent, { recursive: true });
+    const dir = mkdtempSync(join(parent, 'wecom-test-'));
+    const imagePath = join(dir, 'out.png');
+    writeFileSync(imagePath, Buffer.from([0x89, 0x50, 0x4e, 0x47]));
+    const text = `debug:\n\`\`\`text\n[IMAGE: ${imagePath}]`;
+
+    const channel = new WeComChannel('bot', makeConfig(), makeBridge());
+    await channel.connect();
+    const client = lastClient();
+
+    await channel.sendMessage('chat-1', text);
+
+    expect(client.uploadMedia).not.toHaveBeenCalled();
+    expect(client.sendMediaMessage).not.toHaveBeenCalled();
+    expect(client.sendMessage).toHaveBeenCalledWith('chat-1', {
+      msgtype: 'markdown',
+      markdown: { content: text },
+    });
   });
 
   it('splits long markdown responses before sending', async () => {
