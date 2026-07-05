@@ -32,7 +32,7 @@ import { classifyRetryError } from '../utils/retryErrorClassification.js';
 import type { Config } from '../config/config.js';
 import {
   DEFAULT_TOKEN_LIMIT,
-  ESCALATED_MAX_TOKENS,
+  escalatedOutputTokenLimit,
   parsePositiveIntegerEnvValue,
   tokenLimit,
 } from './tokenLimits.js';
@@ -1792,9 +1792,12 @@ export class GeminiChat {
     //
     // The subagent path sets params.config.maxOutputTokens explicitly; the
     // interactive path leaves it undefined but may still use up to
-    // max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')) across MAX_TOKENS
+    // escalatedOutputTokenLimit(model, contextWindowSize) across MAX_TOKENS
     // handling. Pre-reserving that space prevents the dead zone between the
     // adjusted auto threshold and an unadjusted hard threshold (issue #5950).
+    // The escalation limit is capped at half the context window so the
+    // reservation cannot collapse the input budget on small custom windows
+    // (issue #6144).
     const cgConfigForThresholds = this.config.getContentGeneratorConfig();
     const parsedEnvMaxTokensForThreshold = parsePositiveIntegerEnvValue(
       process.env['QWEN_CODE_MAX_OUTPUT_TOKENS'],
@@ -1809,7 +1812,10 @@ export class GeminiChat {
         ? (cgConfigForThresholds?.samplingParams?.max_tokens ??
           parsedEnvMaxTokensForThreshold ??
           0)
-        : Math.max(ESCALATED_MAX_TOKENS, tokenLimit(model, 'output')));
+        : escalatedOutputTokenLimit(
+            model,
+            cgConfigForThresholds?.contextWindowSize,
+          ));
     let currentUserContent: Content | undefined;
     try {
       // The send-lock above is held but the generator's `finally` (which
@@ -2456,19 +2462,22 @@ export class GeminiChat {
 
         // Max output tokens handling: if the retry loop succeeded but hit
         // MAX_TOKENS, retry once at an escalated output limit only when that
-        // would raise the effective initial limit. When the initial limit is
-        // already at or above the escalation floor (for example 64K+ output
-        // models), skip the no-op escalation call but still run continuation
-        // recovery on the partial response.
+        // would raise the effective initial limit. The escalation limit is
+        // capped at half the context window so the retry itself cannot
+        // overflow small custom windows (issue #6144). Must match
+        // effectiveReservedOutput above, which pre-reserves this space.
+        // When the initial limit is already at or above the escalation floor
+        // (for example 64K+ output models), skip the no-op escalation call
+        // but still run continuation recovery on the partial response.
         // Placed outside the retry loop so that any errors from the
         // escalated/recovery streams propagate directly (not caught by retry
         // logic).
         const requestedMaxOutputTokens = params.config?.maxOutputTokens;
         const effectiveInitialMaxOutputTokens =
           requestedMaxOutputTokens ?? tokenLimit(model, 'output');
-        const escalatedLimit = Math.max(
-          ESCALATED_MAX_TOKENS,
-          tokenLimit(model, 'output'),
+        const escalatedLimit = escalatedOutputTokenLimit(
+          model,
+          cgConfigForThresholds?.contextWindowSize,
         );
         const shouldEscalateMaxOutputTokens =
           effectiveInitialMaxOutputTokens < escalatedLimit;
