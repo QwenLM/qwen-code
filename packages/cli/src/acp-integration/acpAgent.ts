@@ -2710,11 +2710,14 @@ class QwenAgent implements Agent {
   // containers.
   private readonly childCpuCoreCount =
     os.availableParallelism?.() ?? os.cpus().length ?? 1;
-  private prevChildCpu: NodeJS.CpuUsage = (() => {
+  private prevChildCpu: NodeJS.CpuUsage | null = (() => {
     try {
       return process.cpuUsage();
     } catch {
-      return { user: 0, system: 0 };
+      // null (not {0,0}) so the first successful poll skips the delta instead
+      // of billing the since-start total as one window — mirrors the daemon's
+      // own safeCpuUsage() null-on-failure contract.
+      return null;
     }
   })();
   private prevChildCpuAt = Date.now();
@@ -5542,13 +5545,14 @@ class QwenAgent implements Agent {
           /* keep prev baseline on failure → this window reads 0, and the next
              successful poll still measures a correct delta window */
         }
+        const prevCpu = this.prevChildCpu;
         const elapsedMs = now - this.prevChildCpuAt;
         let cpuPercent = 0;
-        if (cpu && elapsedMs > 0) {
-          const cpuUs =
-            cpu.user -
-            this.prevChildCpu.user +
-            (cpu.system - this.prevChildCpu.system);
+        // Gate on prevCpu too: after an init-time cpuUsage() failure it is null,
+        // and computing a delta against a zero baseline would manufacture a
+        // phantom spike on the first successful poll.
+        if (cpu && prevCpu && elapsedMs > 0) {
+          const cpuUs = cpu.user - prevCpu.user + (cpu.system - prevCpu.system);
           cpuPercent = Math.min(
             100,
             Math.max(
@@ -5557,15 +5561,25 @@ class QwenAgent implements Agent {
             ),
           );
         }
-        // Advance the baseline ONLY on a successful read. Advancing prevAt
-        // after a throw would pair a full since-last-success cpuUs with a short
-        // since-last-failure elapsedMs on the next poll → a ~2x phantom spike.
+        // Advance the baseline ONLY on a successful read (this also seeds it
+        // after an init-time null). Advancing prevAt after a throw would pair a
+        // full since-last-success cpuUs with a short since-last-failure
+        // elapsedMs on the next poll → a ~2x phantom spike.
         if (cpu) {
           this.prevChildCpu = cpu;
           this.prevChildCpuAt = now;
         }
+        // Guard memoryUsage too (same restricted-container risk as cpuUsage): on
+        // failure report 0 rss but keep the already-computed cpuPercent rather
+        // than throwing the whole handler.
+        let rssBytes = 0;
+        try {
+          rssBytes = process.memoryUsage().rss;
+        } catch {
+          /* restricted container — report 0 rss */
+        }
         return {
-          rssBytes: process.memoryUsage().rss,
+          rssBytes,
           cpuPercent,
         };
       }

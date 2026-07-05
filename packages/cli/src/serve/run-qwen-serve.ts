@@ -2317,9 +2317,12 @@ export async function runQwenServe(
     let prevRateRejected: number | undefined;
     const metricsSamplerTimer = setInterval(() => {
       const nowMs = Date.now();
+      // Read the window lag BEFORE the try: a tick that throws is exactly when
+      // the daemon is overloaded and lag is most diagnostic, so the catch path
+      // must chart the real accumulated lag, not a misleading 0.
+      const eventLoopLagP99Ms = metricsLoopDelay.percentile(99) / 1_000_000;
       try {
         const mem = process.memoryUsage();
-        const eventLoopLagP99Ms = metricsLoopDelay.percentile(99) / 1_000_000;
         // CPU%: skip the delta AND leave the baseline untouched when
         // cpuUsage() throws, so a transient failure can't turn the next
         // successful read's since-start total into one giant window spike.
@@ -2358,7 +2361,13 @@ export async function runQwenServe(
         // sync. Optional-chained: an injected bridge (RunQwenServeDeps.bridge)
         // built against the older contract may not implement these hooks.
         const child = bridge.getChildResourceSnapshot?.();
-        void bridge.refreshChildResource?.();
+        // Only poll the child's resources when someone is watching: the
+        // staleness guard already drops the reading to 0 when idle, so gating
+        // avoids a 5s RPC round-trip (pipe + child CPU) for a chart nobody has
+        // open.
+        if (runtime.getActiveSseCount() > 0 || (acp?.wsStreams ?? 0) > 0) {
+          void bridge.refreshChildResource?.();
+        }
         metricsRing.sample(nowMs, {
           cpuPercent,
           rssBytes: mem.rss,
@@ -2392,7 +2401,7 @@ export async function runQwenServe(
             activeSessions: 0,
             activePrompts: 0,
             pendingPrompts: 0,
-            eventLoopLagP99Ms: 0,
+            eventLoopLagP99Ms,
             sseConnections: 0,
             wsConnections: 0,
             acpConnections: 0,

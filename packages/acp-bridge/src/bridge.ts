@@ -2231,9 +2231,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       // A channel swap during the await would otherwise stamp a dead channel;
       // only write if this is still the live one.
       if (liveChannelInfo() !== info) return;
-      if (typeof res.rssBytes === 'number') info.childRssBytes = res.rssBytes;
-      if (typeof res.cpuPercent === 'number') {
-        info.childCpuPercent = res.cpuPercent;
+      // `typeof NaN === 'number'` is true, so also require finiteness at this
+      // trust boundary — a misbehaving child returning NaN would otherwise be
+      // cached and read as NaN before the sampler's finiteGauge() catches it.
+      if (typeof res.rssBytes === 'number' && Number.isFinite(res.rssBytes)) {
+        info.childRssBytes = res.rssBytes;
+      }
+      if (
+        typeof res.cpuPercent === 'number' &&
+        Number.isFinite(res.cpuPercent)
+      ) {
+        // Clamp on receive too — enforce the [0,100] JSDoc invariant here, not
+        // only on the child's send side.
+        info.childCpuPercent = Math.min(100, Math.max(0, res.cpuPercent));
       }
       info.childResourceAt = Date.now();
     } catch (err) {
