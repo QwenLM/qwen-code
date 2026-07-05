@@ -5894,7 +5894,11 @@ describe('createServeApp', () => {
         });
         const calls = action === 'load' ? bridge.loadCalls : bridge.resumeCalls;
         expect(calls).toEqual([
-          { sessionId: 'persisted-1', workspaceCwd: WS_BOUND },
+          {
+            sessionId: 'persisted-1',
+            workspaceCwd: WS_BOUND,
+            ...(action === 'load' ? { historyReplay: 'response' } : {}),
+          },
         ]);
       }
     });
@@ -5918,7 +5922,41 @@ describe('createServeApp', () => {
       expect(res.status).toBe(200);
       expect(res.body.state).toEqual({ configOptions: [] });
       expect(bridge.loadCalls).toEqual([
-        { sessionId: 'persisted-2', workspaceCwd: '/work/a' },
+        {
+          sessionId: 'persisted-2',
+          workspaceCwd: '/work/a',
+          historyReplay: 'response',
+        },
+      ]);
+    });
+
+    it('surfaces partial response-mode replay details from load', async () => {
+      const bridge = fakeBridge({
+        loadImpl: async (req) => ({
+          sessionId: req.sessionId,
+          workspaceCwd: req.workspaceCwd,
+          attached: false,
+          clientId: 'client-load',
+          state: {},
+          partial: true,
+          replayError: 'replay boom',
+        }),
+      });
+      const app = createServeApp(baseOpts, undefined, { bridge });
+      const res = await request(app)
+        .post('/session/persisted-partial/load')
+        .set('Host', `127.0.0.1:${baseOpts.port}`)
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(res.body.partial).toBe(true);
+      expect(res.body.replayError).toBe('replay boom');
+      expect(bridge.loadCalls).toEqual([
+        {
+          sessionId: 'persisted-partial',
+          workspaceCwd: realpathSync.native(process.cwd()),
+          historyReplay: 'response',
+        },
       ]);
     });
 
@@ -5937,6 +5975,7 @@ describe('createServeApp', () => {
           {
             sessionId: 'persisted-1',
             workspaceCwd: realpathSync.native(process.cwd()),
+            ...(action === 'load' ? { historyReplay: 'response' } : {}),
             clientId: 'client-1',
           },
         ]);

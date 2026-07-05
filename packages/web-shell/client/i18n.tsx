@@ -178,6 +178,13 @@ const EN: Messages = {
   'approval.option.allowAlwaysTool': 'Always allow for this tool',
   'assistant.branch': 'Branch',
   'assistant.copy': 'Copy',
+  'at.category.extensions': 'Extensions',
+  'at.category.extensions.description': 'Reference active extensions',
+  'at.category.files': 'Files',
+  'at.category.files.description': 'Reference workspace files',
+  'at.category.mcpResources': 'MCP resources',
+  'at.category.mcpResources.description': 'Reference MCP server resources',
+  'at.menu': 'Reference menu',
   'common.back': 'back',
   'common.cancel': 'cancel',
   'common.close': 'close',
@@ -191,6 +198,7 @@ const EN: Messages = {
   'common.save': 'save',
   'common.navigate': '↑↓ to navigate',
   'common.next': 'next',
+  'common.noResults': 'No results',
   'common.previous': 'previous',
   'common.refresh': 'refresh',
   'common.search': 'Search',
@@ -215,6 +223,27 @@ const EN: Messages = {
     `${v?.label ?? 'Selection'} copied to the clipboard`,
   'code.copy': 'Copy',
   'code.copied': 'Copied!',
+  'echartsChart.defaultTitle': 'Chart Loading',
+  'echartsChart.noData': 'No data',
+  'echartsChart.tableNotice': (v) => {
+    const omittedRows = Number(v?.omittedRows ?? 0);
+    const omittedColumns = Number(v?.omittedColumns ?? 0);
+    if (omittedRows > 0 && omittedColumns > 0) {
+      return `Showing ${v?.visibleRows ?? 0} of ${v?.totalRows ?? 0} rows and ${v?.visibleColumns ?? 0} of ${v?.totalColumns ?? 0} columns`;
+    }
+    if (omittedColumns > 0) {
+      return `Showing ${v?.visibleColumns ?? 0} of ${v?.totalColumns ?? 0} columns`;
+    }
+    return `Showing ${v?.visibleRows ?? 0} of ${v?.totalRows ?? 0} rows`;
+  },
+  'echartsChart.rendering': 'Rendering chart',
+  'echartsChart.runtimeUnavailable': 'Chart runtime is unavailable.',
+  'echartsChart.renderFailed': 'Chart render failed.',
+  'echartsChart.viewMode': 'View mode',
+  'echartsChart.showChart': 'Show chart',
+  'echartsChart.showData': 'Show data',
+  'echartsChart.chart': 'Chart',
+  'echartsChart.data': 'Data',
   'markdownTable.blank': '(blank)',
   'markdownTable.column': (v) => `Column ${v?.index ?? ''}`,
   'markdownTable.rows': (v) => {
@@ -1545,6 +1574,13 @@ const ZH: Messages = {
   'approval.option.allowAlwaysTool': '对此工具始终允许',
   'assistant.branch': '分叉',
   'assistant.copy': '复制',
+  'at.category.extensions': '扩展',
+  'at.category.extensions.description': '引用已启用扩展',
+  'at.category.files': '文件',
+  'at.category.files.description': '引用工作区文件',
+  'at.category.mcpResources': 'MCP 资源',
+  'at.category.mcpResources.description': '引用 MCP server 资源',
+  'at.menu': '引用菜单',
   'common.back': '返回',
   'common.cancel': '取消',
   'common.close': '关闭',
@@ -1558,6 +1594,7 @@ const ZH: Messages = {
   'common.save': '保存',
   'common.navigate': '↑↓ 导航',
   'common.next': '下一步',
+  'common.noResults': '无结果',
   'common.previous': '上一步',
   'common.refresh': '刷新',
   'common.search': '搜索',
@@ -1580,6 +1617,27 @@ const ZH: Messages = {
   'copy.toClipboard': (v) => `${v?.label ?? '内容'} 已复制到剪贴板`,
   'code.copy': '复制',
   'code.copied': '已复制！',
+  'echartsChart.defaultTitle': '图表加载中',
+  'echartsChart.noData': '暂无数据',
+  'echartsChart.tableNotice': (v) => {
+    const omittedRows = Number(v?.omittedRows ?? 0);
+    const omittedColumns = Number(v?.omittedColumns ?? 0);
+    if (omittedRows > 0 && omittedColumns > 0) {
+      return `显示 ${v?.visibleRows ?? 0}/${v?.totalRows ?? 0} 行，${v?.visibleColumns ?? 0}/${v?.totalColumns ?? 0} 列`;
+    }
+    if (omittedColumns > 0) {
+      return `显示 ${v?.visibleColumns ?? 0}/${v?.totalColumns ?? 0} 列`;
+    }
+    return `显示 ${v?.visibleRows ?? 0}/${v?.totalRows ?? 0} 行`;
+  },
+  'echartsChart.rendering': '正在渲染图表',
+  'echartsChart.runtimeUnavailable': '图表运行时不可用。',
+  'echartsChart.renderFailed': '图表渲染失败。',
+  'echartsChart.viewMode': '视图模式',
+  'echartsChart.showChart': '显示图表',
+  'echartsChart.showData': '显示数据',
+  'echartsChart.chart': '图表',
+  'echartsChart.data': '数据',
   'markdownTable.blank': '(空白)',
   'markdownTable.column': (v) => `第 ${v?.index ?? ''} 列`,
   'markdownTable.rows': (v) => `${v?.count ?? 0} 行`,

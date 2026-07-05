@@ -17,7 +17,11 @@ import OpenAI from 'openai';
 import { DefaultOpenAICompatibleProvider } from './default.js';
 import type { Config } from '../../../config/config.js';
 import type { ContentGeneratorConfig } from '../../contentGenerator.js';
-import { DEFAULT_TIMEOUT, DEFAULT_MAX_RETRIES } from '../constants.js';
+import {
+  DEFAULT_TIMEOUT,
+  DEFAULT_MAX_RETRIES,
+  DISABLED_REQUEST_TIMEOUT_MS,
+} from '../constants.js';
 import { buildRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 import type { OpenAIRuntimeFetchOptions } from '../../../utils/runtimeFetchOptions.js';
 
@@ -167,6 +171,18 @@ describe('DefaultOpenAICompatibleProvider', () => {
           defaultHeaders: {
             'User-Agent': `QwenCode/1.0.0 (${process.platform}; ${process.arch})`,
           },
+        }),
+      );
+    });
+
+    it('should disable the timeout when configured to 0', () => {
+      mockContentGeneratorConfig.timeout = 0;
+
+      provider.buildClient();
+
+      expect(OpenAI).toHaveBeenCalledWith(
+        expect.objectContaining({
+          timeout: DISABLED_REQUEST_TIMEOUT_MS,
         }),
       );
     });

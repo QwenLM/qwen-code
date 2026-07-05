@@ -193,8 +193,12 @@ export function getHomeEnvFallbackVars(
  * - ~/.qwen/.env
  * - ~/.env
  * - <QWEN_HOME>/.env (when set)
+ *
+ * Exported so `settings-cache.ts` can re-run the exact same discovery when
+ * validating its fingerprint; keep the discovery semantics in this single
+ * implementation.
  */
-function findEnvFiles(
+export function findEnvFiles(
   settings: Settings,
   startDir: string,
   userLevelPaths: Set<string> = getUserLevelEnvPaths(),
