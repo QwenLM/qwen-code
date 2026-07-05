@@ -106,7 +106,12 @@ import type {
   DaemonToolToggleResult,
   DaemonSessionArtifactInput,
   DaemonSessionArtifactMutationResult,
+  DaemonSessionArtifactPinOptions,
+  DaemonSessionArtifactRemoveOptions,
+  DaemonSessionArtifactUnpinOptions,
   DaemonSessionArtifactsEnvelope,
+  DaemonSessionArtifactFsckResult,
+  DaemonSessionArtifactGcResult,
   DaemonRewindSnapshotInfo,
   DaemonRewindResult,
   ForkSessionRequest,
@@ -3184,12 +3189,73 @@ export class DaemonClient {
     sessionId: string,
     artifactId: string,
     clientId?: string,
+    options?: DaemonSessionArtifactRemoveOptions,
   ): Promise<DaemonSessionArtifactMutationResult> {
     return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
       `/session/${urlEncode(sessionId)}/artifacts/${urlEncode(artifactId)}`,
       'DELETE /session/:id/artifacts/:artifactId',
       {
         method: 'DELETE',
+        clientId,
+        ...(options !== undefined ? { body: options } : {}),
+      },
+    );
+  }
+
+  async pinSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    clientId?: string,
+    options?: DaemonSessionArtifactPinOptions,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/pin`,
+      'POST /session/:id/artifacts/:artifactId/pin',
+      {
+        method: 'POST',
+        clientId,
+        ...(options !== undefined ? { body: options } : {}),
+      },
+    );
+  }
+
+  async unpinSessionArtifact(
+    sessionId: string,
+    artifactId: string,
+    clientId?: string,
+    options?: DaemonSessionArtifactUnpinOptions,
+  ): Promise<DaemonSessionArtifactMutationResult> {
+    return await this.jsonRequest<DaemonSessionArtifactMutationResult>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts/${encodeURIComponent(artifactId)}/pin`,
+      'DELETE /session/:id/artifacts/:artifactId/pin',
+      {
+        method: 'DELETE',
+        clientId,
+        ...(options !== undefined ? { body: options } : {}),
+      },
+    );
+  }
+
+  async fsckSessionArtifacts(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactFsckResult> {
+    return await this.jsonRequest<DaemonSessionArtifactFsckResult>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts/fsck`,
+      'GET /session/:id/artifacts/fsck',
+      { clientId },
+    );
+  }
+
+  async gcSessionArtifacts(
+    sessionId: string,
+    clientId?: string,
+  ): Promise<DaemonSessionArtifactGcResult> {
+    return await this.jsonRequest<DaemonSessionArtifactGcResult>(
+      `/session/${encodeURIComponent(sessionId)}/artifacts/gc`,
+      'POST /session/:id/artifacts/gc',
+      {
+        method: 'POST',
         clientId,
       },
     );

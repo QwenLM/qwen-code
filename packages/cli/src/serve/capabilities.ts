@@ -46,6 +46,7 @@ export const SERVE_CAPABILITY_REGISTRY = {
   session_events: { since: 'v1' },
   session_artifacts: { since: 'v1' },
   session_artifacts_persistence: { since: 'v1' },
+  session_artifacts_content_retention: { since: 'v1' },
   // Daemon emits `slow_client_warning` synthetic frames at 75% queue
   // fill and honors `?maxQueued=N` (range [16, 2048]) on
   // `GET /session/:id/events`. Old daemons silently lack both — SDK
@@ -304,6 +305,7 @@ export interface AdvertiseFeatureToggles {
   voiceTranscriptionAvailable?: boolean;
   sessionShellCommandEnabled?: boolean;
   sessionArtifactsPersistenceAvailable?: boolean;
+  sessionArtifactsContentRetentionAvailable?: boolean;
   rateLimit?: boolean;
   reloadAvailable?: boolean;
   /**
@@ -384,6 +386,10 @@ export const CONDITIONAL_SERVE_FEATURES: ReadonlyMap<
   [
     'session_artifacts_persistence',
     (toggles) => toggles.sessionArtifactsPersistenceAvailable === true,
+  ],
+  [
+    'session_artifacts_content_retention',
+    (toggles) => toggles.sessionArtifactsContentRetentionAvailable === true,
   ],
   ['rate_limit', (toggles) => toggles.rateLimit === true],
   ['workspace_reload', (toggles) => toggles.reloadAvailable === true],

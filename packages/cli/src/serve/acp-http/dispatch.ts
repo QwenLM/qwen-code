@@ -38,7 +38,12 @@ import {
   UnsupportedDeviceFlowProviderError,
   UpstreamDeviceFlowError,
 } from '../auth/device-flow.js';
-import type { HttpAcpBridge } from '@qwen-code/acp-bridge/bridgeTypes';
+import type {
+  HttpAcpBridge,
+  SessionArtifactPinRequest,
+  SessionArtifactRemoveRequest,
+  SessionArtifactUnpinRequest,
+} from '@qwen-code/acp-bridge/bridgeTypes';
 import type { BridgeEvent } from '@qwen-code/acp-bridge/eventBus';
 import {
   SessionShellClientRequiredError,
@@ -185,6 +190,10 @@ const ALL_QWEN_VENDOR_METHODS: readonly string[] = [
   `${QWEN_METHOD_NS}session/lsp`,
   `${QWEN_METHOD_NS}session/artifacts`,
   `${QWEN_METHOD_NS}session/artifacts/add`,
+  `${QWEN_METHOD_NS}session/artifacts/pin`,
+  `${QWEN_METHOD_NS}session/artifacts/unpin`,
+  `${QWEN_METHOD_NS}session/artifacts/fsck`,
+  `${QWEN_METHOD_NS}session/artifacts/gc`,
   `${QWEN_METHOD_NS}session/artifacts/remove`,
   // Wave 1: memory
   `${QWEN_METHOD_NS}workspace/memory`,
@@ -431,6 +440,40 @@ function pickSessionArtifactInput(
     retention,
     clientRetained,
   } as AddSessionArtifactInput;
+}
+
+function pickSessionArtifactPinRequest(
+  params: Record<string, unknown>,
+): SessionArtifactPinRequest {
+  const request: SessionArtifactPinRequest = {};
+  if (params['mode'] !== undefined) {
+    request.mode = params['mode'] as SessionArtifactPinRequest['mode'];
+  }
+  if (params['ttlDays'] !== undefined) {
+    request.ttlDays = params['ttlDays'] as number;
+  }
+  if (params['clientRetained'] !== undefined) {
+    request.clientRetained = params['clientRetained'] as boolean;
+  }
+  return request;
+}
+
+function pickSessionArtifactUnpinRequest(
+  params: Record<string, unknown>,
+): SessionArtifactUnpinRequest {
+  const retention = params['retention'];
+  return retention === undefined
+    ? {}
+    : { retention: retention as SessionArtifactUnpinRequest['retention'] };
+}
+
+function pickSessionArtifactRemoveRequest(
+  params: Record<string, unknown>,
+): SessionArtifactRemoveRequest {
+  const deleteContent = params['deleteContent'];
+  return deleteContent === undefined
+    ? {}
+    : { deleteContent: deleteContent as boolean };
 }
 
 /**
@@ -2558,6 +2601,75 @@ export class AcpDispatcher {
           return;
         }
 
+        case `${QWEN_METHOD_NS}session/artifacts/pin`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const artifactId = String(params['artifactId'] ?? '');
+            if (!artifactId) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, '`artifactId` is required'),
+                );
+              }
+              return;
+            }
+            const result = await this.bridge.pinSessionArtifact(
+              sessionId,
+              artifactId,
+              this.sessionCtx(conn, sessionId, loopback),
+              pickSessionArtifactPinRequest(params),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/artifacts/unpin`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const artifactId = String(params['artifactId'] ?? '');
+            if (!artifactId) {
+              if (id !== undefined) {
+                conn.sendConn(
+                  error(id, RPC.INVALID_PARAMS, '`artifactId` is required'),
+                );
+              }
+              return;
+            }
+            const result = await this.bridge.unpinSessionArtifact(
+              sessionId,
+              artifactId,
+              this.sessionCtx(conn, sessionId, loopback),
+              pickSessionArtifactUnpinRequest(params),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/artifacts/fsck`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          if (!this.requireOwned(conn, sessionId, id)) return;
+          const result = await this.bridge.fsckSessionArtifacts(
+            sessionId,
+            this.sessionCtx(conn, sessionId, loopback),
+          );
+          this.replyConn(conn, id, result as unknown);
+          return;
+        }
+
+        case `${QWEN_METHOD_NS}session/artifacts/gc`: {
+          const sessionId = String(params['sessionId'] ?? '');
+          await this.withMutableOwned(conn, sessionId, id, async () => {
+            const result = await this.bridge.gcSessionArtifacts(
+              sessionId,
+              this.sessionCtx(conn, sessionId, loopback),
+            );
+            this.replyConn(conn, id, result as unknown);
+          });
+          return;
+        }
+
         case `${QWEN_METHOD_NS}session/artifacts/remove`: {
           const sessionId = String(params['sessionId'] ?? '');
           await this.withMutableOwned(conn, sessionId, id, async () => {
@@ -2574,6 +2686,7 @@ export class AcpDispatcher {
               sessionId,
               artifactId,
               this.sessionCtx(conn, sessionId, loopback),
+              pickSessionArtifactRemoveRequest(params),
             );
             this.replyConn(conn, id, result as unknown);
           });

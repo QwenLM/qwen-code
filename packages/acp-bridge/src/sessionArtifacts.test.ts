@@ -15,6 +15,7 @@ import {
   SessionArtifactStore,
   SessionArtifactValidationError,
 } from './sessionArtifacts.js';
+import { SessionArtifactContentStore } from './sessionArtifactContentStore.js';
 import type {
   RebuiltSessionArtifactSnapshot,
   SessionArtifactEventRecordPayload,
@@ -3278,5 +3279,474 @@ describe('SessionArtifactStore', () => {
         }),
       ],
     });
+  });
+});
+
+describe('SessionArtifactContentStore', () => {
+  let workspace: string;
+  let contentRoot: string;
+
+  beforeEach(async () => {
+    workspace = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-artifacts-'));
+    contentRoot = await fs.mkdtemp(
+      path.join(os.tmpdir(), 'qwen-artifact-content-'),
+    );
+  });
+
+  afterEach(async () => {
+    vi.restoreAllMocks();
+    await fs.rm(workspace, { recursive: true, force: true });
+    await fs.rm(contentRoot, { recursive: true, force: true });
+  });
+
+  async function workspaceArtifact(name: string, body: string) {
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    await fs.writeFile(path.join(workspace, 'reports', name), body);
+    const store = new SessionArtifactStore({
+      sessionId: 'content-session',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [{ title: name, workspacePath: `reports/${name}` }],
+      { strict: true },
+    );
+    return (await store.list()).artifacts[0]!;
+  }
+
+  function fakeContentId(label: string): string {
+    return `${createHash('sha256').update(label).digest('hex')}-${createHash(
+      'sha256',
+    )
+      .update(`suffix:${label}`)
+      .digest('hex')
+      .slice(0, 16)}`;
+  }
+
+  async function writeQuotaManifest(label: string, sizeBytes: number) {
+    const contentId = fakeContentId(label);
+    await fs.mkdir(path.join(contentRoot, contentId), { recursive: true });
+    await fs.writeFile(
+      path.join(contentRoot, contentId, 'manifest.json'),
+      `${JSON.stringify({
+        v: 1,
+        contentId,
+        sessionId: 'content-session',
+        artifactId: contentId,
+        workspacePath: `reports/${contentId}.txt`,
+        sha256: '0'.repeat(64),
+        sizeBytes,
+        createdAt: '2026-07-04T00:00:00.000Z',
+      })}\n`,
+    );
+    return contentId;
+  }
+
+  it('copies pinned workspace content with a path-safe content id', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('report.txt', 'hello');
+
+    const ref = await contentStore.pinWorkspaceFile(
+      'session/with/slash',
+      artifact,
+      workspace,
+    );
+
+    expect(ref).toMatchObject({
+      kind: 'managed_copy',
+      sha256: createHash('sha256').update('hello').digest('hex'),
+      sizeBytes: 5,
+    });
+    expect(ref!.contentId).toMatch(/^[a-f0-9]{64}-[a-f0-9]{16}$/);
+    await expect(
+      fs.readFile(path.join(contentRoot, ref!.contentId, 'content'), 'utf8'),
+    ).resolves.toBe('hello');
+    await expect(contentStore.fsck([ref!])).resolves.toEqual({
+      checked: 1,
+      missing: [],
+      hashMismatches: [],
+    });
+  });
+
+  it('treats fsck read races as missing content', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('race.txt', 'race');
+    const ref = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+    const contentPath = path.join(contentRoot, ref.contentId, 'content');
+    await fs.rm(contentPath);
+    await fs.mkdir(contentPath);
+
+    await expect(contentStore.fsck([ref])).resolves.toEqual({
+      checked: 1,
+      missing: [ref.contentId],
+      hashMismatches: [],
+    });
+  });
+
+  it('reuses an existing retained content copy for repeated pins', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('repeat.txt', 'repeat');
+
+    const first = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+    const second = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+
+    expect(second.contentId).toBe(first.contentId);
+    await expect(contentStore.fsck([second])).resolves.toEqual({
+      checked: 1,
+      missing: [],
+      hashMismatches: [],
+    });
+  });
+
+  it('reuses repeated pins even when the store is otherwise near quota', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('repeat-near-quota.txt', 'repeat');
+    const first = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+    await writeQuotaManifest('quota-filler', 256 * 1024 * 1024);
+
+    const second = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+
+    expect(second.contentId).toBe(first.contentId);
+  });
+
+  it('caches total content bytes after the first quota scan', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const first = await workspaceArtifact('cache-a.txt', 'a');
+    const second = await workspaceArtifact('cache-b.txt', 'b');
+    const readdirSpy = vi.spyOn(fs, 'readdir');
+
+    await contentStore.pinWorkspaceFile('content-session', first, workspace);
+    const rootScansAfterFirst = readdirSpy.mock.calls.filter(
+      ([dir]) => String(dir) === contentRoot,
+    ).length;
+
+    await contentStore.pinWorkspaceFile('content-session', second, workspace);
+    const rootScansAfterSecond = readdirSpy.mock.calls.filter(
+      ([dir]) => String(dir) === contentRoot,
+    ).length;
+
+    expect(rootScansAfterFirst).toBe(1);
+    expect(rootScansAfterSecond).toBe(rootScansAfterFirst);
+  });
+
+  it('rejects files over the per-artifact content limit before copying', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const oversizedPath = path.join(workspace, 'reports', 'oversized.bin');
+    await fs.writeFile(oversizedPath, '');
+    await fs.truncate(oversizedPath, 50 * 1024 * 1024 + 1);
+    const store = new SessionArtifactStore({
+      sessionId: 'content-session',
+      workspaceCwd: workspace,
+    });
+    await store.upsertMany(
+      [{ title: 'oversized.bin', workspacePath: 'reports/oversized.bin' }],
+      { strict: true },
+    );
+    const artifact = (await store.list()).artifacts[0]!;
+
+    await expect(
+      contentStore.pinWorkspaceFile('content-session', artifact, workspace),
+    ).rejects.toThrow(SessionArtifactValidationError);
+  });
+
+  it('rejects non-regular workspace files for content retention', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const artifact = {
+      ...(await workspaceArtifact('regular.txt', 'regular')),
+      workspacePath: 'reports',
+    };
+
+    await expect(
+      contentStore.pinWorkspaceFile('content-session', artifact, workspace),
+    ).rejects.toThrow(SessionArtifactValidationError);
+  });
+
+  it('rejects workspace symlinks that escape before copying content', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const outside = await fs.mkdtemp(path.join(os.tmpdir(), 'qwen-outside-'));
+    try {
+      await fs.writeFile(path.join(outside, 'secret.txt'), 'secret');
+      await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+      await fs.symlink(
+        path.join(outside, 'secret.txt'),
+        path.join(workspace, 'reports', 'link.txt'),
+      );
+      const artifact = {
+        ...(await workspaceArtifact('regular.txt', 'regular')),
+        workspacePath: 'reports/link.txt',
+      };
+
+      await expect(
+        contentStore.pinWorkspaceFile('content-session', artifact, workspace),
+      ).rejects.toThrow(SessionArtifactValidationError);
+    } finally {
+      await fs.rm(outside, { recursive: true, force: true });
+    }
+  });
+
+  it('rejects hardlinked workspace files for content retention', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    await fs.mkdir(path.join(workspace, 'reports'), { recursive: true });
+    const originalPath = path.join(workspace, 'reports', 'original.txt');
+    const hardlinkPath = path.join(workspace, 'reports', 'hardlink.txt');
+    await fs.writeFile(originalPath, 'hardlinked');
+    try {
+      await fs.link(originalPath, hardlinkPath);
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EPERM' || code === 'EACCES' || code === 'EXDEV') {
+        return;
+      }
+      throw error;
+    }
+    const artifact = {
+      ...(await workspaceArtifact('regular.txt', 'regular')),
+      workspacePath: 'reports/hardlink.txt',
+    };
+
+    await expect(
+      contentStore.pinWorkspaceFile('content-session', artifact, workspace),
+    ).rejects.toThrow(SessionArtifactValidationError);
+  });
+
+  it('rejects new content over total quota and cleans up temporary files', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('over-quota.txt', 'new-content');
+    await writeQuotaManifest('quota-filler', 256 * 1024 * 1024);
+
+    await expect(
+      contentStore.pinWorkspaceFile('content-session', artifact, workspace),
+    ).rejects.toThrow(SessionArtifactValidationError);
+    await expect(fs.readdir(path.join(contentRoot, '.tmp'))).resolves.toEqual(
+      [],
+    );
+  });
+
+  it('counts malformed manifest content files against total quota', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('malformed-quota.txt', 'data');
+    const contentId = fakeContentId('malformed-quota');
+    const contentDir = path.join(contentRoot, contentId);
+    await fs.mkdir(contentDir, { recursive: true });
+    await fs.writeFile(
+      path.join(contentDir, 'manifest.json'),
+      '{"sizeBytes":"bad"}\n',
+    );
+    await fs.writeFile(path.join(contentDir, 'content'), '');
+    await fs.truncate(path.join(contentDir, 'content'), 256 * 1024 * 1024);
+
+    await expect(
+      contentStore.pinWorkspaceFile('content-session', artifact, workspace),
+    ).rejects.toThrow(SessionArtifactValidationError);
+  });
+
+  it('cleans stale temporary content files during gc', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const tmpDir = path.join(contentRoot, '.tmp');
+    await fs.mkdir(tmpDir, { recursive: true });
+    await fs.writeFile(path.join(tmpDir, 'stale.bin'), 'stale');
+
+    await contentStore.gc('content-session', new Set());
+
+    await expect(fs.readdir(tmpDir)).resolves.toEqual([]);
+  });
+
+  it('logs and retains content when gc cannot read its manifest', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const contentId = fakeContentId('bad-manifest');
+    const contentDir = path.join(contentRoot, contentId);
+    await fs.mkdir(contentDir, { recursive: true });
+    await fs.writeFile(path.join(contentDir, 'manifest.json'), '{bad json');
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      await expect(
+        contentStore.gc('content-session', new Set()),
+      ).resolves.toEqual({
+        removed: [],
+        retained: [contentId],
+      });
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('content_gc_manifest_read_failed');
+      expect(logged).toContain(contentId);
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
+  it('retains leased content during gc until the pin flow releases it', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const ref = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      await workspaceArtifact('leased.txt', 'leased'),
+      workspace,
+    ))!;
+
+    await expect(
+      contentStore.gc('content-session', new Set()),
+    ).resolves.toMatchObject({
+      removed: [],
+      retained: expect.arrayContaining([ref.contentId]),
+    });
+
+    const releaseGcLease = contentStore.leaseContentRefs([ref]);
+    contentStore.releaseContentRef(ref);
+    await expect(
+      contentStore.gc('content-session', new Set()),
+    ).resolves.toMatchObject({
+      removed: [],
+      retained: expect.arrayContaining([ref.contentId]),
+    });
+
+    releaseGcLease();
+    await expect(
+      contentStore.gc('content-session', new Set()),
+    ).resolves.toMatchObject({
+      removed: [ref.contentId],
+    });
+  });
+
+  it('serializes quota checks across concurrent pins', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const first = await workspaceArtifact('concurrent-a.txt', 'abc');
+    const second = await workspaceArtifact('concurrent-b.txt', 'def');
+    await writeQuotaManifest('quota-filler', 256 * 1024 * 1024 - 3);
+
+    const results = await Promise.allSettled([
+      contentStore.pinWorkspaceFile('content-session', first, workspace),
+      contentStore.pinWorkspaceFile('content-session', second, workspace),
+    ]);
+
+    expect(
+      results.filter((result) => result.status === 'fulfilled'),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === 'rejected'),
+    ).toHaveLength(1);
+  });
+
+  it('reports missing and hash-mismatched retained content', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('report.txt', 'hello');
+    const ref = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+
+    await fs.writeFile(path.join(contentRoot, ref.contentId, 'content'), 'bad');
+    await expect(contentStore.fsck([ref])).resolves.toMatchObject({
+      checked: 1,
+      hashMismatches: [ref.contentId],
+    });
+
+    await fs.rm(path.join(contentRoot, ref.contentId, 'content'));
+    await expect(contentStore.fsck([ref])).resolves.toMatchObject({
+      checked: 1,
+      missing: [ref.contentId],
+    });
+  });
+
+  it('validates retained content refs against manifest and content size', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const artifact = await workspaceArtifact('verify.txt', 'hello');
+    const ref = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      artifact,
+      workspace,
+    ))!;
+
+    await expect(
+      contentStore.verifyContentRef('content-session', artifact.id, ref),
+    ).resolves.toBeUndefined();
+
+    await expect(
+      contentStore.verifyContentRef('other-session', artifact.id, ref),
+    ).resolves.toBe('restore_validation_failed');
+
+    await fs.writeFile(
+      path.join(contentRoot, ref.contentId, 'content'),
+      'HELLO',
+    );
+    await expect(
+      contentStore.verifyContentRef('content-session', artifact.id, ref),
+    ).resolves.toBe('content_hash_mismatch');
+    await expect(contentStore.fsck([ref])).resolves.toMatchObject({
+      hashMismatches: [ref.contentId],
+    });
+
+    await fs.writeFile(path.join(contentRoot, ref.contentId, 'content'), 'bad');
+    await expect(
+      contentStore.verifyContentRef('content-session', artifact.id, ref),
+    ).resolves.toBe('content_hash_mismatch');
+
+    await fs.rm(path.join(contentRoot, ref.contentId, 'content'));
+    await expect(
+      contentStore.verifyContentRef('content-session', artifact.id, ref),
+    ).resolves.toBe('content_missing');
+  });
+
+  it('garbage-collects only unreferenced content for the requested session', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const kept = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      await workspaceArtifact('kept.txt', 'kept'),
+      workspace,
+    ))!;
+    const orphaned = (await contentStore.pinWorkspaceFile(
+      'content-session',
+      await workspaceArtifact('orphaned.txt', 'orphaned'),
+      workspace,
+    ))!;
+    const otherSession = (await contentStore.pinWorkspaceFile(
+      'other-session',
+      await workspaceArtifact('other.txt', 'other'),
+      workspace,
+    ))!;
+    contentStore.releaseContentRef(kept);
+    contentStore.releaseContentRef(orphaned);
+    contentStore.releaseContentRef(otherSession);
+
+    await expect(
+      contentStore.gc('content-session', new Set([kept.contentId])),
+    ).resolves.toEqual({
+      removed: [orphaned.contentId],
+      retained: expect.arrayContaining([
+        kept.contentId,
+        otherSession.contentId,
+      ]),
+    });
+    await expect(
+      fs.access(path.join(contentRoot, orphaned.contentId)),
+    ).rejects.toMatchObject({ code: 'ENOENT' });
+    await expect(
+      fs.access(path.join(contentRoot, kept.contentId)),
+    ).resolves.toBeUndefined();
+    await expect(
+      fs.access(path.join(contentRoot, otherSession.contentId)),
+    ).resolves.toBeUndefined();
   });
 });
