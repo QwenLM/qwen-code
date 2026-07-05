@@ -89,29 +89,33 @@ function renderSidebar(
     onOpenDaemonStatus: () => void;
     onLoadSession: (sessionId: string) => Promise<void> | void;
     onError: (error: unknown, message: string) => void;
+    sessionListReloadToken: number;
   }> = {},
-): HTMLElement {
+): { container: HTMLElement; rerender: (props: typeof overrides) => void } {
   const container = document.createElement('div');
   document.body.appendChild(container);
   const root = createRoot(container);
-  act(() => {
-    root.render(
-      <I18nProvider language="en">
-        <WebShellSidebar
-          collapsed={collapsed}
-          onCollapsedChange={noop}
-          onOpenSettings={noop}
-          onOpenDaemonStatus={noop}
-          onNewSession={() => false}
-          onLoadSession={noop}
-          onError={noop}
-          {...overrides}
-        />
-      </I18nProvider>,
-    );
-  });
+  const doRender = (props: typeof overrides) => {
+    act(() => {
+      root.render(
+        <I18nProvider language="en">
+          <WebShellSidebar
+            collapsed={collapsed}
+            onCollapsedChange={noop}
+            onOpenSettings={noop}
+            onOpenDaemonStatus={noop}
+            onNewSession={() => false}
+            onLoadSession={noop}
+            onError={noop}
+            {...props}
+          />
+        </I18nProvider>,
+      );
+    });
+  };
+  doRender(overrides);
   mounted.push({ root, container });
-  return container;
+  return { container, rerender: doRender };
 }
 
 beforeEach(() => {
@@ -150,7 +154,7 @@ afterEach(() => {
 
 describe('WebShellSidebar — version footer', () => {
   it('shows the qwen-code version in the footer when expanded', () => {
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     const badge = container.querySelector('[title="Qwen Code v1.2.3"]');
     expect(badge).not.toBeNull();
     expect(badge?.textContent).toBe('v1.2.3');
@@ -158,7 +162,7 @@ describe('WebShellSidebar — version footer', () => {
 
   it('renders a non-semver fallback (e.g. "unknown") without a bogus "v" prefix', () => {
     mockConnection.capabilities = { qwenCodeVersion: 'unknown' };
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     const badge = container.querySelector('[title="Qwen Code unknown"]');
     expect(badge).not.toBeNull();
     expect(badge?.textContent).toBe('unknown');
@@ -166,14 +170,14 @@ describe('WebShellSidebar — version footer', () => {
   });
 
   it('hides the version when the sidebar is collapsed', () => {
-    const container = renderSidebar(true);
+    const { container } = renderSidebar(true);
     expect(container.querySelector('[title="Qwen Code v1.2.3"]')).toBeNull();
     expect(container.textContent ?? '').not.toContain('v1.2.3');
   });
 
   it('renders no version badge when the daemon reports none', () => {
     mockConnection.capabilities = undefined;
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     expect(container.textContent ?? '').not.toMatch(/v\d/);
   });
 });
@@ -181,7 +185,7 @@ describe('WebShellSidebar — version footer', () => {
 describe('WebShellSidebar — daemon status entry', () => {
   it('invokes onOpenDaemonStatus when the footer button is clicked', () => {
     const onOpenDaemonStatus = vi.fn();
-    const container = renderSidebar(false, { onOpenDaemonStatus });
+    const { container } = renderSidebar(false, { onOpenDaemonStatus });
     const button = container.querySelector<HTMLButtonElement>(
       '[aria-label="Daemon Status"]',
     );
@@ -194,7 +198,7 @@ describe('WebShellSidebar — daemon status entry', () => {
 
   it('still exposes the daemon status button when collapsed', () => {
     const onOpenDaemonStatus = vi.fn();
-    const container = renderSidebar(true, { onOpenDaemonStatus });
+    const { container } = renderSidebar(true, { onOpenDaemonStatus });
     const button = container.querySelector<HTMLButtonElement>(
       '[aria-label="Daemon Status"]',
     );
@@ -225,7 +229,7 @@ async function clickAsync(el: Element | null): Promise<void> {
 describe('WebShellSidebar — session export', () => {
   it('hides export action when daemon does not advertise session_export', () => {
     mockActive.sessions = [makeSession('session-1')];
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
 
     expect(
       container.querySelector('[aria-label="Export conversation record"]'),
@@ -248,7 +252,7 @@ describe('WebShellSidebar — session export', () => {
     const clickSpy = vi
       .spyOn(HTMLAnchorElement.prototype, 'click')
       .mockImplementation(() => {});
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     const button = container.querySelector<HTMLButtonElement>(
       '[aria-label="Export conversation record"]',
     );
@@ -287,7 +291,7 @@ describe('WebShellSidebar — session export', () => {
     });
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     const onLoadSession = vi.fn();
-    const container = renderSidebar(false, { onLoadSession });
+    const { container } = renderSidebar(false, { onLoadSession });
     const exportButton = container.querySelector<HTMLButtonElement>(
       '[aria-label="Export conversation record"]',
     );
@@ -323,7 +327,7 @@ describe('WebShellSidebar — session export', () => {
     const error = new Error('download failed');
     mockExportSession.mockRejectedValueOnce(error);
     const onError = vi.fn();
-    const container = renderSidebar(false, { onError });
+    const { container } = renderSidebar(false, { onError });
     const button = container.querySelector<HTMLButtonElement>(
       '[aria-label="Export conversation record"]',
     );
@@ -341,7 +345,7 @@ describe('WebShellSidebar — session export', () => {
 describe('WebShellSidebar — archive actions', () => {
   it('archives an active session from the quick action button', async () => {
     mockActive.sessions = [makeSession('aaaaaaaa')];
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     const archiveBtn = container.querySelector<HTMLButtonElement>(
       '[aria-label="Archive"]',
     );
@@ -355,7 +359,7 @@ describe('WebShellSidebar — archive actions', () => {
   it('disables archiving the current session', () => {
     mockActive.sessions = [makeSession('current1')];
     mockConnection.sessionId = 'current1';
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     const archiveBtn = container.querySelector<HTMLButtonElement>(
       '[aria-label="Archive"]',
     );
@@ -367,7 +371,7 @@ describe('WebShellSidebar — archive actions', () => {
 
   it('opens the overflow menu with rename, archive, and delete', () => {
     mockActive.sessions = [makeSession('aaaaaaaa')];
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     click(container.querySelector('[aria-label="More actions"]'));
     const menu = container.querySelector('[role="menu"]');
     expect(menu).not.toBeNull();
@@ -379,7 +383,7 @@ describe('WebShellSidebar — archive actions', () => {
 
   it('archives a non-current session from the overflow menu', async () => {
     mockActive.sessions = [makeSession('aaaaaaaa')];
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     click(container.querySelector('[aria-label="More actions"]'));
     const archiveItem = Array.from(
       container.querySelectorAll<HTMLButtonElement>('[role="menuitem"]'),
@@ -390,7 +394,7 @@ describe('WebShellSidebar — archive actions', () => {
 
   it('reveals archived sessions on demand and restores them', async () => {
     mockArchived.sessions = [makeSession('bbbbbbbb', { isArchived: true })];
-    const container = renderSidebar(false);
+    const { container } = renderSidebar(false);
     // Collapsed by default: the archived rows (and their Restore button) are
     // not rendered until the section is expanded.
     expect(container.querySelector('[aria-label="Restore"]')).toBeNull();
@@ -404,5 +408,104 @@ describe('WebShellSidebar — archive actions', () => {
     expect(restoreBtn).not.toBeNull();
     await clickAsync(restoreBtn);
     expect(mockArchived.unarchiveSession).toHaveBeenCalledWith('bbbbbbbb');
+  });
+});
+
+describe('WebShellSidebar — sessionListReloadToken effect', () => {
+  it('calls reload when token changes', async () => {
+    mockActive.reload.mockResolvedValue(undefined);
+    const { rerender } = renderSidebar(false, {
+      sessionListReloadToken: 0,
+    });
+    expect(mockActive.reload).not.toHaveBeenCalled();
+
+    rerender({ sessionListReloadToken: 1 });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockActive.reload).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not call reload when token is undefined', async () => {
+    mockActive.reload.mockResolvedValue(undefined);
+    const { rerender } = renderSidebar(false);
+
+    rerender({});
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockActive.reload).not.toHaveBeenCalled();
+  });
+
+  it('does not call reload when token is unchanged', async () => {
+    mockActive.reload.mockResolvedValue(undefined);
+    const { rerender } = renderSidebar(false, {
+      sessionListReloadToken: 1,
+    });
+    mockActive.reload.mockClear();
+
+    rerender({ sessionListReloadToken: 1 });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockActive.reload).not.toHaveBeenCalled();
+  });
+
+  it('skips reload when document is hidden', async () => {
+    mockActive.reload.mockResolvedValue(undefined);
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => true,
+    });
+    const { rerender } = renderSidebar(false, {
+      sessionListReloadToken: 0,
+    });
+
+    rerender({ sessionListReloadToken: 1 });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockActive.reload).not.toHaveBeenCalled();
+
+    Object.defineProperty(document, 'hidden', {
+      configurable: true,
+      get: () => false,
+    });
+  });
+
+  it('skips reload when a poll is already in flight', async () => {
+    let resolveFirstPoll: (() => void) | undefined;
+    mockActive.reload.mockReturnValueOnce(
+      new Promise<void>((resolve) => {
+        resolveFirstPoll = resolve;
+      }),
+    );
+    const { rerender } = renderSidebar(false, {
+      sessionListReloadToken: 0,
+    });
+
+    rerender({ sessionListReloadToken: 1 });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockActive.reload).toHaveBeenCalledTimes(1);
+
+    mockActive.reload.mockResolvedValue(undefined);
+    rerender({ sessionListReloadToken: 2 });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockActive.reload).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      resolveFirstPoll?.();
+      await Promise.resolve();
+    });
+
+    rerender({ sessionListReloadToken: 3 });
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(mockActive.reload).toHaveBeenCalledTimes(2);
   });
 });

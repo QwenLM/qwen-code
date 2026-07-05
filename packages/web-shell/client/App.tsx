@@ -1359,7 +1359,6 @@ export function App({
         clearComposerOnPromptStart?: boolean;
       },
     ) => {
-      clearFollowup();
       const isUserPrompt = !text.trimStart().startsWith('/');
       const previousLastSubmittedPrompt = lastSubmittedPromptRef.current;
       const previousLastSubmittedImages = lastSubmittedImagesRef.current;
@@ -1386,7 +1385,7 @@ export function App({
           );
           setIsPreparingPrompt(false);
           // Restore retry-critical refs so Ctrl+Y doesn't resend the
-          // cancelled prompt. clearFollowup is not rolled back.
+          // cancelled prompt.
           lastSubmittedPromptRef.current = previousLastSubmittedPrompt;
           lastSubmittedImagesRef.current = previousLastSubmittedImages;
           retriedTurnErrorIdRef.current = previousRetriedTurnErrorId;
@@ -1402,6 +1401,7 @@ export function App({
       if (!onSubmitBeforeRef.current && shouldShowPreparing) {
         setIsPreparingPrompt(true);
       }
+      clearFollowup();
       try {
         await ensureSessionForPrompt();
       } finally {
@@ -1428,7 +1428,9 @@ export function App({
         // Schedule an additional delayed reload to account for daemon-side
         // session registration lag — the immediate reload above may return
         // a list that doesn't yet include the newly created session.
-        clearTimeout(delayedReloadTimerRef.current);
+        if (delayedReloadTimerRef.current !== null) {
+          clearTimeout(delayedReloadTimerRef.current);
+        }
         delayedReloadTimerRef.current = setTimeout(() => {
           setSessionListReloadToken((n) => n + 1);
         }, 2000);
