@@ -176,7 +176,7 @@ jobs:
                 DRY_RUN=true
                 if [[ "${ISSUE_STATE}" != 'open' ]]; then
                   echo "🧭 comment ignored: issue/PR is not open (#${ISSUE_NUMBER:-n/a})"
-                elif [[ "${COMMENT_BODY}" != @qwen-code\ /autofix* ]]; then
+                elif ! grep -Eq '^[[:space:]]*@qwen-code[[:space:]]+/autofix([[:space:]]|$)' <<< "${COMMENT_BODY}"; then
                   echo "🧭 comment ignored: not an autofix command"
                 else
                   sender_permission=''
@@ -194,7 +194,9 @@ jobs:
                   if [[ "${sender_is_trusted}" != 'true' ]]; then
                     echo "🧭 comment ignored: sender_permission='${sender_permission:-none}' sender_trusted=false"
                   else
-                    [[ "${COMMENT_BODY}" == "@qwen-code /autofix run"* ]] && DRY_RUN=false
+                    if grep -Eq '^[[:space:]]*@qwen-code[[:space:]]+/autofix[[:space:]]+run([[:space:]]|$)' <<< "${COMMENT_BODY}"; then
+                      DRY_RUN=false
+                    fi
                     if [[ "${COMMENT_TARGET_IS_PR}" == "true" ]]; then
                       DO_REVIEW=true
                       ROUTE_PR="${ISSUE_NUMBER}"
@@ -211,8 +213,9 @@ jobs:
           # Forcing a specific issue/PR implies running that phase only for
           # explicit manual dispatch. Event payload numbers still flow to the
           # phase jobs after routing, but must not bypass the label/schedule gates.
-          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${ROUTE_ISSUE}" ]] && DO_ISSUE=true
-          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${ROUTE_PR}" ]] && DO_REVIEW=true
+          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${ROUTE_ISSUE}" && -z "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=false
+          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${ROUTE_PR}" && -z "${ROUTE_ISSUE}" ]] && DO_ISSUE=false && DO_REVIEW=true
+          [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${ROUTE_ISSUE}" && -n "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=true
           echo "do_issue=${DO_ISSUE}" >> "${GITHUB_OUTPUT}"
           echo "do_review=${DO_REVIEW}" >> "${GITHUB_OUTPUT}"
           echo "dry_run=${DRY_RUN}" >> "${GITHUB_OUTPUT}"

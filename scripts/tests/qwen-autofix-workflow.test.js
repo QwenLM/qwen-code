@@ -169,10 +169,13 @@ describe('qwen-autofix workflow', () => {
       '[[ "${EVENT_NAME}" != \'workflow_dispatch\' && "${EVENT_NAME}" != \'issue_comment\' ]] && ! jq -e',
     );
     expect(workflow).toContain(
-      '"${EVENT_NAME}" == \'workflow_dispatch\' && -n "${ROUTE_ISSUE}"',
+      '[[ "${EVENT_NAME}" == \'workflow_dispatch\' && -n "${ROUTE_ISSUE}" && -z "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=false',
     );
     expect(workflow).toContain(
-      '"${EVENT_NAME}" == \'workflow_dispatch\' && -n "${ROUTE_PR}"',
+      '[[ "${EVENT_NAME}" == \'workflow_dispatch\' && -n "${ROUTE_PR}" && -z "${ROUTE_ISSUE}" ]] && DO_ISSUE=false && DO_REVIEW=true',
+    );
+    expect(workflow).toContain(
+      '[[ "${EVENT_NAME}" == \'workflow_dispatch\' && -n "${ROUTE_ISSUE}" && -n "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=true',
     );
     expect(workflow).toContain(
       'is missing ${READY_FOR_AGENT_LABEL}; skipping.',
@@ -195,8 +198,8 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).toContain("issue_comment:\n    types:\n      - 'created'");
     for (const text of [
       "COMMENT_BODY: '${{ github.event.comment.body }}'",
-      '[[ "${COMMENT_BODY}" != @qwen-code\\ /autofix* ]]',
-      '[[ "${COMMENT_BODY}" == "@qwen-code /autofix run"* ]] && DRY_RUN=false',
+      "grep -Eq '^[[:space:]]*@qwen-code[[:space:]]+/autofix([[:space:]]|$)'",
+      "grep -Eq '^[[:space:]]*@qwen-code[[:space:]]+/autofix[[:space:]]+run([[:space:]]|$)'",
       'ROUTE_PR="${ISSUE_NUMBER}"',
       'ROUTE_ISSUE="${ISSUE_NUMBER}"',
       'dry_run=${DRY_RUN}',
@@ -206,6 +209,12 @@ describe('qwen-autofix workflow', () => {
     ]) {
       expect(`${routeStep}\n${workflow}`).toContain(text);
     }
+    expect(routeStep).not.toContain(
+      '[[ "${COMMENT_BODY}" != @qwen-code\\ /autofix* ]]',
+    );
+    expect(routeStep).not.toContain(
+      '[[ "${COMMENT_BODY}" == "@qwen-code /autofix run"* ]]',
+    );
   });
 
   it('keeps forced issue routing bounded to open issues', () => {
