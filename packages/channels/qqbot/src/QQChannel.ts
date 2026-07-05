@@ -33,6 +33,7 @@ import {
   existsSync,
   mkdirSync,
   renameSync,
+  unlinkSync,
 } from 'node:fs';
 import { join } from 'node:path';
 import { OpCode, Intent } from './types.js';
@@ -263,7 +264,7 @@ export class QQChannel extends ChannelBase {
                   })
                   .catch((err) => {
                     process.stderr.write(
-                      `[QQ:${this.name}] Cron flush send error: ${err}\n`,
+                      `[QQ:${this.name}] Cron flush send error: ${sanitizeLogText(err instanceof Error ? err.message : String(err), 200)}\n`,
                     );
                     const retries =
                       (this.cronRetryCount.get(sessionId) ?? 0) + 1;
@@ -295,12 +296,15 @@ export class QQChannel extends ChannelBase {
                             `[QQ:${this.name}] Cron flush retry error: ${sanitizeLogText(retryErr instanceof Error ? retryErr.message : String(retryErr), 200)}
 `,
                           );
+                          this.cronRetryCount.delete(sessionId);
+                          this.cronBuffer.delete(sessionId);
                         });
                     }, 2000).unref();
                   });
                 return;
               }
             }
+            this.cronRetryCount.delete(sessionId);
             this.cronBuffer.delete(sessionId);
           }, 2000).unref();
         });
@@ -952,11 +956,16 @@ export class QQChannel extends ChannelBase {
     if (this.saveTimer) clearTimeout(this.saveTimer);
     this.saveTimer = setTimeout(() => {
       if (this.disposed) return;
+      const tmpPath = this.qqStatePath + '.tmp';
       try {
-        const tmpPath = this.qqStatePath + '.tmp';
         writeFileSync(tmpPath, this.serializeQQState(), { mode: 0o600 });
         renameSync(tmpPath, this.qqStatePath);
       } catch (e) {
+        try {
+          unlinkSync(tmpPath);
+        } catch {
+          /* best-effort cleanup */
+        }
         process.stderr.write(
           `[QQ:${this.name}] saveQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
 `,
@@ -1003,11 +1012,16 @@ export class QQChannel extends ChannelBase {
       clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
+    const tmpPath = this.qqStatePath + '.tmp';
     try {
-      const tmpPath = this.qqStatePath + '.tmp';
       writeFileSync(tmpPath, this.serializeQQState(), { mode: 0o600 });
       renameSync(tmpPath, this.qqStatePath);
     } catch (e) {
+      try {
+        unlinkSync(tmpPath);
+      } catch {
+        /* best-effort cleanup */
+      }
       process.stderr.write(
         `[QQ:${this.name}] flushQQState write failed: ${sanitizeLogText(e instanceof Error ? e.message : String(e), 200)}
 `,
@@ -1742,7 +1756,7 @@ export class QQChannel extends ChannelBase {
         for (const [key, ts] of this.crossEventDedup) {
           if (ts < cutoff) this.crossEventDedup.delete(key);
         }
-        if (this.seenMessages.size === 0) {
+        if (this.seenMessages.size === 0 && this.crossEventDedup.size === 0) {
           clearInterval(this.seenCleanupTimer!);
           this.seenCleanupTimer = null;
         }
@@ -1987,10 +2001,6 @@ export class QQChannel extends ChannelBase {
     if (!result) return;
     const { isSlash, text, senderName, isAtBot } = result;
 
-    if (isAtBot) {
-      this.setReplyMsgId(chatId, event.id);
-    }
-
     if (policy === 'keyword') {
       if (!this._keywordTriggerCache) {
         this._keywordTriggerCache = (this.qqConfig.keywordTriggers ?? [])
@@ -2014,6 +2024,10 @@ export class QQChannel extends ChannelBase {
     // the policy check would consume dedup slots for messages that may later be filtered out.
     if (this.isDuplicate(event.id) || this.isCrossEventDuplicate(chatId, event))
       return;
+
+    if (isAtBot) {
+      this.setReplyMsgId(chatId, event.id);
+    }
 
     this.handleInbound({
       channelName: this.name,

@@ -1055,6 +1055,17 @@ describe('sendMessage', () => {
     // No second call — 429 bails immediately without fallback or rollback
     expect(mockSendQQMessage).toHaveBeenCalledTimes(1);
   });
+  it('sendMessage suppressed when groupActiveMsgEnabled=false (no msgId)', async () => {
+    const ch = makeChannel();
+    const chp = ch as unknown as Record<string, unknown>;
+    const groupActiveMsgEnabled = chp['groupActiveMsgEnabled'] as Map<
+      string,
+      boolean
+    >;
+    groupActiveMsgEnabled.set('test-chat-id', false);
+    await ch.sendMessage('test-chat-id', 'test');
+    expect(mockSendQQMessage).not.toHaveBeenCalled();
+  });
 });
 
 describe('setReplyMsgId', () => {
