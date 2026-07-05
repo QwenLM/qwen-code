@@ -166,7 +166,7 @@ describe('qwen-autofix workflow', () => {
       '(.labels // []) | map(.name) as $labels | ($labels | index($ready))',
     );
     expect(workflow).toContain(
-      '[[ "${EVENT_NAME}" != \'workflow_dispatch\' && "${EVENT_NAME}" != \'issue_comment\' ]] && ! jq -e',
+      '[[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e',
     );
     expect(workflow).toContain(
       '[[ "${EVENT_NAME}" == \'workflow_dispatch\' && -n "${ROUTE_ISSUE}" && -z "${ROUTE_PR}" ]] && DO_ISSUE=true && DO_REVIEW=false',
@@ -194,32 +194,18 @@ describe('qwen-autofix workflow', () => {
     expect(workflow).not.toContain('github.event.sender.author_association');
   });
 
-  it('supports maintainer comment-triggered autofix dry-runs and explicit real runs', () => {
-    expect(workflow).toContain("issue_comment:\n    types:\n      - 'created'");
-    for (const text of [
+  it('does not expose comment-triggered autofix commands', () => {
+    expect(workflow).not.toContain(
+      "issue_comment:\n    types:\n      - 'created'",
+    );
+    expect(workflow).not.toContain(
       "COMMENT_BODY: '${{ github.event.comment.body }}'",
-      "grep -Eq '^[[:space:]]*@qwen-code[[:space:]]+/autofix([[:space:]]|$)'",
-      "grep -Eq '^[[:space:]]*@qwen-code[[:space:]]+/autofix[[:space:]]+run([[:space:]]|$)'",
-      'ROUTE_PR="${ISSUE_NUMBER}"',
-      'ROUTE_ISSUE="${ISSUE_NUMBER}"',
-      'dry_run=${DRY_RUN}',
-      '/autofix run requires maintain or admin',
-      "FORCED_ISSUE: '${{ needs.route.outputs.issue_number || inputs.issue_number || github.event.issue.number }}'",
-      "FORCED_PR: '${{ needs.route.outputs.pr_number || inputs.pr_number }}'",
-      "${{ always() && needs.route.outputs.dry_run != 'true' && (steps.verify.outputs.outcome == 'fixed' || steps.verify.outputs.outcome == 'noop') }}",
-    ]) {
-      expect(`${routeStep}\n${workflow}`).toContain(text);
-    }
-    expect(routeStep).toContain(
-      `[[ "\${sender_permission}" == 'maintain' || "\${sender_permission}" == 'admin' ]]`,
     );
-    expect(routeStep).toContain('comment ignored: sender_permission=');
-    expect(routeStep).not.toContain(
-      '[[ "${COMMENT_BODY}" != @qwen-code\\ /autofix* ]]',
-    );
-    expect(routeStep).not.toContain(
-      '[[ "${COMMENT_BODY}" == "@qwen-code /autofix run"* ]]',
-    );
+    expect(workflow).not.toContain('@qwen-code /autofix');
+    expect(workflow).not.toContain('/autofix run');
+    expect(routeStep).not.toContain('comment command accepted');
+    expect(routeStep).not.toContain('ROUTE_PR="${ISSUE_NUMBER}"');
+    expect(routeStep).not.toContain('ROUTE_ISSUE="${ISSUE_NUMBER}"');
   });
 
   it('keeps forced issue routing bounded to open issues', () => {
@@ -233,14 +219,13 @@ describe('qwen-autofix workflow', () => {
       'elif [[ "$(jq -r \'.state // ""\' "${forced_issue_json}")" != \'OPEN\' ]]; then',
     );
     expect(workflow).toContain(
-      'workflow_dispatch and trusted issue_comment commands are',
-    );
-    expect(workflow).toContain('maintainer-initiated escape hatches');
-    expect(workflow).toContain(
-      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' && "${EVENT_NAME}" != \'issue_comment\' ]] && ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}"',
+      'workflow_dispatch is a maintainer-initiated escape hatch',
     );
     expect(workflow).toContain(
-      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' && "${EVENT_NAME}" != \'issue_comment\' ]] && ! jq -e --arg approved "${AUTOFIX_APPROVED_LABEL}"',
+      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e --arg ready "${READY_FOR_AGENT_LABEL}"',
+    );
+    expect(workflow).toContain(
+      'elif [[ "${EVENT_NAME}" != \'workflow_dispatch\' ]] && ! jq -e --arg approved "${AUTOFIX_APPROVED_LABEL}"',
     );
     expect(workflow).toContain(
       'is missing ${AUTOFIX_APPROVED_LABEL}; skipping.',
@@ -290,7 +275,7 @@ describe('qwen-autofix workflow', () => {
     );
     expect(readDecisionStep).toContain('"${DRY_RUN}" != "true"');
     expect(readDecisionStep).toContain(
-      '[[ -n "${GO}" && "${DRY_RUN}" != "true" && "${EVENT_NAME}" != \'workflow_dispatch\' && "${EVENT_NAME}" != \'issue_comment\' ]]',
+      '[[ -n "${GO}" && "${DRY_RUN}" != "true" && "${EVENT_NAME}" != \'workflow_dispatch\' ]]',
     );
     expect(readDecisionStep).toContain(
       '::warning::Failed to re-validate live labels for issue #${GO}; skipping due to API error',
