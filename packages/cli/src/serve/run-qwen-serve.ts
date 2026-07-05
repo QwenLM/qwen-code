@@ -115,9 +115,11 @@ function daemonPipeDirection(
       return 'outbound';
     case 'received':
       return 'inbound';
+    default: {
+      const exhaustive: never = direction;
+      return exhaustive;
+    }
   }
-  const exhaustive: never = direction;
-  return exhaustive;
 }
 
 // Daemon Status metrics ring: seal one bucket every SAMPLE_MS and retain
