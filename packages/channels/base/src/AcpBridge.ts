@@ -28,7 +28,7 @@ export interface AcpBridgeOptions {
 
 export const ACP_EVENT_LOOP_STALL_RESTART_MS = 5 * 60 * 1000;
 const ACP_EVENT_LOOP_STALL_RE =
-  /^\[perf\] acp agent event loop stall: max=(\d+(?:\.\d+)?)ms/;
+  /^\[perf\] acp agent event loop stall: max=(\d+(?:\.\d+)?)ms/m;
 
 /**
  * Read a command's aliases off a raw wire `available_commands_update` entry. ACP

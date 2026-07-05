@@ -79,12 +79,38 @@ describe('AcpBridge', () => {
       cliEntryPath: '/tmp/qwen',
       cwd: '/tmp',
     });
+    const disconnected = vi.fn();
+    bridge.on('disconnected', disconnected);
+
+    await bridge.start();
+    const proc = child.instances[0]!;
+    proc.kill.mockImplementation(() => {
+      proc.killed = true;
+      proc.emit('exit', null, 'SIGKILL');
+      return true;
+    });
+
+    proc.stderr.write(
+      `[perf] acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS + 1000}ms\n`,
+    );
+
+    expect(proc.kill).toHaveBeenCalledTimes(1);
+    expect(proc.kill).toHaveBeenCalledWith('SIGKILL');
+    expect(bridge.isConnected).toBe(false);
+    expect(disconnected).toHaveBeenCalledWith(null, 'SIGKILL');
+  });
+
+  it('kills the ACP child when a stall line is coalesced with prior stderr', async () => {
+    const bridge = new AcpBridge({
+      cliEntryPath: '/tmp/qwen',
+      cwd: '/tmp',
+    });
 
     await bridge.start();
     const proc = child.instances[0]!;
 
     proc.stderr.write(
-      `[perf] acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS + 1000}ms\n`,
+      `debug line\n[perf] acp agent event loop stall: max=${ACP_EVENT_LOOP_STALL_RESTART_MS + 1000}ms\n`,
     );
 
     expect(proc.kill).toHaveBeenCalledTimes(1);
