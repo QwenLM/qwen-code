@@ -28,6 +28,7 @@ class TestChannel extends ChannelBase {
   }> = [];
   promptEnds: Array<{ chatId: string; sessionId: string; messageId?: string }> =
     [];
+  promptBufferDrops: Array<{ sessionId: string; messageIds: string[] }> = [];
   responseChunks: Array<{ chatId: string; chunk: string; sessionId: string }> =
     [];
   /** When set, onPromptEnd throws AFTER recording — to exercise the finally guard. */
@@ -88,6 +89,13 @@ class TestChannel extends ChannelBase {
     if (this.throwOnPromptEnd) {
       throw new Error('onPromptEnd boom');
     }
+  }
+
+  protected override onPromptBufferDropped(
+    sessionId: string,
+    messageIds: string[],
+  ): void {
+    this.promptBufferDrops.push({ sessionId, messageIds });
   }
 
   protected override onResponseChunk(
@@ -5289,6 +5297,7 @@ describe('ChannelBase', () => {
       await expect(ch.cancelPromptForTest(sessionId)).resolves.toBe(true);
 
       expect(maps.collectBuffers.has(sessionId)).toBe(false);
+      expect(ch.promptBufferDrops).toEqual([{ sessionId, messageIds: [] }]);
       resolvePrompt('late');
       await prompt;
     });

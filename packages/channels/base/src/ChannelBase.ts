@@ -878,7 +878,6 @@ export abstract class ChannelBase {
     if (!buffer) return;
     this.collectBuffers.delete(sessionId);
     const messageIds = this.collectBufferMessageIds(buffer);
-    if (messageIds.length === 0) return;
     try {
       this.onPromptBufferDropped(sessionId, messageIds);
     } catch (err) {

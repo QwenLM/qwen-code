@@ -288,6 +288,24 @@ class FailingProcessWeComChannel extends WeComChannel {
   }
 }
 
+class BlockingAliceProcessWeComChannel extends WeComChannel {
+  private releaseAliceProcess?: () => void;
+  readonly aliceBlocked = new Promise<void>((resolve) => {
+    this.releaseAliceProcess = resolve;
+  });
+
+  releaseAlice(): void {
+    this.releaseAliceProcess?.();
+  }
+
+  protected override async processInbound(envelope: Envelope): Promise<void> {
+    if (envelope.senderId === 'alice') {
+      await this.aliceBlocked;
+    }
+    await super.processInbound(envelope);
+  }
+}
+
 function lastClient(): MockWSClient {
   const client = mocks.instances.at(-1);
   if (!client) throw new Error('missing mock client');
@@ -2338,6 +2356,53 @@ describe('WeComChannel', () => {
     await vi.waitFor(() =>
       expect(existsSync(dirname(attachmentPath!))).toBe(false),
     );
+  });
+
+  it('keeps no-message-id attachment dirs scoped to their session while another session completes', async () => {
+    const bridge = makeBridge();
+    const channel = new BlockingAliceProcessWeComChannel(
+      'bot',
+      makeConfig(),
+      bridge,
+    );
+    await channel.connect();
+    const client = lastClient();
+
+    client.emit('message.file', {
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'alice' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'alice.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(1));
+    const aliceDir = channelFileDirs().find((dir) =>
+      existsSync(join(dir, 'alice.txt')),
+    );
+    expect(aliceDir).toBeDefined();
+    expect(bridge.prompt).not.toHaveBeenCalled();
+
+    client.emit('message.file', {
+      msgtype: 'file',
+      chattype: 'single',
+      from: { userid: 'bob' },
+      file: {
+        url: 'https://example.invalid/file',
+        filename: 'bob.txt',
+      },
+    });
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(1));
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(1));
+    expect(existsSync(aliceDir!)).toBe(true);
+
+    channel.releaseAlice();
+
+    await vi.waitFor(() => expect(bridge.prompt).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(channelFileDirs()).toHaveLength(0));
   });
 
   it('sanitizes message ids before writing drop logs', async () => {

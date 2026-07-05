@@ -93,7 +93,10 @@ export class WeComChannel extends ChannelBase {
   private readonly inFlightMessages = new Set<string>();
   private readonly attachmentDirsByMessage = new Map<string, string[]>();
   private readonly attachmentDirsBySession = new Map<string, string[]>();
-  private attachmentDirsWithoutMessage: string[] = [];
+  private readonly attachmentDirsWithoutMessageByRoute = new Map<
+    string,
+    string[]
+  >();
   private readonly bufferedAttachmentMessages = new Set<string>();
   private readonly coalescedAttachmentMessages = new Map<string, string[]>();
   private dedupTimer?: ReturnType<typeof setInterval>;
@@ -174,7 +177,7 @@ export class WeComChannel extends ChannelBase {
       );
     };
     const kickedHandler = (reason: unknown) => {
-      void this.reconnectAfterKick(reason);
+      this.startKickReconnect(reason);
     };
     const handlers = {
       message: messageHandler,
@@ -370,6 +373,11 @@ export class WeComChannel extends ChannelBase {
     };
     let attachments: Attachment[] = [];
     let processingStarted = false;
+    const attachmentRouteKey = this.attachmentRouteKey(
+      senderId,
+      chatId,
+      envelope.threadId,
+    );
     try {
       if (!(await this.preflightInbound(envelope))) {
         process.stderr.write(
@@ -381,6 +389,7 @@ export class WeComChannel extends ChannelBase {
         body,
         attachments,
         messageId,
+        attachmentRouteKey,
       );
       if (messageId) this.seenMessages.set(messageId, Date.now());
       if (attachments.length) {
@@ -410,7 +419,9 @@ export class WeComChannel extends ChannelBase {
       ) {
         this.cleanupAttachmentDirsForMessage(messageId);
       }
-      if (!messageId) this.cleanupAttachmentDirsWithoutMessage();
+      if (!messageId) {
+        this.cleanupAttachmentDirsWithoutMessage(attachmentRouteKey);
+      }
     }
   }
 
@@ -418,6 +429,7 @@ export class WeComChannel extends ChannelBase {
     body: Record<string, unknown>,
     attachments: Attachment[] = [],
     messageId?: string,
+    routeKey?: string,
   ): Promise<Attachment[]> {
     const refs = collectInboundMediaRefs(body);
     for (const ref of refs) {
@@ -445,7 +457,7 @@ export class WeComChannel extends ChannelBase {
       } else {
         const dir = join(tmpdir(), 'channel-files', randomUUID());
         mkdirSync(dir, { recursive: true });
-        this.rememberAttachmentDir(dir, messageId);
+        this.rememberAttachmentDir(dir, messageId, routeKey);
         const safeName = fileName || `wecom_${ref.type}`;
         const filePath = join(dir, safeName);
         writeFileSync(filePath, data);
@@ -527,13 +539,19 @@ export class WeComChannel extends ChannelBase {
     this.cleanupAttachmentDirsForMessage(messageId);
   }
 
-  private rememberAttachmentDir(dir: string, messageId?: string): void {
+  private rememberAttachmentDir(
+    dir: string,
+    messageId?: string,
+    routeKey?: string,
+  ): void {
     if (messageId) {
       const messageDirs = this.attachmentDirsByMessage.get(messageId) ?? [];
       messageDirs.push(dir);
       this.attachmentDirsByMessage.set(messageId, messageDirs);
-    } else {
-      this.attachmentDirsWithoutMessage.push(dir);
+    } else if (routeKey) {
+      const dirs = this.attachmentDirsWithoutMessageByRoute.get(routeKey) ?? [];
+      dirs.push(dir);
+      this.attachmentDirsWithoutMessageByRoute.set(routeKey, dirs);
     }
   }
 
@@ -586,19 +604,22 @@ export class WeComChannel extends ChannelBase {
   }
 
   private rememberUntrackedDirsForSession(sessionId: string): void {
-    if (this.attachmentDirsWithoutMessage.length === 0) return;
+    const routeKey = this.attachmentRouteKeyForSession(sessionId);
+    if (!routeKey) return;
+    const dirs = this.attachmentDirsWithoutMessageByRoute.get(routeKey);
+    if (!dirs || dirs.length === 0) return;
     const sessionDirs = this.attachmentDirsBySession.get(sessionId) ?? [];
-    for (const dir of this.attachmentDirsWithoutMessage) {
+    for (const dir of dirs) {
       if (!sessionDirs.includes(dir)) sessionDirs.push(dir);
     }
     this.attachmentDirsBySession.set(sessionId, sessionDirs);
-    this.attachmentDirsWithoutMessage = [];
+    this.attachmentDirsWithoutMessageByRoute.delete(routeKey);
   }
 
-  private cleanupAttachmentDirsWithoutMessage(): void {
-    const dirs = this.attachmentDirsWithoutMessage;
-    if (dirs.length === 0) return;
-    this.attachmentDirsWithoutMessage = [];
+  private cleanupAttachmentDirsWithoutMessage(routeKey: string): void {
+    const dirs = this.attachmentDirsWithoutMessageByRoute.get(routeKey);
+    if (!dirs || dirs.length === 0) return;
+    this.attachmentDirsWithoutMessageByRoute.delete(routeKey);
     cleanupAttachmentDirs(dirs);
   }
 
@@ -632,15 +653,41 @@ export class WeComChannel extends ChannelBase {
       new Set([
         ...Array.from(this.attachmentDirsBySession.values()).flat(),
         ...Array.from(this.attachmentDirsByMessage.values()).flat(),
-        ...this.attachmentDirsWithoutMessage,
+        ...Array.from(this.attachmentDirsWithoutMessageByRoute.values()).flat(),
       ]),
     );
     this.attachmentDirsBySession.clear();
     this.attachmentDirsByMessage.clear();
-    this.attachmentDirsWithoutMessage = [];
+    this.attachmentDirsWithoutMessageByRoute.clear();
     this.bufferedAttachmentMessages.clear();
     this.coalescedAttachmentMessages.clear();
     cleanupAttachmentDirs(dirs);
+  }
+
+  private attachmentRouteKeyForSession(sessionId: string): string | undefined {
+    const target = this.router.getTarget(sessionId);
+    if (!target || target.channelName !== this.name) return undefined;
+    return this.attachmentRouteKey(
+      target.senderId,
+      target.chatId,
+      target.threadId,
+    );
+  }
+
+  private attachmentRouteKey(
+    senderId: string,
+    chatId: string,
+    threadId?: string,
+  ): string {
+    switch (this.config.sessionScope) {
+      case 'thread':
+        return `${this.name}:${threadId || chatId}`;
+      case 'single':
+        return `${this.name}:__single__`;
+      case 'user':
+      default:
+        return `${this.name}:${senderId}:${chatId}`;
+    }
   }
 
   private detachClientHandlers(
@@ -738,9 +785,20 @@ export class WeComChannel extends ChannelBase {
       this.kickReconnectRetry = undefined;
       if (this.disconnectGeneration !== disconnectGeneration) return;
       this.kickReconnectAttempts = 0;
-      void this.reconnectAfterKick(reason);
+      this.startKickReconnect(reason);
     }, KICK_RECONNECT_RETRY_MS);
     this.kickReconnectRetry.unref?.();
+  }
+
+  private startKickReconnect(reason: unknown): void {
+    void this.reconnectAfterKick(reason).catch((err: unknown) => {
+      process.stderr.write(
+        `[WeCom:${this.name}] kick-reconnect failed: ${sanitizeLogText(
+          formatSdkError(err),
+          200,
+        )}\n`,
+      );
+    });
   }
 
   private cleanupSeenMessages(): void {
