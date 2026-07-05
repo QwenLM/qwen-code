@@ -1068,11 +1068,15 @@ export class Session implements SessionContext {
    * Replays conversation history to the client using modular components.
    * Delegates to HistoryReplayer for consistent event emission.
    */
-  async replayHistory(records: ChatRecord[]): Promise<void> {
+  primeTurnFromHistory(records: ChatRecord[]): void {
     this.turn = Math.max(
       this.turn,
       computeInitialTurnFromHistory(records, this.config.getSessionId()),
     );
+  }
+
+  async replayHistory(records: ChatRecord[]): Promise<void> {
+    this.primeTurnFromHistory(records);
     await this.historyReplayer.replay(records);
   }
 

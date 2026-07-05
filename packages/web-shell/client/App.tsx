@@ -74,7 +74,11 @@ import { DeleteSessionDialog } from './components/dialogs/DeleteSessionDialog';
 import { ReleaseSessionDialog } from './components/dialogs/ReleaseSessionDialog';
 import { RewindDialog } from './components/dialogs/RewindDialog';
 import { WebShellSidebar } from './components/sidebar/WebShellSidebar';
-import { getLocalCommands } from './constants/localCommands';
+import {
+  getLocalCommands,
+  localizeBuiltinDescriptions,
+  skillDescriptionKey,
+} from './constants/localCommands';
 import { mergeCommands } from './hooks/daemonSessionMappers';
 import { useAnimationFrameValue } from './hooks/useAnimationFrameValue';
 import { useBackgroundTasks } from './hooks/useBackgroundTasks';
@@ -170,6 +174,7 @@ import {
   type LoadingPhrasesResolver,
   type MarkdownTableMode,
   type WebShellTaskInfo,
+  type WebShellAtProvider,
 } from './customization';
 import type { CommandDisplayCategoryOrder } from './utils/commandDisplay';
 import styles from './App.module.css';
@@ -367,6 +372,8 @@ export interface WebShellProps {
   hiddenSlashCommands?: string[];
   /** Slash command category order. Defaults to custom, skill, system. */
   slashCommandCategoryOrder?: CommandDisplayCategoryOrder;
+  /** Additional @ mention categories shown alongside built-in files/extensions. */
+  atProviders?: readonly WebShellAtProvider[];
   /** Custom renderer for the tool-card header content after the status icon and tool name. */
   renderToolHeaderExtra?: ToolHeaderExtraRenderer;
   /** Custom renderer for the welcome header. Receives version, cwd, model, and mode. */
@@ -758,6 +765,7 @@ export function App({
   onBugReport,
   hiddenSlashCommands,
   slashCommandCategoryOrder,
+  atProviders,
   renderToolHeaderExtra,
   renderWelcomeHeader,
   renderWelcomeFooter,
@@ -3376,16 +3384,22 @@ export function App({
 
   const commands = useMemo(() => {
     const skillNames = new Set(connection.skills ?? []);
-    return mergeCommands(connection.commands ?? [], getLocalCommands(t))
+    return localizeBuiltinDescriptions(
+      mergeCommands(connection.commands ?? [], getLocalCommands(t)),
+      t,
+    )
       .filter(
         (command) => !hiddenCommands.has(normalizeHiddenCommand(command.name)),
       )
       .map((command) => {
         if (!skillNames.has(command.name)) return command;
+        const skillKey = skillDescriptionKey(command.name);
         return {
           ...command,
           displayCategory: 'skill' as const,
-          description: command.description || t('skills.run'),
+          description: skillKey
+            ? t(skillKey)
+            : command.description || t('skills.run'),
         };
       });
   }, [connection.commands, connection.skills, hiddenCommands, t]);
@@ -3561,6 +3575,7 @@ export function App({
             <DialogShell
               title={t('daemon.title')}
               size="xl"
+              allowFullscreen
               onClose={() => setShowDaemonStatusDialog(false)}
             >
               <DaemonStatusDialog />
@@ -3971,6 +3986,7 @@ export function App({
                       commands={commands}
                       skills={loadedSkills}
                       slashCommandCategoryOrder={slashCommandCategoryOrder}
+                      atProviders={atProviders}
                       queuedMessages={queuedTexts}
                       onFocusFooter={handleFocusTaskPill}
                       onPopQueuedMessages={editLastQueuedPrompt}

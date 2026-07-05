@@ -254,6 +254,8 @@ jobs:
           fi
 
       - name: 'Install dependencies and build'
+        env:
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           for attempt in 1 2 3; do
             if npm ci --prefer-offline --no-audit --progress=false; then
@@ -264,6 +266,7 @@ jobs:
             fi
             sleep $((attempt * 15))
           done
+          git config core.hooksPath .husky
           npm run build
           npm run bundle
 
@@ -356,10 +359,37 @@ jobs:
           node .github/scripts/resolve-sandbox-image.mjs \
             "$(node -p "require('./package.json').config.sandboxImageUri")"
 
+      - name: 'Fast-track decision'
+        id: 'fasttrack'
+        if: |-
+          ${{ steps.scan.outputs.has_candidates == 'true' }}
+        env:
+          EVENT_NAME: '${{ github.event_name }}'
+          FORCED_ISSUE: '${{ inputs.issue_number }}'
+        run: |-
+          FAST_TRACK=false
+          if [[ "${EVENT_NAME}" == 'workflow_dispatch' && -n "${FORCED_ISSUE}" ]]; then
+            FAST_TRACK=true
+          fi
+          if [[ "${EVENT_NAME}" == 'issues' ]]; then
+            FAST_TRACK=true
+          fi
+
+          if [[ "${FAST_TRACK}" == 'true' ]]; then
+            ISSUE_NUM="$(jq -r '.[0].number' "${WORKDIR}/candidates.json")"
+            jq -n -c --argjson num "${ISSUE_NUM}" \
+              '{go: $num, reason: "Fast-tracked: trusted trigger bypasses LLM assessment.", skip: []}' \
+              > "${WORKDIR}/decision.json"
+            echo "⚡ Fast-track decision: issue #${ISSUE_NUM}"
+            echo 'fast_tracked=true' >> "${GITHUB_OUTPUT}"
+          else
+            echo 'fast_tracked=false' >> "${GITHUB_OUTPUT}"
+          fi
+
       - name: 'Assess candidates'
         id: 'assess'
         if: |-
-          ${{ steps.scan.outputs.has_candidates == 'true' }}
+          ${{ steps.scan.outputs.has_candidates == 'true' && steps.fasttrack.outputs.fast_tracked != 'true' }}
         env:
           GITHUB_TOKEN: '${{ secrets.CI_DEV_BOT_PAT }}'
           OPENAI_API_KEY: '${{ secrets.AUTOFIX_OPENAI_API_KEY }}'
@@ -701,17 +731,22 @@ jobs:
           npm run typecheck
           npm run lint
 
-          # Run tests only for the packages this fix touches: a pre-existing
-          # red or flaky test elsewhere on main must not block every fix.
-          # Cross-package regressions are covered by regular CI on the PR.
+          # Run changed/related tests for the packages this fix touches.
+          # --changed follows the import graph so transitive breakage is caught.
+          # Full regression is covered by regular CI on the PR after the push.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
             | grep -oE '^packages/[^/]+' | sort -u || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
             for p in ${CHANGED_PKGS}; do
-              echo "🧪 Testing ${p}..."
-              npm run test --workspace "${p}" --if-present
+              test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
+              if [[ "${test_script}" != *vitest* ]]; then
+                echo "Skipping ${p}: test script is not Vitest."
+                continue
+              fi
+              echo "🧪 Testing ${p} (changed files only)..."
+              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
             done
           fi
 
@@ -1011,6 +1046,8 @@ jobs:
           fi
 
       - name: 'Install dependencies and build'
+        env:
+          QWEN_SKIP_PREPARE: '1'
         run: |-
           for attempt in 1 2 3; do
             if npm ci --prefer-offline --no-audit --progress=false; then
@@ -1021,6 +1058,7 @@ jobs:
             fi
             sleep $((attempt * 15))
           done
+          git config core.hooksPath .husky
           npm run build
           npm run bundle
 
@@ -1281,17 +1319,22 @@ jobs:
           npm run typecheck
           npm run lint
 
-          # Test only the packages this PR touches: a pre-existing red/flaky test
-          # elsewhere on main must not block a valid response. Cross-package
-          # regressions are covered by regular CI on the PR after the push.
+          # Test changed/related files for the packages this PR touches.
+          # --changed follows the import graph so transitive breakage is caught.
+          # Full regression is covered by regular CI on the PR after the push.
           CHANGED_PKGS="$(git diff --name-only "origin/main...${BRANCH}" \
             | grep -oE '^packages/[^/]+' | sort -u || true)"
           if [[ -z "${CHANGED_PKGS}" ]]; then
             echo 'No package changes detected; skipping package tests.'
           else
             for p in ${CHANGED_PKGS}; do
-              echo "🧪 Testing ${p}..."
-              npm run test --workspace "${p}" --if-present
+              test_script="$(node -e 'const fs = require("node:fs"); const pkg = JSON.parse(fs.readFileSync(process.argv[1], "utf8")); process.stdout.write(pkg.scripts?.test || "");' "${p}/package.json")"
+              if [[ "${test_script}" != *vitest* ]]; then
+                echo "Skipping ${p}: test script is not Vitest."
+                continue
+              fi
+              echo "🧪 Testing ${p} (changed files only)..."
+              npm run test --workspace "${p}" --if-present -- --changed origin/main --passWithNoTests
             done
           fi
           echo "outcome=fixed" >> "${GITHUB_OUTPUT}"
