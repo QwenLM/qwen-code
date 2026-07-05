@@ -311,6 +311,17 @@ class FakeBridge {
     return this.workspaceSessions;
   }
 
+  getSessionSummary(sessionId: string) {
+    const summary = this.workspaceSessions.find(
+      (candidate) => candidate.sessionId === sessionId,
+    );
+    if (summary) return summary;
+    if (sessionId === 'sess-1') {
+      return { sessionId, workspaceCwd: '/ws' };
+    }
+    throw new Error(`Session not found: ${sessionId}`);
+  }
+
   detached: Array<{ sessionId: string; clientId?: string }> = [];
 
   async cancelSession(sessionId: string) {
@@ -1043,6 +1054,30 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
     );
     expect(result.agentCapabilities._meta.qwen.methods).toContain(
       '_qwen/workspace/voice/set',
+    );
+  });
+
+  it('initialize advertises session organization methods', async () => {
+    const { body } = await initializeRaw();
+    const result = body['result'] as {
+      agentCapabilities: {
+        _meta: { qwen: { methods: string[] } };
+      };
+    };
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/session/update_organization',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/list',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/create',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/update',
+    );
+    expect(result.agentCapabilities._meta.qwen.methods).toContain(
+      '_qwen/workspace/session_groups/delete',
     );
   });
 
@@ -6250,6 +6285,163 @@ describe('ACP Streamable HTTP transport (over the wire)', () => {
       const frames = await takeFrames(await streamRes, 1);
       expect(frames[0]).toMatchObject({ result: { v: 1, tools: [] } });
     });
+
+    it('session organization methods persist groups and organized list state', async () => {
+      await withRuntimeDir(async () => {
+        const sessionId = '550e8400-e29b-41d4-a716-446655440010';
+        await writeStoredSession(sessionId);
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        const reader = frameReader(await streamRes);
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 70,
+          method: '_qwen/workspace/session_groups/create',
+          params: { workspaceCwd: '/ws', name: 'Frontend', color: 'blue' },
+        });
+        const createFrame = (await reader.next()) as {
+          result: { group: { id: string; name: string; color: string } };
+        };
+        const group = createFrame.result.group;
+        expect(group).toMatchObject({ name: 'Frontend', color: 'blue' });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 71,
+          method: '_qwen/session/update_organization',
+          params: {
+            sessionId,
+            isPinned: true,
+            groupId: group.id,
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessionId,
+            isPinned: true,
+            groupId: group.id,
+          },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 72,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: group.id,
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessions: [
+              {
+                sessionId,
+                isPinned: true,
+                groupId: group.id,
+              },
+            ],
+          },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 73,
+          method: '_qwen/workspace/session_groups/delete',
+          params: { workspaceCwd: '/ws', groupId: group.id },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: { deleted: true },
+        });
+
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 74,
+          method: 'session/list',
+          params: {
+            workspaceCwd: '/ws',
+            view: 'organized',
+            group: 'ungrouped',
+            _meta: { size: 20 },
+          },
+        });
+        expect(await reader.next()).toMatchObject({
+          result: {
+            sessions: [
+              {
+                sessionId,
+                isPinned: true,
+                groupId: null,
+              },
+            ],
+          },
+        });
+        reader.close();
+      });
+    });
+
+    it('session/list rejects group filter without organized view', async () => {
+      const connId = await initialize();
+      const streamRes = openStream(connId);
+      await new Promise((r) => setTimeout(r, 30));
+      await post(connId, {
+        jsonrpc: '2.0',
+        id: 75,
+        method: 'session/list',
+        params: {
+          workspaceCwd: '/ws',
+          group: 'pinned',
+        },
+      });
+      const frames = await takeFrames(await streamRes, 1);
+      expect(frames[0]).toMatchObject({
+        id: 75,
+        error: {
+          code: -32602,
+          message: '`group` requires `view` to be "organized"',
+        },
+      });
+    });
+
+    it.each([
+      {
+        params: { isPinned: true },
+        message: '`sessionId` is required',
+      },
+      {
+        params: { sessionId: 'session-1', isPinned: 'yes' },
+        message: '`isPinned` must be a boolean',
+      },
+      {
+        params: { sessionId: 'session-1', groupId: 1 },
+        message: '`groupId` must be a string or null',
+      },
+    ])(
+      '_qwen/session/update_organization rejects invalid params: $message',
+      async ({ params, message }) => {
+        const connId = await initialize();
+        const streamRes = openStream(connId);
+        await new Promise((r) => setTimeout(r, 30));
+        await post(connId, {
+          jsonrpc: '2.0',
+          id: 76,
+          method: '_qwen/session/update_organization',
+          params,
+        });
+        const frames = await takeFrames(await streamRes, 1);
+        expect(frames[0]).toMatchObject({
+          id: 76,
+          error: {
+            code: -32602,
+            message,
+          },
+        });
+      },
+    );
 
     it('_qwen/workspace/mcp/tools rejects missing serverName', async () => {
       const connId = await initialize();
