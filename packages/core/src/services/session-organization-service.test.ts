@@ -134,6 +134,69 @@ describe('SessionOrganizationService', () => {
     expect(third.order).toBe(11);
   });
 
+  it('clamps new group order at the maximum safe integer', async () => {
+    const first = await service.createGroup({ name: 'First', color: 'red' });
+    await service.updateGroup(first.id, { order: Number.MAX_SAFE_INTEGER });
+
+    const second = await service.createGroup({
+      name: 'Second',
+      color: 'green',
+    });
+
+    expect(second.order).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it('keeps groups with unsupported stored colors by falling back and warning once', async () => {
+    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
+    await fs.writeFile(
+      service.getStorePath(),
+      JSON.stringify({
+        schemaVersion: 1,
+        groups: [
+          {
+            id: 'group-future',
+            name: 'Future',
+            color: 'teal',
+            order: 0,
+            createdAt: '2026-01-01T00:00:00.000Z',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        ],
+        sessions: {
+          [sessionIdA]: {
+            groupId: 'group-future',
+            updatedAt: '2026-01-01T00:00:00.000Z',
+          },
+        },
+      }),
+      'utf8',
+    );
+
+    await expect(service.listGroups()).resolves.toEqual({
+      groups: [
+        expect.objectContaining({
+          id: 'group-future',
+          name: 'Future',
+          color: 'blue',
+        }),
+      ],
+      colorOptions: GROUP_COLOR_OPTIONS,
+    });
+    const snapshot = await service.readSnapshot();
+    expect(snapshot.sessions.get(sessionIdA)).toEqual(
+      expect.objectContaining({
+        groupId: 'group-future',
+      }),
+    );
+    await new SessionOrganizationService(cwd, (warning) => {
+      warnings.push(warning);
+    }).listGroups();
+
+    expect(warnings).toEqual([
+      'Session group "Future" (id: group-future) uses unsupported color "teal"; using "blue"',
+    ]);
+  });
+
   it('warns when dropping duplicate group names from the sidecar', async () => {
     await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
     await fs.writeFile(
@@ -341,16 +404,45 @@ describe('SessionOrganizationService', () => {
     });
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('Failed to read session organization store');
+    await service.listGroups();
+    expect(warnings).toHaveLength(1);
 
     await expect(
       service.createGroup({ name: 'Fixed', color: 'orange' }),
     ).rejects.toMatchObject({
       code: 'session_organization_store_unreadable',
     });
+    await expect(
+      service.createGroup({ name: 'Fixed Again', color: 'orange' }),
+    ).rejects.toThrow('Delete the file to reset session organization');
 
     await expect(fs.readFile(service.getStorePath(), 'utf8')).resolves.toBe(
       '{not-json',
     );
+  });
+
+  it('includes schema version details in unreadable store warnings', async () => {
+    await fs.mkdir(path.dirname(service.getStorePath()), { recursive: true });
+    await fs.writeFile(
+      service.getStorePath(),
+      JSON.stringify({
+        schemaVersion: 2,
+        groups: [],
+        sessions: {},
+      }),
+      'utf8',
+    );
+
+    await expect(service.listGroups()).resolves.toEqual({
+      groups: [],
+      colorOptions: GROUP_COLOR_OPTIONS,
+    });
+
+    expect(warnings).toEqual([
+      expect.stringContaining(
+        'store schema is unsupported (found schemaVersion 2, expected 1)',
+      ),
+    ]);
   });
 
   it('removes a session organization entry from the sidecar', async () => {

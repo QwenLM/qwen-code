@@ -86,6 +86,7 @@ export class SessionOrganizationError extends Error {
 const STORE_FILE = 'session-organization.v1.json';
 const SCHEMA_VERSION = 1;
 const MAX_GROUP_NAME_LENGTH = 64;
+const FALLBACK_GROUP_COLOR: SessionGroupColor = 'blue';
 const locks = new Map<string, Promise<unknown>>();
 const warningKeysByStorePath = new Map<string, Set<string>>();
 
@@ -128,10 +129,7 @@ function normalizeGroupName(name: unknown): string {
 }
 
 function assertGroupColor(color: unknown): asserts color is SessionGroupColor {
-  if (
-    typeof color !== 'string' ||
-    !GROUP_COLOR_OPTIONS.includes(color as SessionGroupColor)
-  ) {
+  if (typeof color !== 'string' || !isSupportedGroupColor(color)) {
     throw new SessionOrganizationError(
       '`color` must be one of the supported color options',
       'invalid_group_color',
@@ -159,21 +157,8 @@ function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
-function isSessionGroup(value: unknown): value is SessionGroup {
-  if (!isPlainRecord(value)) return false;
-  if (typeof value['id'] !== 'string') return false;
-  if (typeof value['name'] !== 'string') return false;
-  if (typeof value['color'] !== 'string') return false;
-  if (!GROUP_COLOR_OPTIONS.includes(value['color'] as SessionGroupColor)) {
-    return false;
-  }
-  if (typeof value['order'] !== 'number' || !Number.isFinite(value['order'])) {
-    return false;
-  }
-  return (
-    typeof value['createdAt'] === 'string' &&
-    typeof value['updatedAt'] === 'string'
-  );
+function isSupportedGroupColor(color: string): color is SessionGroupColor {
+  return GROUP_COLOR_OPTIONS.includes(color as SessionGroupColor);
 }
 
 function emptyStore(): SessionOrganizationStoreV1 {
@@ -273,11 +258,13 @@ export class SessionOrganizationService {
         id: randomUUID(),
         name,
         color: input.color,
-        order:
+        order: Math.min(
           store.groups.reduce(
             (maxOrder, existing) => Math.max(maxOrder, existing.order),
             -1,
           ) + 1,
+          Number.MAX_SAFE_INTEGER,
+        ),
         createdAt: now,
         updatedAt: now,
       };
@@ -410,14 +397,25 @@ export class SessionOrganizationService {
       const raw = JSON.parse(
         await fs.readFile(this.getStorePath(), 'utf8'),
       ) as unknown;
-      if (!isPlainRecord(raw) || raw['schemaVersion'] !== SCHEMA_VERSION) {
+      if (!isPlainRecord(raw)) {
+        return this.handleUnreadableStore('store root is not an object');
+      }
+      if (raw['schemaVersion'] !== SCHEMA_VERSION) {
         return this.handleUnreadableStore(
-          'store schema is missing or unsupported',
+          `store schema is unsupported (found schemaVersion ${String(
+            raw['schemaVersion'],
+          )}, expected ${SCHEMA_VERSION})`,
         );
       }
-      const groups = Array.isArray(raw['groups'])
-        ? raw['groups'].filter(isSessionGroup)
-        : [];
+      const groups: SessionGroup[] = [];
+      if (Array.isArray(raw['groups'])) {
+        for (const rawGroup of raw['groups']) {
+          const group = this.normalizeSessionGroup(rawGroup);
+          if (group !== undefined) {
+            groups.push(group);
+          }
+        }
+      }
       const sessions = isPlainRecord(raw['sessions']) ? raw['sessions'] : {};
       const normalizedSessions = Object.create(null) as Record<
         string,
@@ -461,7 +459,8 @@ export class SessionOrganizationService {
 
   private handleUnreadableStore(reason: string): SessionOrganizationStoreV1 {
     this.readFailed = true;
-    this.onWarning?.(
+    this.warnOnce(
+      `unreadable-store:${reason}`,
       `Failed to read session organization store at ${this.getStorePath()}: ${reason}`,
     );
     return emptyStore();
@@ -471,7 +470,7 @@ export class SessionOrganizationService {
     await fs.mkdir(path.dirname(this.getStorePath()), { recursive: true });
     if (this.readFailed) {
       throw new SessionOrganizationError(
-        `Cannot update session organization store because it could not be read: ${this.getStorePath()}`,
+        `Cannot update session organization store because it could not be read: ${this.getStorePath()}. Delete the file to reset session organization (group/pin data will be lost), or restore it from backup.`,
         'session_organization_store_unreadable',
       );
     }
@@ -511,6 +510,39 @@ export class SessionOrganizationService {
     });
   }
 
+  private normalizeSessionGroup(value: unknown): SessionGroup | undefined {
+    if (
+      !isPlainRecord(value) ||
+      typeof value['id'] !== 'string' ||
+      typeof value['name'] !== 'string' ||
+      typeof value['color'] !== 'string' ||
+      typeof value['order'] !== 'number' ||
+      !Number.isFinite(value['order']) ||
+      typeof value['createdAt'] !== 'string' ||
+      typeof value['updatedAt'] !== 'string'
+    ) {
+      this.warnMalformedGroupEntry(value);
+      return undefined;
+    }
+    const color = isSupportedGroupColor(value['color'])
+      ? value['color']
+      : FALLBACK_GROUP_COLOR;
+    if (color !== value['color']) {
+      this.warnOnce(
+        `unknown-group-color:${value['id']}\0${value['color']}`,
+        `Session group "${value['name']}" (id: ${value['id']}) uses unsupported color "${value['color']}"; using "${FALLBACK_GROUP_COLOR}"`,
+      );
+    }
+    return {
+      id: value['id'],
+      name: value['name'],
+      color,
+      order: value['order'],
+      createdAt: value['createdAt'],
+      updatedAt: value['updatedAt'],
+    };
+  }
+
   private dedupeGroups(groups: SessionGroup[]): SessionGroup[] {
     const seen = new Set<string>();
     const deduped: SessionGroup[] = [];
@@ -539,6 +571,17 @@ export class SessionOrganizationService {
     this.warnOnce(
       `malformed-session:${sessionId}`,
       `Dropped malformed session organization entry: ${sessionId}`,
+    );
+  }
+
+  private warnMalformedGroupEntry(value: unknown): void {
+    const id =
+      isPlainRecord(value) && typeof value['id'] === 'string'
+        ? value['id']
+        : '<unknown>';
+    this.warnOnce(
+      `malformed-group:${id}`,
+      `Dropped malformed session group entry: ${id}`,
     );
   }
 

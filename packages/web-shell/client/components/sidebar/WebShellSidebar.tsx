@@ -1060,11 +1060,19 @@ export function WebShellSidebar({
       .deleteSessionGroup(deleteGroupCandidate.id)
       .then(() => {
         setDeleteGroupCandidate(null);
+        void reload().catch(() => undefined);
       })
       .catch((err: unknown) => onError(err, t('sidebar.groupDeleteFailed')))
       .then(() => reloadGroups().catch(() => undefined))
       .finally(() => setGroupBusy(false));
-  }, [deleteGroupCandidate, onError, reloadGroups, t, workspaceActions]);
+  }, [
+    deleteGroupCandidate,
+    onError,
+    reload,
+    reloadGroups,
+    t,
+    workspaceActions,
+  ]);
 
   const handleTogglePin = useCallback(
     (session: DaemonSessionSummary) => {

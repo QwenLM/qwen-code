@@ -505,6 +505,65 @@ describe('WebShellSidebar — session organization', () => {
     expect(container.textContent).toContain('Release notes');
   });
 
+  it('reloads sessions after deleting a group', async () => {
+    mockConnection.capabilities = {
+      qwenCodeVersion: '1.2.3',
+      features: ['session_organization'],
+    };
+    mockWorkspaceActions.listSessionGroups.mockResolvedValue({
+      groups: [
+        {
+          id: 'group-1',
+          name: 'Backend',
+          color: 'green',
+          order: 0,
+          createdAt: '2026-07-04T00:00:00.000Z',
+          updatedAt: '2026-07-04T00:00:00.000Z',
+        },
+      ],
+      colorOptions: ['red', 'orange', 'yellow', 'green', 'blue', 'purple'],
+    });
+    mockWorkspaceActions.deleteSessionGroup.mockResolvedValue(true);
+    mockActive.sessions = [
+      makeSession('session-a', {
+        displayName: 'API review',
+        groupId: 'group-1',
+      }),
+    ];
+
+    const container = renderSidebar(false);
+    await act(async () => {
+      await Promise.resolve();
+    });
+    mockWorkspaceActions.listSessionGroups.mockClear();
+
+    const deleteGroupButton = container.querySelector<HTMLButtonElement>(
+      '[aria-label="Delete group"]',
+    );
+    expect(deleteGroupButton).not.toBeNull();
+    act(() => {
+      deleteGroupButton!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+    });
+    const confirmDeleteButton = Array.from(
+      document.body.querySelectorAll<HTMLButtonElement>('button'),
+    ).find((button) => button.textContent?.trim() === 'Delete group');
+    expect(confirmDeleteButton).toBeDefined();
+    await act(async () => {
+      confirmDeleteButton!.dispatchEvent(
+        new MouseEvent('click', { bubbles: true }),
+      );
+      await Promise.resolve();
+    });
+
+    expect(mockWorkspaceActions.deleteSessionGroup).toHaveBeenCalledWith(
+      'group-1',
+    );
+    expect(mockActive.reload).toHaveBeenCalledTimes(1);
+    expect(mockWorkspaceActions.listSessionGroups).toHaveBeenCalledTimes(1);
+  });
+
   it('toggles pin state from the session action button', async () => {
     mockConnection.capabilities = {
       qwenCodeVersion: '1.2.3',
