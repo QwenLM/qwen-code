@@ -12,6 +12,7 @@ import os from 'node:os';
 import path from 'node:path';
 import type { SessionArtifactContentRef } from '@qwen-code/qwen-code-core';
 import type { SessionArtifactPersistenceWarning } from '@qwen-code/qwen-code-core';
+import { writeStderrLine } from './internal/stderrLine.js';
 import type { DaemonSessionArtifact } from './sessionArtifacts.js';
 import { SessionArtifactValidationError } from './sessionArtifacts.js';
 
@@ -266,7 +267,12 @@ export class SessionArtifactContentStore {
         let manifest: ContentManifest;
         try {
           manifest = await readManifest(path.join(fullPath, 'manifest.json'));
-        } catch {
+        } catch (error) {
+          writeStderrLine(
+            `[artifacts] action=content_gc_manifest_read_failed contentId=${entry} reason=${JSON.stringify(
+              error instanceof Error ? error.message : String(error),
+            )}`,
+          );
           retained.push(entry);
           continue;
         }

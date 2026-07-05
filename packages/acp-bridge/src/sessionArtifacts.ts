@@ -917,7 +917,6 @@ export class SessionArtifactStore {
     };
     try {
       await this.persistence.recordSnapshot(payload);
-      this.durableEventsSinceSnapshot = 0;
       this.tombstonedIds.clear();
     } catch (error) {
       writeStderrLine(
@@ -925,6 +924,8 @@ export class SessionArtifactStore {
           error instanceof Error ? error.message : String(error),
         )}`,
       );
+    } finally {
+      this.durableEventsSinceSnapshot = 0;
     }
   }
 
@@ -1002,7 +1003,12 @@ export class SessionArtifactStore {
     writeStderrLine(
       `[artifacts] session=${this.sessionId} action=${action}_denied artifactId=${artifactId} owner=${existing.clientId} requester=${options?.clientId ?? '<anonymous>'}`,
     );
-    return { v: 1, sessionId: this.sessionId, changes: [] };
+    return {
+      v: 1,
+      sessionId: this.sessionId,
+      changes: [],
+      warnings: [`artifact ${artifactId} is owned by a different client`],
+    };
   }
 
   private async normalizeInput(

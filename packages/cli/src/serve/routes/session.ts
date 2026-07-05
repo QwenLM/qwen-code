@@ -156,7 +156,7 @@ function parseArtifactRemoveRequest(
       'deleteContent',
     );
   }
-  return deleteContent ? { deleteContent } : {};
+  return { deleteContent };
 }
 
 function parseArtifactUnpinRequest(req: Request): SessionArtifactUnpinRequest {

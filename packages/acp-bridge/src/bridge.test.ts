@@ -1676,6 +1676,46 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('clears live artifacts when rewind returns no artifact snapshot', async () => {
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          extMethodImpl: (method) => {
+            expect(method).toBe('qwen/control/session/rewind');
+            return {
+              targetTurnIndex: 0,
+              filesChanged: [],
+              filesFailed: [],
+            };
+          },
+        }).channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const created = await bridge.addSessionArtifact(
+      session.sessionId,
+      {
+        title: 'Later artifact',
+        url: 'https://example.com/later',
+      },
+      { clientId: session.clientId },
+    );
+    expect(created.changes).toHaveLength(1);
+
+    await expect(
+      bridge.rewindSession(
+        session.sessionId,
+        { promptId: 'prompt-1' },
+        { clientId: session.clientId },
+      ),
+    ).resolves.toMatchObject({ targetTurnIndex: 0 });
+
+    await expect(
+      bridge.getSessionArtifacts(session.sessionId),
+    ).resolves.toMatchObject({ artifacts: [] });
+
+    await bridge.shutdown();
+  });
+
   it('loads history replay from response metadata when requested', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {

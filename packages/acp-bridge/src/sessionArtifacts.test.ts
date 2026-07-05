@@ -102,9 +102,13 @@ describe('SessionArtifactStore', () => {
     try {
       await expect(
         store.remove(artifactId, { clientId: 'client-b' }),
-      ).resolves.toMatchObject({ changes: [] });
+      ).resolves.toMatchObject({
+        changes: [],
+        warnings: [`artifact ${artifactId} is owned by a different client`],
+      });
       await expect(store.remove(artifactId)).resolves.toMatchObject({
         changes: [],
+        warnings: [`artifact ${artifactId} is owned by a different client`],
       });
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('remove_denied');
@@ -157,7 +161,10 @@ describe('SessionArtifactStore', () => {
     try {
       await expect(
         store.pin(artifactId, { clientId: 'client-b', contentRef }),
-      ).resolves.toMatchObject({ changes: [] });
+      ).resolves.toMatchObject({
+        changes: [],
+        warnings: [`artifact ${artifactId} is owned by a different client`],
+      });
       await expect(
         store.pin(artifactId, { clientId: 'client-a', contentRef }),
       ).resolves.toMatchObject({
@@ -165,7 +172,10 @@ describe('SessionArtifactStore', () => {
       });
       await expect(
         store.unpin(artifactId, { clientId: 'client-b' }),
-      ).resolves.toMatchObject({ changes: [] });
+      ).resolves.toMatchObject({
+        changes: [],
+        warnings: [`artifact ${artifactId} is owned by a different client`],
+      });
 
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('pin_denied');
@@ -2402,6 +2412,54 @@ describe('SessionArtifactStore', () => {
     expect(events[50]).toMatchObject({ sequence: 52 });
   });
 
+  it('does not retry snapshots on every event after a snapshot write failure', async () => {
+    let snapshotAttempts = 0;
+    const store = new SessionArtifactStore({
+      sessionId: 's11-snapshot-failure',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async () => {},
+        recordSnapshot: async () => {
+          snapshotAttempts++;
+          throw new Error('disk full');
+        },
+      },
+    });
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      for (let index = 0; index < 50; index++) {
+        await store.upsertMany(
+          [
+            {
+              title: `Durable ${index}`,
+              url: `https://example.com/snapshot-failure-${index}`,
+            },
+          ],
+          { strict: true },
+        );
+      }
+      expect(snapshotAttempts).toBe(1);
+
+      await store.upsertMany(
+        [
+          {
+            title: 'Durable after failure',
+            url: 'https://example.com/snapshot-after-failure',
+          },
+        ],
+        { strict: true },
+      );
+      expect(snapshotAttempts).toBe(1);
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('snapshot_failed');
+    } finally {
+      stderr.mockRestore();
+    }
+  });
+
   it('compacts explicit tombstones out of periodic snapshots', async () => {
     const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
     const store = new SessionArtifactStore({
@@ -3126,6 +3184,31 @@ describe('SessionArtifactContentStore', () => {
     await contentStore.gc('content-session', new Set());
 
     await expect(fs.readdir(tmpDir)).resolves.toEqual([]);
+  });
+
+  it('logs and retains content when gc cannot read its manifest', async () => {
+    const contentStore = new SessionArtifactContentStore(contentRoot);
+    const contentId = fakeContentId('bad-manifest');
+    const contentDir = path.join(contentRoot, contentId);
+    await fs.mkdir(contentDir, { recursive: true });
+    await fs.writeFile(path.join(contentDir, 'manifest.json'), '{bad json');
+    const stderr = vi
+      .spyOn(process.stderr, 'write')
+      .mockReturnValue(true as never);
+
+    try {
+      await expect(
+        contentStore.gc('content-session', new Set()),
+      ).resolves.toEqual({
+        removed: [],
+        retained: [contentId],
+      });
+      const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
+      expect(logged).toContain('content_gc_manifest_read_failed');
+      expect(logged).toContain(contentId);
+    } finally {
+      stderr.mockRestore();
+    }
   });
 
   it('retains leased content during gc until the pin flow releases it', async () => {

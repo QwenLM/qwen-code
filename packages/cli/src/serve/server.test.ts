@@ -7415,6 +7415,27 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('DELETE /session/:id/artifacts/:artifactId forwards explicit content retention option', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app)
+          .delete('/session/session-A/artifacts/artifact-1')
+          .send({ deleteContent: false }),
+      ).set('X-Qwen-Client-Id', 'client-1');
+
+      expect(res.status).toBe(200);
+      expect(bridge.removeSessionArtifactCalls).toEqual([
+        {
+          sessionId: 'session-A',
+          artifactId: 'artifact-1',
+          context: { clientId: 'client-1' },
+          options: { deleteContent: false },
+        },
+      ]);
+    });
+
     it('POST /session/:id/artifacts/:artifactId/pin forwards mutation auth context', async () => {
       const bridge = fakeBridge();
       const app = createServeApp(tokenOpts, undefined, { bridge });

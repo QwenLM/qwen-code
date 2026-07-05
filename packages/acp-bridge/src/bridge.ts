@@ -6113,42 +6113,48 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       const artifactSnapshot = restoredArtifactSnapshotFromState(
         response as BridgeSessionState,
       );
-      if (artifactSnapshot) {
-        const beforeArtifacts = (await entry.artifacts.list()).artifacts;
-        const artifactRestoreWarnings = await entry.artifacts.restore(
-          artifactSnapshot,
-          {
-            verifyContentRef: (artifact) =>
-              artifact.contentRef
-                ? artifactContentStore.verifyContentRef(
-                    entry.sessionId,
-                    artifact.id,
-                    artifact.contentRef,
-                  )
-                : Promise.resolve(undefined),
-          },
+      const beforeArtifacts = (await entry.artifacts.list()).artifacts;
+      const artifactRestoreWarnings = await entry.artifacts.restore(
+        artifactSnapshot ?? {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: entry.sessionId,
+          sequence: 0,
+          artifacts: [],
+          tombstonedIds: [],
+          stickyEphemeralIds: [],
+          warnings: [],
+        },
+        {
+          verifyContentRef: (artifact) =>
+            artifact.contentRef
+              ? artifactContentStore.verifyContentRef(
+                  entry.sessionId,
+                  artifact.id,
+                  artifact.contentRef,
+                )
+              : Promise.resolve(undefined),
+        },
+      );
+      for (const warning of artifactRestoreWarnings) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=rewind_restore_warning warning=${JSON.stringify(
+            warning,
+          )}`,
         );
-        for (const warning of artifactRestoreWarnings) {
-          writeStderrLine(
-            `[artifacts] session=${entry.sessionId} action=rewind_restore_warning warning=${JSON.stringify(
-              warning,
-            )}`,
-          );
-        }
-        const afterArtifacts = (await entry.artifacts.list()).artifacts;
-        publishArtifactChanges(
-          entry,
-          artifactReseedChanges(beforeArtifacts, afterArtifacts),
-          originatorClientId,
-        );
-        await gcArtifactContent(entry).catch((error) => {
-          writeStderrLine(
-            `qwen serve: session artifact GC failed during rewind for ${JSON.stringify(
-              sessionId,
-            )}: ${error instanceof Error ? error.message : String(error)}`,
-          );
-        });
       }
+      const afterArtifacts = (await entry.artifacts.list()).artifacts;
+      publishArtifactChanges(
+        entry,
+        artifactReseedChanges(beforeArtifacts, afterArtifacts),
+        originatorClientId,
+      );
+      await gcArtifactContent(entry).catch((error) => {
+        writeStderrLine(
+          `qwen serve: session artifact GC failed during rewind for ${JSON.stringify(
+            sessionId,
+          )}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
 
       try {
         entry.events.publish({
