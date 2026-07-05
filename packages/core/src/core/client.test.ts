@@ -992,7 +992,7 @@ describe('Gemini Client (client.ts)', () => {
       ]);
       expect(profiler.timeSync.mock.calls.map(([stage]) => stage)).toEqual([
         'resume_deferred_tool_reveal',
-        'deferred_reminder_resolution',
+        'deferred_reminder_setup',
         'skill_reminder_seed',
         'system_instruction',
         'gemini_chat_construct',

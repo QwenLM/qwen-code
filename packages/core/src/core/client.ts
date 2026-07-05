@@ -1278,14 +1278,11 @@ export class GeminiClient {
           }
         }
       });
-      const deferredTools = profiler.timeSync(
-        'deferred_reminder_resolution',
-        () => {
-          const resolved = this.resolveDeferredToolsForReminder();
-          this.rememberAnnouncedDeferredTools(resolved);
-          return resolved;
-        },
-      );
+      const deferredTools = profiler.timeSync('deferred_reminder_setup', () => {
+        const resolved = this.resolveDeferredToolsForReminder();
+        this.rememberAnnouncedDeferredTools(resolved);
+        return resolved;
+      });
       deferredReminderCount = deferredTools?.length ?? 0;
       [history, snapshotEntries] = await profiler.time(
         'initial_chat_history',

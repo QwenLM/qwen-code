@@ -7,13 +7,25 @@
 import { mkdtemp, readFile, readdir, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { SessionStartSource } from '../hooks/types.js';
 import {
   SESSION_START_PROFILE_ENV,
   createSessionStartProfiler,
   type SessionStartProfileRecord,
 } from './session-start-profiler.js';
+
+const debugLoggerMock = vi.hoisted(() => ({
+  debug: vi.fn(),
+  error: vi.fn(),
+  info: vi.fn(),
+  isEnabled: vi.fn(() => true),
+  warn: vi.fn(),
+}));
+
+vi.mock('../utils/debugLogger.js', () => ({
+  createDebugLogger: vi.fn(() => debugLoggerMock),
+}));
 
 function clockFrom(values: number[]) {
   let last = values[values.length - 1] ?? 0;
@@ -27,6 +39,10 @@ function clockFrom(values: number[]) {
 }
 
 describe('session-start-profiler', () => {
+  beforeEach(() => {
+    debugLoggerMock.debug.mockClear();
+  });
+
   afterEach(() => {
     vi.unstubAllEnvs();
   });
@@ -66,9 +82,9 @@ describe('session-start-profiler', () => {
     await expect(
       profiler.time('initial_chat_history', async () => 'history'),
     ).resolves.toBe('history');
-    expect(
-      profiler.timeSync('system_instruction', () => 'system'),
-    ).toBe('system');
+    expect(profiler.timeSync('system_instruction', () => 'system')).toBe(
+      'system',
+    );
     profiler.finish({
       ok: true,
       extraHistoryLength: 3,
@@ -259,12 +275,16 @@ describe('session-start-profiler', () => {
       enabled: true,
       now: clockFrom([1, 2]),
       writeRecord: () => {
-        throw new Error('disk full');
+        throw Object.assign(new Error('disk full'), { code: 'ENOSPC' });
       },
       getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
     });
 
     expect(() => profiler.finish({ ok: true })).not.toThrow();
+    expect(debugLoggerMock.debug).toHaveBeenCalledWith(
+      'session-start-profiler write failed',
+      { name: 'Error', code: 'ENOSPC' },
+    );
   });
 
   it('does not throw when finish metadata collection fails', () => {
@@ -283,9 +303,7 @@ describe('session-start-profiler', () => {
   });
 
   it('writes bounded JSONL without sensitive fields', async () => {
-    const runtimeDir = await mkdtemp(
-      join(tmpdir(), 'session-start-profiler-'),
-    );
+    const runtimeDir = await mkdtemp(join(tmpdir(), 'session-start-profiler-'));
     vi.stubEnv('QWEN_RUNTIME_DIR', runtimeDir);
     vi.stubEnv(SESSION_START_PROFILE_ENV, '1');
 

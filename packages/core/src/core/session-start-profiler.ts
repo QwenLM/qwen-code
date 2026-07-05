@@ -9,8 +9,11 @@ import * as path from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { Storage } from '../config/storage.js';
 import type { SessionStartSource } from '../hooks/types.js';
+import { createDebugLogger } from '../utils/debugLogger.js';
 
 export const SESSION_START_PROFILE_ENV = 'QWEN_CODE_PROFILE_SESSION_START';
+
+const debugLogger = createDebugLogger('SESSION_START_PROFILER');
 
 export interface SessionStartProfileRecord {
   timestamp: string;
@@ -164,7 +167,18 @@ class EnabledSessionStartProfiler implements SessionStartProfiler {
       };
 
       this.writeRecord(record);
-    } catch {
+    } catch (error) {
+      const code =
+        typeof error === 'object' &&
+        error !== null &&
+        'code' in error &&
+        typeof error.code === 'string'
+          ? error.code
+          : undefined;
+      debugLogger.debug('session-start-profiler write failed', {
+        name: error instanceof Error ? error.name : typeof error,
+        ...(code ? { code } : {}),
+      });
       // Profiling must never affect session creation.
     }
   }
