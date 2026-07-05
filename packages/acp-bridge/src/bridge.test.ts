@@ -1732,6 +1732,124 @@ describe('createAcpSessionBridge', () => {
     await bridge.shutdown();
   });
 
+  it('restores and persists artifact snapshots returned by rewind', async () => {
+    const retainedUrl = 'https://example.com/retained';
+    const rewoundUrl = 'https://example.com/rewound';
+    const rewoundArtifactId = stableSessionArtifactId(
+      SESS_A,
+      `url:${rewoundUrl}`,
+    );
+    const persistedSnapshots: unknown[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/session/artifacts/persist') {
+              if (params['kind'] === 'snapshot') {
+                persistedSnapshots.push(params['payload']);
+              }
+              return {};
+            }
+            expect(method).toBe('qwen/control/session/rewind');
+            return {
+              targetTurnIndex: 0,
+              filesChanged: [],
+              filesFailed: [],
+              artifactSnapshot: {
+                v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+                sessionId: SESS_A,
+                sequence: 8,
+                artifacts: [
+                  {
+                    id: rewoundArtifactId,
+                    kind: 'link',
+                    storage: 'external_url',
+                    source: 'client',
+                    status: 'available',
+                    title: 'Rewound artifact',
+                    url: rewoundUrl,
+                    retention: 'restorable',
+                    clientRetained: true,
+                    createdAt: '2026-07-04T00:00:00.000Z',
+                    updatedAt: '2026-07-04T00:00:00.000Z',
+                  },
+                ],
+                tombstonedIds: [],
+                stickyEphemeralIds: [],
+                warnings: [],
+              },
+            };
+          },
+        }).channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    await bridge.addSessionArtifact(
+      session.sessionId,
+      {
+        title: 'Later artifact',
+        url: retainedUrl,
+      },
+      { clientId: session.clientId },
+    );
+
+    const abort = new AbortController();
+    const iter = bridge.subscribeEvents(session.sessionId, {
+      signal: abort.signal,
+    });
+    const artifactChanges = (async () => {
+      const changes: unknown[] = [];
+      for await (const event of iter) {
+        if (event.type !== 'artifact_changed') continue;
+        changes.push((event.data as { change?: unknown }).change);
+        if (changes.length === 2) return changes;
+      }
+      return changes;
+    })();
+
+    await expect(
+      bridge.rewindSession(
+        session.sessionId,
+        { promptId: 'prompt-1' },
+        { clientId: session.clientId },
+      ),
+    ).resolves.toMatchObject({ targetTurnIndex: 0 });
+
+    await expect(artifactChanges).resolves.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ action: 'removed' }),
+        expect.objectContaining({
+          action: 'created',
+          artifactId: rewoundArtifactId,
+        }),
+      ]),
+    );
+    abort.abort();
+    await expect(
+      bridge.getSessionArtifacts(session.sessionId),
+    ).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: rewoundArtifactId,
+          title: 'Rewound artifact',
+          restoreState: 'restored',
+        },
+      ],
+    });
+    expect(persistedSnapshots).toEqual([
+      expect.objectContaining({
+        sessionId: session.sessionId,
+        artifacts: [
+          expect.objectContaining({
+            id: rewoundArtifactId,
+            title: 'Rewound artifact',
+          }),
+        ],
+      }),
+    ]);
+
+    await bridge.shutdown();
+  });
+
   it('loads history replay from response metadata when requested', async () => {
     const handles: ChannelHandle[] = [];
     const factory: ChannelFactory = async () => {

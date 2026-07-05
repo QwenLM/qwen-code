@@ -6262,9 +6262,20 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
               : Promise.resolve(undefined),
         },
       );
+      const artifactSnapshotWarnings =
+        artifactSnapshot === undefined
+          ? []
+          : await entry.artifacts.recordSnapshot();
       for (const warning of artifactRestoreWarnings) {
         writeStderrLine(
           `[artifacts] session=${entry.sessionId} action=rewind_restore_warning warning=${JSON.stringify(
+            warning,
+          )}`,
+        );
+      }
+      for (const warning of artifactSnapshotWarnings) {
+        writeStderrLine(
+          `[artifacts] session=${entry.sessionId} action=rewind_snapshot_warning warning=${JSON.stringify(
             warning,
           )}`,
         );

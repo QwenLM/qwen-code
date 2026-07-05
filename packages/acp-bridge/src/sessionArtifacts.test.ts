@@ -2575,7 +2575,7 @@ describe('SessionArtifactStore', () => {
     }
   });
 
-  it('compacts explicit tombstones out of periodic snapshots', async () => {
+  it('keeps explicit tombstones in periodic snapshots', async () => {
     const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
     const store = new SessionArtifactStore({
       sessionId: 's11-tombstone-snapshot',
@@ -2607,12 +2607,17 @@ describe('SessionArtifactStore', () => {
 
     expect(snapshots).toHaveLength(1);
     expect(snapshots[0]).toMatchObject({
-      tombstonedIds: [],
+      tombstonedIds: [deletedId],
       stickyEphemeralIds: [],
     });
     expect(
       snapshots[0]?.artifacts.some((artifact) => artifact.id === deletedId),
     ).toBe(false);
+
+    const suppressed = await store.upsertMany([
+      { title: 'Deleted', url: 'https://example.com/deleted' },
+    ]);
+    expect(suppressed.changes).toEqual([]);
   });
 
   it('suppresses implicit upserts for restored tombstones', async () => {

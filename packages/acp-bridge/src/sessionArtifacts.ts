@@ -806,6 +806,31 @@ export class SessionArtifactStore {
     });
   }
 
+  async recordSnapshot(): Promise<string[]> {
+    const persistence = this.persistence;
+    if (!persistence) {
+      return [
+        'artifact persistence unavailable; restored artifacts not snapshotted',
+      ];
+    }
+    return this.enqueue(async () => {
+      const recordedAt = new Date().toISOString();
+      try {
+        await persistence.recordSnapshot(this.buildSnapshotPayload(recordedAt));
+        this.durableEventsSinceSnapshot = 0;
+        this.consecutiveSnapshotFailures = 0;
+        return [];
+      } catch (error) {
+        writeStderrLine(
+          `[artifacts] session=${this.sessionId} action=snapshot_failed reason=${JSON.stringify(
+            error instanceof Error ? error.message : String(error),
+          )}`,
+        );
+        return ['artifact snapshot not persisted'];
+      }
+    });
+  }
+
   private cloneState(): {
     artifacts: Map<string, StoredArtifact>;
     receivedSeq: number;
@@ -946,31 +971,10 @@ export class SessionArtifactStore {
     if (this.durableEventsSinceSnapshot < snapshotThreshold) {
       return;
     }
-    const artifacts = Array.from(this.artifacts.values())
-      .filter((artifact) => artifact.retention !== 'ephemeral')
-      .sort((a, b) => a.insertSeq - b.insertSeq)
-      .map((artifact) =>
-        toPersistedArtifact(toPublicArtifact(artifact), recordedAt),
-      );
-    const stickyEphemeralIds = Array.from(this.stickyEphemeralIds).filter(
-      (id) => this.artifacts.has(id),
-    );
-    const payload: SessionArtifactSnapshotRecordPayload = {
-      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
-      sessionId: this.sessionId,
-      sequence: ++this.persistenceSeq,
-      recordedAt,
-      artifacts,
-      tombstonedIds: [],
-      stickyEphemeralIds,
-    };
     try {
-      await this.persistence.recordSnapshot(payload);
-      this.tombstonedIds.clear();
-      this.stickyEphemeralIds.clear();
-      for (const id of stickyEphemeralIds) {
-        this.stickyEphemeralIds.add(id);
-      }
+      await this.persistence.recordSnapshot(
+        this.buildSnapshotPayload(recordedAt),
+      );
       this.durableEventsSinceSnapshot = 0;
       this.consecutiveSnapshotFailures = 0;
     } catch (error) {
@@ -984,6 +988,29 @@ export class SessionArtifactStore {
         )}`,
       );
     }
+  }
+
+  private buildSnapshotPayload(
+    recordedAt: string,
+  ): SessionArtifactSnapshotRecordPayload {
+    const artifacts = Array.from(this.artifacts.values())
+      .filter((artifact) => artifact.retention !== 'ephemeral')
+      .sort((a, b) => a.insertSeq - b.insertSeq)
+      .map((artifact) =>
+        toPersistedArtifact(toPublicArtifact(artifact), recordedAt),
+      );
+    const stickyEphemeralIds = Array.from(this.stickyEphemeralIds).filter(
+      (id) => this.artifacts.has(id),
+    );
+    return {
+      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+      sessionId: this.sessionId,
+      sequence: ++this.persistenceSeq,
+      recordedAt,
+      artifacts,
+      tombstonedIds: Array.from(this.tombstonedIds),
+      stickyEphemeralIds,
+    };
   }
 
   private downgradeDurableChanges(changes: SessionArtifactChange[]): string[] {
