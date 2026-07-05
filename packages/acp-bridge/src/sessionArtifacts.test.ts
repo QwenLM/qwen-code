@@ -2481,16 +2481,20 @@ describe('SessionArtifactStore', () => {
     expect(events[50]).toMatchObject({ sequence: 52 });
   });
 
-  it('does not retry snapshots on every event after a snapshot write failure', async () => {
+  it('backs off snapshot retries after a write failure and resets after success', async () => {
     let snapshotAttempts = 0;
+    const snapshots: SessionArtifactSnapshotRecordPayload[] = [];
     const store = new SessionArtifactStore({
       sessionId: 's11-snapshot-failure',
       workspaceCwd: workspace,
       persistence: {
         recordEvent: async () => {},
-        recordSnapshot: async () => {
+        recordSnapshot: async (payload) => {
           snapshotAttempts++;
-          throw new Error('disk full');
+          if (snapshotAttempts === 1) {
+            throw new Error('disk full');
+          }
+          snapshots.push(payload);
         },
       },
     });
@@ -2511,6 +2515,7 @@ describe('SessionArtifactStore', () => {
         );
       }
       expect(snapshotAttempts).toBe(1);
+      expect(snapshots).toHaveLength(0);
 
       await store.upsertMany(
         [
@@ -2522,6 +2527,47 @@ describe('SessionArtifactStore', () => {
         { strict: true },
       );
       expect(snapshotAttempts).toBe(1);
+      expect(snapshots).toHaveLength(0);
+
+      for (let index = 51; index < 100; index++) {
+        await store.upsertMany(
+          [
+            {
+              title: `Durable retry ${index}`,
+              url: `https://example.com/snapshot-retry-${index}`,
+            },
+          ],
+          { strict: true },
+        );
+      }
+      expect(snapshotAttempts).toBe(2);
+      expect(snapshots).toHaveLength(1);
+
+      for (let index = 100; index < 149; index++) {
+        await store.upsertMany(
+          [
+            {
+              title: `Durable reset ${index}`,
+              url: `https://example.com/snapshot-reset-${index}`,
+            },
+          ],
+          { strict: true },
+        );
+      }
+      expect(snapshotAttempts).toBe(2);
+
+      await store.upsertMany(
+        [
+          {
+            title: 'Durable after reset',
+            url: 'https://example.com/snapshot-after-reset',
+          },
+        ],
+        { strict: true },
+      );
+      expect(snapshotAttempts).toBe(3);
+      expect(snapshots).toHaveLength(2);
+
       const logged = stderr.mock.calls.map((call) => String(call[0])).join('');
       expect(logged).toContain('snapshot_failed');
     } finally {
@@ -3566,7 +3612,16 @@ describe('SessionArtifactContentStore', () => {
       retained: expect.arrayContaining([ref.contentId]),
     });
 
+    const releaseGcLease = contentStore.leaseContentRefs([ref]);
     contentStore.releaseContentRef(ref);
+    await expect(
+      contentStore.gc('content-session', new Set()),
+    ).resolves.toMatchObject({
+      removed: [],
+      retained: expect.arrayContaining([ref.contentId]),
+    });
+
+    releaseGcLease();
     await expect(
       contentStore.gc('content-session', new Set()),
     ).resolves.toMatchObject({

@@ -52,6 +52,7 @@ const SOURCE_RESERVATIONS: Record<DaemonSessionArtifactSource, number> = {
 const WORKSPACE_STATUS_REFRESH_TTL_MS = 5_000;
 const WORKSPACE_STATUS_REFRESH_BATCH_SIZE = 20;
 const SNAPSHOT_AFTER_DURABLE_EVENTS = 50;
+const MAX_SNAPSHOT_BACKOFF_MULTIPLIER = 4;
 
 export interface ToolArtifactLike {
   kind?: DaemonSessionArtifactKind;
@@ -213,6 +214,7 @@ export class SessionArtifactStore {
   private insertSeq = 0;
   private persistenceSeq = 0;
   private durableEventsSinceSnapshot = 0;
+  private consecutiveSnapshotFailures = 0;
   private realWorkspaceCwdPromise?: Promise<string>;
   private operationQueue: Promise<void> = Promise.resolve();
   private readonly tombstonedIds = new Set<string>();
@@ -709,6 +711,7 @@ export class SessionArtifactStore {
       this.insertSeq = 0;
       this.persistenceSeq = snapshot.sequence;
       this.durableEventsSinceSnapshot = 0;
+      this.consecutiveSnapshotFailures = 0;
       for (const id of snapshot.tombstonedIds) {
         this.tombstonedIds.add(id);
       }
@@ -809,6 +812,7 @@ export class SessionArtifactStore {
     insertSeq: number;
     persistenceSeq: number;
     durableEventsSinceSnapshot: number;
+    consecutiveSnapshotFailures: number;
     tombstonedIds: Set<string>;
     stickyEphemeralIds: Set<string>;
   } {
@@ -823,6 +827,7 @@ export class SessionArtifactStore {
       insertSeq: this.insertSeq,
       persistenceSeq: this.persistenceSeq,
       durableEventsSinceSnapshot: this.durableEventsSinceSnapshot,
+      consecutiveSnapshotFailures: this.consecutiveSnapshotFailures,
       tombstonedIds: new Set(this.tombstonedIds),
       stickyEphemeralIds: new Set(this.stickyEphemeralIds),
     };
@@ -834,6 +839,7 @@ export class SessionArtifactStore {
     insertSeq: number;
     persistenceSeq: number;
     durableEventsSinceSnapshot: number;
+    consecutiveSnapshotFailures: number;
     tombstonedIds: Set<string>;
     stickyEphemeralIds: Set<string>;
   }): void {
@@ -845,6 +851,7 @@ export class SessionArtifactStore {
     this.insertSeq = state.insertSeq;
     this.persistenceSeq = state.persistenceSeq;
     this.durableEventsSinceSnapshot = state.durableEventsSinceSnapshot;
+    this.consecutiveSnapshotFailures = state.consecutiveSnapshotFailures;
     this.tombstonedIds.clear();
     for (const id of state.tombstonedIds) {
       this.tombstonedIds.add(id);
@@ -930,7 +937,13 @@ export class SessionArtifactStore {
   private async maybeRecordSnapshot(recordedAt: string): Promise<void> {
     if (!this.persistence) return;
     this.durableEventsSinceSnapshot++;
-    if (this.durableEventsSinceSnapshot < SNAPSHOT_AFTER_DURABLE_EVENTS) {
+    const snapshotThreshold =
+      SNAPSHOT_AFTER_DURABLE_EVENTS *
+      Math.min(
+        MAX_SNAPSHOT_BACKOFF_MULTIPLIER,
+        2 ** this.consecutiveSnapshotFailures,
+      );
+    if (this.durableEventsSinceSnapshot < snapshotThreshold) {
       return;
     }
     const artifacts = Array.from(this.artifacts.values())
@@ -958,14 +971,18 @@ export class SessionArtifactStore {
       for (const id of stickyEphemeralIds) {
         this.stickyEphemeralIds.add(id);
       }
+      this.durableEventsSinceSnapshot = 0;
+      this.consecutiveSnapshotFailures = 0;
     } catch (error) {
+      this.consecutiveSnapshotFailures = Math.min(
+        this.consecutiveSnapshotFailures + 1,
+        Math.log2(MAX_SNAPSHOT_BACKOFF_MULTIPLIER),
+      );
       writeStderrLine(
         `[artifacts] session=${this.sessionId} action=snapshot_failed reason=${JSON.stringify(
           error instanceof Error ? error.message : String(error),
         )}`,
       );
-    } finally {
-      this.durableEventsSinceSnapshot = 0;
     }
   }
 

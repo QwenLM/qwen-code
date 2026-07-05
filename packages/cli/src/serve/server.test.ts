@@ -7793,6 +7793,32 @@ describe('createServeApp', () => {
       expect(bridge.sessionArtifactsCalls).toEqual([]);
     });
 
+    it('POST /session/:id/artifacts/:artifactId/pin requires a client id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).post('/session/session-A/artifacts/artifact-1/pin'),
+      );
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('client_id_required');
+      expect(bridge.pinSessionArtifactCalls).toEqual([]);
+    });
+
+    it('DELETE /session/:id/artifacts/:artifactId/pin requires a client id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).delete('/session/session-A/artifacts/artifact-1/pin'),
+      );
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('client_id_required');
+      expect(bridge.unpinSessionArtifactCalls).toEqual([]);
+    });
+
     it('GET /session/:id/artifacts returns 404 for an unknown session', async () => {
       const bridge = fakeBridge({
         getSessionArtifactsImpl: async (sessionId) => {
@@ -8168,6 +8194,19 @@ describe('createServeApp', () => {
       ]);
     });
 
+    it('GET /session/:id/artifacts/fsck requires a client id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).get('/session/session-A/artifacts/fsck'),
+      );
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('client_id_required');
+      expect(bridge.fsckSessionArtifactsCalls).toEqual([]);
+    });
+
     it('POST /session/:id/artifacts/gc returns content cleanup result', async () => {
       const bridge = fakeBridge({
         gcSessionArtifactsImpl: async () => ({
@@ -8191,6 +8230,19 @@ describe('createServeApp', () => {
       expect(bridge.gcSessionArtifactsCalls).toEqual([
         { sessionId: 'session-A', context: { clientId: 'client-1' } },
       ]);
+    });
+
+    it('POST /session/:id/artifacts/gc requires a client id', async () => {
+      const bridge = fakeBridge();
+      const app = createServeApp(tokenOpts, undefined, { bridge });
+
+      const res = await auth(
+        request(app).post('/session/session-A/artifacts/gc'),
+      );
+
+      expect(res.status).toBe(403);
+      expect(res.body.code).toBe('client_id_required');
+      expect(bridge.gcSessionArtifactsCalls).toEqual([]);
     });
   });
 

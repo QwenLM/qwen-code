@@ -46,7 +46,7 @@ export interface SessionArtifactGcResult {
 export class SessionArtifactContentStore {
   private readonly rootDir: string;
   private writeQueue: Promise<void> = Promise.resolve();
-  private readonly leasedContentIds = new Set<string>();
+  private readonly leasedContentIds = new Map<string, number>();
   private cachedTotalBytes: number | undefined;
 
   constructor(rootDir = defaultContentRoot()) {
@@ -130,7 +130,7 @@ export class SessionArtifactContentStore {
         if (addedSizeBytes > 0 && this.cachedTotalBytes !== undefined) {
           this.cachedTotalBytes += addedSizeBytes;
         }
-        this.leasedContentIds.add(contentId);
+        this.leaseContentId(contentId);
         return {
           kind: 'managed_copy',
           contentId,
@@ -153,7 +153,20 @@ export class SessionArtifactContentStore {
   }
 
   releaseContentRef(ref: SessionArtifactContentRef): void {
-    this.leasedContentIds.delete(ref.contentId);
+    this.releaseContentId(ref.contentId);
+  }
+
+  leaseContentRefs(refs: readonly SessionArtifactContentRef[]): () => void {
+    const leased: string[] = [];
+    for (const ref of refs) {
+      this.leaseContentId(ref.contentId);
+      leased.push(ref.contentId);
+    }
+    return () => {
+      for (const contentId of leased) {
+        this.releaseContentId(contentId);
+      }
+    };
   }
 
   async fsck(
@@ -337,6 +350,23 @@ export class SessionArtifactContentStore {
     );
     return run;
   }
+
+  private leaseContentId(contentId: string): void {
+    this.leasedContentIds.set(
+      contentId,
+      (this.leasedContentIds.get(contentId) ?? 0) + 1,
+    );
+  }
+
+  private releaseContentId(contentId: string): void {
+    const count = this.leasedContentIds.get(contentId);
+    if (count === undefined) return;
+    if (count <= 1) {
+      this.leasedContentIds.delete(contentId);
+      return;
+    }
+    this.leasedContentIds.set(contentId, count - 1);
+  }
 }
 
 function defaultContentRoot(): string {
@@ -511,9 +541,9 @@ function noFollowFlag(): number {
 
 function sameFile(before: fsSync.Stats, after: fsSync.Stats): boolean {
   if (
-    before.dev !== 0 ||
-    before.ino !== 0 ||
-    after.dev !== 0 ||
+    before.dev !== 0 &&
+    before.ino !== 0 &&
+    after.dev !== 0 &&
     after.ino !== 0
   ) {
     return before.dev === after.dev && before.ino === after.ino;

@@ -78,6 +78,19 @@ interface RegisterSessionRoutesDeps {
 
 const SESSION_ARTIFACT_MAX_TTL_DAYS = 365;
 
+function requireSessionArtifactClientId(
+  clientId: string | undefined,
+  res: Response,
+): clientId is string {
+  if (clientId !== undefined) return true;
+  res.status(403).json({
+    error: 'Session artifact access requires a session-bound client id',
+    code: 'client_id_required',
+    errorKind: 'client_id_required',
+  });
+  return false;
+}
+
 function sendArtifactValidationError(res: Response, err: unknown): boolean {
   if (!(err instanceof SessionArtifactValidationError)) {
     return false;
@@ -731,14 +744,7 @@ export function registerSessionRoutes(
     if (sessionId === null) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
-    if (clientId === undefined) {
-      res.status(403).json({
-        error: 'Session artifact listing requires a session-bound client id',
-        code: 'client_id_required',
-        errorKind: 'client_id_required',
-      });
-      return;
-    }
+    if (!requireSessionArtifactClientId(clientId, res)) return;
     try {
       res
         .status(200)
@@ -807,6 +813,7 @@ export function registerSessionRoutes(
         const artifactId = req.params['artifactId'];
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        if (!requireSessionArtifactClientId(clientId, res)) return;
         if (!artifactId) {
           res.status(400).json({
             v: 1,
@@ -823,7 +830,7 @@ export function registerSessionRoutes(
           const result = await bridge.pinSessionArtifact(
             sessionId,
             artifactId,
-            clientId !== undefined ? { clientId } : undefined,
+            { clientId },
             nonEmptyArtifactPinRequest(options),
           );
           res.status(200).json(result);
@@ -847,6 +854,7 @@ export function registerSessionRoutes(
         const artifactId = req.params['artifactId'];
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        if (!requireSessionArtifactClientId(clientId, res)) return;
         if (!artifactId) {
           res.status(400).json({
             v: 1,
@@ -863,7 +871,7 @@ export function registerSessionRoutes(
           const result = await bridge.unpinSessionArtifact(
             sessionId,
             artifactId,
-            clientId !== undefined ? { clientId } : undefined,
+            { clientId },
             nonEmptyArtifactUnpinRequest(options),
           );
           res.status(200).json(result);
@@ -883,15 +891,11 @@ export function registerSessionRoutes(
     if (sessionId === null) return;
     const clientId = parseClientIdHeader(req, res);
     if (clientId === null) return;
+    if (!requireSessionArtifactClientId(clientId, res)) return;
     try {
       res
         .status(200)
-        .json(
-          await bridge.fsckSessionArtifacts(
-            sessionId,
-            clientId !== undefined ? { clientId } : undefined,
-          ),
-        );
+        .json(await bridge.fsckSessionArtifacts(sessionId, { clientId }));
     } catch (err) {
       sendBridgeError(res, err, {
         route: 'GET /session/:id/artifacts/fsck',
@@ -908,15 +912,11 @@ export function registerSessionRoutes(
       async (req, res, sessionId) => {
         const clientId = parseClientIdHeader(req, res);
         if (clientId === null) return;
+        if (!requireSessionArtifactClientId(clientId, res)) return;
         try {
           res
             .status(200)
-            .json(
-              await bridge.gcSessionArtifacts(
-                sessionId,
-                clientId !== undefined ? { clientId } : undefined,
-              ),
-            );
+            .json(await bridge.gcSessionArtifacts(sessionId, { clientId }));
         } catch (err) {
           sendBridgeError(res, err, {
             route: 'POST /session/:id/artifacts/gc',

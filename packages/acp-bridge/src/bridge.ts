@@ -2791,10 +2791,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
 
   const gcArtifactContent = async (entry: SessionEntry): Promise<void> => {
     const refs = await entry.artifacts.contentRefs();
-    await artifactContentStore.gc(
-      entry.sessionId,
-      new Set(refs.map((ref) => ref.contentId)),
-    );
+    const releaseRefs = artifactContentStore.leaseContentRefs(refs);
+    try {
+      await artifactContentStore.gc(
+        entry.sessionId,
+        new Set(refs.map((ref) => ref.contentId)),
+      );
+    } finally {
+      releaseRefs();
+    }
   };
 
   const pruneExpiredArtifactPins = async (
@@ -4881,10 +4886,15 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
       if (!entry) throw new SessionNotFoundError(sessionId);
       resolveTrustedClientId(entry, context?.clientId);
       const refs = await entry.artifacts.contentRefs();
-      return artifactContentStore.gc(
-        sessionId,
-        new Set(refs.map((ref) => ref.contentId)),
-      );
+      const releaseRefs = artifactContentStore.leaseContentRefs(refs);
+      try {
+        return await artifactContentStore.gc(
+          sessionId,
+          new Set(refs.map((ref) => ref.contentId)),
+        );
+      } finally {
+        releaseRefs();
+      }
     },
 
     listWorkspaceSessions(workspaceCwd) {
