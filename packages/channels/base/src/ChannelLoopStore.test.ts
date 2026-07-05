@@ -71,15 +71,15 @@ describe('ChannelLoopStore', () => {
     ).resolves.toEqual([first]);
   });
 
-  it('does not match targets with different group context', async () => {
-    await store.create(input);
+  it('matches targets after group context is promoted', async () => {
+    const created = await store.create(input);
 
     await expect(
       store.listForTarget('feishu-main', {
         ...input.target,
         isGroup: true,
       }),
-    ).resolves.toEqual([]);
+    ).resolves.toEqual([created]);
   });
 
   it('keeps group targets isolated by sender', async () => {
