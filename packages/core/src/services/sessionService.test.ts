@@ -2721,6 +2721,106 @@ describe('SessionService', () => {
       ]);
     });
 
+    it('does not resurrect artifacts removed by later side records when forking', async () => {
+      const oldId = '72727272-7272-7272-7272-727272727272';
+      const newId = '82828282-8282-8282-8282-828282828282';
+      const { file, lines } = seedSession(oldId);
+      const url = 'https://example.com/forked-then-removed';
+      const oldArtifactId = stableSessionArtifactId(oldId, `url:${url}`);
+      const forkedArtifactId = stableSessionArtifactId(newId, `url:${url}`);
+      const createRecord = {
+        uuid: 'artifact-create',
+        parentUuid: 'u1',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.500Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 1,
+          recordedAt: '2026-04-22T00:00:00.500Z',
+          changes: [
+            {
+              action: 'created',
+              artifactId: oldArtifactId,
+              artifact: {
+                id: oldArtifactId,
+                kind: 'link',
+                storage: 'external_url',
+                source: 'client',
+                status: 'available',
+                title: 'Forked artifact',
+                url,
+                retention: 'restorable',
+                clientRetained: true,
+                createdAt: '2026-04-22T00:00:00.500Z',
+                updatedAt: '2026-04-22T00:00:00.500Z',
+                persistedAt: '2026-04-22T00:00:00.500Z',
+              },
+            },
+          ],
+        },
+      };
+      const removeRecord = {
+        uuid: 'artifact-remove',
+        parentUuid: 'u1',
+        sessionId: oldId,
+        type: 'system',
+        subtype: 'session_artifact_event',
+        timestamp: '2026-04-22T00:00:00.750Z',
+        cwd,
+        version: 'test',
+        systemPayload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: oldId,
+          sequence: 2,
+          recordedAt: '2026-04-22T00:00:00.750Z',
+          changes: [
+            {
+              action: 'removed',
+              artifactId: oldArtifactId,
+              reason: 'explicit',
+            },
+          ],
+        },
+      };
+      fs.writeFileSync(
+        file,
+        [lines[0], createRecord, removeRecord, lines[1]]
+          .map((line) => JSON.stringify(line))
+          .join('\n') + '\n',
+      );
+
+      const result = await service.forkSession(oldId, newId);
+      const loaded = await service.loadSession(newId);
+      const forkedLines = fs
+        .readFileSync(result.filePath, 'utf8')
+        .trim()
+        .split('\n')
+        .map((line) => JSON.parse(line));
+      const forkedRemovePayload = forkedLines.find(
+        (record) => record.uuid === 'artifact-remove',
+      )?.systemPayload;
+
+      expect(result.copiedCount).toBe(4);
+      expect(loaded?.artifactSnapshot?.artifacts).toEqual([]);
+      expect(loaded?.artifactSnapshot?.tombstonedIds).toContain(
+        forkedArtifactId,
+      );
+      expect(forkedRemovePayload).toMatchObject({
+        changes: [
+          {
+            action: 'removed',
+            artifactId: forkedArtifactId,
+            reason: 'explicit',
+          },
+        ],
+      });
+    });
+
     it('preserves file history snapshots on the forked session', async () => {
       const oldId = '31313131-3131-3131-3131-313131313131';
       const newId = '41414141-4141-4141-4141-414141414141';

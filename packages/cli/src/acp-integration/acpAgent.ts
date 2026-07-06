@@ -276,6 +276,53 @@ function isObjectRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
+function parseSessionArtifactEventPayload(
+  payload: unknown,
+): SessionArtifactEventRecordPayload {
+  const record = parseSessionArtifactBasePayload(payload);
+  if (!Array.isArray(record['changes'])) {
+    throw invalidArtifactPersistPayload();
+  }
+  return record as unknown as SessionArtifactEventRecordPayload;
+}
+
+function parseSessionArtifactSnapshotPayload(
+  payload: unknown,
+): SessionArtifactSnapshotRecordPayload {
+  const record = parseSessionArtifactBasePayload(payload);
+  if (!Array.isArray(record['artifacts'])) {
+    throw invalidArtifactPersistPayload();
+  }
+  return record as unknown as SessionArtifactSnapshotRecordPayload;
+}
+
+function parseSessionArtifactBasePayload(
+  payload: unknown,
+): Record<string, unknown> {
+  if (!isObjectRecord(payload)) {
+    throw invalidArtifactPersistPayload();
+  }
+  if (
+    payload['v'] !== SESSION_ARTIFACT_PERSISTENCE_VERSION ||
+    typeof payload['sessionId'] !== 'string' ||
+    payload['sessionId'].length === 0 ||
+    !Number.isSafeInteger(payload['sequence']) ||
+    (payload['sequence'] as number) < 0 ||
+    typeof payload['recordedAt'] !== 'string' ||
+    payload['recordedAt'].length === 0
+  ) {
+    throw invalidArtifactPersistPayload();
+  }
+  return payload;
+}
+
+function invalidArtifactPersistPayload(): Error {
+  return RequestError.invalidParams(
+    undefined,
+    'Invalid or missing artifact persist payload',
+  );
+}
+
 function isBulkLoadReplayRequest(params: LoadSessionRequest): boolean {
   const meta = isObjectRecord(params._meta) ? params._meta : undefined;
   return meta?.[LOAD_REPLAY_MODE_META_KEY] === LOAD_REPLAY_BULK_MODE;
@@ -6340,11 +6387,11 @@ class QwenAgent implements Agent {
         }
         if (kind === 'event') {
           await recording.recordSessionArtifactEvent(
-            payload as SessionArtifactEventRecordPayload,
+            parseSessionArtifactEventPayload(payload),
           );
         } else {
           await recording.recordSessionArtifactSnapshot(
-            payload as SessionArtifactSnapshotRecordPayload,
+            parseSessionArtifactSnapshotPayload(payload),
           );
         }
         return { sessionId, persisted: true, kind };

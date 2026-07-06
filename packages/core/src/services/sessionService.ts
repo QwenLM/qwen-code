@@ -1442,12 +1442,14 @@ export class SessionService {
     // clean linear descendant. `forkedFrom` captures the origin of each
     // message.
     let prevUuid: string | null = null;
+    const remappedArtifactIds = new Map<string, string>();
     const forked: ChatRecord[] = sourceRecords.map((record) => {
       const isArtifactRecord = isSessionArtifactRecord(record);
       const systemPayload = remapSystemPayloadForFork(
         record,
         sourceSessionId,
         newSessionId,
+        remappedArtifactIds,
       );
       const next: ChatRecord = {
         ...record,
@@ -1940,6 +1942,7 @@ function remapSystemPayloadForFork(
   record: ChatRecord,
   sourceSessionId: string,
   newSessionId: string,
+  remappedArtifactIds: Map<string, string>,
 ): ChatRecord['systemPayload'] {
   if (record.type !== 'system') return record.systemPayload;
   if (record.subtype === 'file_history_snapshot') {
@@ -1957,6 +1960,7 @@ function remapSystemPayloadForFork(
       record.systemPayload,
       sourceSessionId,
       newSessionId,
+      remappedArtifactIds,
     ) as ChatRecord['systemPayload'];
   }
   return record.systemPayload;

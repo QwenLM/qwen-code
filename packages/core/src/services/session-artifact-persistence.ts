@@ -255,15 +255,23 @@ export function remapSessionArtifactPayloadForFork(
   payload: unknown,
   sourceSessionId: string,
   newSessionId: string,
+  remappedArtifactIds = new Map<string, string>(),
 ): unknown {
   const snapshot = normalizeSnapshotPayload(payload, []);
   if (snapshot) {
+    const artifacts = snapshot.artifacts.map((artifact) => {
+      const remapped = remapSessionArtifactForFork(
+        artifact,
+        sourceSessionId,
+        newSessionId,
+      );
+      remappedArtifactIds.set(artifact.id, remapped.id);
+      return remapped;
+    });
     return {
       ...snapshot,
       sessionId: newSessionId,
-      artifacts: snapshot.artifacts.map((artifact) =>
-        remapSessionArtifactForFork(artifact, sourceSessionId, newSessionId),
-      ),
+      artifacts,
       tombstonedIds: undefined,
       stickyEphemeralIds: undefined,
     } satisfies SessionArtifactSnapshotRecordPayload;
@@ -271,7 +279,6 @@ export function remapSessionArtifactPayloadForFork(
 
   const event = normalizeEventPayload(payload, []);
   if (!event) return payload;
-  const remappedArtifactIds = new Map<string, string>();
   return {
     ...event,
     sessionId: newSessionId,

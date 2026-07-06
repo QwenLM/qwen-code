@@ -22,6 +22,11 @@ import {
   type SessionArtifactSnapshotRecordPayload,
 } from '@qwen-code/qwen-code-core';
 
+vi.mock('@xterm/headless', () => ({
+  Terminal: class Terminal {},
+  default: { Terminal: class Terminal {} },
+}));
+
 describe('SessionArtifactStore', () => {
   let workspace: string;
 
@@ -2440,7 +2445,7 @@ describe('SessionArtifactStore', () => {
     });
   });
 
-  it('clears durable artifacts but preserves live ephemerals for rewind without a snapshot', async () => {
+  it('keeps live artifacts when rewind restore has no snapshot', async () => {
     const store = new SessionArtifactStore({
       sessionId: 's11-restore-empty-rewind',
       workspaceCwd: workspace,
@@ -2468,15 +2473,17 @@ describe('SessionArtifactStore', () => {
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [
         {
+          id: durable.changes[0]?.artifactId,
+          title: 'Durable',
+          retention: 'restorable',
+        },
+        {
           id: ephemeral.changes[0]?.artifactId,
           title: 'Live only',
           retention: 'ephemeral',
         },
       ],
     });
-    await expect(store.get(durable.changes[0]!.artifactId)).resolves.toBe(
-      undefined,
-    );
   });
 
   it('resets durable event snapshot cadence after restore', async () => {
@@ -2811,6 +2818,63 @@ describe('SessionArtifactStore', () => {
     expect(warnings).toEqual([
       'skipped artifact with mismatched id bad-id',
       'artifact snapshot restore failed; kept existing live artifacts',
+    ]);
+    await expect(store.list()).resolves.toMatchObject({
+      artifacts: [
+        {
+          id: liveId,
+          title: 'Live',
+        },
+      ],
+    });
+  });
+
+  it('keeps live artifacts when a non-empty restore snapshot partially fails', async () => {
+    const sourceEvents: SessionArtifactEventRecordPayload[] = [];
+    const source = new SessionArtifactStore({
+      sessionId: 's11-restore-partial',
+      workspaceCwd: workspace,
+      persistence: {
+        recordEvent: async (payload) => {
+          sourceEvents.push(payload);
+        },
+        recordSnapshot: async () => {},
+      },
+    });
+    await source.upsertMany(
+      [
+        { title: 'Good', url: 'https://example.com/restore-good' },
+        { title: 'Bad', url: 'https://example.com/restore-bad' },
+      ],
+      { strict: true },
+    );
+    const good = sourceEvents[0]!.changes[0]!.artifact!;
+    const bad = {
+      ...sourceEvents[0]!.changes[1]!.artifact!,
+      id: 'bad-id',
+    };
+    const store = new SessionArtifactStore({
+      sessionId: 's11-restore-partial',
+      workspaceCwd: workspace,
+    });
+    const live = await store.upsertMany([
+      { title: 'Live', url: 'https://example.com/live-partial' },
+    ]);
+    const liveId = live.changes[0]!.artifactId;
+
+    const warnings = await store.restore({
+      v: 2,
+      sessionId: 's11-restore-partial',
+      sequence: 8,
+      artifacts: [good, bad],
+      tombstonedIds: [],
+      stickyEphemeralIds: [],
+      warnings: [],
+    });
+
+    expect(warnings).toEqual([
+      'skipped artifact with mismatched id bad-id',
+      'artifact snapshot restore partially failed; restored 1/2 artifacts; kept existing live artifacts',
     ]);
     await expect(store.list()).resolves.toMatchObject({
       artifacts: [

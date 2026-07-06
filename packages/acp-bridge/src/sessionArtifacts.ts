@@ -487,7 +487,7 @@ export class SessionArtifactStore {
     snapshot: RebuiltSessionArtifactSnapshot | undefined,
     options: SessionArtifactRestoreOptions = {},
   ): Promise<string[]> {
-    if (!snapshot && !options.preserveLiveEphemeral) return [];
+    if (!snapshot) return [];
     return this.enqueue(async () => {
       const warnings = [...(snapshot?.warnings ?? [])];
       const previousState = this.cloneState();
@@ -574,13 +574,15 @@ export class SessionArtifactStore {
         }
       }
       if (
-        (snapshot?.artifacts.length ?? 0) > 0 &&
-        restoredCount === 0 &&
+        snapshot.artifacts.length > 0 &&
+        restoredCount < snapshot.artifacts.length &&
         warnings.length > warningCountBeforeRestore
       ) {
         this.restoreState(previousState);
         warnings.push(
-          'artifact snapshot restore failed; kept existing live artifacts',
+          restoredCount === 0
+            ? 'artifact snapshot restore failed; kept existing live artifacts'
+            : `artifact snapshot restore partially failed; restored ${restoredCount}/${snapshot.artifacts.length} artifacts; kept existing live artifacts`,
         );
         this.setLastRestoreWarnings(warnings);
         return warnings;

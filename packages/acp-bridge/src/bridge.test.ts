@@ -1468,6 +1468,72 @@ describe('createAcpSessionBridge', () => {
         ],
       }),
     );
+    expect(persistedSnapshots).toEqual([
+      expect.objectContaining({
+        sessionId: session.sessionId,
+        artifacts: [
+          expect.objectContaining({
+            id: durable.changes[0]?.artifactId,
+            title: 'Durable artifact',
+          }),
+        ],
+      }),
+    ]);
+
+    await bridge.shutdown();
+  });
+
+  it('keeps durable artifacts when rewind omits artifact snapshot metadata', async () => {
+    const persistedSnapshots: unknown[] = [];
+    const bridge = makeBridge({
+      channelFactory: async () =>
+        makeChannel({
+          extMethodImpl: (method, params) => {
+            if (method === 'qwen/control/session/artifacts/persist') {
+              if (params['kind'] === 'snapshot') {
+                persistedSnapshots.push(params['payload']);
+              }
+              return {};
+            }
+            expect(method).toBe('qwen/control/session/rewind');
+            return {
+              targetTurnIndex: 0,
+              filesChanged: [],
+              filesFailed: [],
+            };
+          },
+        }).channel,
+    });
+    const session = await bridge.spawnOrAttach({ workspaceCwd: WS_A });
+    const durable = await bridge.addSessionArtifact(
+      session.sessionId,
+      {
+        title: 'Version-skew durable artifact',
+        url: 'https://example.com/durable-version-skew',
+      },
+      { clientId: session.clientId },
+    );
+
+    await expect(
+      bridge.rewindSession(
+        session.sessionId,
+        { promptId: 'prompt-1' },
+        { clientId: session.clientId },
+      ),
+    ).resolves.toMatchObject({ targetTurnIndex: 0 });
+
+    await expect(
+      bridge.getSessionArtifacts(session.sessionId),
+    ).resolves.toEqual(
+      expect.objectContaining({
+        artifacts: [
+          expect.objectContaining({
+            id: durable.changes[0]?.artifactId,
+            title: 'Version-skew durable artifact',
+          }),
+        ],
+      }),
+    );
     expect(persistedSnapshots).toEqual([]);
 
     await bridge.shutdown();

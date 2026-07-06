@@ -5936,7 +5936,7 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
         response as BridgeSessionState,
       );
       const beforeArtifacts = (await entry.artifacts.list()).artifacts;
-      const shouldRecordArtifactSnapshot =
+      const shouldRestoreArtifactSnapshot =
         artifactSnapshot !== undefined &&
         artifactSnapshotUnavailable === undefined;
       const artifactRestoreWarnings =
@@ -5944,9 +5944,19 @@ export function createAcpSessionBridge(opts: BridgeOptions): AcpSessionBridge {
           ? [
               `artifact snapshot rebuild unavailable during rewind: ${artifactSnapshotUnavailable}`,
             ]
-          : await entry.artifacts.restore(artifactSnapshot, {
-              preserveLiveEphemeral: true,
-            });
+          : shouldRestoreArtifactSnapshot
+            ? await entry.artifacts.restore(artifactSnapshot, {
+                preserveLiveEphemeral: true,
+              })
+            : [];
+      const artifactRestoreFailed = artifactRestoreWarnings.some(
+        (warning) =>
+          warning.includes('artifact snapshot restore failed') ||
+          warning.includes('artifact snapshot restore partially failed'),
+      );
+      const shouldRecordArtifactSnapshot =
+        artifactSnapshotUnavailable !== undefined ||
+        (shouldRestoreArtifactSnapshot && !artifactRestoreFailed);
       const artifactSnapshotWarnings = shouldRecordArtifactSnapshot
         ? await entry.artifacts.recordSnapshot()
         : [];

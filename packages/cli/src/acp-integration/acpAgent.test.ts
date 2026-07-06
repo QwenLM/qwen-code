@@ -119,6 +119,7 @@ vi.mock('node:stream', async (importOriginal) => {
 
 // Mock core dependencies
 vi.mock('@qwen-code/qwen-code-core', () => ({
+  SESSION_ARTIFACT_PERSISTENCE_VERSION: 2,
   createDebugLogger: () => ({
     debug: vi.fn(),
     error: vi.fn(),
@@ -629,6 +630,7 @@ import {
   unregisterGoalHook,
   startEventLoopLagMonitor,
   registerAcpEventLoopLagGauge,
+  SESSION_ARTIFACT_PERSISTENCE_VERSION,
 } from '@qwen-code/qwen-code-core';
 import type { McpServer } from '@agentclientprotocol/sdk';
 import { AgentSideConnection } from '@agentclientprotocol/sdk';
@@ -1834,7 +1836,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
         sessionId: 'session-A',
         kind: 'event',
-        payload: {},
+        payload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId: 'session-A',
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          changes: [],
+        },
       }),
     ).rejects.toThrowError(/Session not found for id: session-A/);
 
@@ -1853,7 +1861,13 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
       agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
         sessionId,
         kind: 'event',
-        payload: {},
+        payload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId,
+          sequence: 1,
+          recordedAt: '2026-07-04T00:00:00.000Z',
+          changes: [],
+        },
       }),
     ).rejects.toThrowError(/Chat recording service unavailable/);
 
@@ -1872,15 +1886,17 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
     const { agent, agentPromise } = await bootAcpAgent();
     const eventPayload = {
-      v: 1,
+      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
       sessionId,
       sequence: 1,
+      recordedAt: '2026-07-04T00:00:00.000Z',
       changes: [],
     };
     const snapshotPayload = {
-      v: 1,
+      v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
       sessionId,
       sequence: 2,
+      recordedAt: '2026-07-04T00:00:01.000Z',
       artifacts: [],
       tombstonedIds: [],
       stickyEphemeralIds: [],
@@ -1908,6 +1924,51 @@ describe('QwenAgent MCP SSE/HTTP support', () => {
     expect(recording.recordSessionArtifactSnapshot).toHaveBeenCalledWith(
       snapshotPayload,
     );
+
+    mockConnectionState.resolve();
+    await agentPromise;
+  });
+
+  it('sessionArtifactsPersist rejects malformed event and snapshot payloads', async () => {
+    const sessionId = 'session-A';
+    const recording = {
+      flush: vi.fn().mockResolvedValue(undefined),
+      recordSessionArtifactEvent: vi.fn().mockResolvedValue(undefined),
+      recordSessionArtifactSnapshot: vi.fn().mockResolvedValue(undefined),
+    };
+    const innerConfig = await setupSessionMocks(sessionId);
+    innerConfig.getChatRecordingService = vi.fn().mockReturnValue(recording);
+    const { agent, agentPromise } = await bootAcpAgent();
+
+    await agent.newSession({ cwd: '/tmp', mcpServers: [] });
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId,
+        kind: 'event',
+        payload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId,
+          sequence: 1,
+          changes: [],
+        },
+      }),
+    ).rejects.toThrowError(/Invalid or missing artifact persist payload/);
+    await expect(
+      agent.extMethod(SERVE_CONTROL_EXT_METHODS.sessionArtifactsPersist, {
+        sessionId,
+        kind: 'snapshot',
+        payload: {
+          v: SESSION_ARTIFACT_PERSISTENCE_VERSION,
+          sessionId,
+          sequence: 2,
+          recordedAt: '2026-07-04T00:00:01.000Z',
+          changes: [],
+        },
+      }),
+    ).rejects.toThrowError(/Invalid or missing artifact persist payload/);
+
+    expect(recording.recordSessionArtifactEvent).not.toHaveBeenCalled();
+    expect(recording.recordSessionArtifactSnapshot).not.toHaveBeenCalled();
 
     mockConnectionState.resolve();
     await agentPromise;
