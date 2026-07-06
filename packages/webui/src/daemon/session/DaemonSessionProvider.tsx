@@ -1457,17 +1457,22 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
           const message =
             error instanceof Error ? error.message : 'Session heartbeat failed';
           const errorStatus = extractHttpStatus(error);
+          const authFailure = isAuthFailureHttpError(error);
           const missingSession = isMissingSessionHttpStatus(errorStatus);
-          if (missingSession) {
+          if (authFailure || missingSession) {
             const deadSessionId = session.sessionId;
-            console.warn(
-              '[DaemonSessionProvider] heartbeat detected missing session (sessionId=%s, status=%d)',
-              deadSessionId,
-              errorStatus,
-            );
+            if (missingSession) {
+              console.warn(
+                '[DaemonSessionProvider] heartbeat detected missing session (sessionId=%s, status=%d)',
+                deadSessionId,
+                errorStatus,
+              );
+            }
             const active = activePromptsRef.current.get(deadSessionId);
             active?.controller.abort();
             activePromptsRef.current.delete(deadSessionId);
+            clearPassiveAssistantDoneTimer(passiveAssistantDoneTimerRef);
+            setPromptStatus('idle');
             if (sessionRef.current?.sessionId === deadSessionId) {
               sessionRef.current = undefined;
             }
@@ -1476,10 +1481,16 @@ export function DaemonSessionProvider(props: DaemonSessionProviderProps) {
             current.sessionId === session.sessionId
               ? {
                   ...current,
-                  status: 'disconnected',
+                  status: authFailure ? 'error' : 'disconnected',
                   error: message,
                   errorStatus,
-                  ...(missingSession ? { sessionId: undefined } : {}),
+                  ...(authFailure || missingSession
+                    ? {
+                        sessionId: undefined,
+                        loadingTranscript: undefined,
+                        catchingUp: undefined,
+                      }
+                    : {}),
                 }
               : current,
           );

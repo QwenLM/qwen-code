@@ -5024,6 +5024,118 @@ describe('DaemonSessionProvider', () => {
     expect(connection?.sessionId).toBeUndefined();
   });
 
+  it('clears prompt state on terminal HTTP heartbeat errors', async () => {
+    sdkMocks.capabilities.mockResolvedValue({
+      v: 1,
+      mode: 'http-bridge',
+      features: ['client_heartbeat'],
+      modelServices: [],
+      workspaceCwd: '/mock-workspace',
+    });
+    const heartbeat = vi.fn(async () => {
+      throw Object.assign(new Error('session gone'), { status: 410 });
+    });
+    const session = createMockSession({
+      heartbeat,
+      submitPrompt: vi.fn(
+        (_req: unknown, signal?: AbortSignal) =>
+          new Promise<NonBlockingPromptAccepted>((_resolve, reject) => {
+            signal?.addEventListener(
+              'abort',
+              () => reject(createAbortError()),
+              { once: true },
+            );
+          }),
+      ),
+      events: createIdleEvents(),
+    });
+    sdkMocks.sessions.push(session);
+    let actions: DaemonUiSessionActions | undefined;
+    let streamingState: ReturnType<typeof useDaemonStreamingState> = 'idle';
+
+    function Harness() {
+      actions = useDaemonActions();
+      streamingState = useDaemonStreamingState();
+      return null;
+    }
+
+    await renderWithProvider(<Harness />, {
+      autoConnect: true,
+      heartbeatIntervalMs: 1,
+      heartbeatFailureThreshold: 1,
+    });
+    const providerActions = requireActions(actions);
+
+    let promptResult: Promise<unknown> | undefined;
+    await act(async () => {
+      promptResult = providerActions.sendPrompt('still running');
+      await flushPromises();
+    });
+    expect(streamingState).toBe('waiting');
+
+    await act(async () => {
+      await wait(10);
+      await flushPromises();
+    });
+
+    expect(streamingState).toBe('idle');
+    const runningPrompt = promptResult;
+    if (!runningPrompt) throw new Error('prompt was not started');
+    await expect(runningPrompt).resolves.toEqual({
+      stopReason: 'cancelled',
+    });
+  });
+
+  it.each([401, 403])(
+    'enters auth-error state on %d heartbeat auth failures',
+    async (status) => {
+      sdkMocks.capabilities.mockResolvedValue({
+        v: 1,
+        mode: 'http-bridge',
+        features: ['client_heartbeat'],
+        modelServices: [],
+        workspaceCwd: '/mock-workspace',
+      });
+      const heartbeat = vi.fn(async () => {
+        throw Object.assign(new Error('Unauthorized'), { status });
+      });
+      sdkMocks.sessions.push(
+        createMockSession({
+          heartbeat,
+          events: createIdleEvents(),
+        }),
+      );
+      let connection: DaemonConnectionState | undefined;
+
+      function Harness() {
+        connection = useDaemonConnection();
+        return null;
+      }
+
+      await renderWithProvider(<Harness />, {
+        autoConnect: true,
+        autoReconnect: true,
+        heartbeatIntervalMs: 1,
+        heartbeatFailureThreshold: 1,
+        reconnectDelayMs: 1,
+        maxReconnectDelayMs: 1,
+      });
+
+      await act(async () => {
+        await wait(20);
+        await flushPromises();
+      });
+
+      expect(heartbeat).toHaveBeenCalled();
+      expect(connection).toMatchObject({
+        status: 'error',
+        error: 'Unauthorized',
+        errorStatus: status,
+      });
+      expect(connection?.sessionId).toBeUndefined();
+    },
+  );
+
   it('ignores stale connect attempts after provider props change', async () => {
     const staleLoad = createDeferred<MockSession>();
     const staleSession = createMockSession({ sessionId: 'session-a' });
