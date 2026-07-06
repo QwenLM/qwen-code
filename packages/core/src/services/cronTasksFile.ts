@@ -23,6 +23,35 @@ export interface DurableCronTask {
   recurring: boolean;
   createdAt: number;
   lastFiredAt: number | null;
+  /**
+   * Optional display name, shown in management UIs (the Web Shell
+   * scheduled-tasks page). Absent on tool-created tasks — consumers fall
+   * back to the prompt. Never used for scheduling.
+   */
+  name?: string;
+  /**
+   * Whether the task is active. Absent or `true` = scheduled; `false` =
+   * kept on disk but skipped by the scheduler — a reversible "off" switch
+   * for the management UI. Absent defaults to enabled so tool-created
+   * tasks (which never write this field) keep firing.
+   */
+  enabled?: boolean;
+}
+
+/**
+ * Generates an 8-character base36 id for a durable task. Shared by the
+ * scheduler (`CronScheduler`) and the daemon's scheduled-tasks route so
+ * route-created and tool-created tasks use one id scheme — changing it here
+ * changes it everywhere. Math.random is fine: ids only need to be unique
+ * within a <50-entry file, not unpredictable.
+ */
+export function generateCronTaskId(): string {
+  const chars = 'abcdefghijklmnopqrstuvwxyz0123456789';
+  let id = '';
+  for (let i = 0; i < 8; i++) {
+    id += chars[Math.floor(Math.random() * chars.length)];
+  }
+  return id;
 }
 
 const TASKS_FILENAME = 'scheduled_tasks.json';
@@ -259,6 +288,12 @@ function isValidTask(value: unknown): value is DurableCronTask {
     typeof obj['prompt'] === 'string' &&
     typeof obj['recurring'] === 'boolean' &&
     isFiniteTimestamp(obj['createdAt']) &&
-    (obj['lastFiredAt'] === null || isFiniteTimestamp(obj['lastFiredAt']))
+    (obj['lastFiredAt'] === null || isFiniteTimestamp(obj['lastFiredAt'])) &&
+    // Optional fields (added for the management UI): absent is valid and
+    // means "unnamed" / "enabled". Present-but-wrong-type routes through
+    // the same fix-or-delete contract as any other corrupt field rather
+    // than being silently coerced or dropped.
+    (obj['name'] === undefined || typeof obj['name'] === 'string') &&
+    (obj['enabled'] === undefined || typeof obj['enabled'] === 'boolean')
   );
 }
