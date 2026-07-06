@@ -101,11 +101,11 @@ describe('<MarkdownDisplay />', () => {
         />,
       );
       const output = lastFrame() ?? '';
-      // Contiguous head + a "generating more" cue — NOT decimated (ink
-      // overflow="hidden" would drop interspersed rows) and NOT blank.
+      // Clipped to budget: head lines present, tail dropped. No "generating more"
+      // cue — incremental scrollback commit (PR #6170) streams content in
+      // real-time, so clipped content is "still streaming" not "delayed output".
       expect(output).toContain('line 1');
       expect(output).toContain('line 2');
-      expect(output).toContain('generating more');
       // The tail is dropped (budget exceeded), so a late line is absent.
       expect(output).not.toContain('line 60');
       const lineCount = output.split('\n').length;
@@ -171,18 +171,14 @@ describe('<MarkdownDisplay />', () => {
       );
       const output = lastFrame() ?? '';
       expect(output.split('\n').length).toBeLessThanOrEqual(10);
-      // The head-slice bounds code content to <= availableTerminalHeight - 2
-      // (= RenderCodeBlock's own inner budget), so the inner "generating more"
-      // never fires inside a slice — there is at most ONE cue, not two stacked.
-      expect(
-        (output.match(/generating more/g) ?? []).length,
-      ).toBeLessThanOrEqual(1);
+      // No "generating more" cue — all cues removed (PR #6170 incremental commit
+      // handles real-time streaming).
+      expect(output.match(/generating more/g) ?? []).toHaveLength(0);
     });
 
     it('does not stack a double cue for a math block near the clip boundary', () => {
-      // RenderMathBlock reserves more rows (RESERVED_LINES=3) than a code block;
-      // the head-slice budget reserves 2 rows so a retained math block never
-      // hits its own inner truncation cue on top of the outer one.
+      // No "generating more" cue — all cues removed (PR #6170 incremental commit
+      // handles real-time streaming).
       const text = [
         '$$',
         ...Array.from({ length: 40 }, (_, i) => `x_{${i}} +`),
@@ -197,9 +193,7 @@ describe('<MarkdownDisplay />', () => {
         />,
       );
       const output = lastFrame() ?? '';
-      expect(
-        (output.match(/generating more/g) ?? []).length,
-      ).toBeLessThanOrEqual(1);
+      expect(output.match(/generating more/g) ?? []).toHaveLength(0);
       expect(output.split('\n').length).toBeLessThanOrEqual(8);
     });
 
@@ -224,7 +218,7 @@ describe('<MarkdownDisplay />', () => {
 
     it('applies the minimum floor at a degenerate budget of 1', () => {
       // Math.max(MIN_PENDING_CONTENT_LINES, 1 - 2) = 1 (floored): keep one
-      // content line + the cue, never 0 or negative.
+      // content line, never 0 or negative. No "generating more" cue.
       const text = Array.from({ length: 60 }, (_, i) => `line ${i + 1}`).join(
         eol,
       );
@@ -239,7 +233,7 @@ describe('<MarkdownDisplay />', () => {
       const output = lastFrame() ?? '';
       expect(output).toContain('line 1');
       expect(output).not.toContain('line 2');
-      expect(output).toContain('generating more');
+      expect(output).not.toContain('generating more');
     });
 
     it('renders unordered lists with different markers', () => {
@@ -314,6 +308,87 @@ Some text before.
         <MarkdownDisplay {...baseProps} text={text} />,
       );
       expect(lastFrame()).toMatchSnapshot();
+    });
+
+    it('holds back an unterminated trailing table row while streaming', () => {
+      const text = `| A | B |
+|---|---|
+| one | two |
+| three | fo`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      // The completed row renders inside the table…
+      expect(output).toContain('one');
+      expect(output).toContain('two');
+      // …but the still-typing frontier row is held back until its closing `|`,
+      // so it never flips between a stray text line and a table row (the source
+      // of per-token footer jitter).
+      expect(output).not.toContain('three');
+      expect(output).toContain('│');
+    });
+
+    it('renders the previously-held frontier row once it terminates', () => {
+      const text = `| A | B |
+|---|---|
+| one | two |
+| three | four |`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('three');
+      expect(output).toContain('four');
+    });
+
+    it('holds back a partial first row, then pops the table in once it terminates', () => {
+      // Header + separator present but the first data row is still being typed.
+      // The partial row is held back and the table is not drawn yet, so there is
+      // no header+separator with a stray partial line flashing beneath it.
+      const partial = `| A | B |
+|---|---|
+| one | tw`.replace(/\n/g, eol);
+      const { lastFrame: partialFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={partial} isPending={true} />,
+      );
+      expect(partialFrame() ?? '').not.toContain('one');
+
+      // Once the row terminates, the table appears complete.
+      const complete = `| A | B |
+|---|---|
+| one | two |`.replace(/\n/g, eol);
+      const { lastFrame: completeFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={complete} isPending={true} />,
+      );
+      const out = completeFrame() ?? '';
+      expect(out).toContain('one');
+      expect(out).toContain('two');
+    });
+
+    it('does not hold back a partial row in committed (non-pending) output', () => {
+      const text = `| A | B |
+|---|---|
+| one | two |
+| three | fo`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={false} />,
+      );
+      // Committed transcript is final, not a streaming frontier — render as-is.
+      expect(lastFrame() ?? '').toContain('three');
+    });
+
+    it('still closes a streaming table when a non-pipe line follows', () => {
+      const text = `| A | B |
+|---|---|
+| one | two |
+Done.`.replace(/\n/g, eol);
+      const { lastFrame } = renderWithProviders(
+        <MarkdownDisplay {...baseProps} text={text} isPending={true} />,
+      );
+      const output = lastFrame() ?? '';
+      expect(output).toContain('one');
+      expect(output).toContain('Done');
     });
 
     it('renders a single-column table', () => {
