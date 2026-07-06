@@ -20,6 +20,8 @@ The output intentionally excludes session IDs, prompts, model responses, hook ou
 
 All profiler writes are best-effort. File-system failures are swallowed so profiling cannot break or slow a session through error handling.
 
+The JSONL writer uses restrictive permissions and `O_NOFOLLOW` on the profile file. Parent-directory replacement remains best-effort because Node does not expose a portable fd-relative append path here; the runtime directory is treated as same-user diagnostic storage, not a boundary against a local same-user attacker.
+
 When disabled, the helper performs no file writes and does not read the high-resolution clock.
 
 `failedStage` only records stages that throw through the profiler wrapper. Stages whose underlying helpers catch and suppress their own errors, such as agent reminder dedup seeding and the SessionStart hook, remain successful from the profiler's perspective.

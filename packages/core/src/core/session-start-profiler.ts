@@ -21,8 +21,9 @@ export interface SessionStartProfileRecord {
   source: SessionStartSource;
   ok: boolean;
   /**
-   * Wall-clock session start duration. The sum of `stages` can be lower because
-   * only profiled callbacks are included in stage timings.
+   * Wall-clock session start duration. The sum of `stages` can differ from
+   * `totalMs` because some stages overlap and unmeasured code runs between
+   * stages.
    */
   totalMs: number;
   stages: Record<string, number>;
@@ -61,11 +62,15 @@ function roundMs(value: number): number {
 
 function getAppendProfileOpenFlags(): number {
   const constants = fs.constants;
+  const noFollow = constants.O_NOFOLLOW;
+  if (noFollow === undefined) {
+    throw new Error('session-start profiler requires O_NOFOLLOW support');
+  }
   return (
     (constants.O_APPEND ?? 0) |
     (constants.O_CREAT ?? 0) |
     (constants.O_WRONLY ?? 0) |
-    (constants.O_NOFOLLOW ?? 0)
+    noFollow
   );
 }
 
@@ -93,6 +98,8 @@ function assertSafeExistingProfileFile(filePath: string): void {
 function writeProfileRecord(record: SessionStartProfileRecord): void {
   const dir = path.join(Storage.getRuntimeBaseDir(), 'session-start-perf');
   fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+  // Node does not expose a portable fd-relative append here; parent-directory
+  // replacement is best-effort while O_NOFOLLOW protects the JSONL file itself.
   assertSafeProfileDirectory(dir);
   try {
     fs.chmodSync(dir, 0o700);
@@ -122,8 +129,12 @@ function writeProfileRecord(record: SessionStartProfileRecord): void {
 
 const disabledProfiler: SessionStartProfiler = {
   enabled: false,
-  async time<T>(_stage: string, fn: () => T | Promise<T>): Promise<T> {
-    return await fn();
+  time<T>(_stage: string, fn: () => T | Promise<T>): Promise<T> {
+    try {
+      return Promise.resolve(fn());
+    } catch (error) {
+      return Promise.reject(error);
+    }
   },
   timeSync<T>(_stage: string, fn: () => T): T {
     return fn();
@@ -210,11 +221,15 @@ class EnabledSessionStartProfiler implements SessionStartProfiler {
       this.writeRecord(record);
     } catch (error) {
       const code = isNodeError(error) ? error.code : undefined;
-      debugLogger.debug('session-start-profiler write failed', {
-        name: error instanceof Error ? error.name : typeof error,
-        message: error instanceof Error ? error.message : undefined,
-        ...(code ? { code } : {}),
-      });
+      try {
+        debugLogger.debug('session-start-profiler write failed', {
+          name: error instanceof Error ? error.name : typeof error,
+          message: error instanceof Error ? error.message : undefined,
+          ...(code ? { code } : {}),
+        });
+      } catch {
+        // Recovery logging must not propagate into session creation.
+      }
       // Profiling must never affect session creation.
     }
   }
@@ -235,7 +250,11 @@ export function createSessionStartProfiler(
     return disabledProfiler;
   }
 
-  debugLogger.debug('session-start-profiler enabled', { source });
+  try {
+    debugLogger.debug('session-start-profiler enabled', { source });
+  } catch {
+    // Activation logging must not affect session startup.
+  }
 
   return new EnabledSessionStartProfiler(source, {
     now: options.now ?? (() => performance.now()),

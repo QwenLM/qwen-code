@@ -51,7 +51,7 @@ describe('session-start-profiler', () => {
   const itNoSymlink = process.platform === 'win32' ? it.skip : it;
 
   beforeEach(() => {
-    debugLoggerMock.debug.mockClear();
+    debugLoggerMock.debug.mockReset();
   });
 
   afterEach(() => {
@@ -73,6 +73,16 @@ describe('session-start-profiler', () => {
     await expect(
       profiler.time('tool_registry_warm', async () => 'ok'),
     ).resolves.toBe('ok');
+    const existingPromise = Promise.resolve('same-promise');
+    expect(profiler.time('same_promise', () => existingPromise)).toBe(
+      existingPromise,
+    );
+    const disabledError = new Error('disabled failure');
+    await expect(
+      profiler.time('disabled_error', () => {
+        throw disabledError;
+      }),
+    ).rejects.toBe(disabledError);
     expect(profiler.timeSync('system_instruction', () => 42)).toBe(42);
     profiler.finish({ ok: true });
 
@@ -300,6 +310,39 @@ describe('session-start-profiler', () => {
       'session-start-profiler write failed',
       { name: 'Error', message: 'disk full', code: 'ENOSPC' },
     );
+  });
+
+  it('does not throw when recovery debug logging fails', () => {
+    const profiler = createSessionStartProfiler(SessionStartSource.Clear, {
+      enabled: true,
+      now: clockFrom([1, 2]),
+      writeRecord: () => {
+        throw new Error('disk full');
+      },
+      getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
+    });
+    debugLoggerMock.debug.mockImplementation(() => {
+      throw new Error('debug log failed');
+    });
+
+    expect(() => profiler.finish({ ok: true })).not.toThrow();
+  });
+
+  it('does not throw when enabled debug logging fails', () => {
+    debugLoggerMock.debug.mockImplementation(() => {
+      throw new Error('debug log failed');
+    });
+    let profiler: ReturnType<typeof createSessionStartProfiler> | undefined;
+
+    expect(() => {
+      profiler = createSessionStartProfiler(SessionStartSource.Clear, {
+        enabled: true,
+        now: clockFrom([1, 2]),
+        writeRecord: vi.fn(),
+        getTimestamp: () => new Date('2026-07-06T00:00:00.000Z'),
+      });
+    }).not.toThrow();
+    expect(profiler?.enabled).toBe(true);
   });
 
   it('does not throw when finish metadata collection fails', () => {
